@@ -1,0 +1,44 @@
+{
+  "generated_at": "2026-05-03T20:52:55Z",
+  "date_tag": "20260503-bd-rchk5-3-mount-warm-pending",
+  "commit": "7ed77b0053aadbc33b94258410af5956b6c44816",
+  "branch": "",
+  "environment": {
+    "hostname": "thinkstation2",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5995WX 64-Cores",
+    "kernel": "Linux 6.17.0-22-generic x86_64 GNU/Linux",
+    "memory_total_kib": 259257084,
+    "memory_total_gib": 247.247,
+    "cargo_target_dir": "/data/tmp/rch_target_frankenfs_bd_rchk5_3_mount_warm",
+    "rustc": "rustc 1.97.0-nightly (f53b654a8 2026-04-30)",
+    "cargo": "cargo 1.97.0-nightly (eb9b60f1f 2026-04-24)",
+    "hyperfine": "hyperfine 1.19.0"
+  },
+  "warmup_runs": 3,
+  "measured_runs": 10,
+  "thresholds_file": "benchmarks/thresholds.toml",
+  "p99_warn_threshold_percent": 10,
+  "p99_fail_threshold_percent": 20,
+  "measurement_coverage": {
+    "measured_count": 0,
+    "pending_count": 1,
+    "cache_workload_metric_count": 0
+  },
+  "measurements": [
+    {
+      "operation": "mount_warm",
+      "metric": "latency",
+      "command": "",
+      "source_json": "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/ffs_cli_mount_cold_probe_report.json",
+      "p50_us": 0,
+      "p95_us": 0,
+      "p99_us": 0,
+      "throughput_ops_sec": 0,
+      "throughput_mb_sec": 0,
+      "status": "pending",
+      "probe_report_json": "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/ffs_cli_mount_cold_probe_report.json",
+      "reason": "mount benchmark probe failed on this host: Mounting ext4 image (block_size=4096, blocks=4096, ro, runtime=standard) at baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/mount_probe_mounts/cold error: FUSE mount failed at baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/mount_probe_mounts/cold: mount I/O error: fusermount3: mount failed: Permission denied : fusermount3: mount failed: Permission denied (set FFS_MOUNT_PROBE_USE_SUDO=1 or --mount-probe-use-sudo if passwordless sudo is available)"
+    }
+  ],
+  "cache_workload_metrics": []
+}

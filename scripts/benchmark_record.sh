@@ -356,6 +356,7 @@ declare -A PENDING_REASONS=(
     ["mount_warm"]="warm mount benchmark requires repeated FUSE mount lifecycle automation in benchmark_record.sh"
     ["mount_recovery"]="recovery mount benchmark requires journal-enabled probe image mount automation"
 )
+declare -A PENDING_SOURCE_JSON=()
 
 MOUNT_BENCH_IMAGE=""
 MOUNT_RECOVERY_IMAGE=""
@@ -401,6 +402,12 @@ print_available_ops() {
     done
 }
 
+pending_entry_matches_filter() {
+    local operation="$1"
+
+    [ -z "$OP_FILTER" ] || [ "$operation" = "$OP_FILTER" ]
+}
+
 apply_op_filter() {
     [ -n "$OP_FILTER" ] || return 0
 
@@ -426,9 +433,25 @@ apply_op_filter() {
     done
 
     if [ "$matched" -ne 1 ]; then
+        if [ -n "${PENDING_REASONS[$OP_FILTER]:-}" ]; then
+            BENCH_LABELS=()
+            BENCH_COMMANDS=()
+            BENCH_FILES=()
+            BENCH_OPERATIONS=()
+            BENCH_PAYLOAD_MB=()
+            BENCH_RUNNERS=()
+            return 0
+        fi
         echo "unknown benchmark operation for --op: ${OP_FILTER}" >&2
         echo "available operations:" >&2
         print_available_ops >&2
+        echo "pending operations:" >&2
+        local operation
+        for operation in mount_cold mount_warm mount_recovery; do
+            if [ -n "${PENDING_REASONS[$operation]:-}" ]; then
+                printf '  - %s (pending: %s)\n' "$operation" "${PENDING_REASONS[$operation]}" >&2
+            fi
+        done
         exit 2
     fi
 
@@ -477,6 +500,9 @@ record_mount_pending_labels() {
     local operation
     for operation in mount_cold mount_warm mount_recovery; do
         if [ -n "${PENDING_REASONS[$operation]:-}" ]; then
+            if ! pending_entry_matches_filter "$operation"; then
+                continue
+            fi
             SKIPPED_LABELS+=("${operation} (pending: ${PENDING_REASONS[$operation]})")
         fi
     done
@@ -579,6 +605,9 @@ configure_mount_benchmarks() {
     cold_probe_report="${OUT_DIR}/ffs_cli_mount_cold_probe_report.json"
     warm_probe_report="${OUT_DIR}/ffs_cli_mount_warm_probe_report.json"
     recovery_probe_report="${OUT_DIR}/ffs_cli_mount_recovery_probe_report.json"
+    PENDING_SOURCE_JSON["mount_cold"]="$cold_probe_report"
+    PENDING_SOURCE_JSON["mount_warm"]="$cold_probe_report"
+    PENDING_SOURCE_JSON["mount_recovery"]="$recovery_probe_report"
     if "${mount_probe_prefix[@]}" scripts/mount_benchmark_probe.sh \
         --bin "$CLI_BIN" \
         --image "$MOUNT_BENCH_IMAGE" \
@@ -602,6 +631,8 @@ configure_mount_benchmarks() {
 
         unset 'PENDING_REASONS[mount_cold]'
         unset 'PENDING_REASONS[mount_warm]'
+        unset 'PENDING_SOURCE_JSON[mount_cold]'
+        unset 'PENDING_SOURCE_JSON[mount_warm]'
 
         local recovery_probe_err
         recovery_probe_err="${OUT_DIR}/ffs_cli_mount_recovery_probe.stderr"
@@ -620,6 +651,7 @@ configure_mount_benchmarks() {
                 "mount_recovery" \
                 "0"
             unset 'PENDING_REASONS[mount_recovery]'
+            unset 'PENDING_SOURCE_JSON[mount_recovery]'
         else
             local recovery_probe_reason
             recovery_probe_reason="$(single_line_text < "$recovery_probe_err")"
@@ -1354,11 +1386,6 @@ done
 echo ""
 
 build_pending_json() {
-    if [ -n "$OP_FILTER" ]; then
-        echo '[]'
-        return
-    fi
-
     local pending_json
     pending_json='[]'
     local operation
@@ -1368,22 +1395,29 @@ build_pending_json() {
         if [ -z "$reason" ]; then
             continue
         fi
+        if ! pending_entry_matches_filter "$operation"; then
+            continue
+        fi
+        local source_json
+        source_json="${PENDING_SOURCE_JSON[$operation]:-}"
         pending_json="$(
             jq -n \
                 --argjson prior "$pending_json" \
                 --arg operation "$operation" \
                 --arg reason "$reason" \
+                --arg source_json "$source_json" \
                 '$prior + [{
                     operation: $operation,
                     metric: "latency",
                     command: "",
-                    source_json: "",
+                    source_json: $source_json,
                     p50_us: 0,
                     p95_us: 0,
                     p99_us: 0,
                     throughput_ops_sec: 0,
                     throughput_mb_sec: 0,
                     status: "pending",
+                    probe_report_json: $source_json,
                     reason: $reason
                 }]'
         )"

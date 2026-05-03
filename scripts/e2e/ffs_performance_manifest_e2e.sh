@@ -52,6 +52,8 @@ BAD_RAW="$E2E_LOG_DIR/performance_manifest_bad.raw"
 UNIT_LOG="$E2E_LOG_DIR/performance_manifest_unit_tests.log"
 MOUNT_PROBE_JSON="$E2E_LOG_DIR/mount_benchmark_probe_input_error.json"
 MOUNT_PROBE_RAW="$E2E_LOG_DIR/mount_benchmark_probe_input_error.raw"
+MOUNT_PENDING_BASELINE_JSON="$REPO_ROOT/benchmarks/baselines/history/20260503-bd-rchk5-3-mount-warm-pending.json"
+MOUNT_PENDING_PROBE_JSON="$REPO_ROOT/baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/ffs_cli_mount_cold_probe_report.json"
 
 e2e_step "Scenario 1: performance manifest module and CLI are wired"
 if grep -q "pub mod performance_baseline_manifest" crates/ffs-harness/src/lib.rs \
@@ -258,6 +260,49 @@ then
 else
     cat "$MOUNT_PROBE_RAW"
     scenario_result "performance_mount_probe_structured_failure" "FAIL" "mount benchmark probe structured failure contract failed"
+fi
+
+e2e_step "Scenario 3c: mounted benchmark pending artifact preserves probe evidence"
+if python3 - "$MOUNT_PENDING_BASELINE_JSON" "$MOUNT_PENDING_PROBE_JSON" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+baseline_path = pathlib.Path(sys.argv[1])
+probe_path = pathlib.Path(sys.argv[2])
+baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+probe = json.loads(probe_path.read_text(encoding="utf-8"))
+
+coverage = baseline["measurement_coverage"]
+if coverage["measured_count"] != 0 or coverage["pending_count"] != 1:
+    raise SystemExit(f"unexpected coverage: {coverage}")
+measurements = baseline["measurements"]
+if len(measurements) != 1:
+    raise SystemExit(f"expected one targeted pending row, got {len(measurements)}")
+row = measurements[0]
+if row["operation"] != "mount_warm" or row["status"] != "pending":
+    raise SystemExit(f"wrong pending row: {row}")
+expected_probe = "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/ffs_cli_mount_cold_probe_report.json"
+if row["source_json"] != expected_probe or row["probe_report_json"] != expected_probe:
+    raise SystemExit(f"pending row lost probe path: {row}")
+if "Permission denied" not in row["reason"]:
+    raise SystemExit("pending reason did not preserve FUSE denial")
+if probe["classification"] != "host_capability_skip":
+    raise SystemExit(f"wrong probe classification: {probe['classification']}")
+if probe["outcome"] != "fail":
+    raise SystemExit(f"wrong probe outcome: {probe['outcome']}")
+if probe["kernel_fuse_mode"] != "permissioned_required":
+    raise SystemExit("missing permissioned FUSE lane")
+attempts = probe["attempts"]
+if len(attempts) != 1 or attempts[0]["cleanup_status"] != "unmounted":
+    raise SystemExit(f"probe did not preserve cleanup evidence: {attempts}")
+PY
+then
+    scenario_result "performance_mount_pending_artifact_preserves_probe" "PASS" "targeted mount_warm pending row points at structured FUSE denial report"
+else
+    scenario_result "performance_mount_pending_artifact_preserves_probe" "FAIL" "checked-in mount pending artifact lost probe evidence"
 fi
 
 e2e_step "Scenario 4: invalid manifest variants fail closed"

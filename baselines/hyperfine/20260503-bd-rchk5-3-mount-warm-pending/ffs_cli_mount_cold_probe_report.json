@@ -1,0 +1,36 @@
+{
+  "attempts": [
+    {
+      "cleanup_status": "unmounted",
+      "exit_code": 1,
+      "label": "cold",
+      "mountpoint": "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/mount_probe_mounts/cold",
+      "ready": false,
+      "stderr_path": "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/mount_probe_mounts/cold.stderr",
+      "stdout_path": "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/mount_probe_mounts/cold.stdout",
+      "timed_out": false
+    }
+  ],
+  "classification": "host_capability_skip",
+  "command": {
+    "ffs_bin": "/data/tmp/rch_target_frankenfs_bd_rchk5_3_mount_warm/release-perf/ffs-cli",
+    "image": "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/mount_probe.ext4",
+    "mount_root": "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/mount_probe_mounts"
+  },
+  "exit_code": 1,
+  "generated_at": "2026-05-03T20:52:55.381961Z",
+  "kernel_fuse_mode": "permissioned_required",
+  "mode": "cold",
+  "mount_options": {
+    "background_repair": "not_enabled_by_probe",
+    "writeback_cache": "disabled"
+  },
+  "outcome": "fail",
+  "probe_id": "mount_benchmark_probe",
+  "reason": "Mounting ext4 image (block_size=4096, blocks=4096, ro, runtime=standard) at baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/mount_probe_mounts/cold error: FUSE mount failed at baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/mount_probe_mounts/cold: mount I/O error: fusermount3: mount failed: Permission denied : fusermount3: mount failed: Permission denied",
+  "required_capabilities": [
+    "benchmark_host",
+    "fuse"
+  ],
+  "schema_version": 1
+}
