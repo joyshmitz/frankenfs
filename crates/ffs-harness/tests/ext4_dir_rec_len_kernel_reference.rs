@@ -36,7 +36,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use ffs_ondisk::{parse_dir_block, Ext4ImageReader};
+use ffs_ondisk::{Ext4ImageReader, parse_dir_block};
 
 fn has_command(name: &str) -> bool {
     matches!(
@@ -112,9 +112,7 @@ fn ext4_dir_rec_len_kernel_reference_coalesces_after_unlink() {
     // Pre-unlink: parse root dir, capture entries.
     let image = std::fs::read(&path).expect("read image");
     let reader = Ext4ImageReader::new(&image).expect("parse image");
-    let (_root_ino, root_inode) = reader
-        .resolve_path(&image, "/")
-        .expect("resolve root");
+    let (_root_ino, root_inode) = reader.resolve_path(&image, "/").expect("resolve root");
 
     let block_size = u64::from(reader.sb.block_size);
     let block_size_usize = usize::try_from(block_size).expect("block size fits");
@@ -157,8 +155,7 @@ fn ext4_dir_rec_len_kernel_reference_coalesces_after_unlink() {
     // 12-byte checksum tail, when present).
     let pre_total_rec: u32 = pre_entries.iter().map(|e| u32::from(e.rec_len)).sum();
     assert_eq!(
-        pre_total_rec,
-        usable_block as u32,
+        pre_total_rec, usable_block as u32,
         "pre-unlink rec_lens must cover the usable block"
     );
 
@@ -175,7 +172,10 @@ fn ext4_dir_rec_len_kernel_reference_coalesces_after_unlink() {
     let n_after = reader_after
         .read_inode_data(&image_after, &root_inode_after, 0, &mut post_block)
         .expect("read root dir block after");
-    assert_eq!(n_after, block_size_usize, "expected to read full root dir block after rm");
+    assert_eq!(
+        n_after, block_size_usize,
+        "expected to read full root dir block after rm"
+    );
     let (post_entries, post_tail) =
         parse_dir_block(&post_block, reader_after.sb.block_size).expect("parse post-unlink");
     let usable_block_after = block_size_usize - if post_tail.is_some() { 12 } else { 0 };
@@ -204,8 +204,7 @@ fn ext4_dir_rec_len_kernel_reference_coalesces_after_unlink() {
     // invariant the kernel and e2fsprogs enforce.
     let post_total_rec: u32 = post_entries.iter().map(|e| u32::from(e.rec_len)).sum();
     assert_eq!(
-        post_total_rec,
-        usable_block_after as u32,
+        post_total_rec, usable_block_after as u32,
         "post-unlink rec_lens must still cover the usable block"
     );
 
