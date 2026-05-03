@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "contract_id": "bd-p2j3e.5-swarm-cache-controller-v1",
+  "generated_at": "2026-05-03T22:30:00Z",
+  "target_host": {
+    "min_cpu_cores_logical": 64,
+    "min_ram_total_gb": 256,
+    "min_ram_available_gb": 192
+  },
+  "fallback_candidate_id": "current_arc",
+  "candidates": [
+    {
+      "candidate_id": "current_arc",
+      "algorithm": "current_arc",
+      "description": "Existing ARC behavior; the conservative fallback when large-host evidence is absent or dirty-pressure risk is not measured.",
+      "fallback_candidate_id": "current_arc",
+      "expected_loss_rule": "Keep current ARC unless a candidate improves p99 and hit rate without increasing dirty pressure or memory overhead beyond the budget."
+    },
+    {
+      "candidate_id": "s3_fifo_guarded",
+      "algorithm": "s3_fifo",
+      "description": "S3-FIFO-style admission candidate guarded by dirty-ratio and eviction-pressure thresholds for 256GB swarm hosts.",
+      "fallback_candidate_id": "current_arc",
+      "expected_loss_rule": "Admit only when p99 latency and hit rate improve and E[dirty_write_risk + memory_cost] stays below the current ARC fallback."
+    },
+    {
+      "candidate_id": "segmented_pressure_guard",
+      "algorithm": "segmented_admission",
+      "description": "Segmented admission candidate that separates metadata, hot data, scrub, and repair traffic under a common memory budget.",
+      "fallback_candidate_id": "current_arc",
+      "expected_loss_rule": "Admit only when metadata and mixed workload p99 improve without crossing high dirty watermark or starving repair/scrub reads."
+    }
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "cache_pressure_256gb_authoritative_fixture",
+      "workload_class": "cache_pressure",
+      "host": {
+        "host_fingerprint": "synthetic-64c-256gb-reference-lane",
+        "cpu_cores_logical": 96,
+        "numa_nodes": 2,
+        "ram_total_gb": 512.0,
+        "ram_available_gb": 420.0,
+        "storage_class": "nvme",
+        "lane": "permissioned_large_host"
+      },
+      "measurements": [
+        {
+          "candidate_id": "current_arc",
+          "hit_rate": 0.82,
+          "p99_latency_us": 5400.0,
+          "dirty_ratio": 0.42,
+          "memory_overhead_gb": 0.0,
+          "eviction_pressure": 0.31,
+          "admission_decision": "fallback_to_current_arc",
+          "release_claim_state": "measured_authoritative"
+        },
+        {
+          "candidate_id": "s3_fifo_guarded",
+          "hit_rate": 0.88,
+          "p99_latency_us": 4100.0,
+          "dirty_ratio": 0.43,
+          "memory_overhead_gb": 11.5,
+          "eviction_pressure": 0.22,
+          "admission_decision": "admit",
+          "release_claim_state": "measured_authoritative"
+        },
+        {
+          "candidate_id": "segmented_pressure_guard",
+          "hit_rate": 0.86,
+          "p99_latency_us": 4550.0,
+          "dirty_ratio": 0.40,
+          "memory_overhead_gb": 14.0,
+          "eviction_pressure": 0.24,
+          "admission_decision": "admit",
+          "release_claim_state": "measured_authoritative"
+        }
+      ],
+      "backpressure": {
+        "dirty_high_watermark": 0.8,
+        "dirty_critical_watermark": 0.95,
+        "current_dirty_ratio": 0.43,
+        "flush_policy": "writeback_batch_with_dirty_pressure_guard",
+        "flush_batch_size": 512,
+        "backpressure_state": "healthy"
+      },
+      "release_claim_state": "measured_authoritative",
+      "reproduction_command": "ffs-harness validate-swarm-cache-controller --contract benchmarks/swarm_cache_controller_contract.json",
+      "raw_logs": [
+        "artifacts/performance/swarm-cache/large-host/run.log"
+      ],
+      "artifact_paths": [
+        "artifacts/performance/swarm-cache/large-host/report.json"
+      ]
+    },
+    {
+      "scenario_id": "cache_pressure_small_host_smoke",
+      "workload_class": "fixture_smoke",
+      "host": {
+        "host_fingerprint": "developer-smoke-small-host",
+        "cpu_cores_logical": 16,
+        "numa_nodes": 1,
+        "ram_total_gb": 64.0,
+        "ram_available_gb": 40.0,
+        "storage_class": "nvme",
+        "lane": "developer_smoke"
+      },
+      "measurements": [
+        {
+          "candidate_id": "current_arc",
+          "hit_rate": 0.74,
+          "p99_latency_us": 8000.0,
+          "dirty_ratio": 0.36,
+          "memory_overhead_gb": 0.0,
+          "eviction_pressure": 0.28,
+          "admission_decision": "fallback_to_current_arc",
+          "release_claim_state": "small_host_smoke"
+        },
+        {
+          "candidate_id": "s3_fifo_guarded",
+          "hit_rate": 0.79,
+          "p99_latency_us": 6900.0,
+          "dirty_ratio": 0.37,
+          "memory_overhead_gb": 3.5,
+          "eviction_pressure": 0.23,
+          "admission_decision": "reject_until_measured",
+          "release_claim_state": "small_host_smoke"
+        }
+      ],
+      "backpressure": {
+        "dirty_high_watermark": 0.8,
+        "dirty_critical_watermark": 0.95,
+        "current_dirty_ratio": 0.37,
+        "flush_policy": "writeback_batch_with_dirty_pressure_guard",
+        "flush_batch_size": 128,
+        "backpressure_state": "healthy"
+      },
+      "release_claim_state": "small_host_smoke",
+      "reproduction_command": "ffs-harness validate-swarm-cache-controller --contract benchmarks/swarm_cache_controller_contract.json",
+      "raw_logs": [
+        "artifacts/performance/swarm-cache/small-host/run.log"
+      ],
+      "artifact_paths": [
+        "artifacts/performance/swarm-cache/small-host/report.json"
+      ]
+    }
+  ],
+  "required_log_fields": [
+    "scenario_id",
+    "host_fingerprint",
+    "cpu_cores_logical",
+    "ram_total_gb",
+    "workload_class",
+    "candidate_id",
+    "algorithm",
+    "hit_rate",
+    "p99_latency_us",
+    "dirty_ratio",
+    "eviction_pressure",
+    "admission_decision",
+    "backpressure_state",
+    "flush_policy",
+    "release_claim_state",
+    "reproduction_command"
+  ],
+  "release_gate_consumers": [
+    "bd-p2j3e",
+    "bd-rchk5",
+    "proof-bundle",
+    "release-gates"
+  ]
+}

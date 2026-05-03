@@ -101,6 +101,11 @@ use ffs_harness::{
         SupportStateAccountingConfig, fail_on_support_state_accounting_errors,
         render_support_state_markdown, run_support_state_accounting,
     },
+    swarm_cache_controller::{
+        DEFAULT_SWARM_CACHE_CONTROLLER_CONTRACT, fail_on_swarm_cache_controller_errors,
+        load_swarm_cache_controller_contract, render_swarm_cache_controller_markdown,
+        validate_swarm_cache_controller_contract,
+    },
     validate_btrfs_fixture, validate_ext4_fixture,
     verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
     workload_corpus::{
@@ -187,6 +192,7 @@ fn run() -> Result<()> {
             validate_performance_baseline_manifest_cmd(&args[1..])
         }
         Some("performance-delta-closeout") => performance_delta_closeout_cmd(&args[1..]),
+        Some("validate-swarm-cache-controller") => validate_swarm_cache_controller_cmd(&args[1..]),
         Some("validate-adversarial-threat-model") => {
             validate_adversarial_threat_model_cmd(&args[1..])
         }
@@ -309,6 +315,14 @@ struct OperatorRecoveryDrillCmdArgs {
 #[derive(Debug)]
 struct WorkloadCorpusCmdArgs {
     corpus_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
+struct SwarmCacheControllerCmdArgs {
+    contract_path: String,
     out_path: Option<String>,
     summary_out_path: Option<String>,
     format: ProofBundleFormat,
@@ -1113,6 +1127,89 @@ fn parse_performance_delta_closeout_cmd_args(
     Ok(Some(PerformanceDeltaCloseoutCmdArgs {
         config_path,
         issues_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
+fn validate_swarm_cache_controller_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_swarm_cache_controller_cmd_args(args)? else {
+        return Ok(());
+    };
+    let contract = load_swarm_cache_controller_contract(Path::new(&cmd_args.contract_path))?;
+    let report = validate_swarm_cache_controller_contract(&contract);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_swarm_cache_controller_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "swarm cache controller report written: {} valid={} scenarios={} candidates={}",
+            path, report.valid, report.scenario_count, report.candidate_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_swarm_cache_controller_markdown(&report)),
+        )?;
+        println!("swarm cache controller summary written: {path}");
+    }
+
+    fail_on_swarm_cache_controller_errors(&report)
+}
+
+fn parse_swarm_cache_controller_cmd_args(
+    args: &[String],
+) -> Result<Option<SwarmCacheControllerCmdArgs>> {
+    let mut contract_path = DEFAULT_SWARM_CACHE_CONTROLLER_CONTRACT.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--contract" => {
+                i += 1;
+                args.get(i)
+                    .context("--contract requires a path")?
+                    .clone_into(&mut contract_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_swarm_cache_controller_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-swarm-cache-controller argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(SwarmCacheControllerCmdArgs {
+        contract_path,
         out_path,
         summary_out_path,
         format,
@@ -2726,6 +2823,7 @@ fn print_usage() {
     );
     print_performance_baseline_manifest_usage_summary();
     print_performance_delta_closeout_usage_summary();
+    print_swarm_cache_controller_usage_summary();
     print_adversarial_threat_model_usage_summary();
     print_soak_canary_campaign_usage_summary();
     print_repair_confidence_lab_usage_summary();
@@ -2809,6 +2907,7 @@ fn print_usage_examples() {
     );
     print_performance_baseline_manifest_example();
     print_performance_delta_closeout_example();
+    print_swarm_cache_controller_example();
     print_adversarial_threat_model_example();
     print_soak_canary_campaign_example();
     print_repair_confidence_lab_example();
@@ -2844,6 +2943,18 @@ fn print_performance_delta_closeout_usage_summary() {
 fn print_performance_delta_closeout_example() {
     println!(
         "  ffs-harness performance-delta-closeout --config benchmarks/performance_delta_closeout.json --out artifacts/performance/delta_closeout.json --summary-out artifacts/performance/delta_closeout.md"
+    );
+}
+
+fn print_swarm_cache_controller_usage_summary() {
+    println!(
+        "  ffs-harness validate-swarm-cache-controller [--contract FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_swarm_cache_controller_example() {
+    println!(
+        "  ffs-harness validate-swarm-cache-controller --contract benchmarks/swarm_cache_controller_contract.json --out artifacts/performance/swarm_cache_controller.json --summary-out artifacts/performance/swarm_cache_controller.md"
     );
 }
 
@@ -3071,6 +3182,16 @@ fn print_performance_delta_closeout_usage() {
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write selected-format closeout report");
     println!("  --summary-out FILE                 Write Markdown closeout summary");
+}
+
+fn print_swarm_cache_controller_usage() {
+    println!("Usage: ffs-harness validate-swarm-cache-controller [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --contract FILE                    Read swarm cache controller contract JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write selected-format validation report");
+    println!("  --summary-out FILE                 Write Markdown inspection summary");
 }
 
 fn print_adversarial_threat_model_usage() {
