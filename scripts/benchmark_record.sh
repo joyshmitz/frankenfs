@@ -776,6 +776,12 @@ add_bench "ffs-block arc concurrent hot read 64 threads (criterion)" \
     "block_cache_arc_concurrent_hot_read_64threads" \
     "512"
 
+add_bench "ffs-block sharded arc concurrent hot read 64 threads (criterion)" \
+    "$(cargo_bench_cmd "-p ffs-block --bench arc_cache -- block_cache_sharded_arc_concurrent_hot_read_64threads")" \
+    "ffs_block_sharded_arc_concurrent_hot_read_64threads.json" \
+    "block_cache_sharded_arc_concurrent_hot_read_64threads" \
+    "512"
+
 add_bench "ffs-block arc compile-like (criterion)" \
     "$(cargo_bench_cmd "-p ffs-block --bench arc_cache -- block_cache_arc_compile_like")" \
     "ffs_block_arc_compile_like.json" \
@@ -810,6 +816,12 @@ add_bench "ffs-block s3fifo concurrent hot read 64 threads (criterion)" \
     "$(cargo_bench_cmd "-p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_concurrent_hot_read_64threads")" \
     "ffs_block_s3fifo_concurrent_hot_read_64threads.json" \
     "block_cache_s3fifo_concurrent_hot_read_64threads" \
+    "512"
+
+add_bench "ffs-block sharded s3fifo concurrent hot read 64 threads (criterion)" \
+    "$(cargo_bench_cmd "-p ffs-block --features s3fifo --bench arc_cache -- block_cache_sharded_s3fifo_concurrent_hot_read_64threads")" \
+    "ffs_block_sharded_s3fifo_concurrent_hot_read_64threads.json" \
+    "block_cache_sharded_s3fifo_concurrent_hot_read_64threads" \
     "512"
 
 add_bench "ffs-block s3fifo compile-like (criterion)" \

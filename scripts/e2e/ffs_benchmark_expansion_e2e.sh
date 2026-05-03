@@ -83,6 +83,7 @@ THRESHOLDS_FILE="$REPO_ROOT/benchmarks/thresholds.toml"
 EXPANDED_OPS=(
     cli_metadata_parse_conformance
     block_cache_arc_concurrent_hot_read_64threads block_cache_s3fifo_concurrent_hot_read_64threads
+    block_cache_sharded_arc_concurrent_hot_read_64threads block_cache_sharded_s3fifo_concurrent_hot_read_64threads
     wal_commit_4k_sync
     wal_write_amplification_1block wal_write_amplification_16block
     mvcc_contention_2writers mvcc_contention_4writers mvcc_contention_8writers
