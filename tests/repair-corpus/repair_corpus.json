@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "corpus_id": "frankenfs_repair_chain_of_custody_v1",
+  "bead_id": "bd-0xa7h",
+  "cases": [
+    {
+      "case_id": "valid_recovery_ext4_4k_block_loss",
+      "seed": 1001,
+      "original_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "corrupted_image_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "corruption_manifest_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "ledger": {
+        "ledger_id": "ledger_recovery_001",
+        "symbol_generation": 7,
+        "bound_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "bound_corrupted_image_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "bound_corruption_manifest_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "row_count": 64,
+        "truncated": false,
+        "tampered_row_id": "",
+        "duplicate_row_id": "",
+        "stale_against_generation": 0
+      },
+      "repair_symbol_budget": 32,
+      "symbols_required_for_recovery": 12,
+      "symbols_supplied": 16,
+      "expected_outcome": "recovered",
+      "expected_refusal_reason": "",
+      "verification": {
+        "post_repair_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "post_repair_symbol_generation": 8,
+        "scrub_clean": true,
+        "reopen_clean": true
+      },
+      "chain_of_custody": {
+        "artifact_path": "artifacts/repair-corpus/recovery_001.json",
+        "artifact_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "recorded_by": "frankenfs_repair_lab",
+        "recorded_at_unix": 1714752000,
+        "linked_bead": "bd-rchk7.2"
+      }
+    },
+    {
+      "case_id": "wrong_image_ledger_refusal",
+      "seed": 2001,
+      "original_image_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "corrupted_image_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "corruption_manifest_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "ledger": {
+        "ledger_id": "ledger_wrong_image_001",
+        "symbol_generation": 4,
+        "bound_image_hash": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+        "bound_corrupted_image_hash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+        "bound_corruption_manifest_hash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "row_count": 32,
+        "truncated": false,
+        "tampered_row_id": "",
+        "duplicate_row_id": "",
+        "stale_against_generation": 0
+      },
+      "repair_symbol_budget": 32,
+      "symbols_required_for_recovery": 10,
+      "symbols_supplied": 0,
+      "expected_outcome": "refused_wrong_image",
+      "expected_refusal_reason": "wrong_image_ledger",
+      "verification": {
+        "post_repair_image_hash": "",
+        "post_repair_symbol_generation": 0,
+        "scrub_clean": false,
+        "reopen_clean": false
+      },
+      "chain_of_custody": {
+        "artifact_path": "artifacts/repair-corpus/refusal_wrong_image_001.json",
+        "artifact_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "recorded_by": "frankenfs_repair_lab",
+        "recorded_at_unix": 1714752100,
+        "linked_bead": "bd-rchk7.2"
+      }
+    },
+    {
+      "case_id": "stale_ledger_refusal",
+      "seed": 3001,
+      "original_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "corrupted_image_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "corruption_manifest_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "ledger": {
+        "ledger_id": "ledger_stale_001",
+        "symbol_generation": 5,
+        "bound_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "bound_corrupted_image_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "bound_corruption_manifest_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "row_count": 32,
+        "truncated": false,
+        "tampered_row_id": "",
+        "duplicate_row_id": "",
+        "stale_against_generation": 9
+      },
+      "repair_symbol_budget": 32,
+      "symbols_required_for_recovery": 10,
+      "symbols_supplied": 0,
+      "expected_outcome": "refused_stale_ledger",
+      "expected_refusal_reason": "stale_ledger",
+      "verification": {
+        "post_repair_image_hash": "",
+        "post_repair_symbol_generation": 0,
+        "scrub_clean": false,
+        "reopen_clean": false
+      },
+      "chain_of_custody": {
+        "artifact_path": "artifacts/repair-corpus/refusal_stale_001.json",
+        "artifact_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "recorded_by": "frankenfs_repair_lab",
+        "recorded_at_unix": 1714752200,
+        "linked_bead": "bd-rchk7.2"
+      }
+    },
+    {
+      "case_id": "truncated_ledger_refusal",
+      "seed": 4001,
+      "original_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "corrupted_image_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "corruption_manifest_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "ledger": {
+        "ledger_id": "ledger_truncated_001",
+        "symbol_generation": 6,
+        "bound_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "bound_corrupted_image_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "bound_corruption_manifest_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "row_count": 12,
+        "truncated": true,
+        "tampered_row_id": "",
+        "duplicate_row_id": "",
+        "stale_against_generation": 0
+      },
+      "repair_symbol_budget": 32,
+      "symbols_required_for_recovery": 10,
+      "symbols_supplied": 0,
+      "expected_outcome": "refused_other",
+      "expected_refusal_reason": "truncated_ledger",
+      "verification": {
+        "post_repair_image_hash": "",
+        "post_repair_symbol_generation": 0,
+        "scrub_clean": false,
+        "reopen_clean": false
+      },
+      "chain_of_custody": {
+        "artifact_path": "artifacts/repair-corpus/refusal_truncated_001.json",
+        "artifact_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "recorded_by": "frankenfs_repair_lab",
+        "recorded_at_unix": 1714752300,
+        "linked_bead": "bd-rchk7.2"
+      }
+    },
+    {
+      "case_id": "post_repair_refresh_mismatch_refusal",
+      "seed": 5001,
+      "original_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "corrupted_image_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000022",
+      "corruption_manifest_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000033",
+      "ledger": {
+        "ledger_id": "ledger_refresh_mismatch_001",
+        "symbol_generation": 11,
+        "bound_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "bound_corrupted_image_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000022",
+        "bound_corruption_manifest_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000033",
+        "row_count": 32,
+        "truncated": false,
+        "tampered_row_id": "",
+        "duplicate_row_id": "",
+        "stale_against_generation": 0
+      },
+      "repair_symbol_budget": 32,
+      "symbols_required_for_recovery": 10,
+      "symbols_supplied": 0,
+      "expected_outcome": "refused_other",
+      "expected_refusal_reason": "post_repair_refresh_mismatch",
+      "verification": {
+        "post_repair_image_hash": "",
+        "post_repair_symbol_generation": 12,
+        "scrub_clean": false,
+        "reopen_clean": false
+      },
+      "chain_of_custody": {
+        "artifact_path": "artifacts/repair-corpus/refusal_refresh_mismatch_001.json",
+        "artifact_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "recorded_by": "frankenfs_repair_lab",
+        "recorded_at_unix": 1714752400,
+        "linked_bead": "bd-rchk7.2"
+      }
+    }
+  ]
+}
