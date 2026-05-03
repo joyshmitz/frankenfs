@@ -810,9 +810,76 @@ pub const PAGE_LOCK_SHARDS_PER_CORE: usize = 4;
 pub const MIN_PAGE_LOCK_SHARDS: usize = 16;
 /// Maximum page-lock shard count.
 pub const MAX_PAGE_LOCK_SHARDS: usize = 1024;
+const PAGE_LOCK_INLINE_CAPACITY: usize = 8;
+
+#[derive(Debug)]
+enum InFlightBlocks {
+    Inline(Vec<BlockNumber>),
+    Large(HashSet<BlockNumber>),
+}
+
+impl InFlightBlocks {
+    fn new() -> Self {
+        Self::Inline(Vec::with_capacity(PAGE_LOCK_INLINE_CAPACITY))
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Inline(blocks) => blocks.len(),
+            Self::Large(blocks) => blocks.len(),
+        }
+    }
+
+    fn contains(&self, block: BlockNumber) -> bool {
+        match self {
+            Self::Inline(blocks) => blocks.contains(&block),
+            Self::Large(blocks) => blocks.contains(&block),
+        }
+    }
+
+    fn insert(&mut self, block: BlockNumber) -> bool {
+        match self {
+            Self::Inline(blocks) => {
+                if blocks.contains(&block) {
+                    return false;
+                }
+                if blocks.len() < PAGE_LOCK_INLINE_CAPACITY {
+                    blocks.push(block);
+                    return true;
+                }
+
+                let mut promoted = HashSet::with_capacity(PAGE_LOCK_INLINE_CAPACITY * 2);
+                promoted.extend(blocks.drain(..));
+                let inserted = promoted.insert(block);
+                *self = Self::Large(promoted);
+                inserted
+            }
+            Self::Large(blocks) => blocks.insert(block),
+        }
+    }
+
+    fn remove(&mut self, block: BlockNumber) -> bool {
+        match self {
+            Self::Inline(blocks) => blocks
+                .iter()
+                .position(|existing| *existing == block)
+                .map(|idx| blocks.swap_remove(idx))
+                .is_some(),
+            Self::Large(blocks) => {
+                let removed = blocks.remove(&block);
+                if blocks.len() <= PAGE_LOCK_INLINE_CAPACITY / 2 {
+                    let mut demoted = Vec::with_capacity(PAGE_LOCK_INLINE_CAPACITY);
+                    demoted.extend(blocks.drain());
+                    *self = Self::Inline(demoted);
+                }
+                removed
+            }
+        }
+    }
+}
 
 struct PageLockShard {
-    in_flight: Mutex<HashSet<BlockNumber>>,
+    in_flight: Mutex<InFlightBlocks>,
     ready: Condvar,
     waiters: AtomicUsize,
 }
@@ -820,7 +887,7 @@ struct PageLockShard {
 impl PageLockShard {
     fn new() -> Self {
         Self {
-            in_flight: Mutex::new(HashSet::with_capacity(4)),
+            in_flight: Mutex::new(InFlightBlocks::new()),
             ready: Condvar::new(),
             waiters: AtomicUsize::new(0),
         }
@@ -884,7 +951,7 @@ impl PageLockTable {
     fn acquire(&self, block: BlockNumber) -> PageLockPermit<'_> {
         let shard = &self.shards[self.shard_index(block)];
         let mut in_flight = shard.in_flight.lock();
-        while in_flight.contains(&block) {
+        while in_flight.contains(block) {
             shard.waiters.fetch_add(1, Ordering::AcqRel);
             shard.ready.wait(&mut in_flight);
             shard.waiters.fetch_sub(1, Ordering::AcqRel);
@@ -926,7 +993,7 @@ pub struct PageLockPermit<'a> {
 impl Drop for PageLockPermit<'_> {
     fn drop(&mut self) {
         let mut in_flight = self.shard.in_flight.lock();
-        let removed = in_flight.remove(&self.block);
+        let removed = in_flight.remove(self.block);
         drop(in_flight);
         if removed && self.shard.waiters.load(Ordering::Acquire) > 0 {
             self.shard.ready.notify_all();
@@ -6260,10 +6327,18 @@ mod tests {
         }
 
         assert_eq!(table.in_flight_len(), IN_FLIGHT_BLOCKS);
+        assert!(matches!(
+            &*table.shards[0].in_flight.lock(),
+            InFlightBlocks::Large(_)
+        ));
         permits.truncate(IN_FLIGHT_BLOCKS / 2);
         assert_eq!(table.in_flight_len(), IN_FLIGHT_BLOCKS / 2);
         drop(permits);
         assert_eq!(table.in_flight_len(), 0);
+        assert!(matches!(
+            &*table.shards[0].in_flight.lock(),
+            InFlightBlocks::Inline(blocks) if blocks.is_empty()
+        ));
     }
 
     #[test]
