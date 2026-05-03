@@ -1,0 +1,36 @@
+{
+  "bead_id": "bd-rchk5.7",
+  "classification": "downgraded_against_reference",
+  "date_tag": "20260503-bd-rchk5-7",
+  "decision": "keep mount_recovery performance downgraded; shell probe overhead candidates did not improve the measured regression",
+  "inputs": {
+    "binary": "/data/tmp/cargo-target/release-perf/ffs-cli",
+    "image": "baselines/hyperfine/20260503/mount_recovery_probe.ext4",
+    "reference": "benchmarks/baselines/history/20260218.json",
+    "regression_row": "benchmarks/baselines/history/20260503-bd-rchk5-3-mount-recovery-sudo-measured.json"
+  },
+  "measurements": [
+    {
+      "artifact": "baselines/hyperfine/20260503-bd-rchk5-7-before/ffs_cli_mount_recovery_probe.json",
+      "mean_ms": 77.817,
+      "min_ms": 74.218,
+      "max_ms": 84.643,
+      "status": "baseline_reproduced"
+    },
+    {
+      "artifact": "baselines/hyperfine/20260503-bd-rchk5-7-after-seqless/ffs_cli_mount_recovery_probe.json",
+      "mean_ms": 183.350,
+      "min_ms": 93.656,
+      "max_ms": 273.751,
+      "status": "rejected_candidate"
+    },
+    {
+      "artifact": "baselines/hyperfine/20260503-bd-rchk5-7-downgraded-current/ffs_cli_mount_recovery_probe.json",
+      "mean_ms": 77.507,
+      "min_ms": 73.052,
+      "max_ms": 82.917,
+      "status": "current_downgraded"
+    }
+  ],
+  "next_profile_target": "ffs-cli mount/FUSE startup and ext4 recovery setup"
+}

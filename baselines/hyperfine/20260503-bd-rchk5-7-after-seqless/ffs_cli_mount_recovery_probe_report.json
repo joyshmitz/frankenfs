@@ -1,0 +1,42 @@
+{
+  "attempts": [
+    {
+      "cleanup_status": "unmounted",
+      "exit_code": 0,
+      "label": "recovery",
+      "mountpoint": "baselines/hyperfine/20260503-bd-rchk5-7-after-seqless/mount_probe_mounts/recovery",
+      "ready": true,
+      "stderr_path": "baselines/hyperfine/20260503-bd-rchk5-7-after-seqless/mount_probe_mounts/recovery.stderr",
+      "stdout_path": "baselines/hyperfine/20260503-bd-rchk5-7-after-seqless/mount_probe_mounts/recovery.stdout",
+      "timed_out": false
+    }
+  ],
+  "classification": "measured",
+  "command": {
+    "ffs_bin": "/data/tmp/cargo-target/release-perf/ffs-cli",
+    "image": "baselines/hyperfine/20260503/mount_recovery_probe.ext4",
+    "mount_root": "baselines/hyperfine/20260503-bd-rchk5-7-after-seqless/mount_probe_mounts"
+  },
+  "exit_code": 0,
+  "generated_at": "2026-05-03T22:18:26.579609Z",
+  "kernel_fuse_mode": "permissioned_required",
+  "mode": "recovery",
+  "mount_options": {
+    "background_repair": "not_enabled_by_probe",
+    "background_scrub": "disabled_by_probe",
+    "writeback_cache": "disabled"
+  },
+  "outcome": "pass",
+  "probe_id": "mount_benchmark_probe",
+  "readiness_poll": {
+    "interval_secs": 0.005,
+    "max_polls": 2000,
+    "max_wait_secs": 10.0
+  },
+  "reason": "mounted benchmark probe completed",
+  "required_capabilities": [
+    "benchmark_host",
+    "fuse"
+  ],
+  "schema_version": 1
+}

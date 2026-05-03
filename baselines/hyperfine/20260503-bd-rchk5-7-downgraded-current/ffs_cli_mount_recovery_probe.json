@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "sudo -n scripts/mount_benchmark_probe.sh --bin /data/tmp/cargo-target/release-perf/ffs-cli --image baselines/hyperfine/20260503/mount_recovery_probe.ext4 --mount-root baselines/hyperfine/20260503-bd-rchk5-7-downgraded-current/mount_probe_mounts --mode recovery --out-json baselines/hyperfine/20260503-bd-rchk5-7-downgraded-current/ffs_cli_mount_recovery_probe_report.json",
+      "mean": 0.07750679385999999,
+      "stddev": 0.0026947158779322593,
+      "median": 0.07683565666,
+      "user": 0.030183979999999992,
+      "system": 0.04827504,
+      "min": 0.07305181316,
+      "max": 0.08291673816,
+      "times": [
+        0.07674259016000001,
+        0.08291673816,
+        0.07651815516,
+        0.07762905816000001,
+        0.07688942816000001,
+        0.07739331216,
+        0.07617750016000001,
+        0.07678188516000001,
+        0.08096745816,
+        0.07305181316
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
