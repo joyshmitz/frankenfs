@@ -2,7 +2,7 @@
 
 //! Mounted write workload matrix validation for `bd-rchk0.3.2`.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
@@ -1117,30 +1117,44 @@ mod tests {
         let report = validate_default_mounted_write_matrix().expect("default matrix validates");
         assert_eq!(report.scenario_count, 13);
         assert_eq!(report.filesystems, vec!["btrfs", "ext4"]);
-        assert!(report
-            .operation_kinds
-            .contains(&"fallocate_keep_size".to_owned()));
-        assert!(report
-            .operation_kinds
-            .contains(&"fallocate_zero_range".to_owned()));
-        assert!(report
-            .operation_kinds
-            .contains(&"fallocate_punch_hole".to_owned()));
+        assert!(
+            report
+                .operation_kinds
+                .contains(&"fallocate_keep_size".to_owned())
+        );
+        assert!(
+            report
+                .operation_kinds
+                .contains(&"fallocate_zero_range".to_owned())
+        );
+        assert!(
+            report
+                .operation_kinds
+                .contains(&"fallocate_punch_hole".to_owned())
+        );
         assert!(report.operation_kinds.contains(&"xattr_set_get".to_owned()));
         assert!(report.operation_kinds.contains(&"xattr_create".to_owned()));
         assert!(report.operation_kinds.contains(&"xattr_replace".to_owned()));
-        assert!(report
-            .operation_kinds
-            .contains(&"xattr_list_get".to_owned()));
-        assert!(report
-            .operation_kinds
-            .contains(&"read_only_write_erofs".to_owned()));
-        assert!(report
-            .operation_kinds
-            .contains(&"rw_repair_rejected_before_serialization".to_owned()));
-        assert!(report
-            .operation_kinds
-            .contains(&"host_capability_skip".to_owned()));
+        assert!(
+            report
+                .operation_kinds
+                .contains(&"xattr_list_get".to_owned())
+        );
+        assert!(
+            report
+                .operation_kinds
+                .contains(&"read_only_write_erofs".to_owned())
+        );
+        assert!(
+            report
+                .operation_kinds
+                .contains(&"rw_repair_rejected_before_serialization".to_owned())
+        );
+        assert!(
+            report
+                .operation_kinds
+                .contains(&"host_capability_skip".to_owned())
+        );
         for scenario_class in REQUIRED_SCENARIO_PROOF_CLASSES {
             assert!(
                 report.scenario_classes.contains(&scenario_class.to_owned()),
@@ -1148,9 +1162,11 @@ mod tests {
             );
         }
         assert!(report.expected_error_classes.contains(&"EROFS".to_owned()));
-        assert!(report
-            .expected_error_classes
-            .contains(&"HOST_CAPABILITY_SKIP".to_owned()));
+        assert!(
+            report
+                .expected_error_classes
+                .contains(&"HOST_CAPABILITY_SKIP".to_owned())
+        );
         assert!(report.no_partial_mutation_scenarios >= 3);
         assert!(report.output_formats.contains(&"json".to_owned()));
         assert!(report.output_formats.contains(&"csv".to_owned()));
@@ -1165,10 +1181,12 @@ mod tests {
             .formats
             .retain(|format| format != "csv");
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("csv format")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("csv format"))
+        );
     }
 
     #[test]
@@ -1182,10 +1200,12 @@ mod tests {
         scenario.workload.no_partial_mutation = false;
         scenario.expected_outcome.no_partial_mutation = false;
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("no_partial_mutation")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("no_partial_mutation"))
+        );
     }
 
     #[test]
@@ -1198,10 +1218,12 @@ mod tests {
                 .retain(|operation| operation != "xattr_set_get");
         }
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("xattr_set_get")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("xattr_set_get"))
+        );
     }
 
     #[test]
@@ -1212,10 +1234,12 @@ mod tests {
             .required_fields
             .retain(|field| field != "expected_error_class");
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("required field expected_error_class")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("required field expected_error_class"))
+        );
     }
 
     #[test]
@@ -1224,10 +1248,12 @@ mod tests {
         matrix.scenarios[0].proof.image_fixture_hash =
             "sha256:ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned();
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("image_fixture_hash")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("image_fixture_hash"))
+        );
     }
 
     #[test]
@@ -1244,10 +1270,12 @@ mod tests {
             .absent_paths
             .clear();
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("expected_survivor_set")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("expected_survivor_set"))
+        );
     }
 
     #[test]
@@ -1258,10 +1286,12 @@ mod tests {
             .artifact_requirements
             .retain(|requirement| requirement != "reopen_state");
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("artifact_requirements missing reopen_state")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("artifact_requirements missing reopen_state"))
+        );
     }
 
     #[test]
@@ -1271,10 +1301,12 @@ mod tests {
             .scenarios
             .retain(|scenario| scenario.proof.scenario_class != "host_skip");
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("matrix missing scenario proof class host_skip")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("matrix missing scenario proof class host_skip"))
+        );
     }
 
     #[test]
@@ -1283,10 +1315,12 @@ mod tests {
         let duplicate = matrix.scenarios[0].scenario_id.clone();
         matrix.scenarios[1].scenario_id = duplicate;
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("duplicate scenario_id")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("duplicate scenario_id"))
+        );
     }
 
     #[test]
@@ -1314,10 +1348,12 @@ mod tests {
         let mut matrix = valid_matrix();
         matrix.multi_handle_scenarios.clear();
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("multi_handle_scenarios")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("multi_handle_scenarios"))
+        );
     }
 
     fn first_multi_handle_scenario(matrix: &mut MountedWriteMatrix) -> &mut MultiHandleScenario {
@@ -1333,10 +1369,12 @@ mod tests {
         let scenario = first_multi_handle_scenario(&mut matrix);
         scenario.handles.truncate(1);
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("at least two handles")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("at least two handles"))
+        );
     }
 
     #[test]
@@ -1345,10 +1383,12 @@ mod tests {
         let scenario = first_multi_handle_scenario(&mut matrix);
         scenario.scenario_id = "mounted_write_does_not_match".to_owned();
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("must start with mounted_write_multihandle_")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("must start with mounted_write_multihandle_"))
+        );
     }
 
     #[test]
@@ -1357,10 +1397,12 @@ mod tests {
         let scenario = first_multi_handle_scenario(&mut matrix);
         scenario.operation_trace[0].handle_id = "h_unknown".to_owned();
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("references unknown handle")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("references unknown handle"))
+        );
     }
 
     #[test]
@@ -1385,10 +1427,12 @@ mod tests {
         let scenario = first_multi_handle_scenario(&mut matrix);
         scenario.handles[0].open_flags = vec!["O_BANANA".to_owned()];
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("unsupported open_flag")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("unsupported open_flag"))
+        );
     }
 
     #[test]
@@ -1397,10 +1441,12 @@ mod tests {
         let scenario = first_multi_handle_scenario(&mut matrix);
         scenario.reopen.kind = "remount_lazy_unsupported".to_owned();
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("unsupported reopen.kind")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("unsupported reopen.kind"))
+        );
     }
 
     #[test]
@@ -1409,10 +1455,12 @@ mod tests {
         let scenario = first_multi_handle_scenario(&mut matrix);
         scenario.cleanup_policy = "abandon".to_owned();
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("unsupported cleanup_policy")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("unsupported cleanup_policy"))
+        );
     }
 
     #[test]
@@ -1421,10 +1469,12 @@ mod tests {
         let scenario = first_multi_handle_scenario(&mut matrix);
         scenario.artifact_requirements.clear();
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("artifact_requirements missing")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("artifact_requirements missing"))
+        );
     }
 
     #[test]
@@ -1437,10 +1487,12 @@ mod tests {
             .expect("rejected multi-handle scenario in fixture");
         scenario.expected_outcome.follow_up_bead = String::new();
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("follow_up_bead")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("follow_up_bead"))
+        );
     }
 
     #[test]
@@ -1453,10 +1505,12 @@ mod tests {
             .expect("rejected multi-handle scenario in fixture");
         scenario.expected_outcome.no_partial_mutation = false;
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("must guarantee no_partial_mutation")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("must guarantee no_partial_mutation"))
+        );
     }
 
     #[test]
@@ -1466,10 +1520,12 @@ mod tests {
             .multi_handle_scenarios
             .retain(|s| s.kind != "open_unlink");
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("missing required kind open_unlink")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("missing required kind open_unlink"))
+        );
     }
 
     #[test]
@@ -1480,10 +1536,12 @@ mod tests {
             .required_fields
             .retain(|field| field != "handle_ids");
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("multi-handle required field handle_ids")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("multi-handle required field handle_ids"))
+        );
     }
 
     #[test]
@@ -1494,10 +1552,12 @@ mod tests {
             .artifact_paths
             .retain(|path| path != "mounted_multihandle_results.json");
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("multi-handle artifact path")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("multi-handle artifact path"))
+        );
     }
 
     #[test]
@@ -1507,10 +1567,12 @@ mod tests {
         let dup = scenario.handles[0].handle_id.clone();
         scenario.handles[1].handle_id = dup;
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("duplicate handle_id")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("duplicate handle_id"))
+        );
     }
 
     #[test]
@@ -1520,9 +1582,11 @@ mod tests {
         scenario.survivor_set.present_paths.clear();
         scenario.survivor_set.absent_paths.clear();
         let report = validate_mounted_write_matrix(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("survivor_set")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("survivor_set"))
+        );
     }
 }

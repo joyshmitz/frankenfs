@@ -333,9 +333,7 @@ fn validate_outcome_and_refusal(
 
 fn validate_refusal_evidence(case: &RepairCorpusCase, errors: &mut Vec<String>) {
     match case.expected_refusal_reason.as_str() {
-        "wrong_image_ledger"
-            if case.ledger.bound_image_hash == case.original_image_hash =>
-        {
+        "wrong_image_ledger" if case.ledger.bound_image_hash == case.original_image_hash => {
             errors.push(format!(
                 "repair case `{}` wrong_image_ledger requires bound_image_hash differs from original_image_hash",
                 case.case_id
@@ -368,17 +366,14 @@ fn validate_refusal_evidence(case: &RepairCorpusCase, errors: &mut Vec<String>) 
                 case.case_id
             ));
         }
-        "insufficient_symbols"
-            if case.symbols_supplied >= case.symbols_required_for_recovery =>
-        {
+        "insufficient_symbols" if case.symbols_supplied >= case.symbols_required_for_recovery => {
             errors.push(format!(
                 "repair case `{}` insufficient_symbols requires symbols_supplied < symbols_required_for_recovery",
                 case.case_id
             ));
         }
         "post_repair_refresh_mismatch"
-            if case.verification.post_repair_symbol_generation
-                <= case.ledger.symbol_generation =>
+            if case.verification.post_repair_symbol_generation <= case.ledger.symbol_generation =>
         {
             errors.push(format!(
                 "repair case `{}` post_repair_refresh_mismatch requires post_repair_symbol_generation > ledger.symbol_generation",

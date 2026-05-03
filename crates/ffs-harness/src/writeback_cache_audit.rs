@@ -182,9 +182,7 @@ fn check_filesystem_and_operation(
     None
 }
 
-fn check_fuse_capability(
-    gate: &WritebackCacheAuditGate,
-) -> Option<WritebackCacheAuditDecision> {
+fn check_fuse_capability(gate: &WritebackCacheAuditGate) -> Option<WritebackCacheAuditDecision> {
     if gate.fuse_capability.probe_status != "available" {
         return Some(reject(
             "fuse_capability_unavailable",
@@ -263,9 +261,7 @@ fn check_crash_and_fsync_evidence(
     None
 }
 
-fn check_conflicting_flags(
-    gate: &WritebackCacheAuditGate,
-) -> Option<WritebackCacheAuditDecision> {
+fn check_conflicting_flags(gate: &WritebackCacheAuditGate) -> Option<WritebackCacheAuditDecision> {
     let banned_flags = [
         "noflush",
         "writeback_cache_disable",
@@ -390,7 +386,10 @@ mod tests {
             .raw_options
             .push("writeback_cache".to_owned());
         let decision = evaluate_writeback_cache_audit(&gate);
-        assert_eq!(rejection_reason(&decision), Some("default_or_read_only_mount"));
+        assert_eq!(
+            rejection_reason(&decision),
+            Some("default_or_read_only_mount")
+        );
     }
 
     #[test]
@@ -398,7 +397,10 @@ mod tests {
         let mut gate = happy_gate();
         gate.mount_options.mode = "ro".to_owned();
         let decision = evaluate_writeback_cache_audit(&gate);
-        assert_eq!(rejection_reason(&decision), Some("default_or_read_only_mount"));
+        assert_eq!(
+            rejection_reason(&decision),
+            Some("default_or_read_only_mount")
+        );
     }
 
     #[test]
@@ -406,7 +408,10 @@ mod tests {
         let mut gate = happy_gate();
         gate.explicit_opt_in = false;
         let decision = evaluate_writeback_cache_audit(&gate);
-        assert_eq!(rejection_reason(&decision), Some("default_or_read_only_mount"));
+        assert_eq!(
+            rejection_reason(&decision),
+            Some("default_or_read_only_mount")
+        );
     }
 
     #[test]
@@ -436,7 +441,10 @@ mod tests {
         let mut gate = happy_gate();
         gate.fuse_capability.probe_status = "unavailable".to_owned();
         let decision = evaluate_writeback_cache_audit(&gate);
-        assert_eq!(rejection_reason(&decision), Some("fuse_capability_unavailable"));
+        assert_eq!(
+            rejection_reason(&decision),
+            Some("fuse_capability_unavailable")
+        );
     }
 
     #[test]
@@ -444,7 +452,10 @@ mod tests {
         let mut gate = happy_gate();
         gate.fuse_capability.helper_binary_present = false;
         let decision = evaluate_writeback_cache_audit(&gate);
-        assert_eq!(rejection_reason(&decision), Some("fuse_capability_unavailable"));
+        assert_eq!(
+            rejection_reason(&decision),
+            Some("fuse_capability_unavailable")
+        );
     }
 
     #[test]
@@ -516,7 +527,8 @@ mod tests {
     #[test]
     fn conflicting_cli_flag_is_rejected() {
         let mut gate = happy_gate();
-        gate.conflicting_flags.push("ffs_writeback_force".to_owned());
+        gate.conflicting_flags
+            .push("ffs_writeback_force".to_owned());
         let decision = evaluate_writeback_cache_audit(&gate);
         assert_eq!(rejection_reason(&decision), Some("conflicting_cli_flags"));
     }

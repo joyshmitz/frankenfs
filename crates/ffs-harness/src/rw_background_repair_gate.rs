@@ -95,7 +95,8 @@ pub fn evaluate_rw_background_repair_gate(
     ) {
         return decision;
     }
-    if let Some(decision) = check_artifact_posture("race_tests", &gate.race_tests, "stale_race_tests")
+    if let Some(decision) =
+        check_artifact_posture("race_tests", &gate.race_tests, "stale_race_tests")
     {
         return decision;
     }
@@ -104,9 +105,11 @@ pub fn evaluate_rw_background_repair_gate(
     {
         return decision;
     }
-    if let Some(decision) =
-        check_artifact_posture("release_gate", &gate.release_gate, "downgraded_release_gate")
-    {
+    if let Some(decision) = check_artifact_posture(
+        "release_gate",
+        &gate.release_gate,
+        "downgraded_release_gate",
+    ) {
         return decision;
     }
     if let Some(decision) = check_remediation_catalog(gate) {
@@ -121,9 +124,7 @@ pub fn evaluate_rw_background_repair_gate(
     RwBackgroundRepairDecision::Accept
 }
 
-fn check_default_and_opt_in(
-    gate: &RwBackgroundRepairGate,
-) -> Option<RwBackgroundRepairDecision> {
+fn check_default_and_opt_in(gate: &RwBackgroundRepairGate) -> Option<RwBackgroundRepairDecision> {
     if gate.default_state != "disabled" {
         return Some(refuse(
             "default_state_must_be_disabled",
@@ -141,9 +142,7 @@ fn check_default_and_opt_in(
     None
 }
 
-fn check_image_and_writeback(
-    gate: &RwBackgroundRepairGate,
-) -> Option<RwBackgroundRepairDecision> {
+fn check_image_and_writeback(gate: &RwBackgroundRepairGate) -> Option<RwBackgroundRepairDecision> {
     if !gate.image_writable {
         return Some(refuse(
             "unwritable_image",
@@ -207,9 +206,7 @@ fn check_artifact_posture(
     None
 }
 
-fn check_remediation_catalog(
-    gate: &RwBackgroundRepairGate,
-) -> Option<RwBackgroundRepairDecision> {
+fn check_remediation_catalog(gate: &RwBackgroundRepairGate) -> Option<RwBackgroundRepairDecision> {
     if gate.remediation_catalog.remediation_id.trim().is_empty() {
         return Some(refuse(
             "missing_remediation_entry",
@@ -217,11 +214,7 @@ fn check_remediation_catalog(
             "every refusal path must point to a remediation entry; add one before enabling",
         ));
     }
-    if !gate
-        .remediation_catalog
-        .remediation_id
-        .starts_with("rem_")
-    {
+    if !gate.remediation_catalog.remediation_id.starts_with("rem_") {
         return Some(refuse(
             "missing_remediation_entry",
             "remediation_catalog",
@@ -238,9 +231,7 @@ fn check_remediation_catalog(
     None
 }
 
-fn check_rollback_path(
-    gate: &RwBackgroundRepairGate,
-) -> Option<RwBackgroundRepairDecision> {
+fn check_rollback_path(gate: &RwBackgroundRepairGate) -> Option<RwBackgroundRepairDecision> {
     if gate.rollback_command.trim().is_empty() {
         return Some(refuse(
             "missing_rollback_path",
@@ -258,9 +249,7 @@ fn check_rollback_path(
     None
 }
 
-fn check_conflicting_flags(
-    gate: &RwBackgroundRepairGate,
-) -> Option<RwBackgroundRepairDecision> {
+fn check_conflicting_flags(gate: &RwBackgroundRepairGate) -> Option<RwBackgroundRepairDecision> {
     let banned = [
         "background-repair-force",
         "background-repair-skip-gate",
@@ -346,7 +335,10 @@ mod tests {
         let mut gate = happy_gate();
         gate.default_state = "experimental_enabled".to_owned();
         let decision = evaluate_rw_background_repair_gate(&gate);
-        assert_eq!(refusal_reason(&decision), Some("default_state_must_be_disabled"));
+        assert_eq!(
+            refusal_reason(&decision),
+            Some("default_state_must_be_disabled")
+        );
     }
 
     #[test]
@@ -370,7 +362,10 @@ mod tests {
         let mut gate = happy_gate();
         gate.writeback_cache_state = "unsafe".to_owned();
         let decision = evaluate_rw_background_repair_gate(&gate);
-        assert_eq!(refusal_reason(&decision), Some("unsafe_writeback_cache_state"));
+        assert_eq!(
+            refusal_reason(&decision),
+            Some("unsafe_writeback_cache_state")
+        );
     }
 
     #[test]
@@ -378,7 +373,10 @@ mod tests {
         let mut gate = happy_gate();
         gate.writeback_cache_state = "stale".to_owned();
         let decision = evaluate_rw_background_repair_gate(&gate);
-        assert_eq!(refusal_reason(&decision), Some("unsafe_writeback_cache_state"));
+        assert_eq!(
+            refusal_reason(&decision),
+            Some("unsafe_writeback_cache_state")
+        );
     }
 
     #[test]
@@ -402,7 +400,10 @@ mod tests {
         let mut gate = happy_gate();
         gate.mounted_write_matrix.fresh = false;
         let decision = evaluate_rw_background_repair_gate(&gate);
-        assert_eq!(refusal_reason(&decision), Some("stale_mounted_write_matrix"));
+        assert_eq!(
+            refusal_reason(&decision),
+            Some("stale_mounted_write_matrix")
+        );
     }
 
     #[test]
@@ -509,7 +510,8 @@ mod tests {
         gate.race_tests.fresh = false;
         let decision = evaluate_rw_background_repair_gate(&gate);
         if let RwBackgroundRepairDecision::Refuse {
-            controlling_artifact, ..
+            controlling_artifact,
+            ..
         } = decision
         {
             assert_eq!(controlling_artifact, "race_tests");

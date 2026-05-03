@@ -1016,10 +1016,7 @@ pub struct MutationPreconditionGate {
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum MutationPreconditionDecision {
     Allow,
-    Refuse {
-        reason: String,
-        remediation: String,
-    },
+    Refuse { reason: String, remediation: String },
 }
 
 const ALLOWED_BACKUP_STRATEGIES: [&str; 4] = [
@@ -1039,7 +1036,9 @@ pub fn evaluate_mutation_preconditions(
             "rerun preflight checks before requesting mutation",
         );
     }
-    let elapsed = gate.now_unix.saturating_sub(gate.preflight_evaluated_at_unix);
+    let elapsed = gate
+        .now_unix
+        .saturating_sub(gate.preflight_evaluated_at_unix);
     if elapsed > gate.preflight_freshness_ttl_seconds {
         return refuse(
             "stale_preflight",
@@ -1344,10 +1343,12 @@ mod tests {
     fn operator_confirmation_mismatch_refuses_mutation() {
         let mut gate = happy_gate();
         gate.operator_confirmation_hash =
-            "sha256:abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc"
-                .to_owned();
+            "sha256:abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc".to_owned();
         let decision = evaluate_mutation_preconditions(&gate);
-        assert_eq!(refusal_reason(&decision), Some("operator_confirmation_mismatch"));
+        assert_eq!(
+            refusal_reason(&decision),
+            Some("operator_confirmation_mismatch")
+        );
     }
 
     #[test]
@@ -1387,7 +1388,10 @@ mod tests {
         let mut gate = happy_gate();
         gate.backup_strategy = "rsync_to_thumb_drive".to_owned();
         let decision = evaluate_mutation_preconditions(&gate);
-        assert_eq!(refusal_reason(&decision), Some("unsupported_backup_strategy"));
+        assert_eq!(
+            refusal_reason(&decision),
+            Some("unsupported_backup_strategy")
+        );
     }
 
     #[test]

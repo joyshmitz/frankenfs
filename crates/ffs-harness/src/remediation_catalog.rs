@@ -277,7 +277,10 @@ fn validate_remediation_links(entry: &RemediationEntry, errors: &mut Vec<String>
     }
     for link in &entry.artifact_links {
         if link.trim().is_empty() {
-            errors.push(format!("remediation `{}` has empty artifact_link", entry.id));
+            errors.push(format!(
+                "remediation `{}` has empty artifact_link",
+                entry.id
+            ));
         }
     }
     if !entry.docs_target.contains('/')
@@ -291,15 +294,11 @@ fn validate_remediation_links(entry: &RemediationEntry, errors: &mut Vec<String>
     }
 }
 
-fn validate_remediation_safety_invariants(
-    entry: &RemediationEntry,
-    errors: &mut Vec<String>,
-) {
-    let is_refusal = entry.outcome_class == "security_refusal"
-        || entry.outcome_class == "unsafe_repair_refusal";
-    let claims_no_data_loss =
-        entry.data_safety_severity == "data_loss_blocked_by_refusal"
-            || entry.data_safety_severity == "no_user_data_at_risk";
+fn validate_remediation_safety_invariants(entry: &RemediationEntry, errors: &mut Vec<String>) {
+    let is_refusal =
+        entry.outcome_class == "security_refusal" || entry.outcome_class == "unsafe_repair_refusal";
+    let claims_no_data_loss = entry.data_safety_severity == "data_loss_blocked_by_refusal"
+        || entry.data_safety_severity == "no_user_data_at_risk";
     if is_refusal && !claims_no_data_loss {
         errors.push(format!(
             "remediation `{}` refusal outcome must classify data_safety_severity as `data_loss_blocked_by_refusal` or `no_user_data_at_risk`",
@@ -598,7 +597,8 @@ mod tests {
             report
                 .errors
                 .iter()
-                .any(|err| err.contains("passing_with_caveat must not claim feature_state=validated"))
+                .any(|err| err
+                    .contains("passing_with_caveat must not claim feature_state=validated"))
         );
     }
 
