@@ -66,6 +66,7 @@ pub struct AmbitionEvidenceMatrixReport {
     pub grouped_by_budget_status: BTreeMap<String, Vec<String>>,
     pub grouped_by_release_gate_consumer: BTreeMap<String, Vec<String>>,
     pub stale_reference_checks: Vec<ReferenceCheck>,
+    pub required_output_coverage: Vec<RequiredOutputCoverage>,
     pub missing_field_diagnostics: Vec<String>,
     pub generated_artifact_paths: Vec<String>,
     pub required_log_fields: Vec<String>,
@@ -114,6 +115,16 @@ pub struct ReferenceCheck {
     pub exists: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequiredOutputCoverage {
+    pub source_bead_id: String,
+    pub expected_output: String,
+    pub matrix_fields: Vec<String>,
+    pub release_gate_consumer: String,
+    pub represented: bool,
+    pub diagnostic: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IssueSummary {
     id: String,
@@ -144,6 +155,7 @@ pub fn analyze_ambition_evidence_matrix(
     let rows = build_matrix_rows(&issues, &mut errors);
     let mut missing_field_diagnostics = validate_matrix_rows(&rows);
     let stale_reference_checks = collect_reference_checks(&rows, &issues);
+    let required_output_coverage = collect_required_output_coverage(&rows);
 
     errors.extend(missing_field_diagnostics.iter().cloned());
     errors.extend(
@@ -154,6 +166,17 @@ pub fn analyze_ambition_evidence_matrix(
                 format!(
                     "{} stale reference {} in {}",
                     check.source_bead_id, check.referenced_bead_id, check.field
+                )
+            }),
+    );
+    errors.extend(
+        required_output_coverage
+            .iter()
+            .filter(|coverage| !coverage.represented)
+            .map(|coverage| {
+                format!(
+                    "{} output {} is not represented: {}",
+                    coverage.source_bead_id, coverage.expected_output, coverage.diagnostic
                 )
             }),
     );
@@ -180,6 +203,7 @@ pub fn analyze_ambition_evidence_matrix(
         grouped_by_budget_status: group_by(&rows, |row| row.overhead_budget_status.as_str()),
         grouped_by_release_gate_consumer: group_by(&rows, |row| row.release_gate_consumer.as_str()),
         stale_reference_checks,
+        required_output_coverage,
         missing_field_diagnostics,
         generated_artifact_paths: generated_artifact_paths.to_vec(),
         required_log_fields: REQUIRED_LOG_TOKENS
@@ -673,6 +697,125 @@ fn reference_check(
     }
 }
 
+fn collect_required_output_coverage(
+    rows: &[AmbitionEvidenceMatrixRow],
+) -> Vec<RequiredOutputCoverage> {
+    required_output_specs()
+        .into_iter()
+        .map(|(source_bead_id, expected_output, matrix_fields)| {
+            let row = rows
+                .iter()
+                .find(|candidate| candidate.source_bead_id == source_bead_id);
+            let represented =
+                row.is_some_and(|row| required_output_is_represented(source_bead_id, row));
+            let diagnostic = if represented {
+                "required output is represented in matrix row".to_owned()
+            } else if row.is_some() {
+                "matrix row exists but required fields are incomplete".to_owned()
+            } else {
+                "required source bead is missing from matrix rows".to_owned()
+            };
+            RequiredOutputCoverage {
+                source_bead_id: source_bead_id.to_owned(),
+                expected_output: expected_output.to_owned(),
+                matrix_fields: matrix_fields.iter().map(ToString::to_string).collect(),
+                release_gate_consumer: row.map_or_else(
+                    || "readiness-report".to_owned(),
+                    |row| row.release_gate_consumer.clone(),
+                ),
+                represented,
+                diagnostic,
+            }
+        })
+        .collect()
+}
+
+fn required_output_specs() -> [(&'static str, &'static str, &'static [&'static str]); 5] {
+    [
+        (
+            "bd-rchk0.5.10.1",
+            "versioned ambition evidence matrix control plane",
+            &[
+                "matrix_version",
+                "generated_artifact_paths",
+                "reproduction_command",
+            ],
+        ),
+        (
+            "bd-rchk0.5.11",
+            "adversarial image security and safety threat model",
+            &[
+                "threat_class",
+                "threat_model_status",
+                "expected_safe_behavior",
+                "hostile_artifact_handling",
+            ],
+        ),
+        (
+            "bd-rchk0.5.12",
+            "user remediation catalog mapping for proof failures",
+            &[
+                "remediation_status",
+                "remediation_id",
+                "remediation_follow_up",
+            ],
+        ),
+        (
+            "bd-rchk0.5.13",
+            "low-privilege local trust demo proof status",
+            &[
+                "demo_profile",
+                "proof_demo_status",
+                "low_privilege_proof_status",
+            ],
+        ),
+        (
+            "bd-rchk0.5.14",
+            "proof instrumentation overhead budget evidence",
+            &[
+                "overhead_budget_status",
+                "budget_profile",
+                "measured_overhead",
+            ],
+        ),
+    ]
+}
+
+fn required_output_is_represented(source_bead_id: &str, row: &AmbitionEvidenceMatrixRow) -> bool {
+    match source_bead_id {
+        "bd-rchk0.5.10.1" => {
+            !row.artifact_path.trim().is_empty()
+                && row
+                    .reproduction_command
+                    .contains("validate-ambition-evidence-matrix")
+                && REQUIRED_LOG_TOKENS
+                    .iter()
+                    .all(|token| row.required_logs.contains(token))
+        }
+        "bd-rchk0.5.11" => {
+            !row.threat_class.trim().is_empty()
+                && !row.expected_safe_behavior.trim().is_empty()
+                && !row.hostile_artifact_handling.trim().is_empty()
+                && COVERAGE_STATES.contains(&row.threat_model_status.as_str())
+        }
+        "bd-rchk0.5.12" => {
+            !row.remediation_id.trim().is_empty()
+                && COVERAGE_STATES.contains(&row.remediation_status.as_str())
+        }
+        "bd-rchk0.5.13" => {
+            !row.demo_profile.trim().is_empty()
+                && COVERAGE_STATES.contains(&row.proof_demo_status.as_str())
+                && COVERAGE_STATES.contains(&row.low_privilege_proof_status.as_str())
+        }
+        "bd-rchk0.5.14" => {
+            !row.budget_profile.trim().is_empty()
+                && !row.measured_overhead.trim().is_empty()
+                && COVERAGE_STATES.contains(&row.overhead_budget_status.as_str())
+        }
+        _ => false,
+    }
+}
+
 fn group_by<F>(rows: &[AmbitionEvidenceMatrixRow], key_fn: F) -> BTreeMap<String, Vec<String>>
 where
     F: Fn(&AmbitionEvidenceMatrixRow) -> &str,
@@ -744,9 +887,12 @@ mod tests {
     }
 
     fn fixture_issue(id: &str, title: &str, labels: &[&str]) -> String {
+        let labels_json = match serde_json::to_string(labels) {
+            Ok(labels_json) => labels_json,
+            Err(err) => format!(r#"["label-serialization-error:{err}"]"#),
+        };
         format!(
-            r#"{{"id":"{id}","title":"{title}","status":"open","labels":{labels},"description":"{title}","design":"matrix row","acceptance_criteria":"logs include matrix_version source_bead_ids stale_reference_checks missing_field_diagnostics generated_artifact_paths reproduction_command"}}"#,
-            labels = serde_json::to_string(labels).expect("labels serialize")
+            r#"{{"id":"{id}","title":"{title}","status":"open","labels":{labels_json},"description":"{title}","design":"matrix row","acceptance_criteria":"logs include matrix_version source_bead_ids stale_reference_checks missing_field_diagnostics generated_artifact_paths reproduction_command"}}"#
         )
     }
 
@@ -894,6 +1040,34 @@ mod tests {
     }
 
     #[test]
+    fn not_applicable_status_requires_rationale() {
+        let mut row = valid_row();
+        row.threat_model_status = "not-applicable".to_owned();
+        row.non_applicability_rationale.clear();
+        let errors = validate_matrix_rows(&[row]);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("not-applicable without rationale")),
+            "expected not-applicable rationale error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn deferred_status_requires_reason() {
+        let mut row = valid_row();
+        row.proof_demo_status = "deferred".to_owned();
+        row.deferred_reason.clear();
+        let errors = validate_matrix_rows(&[row]);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("deferred without reason")),
+            "expected deferred reason error, got {errors:?}"
+        );
+    }
+
+    #[test]
     fn missing_required_reference_fails_stale_check() {
         let issues = fixture_issues().replace(
             &fixture_issue(
@@ -912,5 +1086,36 @@ mod tests {
             "expected stale reference error, got {:?}",
             report.errors
         );
+    }
+
+    #[test]
+    fn required_downstream_outputs_are_explicitly_represented() {
+        let report = analyze_ambition_evidence_matrix(
+            &fixture_issues(),
+            &[DEFAULT_ARTIFACT_PATH.to_owned()],
+        );
+        assert_eq!(report.required_output_coverage.len(), 5);
+        for required_id in [
+            "bd-rchk0.5.11",
+            "bd-rchk0.5.12",
+            "bd-rchk0.5.13",
+            "bd-rchk0.5.14",
+        ] {
+            let coverage = report
+                .required_output_coverage
+                .iter()
+                .find(|coverage| coverage.source_bead_id == required_id);
+            assert!(coverage.is_some(), "missing coverage row for {required_id}");
+            if let Some(coverage) = coverage {
+                assert!(
+                    coverage.represented,
+                    "expected {required_id} to be represented, got {coverage:?}"
+                );
+                assert!(
+                    !coverage.matrix_fields.is_empty(),
+                    "expected field mapping for {required_id}"
+                );
+            }
+        }
     }
 }

@@ -129,7 +129,43 @@ else
     scenario_result "ambition_matrix_log_tokens" "FAIL" "only ${TOKENS_FOUND}/6 log tokens present"
 fi
 
-e2e_step "Scenario 5: unit/schema tests pass"
+e2e_step "Scenario 5: required downstream outputs are represented"
+if python3 - "$REPORT_JSON" <<'PY'
+import json
+import sys
+
+data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+coverage = {
+    row["source_bead_id"]: row
+    for row in data.get("required_output_coverage", [])
+}
+required = [
+    "bd-rchk0.5.11",
+    "bd-rchk0.5.12",
+    "bd-rchk0.5.13",
+    "bd-rchk0.5.14",
+]
+missing = [bead for bead in required if bead not in coverage]
+unrepresented = [
+    bead
+    for bead in required
+    if bead in coverage and not coverage[bead].get("represented")
+]
+if missing or unrepresented:
+    raise SystemExit(
+        f"missing={missing} unrepresented={unrepresented}"
+    )
+for bead in required:
+    if not coverage[bead].get("matrix_fields"):
+        raise SystemExit(f"{bead} has no matrix field mapping")
+PY
+then
+    scenario_result "ambition_matrix_required_outputs" "PASS" "required output coverage represented"
+else
+    scenario_result "ambition_matrix_required_outputs" "FAIL" "required output coverage missing"
+fi
+
+e2e_step "Scenario 6: unit/schema tests pass"
 if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib -- ambition_evidence_matrix \
     2>"$UNIT_LOG" | tee -a "$UNIT_LOG"; then
     TESTS_RUN=$(grep -c "test ambition_evidence_matrix::tests::" "$UNIT_LOG" 2>/dev/null || echo "0")
