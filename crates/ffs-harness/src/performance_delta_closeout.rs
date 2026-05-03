@@ -36,6 +36,8 @@ pub struct PerformanceDeltaCloseoutConfig {
     pub follow_up_overrides: Vec<PerformanceDeltaFollowUpOverride>,
     #[serde(default)]
     pub unmeasured_claims: Vec<PerformanceUnmeasuredClaim>,
+    #[serde(default)]
+    pub missing_reference_decisions: Vec<PerformanceMissingReferenceDecision>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -63,6 +65,17 @@ pub struct PerformanceUnmeasuredClaim {
     pub reason: String,
     pub follow_up_bead: String,
     pub reproduction_command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerformanceMissingReferenceDecision {
+    pub operation: String,
+    pub no_reference_claim_state: String,
+    pub comparison_target_rationale: String,
+    pub release_wording: String,
+    pub raw_logs: Vec<String>,
+    pub reproduction_command: String,
+    pub validation_command: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -169,6 +182,14 @@ pub struct PerformanceDeltaRow {
     pub follow_up_present: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up_payload: Option<PerformanceFollowUpPayload>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_logs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison_target_rationale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_wording: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_command: Option<String>,
     pub rationale: String,
     pub reproduction_command: String,
 }
@@ -299,18 +320,23 @@ pub fn render_performance_delta_closeout_markdown(
         let _ = writeln!(out, "- `{bead}`");
     }
     out.push_str("\n## Rows\n\n");
-    out.push_str("| Operation | Class | p99 delta | Throughput delta | Follow-up | Rationale |\n");
-    out.push_str("|---|---:|---:|---:|---|---|\n");
+    out.push_str("| Operation | Class | Claim state | p99 delta | Throughput delta | Follow-up | Rationale |\n");
+    out.push_str("|---|---:|---|---:|---:|---|---|\n");
     for row in &report.rows {
         let p99 = format_optional_percent(row.p99_delta_percent);
         let throughput = format_optional_percent(row.throughput_delta_percent);
         let follow_up = row.follow_up_bead.as_deref().unwrap_or("n/a");
-        let rationale = row.rationale.replace('|', "/");
+        let rationale = row
+            .release_wording
+            .as_deref()
+            .unwrap_or(&row.rationale)
+            .replace('|', "/");
         let _ = writeln!(
             out,
-            "| `{}` | `{}` | {} | {} | `{}` | {} |",
+            "| `{}` | `{}` | `{}` | {} | {} | `{}` | {} |",
             row.operation,
             row.classification.label(),
+            row.release_claim_state,
             p99,
             throughput,
             follow_up,
@@ -375,7 +401,82 @@ fn validate_config_shape(config: &PerformanceDeltaCloseoutConfig) -> Vec<String>
     {
         errors.push("policy.missing_reference_follow_up_bead must not be empty".to_owned());
     }
+    validate_missing_reference_decisions(config, &mut errors);
     errors
+}
+
+fn validate_missing_reference_decisions(
+    config: &PerformanceDeltaCloseoutConfig,
+    errors: &mut Vec<String>,
+) {
+    let mut seen = BTreeSet::new();
+    for decision in &config.missing_reference_decisions {
+        if decision.operation.trim().is_empty() {
+            errors.push("missing_reference_decisions.operation must not be empty".to_owned());
+        }
+        if !seen.insert(decision.operation.clone()) {
+            errors.push(format!(
+                "duplicate missing_reference_decision for {}",
+                decision.operation
+            ));
+        }
+        if decision.no_reference_claim_state.trim().is_empty() {
+            errors.push(format!(
+                "{} missing_reference_decision must declare no_reference_claim_state",
+                decision.operation
+            ));
+        }
+        let claim_state = decision.no_reference_claim_state.to_ascii_lowercase();
+        if claim_state.contains("regression_free")
+            || claim_state.contains("authoritative")
+            || claim_state == "measured_local"
+        {
+            errors.push(format!(
+                "{} no-reference claim state must stay conservative",
+                decision.operation
+            ));
+        }
+        if decision.comparison_target_rationale.trim().is_empty() {
+            errors.push(format!(
+                "{} missing_reference_decision must explain comparison_target_rationale",
+                decision.operation
+            ));
+        }
+        if decision.release_wording.trim().is_empty() {
+            errors.push(format!(
+                "{} missing_reference_decision must provide release_wording",
+                decision.operation
+            ));
+        }
+        let release_wording = decision.release_wording.to_ascii_lowercase();
+        if release_wording.contains("regression-free")
+            || release_wording.contains("regression free")
+        {
+            errors.push(format!(
+                "{} release wording must not claim regression-free status",
+                decision.operation
+            ));
+        }
+        if decision.raw_logs.is_empty() || decision.raw_logs.iter().any(|log| log.trim().is_empty())
+        {
+            errors.push(format!(
+                "{} missing_reference_decision must list raw log links",
+                decision.operation
+            ));
+        }
+        if decision.reproduction_command.trim().is_empty() {
+            errors.push(format!(
+                "{} missing_reference_decision must provide reproduction_command",
+                decision.operation
+            ));
+        }
+        if decision.validation_command.trim().is_empty() {
+            errors.push(format!(
+                "{} missing_reference_decision must provide validation_command",
+                decision.operation
+            ));
+        }
+    }
 }
 
 fn load_issue_ids(path: &Path) -> Result<BTreeSet<String>> {
@@ -528,6 +629,16 @@ fn load_comparison_rows(
             follow_up_present,
             follow_up_payload,
             follow_up_bead: follow_up,
+            raw_logs: raw_logs_for([
+                string_field(row, "current_source_json"),
+                string_field(row, "current_probe_report_json"),
+                Some(artifact.to_owned()),
+            ]),
+            comparison_target_rationale: None,
+            release_wording: None,
+            validation_command: Some(format!(
+                "cargo run -p ffs-harness -- performance-delta-closeout --config {DEFAULT_PERFORMANCE_DELTA_CLOSEOUT_CONFIG}"
+            )),
             rationale: comparison_rationale(row, classification),
             reproduction_command: format!(
                 "cargo run -p ffs-harness -- performance-delta-closeout --config {DEFAULT_PERFORMANCE_DELTA_CLOSEOUT_CONFIG}"
@@ -568,6 +679,10 @@ fn unmeasured_claim_row(
         follow_up_bead: Some(claim.follow_up_bead.clone()),
         follow_up_present,
         follow_up_payload: Some(claim_follow_up_payload(claim)),
+        raw_logs: vec![claim.claim_id.clone()],
+        comparison_target_rationale: None,
+        release_wording: None,
+        validation_command: Some(claim.reproduction_command.clone()),
         rationale: claim.reason.clone(),
         reproduction_command: claim.reproduction_command.clone(),
     }
@@ -670,6 +785,17 @@ fn row_with_reference(
         follow_up_present,
         follow_up_payload,
         follow_up_bead: follow_up,
+        raw_logs: raw_logs_for([
+            current.source_json.clone(),
+            reference.source_json.clone(),
+            Some(current.source_artifact.clone()),
+        ]),
+        comparison_target_rationale: Some(format!(
+            "same-operation reference baseline from {}",
+            reference.source_artifact
+        )),
+        release_wording: None,
+        validation_command: Some(current.command.clone()),
         rationale: reference_rationale(current, reference, classification),
         reproduction_command: current.command.clone(),
     }
@@ -697,6 +823,40 @@ fn row_without_reference(
     let follow_up_payload = follow_up.as_ref().map(|bead| {
         measurement_follow_up_payload(bead, current, None, classification, None, None, config)
     });
+    let decision = (classification == PerformanceDeltaClassification::MissingReference)
+        .then(|| missing_reference_decision_for(&current.operation, config))
+        .flatten();
+    if classification == PerformanceDeltaClassification::MissingReference && decision.is_none() {
+        errors.push(format!(
+            "{} is missing an explicit no-reference decision",
+            current.operation
+        ));
+    }
+    let raw_logs = decision.map_or_else(
+        || {
+            raw_logs_for([
+                current.source_json.clone(),
+                Some(current.source_artifact.clone()),
+            ])
+        },
+        |decision| decision.raw_logs.clone(),
+    );
+    let comparison_target_rationale =
+        decision.map(|decision| decision.comparison_target_rationale.clone());
+    let release_wording = decision.map(|decision| decision.release_wording.clone());
+    let validation_command = decision.map(|decision| decision.validation_command.clone());
+    let release_claim_state = decision.map_or_else(
+        || release_claim_state(classification).to_owned(),
+        |decision| decision.no_reference_claim_state.clone(),
+    );
+    let rationale = decision.map_or_else(
+        || missing_reference_rationale(current, classification),
+        |decision| decision.comparison_target_rationale.clone(),
+    );
+    let reproduction_command = decision.map_or_else(
+        || current.command.clone(),
+        |decision| decision.reproduction_command.clone(),
+    );
     PerformanceDeltaRow {
         row_id: format!(
             "{row_kind}:{}:{}",
@@ -714,12 +874,16 @@ fn row_without_reference(
         current_throughput_ops_sec: current.throughput_ops_sec,
         throughput_delta_percent: None,
         classification,
-        release_claim_state: release_claim_state(classification).to_owned(),
+        release_claim_state,
         follow_up_present,
         follow_up_payload,
         follow_up_bead: follow_up,
-        rationale: missing_reference_rationale(current, classification),
-        reproduction_command: current.command.clone(),
+        raw_logs,
+        comparison_target_rationale,
+        release_wording,
+        validation_command,
+        rationale,
+        reproduction_command,
     }
 }
 
@@ -820,6 +984,16 @@ fn follow_up_for(
     Some(follow_up)
 }
 
+fn missing_reference_decision_for<'a>(
+    operation: &str,
+    config: &'a PerformanceDeltaCloseoutConfig,
+) -> Option<&'a PerformanceMissingReferenceDecision> {
+    config
+        .missing_reference_decisions
+        .iter()
+        .find(|decision| decision.operation == operation)
+}
+
 fn validate_follow_up_overrides(
     config: &PerformanceDeltaCloseoutConfig,
     issue_ids: &BTreeSet<String>,
@@ -865,7 +1039,64 @@ fn validate_required_follow_ups(rows: &[PerformanceDeltaRow], errors: &mut Vec<S
                 None => errors.push(format!("{} missing follow-up payload", row.row_id)),
             }
         }
+        if row.classification == PerformanceDeltaClassification::MissingReference {
+            validate_missing_reference_row(row, errors);
+        }
     }
+}
+
+fn validate_missing_reference_row(row: &PerformanceDeltaRow, errors: &mut Vec<String>) {
+    if row.raw_logs.is_empty() {
+        errors.push(format!("{} missing no-reference raw_logs", row.row_id));
+    }
+    if row
+        .comparison_target_rationale
+        .as_deref()
+        .is_none_or(str::is_empty)
+    {
+        errors.push(format!(
+            "{} missing no-reference comparison_target_rationale",
+            row.row_id
+        ));
+    }
+    if row.release_wording.as_deref().is_none_or(str::is_empty) {
+        errors.push(format!(
+            "{} missing no-reference release_wording",
+            row.row_id
+        ));
+    }
+    if row.validation_command.as_deref().is_none_or(str::is_empty) {
+        errors.push(format!(
+            "{} missing no-reference validation_command",
+            row.row_id
+        ));
+    }
+    let claim_state = row.release_claim_state.to_ascii_lowercase();
+    if claim_state.contains("regression_free")
+        || claim_state.contains("authoritative")
+        || claim_state == "measured_local"
+        || claim_state == "unknown"
+    {
+        errors.push(format!(
+            "{} no-reference release_claim_state must be explicit and conservative",
+            row.row_id
+        ));
+    }
+    if row
+        .release_wording
+        .as_deref()
+        .is_some_and(claims_regression_free)
+    {
+        errors.push(format!(
+            "{} no-reference release wording must not claim regression-free status",
+            row.row_id
+        ));
+    }
+}
+
+fn claims_regression_free(wording: &str) -> bool {
+    let lower = wording.to_ascii_lowercase();
+    lower.contains("regression-free") || lower.contains("regression free")
 }
 
 fn validate_follow_up_payload(
@@ -1158,12 +1389,13 @@ fn command_or_default(command: &str, operation: &str) -> String {
 }
 
 fn profile_from_command(command: &str) -> String {
-    command
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .find_map(|pair| (pair[0] == "--profile").then(|| pair[1].to_owned()))
-        .unwrap_or_else(|| "release".to_owned())
+    let mut parts = command.split_whitespace();
+    while let Some(part) = parts.next() {
+        if part == "--profile" {
+            return parts.next().unwrap_or("release").to_owned();
+        }
+    }
+    "release".to_owned()
 }
 
 fn suspected_subsystem(operation: &str) -> String {
@@ -1299,6 +1531,21 @@ mod tests {
                 source_contains: None,
             }],
             unmeasured_claims: Vec::new(),
+            missing_reference_decisions: vec![PerformanceMissingReferenceDecision {
+                operation: "wal_commit_4k_sync".to_owned(),
+                no_reference_claim_state: "reference_limited_experimental".to_owned(),
+                comparison_target_rationale: "no same-operation reference baseline exists"
+                    .to_owned(),
+                release_wording: "Treat as reference-limited experimental until a same-operation baseline exists."
+                    .to_owned(),
+                raw_logs: vec!["raw/current.json".to_owned()],
+                reproduction_command:
+                    "cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- wal_commit_4k_sync"
+                        .to_owned(),
+                validation_command:
+                    "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json"
+                        .to_owned(),
+            }],
         }
     }
 
@@ -1413,6 +1660,29 @@ mod tests {
                 .iter()
                 .any(|bead| bead == "bd-rchk5.8")
         );
+        let required_no_reference = [
+            "block_cache_sharded_arc_concurrent_hot_read_64threads",
+            "block_cache_sharded_s3fifo_concurrent_hot_read_64threads",
+            "cli_metadata_parse_conformance",
+            "repair_symbol_refresh_staleness_latency",
+            "wal_commit_4k_sync",
+        ];
+        for operation in required_no_reference {
+            let maybe_row = report.rows.iter().find(|row| {
+                row.operation == operation
+                    && row.classification == PerformanceDeltaClassification::MissingReference
+            });
+            assert!(
+                maybe_row.is_some(),
+                "missing no-reference row for {operation}"
+            );
+            let Some(row) = maybe_row else { continue };
+            assert_eq!(row.release_claim_state, "reference_limited_experimental");
+            assert!(!row.raw_logs.is_empty());
+            assert!(row.comparison_target_rationale.is_some());
+            assert!(row.release_wording.is_some());
+            assert!(row.validation_command.is_some());
+        }
     }
 
     #[test]
@@ -1461,6 +1731,10 @@ mod tests {
                 follow_up_bead: Some("bd-rchk5.5".to_owned()),
                 follow_up_present: true,
                 follow_up_payload: None,
+                raw_logs: vec!["comparison.json".to_owned()],
+                comparison_target_rationale: None,
+                release_wording: None,
+                validation_command: Some("cargo run".to_owned()),
                 rationale: "slow".to_owned(),
                 reproduction_command: "cargo run".to_owned(),
             }],
@@ -1584,6 +1858,10 @@ mod tests {
             follow_up_bead: Some("bd-rchk5.5".to_owned()),
             follow_up_present: true,
             follow_up_payload: Some(payload),
+            raw_logs: vec!["raw.json".to_owned()],
+            comparison_target_rationale: None,
+            release_wording: None,
+            validation_command: Some("cargo bench".to_owned()),
             rationale: "slow".to_owned(),
             reproduction_command: "cargo bench".to_owned(),
         };

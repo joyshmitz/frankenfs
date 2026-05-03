@@ -39,9 +39,12 @@ CONFIG_JSON="$REPO_ROOT/benchmarks/performance_delta_closeout.json"
 REPORT_JSON="$E2E_LOG_DIR/performance_delta_closeout.json"
 SUMMARY_MD="$E2E_LOG_DIR/performance_delta_closeout.md"
 VALIDATE_RAW="$E2E_LOG_DIR/performance_delta_closeout.raw"
+VALIDATE_MD_RAW="$E2E_LOG_DIR/performance_delta_closeout_md.raw"
+ISSUES_JSONL="$E2E_LOG_DIR/issues.jsonl"
 BAD_ISSUES_JSONL="$E2E_LOG_DIR/issues_missing_mount_cold_followup.jsonl"
 BAD_RAW="$E2E_LOG_DIR/performance_delta_closeout_bad.raw"
 UNIT_LOG="$E2E_LOG_DIR/performance_delta_closeout_unit_tests.log"
+cp "$REPO_ROOT/.beads/issues.jsonl" "$ISSUES_JSONL"
 
 e2e_step "Scenario 1: performance delta closeout module and CLI are wired"
 if grep -q "pub mod performance_delta_closeout" crates/ffs-harness/src/lib.rs \
@@ -53,10 +56,46 @@ else
 fi
 
 e2e_step "Scenario 2: checked-in closeout config validates artifacts"
-if "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- performance-delta-closeout \
+if cargo run --quiet -p ffs-harness -- performance-delta-closeout \
     --config "$CONFIG_JSON" \
-    --out "$REPORT_JSON" \
-    --summary-out "$SUMMARY_MD" >"$VALIDATE_RAW" 2>&1; then
+    --issues "$ISSUES_JSONL" >"$VALIDATE_RAW" 2>&1 \
+    && cargo run --quiet -p ffs-harness -- performance-delta-closeout \
+        --config "$CONFIG_JSON" \
+        --issues "$ISSUES_JSONL" \
+        --format markdown >"$VALIDATE_MD_RAW" 2>&1 \
+    && python3 - "$VALIDATE_RAW" "$REPORT_JSON" "$VALIDATE_MD_RAW" "$SUMMARY_MD" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+
+json_raw, json_report, md_raw, md_report = sys.argv[1:5]
+text = open(json_raw, encoding="utf-8", errors="replace").read()
+decoder = json.JSONDecoder()
+for index, char in enumerate(text):
+    if char != "{":
+        continue
+    try:
+        obj, _ = decoder.raw_decode(text[index:])
+    except json.JSONDecodeError:
+        continue
+    if isinstance(obj, dict) and obj.get("schema_version") == 1 and "closeout_id" in obj:
+        with open(json_report, "w", encoding="utf-8") as handle:
+            json.dump(obj, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        break
+else:
+    raise SystemExit("performance delta closeout JSON object not found in command output")
+
+markdown = open(md_raw, encoding="utf-8", errors="replace").read()
+marker = "# Performance Delta Closeout"
+index = markdown.find(marker)
+if index < 0:
+    raise SystemExit("performance delta closeout Markdown marker not found")
+with open(md_report, "w", encoding="utf-8") as handle:
+    handle.write(markdown[index:])
+PY
+then
     scenario_result "performance_delta_closeout_validates" "PASS" "closeout report accepted"
 else
     cat "$VALIDATE_RAW"
@@ -99,6 +138,8 @@ for operation, bead in required_regressions.items():
         raise SystemExit(f"follow-up bead missing for {operation}")
 
 missing_reference_ops = {
+    "block_cache_sharded_arc_concurrent_hot_read_64threads",
+    "block_cache_sharded_s3fifo_concurrent_hot_read_64threads",
     "cli_metadata_parse_conformance",
     "repair_symbol_refresh_staleness_latency",
     "wal_commit_4k_sync",
@@ -110,6 +151,17 @@ observed_missing = {
 }
 if not missing_reference_ops <= observed_missing:
     raise SystemExit(f"missing reference follow-ups absent: {missing_reference_ops - observed_missing}")
+
+for row in report["rows"]:
+    if row["operation"] in missing_reference_ops and row["classification"] == "missing_reference":
+        if row["release_claim_state"] != "reference_limited_experimental":
+            raise SystemExit(f"missing-reference row lacks explicit no-reference claim state: {row}")
+        for field in ("raw_logs", "comparison_target_rationale", "release_wording", "validation_command"):
+            if not row.get(field):
+                raise SystemExit(f"missing-reference row lacks {field}: {row}")
+        wording = row["release_wording"].lower()
+        if "regression-free" in wording or "regression free" in wording:
+            raise SystemExit(f"missing-reference row overclaims release wording: {row}")
 
 pending = [
     row for row in report["rows"]
@@ -181,7 +233,7 @@ fi
 
 e2e_step "Scenario 4: missing follow-up bead fails closed"
 grep -v '"id":"bd-rchk5.5"' "$REPO_ROOT/.beads/issues.jsonl" >"$BAD_ISSUES_JSONL"
-if "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- performance-delta-closeout \
+if cargo run --quiet -p ffs-harness -- performance-delta-closeout \
     --config "$CONFIG_JSON" \
     --issues "$BAD_ISSUES_JSONL" >"$BAD_RAW" 2>&1; then
     scenario_result "performance_delta_closeout_missing_followup_rejected" "FAIL" "missing follow-up bead accepted"
@@ -193,7 +245,7 @@ else
 fi
 
 e2e_step "Scenario 5: unit tests cover closeout classification and checked-in config"
-if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness performance_delta_closeout -- --nocapture >"$UNIT_LOG" 2>&1; then
+if cargo test -p ffs-harness performance_delta_closeout -- --nocapture >"$UNIT_LOG" 2>&1; then
     scenario_result "performance_delta_closeout_unit_tests" "PASS" "unit tests passed"
 else
     cat "$UNIT_LOG"

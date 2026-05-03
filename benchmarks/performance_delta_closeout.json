@@ -64,5 +64,77 @@
       "follow_up_bead": "bd-t21em",
       "reproduction_command": "cargo run -p ffs-harness -- validate-soak-canary-campaigns --manifest benchmarks/soak_canary_campaign_manifest.json"
     }
+  ],
+  "missing_reference_decisions": [
+    {
+      "operation": "block_cache_sharded_arc_concurrent_hot_read_64threads",
+      "no_reference_claim_state": "reference_limited_experimental",
+      "comparison_target_rationale": "No checked-in same-operation 64-thread sharded ARC reference exists in the 20260218, 20260219, or 20260406 baseline set; older single-shard ARC rows are not comparable to the new 64-core/shard contention lane.",
+      "release_wording": "Report only the measured local 64-thread sharded ARC value and keep public performance wording reference-limited experimental until a same-operation baseline is captured on a comparable host.",
+      "raw_logs": [
+        "benchmarks/baselines/history/20260503-sharded-arc-hot64.json",
+        "baselines/hyperfine/20260503-sharded-arc-hot64/ffs_block_sharded_arc_concurrent_hot_read_64threads.json",
+        "baselines/hyperfine/20260503-sharded-arc-hot64/ffs_block_sharded_arc_concurrent_hot_read_64threads.stdout",
+        "baselines/hyperfine/20260503-sharded-arc-hot64/ffs_block_sharded_arc_concurrent_hot_read_64threads.stderr"
+      ],
+      "reproduction_command": "cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_sharded_arc_concurrent_hot_read_64threads",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json"
+    },
+    {
+      "operation": "block_cache_sharded_s3fifo_concurrent_hot_read_64threads",
+      "no_reference_claim_state": "reference_limited_experimental",
+      "comparison_target_rationale": "No checked-in same-operation 64-thread sharded S3-FIFO reference exists in the 20260218, 20260219, or 20260406 baseline set; older single-shard S3-FIFO rows do not exercise the same sharded hot-read contention path.",
+      "release_wording": "Report only the measured local 64-thread sharded S3-FIFO value and keep public performance wording reference-limited experimental until a same-operation baseline is captured on a comparable host.",
+      "raw_logs": [
+        "benchmarks/baselines/history/20260503-sharded-s3fifo-hot64.json",
+        "baselines/hyperfine/20260503-sharded-s3fifo-hot64/ffs_block_sharded_s3fifo_concurrent_hot_read_64threads.json",
+        "baselines/hyperfine/20260503-sharded-s3fifo-hot64/ffs_block_sharded_s3fifo_concurrent_hot_read_64threads.stdout",
+        "baselines/hyperfine/20260503-sharded-s3fifo-hot64/ffs_block_sharded_s3fifo_concurrent_hot_read_64threads.stderr"
+      ],
+      "reproduction_command": "cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_sharded_s3fifo_concurrent_hot_read_64threads",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json"
+    },
+    {
+      "operation": "cli_metadata_parse_conformance",
+      "no_reference_claim_state": "reference_limited_experimental",
+      "comparison_target_rationale": "No checked-in same-operation metadata_parse criterion reference exists in the 20260218, 20260219, or 20260406 baseline set; parity and fixture-validation CLI rows cover broader commands and cannot isolate parser microbenchmark latency.",
+      "release_wording": "Report only the measured local metadata parser value and keep public performance wording reference-limited experimental until a same-operation parser baseline is captured.",
+      "raw_logs": [
+        "benchmarks/baselines/history/20260503-bd-rchk5-2-metadata-parse.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-metadata-parse/ffs_harness_metadata_parse.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-metadata-parse/ffs_harness_metadata_parse.stdout",
+        "baselines/hyperfine/20260503-bd-rchk5-2-metadata-parse/ffs_harness_metadata_parse.stderr"
+      ],
+      "reproduction_command": "cargo bench --profile release-perf -p ffs-harness --bench metadata_parse -- metadata_parse",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json"
+    },
+    {
+      "operation": "repair_symbol_refresh_staleness_latency",
+      "no_reference_claim_state": "reference_limited_experimental",
+      "comparison_target_rationale": "No checked-in same-operation repair-symbol refresh staleness reference exists in the 20260218, 20260219, or 20260406 baseline set; older scrub and RaptorQ encode/decode rows do not measure the same refresh-staleness control path.",
+      "release_wording": "Report only the measured local symbol-refresh staleness value and keep public performance wording reference-limited experimental until a same-operation refresh baseline is captured.",
+      "raw_logs": [
+        "benchmarks/baselines/history/20260503-bd-rchk5-2-refresh-staleness.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-refresh-staleness/ffs_repair_symbol_refresh_staleness_latency.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-refresh-staleness/ffs_repair_symbol_refresh_staleness_latency.stdout",
+        "baselines/hyperfine/20260503-bd-rchk5-2-refresh-staleness/ffs_repair_symbol_refresh_staleness_latency.stderr"
+      ],
+      "reproduction_command": "cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- repair_symbol_refresh_staleness_latency",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json"
+    },
+    {
+      "operation": "wal_commit_4k_sync",
+      "no_reference_claim_state": "reference_limited_experimental",
+      "comparison_target_rationale": "No checked-in same-operation WAL commit 4 KiB sync reference exists in the 20260218, 20260219, or 20260406 baseline set; older WAL write-amplification rows measure different commit shapes and cannot support a regression-free claim.",
+      "release_wording": "Report only the measured local WAL commit value and keep public performance wording reference-limited experimental until a same-operation WAL sync baseline is captured.",
+      "raw_logs": [
+        "benchmarks/baselines/history/20260503-bd-rchk5-2-wal-commit.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-wal-commit/ffs_mvcc_wal_commit_4k_sync.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-wal-commit/ffs_mvcc_wal_commit_4k_sync.stdout",
+        "baselines/hyperfine/20260503-bd-rchk5-2-wal-commit/ffs_mvcc_wal_commit_4k_sync.stderr"
+      ],
+      "reproduction_command": "cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- wal_commit_4k_sync",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json"
+    }
   ]
 }

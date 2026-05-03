@@ -20,6 +20,200 @@
     "bd-rchk5.8",
     "bd-t21em"
   ],
+  "follow_up_payloads": [
+    {
+      "follow_up_bead": "bd-9vzzk",
+      "classification": "pending_capability",
+      "workload_id": "mount_warm",
+      "command_template": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json --workload mount_warm",
+      "profile": "release",
+      "environment_manifest_id": "sha256:d06d8b3520adfcbea2f56bc591bc984dff8d7291a504bb145b1576a70cd7a7d8",
+      "baseline_artifact_hash": "missing_reference",
+      "current_artifact_hash": "sha256:740719c43c4dc1eef3878f12f68897d661015c89d309ed9eef179a60a74ac55a",
+      "observed_value": 0.0,
+      "threshold_value": 0.0,
+      "unit": "throughput_ops_sec",
+      "suspected_subsystem": "mount",
+      "raw_logs": [
+        "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/ffs_cli_mount_cold_probe_report.json",
+        "benchmarks/baselines/history/20260503-bd-rchk5-3-mount-warm-pending.json"
+      ],
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json --workload mount_warm"
+    },
+    {
+      "follow_up_bead": "bd-rchk5.5",
+      "classification": "regression",
+      "workload_id": "mount_cold",
+      "command_template": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json",
+      "profile": "release-perf",
+      "environment_manifest_id": "sha256:b19ff45f297374e03538a38f42951611d2ede5f4eddc494c3a91b152f8099183",
+      "baseline_artifact_hash": "sha256:eb943d077b7aabc6982a3d2e7d3b5fa0f3f7cc6462dcdb5dbd73d8619b49f573",
+      "current_artifact_hash": "sha256:5f5a0a4af42f61389a397a5963628a0f9b6ea39fe9288b8a53fe01747513107e",
+      "observed_value": 374.884,
+      "threshold_value": 50.0,
+      "unit": "p99_delta_percent",
+      "suspected_subsystem": "mount",
+      "raw_logs": [
+        "baselines/hyperfine/20260503-bd-rchk5-3-mount-cold-sudo-measured/ffs_cli_mount_cold_probe.json",
+        "baselines/hyperfine/20260503-bd-rchk5-3-mount-cold-sudo-measured/ffs_cli_mount_cold_probe_report.json",
+        "benchmarks/baselines/history/20260503-bd-rchk5-3-mount-sudo-comparison.json"
+      ],
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json"
+    },
+    {
+      "follow_up_bead": "bd-rchk5.6",
+      "classification": "regression",
+      "workload_id": "mount_warm",
+      "command_template": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json",
+      "profile": "release-perf",
+      "environment_manifest_id": "sha256:b19ff45f297374e03538a38f42951611d2ede5f4eddc494c3a91b152f8099183",
+      "baseline_artifact_hash": "sha256:249bb1155b1e393c91d3090f6e13badae260c40d8335b2c8b31d634e68748a2b",
+      "current_artifact_hash": "sha256:9c38d6d80cffa2115465cdc7b05c5a799e31f6540de7008a94c57911d37cf031",
+      "observed_value": 414.996,
+      "threshold_value": 50.0,
+      "unit": "p99_delta_percent",
+      "suspected_subsystem": "mount",
+      "raw_logs": [
+        "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/ffs_cli_mount_warm_probe.json",
+        "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/ffs_cli_mount_warm_probe_report.json",
+        "benchmarks/baselines/history/20260503-bd-rchk5-3-mount-sudo-comparison.json"
+      ],
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json"
+    },
+    {
+      "follow_up_bead": "bd-rchk5.7",
+      "classification": "regression",
+      "workload_id": "mount_recovery",
+      "command_template": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json",
+      "profile": "release-perf",
+      "environment_manifest_id": "sha256:b19ff45f297374e03538a38f42951611d2ede5f4eddc494c3a91b152f8099183",
+      "baseline_artifact_hash": "sha256:200df2bed771106221fe03885b31aaea1b91fe46f4a9e5c6890ef3408f05b37e",
+      "current_artifact_hash": "sha256:1a86cd03b6914fbd2141b0a6ae7a2a217f96c81fbc9e28350789729407686e9c",
+      "observed_value": 111.927,
+      "threshold_value": 50.0,
+      "unit": "p99_delta_percent",
+      "suspected_subsystem": "mount",
+      "raw_logs": [
+        "baselines/hyperfine/20260503-bd-rchk5-3-mount-recovery-sudo-measured/ffs_cli_mount_recovery_probe.json",
+        "baselines/hyperfine/20260503-bd-rchk5-3-mount-recovery-sudo-measured/ffs_cli_mount_recovery_probe_report.json",
+        "benchmarks/baselines/history/20260503-bd-rchk5-3-mount-sudo-comparison.json"
+      ],
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json"
+    },
+    {
+      "follow_up_bead": "bd-rchk5.8",
+      "classification": "missing_reference",
+      "workload_id": "block_cache_sharded_arc_concurrent_hot_read_64threads",
+      "command_template": "cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_sharded_arc_concurrent_hot_read_64threads",
+      "profile": "release-perf",
+      "environment_manifest_id": "sha256:a8726543e029a951e2f2782c686093b29eeeb43d207272d2671a44cbe222e1c6",
+      "baseline_artifact_hash": "missing_reference",
+      "current_artifact_hash": "sha256:a639516c6bae4fb00a41da86fc68f15a73253cda6cba97e5508e5ffd450781c5",
+      "observed_value": 110.497238,
+      "threshold_value": 0.0,
+      "unit": "throughput_ops_sec",
+      "suspected_subsystem": "block",
+      "raw_logs": [
+        "baselines/hyperfine/20260503-sharded-arc-hot64/ffs_block_sharded_arc_concurrent_hot_read_64threads.json",
+        "benchmarks/baselines/history/20260503-sharded-arc-hot64.json"
+      ],
+      "validation_command": "cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_sharded_arc_concurrent_hot_read_64threads"
+    },
+    {
+      "follow_up_bead": "bd-rchk5.8",
+      "classification": "missing_reference",
+      "workload_id": "block_cache_sharded_s3fifo_concurrent_hot_read_64threads",
+      "command_template": "cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_sharded_s3fifo_concurrent_hot_read_64threads",
+      "profile": "release-perf",
+      "environment_manifest_id": "sha256:1467575ba425761bce3fa890eae624d0cc514a8147c4bfc938a7801643709a8c",
+      "baseline_artifact_hash": "missing_reference",
+      "current_artifact_hash": "sha256:4aa5633eed42c2f2aaacff9c84d95dca22fc7d69e50c57b8a47c30b6f04c363b",
+      "observed_value": 96.209352,
+      "threshold_value": 0.0,
+      "unit": "throughput_ops_sec",
+      "suspected_subsystem": "block",
+      "raw_logs": [
+        "baselines/hyperfine/20260503-sharded-s3fifo-hot64/ffs_block_sharded_s3fifo_concurrent_hot_read_64threads.json",
+        "benchmarks/baselines/history/20260503-sharded-s3fifo-hot64.json"
+      ],
+      "validation_command": "cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_sharded_s3fifo_concurrent_hot_read_64threads"
+    },
+    {
+      "follow_up_bead": "bd-rchk5.8",
+      "classification": "missing_reference",
+      "workload_id": "cli_metadata_parse_conformance",
+      "command_template": "cargo bench --profile release-perf -p ffs-harness --bench metadata_parse -- metadata_parse",
+      "profile": "release-perf",
+      "environment_manifest_id": "sha256:7d30347ff3006c137d32f90a734b8ac61fc4df9f6be9114babe80717b6521049",
+      "baseline_artifact_hash": "missing_reference",
+      "current_artifact_hash": "sha256:d5cd3bc62ae14403033ec24ea2757de7febcd560ddd380a2974b30c5ee61f25c",
+      "observed_value": 9626492.106276,
+      "threshold_value": 0.0,
+      "unit": "throughput_ops_sec",
+      "suspected_subsystem": "cli",
+      "raw_logs": [
+        "baselines/hyperfine/20260503-bd-rchk5-2-metadata-parse/ffs_harness_metadata_parse.json",
+        "benchmarks/baselines/history/20260503-bd-rchk5-2-metadata-parse.json"
+      ],
+      "validation_command": "cargo bench --profile release-perf -p ffs-harness --bench metadata_parse -- metadata_parse"
+    },
+    {
+      "follow_up_bead": "bd-rchk5.8",
+      "classification": "missing_reference",
+      "workload_id": "repair_symbol_refresh_staleness_latency",
+      "command_template": "cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- repair_symbol_refresh_staleness_latency",
+      "profile": "release-perf",
+      "environment_manifest_id": "sha256:7d30347ff3006c137d32f90a734b8ac61fc4df9f6be9114babe80717b6521049",
+      "baseline_artifact_hash": "missing_reference",
+      "current_artifact_hash": "sha256:82bccc0d960053e7b60cb4547d8ed6b1748ea8d51e5a23e98d718a6d4e01985c",
+      "observed_value": 15207737.69694,
+      "threshold_value": 0.0,
+      "unit": "throughput_ops_sec",
+      "suspected_subsystem": "repair",
+      "raw_logs": [
+        "baselines/hyperfine/20260503-bd-rchk5-2-refresh-staleness/ffs_repair_symbol_refresh_staleness_latency.json",
+        "benchmarks/baselines/history/20260503-bd-rchk5-2-refresh-staleness.json"
+      ],
+      "validation_command": "cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- repair_symbol_refresh_staleness_latency"
+    },
+    {
+      "follow_up_bead": "bd-rchk5.8",
+      "classification": "missing_reference",
+      "workload_id": "wal_commit_4k_sync",
+      "command_template": "cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- wal_commit_4k_sync",
+      "profile": "release-perf",
+      "environment_manifest_id": "sha256:7d30347ff3006c137d32f90a734b8ac61fc4df9f6be9114babe80717b6521049",
+      "baseline_artifact_hash": "missing_reference",
+      "current_artifact_hash": "sha256:971910fc204684c39427a3df91ebe4fb2de279c4ef398458da8b2197cc065e59",
+      "observed_value": 102.426483,
+      "threshold_value": 0.0,
+      "unit": "throughput_ops_sec",
+      "suspected_subsystem": "wal",
+      "raw_logs": [
+        "baselines/hyperfine/20260503-bd-rchk5-2-wal-commit/ffs_mvcc_wal_commit_4k_sync.json",
+        "benchmarks/baselines/history/20260503-bd-rchk5-2-wal-commit.json"
+      ],
+      "validation_command": "cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- wal_commit_4k_sync"
+    },
+    {
+      "follow_up_bead": "bd-t21em",
+      "classification": "unmeasured",
+      "workload_id": "long_campaign_writeback_cache_smoke",
+      "command_template": "cargo run -p ffs-harness -- validate-soak-canary-campaigns --manifest benchmarks/soak_canary_campaign_manifest.json",
+      "profile": "deferred",
+      "environment_manifest_id": "claim:cc7b6ed956b4796ad317c51dd1982fa39552b557a9961dd7075b1cc1af408d6f",
+      "baseline_artifact_hash": "missing_measurement",
+      "current_artifact_hash": "claim:03fd4da73605247ef5588c502855935031e2b6ad37e954219f907dee4169cd00",
+      "observed_value": 0.0,
+      "threshold_value": 0.0,
+      "unit": "claim_state",
+      "suspected_subsystem": "long",
+      "raw_logs": [
+        "long_campaign_writeback_cache_smoke"
+      ],
+      "validation_command": "cargo run -p ffs-harness -- validate-soak-canary-campaigns --manifest benchmarks/soak_canary_campaign_manifest.json"
+    }
+  ],
   "rows_requiring_follow_up": 10,
   "rows": [
     {
@@ -38,6 +232,13 @@
       "classification": "improved",
       "release_claim_state": "measured_local",
       "follow_up_present": false,
+      "raw_logs": [
+        "baselines/hyperfine/20260406/ffs_block_arc_sequential_scan.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-arc-seq/ffs_block_arc_sequential_scan.json",
+        "benchmarks/baselines/history/20260503-bd-rchk5-2-arc-seq.json"
+      ],
+      "comparison_target_rationale": "same-operation reference baseline from benchmarks/baselines/history/20260406.json",
+      "validation_command": "cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_arc_sequential_scan",
       "rationale": "same-operation comparison against benchmarks/baselines/history/20260406.json; classified as improved",
       "reproduction_command": "cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_arc_sequential_scan"
     },
@@ -57,6 +258,13 @@
       "classification": "improved",
       "release_claim_state": "measured_local",
       "follow_up_present": false,
+      "raw_logs": [
+        "baselines/hyperfine/20260406/ffs_block_arc_mixed_seq70_hot30.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-arc-mixed/ffs_block_arc_mixed_seq70_hot30.json",
+        "benchmarks/baselines/history/20260503-bd-rchk5-2-arc-mixed.json"
+      ],
+      "comparison_target_rationale": "same-operation reference baseline from benchmarks/baselines/history/20260406.json",
+      "validation_command": "cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_arc_mixed_seq70_hot30",
       "rationale": "same-operation comparison against benchmarks/baselines/history/20260406.json; classified as improved",
       "reproduction_command": "cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_arc_mixed_seq70_hot30"
     },
@@ -69,10 +277,38 @@
       "current_p99_us": 9264.0,
       "current_throughput_ops_sec": 110.497238,
       "classification": "missing_reference",
-      "release_claim_state": "unknown",
+      "release_claim_state": "reference_limited_experimental",
       "follow_up_bead": "bd-rchk5.8",
       "follow_up_present": true,
-      "rationale": "measured in benchmarks/baselines/history/20260503-sharded-arc-hot64.json but no checked-in same-operation reference baseline exists",
+      "follow_up_payload": {
+        "follow_up_bead": "bd-rchk5.8",
+        "classification": "missing_reference",
+        "workload_id": "block_cache_sharded_arc_concurrent_hot_read_64threads",
+        "command_template": "cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_sharded_arc_concurrent_hot_read_64threads",
+        "profile": "release-perf",
+        "environment_manifest_id": "sha256:a8726543e029a951e2f2782c686093b29eeeb43d207272d2671a44cbe222e1c6",
+        "baseline_artifact_hash": "missing_reference",
+        "current_artifact_hash": "sha256:a639516c6bae4fb00a41da86fc68f15a73253cda6cba97e5508e5ffd450781c5",
+        "observed_value": 110.497238,
+        "threshold_value": 0.0,
+        "unit": "throughput_ops_sec",
+        "suspected_subsystem": "block",
+        "raw_logs": [
+          "baselines/hyperfine/20260503-sharded-arc-hot64/ffs_block_sharded_arc_concurrent_hot_read_64threads.json",
+          "benchmarks/baselines/history/20260503-sharded-arc-hot64.json"
+        ],
+        "validation_command": "cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_sharded_arc_concurrent_hot_read_64threads"
+      },
+      "raw_logs": [
+        "benchmarks/baselines/history/20260503-sharded-arc-hot64.json",
+        "baselines/hyperfine/20260503-sharded-arc-hot64/ffs_block_sharded_arc_concurrent_hot_read_64threads.json",
+        "baselines/hyperfine/20260503-sharded-arc-hot64/ffs_block_sharded_arc_concurrent_hot_read_64threads.stdout",
+        "baselines/hyperfine/20260503-sharded-arc-hot64/ffs_block_sharded_arc_concurrent_hot_read_64threads.stderr"
+      ],
+      "comparison_target_rationale": "No checked-in same-operation 64-thread sharded ARC reference exists in the 20260218, 20260219, or 20260406 baseline set; older single-shard ARC rows are not comparable to the new 64-core/shard contention lane.",
+      "release_wording": "Report only the measured local 64-thread sharded ARC value and keep public performance wording reference-limited experimental until a same-operation baseline is captured on a comparable host.",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json",
+      "rationale": "No checked-in same-operation 64-thread sharded ARC reference exists in the 20260218, 20260219, or 20260406 baseline set; older single-shard ARC rows are not comparable to the new 64-core/shard contention lane.",
       "reproduction_command": "cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_sharded_arc_concurrent_hot_read_64threads"
     },
     {
@@ -84,10 +320,38 @@
       "current_p99_us": 10612.0,
       "current_throughput_ops_sec": 96.209352,
       "classification": "missing_reference",
-      "release_claim_state": "unknown",
+      "release_claim_state": "reference_limited_experimental",
       "follow_up_bead": "bd-rchk5.8",
       "follow_up_present": true,
-      "rationale": "measured in benchmarks/baselines/history/20260503-sharded-s3fifo-hot64.json but no checked-in same-operation reference baseline exists",
+      "follow_up_payload": {
+        "follow_up_bead": "bd-rchk5.8",
+        "classification": "missing_reference",
+        "workload_id": "block_cache_sharded_s3fifo_concurrent_hot_read_64threads",
+        "command_template": "cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_sharded_s3fifo_concurrent_hot_read_64threads",
+        "profile": "release-perf",
+        "environment_manifest_id": "sha256:1467575ba425761bce3fa890eae624d0cc514a8147c4bfc938a7801643709a8c",
+        "baseline_artifact_hash": "missing_reference",
+        "current_artifact_hash": "sha256:4aa5633eed42c2f2aaacff9c84d95dca22fc7d69e50c57b8a47c30b6f04c363b",
+        "observed_value": 96.209352,
+        "threshold_value": 0.0,
+        "unit": "throughput_ops_sec",
+        "suspected_subsystem": "block",
+        "raw_logs": [
+          "baselines/hyperfine/20260503-sharded-s3fifo-hot64/ffs_block_sharded_s3fifo_concurrent_hot_read_64threads.json",
+          "benchmarks/baselines/history/20260503-sharded-s3fifo-hot64.json"
+        ],
+        "validation_command": "cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_sharded_s3fifo_concurrent_hot_read_64threads"
+      },
+      "raw_logs": [
+        "benchmarks/baselines/history/20260503-sharded-s3fifo-hot64.json",
+        "baselines/hyperfine/20260503-sharded-s3fifo-hot64/ffs_block_sharded_s3fifo_concurrent_hot_read_64threads.json",
+        "baselines/hyperfine/20260503-sharded-s3fifo-hot64/ffs_block_sharded_s3fifo_concurrent_hot_read_64threads.stdout",
+        "baselines/hyperfine/20260503-sharded-s3fifo-hot64/ffs_block_sharded_s3fifo_concurrent_hot_read_64threads.stderr"
+      ],
+      "comparison_target_rationale": "No checked-in same-operation 64-thread sharded S3-FIFO reference exists in the 20260218, 20260219, or 20260406 baseline set; older single-shard S3-FIFO rows do not exercise the same sharded hot-read contention path.",
+      "release_wording": "Report only the measured local 64-thread sharded S3-FIFO value and keep public performance wording reference-limited experimental until a same-operation baseline is captured on a comparable host.",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json",
+      "rationale": "No checked-in same-operation 64-thread sharded S3-FIFO reference exists in the 20260218, 20260219, or 20260406 baseline set; older single-shard S3-FIFO rows do not exercise the same sharded hot-read contention path.",
       "reproduction_command": "cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_sharded_s3fifo_concurrent_hot_read_64threads"
     },
     {
@@ -99,10 +363,38 @@
       "current_p99_us": 0.0,
       "current_throughput_ops_sec": 9626492.106276,
       "classification": "missing_reference",
-      "release_claim_state": "unknown",
+      "release_claim_state": "reference_limited_experimental",
       "follow_up_bead": "bd-rchk5.8",
       "follow_up_present": true,
-      "rationale": "measured in benchmarks/baselines/history/20260503-bd-rchk5-2-metadata-parse.json but no checked-in same-operation reference baseline exists",
+      "follow_up_payload": {
+        "follow_up_bead": "bd-rchk5.8",
+        "classification": "missing_reference",
+        "workload_id": "cli_metadata_parse_conformance",
+        "command_template": "cargo bench --profile release-perf -p ffs-harness --bench metadata_parse -- metadata_parse",
+        "profile": "release-perf",
+        "environment_manifest_id": "sha256:7d30347ff3006c137d32f90a734b8ac61fc4df9f6be9114babe80717b6521049",
+        "baseline_artifact_hash": "missing_reference",
+        "current_artifact_hash": "sha256:d5cd3bc62ae14403033ec24ea2757de7febcd560ddd380a2974b30c5ee61f25c",
+        "observed_value": 9626492.106276,
+        "threshold_value": 0.0,
+        "unit": "throughput_ops_sec",
+        "suspected_subsystem": "cli",
+        "raw_logs": [
+          "baselines/hyperfine/20260503-bd-rchk5-2-metadata-parse/ffs_harness_metadata_parse.json",
+          "benchmarks/baselines/history/20260503-bd-rchk5-2-metadata-parse.json"
+        ],
+        "validation_command": "cargo bench --profile release-perf -p ffs-harness --bench metadata_parse -- metadata_parse"
+      },
+      "raw_logs": [
+        "benchmarks/baselines/history/20260503-bd-rchk5-2-metadata-parse.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-metadata-parse/ffs_harness_metadata_parse.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-metadata-parse/ffs_harness_metadata_parse.stdout",
+        "baselines/hyperfine/20260503-bd-rchk5-2-metadata-parse/ffs_harness_metadata_parse.stderr"
+      ],
+      "comparison_target_rationale": "No checked-in same-operation metadata_parse criterion reference exists in the 20260218, 20260219, or 20260406 baseline set; parity and fixture-validation CLI rows cover broader commands and cannot isolate parser microbenchmark latency.",
+      "release_wording": "Report only the measured local metadata parser value and keep public performance wording reference-limited experimental until a same-operation parser baseline is captured.",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json",
+      "rationale": "No checked-in same-operation metadata_parse criterion reference exists in the 20260218, 20260219, or 20260406 baseline set; parity and fixture-validation CLI rows cover broader commands and cannot isolate parser microbenchmark latency.",
       "reproduction_command": "cargo bench --profile release-perf -p ffs-harness --bench metadata_parse -- metadata_parse"
     },
     {
@@ -121,6 +413,13 @@
       "classification": "improved",
       "release_claim_state": "measured_local",
       "follow_up_present": false,
+      "raw_logs": [
+        "baselines/hyperfine/20260406/ffs_mvcc_contention_4writers.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-mvcc4/ffs_mvcc_contention_4writers.json",
+        "benchmarks/baselines/history/20260503-bd-rchk5-2-mvcc4.json"
+      ],
+      "comparison_target_rationale": "same-operation reference baseline from benchmarks/baselines/history/20260406.json",
+      "validation_command": "cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- mvcc_contention_4writers",
       "rationale": "same-operation comparison against benchmarks/baselines/history/20260406.json; classified as improved",
       "reproduction_command": "cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- mvcc_contention_4writers"
     },
@@ -140,6 +439,13 @@
       "classification": "improved",
       "release_claim_state": "measured_local",
       "follow_up_present": false,
+      "raw_logs": [
+        "baselines/hyperfine/20260406/ffs_repair_raptorq_encode_group_16blocks.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-raptorq-encode/ffs_repair_raptorq_encode_group_16blocks.json",
+        "benchmarks/baselines/history/20260503-bd-rchk5-2-raptorq-encode.json"
+      ],
+      "comparison_target_rationale": "same-operation reference baseline from benchmarks/baselines/history/20260406.json",
+      "validation_command": "cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- raptorq_encode_group_16blocks",
       "rationale": "same-operation comparison against benchmarks/baselines/history/20260406.json; classified as improved",
       "reproduction_command": "cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- raptorq_encode_group_16blocks"
     },
@@ -152,10 +458,38 @@
       "current_p99_us": 0.0,
       "current_throughput_ops_sec": 15207737.69694,
       "classification": "missing_reference",
-      "release_claim_state": "unknown",
+      "release_claim_state": "reference_limited_experimental",
       "follow_up_bead": "bd-rchk5.8",
       "follow_up_present": true,
-      "rationale": "measured in benchmarks/baselines/history/20260503-bd-rchk5-2-refresh-staleness.json but no checked-in same-operation reference baseline exists",
+      "follow_up_payload": {
+        "follow_up_bead": "bd-rchk5.8",
+        "classification": "missing_reference",
+        "workload_id": "repair_symbol_refresh_staleness_latency",
+        "command_template": "cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- repair_symbol_refresh_staleness_latency",
+        "profile": "release-perf",
+        "environment_manifest_id": "sha256:7d30347ff3006c137d32f90a734b8ac61fc4df9f6be9114babe80717b6521049",
+        "baseline_artifact_hash": "missing_reference",
+        "current_artifact_hash": "sha256:82bccc0d960053e7b60cb4547d8ed6b1748ea8d51e5a23e98d718a6d4e01985c",
+        "observed_value": 15207737.69694,
+        "threshold_value": 0.0,
+        "unit": "throughput_ops_sec",
+        "suspected_subsystem": "repair",
+        "raw_logs": [
+          "baselines/hyperfine/20260503-bd-rchk5-2-refresh-staleness/ffs_repair_symbol_refresh_staleness_latency.json",
+          "benchmarks/baselines/history/20260503-bd-rchk5-2-refresh-staleness.json"
+        ],
+        "validation_command": "cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- repair_symbol_refresh_staleness_latency"
+      },
+      "raw_logs": [
+        "benchmarks/baselines/history/20260503-bd-rchk5-2-refresh-staleness.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-refresh-staleness/ffs_repair_symbol_refresh_staleness_latency.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-refresh-staleness/ffs_repair_symbol_refresh_staleness_latency.stdout",
+        "baselines/hyperfine/20260503-bd-rchk5-2-refresh-staleness/ffs_repair_symbol_refresh_staleness_latency.stderr"
+      ],
+      "comparison_target_rationale": "No checked-in same-operation repair-symbol refresh staleness reference exists in the 20260218, 20260219, or 20260406 baseline set; older scrub and RaptorQ encode/decode rows do not measure the same refresh-staleness control path.",
+      "release_wording": "Report only the measured local symbol-refresh staleness value and keep public performance wording reference-limited experimental until a same-operation refresh baseline is captured.",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json",
+      "rationale": "No checked-in same-operation repair-symbol refresh staleness reference exists in the 20260218, 20260219, or 20260406 baseline set; older scrub and RaptorQ encode/decode rows do not measure the same refresh-staleness control path.",
       "reproduction_command": "cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- repair_symbol_refresh_staleness_latency"
     },
     {
@@ -167,10 +501,38 @@
       "current_p99_us": 10075.0,
       "current_throughput_ops_sec": 102.426483,
       "classification": "missing_reference",
-      "release_claim_state": "unknown",
+      "release_claim_state": "reference_limited_experimental",
       "follow_up_bead": "bd-rchk5.8",
       "follow_up_present": true,
-      "rationale": "measured in benchmarks/baselines/history/20260503-bd-rchk5-2-wal-commit.json but no checked-in same-operation reference baseline exists",
+      "follow_up_payload": {
+        "follow_up_bead": "bd-rchk5.8",
+        "classification": "missing_reference",
+        "workload_id": "wal_commit_4k_sync",
+        "command_template": "cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- wal_commit_4k_sync",
+        "profile": "release-perf",
+        "environment_manifest_id": "sha256:7d30347ff3006c137d32f90a734b8ac61fc4df9f6be9114babe80717b6521049",
+        "baseline_artifact_hash": "missing_reference",
+        "current_artifact_hash": "sha256:971910fc204684c39427a3df91ebe4fb2de279c4ef398458da8b2197cc065e59",
+        "observed_value": 102.426483,
+        "threshold_value": 0.0,
+        "unit": "throughput_ops_sec",
+        "suspected_subsystem": "wal",
+        "raw_logs": [
+          "baselines/hyperfine/20260503-bd-rchk5-2-wal-commit/ffs_mvcc_wal_commit_4k_sync.json",
+          "benchmarks/baselines/history/20260503-bd-rchk5-2-wal-commit.json"
+        ],
+        "validation_command": "cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- wal_commit_4k_sync"
+      },
+      "raw_logs": [
+        "benchmarks/baselines/history/20260503-bd-rchk5-2-wal-commit.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-wal-commit/ffs_mvcc_wal_commit_4k_sync.json",
+        "baselines/hyperfine/20260503-bd-rchk5-2-wal-commit/ffs_mvcc_wal_commit_4k_sync.stdout",
+        "baselines/hyperfine/20260503-bd-rchk5-2-wal-commit/ffs_mvcc_wal_commit_4k_sync.stderr"
+      ],
+      "comparison_target_rationale": "No checked-in same-operation WAL commit 4 KiB sync reference exists in the 20260218, 20260219, or 20260406 baseline set; older WAL write-amplification rows measure different commit shapes and cannot support a regression-free claim.",
+      "release_wording": "Report only the measured local WAL commit value and keep public performance wording reference-limited experimental until a same-operation WAL sync baseline is captured.",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json",
+      "rationale": "No checked-in same-operation WAL commit 4 KiB sync reference exists in the 20260218, 20260219, or 20260406 baseline set; older WAL write-amplification rows measure different commit shapes and cannot support a regression-free claim.",
       "reproduction_command": "cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- wal_commit_4k_sync"
     },
     {
@@ -185,6 +547,29 @@
       "release_claim_state": "unknown",
       "follow_up_bead": "bd-9vzzk",
       "follow_up_present": true,
+      "follow_up_payload": {
+        "follow_up_bead": "bd-9vzzk",
+        "classification": "pending_capability",
+        "workload_id": "mount_warm",
+        "command_template": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json --workload mount_warm",
+        "profile": "release",
+        "environment_manifest_id": "sha256:d06d8b3520adfcbea2f56bc591bc984dff8d7291a504bb145b1576a70cd7a7d8",
+        "baseline_artifact_hash": "missing_reference",
+        "current_artifact_hash": "sha256:740719c43c4dc1eef3878f12f68897d661015c89d309ed9eef179a60a74ac55a",
+        "observed_value": 0.0,
+        "threshold_value": 0.0,
+        "unit": "throughput_ops_sec",
+        "suspected_subsystem": "mount",
+        "raw_logs": [
+          "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/ffs_cli_mount_cold_probe_report.json",
+          "benchmarks/baselines/history/20260503-bd-rchk5-3-mount-warm-pending.json"
+        ],
+        "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json --workload mount_warm"
+      },
+      "raw_logs": [
+        "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/ffs_cli_mount_cold_probe_report.json",
+        "benchmarks/baselines/history/20260503-bd-rchk5-3-mount-warm-pending.json"
+      ],
       "rationale": "artifact benchmarks/baselines/history/20260503-bd-rchk5-3-mount-warm-pending.json is pending because required host capability was unavailable",
       "reproduction_command": ""
     },
@@ -205,6 +590,32 @@
       "release_claim_state": "unknown",
       "follow_up_bead": "bd-rchk5.5",
       "follow_up_present": true,
+      "follow_up_payload": {
+        "follow_up_bead": "bd-rchk5.5",
+        "classification": "regression",
+        "workload_id": "mount_cold",
+        "command_template": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json",
+        "profile": "release-perf",
+        "environment_manifest_id": "sha256:b19ff45f297374e03538a38f42951611d2ede5f4eddc494c3a91b152f8099183",
+        "baseline_artifact_hash": "sha256:eb943d077b7aabc6982a3d2e7d3b5fa0f3f7cc6462dcdb5dbd73d8619b49f573",
+        "current_artifact_hash": "sha256:5f5a0a4af42f61389a397a5963628a0f9b6ea39fe9288b8a53fe01747513107e",
+        "observed_value": 374.884,
+        "threshold_value": 50.0,
+        "unit": "p99_delta_percent",
+        "suspected_subsystem": "mount",
+        "raw_logs": [
+          "baselines/hyperfine/20260503-bd-rchk5-3-mount-cold-sudo-measured/ffs_cli_mount_cold_probe.json",
+          "baselines/hyperfine/20260503-bd-rchk5-3-mount-cold-sudo-measured/ffs_cli_mount_cold_probe_report.json",
+          "benchmarks/baselines/history/20260503-bd-rchk5-3-mount-sudo-comparison.json"
+        ],
+        "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json"
+      },
+      "raw_logs": [
+        "baselines/hyperfine/20260503-bd-rchk5-3-mount-cold-sudo-measured/ffs_cli_mount_cold_probe.json",
+        "baselines/hyperfine/20260503-bd-rchk5-3-mount-cold-sudo-measured/ffs_cli_mount_cold_probe_report.json",
+        "benchmarks/baselines/history/20260503-bd-rchk5-3-mount-sudo-comparison.json"
+      ],
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json",
       "rationale": "comparison artifact verdict=slower_than_reference; classified as regression",
       "reproduction_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json"
     },
@@ -225,6 +636,32 @@
       "release_claim_state": "unknown",
       "follow_up_bead": "bd-rchk5.6",
       "follow_up_present": true,
+      "follow_up_payload": {
+        "follow_up_bead": "bd-rchk5.6",
+        "classification": "regression",
+        "workload_id": "mount_warm",
+        "command_template": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json",
+        "profile": "release-perf",
+        "environment_manifest_id": "sha256:b19ff45f297374e03538a38f42951611d2ede5f4eddc494c3a91b152f8099183",
+        "baseline_artifact_hash": "sha256:249bb1155b1e393c91d3090f6e13badae260c40d8335b2c8b31d634e68748a2b",
+        "current_artifact_hash": "sha256:9c38d6d80cffa2115465cdc7b05c5a799e31f6540de7008a94c57911d37cf031",
+        "observed_value": 414.996,
+        "threshold_value": 50.0,
+        "unit": "p99_delta_percent",
+        "suspected_subsystem": "mount",
+        "raw_logs": [
+          "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/ffs_cli_mount_warm_probe.json",
+          "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/ffs_cli_mount_warm_probe_report.json",
+          "benchmarks/baselines/history/20260503-bd-rchk5-3-mount-sudo-comparison.json"
+        ],
+        "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json"
+      },
+      "raw_logs": [
+        "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/ffs_cli_mount_warm_probe.json",
+        "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/ffs_cli_mount_warm_probe_report.json",
+        "benchmarks/baselines/history/20260503-bd-rchk5-3-mount-sudo-comparison.json"
+      ],
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json",
       "rationale": "comparison artifact verdict=slower_than_reference; classified as regression",
       "reproduction_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json"
     },
@@ -245,6 +682,32 @@
       "release_claim_state": "unknown",
       "follow_up_bead": "bd-rchk5.7",
       "follow_up_present": true,
+      "follow_up_payload": {
+        "follow_up_bead": "bd-rchk5.7",
+        "classification": "regression",
+        "workload_id": "mount_recovery",
+        "command_template": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json",
+        "profile": "release-perf",
+        "environment_manifest_id": "sha256:b19ff45f297374e03538a38f42951611d2ede5f4eddc494c3a91b152f8099183",
+        "baseline_artifact_hash": "sha256:200df2bed771106221fe03885b31aaea1b91fe46f4a9e5c6890ef3408f05b37e",
+        "current_artifact_hash": "sha256:1a86cd03b6914fbd2141b0a6ae7a2a217f96c81fbc9e28350789729407686e9c",
+        "observed_value": 111.927,
+        "threshold_value": 50.0,
+        "unit": "p99_delta_percent",
+        "suspected_subsystem": "mount",
+        "raw_logs": [
+          "baselines/hyperfine/20260503-bd-rchk5-3-mount-recovery-sudo-measured/ffs_cli_mount_recovery_probe.json",
+          "baselines/hyperfine/20260503-bd-rchk5-3-mount-recovery-sudo-measured/ffs_cli_mount_recovery_probe_report.json",
+          "benchmarks/baselines/history/20260503-bd-rchk5-3-mount-sudo-comparison.json"
+        ],
+        "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json"
+      },
+      "raw_logs": [
+        "baselines/hyperfine/20260503-bd-rchk5-3-mount-recovery-sudo-measured/ffs_cli_mount_recovery_probe.json",
+        "baselines/hyperfine/20260503-bd-rchk5-3-mount-recovery-sudo-measured/ffs_cli_mount_recovery_probe_report.json",
+        "benchmarks/baselines/history/20260503-bd-rchk5-3-mount-sudo-comparison.json"
+      ],
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json",
       "rationale": "comparison artifact verdict=slower_than_reference; classified as regression",
       "reproduction_command": "cargo run -p ffs-harness -- performance-delta-closeout --config benchmarks/performance_delta_closeout.json"
     },
@@ -257,6 +720,28 @@
       "release_claim_state": "unknown",
       "follow_up_bead": "bd-t21em",
       "follow_up_present": true,
+      "follow_up_payload": {
+        "follow_up_bead": "bd-t21em",
+        "classification": "unmeasured",
+        "workload_id": "long_campaign_writeback_cache_smoke",
+        "command_template": "cargo run -p ffs-harness -- validate-soak-canary-campaigns --manifest benchmarks/soak_canary_campaign_manifest.json",
+        "profile": "deferred",
+        "environment_manifest_id": "claim:cc7b6ed956b4796ad317c51dd1982fa39552b557a9961dd7075b1cc1af408d6f",
+        "baseline_artifact_hash": "missing_measurement",
+        "current_artifact_hash": "claim:03fd4da73605247ef5588c502855935031e2b6ad37e954219f907dee4169cd00",
+        "observed_value": 0.0,
+        "threshold_value": 0.0,
+        "unit": "claim_state",
+        "suspected_subsystem": "long",
+        "raw_logs": [
+          "long_campaign_writeback_cache_smoke"
+        ],
+        "validation_command": "cargo run -p ffs-harness -- validate-soak-canary-campaigns --manifest benchmarks/soak_canary_campaign_manifest.json"
+      },
+      "raw_logs": [
+        "long_campaign_writeback_cache_smoke"
+      ],
+      "validation_command": "cargo run -p ffs-harness -- validate-soak-canary-campaigns --manifest benchmarks/soak_canary_campaign_manifest.json",
       "rationale": "Long-campaign writeback-cache performance remains deferred until soak stop conditions and flake root-cause classification are implemented.",
       "reproduction_command": "cargo run -p ffs-harness -- validate-soak-canary-campaigns --manifest benchmarks/soak_canary_campaign_manifest.json"
     }
