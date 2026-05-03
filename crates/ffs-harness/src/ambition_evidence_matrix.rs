@@ -565,7 +565,7 @@ fn validate_status(
             errors.push(format!(
                 "{} {field} is not-applicable without rationale",
                 row.source_bead_id
-            ))
+            ));
         }
         "deferred" if row.deferred_reason.trim().is_empty() => errors.push(format!(
             "{} {field} is deferred without reason",
@@ -721,6 +721,28 @@ pub fn fail_on_ambition_evidence_matrix_errors(
 mod tests {
     use super::*;
 
+    type RowMutator = fn(&mut AmbitionEvidenceMatrixRow);
+
+    fn clear_threat_model_status(row: &mut AmbitionEvidenceMatrixRow) {
+        row.threat_model_status.clear();
+    }
+
+    fn clear_remediation_id(row: &mut AmbitionEvidenceMatrixRow) {
+        row.remediation_id.clear();
+    }
+
+    fn clear_proof_demo_status(row: &mut AmbitionEvidenceMatrixRow) {
+        row.proof_demo_status.clear();
+    }
+
+    fn clear_low_privilege_proof_status(row: &mut AmbitionEvidenceMatrixRow) {
+        row.low_privilege_proof_status.clear();
+    }
+
+    fn clear_overhead_budget_status(row: &mut AmbitionEvidenceMatrixRow) {
+        row.overhead_budget_status.clear();
+    }
+
     fn fixture_issue(id: &str, title: &str, labels: &[&str]) -> String {
         format!(
             r#"{{"id":"{id}","title":"{title}","status":"open","labels":{labels},"description":"{title}","design":"matrix row","acceptance_criteria":"logs include matrix_version source_bead_ids stale_reference_checks missing_field_diagnostics generated_artifact_paths reproduction_command"}}"#,
@@ -835,24 +857,15 @@ mod tests {
 
     #[test]
     fn schema_rejects_missing_required_matrix_fields() {
-        let cases: Vec<(&str, Box<dyn Fn(&mut AmbitionEvidenceMatrixRow)>)> = vec![
-            (
-                "threat_model_status",
-                Box::new(|row| row.threat_model_status.clear()),
-            ),
-            ("remediation_id", Box::new(|row| row.remediation_id.clear())),
-            (
-                "proof_demo_status",
-                Box::new(|row| row.proof_demo_status.clear()),
-            ),
+        let cases: [(&str, RowMutator); 5] = [
+            ("threat_model_status", clear_threat_model_status),
+            ("remediation_id", clear_remediation_id),
+            ("proof_demo_status", clear_proof_demo_status),
             (
                 "low_privilege_proof_status",
-                Box::new(|row| row.low_privilege_proof_status.clear()),
+                clear_low_privilege_proof_status,
             ),
-            (
-                "overhead_budget_status",
-                Box::new(|row| row.overhead_budget_status.clear()),
-            ),
+            ("overhead_budget_status", clear_overhead_budget_status),
         ];
 
         for (expected, mutate) in cases {
