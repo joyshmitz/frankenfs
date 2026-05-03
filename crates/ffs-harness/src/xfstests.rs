@@ -204,6 +204,7 @@ const REQUIRED_XFSTESTS_ARTIFACTS: &[&str] = &[
     "summary.json",
     "results.json",
     "junit.xml",
+    "check.log",
 ];
 
 const KNOWN_XFSTESTS_COMMAND_PLAN_LANES: &[&str] = &[
@@ -1434,6 +1435,24 @@ generic/001  2s ... pass\n";
                 .iter()
                 .any(|error| error.contains("missing artifact requirement: policy_report.md")),
             "expected missing artifact requirement error, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn xfstests_policy_rejects_missing_check_log_artifact_requirement() {
+        let selected = vec!["generic/001".to_owned()];
+        let mut entry = valid_policy_entry("generic/001");
+        entry
+            .artifact_requirements
+            .retain(|artifact| artifact != "check.log");
+
+        let errors = validate_xfstests_policy(&selected, &[entry]);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("missing artifact requirement: check.log")),
+            "expected missing check.log artifact requirement error, got {errors:#?}"
         );
     }
 

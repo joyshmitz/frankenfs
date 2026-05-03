@@ -186,6 +186,7 @@ required_artifacts = {
     "summary.json",
     "results.json",
     "junit.xml",
+    "check.log",
 }
 allowed_plan_lanes = {
     "dry_run_only",
