@@ -80,6 +80,7 @@ use ffs_harness::{
         validate_repair_confidence_lab,
     },
     repair_writeback_serialization::{
+        build_repair_writeback_proof_summary,
         build_repair_writeback_serialization_sample_artifact_manifest,
         fail_on_repair_writeback_serialization_errors,
         load_repair_writeback_serialization_contract,
@@ -271,6 +272,7 @@ struct RepairWritebackSerializationCmdArgs {
     out_path: Option<String>,
     artifact_out_path: Option<String>,
     summary_out_path: Option<String>,
+    proof_summary_out_path: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1455,6 +1457,15 @@ fn validate_repair_writeback_serialization_cmd(args: &[String]) -> Result<()> {
         println!("repair/writeback serialization summary written: {path}");
     }
 
+    if let Some(path) = cmd_args.proof_summary_out_path {
+        let proof_summary = build_repair_writeback_proof_summary(&contract, &report);
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", serde_json::to_string_pretty(&proof_summary)?),
+        )?;
+        println!("repair/writeback proof summary written: {path}");
+    }
+
     fail_on_repair_writeback_serialization_errors(&report)
 }
 
@@ -1466,6 +1477,7 @@ fn parse_repair_writeback_serialization_cmd_args(
     let mut out_path: Option<String> = None;
     let mut artifact_out_path: Option<String> = None;
     let mut summary_out_path: Option<String> = None;
+    let mut proof_summary_out_path: Option<String> = None;
     let mut i = 0;
 
     while i < args.len() {
@@ -1504,6 +1516,14 @@ fn parse_repair_writeback_serialization_cmd_args(
                         .to_owned(),
                 );
             }
+            "--proof-summary-out" => {
+                i += 1;
+                proof_summary_out_path = Some(
+                    args.get(i)
+                        .context("--proof-summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
             "--help" | "-h" => {
                 print_repair_writeback_serialization_usage();
                 return Ok(None);
@@ -1520,6 +1540,7 @@ fn parse_repair_writeback_serialization_cmd_args(
         out_path,
         artifact_out_path,
         summary_out_path,
+        proof_summary_out_path,
     }))
 }
 
@@ -2978,6 +2999,7 @@ fn print_repair_writeback_serialization_usage() {
     println!("  --out FILE                         Write validation report JSON");
     println!("  --artifact-out FILE                Write sample shared QA artifact manifest JSON");
     println!("  --summary-out FILE                 Write Markdown contract summary");
+    println!("  --proof-summary-out FILE           Write downstream proof summary JSON");
 }
 
 fn print_workload_corpus_usage() {

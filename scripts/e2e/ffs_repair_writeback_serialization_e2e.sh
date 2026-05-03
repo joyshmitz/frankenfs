@@ -49,6 +49,7 @@ CONTRACT_JSON="$REPO_ROOT/docs/repair-writeback-serialization-contract.json"
 REPORT_JSON="$E2E_LOG_DIR/repair_writeback_serialization_report.json"
 ARTIFACT_JSON="$E2E_LOG_DIR/repair_writeback_serialization_artifact_manifest.json"
 SUMMARY_MD="$E2E_LOG_DIR/repair_writeback_serialization_summary.md"
+PROOF_SUMMARY_JSON="$E2E_LOG_DIR/repair_writeback_serialization_proof_summary.json"
 VALIDATE_RAW="$E2E_LOG_DIR/repair_writeback_serialization_validate.raw"
 BAD_MISSING_EVIDENCE="$E2E_LOG_DIR/bad_missing_evidence.json"
 BAD_UNSAFE_RISK="$E2E_LOG_DIR/bad_unsafe_risk.json"
@@ -74,7 +75,8 @@ if cargo run --quiet -p ffs-harness -- validate-repair-writeback-serialization \
     --artifact-root "artifacts/repair-writeback/dry-run" \
     --out "$REPORT_JSON" \
     --artifact-out "$ARTIFACT_JSON" \
-    --summary-out "$SUMMARY_MD" >"$VALIDATE_RAW" 2>&1; then
+    --summary-out "$SUMMARY_MD" \
+    --proof-summary-out "$PROOF_SUMMARY_JSON" >"$VALIDATE_RAW" 2>&1; then
     scenario_result "repair_writeback_contract_validates" "PASS" "checked-in contract accepted"
 else
     cat "$VALIDATE_RAW"
@@ -82,7 +84,7 @@ else
 fi
 
 e2e_step "Scenario 3: report proves fail-closed policy, risk decision, and consumers"
-if python3 - "$REPORT_JSON" "$ARTIFACT_JSON" "$SUMMARY_MD" <<'PY'
+if python3 - "$REPORT_JSON" "$ARTIFACT_JSON" "$SUMMARY_MD" "$PROOF_SUMMARY_JSON" <<'PY'
 import json
 import pathlib
 import sys
@@ -90,6 +92,7 @@ import sys
 report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 artifact = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
 summary = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
+proof_summary = json.loads(pathlib.Path(sys.argv[4]).read_text(encoding="utf-8"))
 
 if not report["valid"]:
     raise SystemExit(report["errors"])
@@ -164,9 +167,33 @@ if not any(row.get("release_gate_feature") == "repair.rw.writeback" for row in m
     raise SystemExit("missing release-gate metadata")
 if "rw_repair_serialization_missing" not in summary:
     raise SystemExit("summary missing fail-closed error class")
+
+if proof_summary["schema_version"] != 1:
+    raise SystemExit("wrong proof summary schema")
+if proof_summary["producer_bead_id"] != "bd-rchk0.1.1.1":
+    raise SystemExit("proof summary does not name child bead producer")
+if proof_summary["source_bead_id"] != "bd-rchk0.1.1":
+    raise SystemExit("proof summary does not preserve source contract bead")
+if proof_summary["safe_to_enable_rw_repair"]:
+    raise SystemExit("proof summary cannot allow rw repair without the serializer")
+required_downstream = {"bd-rchk0.1.2", "bd-rchk0.1.3", "bd-rchk0.1.4"}
+observed_downstream = {row["bead_id"] for row in proof_summary["downstream_inputs"]}
+if not required_downstream <= observed_downstream:
+    raise SystemExit(f"proof summary missing downstream inputs: {sorted(required_downstream - observed_downstream)}")
+if not any(
+    row["from_state"] == "client_write_in_flight"
+    and row["event"] == "repair_writeback_requested"
+    and not row["allowed"]
+    and not row["mutation_allowed"]
+    and row["error_class"] == "rw_repair_serialization_missing"
+    for row in proof_summary["transition_guards"]
+):
+    raise SystemExit("proof summary missing fail-closed transition guard")
+if not required_cases <= {row["coverage_case"] for row in proof_summary["race_schedule_inputs"]}:
+    raise SystemExit("proof summary missing race schedule coverage")
 PY
 then
-    scenario_result "repair_writeback_fail_closed_report" "PASS" "report and sample artifact verified"
+    scenario_result "repair_writeback_fail_closed_report" "PASS" "report, proof summary, and sample artifact verified"
 else
     scenario_result "repair_writeback_fail_closed_report" "FAIL" "report contract failed"
 fi
@@ -338,6 +365,7 @@ e2e_log "Repair/writeback contract: $CONTRACT_JSON"
 e2e_log "Validation report: $REPORT_JSON"
 e2e_log "Sample artifact manifest: $ARTIFACT_JSON"
 e2e_log "Markdown summary: $SUMMARY_MD"
+e2e_log "Proof summary: $PROOF_SUMMARY_JSON"
 e2e_log "Fail-closed artifact: $FAIL_CLOSED_ARTIFACT"
 
 if ((FAIL_COUNT == 0)); then

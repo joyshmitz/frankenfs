@@ -25,6 +25,7 @@ use std::fs;
 use std::path::Path;
 
 pub const REPAIR_WRITEBACK_SERIALIZATION_SCHEMA_VERSION: u32 = 1;
+pub const REPAIR_WRITEBACK_PROOF_SUMMARY_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_REPAIR_WRITEBACK_CONTRACT_PATH: &str =
     "docs/repair-writeback-serialization-contract.json";
 
@@ -426,6 +427,67 @@ pub struct SerializationRiskReport {
     pub diagnostics: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairWritebackProofSummary {
+    pub schema_version: u32,
+    pub summary_id: String,
+    pub producer_bead_id: String,
+    pub source_bead_id: String,
+    pub contract_id: String,
+    pub valid: bool,
+    pub read_write_repair_state: String,
+    pub fail_closed_error_class: String,
+    pub mutating_rw_repair_enabled: bool,
+    pub safe_to_enable_rw_repair: bool,
+    pub artifact_root: String,
+    pub required_evidence_fields: Vec<String>,
+    pub transition_guards: Vec<ProofTransitionGuard>,
+    pub scenario_inputs: Vec<ProofScenarioInput>,
+    pub race_schedule_inputs: Vec<ProofRaceScheduleInput>,
+    pub downstream_inputs: Vec<ProofDownstreamInput>,
+    pub reproduction_command: String,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofTransitionGuard {
+    pub from_state: String,
+    pub event: String,
+    pub to_state: String,
+    pub allowed: bool,
+    pub mutation_allowed: bool,
+    pub error_class: String,
+    pub follow_up_bead: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofScenarioInput {
+    pub scenario_id: String,
+    pub expected_outcome: String,
+    pub expected_error_class: String,
+    pub final_state: String,
+    pub proves_no_lost_client_write: bool,
+    pub preserves_reproduction_data: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofRaceScheduleInput {
+    pub schedule_id: String,
+    pub coverage_case: String,
+    pub classification: String,
+    pub timeout_decision: String,
+    pub liveness_decision: String,
+    pub follow_up_bead: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofDownstreamInput {
+    pub bead_id: String,
+    pub required_before_state: String,
+    pub reason: String,
+    pub required_fields: Vec<String>,
+}
+
 pub fn load_repair_writeback_serialization_contract(
     path: &Path,
 ) -> Result<RepairWritebackSerializationContract> {
@@ -733,6 +795,7 @@ pub fn build_repair_writeback_serialization_sample_artifact_manifest(
 
     for path in [
         "repair_writeback_serialization_report.json",
+        "repair_writeback_serialization_proof_summary.json",
         "repair_writeback_serialization_summary.md",
         "repair_writeback_serialization_repro.log",
     ] {
@@ -771,6 +834,86 @@ pub fn build_repair_writeback_serialization_sample_artifact_manifest(
     }
 
     builder.duration_secs(0.5).build()
+}
+
+#[must_use]
+pub fn build_repair_writeback_proof_summary(
+    contract: &RepairWritebackSerializationContract,
+    report: &RepairWritebackSerializationReport,
+) -> RepairWritebackProofSummary {
+    let downstream_inputs = contract
+        .follow_up_beads
+        .iter()
+        .filter(|follow_up| follow_up.bead_id != "bd-rchk0.1.1.1")
+        .map(|follow_up| ProofDownstreamInput {
+            bead_id: follow_up.bead_id.clone(),
+            required_before_state: follow_up.required_before_state.clone(),
+            reason: follow_up.reason.clone(),
+            required_fields: vec![
+                "transition_guards".to_owned(),
+                "scenario_inputs".to_owned(),
+                "race_schedule_inputs".to_owned(),
+                "required_evidence_fields".to_owned(),
+            ],
+        })
+        .collect();
+
+    RepairWritebackProofSummary {
+        schema_version: REPAIR_WRITEBACK_PROOF_SUMMARY_SCHEMA_VERSION,
+        summary_id: "bd-rchk0.1.1.1-repair-writeback-proof-summary-v1".to_owned(),
+        producer_bead_id: "bd-rchk0.1.1.1".to_owned(),
+        source_bead_id: contract.bead_id.clone(),
+        contract_id: contract.contract_id.clone(),
+        valid: report.valid,
+        read_write_repair_state: contract.current_policy.read_write_repair_state.clone(),
+        fail_closed_error_class: contract.current_policy.fail_closed_error_class.clone(),
+        mutating_rw_repair_enabled: contract.current_policy.mutating_rw_repair_enabled,
+        safe_to_enable_rw_repair: report.valid
+            && contract.current_policy.mutating_rw_repair_enabled
+            && contract.current_policy.serialization_point != "not_implemented",
+        artifact_root: report.artifact_root.clone(),
+        required_evidence_fields: contract.required_evidence_fields.clone(),
+        transition_guards: report
+            .transition_evaluations
+            .iter()
+            .map(|transition| ProofTransitionGuard {
+                from_state: transition.from_state.clone(),
+                event: transition.event.clone(),
+                to_state: transition.to_state.clone(),
+                allowed: transition.allowed,
+                mutation_allowed: transition.mutation_allowed,
+                error_class: transition.error_class.clone(),
+                follow_up_bead: transition.follow_up_bead.clone(),
+            })
+            .collect(),
+        scenario_inputs: report
+            .scenario_reports
+            .iter()
+            .map(|scenario| ProofScenarioInput {
+                scenario_id: scenario.scenario_id.clone(),
+                expected_outcome: scenario.expected_outcome.clone(),
+                expected_error_class: scenario.expected_error_class.clone(),
+                final_state: scenario.final_state.clone(),
+                proves_no_lost_client_write: scenario.proves_no_lost_client_write,
+                preserves_reproduction_data: scenario.preserves_reproduction_data,
+            })
+            .collect(),
+        race_schedule_inputs: report
+            .schedule_reports
+            .iter()
+            .map(|schedule| ProofRaceScheduleInput {
+                schedule_id: schedule.schedule_id.clone(),
+                coverage_case: schedule.coverage_case.clone(),
+                classification: schedule.classification.clone(),
+                timeout_decision: schedule.timeout_decision.clone(),
+                liveness_decision: schedule.liveness_decision.clone(),
+                follow_up_bead: schedule.follow_up_bead.clone(),
+            })
+            .collect(),
+        downstream_inputs,
+        reproduction_command: report.reproduction_command.clone(),
+        errors: report.errors.clone(),
+    }
 }
 
 pub fn fail_on_repair_writeback_serialization_errors(
@@ -1895,5 +2038,57 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(manifest.gate_id, "repair_writeback_serialization");
         assert_eq!(manifest.bead_id.as_deref(), Some("bd-rchk0.1.1"));
+    }
+
+    #[test]
+    fn proof_summary_is_downstream_consumable() {
+        let contract = sample_contract();
+        let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
+        let summary = build_repair_writeback_proof_summary(&contract, &report);
+        assert_eq!(
+            summary.schema_version,
+            REPAIR_WRITEBACK_PROOF_SUMMARY_SCHEMA_VERSION
+        );
+        assert_eq!(summary.producer_bead_id, "bd-rchk0.1.1.1");
+        assert_eq!(summary.source_bead_id, "bd-rchk0.1.1");
+        assert!(summary.valid);
+        assert!(!summary.safe_to_enable_rw_repair);
+        assert_eq!(
+            summary.fail_closed_error_class,
+            "rw_repair_serialization_missing"
+        );
+        assert!(
+            summary.transition_guards.iter().any(|guard| {
+                guard.from_state == "client_write_in_flight"
+                    && guard.event == "repair_writeback_requested"
+                    && !guard.allowed
+                    && !guard.mutation_allowed
+                    && guard.error_class == "rw_repair_serialization_missing"
+            }),
+            "summary must preserve the fail-closed transition guard"
+        );
+        for bead_id in ["bd-rchk0.1.2", "bd-rchk0.1.3", "bd-rchk0.1.4"] {
+            assert!(
+                summary
+                    .downstream_inputs
+                    .iter()
+                    .any(|input| input.bead_id == bead_id),
+                "missing downstream input for {bead_id}"
+            );
+        }
+        assert!(summary.scenario_inputs.iter().any(|scenario| {
+            scenario.scenario_id == "repair_writeback_rw_fail_closed"
+                && scenario.proves_no_lost_client_write
+                && scenario.preserves_reproduction_data
+        }));
+        assert!(
+            REQUIRED_RACE_COVERAGE_CASES.iter().all(|coverage_case| {
+                summary
+                    .race_schedule_inputs
+                    .iter()
+                    .any(|schedule| schedule.coverage_case == *coverage_case)
+            }),
+            "summary must expose all required race coverage cases"
+        );
     }
 }
