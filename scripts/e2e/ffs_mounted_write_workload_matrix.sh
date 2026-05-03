@@ -20,6 +20,7 @@ MATRIX_PATH="${FFS_MOUNTED_WRITE_MATRIX:-$REPO_ROOT/tests/workload-matrix/mounte
 VALIDATION_JSON="$E2E_LOG_DIR/mounted_write_workload_matrix_validation.json"
 RESULT_JSON="$E2E_LOG_DIR/mounted_write_workload_results.json"
 RESULT_CSV="$E2E_LOG_DIR/mounted_write_workload_results.csv"
+MULTIHANDLE_RESULT_JSON="$E2E_LOG_DIR/mounted_multihandle_results.json"
 STDOUT_DIR="$E2E_LOG_DIR/stdout"
 STDERR_DIR="$E2E_LOG_DIR/stderr"
 
@@ -37,6 +38,7 @@ FFS_MOUNTED_WRITE_BTRFS_MOUNTPOINT="${FFS_MOUNTED_WRITE_BTRFS_MOUNTPOINT:-}" \
 FFS_MOUNTED_WRITE_MATRIX_PATH="$MATRIX_PATH" \
 FFS_MOUNTED_WRITE_RESULT_JSON="$RESULT_JSON" \
 FFS_MOUNTED_WRITE_RESULT_CSV="$RESULT_CSV" \
+FFS_MOUNTED_WRITE_MULTIHANDLE_RESULT_JSON="$MULTIHANDLE_RESULT_JSON" \
 FFS_MOUNTED_WRITE_STDOUT_DIR="$STDOUT_DIR" \
 FFS_MOUNTED_WRITE_STDERR_DIR="$STDERR_DIR" \
 python3 - <<'PY'
@@ -55,6 +57,9 @@ from datetime import datetime, timezone
 matrix_path = pathlib.Path(os.environ["FFS_MOUNTED_WRITE_MATRIX_PATH"])
 result_json = pathlib.Path(os.environ["FFS_MOUNTED_WRITE_RESULT_JSON"])
 result_csv = pathlib.Path(os.environ["FFS_MOUNTED_WRITE_RESULT_CSV"])
+multi_handle_result_json = pathlib.Path(
+    os.environ["FFS_MOUNTED_WRITE_MULTIHANDLE_RESULT_JSON"]
+)
 stdout_dir = pathlib.Path(os.environ["FFS_MOUNTED_WRITE_STDOUT_DIR"])
 stderr_dir = pathlib.Path(os.environ["FFS_MOUNTED_WRITE_STDERR_DIR"])
 execute = os.environ.get("FFS_MOUNTED_WRITE_EXECUTE") == "1"
@@ -247,6 +252,92 @@ for scenario in matrix["scenarios"]:
         )
     )
 
+
+def run_multi_handle_scenario(scenario: dict[str, object]) -> dict[str, object]:
+    scenario_id = str(scenario["scenario_id"])
+    filesystem = str(scenario["filesystem"])
+    expected = dict(scenario["expected_outcome"])
+    handles = list(scenario["handles"])
+    operation_trace = list(scenario["operation_trace"])
+    cache_visibility = dict(scenario["cache_visibility"])
+    reopen = dict(scenario["reopen"])
+    survivor_set = dict(scenario["survivor_set"])
+    stdout_path = stdout_dir / f"{scenario_id}.out"
+    stderr_path = stderr_dir / f"{scenario_id}.err"
+    operation_trace_path = stdout_dir / f"{scenario_id}.trace.json"
+    operation_trace_path.write_text(
+        json.dumps(operation_trace, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    mountpoint = mountpoints.get(filesystem, "")
+
+    base = {
+        "scenario_id": scenario_id,
+        "kind": str(scenario["kind"]),
+        "filesystem": filesystem,
+        "mount_flags": list(scenario["mount_flags"]),
+        "handle_ids": [str(h["handle_id"]) for h in handles],
+        "operation_trace": operation_trace,
+        "operation_trace_path": str(operation_trace_path),
+        "expected_visibility": cache_visibility,
+        "observed_visibility": {},
+        "reopen_state": reopen,
+        "survivor_set": survivor_set,
+        "expected_outcome": str(expected["outcome_class"]),
+        "actual_outcome": "skip",
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "cleanup_status": "not_run",
+        "skip_reason": "",
+        "duration_ms": 0,
+    }
+
+    if not execute:
+        base["skip_reason"] = "FFS_MOUNTED_WRITE_EXECUTE not set to 1"
+        append_log(
+            stdout_path,
+            f"dry-run multi-handle skip kind={scenario['kind']} handles={base['handle_ids']}",
+        )
+        return base
+    if not mountpoint:
+        base["skip_reason"] = (
+            f"FFS_MOUNTED_WRITE_{filesystem.upper()}_MOUNTPOINT not set"
+        )
+        append_log(stdout_path, str(base["skip_reason"]))
+        return base
+
+    base["skip_reason"] = (
+        "multi-handle runner not yet implemented under FFS_MOUNTED_WRITE_EXECUTE"
+    )
+    append_log(stdout_path, str(base["skip_reason"]))
+    return base
+
+
+multi_handle_results: list[dict[str, object]] = []
+for scenario in matrix.get("multi_handle_scenarios", []):
+    multi_result = run_multi_handle_scenario(dict(scenario))
+    multi_handle_results.append(multi_result)
+    print(
+        "MULTIHANDLE_RESULT|scenario_id={scenario_id}|kind={kind}|outcome={actual_outcome}|detail={skip_reason}".format(
+            **multi_result
+        )
+    )
+
+multi_handle_payload = {
+    "schema_version": 1,
+    "bead_id": matrix["bead_id"],
+    "matrix_schema_version": matrix["schema_version"],
+    "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "matrix_path": str(matrix_path),
+    "execute": execute,
+    "results": multi_handle_results,
+    "reproduction_command": "scripts/e2e/ffs_mounted_write_workload_matrix.sh",
+}
+multi_handle_result_json.write_text(
+    json.dumps(multi_handle_payload, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+
 payload = {
     "schema_version": 1,
     "bead_id": matrix["bead_id"],
@@ -284,3 +375,4 @@ PY
 
 e2e_log "Mounted write workload results JSON: $RESULT_JSON"
 e2e_log "Mounted write workload results CSV: $RESULT_CSV"
+e2e_log "Mounted multi-handle results JSON: $MULTIHANDLE_RESULT_JSON"

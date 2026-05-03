@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-pub const MATRIX_SCHEMA_VERSION: u32 = 1;
+pub const MATRIX_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_MATRIX_PATH: &str = "tests/workload-matrix/mounted_write_workload_matrix.json";
 const DEFAULT_MATRIX_JSON: &str =
     include_str!("../../../tests/workload-matrix/mounted_write_workload_matrix.json");
@@ -30,6 +30,64 @@ const REQUIRED_OPERATIONS: [&str; 11] = [
 const REQUIRED_FSYNC_PATTERNS: [&str; 4] = ["every_write", "metadata_only", "final_only", "none"];
 const REQUIRED_RESULT_FORMATS: [&str; 2] = ["json", "csv"];
 
+const REQUIRED_MULTI_HANDLE_KINDS: [&str; 6] = [
+    "two_handle_read_after_write",
+    "open_unlink",
+    "rename_while_open",
+    "truncate_while_open",
+    "metadata_attr_while_open",
+    "xattr_visibility",
+];
+
+const ALLOWED_MULTI_HANDLE_KINDS: [&str; 9] = [
+    "two_handle_read_after_write",
+    "open_unlink",
+    "rename_while_open",
+    "truncate_while_open",
+    "metadata_attr_while_open",
+    "xattr_visibility",
+    "readdir_after_mutation",
+    "symlink_read_after_rename",
+    "rejected_op_no_partial_mutation",
+];
+
+const ALLOWED_HANDLE_OPEN_FLAGS: [&str; 8] = [
+    "O_RDONLY",
+    "O_WRONLY",
+    "O_RDWR",
+    "O_APPEND",
+    "O_DIRECTORY",
+    "O_NOFOLLOW",
+    "O_PATH",
+    "O_TRUNC",
+];
+
+const ALLOWED_REOPEN_KINDS: [&str; 4] = ["none", "close_open", "remount", "image_reopen"];
+
+const ALLOWED_CLEANUP_POLICIES: [&str; 3] = [
+    "teardown_image",
+    "preserve_artifacts_on_failure",
+    "preserve_artifacts_always",
+];
+
+const REQUIRED_MULTI_HANDLE_ARTIFACTS: [&str; 4] = [
+    "scenario_id",
+    "operation_trace_path",
+    "expected_visibility",
+    "observed_visibility",
+];
+
+const REQUIRED_MULTI_HANDLE_RESULT_FIELDS: [&str; 6] = [
+    "scenario_id",
+    "handle_ids",
+    "operation_trace",
+    "expected_visibility",
+    "observed_visibility",
+    "reopen_state",
+];
+
+const REQUIRED_MULTI_HANDLE_RESULT_ARTIFACTS: [&str; 1] = ["mounted_multihandle_results.json"];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MountedWriteMatrix {
     pub schema_version: u32,
@@ -37,6 +95,69 @@ pub struct MountedWriteMatrix {
     pub runner: String,
     pub results_contract: ResultsContract,
     pub scenarios: Vec<MountedWriteScenario>,
+    #[serde(default)]
+    pub multi_handle_scenarios: Vec<MultiHandleScenario>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiHandleScenario {
+    pub scenario_id: String,
+    pub kind: String,
+    pub filesystem: String,
+    pub image_setup: String,
+    pub mount_flags: Vec<String>,
+    pub fs_specific_options: Vec<String>,
+    pub handles: Vec<HandleSpec>,
+    pub operation_trace: Vec<HandleOperation>,
+    pub cache_visibility: CacheVisibility,
+    pub reopen: ReopenExpectation,
+    pub survivor_set: SurvivorSet,
+    pub cleanup_policy: String,
+    pub artifact_requirements: Vec<String>,
+    pub expected_outcome: MultiHandleOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandleSpec {
+    pub handle_id: String,
+    pub purpose: String,
+    pub open_flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandleOperation {
+    pub step: u32,
+    pub handle_id: String,
+    pub op: String,
+    pub args: Vec<String>,
+    pub expected_result: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheVisibility {
+    pub other_handle_state: String,
+    pub stat_must_match: bool,
+    pub data_must_match: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReopenExpectation {
+    pub kind: String,
+    pub expected_state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurvivorSet {
+    pub present_paths: Vec<String>,
+    pub absent_paths: Vec<String>,
+    pub xattr_state: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiHandleOutcome {
+    pub outcome_class: String,
+    pub no_partial_mutation: bool,
+    pub follow_up_bead: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +207,11 @@ pub struct MountedWriteMatrixReport {
     pub output_formats: Vec<String>,
     pub max_concurrency: u32,
     pub write_sizes: Vec<u64>,
+    pub multi_handle_scenario_count: usize,
+    pub multi_handle_kinds: Vec<String>,
+    pub multi_handle_filesystems: Vec<String>,
+    pub multi_handle_max_handles: u32,
+    pub multi_handle_unsupported_count: usize,
     pub valid: bool,
     pub errors: Vec<String>,
 }
@@ -143,6 +269,31 @@ pub fn validate_mounted_write_matrix(matrix: &MountedWriteMatrix) -> MountedWrit
         &mut errors,
     );
 
+    let mut multi_handle_kinds = BTreeSet::new();
+    let mut multi_handle_filesystems = BTreeSet::new();
+    let mut multi_handle_max_handles = 0_u32;
+    let mut multi_handle_unsupported_count = 0_usize;
+
+    for scenario in &matrix.multi_handle_scenarios {
+        validate_multi_handle_scenario(
+            scenario,
+            &mut scenario_ids,
+            &mut multi_handle_kinds,
+            &mut multi_handle_filesystems,
+            &mut multi_handle_max_handles,
+            &mut multi_handle_unsupported_count,
+            &mut errors,
+        );
+    }
+
+    validate_multi_handle_coverage(
+        &matrix.multi_handle_scenarios,
+        &multi_handle_kinds,
+        &multi_handle_filesystems,
+        multi_handle_unsupported_count,
+        &mut errors,
+    );
+
     MountedWriteMatrixReport {
         schema_version: matrix.schema_version,
         bead_id: matrix.bead_id.clone(),
@@ -153,6 +304,11 @@ pub fn validate_mounted_write_matrix(matrix: &MountedWriteMatrix) -> MountedWrit
         output_formats: matrix.results_contract.formats.clone(),
         max_concurrency,
         write_sizes: write_sizes.into_iter().collect(),
+        multi_handle_scenario_count: matrix.multi_handle_scenarios.len(),
+        multi_handle_kinds: multi_handle_kinds.into_iter().collect(),
+        multi_handle_filesystems: multi_handle_filesystems.into_iter().collect(),
+        multi_handle_max_handles,
+        multi_handle_unsupported_count,
         valid: errors.is_empty(),
         errors,
     }
@@ -207,6 +363,24 @@ fn validate_result_contract(contract: &ResultsContract, errors: &mut Vec<String>
     ] {
         if !contract.artifact_paths.iter().any(|path| path == required) {
             errors.push(format!("results_contract missing artifact path {required}"));
+        }
+    }
+    for required in REQUIRED_MULTI_HANDLE_RESULT_FIELDS {
+        if !contract
+            .required_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            errors.push(format!(
+                "results_contract missing multi-handle required field {required}"
+            ));
+        }
+    }
+    for required in REQUIRED_MULTI_HANDLE_RESULT_ARTIFACTS {
+        if !contract.artifact_paths.iter().any(|path| path == required) {
+            errors.push(format!(
+                "results_contract missing multi-handle artifact path {required}"
+            ));
         }
     }
 }
@@ -403,6 +577,301 @@ fn validate_coverage(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn validate_multi_handle_scenario(
+    scenario: &MultiHandleScenario,
+    scenario_ids: &mut BTreeSet<String>,
+    multi_handle_kinds: &mut BTreeSet<String>,
+    multi_handle_filesystems: &mut BTreeSet<String>,
+    multi_handle_max_handles: &mut u32,
+    multi_handle_unsupported_count: &mut usize,
+    errors: &mut Vec<String>,
+) {
+    validate_multi_handle_identity(scenario, scenario_ids, multi_handle_kinds, errors);
+    validate_multi_handle_environment(scenario, multi_handle_filesystems, errors);
+    let handle_ids = validate_multi_handle_handles(scenario, multi_handle_max_handles, errors);
+    validate_multi_handle_operation_trace(scenario, &handle_ids, errors);
+    validate_multi_handle_expectations(scenario, errors);
+    validate_multi_handle_outcome(scenario, multi_handle_unsupported_count, errors);
+}
+
+fn validate_multi_handle_identity(
+    scenario: &MultiHandleScenario,
+    scenario_ids: &mut BTreeSet<String>,
+    multi_handle_kinds: &mut BTreeSet<String>,
+    errors: &mut Vec<String>,
+) {
+    if !scenario_ids.insert(scenario.scenario_id.clone()) {
+        errors.push(format!("duplicate scenario_id {}", scenario.scenario_id));
+    }
+    if !scenario
+        .scenario_id
+        .starts_with("mounted_write_multihandle_")
+    {
+        errors.push(format!(
+            "multi-handle scenario_id {} must start with mounted_write_multihandle_",
+            scenario.scenario_id
+        ));
+    }
+    if !ALLOWED_MULTI_HANDLE_KINDS.contains(&scenario.kind.as_str()) {
+        errors.push(format!(
+            "multi-handle scenario {} has unsupported kind {}",
+            scenario.scenario_id, scenario.kind
+        ));
+    }
+    multi_handle_kinds.insert(scenario.kind.clone());
+}
+
+fn validate_multi_handle_environment(
+    scenario: &MultiHandleScenario,
+    multi_handle_filesystems: &mut BTreeSet<String>,
+    errors: &mut Vec<String>,
+) {
+    if !REQUIRED_FILESYSTEMS.contains(&scenario.filesystem.as_str()) {
+        errors.push(format!(
+            "multi-handle scenario {} has unsupported filesystem {}",
+            scenario.scenario_id, scenario.filesystem
+        ));
+    }
+    multi_handle_filesystems.insert(scenario.filesystem.clone());
+    if scenario.image_setup.trim().is_empty() {
+        errors.push(format!(
+            "multi-handle scenario {} missing image_setup",
+            scenario.scenario_id
+        ));
+    }
+    if scenario.mount_flags.is_empty() {
+        errors.push(format!(
+            "multi-handle scenario {} missing mount_flags",
+            scenario.scenario_id
+        ));
+    }
+    if scenario.fs_specific_options.is_empty() {
+        errors.push(format!(
+            "multi-handle scenario {} missing fs_specific_options",
+            scenario.scenario_id
+        ));
+    }
+}
+
+fn validate_multi_handle_handles(
+    scenario: &MultiHandleScenario,
+    multi_handle_max_handles: &mut u32,
+    errors: &mut Vec<String>,
+) -> BTreeSet<String> {
+    if scenario.handles.len() < 2 {
+        errors.push(format!(
+            "multi-handle scenario {} must declare at least two handles",
+            scenario.scenario_id
+        ));
+    }
+    let mut handle_ids = BTreeSet::new();
+    for handle in &scenario.handles {
+        if handle.handle_id.trim().is_empty() {
+            errors.push(format!(
+                "multi-handle scenario {} has handle with empty handle_id",
+                scenario.scenario_id
+            ));
+        }
+        if !handle_ids.insert(handle.handle_id.clone()) {
+            errors.push(format!(
+                "multi-handle scenario {} has duplicate handle_id {}",
+                scenario.scenario_id, handle.handle_id
+            ));
+        }
+        if handle.purpose.trim().is_empty() {
+            errors.push(format!(
+                "multi-handle scenario {} handle {} missing purpose",
+                scenario.scenario_id, handle.handle_id
+            ));
+        }
+        if handle.open_flags.is_empty() {
+            errors.push(format!(
+                "multi-handle scenario {} handle {} missing open_flags",
+                scenario.scenario_id, handle.handle_id
+            ));
+        }
+        for flag in &handle.open_flags {
+            if !ALLOWED_HANDLE_OPEN_FLAGS.contains(&flag.as_str()) {
+                errors.push(format!(
+                    "multi-handle scenario {} handle {} has unsupported open_flag {}",
+                    scenario.scenario_id, handle.handle_id, flag
+                ));
+            }
+        }
+    }
+    let handle_count = u32::try_from(scenario.handles.len()).unwrap_or(u32::MAX);
+    if handle_count > *multi_handle_max_handles {
+        *multi_handle_max_handles = handle_count;
+    }
+    handle_ids
+}
+
+fn validate_multi_handle_operation_trace(
+    scenario: &MultiHandleScenario,
+    handle_ids: &BTreeSet<String>,
+    errors: &mut Vec<String>,
+) {
+    if scenario.operation_trace.is_empty() {
+        errors.push(format!(
+            "multi-handle scenario {} missing operation_trace",
+            scenario.scenario_id
+        ));
+    }
+    let mut last_step = 0_u32;
+    let mut steps_seen = BTreeSet::new();
+    for op in &scenario.operation_trace {
+        if !steps_seen.insert(op.step) {
+            errors.push(format!(
+                "multi-handle scenario {} operation_trace has duplicate step {}",
+                scenario.scenario_id, op.step
+            ));
+        }
+        if op.step <= last_step && last_step != 0 {
+            errors.push(format!(
+                "multi-handle scenario {} operation_trace steps must be strictly increasing (saw {} after {})",
+                scenario.scenario_id, op.step, last_step
+            ));
+        }
+        last_step = op.step;
+        if !handle_ids.contains(&op.handle_id) {
+            errors.push(format!(
+                "multi-handle scenario {} operation_trace references unknown handle {}",
+                scenario.scenario_id, op.handle_id
+            ));
+        }
+        if op.op.trim().is_empty() {
+            errors.push(format!(
+                "multi-handle scenario {} step {} missing op",
+                scenario.scenario_id, op.step
+            ));
+        }
+        if op.expected_result.trim().is_empty() {
+            errors.push(format!(
+                "multi-handle scenario {} step {} missing expected_result",
+                scenario.scenario_id, op.step
+            ));
+        }
+    }
+}
+
+fn validate_multi_handle_expectations(scenario: &MultiHandleScenario, errors: &mut Vec<String>) {
+    if scenario
+        .cache_visibility
+        .other_handle_state
+        .trim()
+        .is_empty()
+    {
+        errors.push(format!(
+            "multi-handle scenario {} missing cache_visibility.other_handle_state",
+            scenario.scenario_id
+        ));
+    }
+    if !ALLOWED_REOPEN_KINDS.contains(&scenario.reopen.kind.as_str()) {
+        errors.push(format!(
+            "multi-handle scenario {} has unsupported reopen.kind {}",
+            scenario.scenario_id, scenario.reopen.kind
+        ));
+    }
+    if scenario.reopen.expected_state.trim().is_empty() {
+        errors.push(format!(
+            "multi-handle scenario {} missing reopen.expected_state",
+            scenario.scenario_id
+        ));
+    }
+    if scenario.survivor_set.present_paths.is_empty()
+        && scenario.survivor_set.absent_paths.is_empty()
+    {
+        errors.push(format!(
+            "multi-handle scenario {} survivor_set must declare at least one present or absent path",
+            scenario.scenario_id
+        ));
+    }
+    if !ALLOWED_CLEANUP_POLICIES.contains(&scenario.cleanup_policy.as_str()) {
+        errors.push(format!(
+            "multi-handle scenario {} has unsupported cleanup_policy {}",
+            scenario.scenario_id, scenario.cleanup_policy
+        ));
+    }
+    for required in REQUIRED_MULTI_HANDLE_ARTIFACTS {
+        if !scenario
+            .artifact_requirements
+            .iter()
+            .any(|requirement| requirement == required)
+        {
+            errors.push(format!(
+                "multi-handle scenario {} artifact_requirements missing {}",
+                scenario.scenario_id, required
+            ));
+        }
+    }
+}
+
+fn validate_multi_handle_outcome(
+    scenario: &MultiHandleScenario,
+    multi_handle_unsupported_count: &mut usize,
+    errors: &mut Vec<String>,
+) {
+    if !["pass", "skip", "unsupported_rejected"]
+        .contains(&scenario.expected_outcome.outcome_class.as_str())
+    {
+        errors.push(format!(
+            "multi-handle scenario {} has invalid outcome_class {}",
+            scenario.scenario_id, scenario.expected_outcome.outcome_class
+        ));
+    }
+    if scenario.expected_outcome.outcome_class == "unsupported_rejected" {
+        *multi_handle_unsupported_count += 1;
+        if !scenario.expected_outcome.no_partial_mutation {
+            errors.push(format!(
+                "multi-handle scenario {} unsupported_rejected outcome must guarantee no_partial_mutation",
+                scenario.scenario_id
+            ));
+        }
+        if !scenario.expected_outcome.follow_up_bead.starts_with("bd-") {
+            errors.push(format!(
+                "multi-handle scenario {} unsupported_rejected outcome needs follow_up_bead starting with bd-",
+                scenario.scenario_id
+            ));
+        }
+    }
+}
+
+fn validate_multi_handle_coverage(
+    scenarios: &[MultiHandleScenario],
+    kinds: &BTreeSet<String>,
+    filesystems: &BTreeSet<String>,
+    unsupported_count: usize,
+    errors: &mut Vec<String>,
+) {
+    if scenarios.is_empty() {
+        errors.push(
+            "matrix must declare multi_handle_scenarios; rw readiness cannot rely on single-handle status codes alone".to_owned(),
+        );
+        return;
+    }
+    for required in REQUIRED_MULTI_HANDLE_KINDS {
+        if !kinds.contains(required) {
+            errors.push(format!(
+                "multi_handle_scenarios missing required kind {required}"
+            ));
+        }
+    }
+    for required in REQUIRED_FILESYSTEMS {
+        if !filesystems.contains(required) {
+            errors.push(format!(
+                "multi_handle_scenarios missing filesystem {required}"
+            ));
+        }
+    }
+    if unsupported_count == 0 {
+        errors.push(
+            "multi_handle_scenarios must include at least one rejected operation that proves no partial mutation"
+                .to_owned(),
+        );
+    }
+}
+
 pub fn fail_on_mounted_write_matrix_errors(report: &MountedWriteMatrixReport) -> Result<()> {
     if report.valid {
         Ok(())
@@ -503,6 +972,276 @@ mod tests {
                 .errors
                 .iter()
                 .any(|error| error.contains("duplicate scenario_id"))
+        );
+    }
+
+    #[test]
+    fn default_matrix_carries_required_multi_handle_coverage() {
+        let report = validate_default_mounted_write_matrix().expect("default matrix validates");
+        assert_eq!(report.schema_version, MATRIX_SCHEMA_VERSION);
+        assert!(
+            report.multi_handle_scenario_count >= REQUIRED_MULTI_HANDLE_KINDS.len(),
+            "need at least one scenario per required kind, got {}",
+            report.multi_handle_scenario_count
+        );
+        for kind in REQUIRED_MULTI_HANDLE_KINDS {
+            assert!(
+                report.multi_handle_kinds.iter().any(|k| k == kind),
+                "missing multi-handle kind {kind}"
+            );
+        }
+        assert_eq!(report.multi_handle_filesystems, vec!["btrfs", "ext4"]);
+        assert!(report.multi_handle_max_handles >= 2);
+        assert!(report.multi_handle_unsupported_count >= 1);
+    }
+
+    #[test]
+    fn empty_multi_handle_scenarios_are_rejected() {
+        let mut matrix = valid_matrix();
+        matrix.multi_handle_scenarios.clear();
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("multi_handle_scenarios"))
+        );
+    }
+
+    fn first_multi_handle_scenario(matrix: &mut MountedWriteMatrix) -> &mut MultiHandleScenario {
+        matrix
+            .multi_handle_scenarios
+            .first_mut()
+            .expect("at least one multi-handle scenario in fixture")
+    }
+
+    #[test]
+    fn multi_handle_scenario_must_have_at_least_two_handles() {
+        let mut matrix = valid_matrix();
+        let scenario = first_multi_handle_scenario(&mut matrix);
+        scenario.handles.truncate(1);
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("at least two handles"))
+        );
+    }
+
+    #[test]
+    fn multi_handle_scenario_id_prefix_is_enforced() {
+        let mut matrix = valid_matrix();
+        let scenario = first_multi_handle_scenario(&mut matrix);
+        scenario.scenario_id = "mounted_write_does_not_match".to_owned();
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("must start with mounted_write_multihandle_"))
+        );
+    }
+
+    #[test]
+    fn multi_handle_operation_must_reference_known_handle() {
+        let mut matrix = valid_matrix();
+        let scenario = first_multi_handle_scenario(&mut matrix);
+        scenario.operation_trace[0].handle_id = "h_unknown".to_owned();
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("references unknown handle"))
+        );
+    }
+
+    #[test]
+    fn multi_handle_operation_steps_must_strictly_increase() {
+        let mut matrix = valid_matrix();
+        let scenario = first_multi_handle_scenario(&mut matrix);
+        if scenario.operation_trace.len() >= 2 {
+            scenario.operation_trace[1].step = scenario.operation_trace[0].step;
+        } else {
+            panic!("scenario operation_trace must have at least two steps for this test");
+        }
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("duplicate step")
+                    || error.contains("strictly increasing"))
+        );
+    }
+
+    #[test]
+    fn multi_handle_open_flags_are_validated() {
+        let mut matrix = valid_matrix();
+        let scenario = first_multi_handle_scenario(&mut matrix);
+        scenario.handles[0].open_flags = vec!["O_BANANA".to_owned()];
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("unsupported open_flag"))
+        );
+    }
+
+    #[test]
+    fn multi_handle_reopen_kind_is_validated() {
+        let mut matrix = valid_matrix();
+        let scenario = first_multi_handle_scenario(&mut matrix);
+        scenario.reopen.kind = "remount_lazy_unsupported".to_owned();
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("unsupported reopen.kind"))
+        );
+    }
+
+    #[test]
+    fn multi_handle_cleanup_policy_is_validated() {
+        let mut matrix = valid_matrix();
+        let scenario = first_multi_handle_scenario(&mut matrix);
+        scenario.cleanup_policy = "abandon".to_owned();
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("unsupported cleanup_policy"))
+        );
+    }
+
+    #[test]
+    fn multi_handle_artifact_requirements_are_required() {
+        let mut matrix = valid_matrix();
+        let scenario = first_multi_handle_scenario(&mut matrix);
+        scenario.artifact_requirements.clear();
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("artifact_requirements missing"))
+        );
+    }
+
+    #[test]
+    fn multi_handle_unsupported_outcome_requires_follow_up_bead() {
+        let mut matrix = valid_matrix();
+        let scenario = matrix
+            .multi_handle_scenarios
+            .iter_mut()
+            .find(|s| s.expected_outcome.outcome_class == "unsupported_rejected")
+            .expect("rejected multi-handle scenario in fixture");
+        scenario.expected_outcome.follow_up_bead = String::new();
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("follow_up_bead"))
+        );
+    }
+
+    #[test]
+    fn multi_handle_unsupported_outcome_requires_no_partial_mutation() {
+        let mut matrix = valid_matrix();
+        let scenario = matrix
+            .multi_handle_scenarios
+            .iter_mut()
+            .find(|s| s.expected_outcome.outcome_class == "unsupported_rejected")
+            .expect("rejected multi-handle scenario in fixture");
+        scenario.expected_outcome.no_partial_mutation = false;
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("must guarantee no_partial_mutation"))
+        );
+    }
+
+    #[test]
+    fn multi_handle_required_kinds_are_enforced() {
+        let mut matrix = valid_matrix();
+        matrix
+            .multi_handle_scenarios
+            .retain(|s| s.kind != "open_unlink");
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("missing required kind open_unlink"))
+        );
+    }
+
+    #[test]
+    fn multi_handle_results_contract_requires_handle_fields() {
+        let mut matrix = valid_matrix();
+        matrix
+            .results_contract
+            .required_fields
+            .retain(|field| field != "handle_ids");
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("multi-handle required field handle_ids"))
+        );
+    }
+
+    #[test]
+    fn multi_handle_results_contract_requires_artifact_path() {
+        let mut matrix = valid_matrix();
+        matrix
+            .results_contract
+            .artifact_paths
+            .retain(|path| path != "mounted_multihandle_results.json");
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("multi-handle artifact path"))
+        );
+    }
+
+    #[test]
+    fn multi_handle_duplicate_handle_id_is_rejected() {
+        let mut matrix = valid_matrix();
+        let scenario = first_multi_handle_scenario(&mut matrix);
+        let dup = scenario.handles[0].handle_id.clone();
+        scenario.handles[1].handle_id = dup;
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("duplicate handle_id"))
+        );
+    }
+
+    #[test]
+    fn multi_handle_survivor_set_must_not_be_empty() {
+        let mut matrix = valid_matrix();
+        let scenario = first_multi_handle_scenario(&mut matrix);
+        scenario.survivor_set.present_paths.clear();
+        scenario.survivor_set.absent_paths.clear();
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("survivor_set"))
         );
     }
 }

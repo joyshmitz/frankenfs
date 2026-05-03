@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "bead_id": "bd-rchk0.3.2",
   "runner": "scripts/e2e/ffs_mounted_write_workload_matrix.sh",
   "results_contract": {
@@ -17,11 +17,17 @@
       "stdout_path",
       "stderr_path",
       "cleanup_status",
-      "skip_reason"
+      "skip_reason",
+      "handle_ids",
+      "operation_trace",
+      "expected_visibility",
+      "observed_visibility",
+      "reopen_state"
     ],
     "artifact_paths": [
       "mounted_write_workload_results.json",
       "mounted_write_workload_results.csv",
+      "mounted_multihandle_results.json",
       "run.log"
     ]
   },
@@ -190,6 +196,354 @@
       "expected_outcome": {
         "outcome_class": "unsupported_rejected",
         "detail": "root-owned DefaultPermissions write rejects with no partial mutation and records host-vs-product classification",
+        "no_partial_mutation": true,
+        "follow_up_bead": "bd-rchk0.3.4"
+      }
+    }
+  ],
+  "multi_handle_scenarios": [
+    {
+      "scenario_id": "mounted_write_multihandle_ext4_two_handle_read_after_write",
+      "kind": "two_handle_read_after_write",
+      "filesystem": "ext4",
+      "image_setup": "fresh ext4 image with single regular file pre-populated to 64 KiB",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["dir_index", "extent"],
+      "handles": [
+        {"handle_id": "h_writer", "purpose": "write_then_fsync", "open_flags": ["O_RDWR"]},
+        {"handle_id": "h_reader", "purpose": "read_after_writer_fsync", "open_flags": ["O_RDONLY"]}
+      ],
+      "operation_trace": [
+        {"step": 1, "handle_id": "h_writer", "op": "write", "args": ["offset=0", "len=4096", "byte=0xAA"], "expected_result": "success"},
+        {"step": 2, "handle_id": "h_writer", "op": "fsync", "args": [], "expected_result": "success"},
+        {"step": 3, "handle_id": "h_reader", "op": "read", "args": ["offset=0", "len=4096"], "expected_result": "post_write_bytes"},
+        {"step": 4, "handle_id": "h_reader", "op": "fstat", "args": [], "expected_result": "size_at_least_4096"}
+      ],
+      "cache_visibility": {
+        "other_handle_state": "post_fsync_writer_bytes",
+        "stat_must_match": true,
+        "data_must_match": true
+      },
+      "reopen": {
+        "kind": "close_open",
+        "expected_state": "post_fsync writer bytes survive reopen"
+      },
+      "survivor_set": {
+        "present_paths": ["/file_under_test"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "cleanup_policy": "teardown_image",
+      "artifact_requirements": ["scenario_id", "operation_trace_path", "expected_visibility", "observed_visibility"],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_multihandle_btrfs_two_handle_read_after_write",
+      "kind": "two_handle_read_after_write",
+      "filesystem": "btrfs",
+      "image_setup": "single-device btrfs subvolume with file pre-populated to 64 KiB",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["single_device", "csum"],
+      "handles": [
+        {"handle_id": "h_writer", "purpose": "write_then_fsync", "open_flags": ["O_RDWR"]},
+        {"handle_id": "h_reader", "purpose": "read_after_writer_fsync", "open_flags": ["O_RDONLY"]}
+      ],
+      "operation_trace": [
+        {"step": 1, "handle_id": "h_writer", "op": "write", "args": ["offset=0", "len=8192", "byte=0xCC"], "expected_result": "success"},
+        {"step": 2, "handle_id": "h_writer", "op": "fsync", "args": [], "expected_result": "success"},
+        {"step": 3, "handle_id": "h_reader", "op": "read", "args": ["offset=0", "len=8192"], "expected_result": "post_write_bytes"}
+      ],
+      "cache_visibility": {
+        "other_handle_state": "post_fsync_writer_bytes",
+        "stat_must_match": true,
+        "data_must_match": true
+      },
+      "reopen": {
+        "kind": "close_open",
+        "expected_state": "btrfs reader observes csum-verified post-fsync content"
+      },
+      "survivor_set": {
+        "present_paths": ["/file_under_test"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "cleanup_policy": "teardown_image",
+      "artifact_requirements": ["scenario_id", "operation_trace_path", "expected_visibility", "observed_visibility"],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_multihandle_ext4_open_unlink_holds_data",
+      "kind": "open_unlink",
+      "filesystem": "ext4",
+      "image_setup": "ext4 image with file f1 pre-populated to 32 KiB",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["dir_index"],
+      "handles": [
+        {"handle_id": "h_holder", "purpose": "holds_unlinked_inode", "open_flags": ["O_RDWR"]},
+        {"handle_id": "h_remover", "purpose": "unlinks_directory_entry", "open_flags": ["O_DIRECTORY"]}
+      ],
+      "operation_trace": [
+        {"step": 1, "handle_id": "h_remover", "op": "unlink", "args": ["path=/f1"], "expected_result": "success"},
+        {"step": 2, "handle_id": "h_holder", "op": "read", "args": ["offset=0", "len=4096"], "expected_result": "pre_unlink_bytes"},
+        {"step": 3, "handle_id": "h_holder", "op": "write", "args": ["offset=0", "len=4096", "byte=0x55"], "expected_result": "success"},
+        {"step": 4, "handle_id": "h_holder", "op": "fstat", "args": [], "expected_result": "nlink_zero"}
+      ],
+      "cache_visibility": {
+        "other_handle_state": "directory_entry_absent_inode_live",
+        "stat_must_match": true,
+        "data_must_match": true
+      },
+      "reopen": {
+        "kind": "close_open",
+        "expected_state": "after holder closes inode is reaped and path remains absent"
+      },
+      "survivor_set": {
+        "present_paths": [],
+        "absent_paths": ["/f1"],
+        "xattr_state": []
+      },
+      "cleanup_policy": "teardown_image",
+      "artifact_requirements": ["scenario_id", "operation_trace_path", "expected_visibility", "observed_visibility"],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_multihandle_ext4_rename_while_source_open",
+      "kind": "rename_while_open",
+      "filesystem": "ext4",
+      "image_setup": "ext4 image with /src pre-populated and /dst absent",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["dir_index"],
+      "handles": [
+        {"handle_id": "h_open_src", "purpose": "stays_open_across_rename", "open_flags": ["O_RDWR"]},
+        {"handle_id": "h_renamer", "purpose": "performs_rename", "open_flags": ["O_DIRECTORY"]}
+      ],
+      "operation_trace": [
+        {"step": 1, "handle_id": "h_renamer", "op": "rename", "args": ["from=/src", "to=/dst"], "expected_result": "success"},
+        {"step": 2, "handle_id": "h_open_src", "op": "write", "args": ["offset=0", "len=2048", "byte=0xBB"], "expected_result": "success"},
+        {"step": 3, "handle_id": "h_open_src", "op": "fstat", "args": [], "expected_result": "size_at_least_2048"}
+      ],
+      "cache_visibility": {
+        "other_handle_state": "renamed_path_visible_at_dst_open_handle_writes_to_same_inode",
+        "stat_must_match": true,
+        "data_must_match": true
+      },
+      "reopen": {
+        "kind": "close_open",
+        "expected_state": "reopen of /dst observes writes performed via h_open_src"
+      },
+      "survivor_set": {
+        "present_paths": ["/dst"],
+        "absent_paths": ["/src"],
+        "xattr_state": []
+      },
+      "cleanup_policy": "teardown_image",
+      "artifact_requirements": ["scenario_id", "operation_trace_path", "expected_visibility", "observed_visibility"],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_multihandle_btrfs_truncate_while_open",
+      "kind": "truncate_while_open",
+      "filesystem": "btrfs",
+      "image_setup": "btrfs subvolume with file pre-populated to 1 MiB",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["single_device"],
+      "handles": [
+        {"handle_id": "h_owner", "purpose": "holds_file_during_truncate", "open_flags": ["O_RDWR"]},
+        {"handle_id": "h_truncater", "purpose": "performs_truncate", "open_flags": ["O_RDWR"]}
+      ],
+      "operation_trace": [
+        {"step": 1, "handle_id": "h_truncater", "op": "ftruncate", "args": ["new_size=4096"], "expected_result": "success"},
+        {"step": 2, "handle_id": "h_owner", "op": "fstat", "args": [], "expected_result": "size_equals_4096"},
+        {"step": 3, "handle_id": "h_owner", "op": "read", "args": ["offset=0", "len=4096"], "expected_result": "post_truncate_bytes"},
+        {"step": 4, "handle_id": "h_owner", "op": "read", "args": ["offset=4096", "len=4096"], "expected_result": "ENXIO_or_short_read"}
+      ],
+      "cache_visibility": {
+        "other_handle_state": "post_truncate_size_visible_to_other_handle",
+        "stat_must_match": true,
+        "data_must_match": false
+      },
+      "reopen": {
+        "kind": "close_open",
+        "expected_state": "reopened size matches post-truncate length"
+      },
+      "survivor_set": {
+        "present_paths": ["/file_under_test"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "cleanup_policy": "teardown_image",
+      "artifact_requirements": ["scenario_id", "operation_trace_path", "expected_visibility", "observed_visibility"],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_multihandle_ext4_chmod_while_open",
+      "kind": "metadata_attr_while_open",
+      "filesystem": "ext4",
+      "image_setup": "ext4 image with /attrfile (mode 0644) pre-populated",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["dir_index"],
+      "handles": [
+        {"handle_id": "h_existing", "purpose": "open_before_chmod", "open_flags": ["O_RDWR"]},
+        {"handle_id": "h_chmod", "purpose": "applies_chmod", "open_flags": ["O_RDONLY"]}
+      ],
+      "operation_trace": [
+        {"step": 1, "handle_id": "h_chmod", "op": "fchmod", "args": ["mode=0600"], "expected_result": "success"},
+        {"step": 2, "handle_id": "h_existing", "op": "fstat", "args": [], "expected_result": "mode_equals_0600"},
+        {"step": 3, "handle_id": "h_existing", "op": "write", "args": ["offset=0", "len=1024", "byte=0xEE"], "expected_result": "success"}
+      ],
+      "cache_visibility": {
+        "other_handle_state": "post_chmod_mode_visible_existing_writes_still_allowed",
+        "stat_must_match": true,
+        "data_must_match": true
+      },
+      "reopen": {
+        "kind": "close_open",
+        "expected_state": "fresh open observes mode 0600"
+      },
+      "survivor_set": {
+        "present_paths": ["/attrfile"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "cleanup_policy": "teardown_image",
+      "artifact_requirements": ["scenario_id", "operation_trace_path", "expected_visibility", "observed_visibility"],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_multihandle_ext4_xattr_visibility",
+      "kind": "xattr_visibility",
+      "filesystem": "ext4",
+      "image_setup": "ext4 image with user_xattr enabled and /xattrfile pre-populated",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["user_xattr"],
+      "handles": [
+        {"handle_id": "h_setter", "purpose": "writes_user_xattr", "open_flags": ["O_RDWR"]},
+        {"handle_id": "h_reader", "purpose": "reads_user_xattr", "open_flags": ["O_RDONLY"]}
+      ],
+      "operation_trace": [
+        {"step": 1, "handle_id": "h_setter", "op": "xattr_set", "args": ["name=user.k1", "value=v1"], "expected_result": "success"},
+        {"step": 2, "handle_id": "h_reader", "op": "xattr_get", "args": ["name=user.k1"], "expected_result": "value_v1"},
+        {"step": 3, "handle_id": "h_setter", "op": "xattr_remove", "args": ["name=user.k1"], "expected_result": "success"},
+        {"step": 4, "handle_id": "h_reader", "op": "xattr_get", "args": ["name=user.k1"], "expected_result": "ENODATA"}
+      ],
+      "cache_visibility": {
+        "other_handle_state": "xattr_set_and_remove_visible_to_other_handle",
+        "stat_must_match": false,
+        "data_must_match": false
+      },
+      "reopen": {
+        "kind": "close_open",
+        "expected_state": "fresh open finds no user.k1 xattr"
+      },
+      "survivor_set": {
+        "present_paths": ["/xattrfile"],
+        "absent_paths": [],
+        "xattr_state": ["user.k1=absent"]
+      },
+      "cleanup_policy": "teardown_image",
+      "artifact_requirements": ["scenario_id", "operation_trace_path", "expected_visibility", "observed_visibility"],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_multihandle_btrfs_readdir_after_unlink",
+      "kind": "readdir_after_mutation",
+      "filesystem": "btrfs",
+      "image_setup": "btrfs subvolume with /dir containing a, b, c entries",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["single_device"],
+      "handles": [
+        {"handle_id": "h_dir", "purpose": "directory_iterator", "open_flags": ["O_DIRECTORY", "O_RDONLY"]},
+        {"handle_id": "h_mutator", "purpose": "unlinks_b", "open_flags": ["O_DIRECTORY"]}
+      ],
+      "operation_trace": [
+        {"step": 1, "handle_id": "h_dir", "op": "readdir", "args": ["pos=0"], "expected_result": "entries_a_b_c"},
+        {"step": 2, "handle_id": "h_mutator", "op": "unlink", "args": ["path=/dir/b"], "expected_result": "success"},
+        {"step": 3, "handle_id": "h_dir", "op": "readdir", "args": ["restart=true"], "expected_result": "entries_a_c"}
+      ],
+      "cache_visibility": {
+        "other_handle_state": "second_readdir_after_unlink_observes_b_absent",
+        "stat_must_match": false,
+        "data_must_match": false
+      },
+      "reopen": {
+        "kind": "close_open",
+        "expected_state": "reopen of /dir lists a and c only"
+      },
+      "survivor_set": {
+        "present_paths": ["/dir/a", "/dir/c"],
+        "absent_paths": ["/dir/b"],
+        "xattr_state": []
+      },
+      "cleanup_policy": "teardown_image",
+      "artifact_requirements": ["scenario_id", "operation_trace_path", "expected_visibility", "observed_visibility"],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_multihandle_ext4_rejected_open_unlink_with_open_dir_handle",
+      "kind": "rejected_op_no_partial_mutation",
+      "filesystem": "ext4",
+      "image_setup": "ext4 image with read-only inode immutable flag set on /immut",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["dir_index", "immutable_attr"],
+      "handles": [
+        {"handle_id": "h_immut_reader", "purpose": "open_for_read_only", "open_flags": ["O_RDONLY"]},
+        {"handle_id": "h_writer_attempt", "purpose": "attempts_rejected_write", "open_flags": ["O_RDWR"]}
+      ],
+      "operation_trace": [
+        {"step": 1, "handle_id": "h_writer_attempt", "op": "write", "args": ["offset=0", "len=4096", "byte=0xFF"], "expected_result": "EPERM"},
+        {"step": 2, "handle_id": "h_immut_reader", "op": "read", "args": ["offset=0", "len=4096"], "expected_result": "pre_attempt_bytes"},
+        {"step": 3, "handle_id": "h_immut_reader", "op": "fstat", "args": [], "expected_result": "size_unchanged"}
+      ],
+      "cache_visibility": {
+        "other_handle_state": "rejected_write_does_not_alter_other_handle_view",
+        "stat_must_match": true,
+        "data_must_match": true
+      },
+      "reopen": {
+        "kind": "image_reopen",
+        "expected_state": "image reopen confirms file bytes equal pre-attempt content"
+      },
+      "survivor_set": {
+        "present_paths": ["/immut"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "cleanup_policy": "preserve_artifacts_on_failure",
+      "artifact_requirements": ["scenario_id", "operation_trace_path", "expected_visibility", "observed_visibility"],
+      "expected_outcome": {
+        "outcome_class": "unsupported_rejected",
         "no_partial_mutation": true,
         "follow_up_bead": "bd-rchk0.3.4"
       }
