@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "catalog_id": "frankenfs_readiness_remediation_v1",
+  "bead_id": "bd-rchk0.5.12",
+  "entries": [
+    {
+      "id": "rem_core_unit_product_failure",
+      "proof_lane": "core_unit",
+      "feature_state": "validated",
+      "outcome_class": "product_failure",
+      "data_safety_severity": "potential_data_loss",
+      "mutation_status": "none",
+      "user_summary": "A core invariant test failed; on-disk semantics may diverge from kernel ext4/btrfs.",
+      "technical_cause": "Workspace-level cargo test reported one or more failing unit assertions in ffs-core, ffs-mvcc, or ffs-journal.",
+      "immediate_action": "Stop using this build for any read-write workload. Rebuild from the previous known-good tag and capture the failing test output.",
+      "safe_retry_policy": "no_retry_until_root_cause",
+      "reproduction_command": "rch exec -- cargo test --workspace --all-targets",
+      "artifact_links": [
+        "artifacts/qa/core_unit/<run_id>.json",
+        "artifacts/qa/core_unit/<run_id>.log"
+      ],
+      "owning_bead": "bd-rchk0.5.1",
+      "escalation_path": "core@frankenfs",
+      "docs_target": "docs/operator/triage-core-unit-failure.md"
+    },
+    {
+      "id": "rem_mounted_smoke_host_skip",
+      "proof_lane": "mounted_smoke",
+      "feature_state": "experimental",
+      "outcome_class": "host_capability_skip",
+      "data_safety_severity": "no_user_data_at_risk",
+      "mutation_status": "none",
+      "user_summary": "Mounted smoke could not run because the host lacks /dev/fuse, sudo, or fuser binaries.",
+      "technical_cause": "FUSE capability probe reported missing kernel module, missing helper binary, or unprivileged user namespace constraints.",
+      "immediate_action": "Re-run on a host with fuser >= 0.16 and /dev/fuse available, or treat the mounted lane as authoritatively unavailable for this build.",
+      "safe_retry_policy": "retry_after_capability_probe",
+      "reproduction_command": "rch exec -- cargo run -p ffs-harness -- fuse-capability-probe --json",
+      "artifact_links": [
+        "artifacts/qa/mounted_smoke/<run_id>.skip.json",
+        "artifacts/qa/mounted_smoke/<run_id>.capability.json"
+      ],
+      "owning_bead": "bd-rchk4",
+      "escalation_path": "fuse@frankenfs",
+      "docs_target": "docs/operator/mounted-host-capabilities.md"
+    },
+    {
+      "id": "rem_unsupported_mknod_block",
+      "proof_lane": "mounted_smoke",
+      "feature_state": "unsupported",
+      "outcome_class": "unsupported_operation",
+      "data_safety_severity": "no_user_data_at_risk",
+      "mutation_status": "refused",
+      "user_summary": "mknod for block/char devices is not supported and was rejected before any disk state changed.",
+      "technical_cause": "FUSE backend declines mknod for special files outside the V1 envelope to preserve no-partial-mutation guarantees.",
+      "immediate_action": "Use a regular file or a kernel-mounted filesystem if device nodes are required; otherwise treat the rejection as the documented contract.",
+      "safe_retry_policy": "do_not_retry_unsupported",
+      "reproduction_command": "scripts/e2e/ffs_mounted_write_workload_matrix.sh",
+      "artifact_links": [
+        "artifacts/qa/mounted_smoke/<run_id>/mounted_write_workload_results.json"
+      ],
+      "owning_bead": "bd-rchk0.3.4",
+      "escalation_path": "fuse@frankenfs",
+      "docs_target": "docs/mounted/unsupported-operations.md"
+    },
+    {
+      "id": "rem_stale_proof_bundle",
+      "proof_lane": "mounted_xfstests",
+      "feature_state": "deferred",
+      "outcome_class": "stale_artifact",
+      "data_safety_severity": "no_user_data_at_risk",
+      "mutation_status": "none",
+      "user_summary": "Proof bundle artifact is older than the freshness TTL; readiness verdict cannot be trusted.",
+      "technical_cause": "Bundle generated_at exceeds the configured TTL or its source artifacts have changed hashes since generation.",
+      "immediate_action": "Regenerate the proof bundle and rerun the release-gate evaluator before publishing readiness claims.",
+      "safe_retry_policy": "regenerate_bundle_then_retry",
+      "reproduction_command": "rch exec -- cargo run -p ffs-harness -- build-operator-proof-bundle --out artifacts/proof-bundle/latest.json",
+      "artifact_links": [
+        "artifacts/proof-bundle/latest.json",
+        "artifacts/proof-bundle/latest.manifest.json"
+      ],
+      "owning_bead": "bd-rchk0.5.4",
+      "escalation_path": "release@frankenfs",
+      "docs_target": "docs/operator/proof-bundle-freshness.md"
+    },
+    {
+      "id": "rem_security_refusal_hostile_image",
+      "proof_lane": "mounted_smoke",
+      "feature_state": "validated",
+      "outcome_class": "security_refusal",
+      "data_safety_severity": "data_loss_blocked_by_refusal",
+      "mutation_status": "refused",
+      "user_summary": "FrankenFS refused to operate on a hostile image to protect the host and any pre-existing data.",
+      "technical_cause": "Image header, journal, or extent tree triggered the adversarial threat-model gate (e.g. impossible block counts, malformed checksums, suspicious xattr name length).",
+      "immediate_action": "Do not retry; capture the refusal artifact and route the image through the security review pipeline before any further use.",
+      "safe_retry_policy": "no_retry_until_security_review",
+      "reproduction_command": "rch exec -- cargo run -p ffs-harness -- validate-adversarial-threat-model --image <path>",
+      "artifact_links": [
+        "artifacts/security/<image_hash>/refusal.json",
+        "artifacts/security/<image_hash>/raw.log"
+      ],
+      "owning_bead": "bd-rchk0.5.11",
+      "escalation_path": "security@frankenfs",
+      "docs_target": "docs/security/hostile-image-refusal.md"
+    },
+    {
+      "id": "rem_unsafe_repair_refused",
+      "proof_lane": "repair_lab",
+      "feature_state": "detection_only",
+      "outcome_class": "unsafe_repair_refusal",
+      "data_safety_severity": "data_loss_blocked_by_refusal",
+      "mutation_status": "refused",
+      "user_summary": "Automatic repair refused to mutate user data because the confidence gate failed.",
+      "technical_cause": "Repair confidence lab thresholds (symbol coverage, ledger integrity, residual risk) did not meet the mutation_safety_gate, so the repair plan stopped at detection-only.",
+      "immediate_action": "Capture the detection report, take a manual backup before any further attempts, and route the image to the repair-confidence calibration corpus.",
+      "safe_retry_policy": "manual_dry_run_then_review",
+      "reproduction_command": "rch exec -- cargo run -p ffs-harness -- run-repair-confidence-lab --image <path> --dry-run",
+      "artifact_links": [
+        "artifacts/repair/<image_hash>/detection.json",
+        "artifacts/repair/<image_hash>/dry_run.json"
+      ],
+      "owning_bead": "bd-rchk0.5.3",
+      "escalation_path": "repair@frankenfs",
+      "docs_target": "docs/repair/unsafe-refusal.md"
+    },
+    {
+      "id": "rem_passing_with_experimental_caveat",
+      "proof_lane": "mounted_smoke",
+      "feature_state": "experimental",
+      "outcome_class": "passing_with_caveat",
+      "data_safety_severity": "no_user_data_at_risk",
+      "mutation_status": "dry_run",
+      "user_summary": "Mounted smoke passed under an experimental feature flag; production claims must remain qualified.",
+      "technical_cause": "Lane succeeded only with feature-state experimental enabled; full validation requires authoritative lane runs and broader xfstests coverage.",
+      "immediate_action": "Continue using only as experimental; record the caveat in any README/FEATURE_PARITY status update derived from this run.",
+      "safe_retry_policy": "ok_to_retry",
+      "reproduction_command": "scripts/e2e/ffs_mounted_smoke_e2e.sh",
+      "artifact_links": [
+        "artifacts/qa/mounted_smoke/<run_id>.json",
+        "artifacts/qa/mounted_smoke/<run_id>.experimental.json"
+      ],
+      "owning_bead": "bd-mpcse",
+      "escalation_path": "release@frankenfs",
+      "docs_target": "FEATURE_PARITY.md"
+    }
+  ]
+}
