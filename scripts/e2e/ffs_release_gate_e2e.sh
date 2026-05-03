@@ -2,8 +2,8 @@
 # ffs_release_gate_e2e.sh - smoke gate for bd-rchk0.5.6.1.
 #
 # Builds a proof bundle plus release-gate policy, proves passing gates emit
-# generated public wording, and proves missing, stale, and threshold-failing
-# evidence fail closed.
+# generated public wording, and proves stale, missing, refused, noisy, and
+# host-capability-limited evidence downgrades public feature state.
 
 set -euo pipefail
 
@@ -33,6 +33,32 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+write_lane_status_variant() {
+    local source_manifest="$1"
+    local output_manifest="$2"
+    local lane_id="$3"
+    local status="$4"
+    python3 - "$source_manifest" "$output_manifest" "$lane_id" "$status" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+source_path, output_path, lane_id, status = sys.argv[1:]
+data = json.loads(pathlib.Path(source_path).read_text(encoding="utf-8"))
+for lane in data["lanes"]:
+    if lane["lane_id"] == lane_id:
+        lane["status"] = status
+        raw_log = pathlib.Path(data["lanes"][0]["raw_log_path"]).parent / f"{lane_id}.log"
+        lane["raw_log_path"] = raw_log.as_posix()
+        break
+else:
+    raise SystemExit(f"lane {lane_id} not found")
+pathlib.Path(output_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
 e2e_init "ffs_release_gate"
 
 GIT_SHA="$(git rev-parse HEAD)"
@@ -51,6 +77,19 @@ STALE_RAW="$E2E_LOG_DIR/release_gate_stale.raw"
 THRESHOLD_POLICY="$BUNDLE_DIR/release_gate_threshold_fail_policy.json"
 THRESHOLD_REPORT="$E2E_LOG_DIR/release_gate_threshold_fail_report.json"
 THRESHOLD_RAW="$E2E_LOG_DIR/release_gate_threshold_fail.raw"
+HOSTILE_MANIFEST="$BUNDLE_DIR/release_gate_hostile_image.json"
+HOSTILE_REPORT="$E2E_LOG_DIR/release_gate_hostile_image_report.json"
+HOSTILE_RAW="$E2E_LOG_DIR/release_gate_hostile_image.raw"
+UNSAFE_REPAIR_MANIFEST="$BUNDLE_DIR/release_gate_unsafe_repair.json"
+UNSAFE_REPAIR_REPORT="$E2E_LOG_DIR/release_gate_unsafe_repair_report.json"
+UNSAFE_REPAIR_RAW="$E2E_LOG_DIR/release_gate_unsafe_repair.raw"
+NOISY_PERFORMANCE_MANIFEST="$BUNDLE_DIR/release_gate_noisy_performance.json"
+NOISY_PERFORMANCE_REPORT="$E2E_LOG_DIR/release_gate_noisy_performance_report.json"
+NOISY_PERFORMANCE_RAW="$E2E_LOG_DIR/release_gate_noisy_performance.raw"
+CAPABILITY_MANIFEST="$BUNDLE_DIR/release_gate_host_capability_skip.json"
+CAPABILITY_POLICY="$BUNDLE_DIR/release_gate_host_capability_skip_policy.json"
+CAPABILITY_REPORT="$E2E_LOG_DIR/release_gate_host_capability_skip_report.json"
+CAPABILITY_RAW="$E2E_LOG_DIR/release_gate_host_capability_skip.raw"
 UNIT_LOG="$E2E_LOG_DIR/release_gate_unit_tests.log"
 
 mkdir -p "$BUNDLE_DIR"
@@ -152,16 +191,44 @@ manifest = {
 }
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-def required_lane(lane: str) -> dict[str, object]:
+def required_lane(
+    lane: str,
+    *,
+    risk_class: str = "generic",
+    failed_state: str = "disabled",
+    skipped_state: str = "experimental",
+    allow_capability_skip: bool = True,
+) -> dict[str, object]:
     return {
         "lane_id": lane,
         "expected_outcome": "pass",
         "missing_state": "hidden",
-        "failed_state": "disabled",
-        "skipped_state": "experimental",
-        "allow_capability_skip": True,
+        "failed_state": failed_state,
+        "risk_class": risk_class,
+        "skipped_state": skipped_state,
+        "allow_capability_skip": allow_capability_skip,
         "remediation_id": "bd-rchk0.5.6.1",
     }
+
+def required_lane_for_feature(feature_id: str, lane: str) -> dict[str, object]:
+    if feature_id == "mount.rw.ext4" and lane == "conformance":
+        return required_lane(lane, risk_class="security_refused", failed_state="disabled")
+    if feature_id == "mount.rw.ext4" and lane == "fuse":
+        return required_lane(
+            lane,
+            risk_class="host_capability_skip",
+            failed_state="hidden",
+            skipped_state="experimental",
+        )
+    if feature_id == "repair.rw.writeback" and lane == "repair_lab":
+        return required_lane(
+            lane,
+            risk_class="unsafe_repair_refused",
+            failed_state="detection_only",
+        )
+    if feature_id == "writeback_cache" and lane == "performance":
+        return required_lane(lane, risk_class="noisy_performance", failed_state="experimental")
+    return required_lane(lane)
 
 def feature(feature_id: str, docs_id: str, previous: str, target: str, feature_lanes: list[str]) -> dict[str, object]:
     return {
@@ -169,20 +236,13 @@ def feature(feature_id: str, docs_id: str, previous: str, target: str, feature_l
         "docs_wording_id": docs_id,
         "previous_state": previous,
         "target_state": target,
-        "required_lanes": [required_lane(lane) for lane in feature_lanes],
+        "required_lanes": [required_lane_for_feature(feature_id, lane) for lane in feature_lanes],
         "thresholds": [
             {
                 "metric": "pass_lanes",
                 "comparator": "at_least",
                 "value": 9,
                 "downgrade_to": "experimental",
-                "remediation_id": "bd-rchk0.5.6.1",
-            },
-            {
-                "metric": "fail_lanes",
-                "comparator": "at_most",
-                "value": 0,
-                "downgrade_to": "disabled",
                 "remediation_id": "bd-rchk0.5.6.1",
             },
             {
@@ -206,13 +266,6 @@ def feature(feature_id: str, docs_id: str, previous: str, target: str, feature_l
                 "trigger": "any_required_lane_missing",
                 "downgrade_to": "hidden",
                 "reason": "missing required lane hides public claim",
-                "remediation_id": "bd-rchk0.5.6.1",
-            },
-            {
-                "switch_id": "failed-evidence",
-                "trigger": "any_required_lane_failed",
-                "downgrade_to": "disabled",
-                "reason": "failed lane disables user-data-affecting feature",
                 "remediation_id": "bd-rchk0.5.6.1",
             },
         ],
@@ -260,7 +313,7 @@ else
 fi
 
 e2e_step "Scenario 3: generated public wording comes from policy data"
-if python3 - "$REPORT_JSON" "$WORDING_TSV" <<'PY'
+if python3 - "$REPORT_JSON" "$WORDING_TSV" "$VALIDATE_RAW" <<'PY'
 from __future__ import annotations
 
 import json
@@ -269,6 +322,7 @@ import sys
 
 report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 wording = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+raw = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 if not report["valid"] or not report["release_ready"]:
     raise SystemExit("passing report is not release-ready")
 states = {row["feature_id"]: row["final_state"] for row in report["feature_reports"]}
@@ -280,9 +334,25 @@ expected = {
 }
 if states != expected:
     raise SystemExit(f"unexpected states: {states}")
-for field in ["feature_id", "previous_state", "final_state", "docs_wording_id", "reproduction_command"]:
+for field in [
+    "feature_id",
+    "previous_state",
+    "proposed_state",
+    "final_state",
+    "transition_reason",
+    "controlling_artifact_hash",
+    "threshold_value",
+    "observed_value",
+    "remediation_id",
+    "docs_wording_id",
+    "output_path",
+    "reproduction_command",
+]:
     if field not in report["required_log_fields"]:
         raise SystemExit(f"missing required log field {field}")
+for output_name in ["release_gate_report.json", "release_gate_wording.tsv"]:
+    if output_name not in raw:
+        raise SystemExit(f"CLI log did not include output path for {output_name}")
 if "readme.writeback_cache" not in wording or "opt-in mutating" not in wording:
     raise SystemExit("wording TSV did not preserve generated docs-safe wording")
 PY
@@ -364,7 +434,156 @@ else
     scenario_result "release_gate_threshold_failure_rejected" "FAIL" "threshold failure lacked expected diagnostic"
 fi
 
-e2e_step "Scenario 7: release gate unit tests pass"
+e2e_step "Scenario 7: hostile image/security refusal fails closed"
+write_lane_status_variant "$MANIFEST_JSON" "$HOSTILE_MANIFEST" "conformance" "fail"
+if cargo run --quiet -p ffs-harness -- evaluate-release-gates \
+    --bundle "$HOSTILE_MANIFEST" \
+    --policy "$POLICY_JSON" \
+    --current-git-sha "$GIT_SHA" \
+    --max-age-days 10000 \
+    --out "$HOSTILE_REPORT" >"$HOSTILE_RAW" 2>&1; then
+    scenario_result "release_gate_hostile_image_rejected" "FAIL" "security-refused hostile image was accepted"
+elif python3 - "$HOSTILE_REPORT" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+states = {row["feature_id"]: row["final_state"] for row in report["feature_reports"]}
+if states.get("mount.rw.ext4") != "disabled":
+    raise SystemExit(f"mount.rw.ext4 was not disabled: {states.get('mount.rw.ext4')}")
+if not any(
+    "security_refused" in finding["finding_id"]
+    and finding.get("remediation_id") == "bd-rchk0.5.6.1"
+    for finding in report["findings"]
+):
+    raise SystemExit("security_refused finding with remediation was not emitted")
+PY
+then
+    scenario_result "release_gate_hostile_image_rejected" "PASS" "security refusal disabled hostile-image readiness"
+else
+    scenario_result "release_gate_hostile_image_rejected" "FAIL" "security refusal lacked expected public state or remediation"
+fi
+
+e2e_step "Scenario 8: unsafe repair refusal downgrades mutation to detection-only"
+write_lane_status_variant "$MANIFEST_JSON" "$UNSAFE_REPAIR_MANIFEST" "repair_lab" "fail"
+if cargo run --quiet -p ffs-harness -- evaluate-release-gates \
+    --bundle "$UNSAFE_REPAIR_MANIFEST" \
+    --policy "$POLICY_JSON" \
+    --current-git-sha "$GIT_SHA" \
+    --max-age-days 10000 \
+    --out "$UNSAFE_REPAIR_REPORT" >"$UNSAFE_REPAIR_RAW" 2>&1; then
+    scenario_result "release_gate_unsafe_repair_rejected" "FAIL" "unsafe repair refusal was accepted"
+elif python3 - "$UNSAFE_REPAIR_REPORT" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+states = {row["feature_id"]: row["final_state"] for row in report["feature_reports"]}
+if states.get("repair.rw.writeback") != "detection_only":
+    raise SystemExit(f"repair.rw.writeback was not detection-only: {states.get('repair.rw.writeback')}")
+if not any(
+    "unsafe_repair_refused" in finding["finding_id"]
+    and finding.get("remediation_id") == "bd-rchk0.5.6.1"
+    for finding in report["findings"]
+):
+    raise SystemExit("unsafe_repair_refused finding with remediation was not emitted")
+PY
+then
+    scenario_result "release_gate_unsafe_repair_rejected" "PASS" "unsafe repair refusal downgraded mutation to detection-only"
+else
+    scenario_result "release_gate_unsafe_repair_rejected" "FAIL" "unsafe repair refusal lacked expected public state or remediation"
+fi
+
+e2e_step "Scenario 9: noisy performance evidence downgrades readiness"
+write_lane_status_variant "$MANIFEST_JSON" "$NOISY_PERFORMANCE_MANIFEST" "performance" "fail"
+if cargo run --quiet -p ffs-harness -- evaluate-release-gates \
+    --bundle "$NOISY_PERFORMANCE_MANIFEST" \
+    --policy "$POLICY_JSON" \
+    --current-git-sha "$GIT_SHA" \
+    --max-age-days 10000 \
+    --out "$NOISY_PERFORMANCE_REPORT" >"$NOISY_PERFORMANCE_RAW" 2>&1; then
+    scenario_result "release_gate_noisy_performance_downgrades" "FAIL" "noisy performance was accepted"
+elif python3 - "$NOISY_PERFORMANCE_REPORT" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+states = {row["feature_id"]: row["final_state"] for row in report["feature_reports"]}
+if states.get("writeback_cache") != "experimental":
+    raise SystemExit(f"writeback_cache was not experimental: {states.get('writeback_cache')}")
+if not any(
+    "noisy_performance" in finding["finding_id"]
+    and finding.get("remediation_id") == "bd-rchk0.5.6.1"
+    for finding in report["findings"]
+):
+    raise SystemExit("noisy_performance finding with remediation was not emitted")
+PY
+then
+    scenario_result "release_gate_noisy_performance_downgrades" "PASS" "noisy performance downgraded public readiness"
+else
+    scenario_result "release_gate_noisy_performance_downgrades" "FAIL" "noisy performance lacked expected public state or remediation"
+fi
+
+e2e_step "Scenario 10: host capability skip downgrades without a blocking error"
+write_lane_status_variant "$MANIFEST_JSON" "$CAPABILITY_MANIFEST" "fuse" "skip"
+python3 - "$POLICY_JSON" "$CAPABILITY_POLICY" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+policy_path, out_path = sys.argv[1:]
+data = json.loads(pathlib.Path(policy_path).read_text(encoding="utf-8"))
+for feature in data["features"]:
+    for threshold in feature["thresholds"]:
+        if threshold["metric"] == "pass_lanes":
+            threshold["value"] = 8
+pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if cargo run --quiet -p ffs-harness -- evaluate-release-gates \
+    --bundle "$CAPABILITY_MANIFEST" \
+    --policy "$CAPABILITY_POLICY" \
+    --current-git-sha "$GIT_SHA" \
+    --max-age-days 10000 \
+    --out "$CAPABILITY_REPORT" >"$CAPABILITY_RAW" 2>&1 \
+    && python3 - "$CAPABILITY_REPORT" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+states = {row["feature_id"]: row["final_state"] for row in report["feature_reports"]}
+if not report["valid"] or report["release_ready"]:
+    raise SystemExit("capability skip should be valid but not release-ready")
+if states.get("mount.rw.ext4") != "experimental":
+    raise SystemExit(f"mount.rw.ext4 was not experimental: {states.get('mount.rw.ext4')}")
+if not any(
+    "host_capability_skip" in finding["finding_id"]
+    and finding["severity"] == "warn"
+    and finding.get("remediation_id") == "bd-rchk0.5.6.1"
+    for finding in report["findings"]
+):
+    raise SystemExit("host_capability_skip warning with remediation was not emitted")
+PY
+then
+    scenario_result "release_gate_host_capability_skip_downgrades" "PASS" "host capability skip downgraded without blocking"
+else
+    scenario_result "release_gate_host_capability_skip_downgrades" "FAIL" "host capability skip lacked expected warning downgrade"
+fi
+
+e2e_step "Scenario 11: release gate unit tests pass"
 if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib release_gate -- --nocapture >"$UNIT_LOG" 2>&1; then
     cat "$UNIT_LOG"
     scenario_result "release_gate_unit_tests" "PASS" "release_gate unit tests passed"

@@ -137,12 +137,64 @@ pub struct RequiredReleaseLane {
     pub expected_outcome: ProofBundleOutcome,
     pub missing_state: FeatureState,
     pub failed_state: FeatureState,
+    #[serde(default = "default_required_lane_risk_class")]
+    pub risk_class: RequiredLaneRiskClass,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped_state: Option<FeatureState>,
     #[serde(default)]
     pub allow_capability_skip: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequiredLaneRiskClass {
+    Generic,
+    SecurityRefused,
+    UnsafeRepairRefused,
+    NoisyPerformance,
+    HostCapabilitySkip,
+}
+
+impl RequiredLaneRiskClass {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::SecurityRefused => "security_refused",
+            Self::UnsafeRepairRefused => "unsafe_repair_refused",
+            Self::NoisyPerformance => "noisy_performance",
+            Self::HostCapabilitySkip => "host_capability_skip",
+        }
+    }
+
+    #[must_use]
+    pub const fn failure_reason_id(self, observed: ProofBundleOutcome) -> &'static str {
+        match (self, observed) {
+            (Self::Generic, _) => "required_lane_not_passing",
+            (Self::SecurityRefused, _) => "security_refused",
+            (Self::UnsafeRepairRefused, _) => "unsafe_repair_refused",
+            (Self::NoisyPerformance, _) => "noisy_performance",
+            (Self::HostCapabilitySkip, ProofBundleOutcome::Skip) => "capability_blocked",
+            (Self::HostCapabilitySkip, _) => "host_capability_failed",
+        }
+    }
+
+    #[must_use]
+    pub const fn skip_reason_id(self) -> &'static str {
+        match self {
+            Self::HostCapabilitySkip => "host_capability_skip",
+            Self::Generic => "capability_skip",
+            Self::SecurityRefused => "security_refused_skip",
+            Self::UnsafeRepairRefused => "unsafe_repair_refused_skip",
+            Self::NoisyPerformance => "noisy_performance_skip",
+        }
+    }
+}
+
+const fn default_required_lane_risk_class() -> RequiredLaneRiskClass {
+    RequiredLaneRiskClass::Generic
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -740,10 +792,11 @@ fn evaluate_feature(
                 let mut input = FindingInput::new(
                     ReleaseGateFindingSeverity::Warn,
                     proposed,
-                    "capability_skip",
+                    lane.risk_class.skip_reason_id(),
                     format!(
-                        "required lane {} skipped due to host capability",
-                        lane.lane_id
+                        "required lane {} skipped due to host capability; risk_class={}",
+                        lane.lane_id,
+                        lane.risk_class.label()
                     ),
                 );
                 input.controlling_lane = Some(lane.lane_id.clone());
@@ -761,12 +814,13 @@ fn evaluate_feature(
                 let mut input = FindingInput::new(
                     ReleaseGateFindingSeverity::Block,
                     proposed,
-                    "required_lane_not_passing",
+                    lane.risk_class.failure_reason_id(observed),
                     format!(
-                        "required lane {} observed {} expected {}",
+                        "required lane {} observed {} expected {}; risk_class={}",
                         lane.lane_id,
                         observed.label(),
-                        lane.expected_outcome.label()
+                        lane.expected_outcome.label(),
+                        lane.risk_class.label()
                     ),
                 );
                 input.controlling_lane = Some(lane.lane_id.clone());
@@ -1070,10 +1124,65 @@ mod tests {
             expected_outcome: ProofBundleOutcome::Pass,
             missing_state: FeatureState::Hidden,
             failed_state: FeatureState::Disabled,
+            risk_class: RequiredLaneRiskClass::Generic,
             skipped_state: Some(FeatureState::Experimental),
             allow_capability_skip: true,
             remediation_id: Some("bd-rchk0.5.6.1".to_owned()),
         }
+    }
+
+    fn set_lane_status(
+        proof: &mut ProofBundleValidationReport,
+        lane_id: &str,
+        status: ProofBundleOutcome,
+    ) {
+        let lane = proof
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.lane_id == lane_id)
+            .expect("lane present");
+        lane.status = status;
+        proof.totals.pass = proof
+            .lanes
+            .iter()
+            .filter(|lane| lane.status == ProofBundleOutcome::Pass)
+            .count();
+        proof.totals.fail = proof
+            .lanes
+            .iter()
+            .filter(|lane| lane.status == ProofBundleOutcome::Fail)
+            .count();
+        proof.totals.skip = proof
+            .lanes
+            .iter()
+            .filter(|lane| lane.status == ProofBundleOutcome::Skip)
+            .count();
+        proof.totals.error = proof
+            .lanes
+            .iter()
+            .filter(|lane| lane.status == ProofBundleOutcome::Error)
+            .count();
+    }
+
+    fn one_lane_policy(
+        lane_id: &str,
+        previous_state: FeatureState,
+        target_state: FeatureState,
+        failed_state: FeatureState,
+        risk_class: RequiredLaneRiskClass,
+    ) -> ReleaseGatePolicy {
+        let mut policy = sample_policy();
+        let feature = &mut policy.features[0];
+        feature.previous_state = previous_state;
+        feature.target_state = target_state;
+        feature.required_lanes = vec![RequiredReleaseLane {
+            failed_state,
+            risk_class,
+            ..required_lane(lane_id)
+        }];
+        feature.thresholds.clear();
+        feature.kill_switches.clear();
+        policy
     }
 
     #[test]
@@ -1151,16 +1260,10 @@ mod tests {
     #[test]
     fn capability_skip_is_warn_and_downgrades_without_blocking() {
         let mut proof = passing_proof();
-        let fuse = proof
-            .lanes
-            .iter_mut()
-            .find(|lane| lane.lane_id == "writeback_cache")
-            .expect("lane present");
-        fuse.status = ProofBundleOutcome::Skip;
-        proof.totals.pass = 8;
-        proof.totals.skip = 1;
+        set_lane_status(&mut proof, "writeback_cache", ProofBundleOutcome::Skip);
         let mut policy = sample_policy();
         policy.features[0].thresholds.clear();
+        policy.features[0].required_lanes[0].risk_class = RequiredLaneRiskClass::HostCapabilitySkip;
         let report = evaluate_release_gates(&policy, &proof);
         assert!(report.valid, "{:?}", report.errors);
         assert!(!report.release_ready);
@@ -1171,6 +1274,111 @@ mod tests {
         assert_eq!(
             report.findings[0].severity,
             ReleaseGateFindingSeverity::Warn
+        );
+        assert!(
+            report.findings[0]
+                .finding_id
+                .contains("host_capability_skip")
+        );
+    }
+
+    #[test]
+    fn unsafe_repair_refusal_downgrades_opt_in_mutating_to_detection_only() {
+        let mut proof = passing_proof();
+        set_lane_status(&mut proof, "repair_lab", ProofBundleOutcome::Fail);
+        let policy = one_lane_policy(
+            "repair_lab",
+            FeatureState::OptInMutating,
+            FeatureState::OptInMutating,
+            FeatureState::DetectionOnly,
+            RequiredLaneRiskClass::UnsafeRepairRefused,
+        );
+        let report = evaluate_release_gates(&policy, &proof);
+        assert!(!report.valid);
+        assert_eq!(
+            report.feature_reports[0].final_state,
+            FeatureState::DetectionOnly
+        );
+        assert!(report.findings.iter().any(|finding| {
+            finding.finding_id.contains("unsafe_repair_refused")
+                && finding
+                    .transition_reason
+                    .contains("risk_class=unsafe_repair_refused")
+        }));
+    }
+
+    #[test]
+    fn security_refusal_disables_supported_feature_claim() {
+        let mut proof = passing_proof();
+        set_lane_status(&mut proof, "conformance", ProofBundleOutcome::Fail);
+        let policy = one_lane_policy(
+            "conformance",
+            FeatureState::OptInMutating,
+            FeatureState::Validated,
+            FeatureState::Disabled,
+            RequiredLaneRiskClass::SecurityRefused,
+        );
+        let report = evaluate_release_gates(&policy, &proof);
+        assert!(!report.valid);
+        assert_eq!(
+            report.feature_reports[0].final_state,
+            FeatureState::Disabled
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.finding_id.contains("security_refused")
+                    && finding.remediation_id.as_deref() == Some("bd-rchk0.5.6.1"))
+        );
+    }
+
+    #[test]
+    fn noisy_performance_reduces_validated_claim_to_experimental() {
+        let mut proof = passing_proof();
+        set_lane_status(&mut proof, "performance", ProofBundleOutcome::Fail);
+        let policy = one_lane_policy(
+            "performance",
+            FeatureState::Validated,
+            FeatureState::Validated,
+            FeatureState::Experimental,
+            RequiredLaneRiskClass::NoisyPerformance,
+        );
+        let report = evaluate_release_gates(&policy, &proof);
+        assert!(!report.valid);
+        assert_eq!(
+            report.feature_reports[0].final_state,
+            FeatureState::Experimental
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.finding_id.contains("noisy_performance"))
+        );
+    }
+
+    #[test]
+    fn capability_blocked_ready_claim_fails_closed_to_hidden() {
+        let mut proof = passing_proof();
+        set_lane_status(&mut proof, "fuse", ProofBundleOutcome::Skip);
+        let mut policy = one_lane_policy(
+            "fuse",
+            FeatureState::Experimental,
+            FeatureState::Validated,
+            FeatureState::Hidden,
+            RequiredLaneRiskClass::HostCapabilitySkip,
+        );
+        policy.features[0].required_lanes[0].allow_capability_skip = false;
+        policy.features[0].required_lanes[0].skipped_state = None;
+        let report = evaluate_release_gates(&policy, &proof);
+        assert!(!report.valid);
+        assert_eq!(report.feature_reports[0].final_state, FeatureState::Hidden);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.finding_id.contains("capability_blocked"))
         );
     }
 
@@ -1238,6 +1446,34 @@ mod tests {
             failing.generated_wording[0].wording
         );
         assert!(failing.generated_wording[0].wording.contains("disabled"));
+    }
+
+    #[test]
+    fn hand_edited_public_claim_cannot_override_gate_data() {
+        let mut proof = passing_proof();
+        set_lane_status(&mut proof, "conformance", ProofBundleOutcome::Fail);
+        let mut policy = one_lane_policy(
+            "conformance",
+            FeatureState::Experimental,
+            FeatureState::Validated,
+            FeatureState::Disabled,
+            RequiredLaneRiskClass::SecurityRefused,
+        );
+        policy.features[0].docs_wording_id =
+            "feature_parity.hand_edited.validated_claim".to_owned();
+        let report = evaluate_release_gates(&policy, &proof);
+        assert!(!report.valid);
+        assert_eq!(
+            report.feature_reports[0].target_state,
+            FeatureState::Validated
+        );
+        assert_eq!(
+            report.generated_wording[0].docs_wording_id,
+            "feature_parity.hand_edited.validated_claim"
+        );
+        assert_eq!(report.generated_wording[0].state, FeatureState::Disabled);
+        assert!(report.generated_wording[0].wording.contains("disabled"));
+        assert!(!report.generated_wording[0].wording.contains("validated by"));
     }
 
     #[test]

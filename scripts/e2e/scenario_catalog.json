@@ -770,6 +770,30 @@
           "evidence": "scenario_result \"release_gate_threshold_failure_rejected\" \"PASS\""
         },
         {
+          "id": "release_gate_hostile_image_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"release_gate_hostile_image_rejected\" \"PASS\""
+        },
+        {
+          "id": "release_gate_unsafe_repair_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"release_gate_unsafe_repair_rejected\" \"PASS\""
+        },
+        {
+          "id": "release_gate_noisy_performance_downgrades",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "scenario_result \"release_gate_noisy_performance_downgrades\" \"PASS\""
+        },
+        {
+          "id": "release_gate_host_capability_skip_downgrades",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "scenario_result \"release_gate_host_capability_skip_downgrades\" \"PASS\""
+        },
+        {
           "id": "release_gate_unit_tests",
           "category": "happy",
           "status": "active",

@@ -547,10 +547,13 @@ rch exec -- cargo run -p ffs-harness -- evaluate-release-gates \
 ```
 
 Policy features declare `previous_state`, `target_state`, required proof-bundle
-lanes, threshold checks, kill switches, docs wording ids, and remediation beads
-or explicit non-goal rationale. Supported states are `hidden`, `disabled`,
-`deprecated_blocked`, `dry_run_only`, `detection_only`, `experimental`,
-`opt_in_mutating`, and `validated`.
+lanes, lane `risk_class` values, threshold checks, kill switches, docs wording
+ids, and remediation beads or explicit non-goal rationale. Lane risk classes
+differentiate generic evidence loss from `security_refused`,
+`unsafe_repair_refused`, `noisy_performance`, and `host_capability_skip`
+downgrades. Supported states are `hidden`, `disabled`, `deprecated_blocked`,
+`dry_run_only`, `detection_only`, `experimental`, `opt_in_mutating`, and
+`validated`.
 
 The JSON report records the final feature state, whether an upgrade is allowed,
 all downgrade findings, controlling lane or artifact, threshold value,
@@ -566,8 +569,9 @@ The E2E smoke is:
 ```
 
 It builds a passing proof bundle and policy, verifies generated wording, then
-proves missing evidence, stale SHA, and threshold failures are rejected with
-machine-readable diagnostics.
+proves missing evidence, stale SHA, threshold failures, hostile-image/security
+refusal, unsafe repair refusal, noisy performance, and host capability skips
+produce machine-readable downgrade diagnostics.
 
 ### Redaction Policy
 
