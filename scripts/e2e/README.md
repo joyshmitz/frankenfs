@@ -52,6 +52,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 
 # Run adversarial-image threat model dry-run validation
 ./scripts/e2e/ffs_adversarial_threat_model_e2e.sh
+
+# Run soak/canary campaign manifest dry-run validation
+./scripts/e2e/ffs_soak_canary_campaign_e2e.sh
 ```
 
 ## Scenario Catalog Contract
@@ -174,6 +177,36 @@ cargo run -p ffs-harness -- operational-readiness-report \
 Attach the JSON or Markdown report path to the bead close reason when a bead
 claims operational readiness evidence. The report is an aggregator; it does not
 replace the raw per-suite logs, manifests, or reproduction commands.
+
+### Soak/Canary Campaigns
+
+The soak/canary campaign manifest defines bounded `smoke`, `nightly`, `stress`,
+and `canary` profiles for repeated mount, repair, writeback-cache gate, and
+artifact aggregation work. The dry-run validator does not perform long mounted
+runs; it proves the campaign contract, resource limits, heartbeat vocabulary,
+flake/failure classification, and proof-bundle/release-gate consumers before a
+permissioned worker runs the long profile.
+
+```bash
+cargo run -p ffs-harness -- validate-soak-canary-campaigns \
+  --manifest benchmarks/soak_canary_campaign_manifest.json \
+  --artifact-root artifacts/soak/dry-run \
+  --out artifacts/soak/campaign_report.json \
+  --artifact-out artifacts/soak/sample_artifact_manifest.json \
+  --summary-out artifacts/soak/campaign_summary.md
+```
+
+The E2E smoke is bounded and safe for local CI:
+
+```bash
+./scripts/e2e/ffs_soak_canary_campaign_e2e.sh
+```
+
+Long profiles are intended for RCH, CI, or manual permissioned hosts. They must
+record kernel, FUSE capability, toolchain, git SHA, workload IDs, seeds,
+duration, resource usage, cleanup status, and reproduction command. Recurring
+flakes are never swallowed: campaign output must preserve reproduction data and
+link a follow-up bead.
 
 ### Permissioned FUSE Lane
 

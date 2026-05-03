@@ -1,0 +1,470 @@
+{
+  "allowed_capabilities": [
+    "artifact_aggregation",
+    "btrfs_fixture",
+    "cargo",
+    "ext4_fixture",
+    "fuse",
+    "operational_readiness_report",
+    "proof_bundle",
+    "rch",
+    "release_gate",
+    "repair_scrub",
+    "resource_monitor",
+    "writeback_cache_gate"
+  ],
+  "artifact_consumers": [
+    "operator_proof_bundle",
+    "release_gate_evaluator",
+    "operational_readiness_report"
+  ],
+  "artifact_root_template": "artifacts/soak/{profile}",
+  "manifest_id": "bd-rchk0.5.9-soak-canary-campaigns-v1",
+  "profiles": [
+    {
+      "artifact_retention_days": 14,
+      "description": "Bounded local dry-run profile for CI smoke and fast developer validation.",
+      "duration_seconds": 30,
+      "heartbeat_interval_seconds": 10,
+      "max_errors": 0,
+      "max_failures": 0,
+      "max_flakes": 0,
+      "max_iterations": 3,
+      "profile_id": "smoke",
+      "required_capabilities": [
+        "cargo",
+        "artifact_aggregation",
+        "resource_monitor"
+      ],
+      "resource_limits": {
+        "max_artifact_mib": 64,
+        "max_cpu_percent": 200,
+        "max_memory_mib": 512,
+        "max_wall_seconds": 60
+      }
+    },
+    {
+      "artifact_retention_days": 30,
+      "description": "Nightly RCH or CI endurance profile for repeated mount, repair, and artifact aggregation checks.",
+      "duration_seconds": 14400,
+      "heartbeat_interval_seconds": 300,
+      "long_run_context": {
+        "intended_hosts": [
+          "rch",
+          "ci",
+          "manual_permissioned"
+        ],
+        "operator_notes": "Nightly runs may skip mounted workloads only through structured host-capability artifacts; product failures and recurring flakes must preserve reproduction packs.",
+        "records_environment_fields": [
+          "kernel",
+          "fuse_capability",
+          "toolchain",
+          "git_sha",
+          "workload_ids",
+          "seeds",
+          "duration_seconds",
+          "resource_usage",
+          "cleanup_status",
+          "reproduction_command"
+        ]
+      },
+      "max_errors": 0,
+      "max_failures": 0,
+      "max_flakes": 2,
+      "max_iterations": 100,
+      "profile_id": "nightly",
+      "required_capabilities": [
+        "cargo",
+        "rch",
+        "fuse",
+        "repair_scrub",
+        "artifact_aggregation",
+        "resource_monitor"
+      ],
+      "resource_limits": {
+        "max_artifact_mib": 2048,
+        "max_cpu_percent": 3200,
+        "max_memory_mib": 8192,
+        "max_wall_seconds": 15000
+      }
+    },
+    {
+      "artifact_retention_days": 45,
+      "description": "Controlled stress profile for 256GB+ RAM and 64+ core hosts with repeated metadata churn and repair dry-runs.",
+      "duration_seconds": 21600,
+      "heartbeat_interval_seconds": 300,
+      "long_run_context": {
+        "intended_hosts": [
+          "rch",
+          "ci",
+          "manual_permissioned"
+        ],
+        "operator_notes": "Stress runs are opt-in for large workers; resource exhaustion is a campaign failure, not a flake, unless a linked reproduction pack proves host-only pressure.",
+        "records_environment_fields": [
+          "kernel",
+          "fuse_capability",
+          "toolchain",
+          "git_sha",
+          "workload_ids",
+          "seeds",
+          "duration_seconds",
+          "resource_usage",
+          "cleanup_status",
+          "reproduction_command"
+        ]
+      },
+      "max_errors": 0,
+      "max_failures": 0,
+      "max_flakes": 1,
+      "max_iterations": 250,
+      "profile_id": "stress",
+      "required_capabilities": [
+        "cargo",
+        "rch",
+        "fuse",
+        "repair_scrub",
+        "resource_monitor"
+      ],
+      "resource_limits": {
+        "max_artifact_mib": 4096,
+        "max_cpu_percent": 6400,
+        "max_memory_mib": 32768,
+        "max_wall_seconds": 22200
+      }
+    },
+    {
+      "artifact_retention_days": 30,
+      "description": "Manual permissioned canary profile for a single candidate release build before readiness wording changes.",
+      "duration_seconds": 3600,
+      "heartbeat_interval_seconds": 120,
+      "long_run_context": {
+        "intended_hosts": [
+          "rch",
+          "ci",
+          "manual_permissioned"
+        ],
+        "operator_notes": "Canary runs feed release gates directly; stale evidence or missing FUSE capability must downgrade public readiness claims.",
+        "records_environment_fields": [
+          "kernel",
+          "fuse_capability",
+          "toolchain",
+          "git_sha",
+          "workload_ids",
+          "seeds",
+          "duration_seconds",
+          "resource_usage",
+          "cleanup_status",
+          "reproduction_command"
+        ]
+      },
+      "max_errors": 0,
+      "max_failures": 0,
+      "max_flakes": 0,
+      "max_iterations": 40,
+      "profile_id": "canary",
+      "required_capabilities": [
+        "cargo",
+        "fuse",
+        "repair_scrub",
+        "proof_bundle",
+        "release_gate",
+        "resource_monitor"
+      ],
+      "resource_limits": {
+        "max_artifact_mib": 1024,
+        "max_cpu_percent": 1600,
+        "max_memory_mib": 4096,
+        "max_wall_seconds": 3900
+      }
+    }
+  ],
+  "required_environment_fields": [
+    "campaign_id",
+    "git_sha",
+    "kernel",
+    "fuse_capability",
+    "toolchain",
+    "rustc_version",
+    "cargo_version",
+    "worker_id",
+    "cpu_cores_logical",
+    "ram_total_gb",
+    "workload_ids",
+    "seeds",
+    "duration_seconds",
+    "resource_usage"
+  ],
+  "required_log_fields": [
+    "campaign_id",
+    "profile_id",
+    "workload_id",
+    "seed",
+    "iteration",
+    "heartbeat_index",
+    "elapsed_seconds",
+    "outcome",
+    "classification",
+    "failure_threshold",
+    "resource_limits",
+    "artifact_path",
+    "stdout_path",
+    "stderr_path",
+    "cleanup_status",
+    "reproduction_command"
+  ],
+  "schema_version": 1,
+  "shared_qa_schema_version": 1,
+  "workloads": [
+    {
+      "command_template": "scripts/e2e/ffs_fuse_production.sh --campaign-profile {profile} --scenario mount_cycle_ext4 --seed {seed} --out {artifact_dir}/{workload_id}",
+      "description": "Repeated ext4 read-only mount, probe, unmount, and reopen cycle.",
+      "expected_safe_behavior": "Pass on permissioned hosts; otherwise emit a host capability skip artifact.",
+      "failure_threshold": {
+        "flake_window_iterations": 5,
+        "follow_up_bead": "bd-t21em",
+        "max_errors": 0,
+        "max_failures": 0,
+        "max_flakes": 1,
+        "preserve_repro_artifacts": true
+      },
+      "filesystem": "ext4",
+      "kind": "mount_cycle",
+      "output_artifact": {
+        "aggregate_key": "campaigns[].mount_cycles.ext4",
+        "category": "benchmark_report",
+        "content_type": "application/json",
+        "path_template": "{artifact_dir}/{profile}/{workload_id}_summary.json"
+      },
+      "profile_ids": [
+        "smoke",
+        "nightly",
+        "stress",
+        "canary"
+      ],
+      "required_capabilities": [
+        "cargo",
+        "ext4_fixture",
+        "fuse"
+      ],
+      "seeds": [
+        1001,
+        1002
+      ],
+      "workload_id": "soak_mount_cycle_ext4_ro"
+    },
+    {
+      "command_template": "scripts/e2e/ffs_fuse_production.sh --campaign-profile {profile} --scenario mount_cycle_btrfs --seed {seed} --out {artifact_dir}/{workload_id}",
+      "description": "Repeated btrfs read-only mount, stat/list root, unmount, and reopen cycle.",
+      "expected_safe_behavior": "Pass on permissioned btrfs hosts; otherwise emit btrfs fixture/tool/capability skip.",
+      "failure_threshold": {
+        "flake_window_iterations": 5,
+        "follow_up_bead": "bd-t21em",
+        "max_errors": 0,
+        "max_failures": 0,
+        "max_flakes": 1,
+        "preserve_repro_artifacts": true
+      },
+      "filesystem": "btrfs",
+      "kind": "mount_cycle",
+      "output_artifact": {
+        "aggregate_key": "campaigns[].mount_cycles.btrfs",
+        "category": "benchmark_report",
+        "content_type": "application/json",
+        "path_template": "{artifact_dir}/{profile}/{workload_id}_summary.json"
+      },
+      "profile_ids": [
+        "nightly",
+        "stress",
+        "canary"
+      ],
+      "required_capabilities": [
+        "cargo",
+        "btrfs_fixture",
+        "fuse"
+      ],
+      "seeds": [
+        2001
+      ],
+      "workload_id": "soak_mount_cycle_btrfs_ro"
+    },
+    {
+      "command_template": "scripts/e2e/ffs_ext4_rw_smoke.sh --campaign-profile {profile} --metadata-churn --seed {seed} --out {artifact_dir}/{workload_id}",
+      "description": "Metadata-heavy create, rename, unlink, and directory listing churn.",
+      "expected_safe_behavior": "Preserve survivor set and classify unsupported write paths without partial mutation.",
+      "failure_threshold": {
+        "flake_window_iterations": 10,
+        "follow_up_bead": "bd-t21em",
+        "max_errors": 0,
+        "max_failures": 0,
+        "max_flakes": 1,
+        "preserve_repro_artifacts": true
+      },
+      "filesystem": "ext4",
+      "kind": "metadata_churn",
+      "output_artifact": {
+        "aggregate_key": "campaigns[].metadata_churn.rows[]",
+        "category": "benchmark_report",
+        "content_type": "application/json",
+        "path_template": "{artifact_dir}/{profile}/{workload_id}_summary.json"
+      },
+      "profile_ids": [
+        "smoke",
+        "nightly",
+        "stress",
+        "canary"
+      ],
+      "required_capabilities": [
+        "cargo",
+        "ext4_fixture"
+      ],
+      "seeds": [
+        3001,
+        3002
+      ],
+      "workload_id": "soak_metadata_churn_ext4"
+    },
+    {
+      "command_template": "scripts/e2e/ffs_ext4_rw_smoke.sh --campaign-profile {profile} --read-write-verify --seed {seed} --out {artifact_dir}/{workload_id}",
+      "description": "Repeated write, fsync, remount, and readback verification loop.",
+      "expected_safe_behavior": "Pass only with verified readback; unsupported writes fail closed with preserved artifacts.",
+      "failure_threshold": {
+        "flake_window_iterations": 10,
+        "follow_up_bead": "bd-t21em",
+        "max_errors": 0,
+        "max_failures": 0,
+        "max_flakes": 1,
+        "preserve_repro_artifacts": true
+      },
+      "filesystem": "ext4",
+      "kind": "read_write_verify",
+      "output_artifact": {
+        "aggregate_key": "campaigns[].read_write_verify.rows[]",
+        "category": "benchmark_report",
+        "content_type": "application/json",
+        "path_template": "{artifact_dir}/{profile}/{workload_id}_summary.json"
+      },
+      "profile_ids": [
+        "nightly",
+        "stress",
+        "canary"
+      ],
+      "required_capabilities": [
+        "cargo",
+        "ext4_fixture",
+        "fuse"
+      ],
+      "seeds": [
+        4001
+      ],
+      "workload_id": "soak_read_write_verify_ext4"
+    },
+    {
+      "command_template": "scripts/e2e/ffs_repair_recovery_smoke.sh --campaign-profile {profile} --dry-run --seed {seed} --out {artifact_dir}/{workload_id}",
+      "description": "Repair scrub/dry-run campaign with ledger validation and no ambient mutation.",
+      "expected_safe_behavior": "Detection-only or dry-run repair emits ledger evidence; unsafe mutation is refused.",
+      "failure_threshold": {
+        "flake_window_iterations": 8,
+        "follow_up_bead": "bd-t21em",
+        "max_errors": 0,
+        "max_failures": 0,
+        "max_flakes": 1,
+        "preserve_repro_artifacts": true
+      },
+      "filesystem": "mixed",
+      "kind": "repair_scrub_dry_run",
+      "output_artifact": {
+        "aggregate_key": "campaigns[].repair_scrub.rows[]",
+        "category": "proof_artifact",
+        "content_type": "application/json",
+        "path_template": "{artifact_dir}/{profile}/{workload_id}_ledger_summary.json"
+      },
+      "profile_ids": [
+        "smoke",
+        "nightly",
+        "stress",
+        "canary"
+      ],
+      "required_capabilities": [
+        "cargo",
+        "repair_scrub"
+      ],
+      "seeds": [
+        5001,
+        5002
+      ],
+      "workload_id": "soak_repair_scrub_dry_run"
+    },
+    {
+      "command_template": "scripts/e2e/ffs_writeback_e2e.sh --campaign-profile {profile} --gate-only --seed {seed} --out {artifact_dir}/{workload_id}",
+      "description": "Writeback-cache gate replay that proves unsupported or missing evidence stays disabled.",
+      "expected_safe_behavior": "Never enable writeback_cache from soak evidence alone; emit disabled or opt-in gate artifact.",
+      "failure_threshold": {
+        "flake_window_iterations": 5,
+        "follow_up_bead": "bd-t21em",
+        "max_errors": 0,
+        "max_failures": 0,
+        "max_flakes": 0,
+        "preserve_repro_artifacts": true
+      },
+      "filesystem": "mixed",
+      "kind": "writeback_cache_gate",
+      "output_artifact": {
+        "aggregate_key": "campaigns[].writeback_cache.rows[]",
+        "category": "proof_artifact",
+        "content_type": "application/json",
+        "path_template": "{artifact_dir}/{profile}/{workload_id}_gate_summary.json"
+      },
+      "profile_ids": [
+        "nightly",
+        "canary"
+      ],
+      "required_capabilities": [
+        "cargo",
+        "writeback_cache_gate",
+        "release_gate"
+      ],
+      "seeds": [
+        6001
+      ],
+      "workload_id": "soak_writeback_cache_gate"
+    },
+    {
+      "command_template": "env FFS_CAMPAIGN_SEED={seed} cargo run -p ffs-harness -- operational-readiness-report --artifacts {artifact_dir}/{profile} --out {artifact_dir}/{profile}/{workload_id}_readiness.json --current-git-sha dry-run --format json",
+      "description": "Aggregate campaign outputs into proof-bundle and release-gate consumable summaries.",
+      "expected_safe_behavior": "Aggregation fails closed on missing, stale, or ambiguous campaign artifacts.",
+      "failure_threshold": {
+        "flake_window_iterations": 3,
+        "follow_up_bead": "bd-t21em",
+        "max_errors": 0,
+        "max_failures": 0,
+        "max_flakes": 0,
+        "preserve_repro_artifacts": true
+      },
+      "filesystem": "not_applicable",
+      "kind": "artifact_aggregation",
+      "output_artifact": {
+        "aggregate_key": "campaigns[].artifact_aggregation.rows[]",
+        "category": "summary_report",
+        "content_type": "application/json",
+        "path_template": "{artifact_dir}/{profile}/{workload_id}_summary.json"
+      },
+      "profile_ids": [
+        "smoke",
+        "nightly",
+        "stress",
+        "canary"
+      ],
+      "required_capabilities": [
+        "cargo",
+        "artifact_aggregation",
+        "operational_readiness_report",
+        "proof_bundle",
+        "release_gate"
+      ],
+      "seeds": [
+        7001
+      ],
+      "workload_id": "soak_artifact_aggregation"
+    }
+  ]
+}

@@ -47,6 +47,11 @@ use ffs_harness::{
         evaluate_release_gates, fail_on_release_gate_errors, load_release_gate_policy,
         render_release_gate_markdown,
     },
+    soak_canary_campaign::{
+        build_soak_canary_sample_artifact_manifest, fail_on_soak_canary_campaign_errors,
+        load_soak_canary_campaign_manifest, render_soak_canary_campaign_markdown,
+        validate_soak_canary_campaign_manifest,
+    },
     validate_btrfs_fixture, validate_ext4_fixture,
     verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
     xfstests::{
@@ -125,6 +130,7 @@ fn run() -> Result<()> {
         Some("validate-adversarial-threat-model") => {
             validate_adversarial_threat_model_cmd(&args[1..])
         }
+        Some("validate-soak-canary-campaigns") => validate_soak_canary_campaigns_cmd(&args[1..]),
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
         Some("validate-mounted-write-matrix") => validate_mounted_write_matrix_cmd(&args[1..]),
         Some("validate-mounted-recovery-matrix") => {
@@ -179,6 +185,15 @@ struct AdversarialThreatModelCmdArgs {
     out_path: Option<String>,
     artifact_out_path: Option<String>,
     wording_out_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct SoakCanaryCampaignCmdArgs {
+    manifest_path: String,
+    artifact_root: String,
+    out_path: Option<String>,
+    artifact_out_path: Option<String>,
+    summary_out_path: Option<String>,
 }
 
 fn operational_readiness_report_cmd(args: &[String]) -> Result<()> {
@@ -683,6 +698,113 @@ fn parse_adversarial_threat_model_cmd_args(
         out_path,
         artifact_out_path,
         wording_out_path,
+    }))
+}
+
+fn validate_soak_canary_campaigns_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_soak_canary_campaign_cmd_args(args)? else {
+        return Ok(());
+    };
+    let manifest = load_soak_canary_campaign_manifest(Path::new(&cmd_args.manifest_path))?;
+    let report = validate_soak_canary_campaign_manifest(&manifest, &cmd_args.artifact_root);
+    let output = serde_json::to_string_pretty(&report)?;
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "soak/canary campaign report written: {} valid={} profiles={} workloads={}",
+            path, report.valid, report.profile_count, report.workload_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.artifact_out_path {
+        let artifact_manifest = build_soak_canary_sample_artifact_manifest(
+            &manifest,
+            &cmd_args.artifact_root,
+            &report.failure_evaluations,
+        );
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", serde_json::to_string_pretty(&artifact_manifest)?),
+        )?;
+        println!("soak/canary sample artifact manifest written: {path}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &render_soak_canary_campaign_markdown(&report),
+        )?;
+        println!("soak/canary campaign summary written: {path}");
+    }
+
+    fail_on_soak_canary_campaign_errors(&report)
+}
+
+fn parse_soak_canary_campaign_cmd_args(
+    args: &[String],
+) -> Result<Option<SoakCanaryCampaignCmdArgs>> {
+    let mut manifest_path: Option<String> = None;
+    let mut artifact_root = "artifacts/soak/dry-run".to_owned();
+    let mut out_path: Option<String> = None;
+    let mut artifact_out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                manifest_path = Some(
+                    args.get(i)
+                        .context("--manifest requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--artifact-root" => {
+                i += 1;
+                args.get(i)
+                    .context("--artifact-root requires a path")?
+                    .clone_into(&mut artifact_root);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--artifact-out" => {
+                i += 1;
+                artifact_out_path = Some(
+                    args.get(i)
+                        .context("--artifact-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_soak_canary_campaign_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-soak-canary-campaigns argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(SoakCanaryCampaignCmdArgs {
+        manifest_path: manifest_path
+            .context("--manifest is required for soak/canary campaign validation")?,
+        artifact_root,
+        out_path,
+        artifact_out_path,
+        summary_out_path,
     }))
 }
 
@@ -1488,6 +1610,7 @@ fn print_usage() {
     );
     print_performance_baseline_manifest_usage_summary();
     print_adversarial_threat_model_usage_summary();
+    print_soak_canary_campaign_usage_summary();
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
     println!("  ffs-harness validate-mounted-recovery-matrix [--matrix FILE] [--out FILE]");
     println!();
@@ -1547,6 +1670,7 @@ fn print_usage_examples() {
     );
     print_performance_baseline_manifest_example();
     print_adversarial_threat_model_example();
+    print_soak_canary_campaign_example();
     println!(
         "  ffs-harness validate-mounted-write-matrix --out artifacts/e2e/mounted_write_matrix.json"
     );
@@ -1576,6 +1700,18 @@ fn print_adversarial_threat_model_usage_summary() {
 fn print_adversarial_threat_model_example() {
     println!(
         "  ffs-harness validate-adversarial-threat-model --model security/adversarial_image_threat_model.json --out artifacts/security/threat_model_report.json --artifact-out artifacts/security/sample_artifact_manifest.json --wording-out artifacts/security/security_wording.tsv"
+    );
+}
+
+fn print_soak_canary_campaign_usage_summary() {
+    println!(
+        "  ffs-harness validate-soak-canary-campaigns --manifest FILE [--artifact-root DIR] [--out FILE] [--artifact-out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_soak_canary_campaign_example() {
+    println!(
+        "  ffs-harness validate-soak-canary-campaigns --manifest benchmarks/soak_canary_campaign_manifest.json --out artifacts/soak/campaign_report.json --artifact-out artifacts/soak/sample_artifact_manifest.json --summary-out artifacts/soak/campaign_summary.md"
     );
 }
 
@@ -1683,6 +1819,17 @@ fn print_adversarial_threat_model_usage() {
     println!("  --out FILE                         Write validation report JSON");
     println!("  --artifact-out FILE                Write sample shared QA artifact manifest JSON");
     println!("  --wording-out FILE                 Write generated docs-safe wording TSV");
+}
+
+fn print_soak_canary_campaign_usage() {
+    println!("Usage: ffs-harness validate-soak-canary-campaigns [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --manifest FILE                    Read soak/canary campaign manifest JSON");
+    println!("  --artifact-root DIR                Root for dry-run campaign artifacts");
+    println!("  --out FILE                         Write validation report JSON");
+    println!("  --artifact-out FILE                Write sample shared QA artifact manifest JSON");
+    println!("  --summary-out FILE                 Write Markdown campaign summary");
 }
 
 fn print_mounted_write_matrix_usage() {

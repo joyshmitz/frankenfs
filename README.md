@@ -1389,6 +1389,7 @@ the suite artifact directory:
 | `junit.xml` and `run.log` | all E2E suites | CI-readable verdict and full command transcript |
 | `mount_*.log` | every mounted scenario | Raw `ffs-cli mount` stdout/stderr for postmortem debugging |
 | operational manifest JSON | readiness report consumers | `pass`/`fail`/`skip`/`error` records using the shared artifact schema |
+| `soak_canary_campaign_report.json` | endurance and canary gates | Campaign profile, workload IDs, seeds, heartbeat summaries, resource caps, pass/fail/skip/error/flake classification, and reproduction links |
 
 ### Readiness Gates
 
@@ -1405,6 +1406,7 @@ the suite artifact directory:
 | `writeback_cache` | kernel FUSE writeback-cache mode can be enabled | Remains unsupported until the epoch-barrier acceptance gate, opt-in wiring, crash matrix, and docs are complete | `bd-rchk0.2.1`, `bd-rchk0.2.2`, `bd-rchk0.2.3` |
 | `errors.evidence` | mounted failures are actionable rather than opaque | Every failure path reports `operation_id`, `scenario_id`, `outcome`, `error_class`, remediation hint where applicable, raw logs, and cleanup status | `bd-rchk0.3.4`, `bd-rchk0.4.3` |
 | `performance.baseline` | performance claims are current for representative workloads | Fresh dated throughput/latency artifacts with host/runtime metadata; no readiness wording may imply performance tuning is complete before this lands | `bd-rchk5`, `bd-rchk5.1`, `bd-rchk5.3` |
+| `operational.soak_canary` | mounted and repair behavior remains stable over repeated realistic use | `validate-soak-canary-campaigns` defines bounded smoke/nightly/stress/canary profiles, heartbeat logs, resource caps, flake follow-up rules, and proof-bundle/release-gate consumers before long campaigns can upgrade readiness wording | `bd-rchk0.5.9`, `bd-t21em` |
 
 ### Allowed Deferrals and Non-Goals
 
@@ -1417,6 +1419,9 @@ the suite artifact directory:
   but they must not imply a current xfstests pass rate.
 - Performance readiness is explicitly delegated to `bd-rchk5`; correctness
   gates cannot silently upgrade throughput or latency claims.
+- Soak/canary readiness is separate from single-scenario E2E success. Local
+  smoke validates the campaign contract; nightly/stress/canary profiles require
+  RCH, CI, or manual permissioned hosts and fresh resource/cleanup evidence.
 - Hostile-image safety is explicitly delegated to the adversarial threat model
   and later containment/fuzz proofs. Ordinary corruption repair, unsupported
   formats, detection-only scrub, and mutating repair readiness remain distinct

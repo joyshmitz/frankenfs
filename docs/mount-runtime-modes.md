@@ -25,6 +25,31 @@ Operators should distinguish:
 | Detection-only scrub | May inspect and log findings but must not mutate the image. |
 | Mutating repair | Requires explicit opt-in plus fresh preflight, ledger, backup/rollback, and release-gate evidence. |
 
+## Soak And Canary Campaigns
+
+Single mounted smoke tests do not prove endurance. The campaign contract in
+`benchmarks/soak_canary_campaign_manifest.json` defines bounded `smoke`,
+`nightly`, `stress`, and `canary` profiles for repeated mount/unmount/reopen,
+metadata churn, read/write/verify, repair scrub dry-runs, writeback-cache gate
+checks, and artifact aggregation.
+
+The local dry-run validator is:
+
+```bash
+cargo run -p ffs-harness -- validate-soak-canary-campaigns \
+  --manifest benchmarks/soak_canary_campaign_manifest.json \
+  --artifact-root artifacts/soak/dry-run \
+  --out artifacts/soak/campaign_report.json \
+  --artifact-out artifacts/soak/sample_artifact_manifest.json \
+  --summary-out artifacts/soak/campaign_summary.md
+```
+
+Long `nightly`, `stress`, and `canary` profiles are for RCH, CI, or manual
+permissioned hosts. They must record kernel, FUSE capability, toolchain, git
+SHA, workload IDs, seeds, duration, resource usage, cleanup status, and the
+reproduction command. Recurring flakes must preserve a repro pack and link a
+follow-up bead; they are not allowed to silently soften release gates.
+
 ## Startup Banner
 
 The CLI prints the active runtime mode in the startup banner:
