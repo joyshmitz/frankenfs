@@ -1,0 +1,290 @@
+  [2m2026-05-03T18:58:00.536421Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1153651 at ubuntu@38.242.134.66 (6 slots, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:314 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:00.803146Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenfs (hash: 85b7e757d4cf61cc)[0m
+    [2;3mat[0m rch/src/hook.rs:4933 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:00.803207Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 23 roots[0m
+    [2;3mat[0m rch/src/hook.rs:4955 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:05.030902Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1153651...[0m
+    [2;3mat[0m rch/src/hook.rs:4982 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:05.030976Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs -> /data/projects/frankenfs on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:13.148751Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 8117ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:13.148867Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs -> /data/projects/frankenfs/crates/ffs on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:16.263839Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3114ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:16.263939Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-alloc -> /data/projects/frankenfs/crates/ffs-alloc on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:18.998360Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2734ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:18.998499Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-block -> /data/projects/frankenfs/crates/ffs-block on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:21.589792Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2591ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:21.589918Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-btree -> /data/projects/frankenfs/crates/ffs-btree on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:24.490828Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2900ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:24.490944Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-btrfs -> /data/projects/frankenfs/crates/ffs-btrfs on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:27.943741Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3452ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:27.943868Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-cli -> /data/projects/frankenfs/crates/ffs-cli on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:30.409080Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2465ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:30.409181Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-core -> /data/projects/frankenfs/crates/ffs-core on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:34.011700Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3602ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:34.011856Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-dir -> /data/projects/frankenfs/crates/ffs-dir on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:36.246865Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2234ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:36.247005Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-error -> /data/projects/frankenfs/crates/ffs-error on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:38.660953Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2413ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:38.661082Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-ext4 -> /data/projects/frankenfs/crates/ffs-ext4 on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:40.698909Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2037ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:40.699005Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-extent -> /data/projects/frankenfs/crates/ffs-extent on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:42.812879Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2113ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:42.813002Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-fuse -> /data/projects/frankenfs/crates/ffs-fuse on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:45.359618Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2546ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:45.359720Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-harness -> /data/projects/frankenfs/crates/ffs-harness on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:47.729850Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2370ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:47.729954Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-inode -> /data/projects/frankenfs/crates/ffs-inode on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:50.095146Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2365ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:50.095262Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-journal -> /data/projects/frankenfs/crates/ffs-journal on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:52.552758Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2457ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:52.552879Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-mvcc -> /data/projects/frankenfs/crates/ffs-mvcc on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:55.128294Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2575ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:55.128416Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-ondisk -> /data/projects/frankenfs/crates/ffs-ondisk on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:57.807008Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2678ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:58:57.807157Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-repair -> /data/projects/frankenfs/crates/ffs-repair on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:59:01.095040Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3287ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:59:01.095140Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-tui -> /data/projects/frankenfs/crates/ffs-tui on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:59:04.520726Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3425ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:59:04.520827Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-types -> /data/projects/frankenfs/crates/ffs-types on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:59:06.883284Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2362ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:59:06.883406Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-xattr -> /data/projects/frankenfs/crates/ffs-xattr on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:59:09.179980Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2296ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:59:09.180104Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/vendor/fuser -> /data/projects/frankenfs/vendor/fuser on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1031 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:59:11.471088Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2290ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1100 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:59:11.471130Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 28990 files, 2541781 bytes in 66423ms[0m
+    [2;3mat[0m rch/src/hook.rs:5142 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:59:13.471856Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- raptorq_decode_group_16blocks[0m
+    [2;3mat[0m rch/src/hook.rs:5169 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T18:59:13.471893Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/tmp/rch_target_frankenfs_bd_rchk5_2 -> /data/projects/frankenfs/.rch-target[0m
+    [2;3mat[0m rch/src/transfer.rs:499 [2;3mon[0m ThreadId(1)
+
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.185
+   Compiling serde_core v1.0.228
+   Compiling crossbeam-utils v0.8.21
+   Compiling once_cell v1.21.4
+   Compiling typenum v1.20.0
+   Compiling cpufeatures v0.3.0
+   Compiling allocator-api2 v0.2.21
+   Compiling foldhash v0.2.0
+   Compiling cmov v0.5.3
+   Compiling equivalent v1.0.2
+   Compiling const-oid v0.10.2
+   Compiling pin-project-lite v0.2.17
+   Compiling tracing-core v0.1.36
+   Compiling bitflags v2.11.1
+   Compiling thiserror v2.0.18
+   Compiling zmij v1.0.21
+   Compiling ctutils v0.4.2
+   Compiling memchr v2.8.0
+   Compiling hashbrown v0.17.0
+   Compiling crossbeam-epoch v0.9.18
+   Compiling smallvec v1.15.1
+   Compiling itoa v1.0.18
+   Compiling linux-raw-sys v0.12.1
+   Compiling tracing v0.1.44
+   Compiling hybrid-array v0.4.10
+   Compiling crossbeam-deque v0.8.6
+   Compiling num-traits v0.2.19
+   Compiling fastrand v2.4.1
+   Compiling rustix v1.1.4
+   Compiling rayon-core v1.13.0
+   Compiling arrayref v0.3.9
+   Compiling constant_time_eq v0.4.2
+   Compiling either v1.15.0
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.1
+   Compiling indexmap v2.14.0
+   Compiling arrayvec v0.7.6
+   Compiling log v0.4.29
+   Compiling errno v0.3.14
+   Compiling lazy_static v1.5.0
+   Compiling scopeguard v1.2.0
+   Compiling sharded-slab v0.1.7
+   Compiling tracing-log v0.2.0
+   Compiling blake3 v1.8.4
+   Compiling signal-hook-registry v1.4.8
+   Compiling lock_api v0.4.14
+   Compiling rayon v1.12.0
+   Compiling parking_lot_core v0.9.12
+   Compiling getrandom v0.4.2
+   Compiling rmp v0.8.15
+   Compiling digest v0.11.2
+   Compiling thread_local v1.1.9
+   Compiling crc32c v0.6.8
+   Compiling memoffset v0.9.1
+   Compiling bytes v1.11.1
+   Compiling futures-io v0.3.32
+   Compiling unty-next v0.1.1
+   Compiling serde v1.0.228
+   Compiling serde_json v1.0.149
+   Compiling nu-ansi-term v0.50.3
+   Compiling futures-core v0.3.32
+   Compiling parking v2.2.1
+   Compiling sha1 v0.11.0
+   Compiling futures-lite v2.6.1
+   Compiling sha2 v0.11.0
+   Compiling hmac v0.13.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling nix v0.31.2
+   Compiling parking_lot v0.12.5
+   Compiling franken-kernel v0.3.1
+   Compiling bincode-next v2.1.0
+   Compiling franken-evidence v0.3.1
+   Compiling rmp-serde v1.3.1
+   Compiling prost v0.13.5
+   Compiling franken-decision v0.3.1
+   Compiling polling v3.11.0
+   Compiling tempfile v3.27.0
+   Compiling signal-hook v0.4.4
+   Compiling socket2 v0.6.3
+   Compiling crossbeam-queue v0.3.12
+   Compiling ffs-types v0.1.0 (/data/projects/frankenfs/crates/ffs-types)
+   Compiling pin-project v1.1.11
+   Compiling crc32fast v1.5.0
+   Compiling slab v0.4.12
+   Compiling base64 v0.22.1
+   Compiling ffs-error v0.1.0 (/data/projects/frankenfs/crates/ffs-error)
+   Compiling ffs-ondisk v0.1.0 (/data/projects/frankenfs/crates/ffs-ondisk)
+   Compiling console v0.16.3
+   Compiling similar v2.7.0
+   Compiling asupersync v0.3.1
+   Compiling insta v1.47.2
+   Compiling ffs-repair v0.1.0 (/data/projects/frankenfs/crates/ffs-repair)
+   Compiling ffs-block v0.1.0 (/data/projects/frankenfs/crates/ffs-block)
+    Finished `release-perf` profile [optimized] target(s) in 6m 24s
+     Running benches/scrub_codec.rs (.rch-target/release-perf/deps/scrub_codec-768bfa977d6af5c6)
+Gnuplot not found, using plotters backend
+Benchmarking raptorq_decode_group_16blocks
+Benchmarking raptorq_decode_group_16blocks: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 5.9s, enable flat sampling, or reduce sample count to 60.
+Benchmarking raptorq_decode_group_16blocks: Collecting 100 samples in estimated 5.8555 s (5050 iterations)
+Benchmarking raptorq_decode_group_16blocks: Analyzing
+raptorq_decode_group_16blocks
+                        time:   [1.0971 ms 1.1221 ms 1.1462 ms]
+
+  [2m2026-05-03T19:05:52.178455Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 398706ms[0m
+    [2;3mat[0m rch/src/hook.rs:5290 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T19:05:52.178805Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:5339 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T19:05:52.178844Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenfs on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1716 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T19:05:54.797716Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 2618ms (817 files, 333 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:1755 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T19:05:54.797807Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 817 files, 333 bytes in 2618ms[0m
+    [2;3mat[0m rch/src/hook.rs:5372 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T19:05:54.797897Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenfs/.rch-target on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1716 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T19:08:09.974943Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 135177ms (10842 files, 187052 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:1755 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T19:08:09.974973Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 10842 files, 187052 bytes in 135177ms[0m
+    [2;3mat[0m rch/src/hook.rs:5490 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1153651 (609.4s)

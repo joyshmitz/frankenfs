@@ -1,0 +1,29 @@
+{
+  "results": [
+    {
+      "command": "rch exec -- cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- raptorq_decode_group_16blocks",
+      "mean": 0.001122100000,
+      "stddev": 0.000012525510,
+      "median": 0.001122100000,
+      "min": 0.001097100000,
+      "max": 0.001146200000,
+      "times": [
+        0.001097100000,
+        0.001122100000,
+        0.001146200000
+      ],
+      "exit_codes": [
+        0
+      ]
+    }
+  ],
+  "benchmark_mode": "criterion_once",
+  "measurement_source": "criterion_estimate",
+  "criterion_estimate_source": "baselines/hyperfine/20260503-raptorq16dec/ffs_repair_raptorq_decode_group_16blocks.stderr",
+  "wall_time_seconds": 609.479195648,
+  "command_stdout": "baselines/hyperfine/20260503-raptorq16dec/ffs_repair_raptorq_decode_group_16blocks.stdout",
+  "command_stderr": "baselines/hyperfine/20260503-raptorq16dec/ffs_repair_raptorq_decode_group_16blocks.stderr",
+  "text_report": "baselines/hyperfine/20260503-raptorq16dec/ffs_repair_raptorq_decode_group_16blocks.txt",
+  "started_at": "2026-05-03T18:58:00Z",
+  "finished_at": "2026-05-03T19:08:09Z"
+}
