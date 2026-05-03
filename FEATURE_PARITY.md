@@ -27,8 +27,12 @@
 >
 > **Boundary rule:** this table measures the tracked V1 feature denominator.
 > It does not certify production readiness, current xfstests pass rate,
-> performance targets, or every future hardening task. Those operational bridge
-> items are tracked separately in Section 4.
+> performance targets, or every future hardening task. Operational bridge items
+> are tracked through support-state accounting, which distinguishes validated,
+> experimental, detection-only, dry-run-only, parse-only, single-device-only,
+> basic-coverage, disabled, opt-in-mutating, unsupported, deferred, and
+> host-blocked states before public docs or release gates can strengthen a
+> claim.
 
 ## 2. Tracked Capability Matrix
 

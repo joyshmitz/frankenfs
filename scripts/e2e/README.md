@@ -492,6 +492,41 @@ The E2E smoke is:
 It validates the checked-in manifest, checks dry-run command and artifact
 expansion, rejects malformed manifest variants, and runs the module unit tests.
 
+## Support-State Accounting
+
+Support-state accounting separates implementation inventory from readiness
+claims. It keeps the `FEATURE_PARITY.md` count table parseable while requiring
+every user-facing claim to name a tier such as `validated`, `experimental`,
+`detection_only`, `dry_run_only`, `parse_only`, `single_device_only`,
+`basic_coverage`, `disabled`, `opt_in_mutating`, `unsupported`, `deferred`, or
+`host_blocked`.
+
+Validate the checked-in parity wording and Beads ownership links with:
+
+```bash
+cargo run -p ffs-harness -- validate-support-state-accounting \
+  --issues .beads/issues.jsonl \
+  --feature-parity FEATURE_PARITY.md \
+  --out artifacts/parity/support_state_accounting.json \
+  --summary-out artifacts/parity/support_state_accounting.md
+```
+
+The validator rejects unscoped flat 100 percent parity wording, stale/missing
+owner beads, missing structured log fields, and any row that does not compose
+with the fail-closed release evaluator contract. README and FEATURE_PARITY-safe
+wording should consume the support-state rows rather than treating inventory
+percentages as readiness percentages.
+
+The E2E smoke is:
+
+```bash
+./scripts/e2e/ffs_support_state_accounting_e2e.sh
+```
+
+It writes JSON and Markdown reports, checks historical 86/86, 90/90, and 100
+percent migration classifications, injects unsafe flat parity wording, injects
+missing owner beads, and runs the module unit tests.
+
 ## Release Gate Evaluation
 
 Release gates are executable policy files that consume a validated proof bundle

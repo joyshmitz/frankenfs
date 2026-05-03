@@ -27,6 +27,7 @@ pub mod proof_overhead_budget;
 pub mod release_gate;
 pub mod repair_writeback_serialization;
 pub mod soak_canary_campaign;
+pub mod support_state_accounting;
 pub mod tabletop_drill;
 pub mod verification_runner;
 pub mod xfstests;

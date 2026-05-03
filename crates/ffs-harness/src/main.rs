@@ -59,6 +59,10 @@ use ffs_harness::{
         load_soak_canary_campaign_manifest, render_soak_canary_campaign_markdown,
         validate_soak_canary_campaign_manifest,
     },
+    support_state_accounting::{
+        SupportStateAccountingConfig, fail_on_support_state_accounting_errors,
+        render_support_state_markdown, run_support_state_accounting,
+    },
     validate_btrfs_fixture, validate_ext4_fixture,
     verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
     xfstests::{
@@ -127,6 +131,9 @@ fn run() -> Result<()> {
         Some("validate-deferred-parity-audit") => validate_deferred_parity_audit_cmd(&args[1..]),
         Some("validate-ambition-evidence-matrix") => {
             validate_ambition_evidence_matrix_cmd(&args[1..])
+        }
+        Some("validate-support-state-accounting") => {
+            validate_support_state_accounting_cmd(&args[1..])
         }
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
         Some("validate-proof-bundle") => validate_proof_bundle_cmd(&args[1..]),
@@ -1380,6 +1387,88 @@ fn validate_ambition_evidence_matrix_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn validate_support_state_accounting_cmd(args: &[String]) -> Result<()> {
+    let mut config = SupportStateAccountingConfig::default();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--issues" => {
+                i += 1;
+                config.issues_jsonl =
+                    Path::new(args.get(i).context("--issues requires a path")?).to_path_buf();
+            }
+            "--feature-parity" => {
+                i += 1;
+                config.feature_parity_markdown =
+                    Path::new(args.get(i).context("--feature-parity requires a path")?)
+                        .to_path_buf();
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_support_state_accounting_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-support-state-accounting argument: {other}"),
+        }
+        i += 1;
+    }
+
+    config.generated_artifact_paths = match (&out_path, &summary_out_path) {
+        (Some(json), Some(markdown)) => vec![json.clone(), markdown.clone()],
+        (Some(json), None) => vec![json.clone()],
+        (None, Some(markdown)) => vec![markdown.clone()],
+        (None, None) => config.generated_artifact_paths,
+    };
+
+    let report = run_support_state_accounting(&config)?;
+    fail_on_support_state_accounting_errors(&report)?;
+    let json = serde_json::to_string_pretty(&report)?;
+    let output = match format {
+        ProofBundleFormat::Json => json,
+        ProofBundleFormat::Markdown => render_support_state_markdown(&report),
+    };
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "support-state accounting report written: {} rows={} states={}",
+            path,
+            report.row_count,
+            report.grouped_by_support_state.len()
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_support_state_markdown(&report)),
+        )?;
+        println!("support-state accounting markdown written: {path}");
+    }
+    Ok(())
+}
+
 fn validate_mounted_write_matrix_cmd(args: &[String]) -> Result<()> {
     let mut matrix_path = DEFAULT_MATRIX_PATH.to_owned();
     let mut out_path: Option<String> = None;
@@ -1728,6 +1817,9 @@ fn print_usage() {
     );
     println!("  ffs-harness validate-ambition-evidence-matrix [--issues FILE] [--out FILE]");
     println!(
+        "  ffs-harness validate-support-state-accounting [--issues FILE] [--feature-parity FILE] [--out FILE] [--summary-out FILE]"
+    );
+    println!(
         "  ffs-harness validate-proof-overhead-budget --budget FILE --metrics FILE [--out FILE]"
     );
     println!(
@@ -1787,6 +1879,9 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness validate-ambition-evidence-matrix --out artifacts/ambition/evidence_matrix.json"
+    );
+    println!(
+        "  ffs-harness validate-support-state-accounting --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
     );
     println!(
         "  ffs-harness validate-proof-overhead-budget --budget artifacts/proof/budget.json --metrics artifacts/proof/metrics.json --out artifacts/proof/budget_report.json"
@@ -1904,6 +1999,19 @@ fn print_ambition_evidence_matrix_usage() {
     println!("Options:");
     println!("  --issues FILE                      Read bead JSONL from FILE");
     println!("  --out FILE                         Write JSON report to FILE");
+}
+
+fn print_support_state_accounting_usage() {
+    println!("Usage: ffs-harness validate-support-state-accounting [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --issues FILE                      Read bead JSONL from FILE");
+    println!("  --feature-parity FILE              Read FEATURE_PARITY markdown from FILE");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!(
+        "  --out FILE                         Write selected-format support-state report to FILE"
+    );
+    println!("  --summary-out FILE                 Write Markdown inspection summary");
 }
 
 fn print_proof_overhead_budget_usage() {
