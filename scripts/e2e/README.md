@@ -58,6 +58,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 
 # Run repair/writeback serialization contract dry-run validation
 ./scripts/e2e/ffs_repair_writeback_serialization_e2e.sh
+
+# Run repair/writeback mounted route smoke
+./scripts/e2e/ffs_repair_writeback_route_e2e.sh
 ```
 
 ## Scenario Catalog Contract
@@ -240,6 +243,22 @@ The fail-closed artifact must include `operation_id`, `scenario_id`,
 `snapshot_epoch`, `lease_id`, `repair_symbol_version`, `expected_state`,
 `observed_state`, `error_class`, `artifact_paths`, `cleanup_status`,
 `reproduction_command`, and `follow_up_bead`.
+
+### Repair Writeback Route
+
+The route smoke proves the implementation surface behind the contract:
+`OpenFs::repair_writeback_blocks_via_mounted_mutation_path` stages recovered
+blocks in a mounted MVCC request scope, commits, flushes, and verifies durable
+bytes, while `ffs-repair` consumes an explicit recovered-block writeback
+authority and fails closed when that authority rejects a stale repair snapshot.
+
+```bash
+./scripts/e2e/ffs_repair_writeback_route_e2e.sh
+```
+
+The generated artifact records operation and scenario IDs, expected and
+observed states, ledger event classes, visible data before/after repair,
+stdout/stderr log paths, cleanup status, and the reproduction command.
 
 ### Permissioned FUSE Lane
 

@@ -368,6 +368,35 @@
       ]
     },
     {
+      "suite_id": "ffs_repair_writeback_route",
+      "script": "scripts/e2e/ffs_repair_writeback_route_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "repair_writeback_mounted_request_scope",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_writeback_mounted_request_scope|outcome=PASS"
+        },
+        {
+          "id": "repair_writeback_authority_injected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_writeback_authority_injected|outcome=PASS"
+        },
+        {
+          "id": "repair_writeback_route_artifact",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_writeback_route_artifact|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_expansion",
       "script": "scripts/e2e/ffs_benchmark_expansion_e2e.sh",
       "required_categories": [

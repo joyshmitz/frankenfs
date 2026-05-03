@@ -229,6 +229,7 @@ pub enum RequestOp {
     Setxattr,
     Removexattr,
     Write,
+    RepairWriteback,
     IoctlRead,
     IoctlWrite,
 }
@@ -251,6 +252,7 @@ impl RequestOp {
                 | Self::Setxattr
                 | Self::Removexattr
                 | Self::Write
+                | Self::RepairWriteback
                 | Self::IoctlWrite
                 | Self::Fsync
                 | Self::Fsyncdir

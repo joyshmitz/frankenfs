@@ -33,7 +33,8 @@ use crate::evidence::{
     SymbolRefreshDetail,
 };
 use crate::recovery::{
-    GroupRecoveryOrchestrator, RecoveryAttemptResult, RecoveryDecoderStats, RecoveryOutcome,
+    DirectDeviceRecoveryWriteback, GroupRecoveryOrchestrator, RecoveryAttemptResult,
+    RecoveryDecoderStats, RecoveryOutcome, RecoveryWriteback,
 };
 use crate::scrub::{BlockValidator, ScrubReport, Scrubber, Severity};
 use crate::storage::{RepairGroupLayout, RepairGroupStorage};
@@ -780,6 +781,8 @@ pub struct ScrubWithRecovery<'a, W: Write> {
     runtime_metrics: RepairRuntimeMetrics,
     /// Optional thread-safe atomic metrics for concurrent external observation.
     atomic_metrics: Option<RepairPipelineMetrics>,
+    /// Authority that makes recovered source blocks durable.
+    recovery_writeback: Arc<dyn RecoveryWriteback>,
     /// Whether this pipeline may mutate the device for recovery or symbol refresh.
     repair_writes_enabled: bool,
 }
@@ -837,6 +840,7 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
             refresh_states,
             runtime_metrics: RepairRuntimeMetrics::default(),
             atomic_metrics: None,
+            recovery_writeback: Arc::new(DirectDeviceRecoveryWriteback),
             repair_writes_enabled: true,
         }
     }
@@ -859,8 +863,20 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
     /// and corruption records are still emitted, but recovery and repair-symbol
     /// refresh writes are skipped. This is used by read-only mount integration.
     #[must_use]
-    pub const fn with_repair_writes_enabled(mut self, enabled: bool) -> Self {
+    pub fn with_repair_writes_enabled(mut self, enabled: bool) -> Self {
         self.repair_writes_enabled = enabled;
+        self
+    }
+
+    /// Override the recovered-block writeback authority.
+    ///
+    /// The default authority writes directly to the supplied block device and
+    /// is valid for offline repair and client read-only mount repair. Mounted
+    /// read-write repair should provide an authority that stages recovered
+    /// blocks through the mounted mutation path before symbol refresh.
+    #[must_use]
+    pub fn with_recovery_writeback(mut self, writeback: Arc<dyn RecoveryWriteback>) -> Self {
+        self.recovery_writeback = writeback;
         self
     }
 
@@ -1882,8 +1898,9 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
         group_cfg: &GroupConfig,
         corrupt_blocks: &[BlockNumber],
     ) -> RecoveryAttemptResult {
-        let orchestrator = match GroupRecoveryOrchestrator::new(
+        let orchestrator = match GroupRecoveryOrchestrator::new_with_writeback(
             self.device,
+            self.recovery_writeback.as_ref(),
             self.fs_uuid,
             group_cfg.layout,
             group_cfg.source_first_block,
@@ -2410,6 +2427,54 @@ mod tests {
     };
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Default)]
+    struct RecordingRecoveryWriteback {
+        blocks: Mutex<Vec<BlockNumber>>,
+    }
+
+    impl RecoveryWriteback for RecordingRecoveryWriteback {
+        fn writeback_recovered(
+            &self,
+            cx: &Cx,
+            device: &dyn BlockDevice,
+            recovered: &[crate::codec::RecoveredBlock],
+        ) -> Result<()> {
+            for block in recovered {
+                device.write_block(cx, block.block, &block.data)?;
+                self.blocks
+                    .lock()
+                    .map_err(|_| FfsError::RepairFailed("recording writeback lock".to_owned()))?
+                    .push(block.block);
+            }
+            device.sync(cx)?;
+            Ok(())
+        }
+
+        fn authority_name(&self) -> &'static str {
+            "recording_mounted_mutation_path"
+        }
+    }
+
+    #[derive(Debug)]
+    struct RejectingRecoveryWriteback;
+
+    impl RecoveryWriteback for RejectingRecoveryWriteback {
+        fn writeback_recovered(
+            &self,
+            _cx: &Cx,
+            _device: &dyn BlockDevice,
+            _recovered: &[crate::codec::RecoveredBlock],
+        ) -> Result<()> {
+            Err(FfsError::RepairFailed(
+                "mounted mutation path rejected stale repair snapshot".to_owned(),
+            ))
+        }
+
+        fn authority_name(&self) -> &'static str {
+            "rejecting_mounted_mutation_path"
+        }
+    }
 
     const E2E_GROUP_COUNT: u32 = 20;
     const E2E_GROUP_BLOCK_COUNT: u32 = 64;
@@ -3216,6 +3281,112 @@ mod tests {
                 "block {idx} not restored"
             );
         }
+    }
+
+    #[test]
+    fn recovery_uses_configured_writeback_authority() {
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 8;
+
+        let originals = write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+        device
+            .write_block(&cx, BlockNumber(3), &vec![0xAA; block_size as usize])
+            .expect("inject corruption");
+
+        let validator = CorruptBlockValidator::new(vec![3]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let writeback = Arc::new(RecordingRecoveryWriteback::default());
+        let mut ledger_buf = Vec::new();
+        let mut pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        )
+        .with_recovery_writeback(writeback.clone());
+
+        let report = pipeline.scrub_and_recover(&cx).expect("pipeline");
+
+        assert!(report.is_fully_recovered());
+        assert_eq!(
+            writeback
+                .blocks
+                .lock()
+                .expect("recording writeback lock")
+                .as_slice(),
+            &[BlockNumber(3)]
+        );
+        let restored = device.read_block(&cx, BlockNumber(3)).expect("read");
+        assert_eq!(restored.as_slice(), originals[3].as_slice());
+    }
+
+    #[test]
+    fn recovery_writeback_rejection_fails_closed_without_symbol_refresh() {
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 8;
+
+        write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+        device
+            .write_block(&cx, BlockNumber(3), &vec![0xAA; block_size as usize])
+            .expect("inject corruption");
+
+        let validator = CorruptBlockValidator::new(vec![3]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let mut ledger_buf = Vec::new();
+        let pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        )
+        .with_recovery_writeback(Arc::new(RejectingRecoveryWriteback));
+        let mut pipeline = pipeline;
+
+        let report = pipeline.scrub_and_recover(&cx).expect("pipeline");
+        let records = crate::evidence::parse_evidence_ledger(pipeline.into_ledger());
+
+        assert!(!report.is_fully_recovered());
+        assert_eq!(report.total_unrecoverable, 1);
+        assert_eq!(count_event(&records, EvidenceEventType::RepairSucceeded), 0);
+        assert_eq!(count_event(&records, EvidenceEventType::RepairFailed), 1);
+        assert_eq!(count_event(&records, EvidenceEventType::SymbolRefresh), 0);
+        let failed = records
+            .iter()
+            .find(|record| record.event_type == EvidenceEventType::RepairFailed)
+            .expect("repair failed record");
+        let reason = failed
+            .repair
+            .as_ref()
+            .and_then(|detail| detail.reason.as_deref())
+            .unwrap_or_default();
+        assert!(
+            reason.contains("stale repair snapshot"),
+            "unexpected failure reason: {reason}"
+        );
     }
 
     #[test]

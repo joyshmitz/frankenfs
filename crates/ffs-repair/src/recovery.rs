@@ -15,8 +15,55 @@ use ffs_error::{FfsError, Result};
 use ffs_types::{BlockNumber, GroupNumber};
 use serde::{Deserialize, Serialize};
 
-use crate::codec::{DecodeOutcome, decode_group_with_owned_repair_symbols};
+use crate::codec::{DecodeOutcome, RecoveredBlock, decode_group_with_owned_repair_symbols};
 use crate::storage::{RepairGroupLayout, RepairGroupStorage};
+
+/// Authority used to make recovered blocks durable.
+pub trait RecoveryWriteback: Send + Sync + std::fmt::Debug {
+    fn writeback_recovered(
+        &self,
+        cx: &Cx,
+        device: &dyn BlockDevice,
+        recovered: &[RecoveredBlock],
+    ) -> Result<()>;
+
+    fn authority_name(&self) -> &'static str;
+}
+
+/// Direct block-device writeback for offline repair or client read-only mounts.
+#[derive(Debug, Default)]
+pub struct DirectDeviceRecoveryWriteback;
+
+impl RecoveryWriteback for DirectDeviceRecoveryWriteback {
+    fn writeback_recovered(
+        &self,
+        cx: &Cx,
+        device: &dyn BlockDevice,
+        recovered: &[RecoveredBlock],
+    ) -> Result<()> {
+        for block in recovered {
+            device.write_block(cx, block.block, &block.data)?;
+        }
+        device.sync(cx)?;
+        for block in recovered {
+            let observed = device.read_block(cx, block.block)?;
+            if observed.as_slice() != block.data {
+                return Err(FfsError::RepairFailed(format!(
+                    "post-repair verification failed at block {}",
+                    block.block.0
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn authority_name(&self) -> &'static str {
+        "direct_device"
+    }
+}
+
+static DIRECT_DEVICE_RECOVERY_WRITEBACK: DirectDeviceRecoveryWriteback =
+    DirectDeviceRecoveryWriteback;
 
 /// Decode stats captured in the recovery evidence ledger.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +130,7 @@ impl RecoveryAttemptResult {
 /// Recovery orchestrator bound to one group/source region.
 pub struct GroupRecoveryOrchestrator<'a> {
     device: &'a dyn BlockDevice,
+    writeback: &'a dyn RecoveryWriteback,
     storage: RepairGroupStorage<'a>,
     fs_uuid: [u8; 16],
     source_first_block: BlockNumber,
@@ -93,6 +141,24 @@ impl<'a> GroupRecoveryOrchestrator<'a> {
     /// Create a recovery orchestrator for one source region within a group.
     pub fn new(
         device: &'a dyn BlockDevice,
+        fs_uuid: [u8; 16],
+        layout: RepairGroupLayout,
+        source_first_block: BlockNumber,
+        source_block_count: u32,
+    ) -> Result<Self> {
+        Self::new_with_writeback(
+            device,
+            &DIRECT_DEVICE_RECOVERY_WRITEBACK,
+            fs_uuid,
+            layout,
+            source_first_block,
+            source_block_count,
+        )
+    }
+
+    pub fn new_with_writeback(
+        device: &'a dyn BlockDevice,
+        writeback: &'a dyn RecoveryWriteback,
         fs_uuid: [u8; 16],
         layout: RepairGroupLayout,
         source_first_block: BlockNumber,
@@ -125,6 +191,7 @@ impl<'a> GroupRecoveryOrchestrator<'a> {
 
         Ok(Self {
             device,
+            writeback,
             storage: RepairGroupStorage::new(device, layout),
             fs_uuid,
             source_first_block,
@@ -279,7 +346,10 @@ impl<'a> GroupRecoveryOrchestrator<'a> {
         }
 
         let recovered_blocks = decode.recovered.iter().map(|b| b.block).collect::<Vec<_>>();
-        if let Err(err) = self.writeback_recovered(cx, decode) {
+        if let Err(err) = self
+            .writeback
+            .writeback_recovered(cx, self.device, &decode.recovered)
+        {
             return self.failure_result(
                 generation,
                 corrupt_count,
@@ -297,23 +367,6 @@ impl<'a> GroupRecoveryOrchestrator<'a> {
             stats,
             recovered_blocks,
         )
-    }
-
-    fn writeback_recovered(&self, cx: &Cx, decode: &DecodeOutcome) -> Result<()> {
-        for block in &decode.recovered {
-            self.device.write_block(cx, block.block, &block.data)?;
-        }
-        self.device.sync(cx)?;
-        for block in &decode.recovered {
-            let observed = self.device.read_block(cx, block.block)?;
-            if observed.as_slice() != block.data {
-                return Err(FfsError::RepairFailed(format!(
-                    "post-repair verification failed at block {}",
-                    block.block.0
-                )));
-            }
-        }
-        Ok(())
     }
 
     fn normalize_indices(indices: &mut Vec<u32>, source_block_count: u32) -> Result<()> {

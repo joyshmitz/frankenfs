@@ -70,6 +70,15 @@ refusal, cancellation cleanup, halfway writeback failure handling, and
 `rw_repair_serialization_missing` when a read-write mounted repair mutation is
 requested before the serializer exists. `flush` is not a durability boundary.
 
+Implementation hook: `OpenFs::repair_writeback_blocks_via_mounted_mutation_path`
+stages recovered physical blocks in a `RequestOp::RepairWriteback` MVCC request
+scope, commits through the same mutation authority as mounted writes, flushes
+the committed versions to the backing image, verifies durable bytes, and only
+then allows repair-symbol refresh consumers to proceed. `ffs-repair` also makes
+recovered-block writeback an explicit `RecoveryWriteback` authority; the
+default direct-device authority remains scoped to offline repair and client
+read-only mount repair.
+
 ## Startup Banner
 
 The CLI prints the active runtime mode in the startup banner:
