@@ -404,6 +404,28 @@ pub trait BlockDevice: Send + Sync {
     fn sync(&self, cx: &Cx) -> Result<()>;
 }
 
+impl<D: BlockDevice + ?Sized> BlockDevice for Arc<D> {
+    fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
+        (**self).read_block(cx, block)
+    }
+
+    fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
+        (**self).write_block(cx, block, data)
+    }
+
+    fn block_size(&self) -> u32 {
+        (**self).block_size()
+    }
+
+    fn block_count(&self) -> u64 {
+        (**self).block_count()
+    }
+
+    fn sync(&self, cx: &Cx) -> Result<()> {
+        (**self).sync(cx)
+    }
+}
+
 /// Multi-block I/O helpers.
 ///
 /// Default implementations preserve correctness by delegating to scalar
@@ -714,6 +736,64 @@ pub struct CacheMetrics {
 }
 
 impl CacheMetrics {
+    /// Aggregate shard-local cache metrics into one cache-wide snapshot.
+    ///
+    /// Shards keep independent recency queues and dirty clocks, so queue
+    /// lengths and monotonic counters are additive. The oldest dirty age uses
+    /// the maximum shard-local age as the conservative cache-wide age.
+    #[must_use]
+    pub fn aggregate(shards: impl IntoIterator<Item = Self>) -> Self {
+        let mut total = Self {
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            dirty_flushes: 0,
+            t1_len: 0,
+            t2_len: 0,
+            b1_len: 0,
+            b2_len: 0,
+            resident: 0,
+            dirty_blocks: 0,
+            dirty_bytes: 0,
+            writeback_queue_depth: 0,
+            oldest_dirty_age_ticks: None,
+            capacity: 0,
+            p: 0,
+            b1_ghost_hits: 0,
+            b2_ghost_hits: 0,
+        };
+
+        for shard in shards {
+            total.hits = total.hits.saturating_add(shard.hits);
+            total.misses = total.misses.saturating_add(shard.misses);
+            total.evictions = total.evictions.saturating_add(shard.evictions);
+            total.dirty_flushes = total.dirty_flushes.saturating_add(shard.dirty_flushes);
+            total.t1_len = total.t1_len.saturating_add(shard.t1_len);
+            total.t2_len = total.t2_len.saturating_add(shard.t2_len);
+            total.b1_len = total.b1_len.saturating_add(shard.b1_len);
+            total.b2_len = total.b2_len.saturating_add(shard.b2_len);
+            total.resident = total.resident.saturating_add(shard.resident);
+            total.dirty_blocks = total.dirty_blocks.saturating_add(shard.dirty_blocks);
+            total.dirty_bytes = total.dirty_bytes.saturating_add(shard.dirty_bytes);
+            total.writeback_queue_depth = total
+                .writeback_queue_depth
+                .saturating_add(shard.writeback_queue_depth);
+            total.oldest_dirty_age_ticks =
+                match (total.oldest_dirty_age_ticks, shard.oldest_dirty_age_ticks) {
+                    (Some(lhs), Some(rhs)) => Some(lhs.max(rhs)),
+                    (None, Some(rhs)) => Some(rhs),
+                    (Some(lhs), None) => Some(lhs),
+                    (None, None) => None,
+                };
+            total.capacity = total.capacity.saturating_add(shard.capacity);
+            total.p = total.p.saturating_add(shard.p);
+            total.b1_ghost_hits = total.b1_ghost_hits.saturating_add(shard.b1_ghost_hits);
+            total.b2_ghost_hits = total.b2_ghost_hits.saturating_add(shard.b2_ghost_hits);
+        }
+
+        total
+    }
+
     /// Cache hit ratio in the range [0.0, 1.0].
     ///
     /// Returns 0.0 if no accesses have been made.
@@ -2295,11 +2375,11 @@ impl ArcState {
 ///    contention under typical FUSE workloads (many concurrent reads, few
 ///    writes) remains low.
 ///
-/// **Future sharding:** If profiling reveals metadata lock contention under
-/// heavy parallel read workloads, the resident maps/lists can be sharded by
-/// `BlockNumber` into N independent `Mutex<ArcState>` segments. The current
-/// state lock plus page-lock table keeps policy decisions centralized while
-/// eliminating duplicate same-block miss I/O.
+/// **High-core sharding:** [`ShardedArcCache`] shards resident metadata by
+/// `BlockNumber` into N independent `Mutex<ArcState>` segments for workloads
+/// that show metadata lock contention under heavy parallel read bursts. This
+/// type remains the single-policy default for smaller deployments and for
+/// callers that need one global adaptive replacement policy.
 ///
 /// See [`DeferredArcCache`] for an integrated write-back + background flush variant.
 #[derive(Debug)]
@@ -2319,6 +2399,121 @@ pub enum ArcWritePolicy {
     WriteThrough,
     /// Keep writes in cache until sync; dirty blocks cannot be evicted.
     WriteBack,
+}
+
+/// Maximum default shard count selected by [`ShardedArcCache::for_host_parallelism`].
+pub const MAX_HOST_PARALLEL_CACHE_SHARDS: usize = 64;
+
+/// Block-number-sharded wrapper around [`ArcCache`] for high-core read bursts.
+///
+/// Each shard owns an independent [`ArcCache`] and metadata lock. A block is
+/// routed by `block % shard_count`, so any given block has exactly one cache
+/// owner while unrelated hot blocks can be served by different locks. The
+/// policy tradeoff is deliberate: replacement is shard-local instead of global,
+/// buying lower contention for 64+ core swarms without weakening write-back
+/// durability, dirty tracking, or same-block miss coalescing within a shard.
+#[derive(Debug)]
+pub struct ShardedArcCache<D: BlockDevice> {
+    inner: Arc<D>,
+    shards: Vec<ArcCache<Arc<D>>>,
+}
+
+impl<D: BlockDevice> ShardedArcCache<D> {
+    /// Create a write-through sharded cache with an explicit shard count.
+    pub fn new(inner: D, capacity_blocks: usize, shard_count: usize) -> Result<Self> {
+        Self::new_with_policy(
+            inner,
+            capacity_blocks,
+            shard_count,
+            ArcWritePolicy::WriteThrough,
+        )
+    }
+
+    /// Create a sharded cache sized to the current host's hardware parallelism.
+    pub fn for_host_parallelism(inner: D, capacity_blocks: usize) -> Result<Self> {
+        let host_threads = thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let shard_count = host_threads
+            .clamp(1, MAX_HOST_PARALLEL_CACHE_SHARDS)
+            .min(capacity_blocks.max(1));
+        Self::new(inner, capacity_blocks, shard_count)
+    }
+
+    /// Create a sharded cache with the requested write policy.
+    pub fn new_with_policy(
+        inner: D,
+        capacity_blocks: usize,
+        shard_count: usize,
+        write_policy: ArcWritePolicy,
+    ) -> Result<Self> {
+        if capacity_blocks == 0 {
+            return Err(FfsError::Format(
+                "ShardedArcCache capacity_blocks must be > 0".to_owned(),
+            ));
+        }
+        if shard_count == 0 {
+            return Err(FfsError::Format(
+                "ShardedArcCache shard_count must be > 0".to_owned(),
+            ));
+        }
+
+        let shard_count = shard_count.min(capacity_blocks);
+        let base_capacity = capacity_blocks / shard_count;
+        let remainder = capacity_blocks % shard_count;
+        let inner = Arc::new(inner);
+        let mut shards = Vec::with_capacity(shard_count);
+
+        for shard_index in 0..shard_count {
+            let shard_capacity = base_capacity + usize::from(shard_index < remainder);
+            shards.push(ArcCache::new_with_policy(
+                Arc::clone(&inner),
+                shard_capacity,
+                write_policy,
+            )?);
+        }
+
+        Ok(Self { inner, shards })
+    }
+
+    /// Return the underlying block device shared by all shards.
+    #[must_use]
+    pub fn inner(&self) -> &Arc<D> {
+        &self.inner
+    }
+
+    /// Number of independently locked cache shards.
+    #[must_use]
+    pub fn shard_count(&self) -> usize {
+        self.shards.len()
+    }
+
+    /// Deterministic owner shard for `block`.
+    #[must_use]
+    pub fn shard_index_for(&self, block: BlockNumber) -> usize {
+        let shard_count = u64::try_from(self.shards.len()).unwrap_or(u64::MAX);
+        usize::try_from(block.0 % shard_count).unwrap_or(0)
+    }
+
+    fn shard_for(&self, block: BlockNumber) -> &ArcCache<Arc<D>> {
+        &self.shards[self.shard_index_for(block)]
+    }
+
+    /// Per-shard metric snapshots for diagnosing imbalance.
+    #[must_use]
+    pub fn shard_metrics(&self) -> Vec<CacheMetrics> {
+        self.shards.iter().map(ArcCache::metrics).collect()
+    }
+
+    /// Aggregate metric snapshot across all shards.
+    #[must_use]
+    pub fn metrics(&self) -> CacheMetrics {
+        CacheMetrics::aggregate(self.shard_metrics())
+    }
+
+    /// Export aggregate cache metrics using the runtime/e2e JSON field names.
+    #[must_use]
+    pub fn runtime_metrics(&self) -> CacheRuntimeMetricsSnapshot {
+        self.metrics().runtime_metrics_snapshot()
+    }
 }
 
 /// Default dirty-ratio threshold where aggressive flush is preferred.
@@ -3367,6 +3562,49 @@ impl<D: BlockDevice> BlockDevice for ArcCache<D> {
         // Flush any deferred dirty blocks before syncing the underlying device.
         self.flush_dirty(cx)?;
         self.inner.sync(cx)
+    }
+}
+
+impl<D: BlockDevice> BlockDevice for ShardedArcCache<D> {
+    fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
+        self.shard_for(block).read_block(cx, block)
+    }
+
+    fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
+        self.shard_for(block).write_block(cx, block, data)
+    }
+
+    fn block_size(&self) -> u32 {
+        self.inner.block_size()
+    }
+
+    fn block_count(&self) -> u64 {
+        self.inner.block_count()
+    }
+
+    fn sync(&self, cx: &Cx) -> Result<()> {
+        for shard in &self.shards {
+            shard.flush_dirty(cx)?;
+        }
+        self.inner.sync(cx)
+    }
+}
+
+impl<D: BlockDevice> BlockCache for ShardedArcCache<D> {
+    fn mark_clean(&self, block: BlockNumber) {
+        self.shard_for(block).mark_clean(block);
+    }
+
+    fn dirty_blocks_oldest_first(&self) -> Vec<BlockNumber> {
+        let mut dirty = Vec::new();
+        for shard in &self.shards {
+            dirty.extend(shard.dirty_blocks_oldest_first());
+        }
+        dirty
+    }
+
+    fn evict(&self, block: BlockNumber) {
+        self.shard_for(block).evict(block);
     }
 }
 
@@ -6314,6 +6552,66 @@ mod tests {
         assert_eq!(metrics.misses, 1);
         assert_eq!(metrics.hits, u64::try_from(THREADS - 1).expect("fits u64"));
         assert_eq!(cache.page_locks.in_flight_len(), 0);
+    }
+
+    #[test]
+    fn sharded_arc_cache_aggregates_hits_and_capacity() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 32);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let cache = ShardedArcCache::new(dev, 8, 4).expect("sharded cache");
+
+        assert_eq!(cache.shard_count(), 4);
+        assert_eq!(cache.metrics().capacity, 8);
+
+        for block in 0..8_u64 {
+            let first = cache
+                .read_block(&cx, BlockNumber(block))
+                .expect("first read");
+            let second = cache
+                .read_block(&cx, BlockNumber(block))
+                .expect("second read");
+            assert_eq!(first.as_slice(), second.as_slice());
+        }
+
+        let metrics = cache.metrics();
+        assert_eq!(metrics.misses, 8);
+        assert_eq!(metrics.hits, 8);
+        assert_eq!(metrics.resident, 8);
+        assert_eq!(metrics.capacity, 8);
+        assert!(cache.shard_metrics().iter().all(|shard| shard.capacity == 2));
+    }
+
+    #[test]
+    fn sharded_arc_cache_writeback_sync_flushes_all_shards_once() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 16);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let cache =
+            ShardedArcCache::new_with_policy(dev, 8, 4, ArcWritePolicy::WriteBack).expect("cache");
+
+        let block_len = usize::try_from(cache.block_size()).expect("block size fits usize");
+        cache
+            .write_block(&cx, BlockNumber(0), &vec![7_u8; block_len])
+            .expect("write block 0");
+        cache
+            .write_block(&cx, BlockNumber(5), &vec![9_u8; block_len])
+            .expect("write block 5");
+        assert_eq!(cache.metrics().dirty_blocks, 2);
+
+        cache.sync(&cx).expect("sync");
+        assert_eq!(cache.metrics().dirty_blocks, 0);
+
+        let block0 = cache
+            .inner()
+            .read_block(&cx, BlockNumber(0))
+            .expect("underlying block 0");
+        let block5 = cache
+            .inner()
+            .read_block(&cx, BlockNumber(5))
+            .expect("underlying block 5");
+        assert!(block0.as_slice().iter().all(|byte| *byte == 7));
+        assert!(block5.as_slice().iter().all(|byte| *byte == 9));
     }
 
     #[test]
