@@ -1,0 +1,317 @@
+{
+  "schema_version": 1,
+  "corpus_id": "frankenfs_btrfs_multidev_v1",
+  "bead_id": "bd-ch373",
+  "scenarios": [
+    {
+      "scenario_id": "btrfs_multidev_raid1_healthy_assembly",
+      "kind": "healthy_assembly",
+      "profile": "raid1",
+      "device_count": 2,
+      "devices": [
+        {
+          "device_id": 1,
+          "fsid_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "image_path": "fixtures/btrfs/raid1_dev0.img",
+          "image_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "byte_size": 134217728,
+          "stripe_index": 0,
+          "stale": false,
+          "present": true
+        },
+        {
+          "device_id": 2,
+          "fsid_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "image_path": "fixtures/btrfs/raid1_dev1.img",
+          "image_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "byte_size": 134217728,
+          "stripe_index": 1,
+          "stale": false,
+          "present": true
+        }
+      ],
+      "chunk_layout": {
+        "chunk_size": 1073741824,
+        "stripe_size": 65536,
+        "stripes_per_chunk": 1,
+        "mirror_count": 2
+      },
+      "degraded_state": "healthy",
+      "expected_outcome": "assembly_success",
+      "expected_refusal_remediation": "",
+      "mount_mode": "read_only",
+      "repair_scrub_boundary": {
+        "scrub_supported": true,
+        "repair_supported": false,
+        "follow_up_bead": "bd-rchk0.5.3"
+      },
+      "artifact_requirements": [
+        "scenario_id",
+        "device_image_hashes",
+        "expected_outcome",
+        "chunk_mapping_summary"
+      ],
+      "cleanup_policy": "teardown_image_set"
+    },
+    {
+      "scenario_id": "btrfs_multidev_raid1_device_order_permutation",
+      "kind": "device_order_permutation",
+      "profile": "raid1",
+      "device_count": 2,
+      "devices": [
+        {
+          "device_id": 2,
+          "fsid_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "image_path": "fixtures/btrfs/raid1_dev1.img",
+          "image_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "byte_size": 134217728,
+          "stripe_index": 1,
+          "stale": false,
+          "present": true
+        },
+        {
+          "device_id": 1,
+          "fsid_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "image_path": "fixtures/btrfs/raid1_dev0.img",
+          "image_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "byte_size": 134217728,
+          "stripe_index": 0,
+          "stale": false,
+          "present": true
+        }
+      ],
+      "chunk_layout": {
+        "chunk_size": 1073741824,
+        "stripe_size": 65536,
+        "stripes_per_chunk": 1,
+        "mirror_count": 2
+      },
+      "degraded_state": "healthy",
+      "expected_outcome": "assembly_success",
+      "expected_refusal_remediation": "",
+      "mount_mode": "read_only",
+      "repair_scrub_boundary": {
+        "scrub_supported": true,
+        "repair_supported": false,
+        "follow_up_bead": "bd-rchk0.5.3"
+      },
+      "artifact_requirements": [
+        "scenario_id",
+        "device_image_hashes",
+        "expected_outcome",
+        "chunk_mapping_summary"
+      ],
+      "cleanup_policy": "teardown_image_set"
+    },
+    {
+      "scenario_id": "btrfs_multidev_raid1_missing_device",
+      "kind": "missing_device",
+      "profile": "raid1",
+      "device_count": 2,
+      "devices": [
+        {
+          "device_id": 1,
+          "fsid_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "image_path": "fixtures/btrfs/raid1_dev0.img",
+          "image_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "byte_size": 134217728,
+          "stripe_index": 0,
+          "stale": false,
+          "present": true
+        },
+        {
+          "device_id": 2,
+          "fsid_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "image_path": "fixtures/btrfs/raid1_dev1.img",
+          "image_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "byte_size": 134217728,
+          "stripe_index": 1,
+          "stale": false,
+          "present": false
+        }
+      ],
+      "chunk_layout": {
+        "chunk_size": 1073741824,
+        "stripe_size": 65536,
+        "stripes_per_chunk": 1,
+        "mirror_count": 2
+      },
+      "degraded_state": "missing_device",
+      "expected_outcome": "degraded_read_only",
+      "expected_refusal_remediation": "",
+      "mount_mode": "read_only",
+      "repair_scrub_boundary": {
+        "scrub_supported": true,
+        "repair_supported": false,
+        "follow_up_bead": "bd-rchk0.5.3"
+      },
+      "artifact_requirements": [
+        "scenario_id",
+        "device_image_hashes",
+        "expected_outcome",
+        "missing_device_id"
+      ],
+      "cleanup_policy": "preserve_artifacts_on_failure"
+    },
+    {
+      "scenario_id": "btrfs_multidev_raid1_duplicate_device_id",
+      "kind": "duplicate_device_id",
+      "profile": "raid1",
+      "device_count": 2,
+      "devices": [
+        {
+          "device_id": 1,
+          "fsid_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "image_path": "fixtures/btrfs/raid1_dev0.img",
+          "image_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "byte_size": 134217728,
+          "stripe_index": 0,
+          "stale": false,
+          "present": true
+        },
+        {
+          "device_id": 1,
+          "fsid_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "image_path": "fixtures/btrfs/raid1_dev0_dup.img",
+          "image_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "byte_size": 134217728,
+          "stripe_index": 0,
+          "stale": false,
+          "present": true
+        }
+      ],
+      "chunk_layout": {
+        "chunk_size": 1073741824,
+        "stripe_size": 65536,
+        "stripes_per_chunk": 1,
+        "mirror_count": 2
+      },
+      "degraded_state": "duplicate_device_id",
+      "expected_outcome": "refused_duplicate_device_id",
+      "expected_refusal_remediation": "two images claim the same device_id; remove the duplicate or rebuild the image set",
+      "mount_mode": "parser_only",
+      "repair_scrub_boundary": {
+        "scrub_supported": false,
+        "repair_supported": false,
+        "follow_up_bead": "bd-rchk0.5.3"
+      },
+      "artifact_requirements": [
+        "scenario_id",
+        "device_image_hashes",
+        "expected_outcome",
+        "duplicate_device_id"
+      ],
+      "cleanup_policy": "preserve_artifacts_on_failure"
+    },
+    {
+      "scenario_id": "btrfs_multidev_raid1_stale_superblock",
+      "kind": "stale_superblock",
+      "profile": "raid1",
+      "device_count": 2,
+      "devices": [
+        {
+          "device_id": 1,
+          "fsid_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "image_path": "fixtures/btrfs/raid1_dev0.img",
+          "image_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "byte_size": 134217728,
+          "stripe_index": 0,
+          "stale": false,
+          "present": true
+        },
+        {
+          "device_id": 2,
+          "fsid_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "image_path": "fixtures/btrfs/raid1_dev1_stale.img",
+          "image_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "byte_size": 134217728,
+          "stripe_index": 1,
+          "stale": true,
+          "present": true
+        }
+      ],
+      "chunk_layout": {
+        "chunk_size": 1073741824,
+        "stripe_size": 65536,
+        "stripes_per_chunk": 1,
+        "mirror_count": 2
+      },
+      "degraded_state": "stale_device",
+      "expected_outcome": "refused_stale_superblock",
+      "expected_refusal_remediation": "device superblock generation lags primary; resync or replace the device before reattempt",
+      "mount_mode": "parser_only",
+      "repair_scrub_boundary": {
+        "scrub_supported": false,
+        "repair_supported": false,
+        "follow_up_bead": "bd-rchk0.5.3"
+      },
+      "artifact_requirements": [
+        "scenario_id",
+        "device_image_hashes",
+        "expected_outcome",
+        "stale_device_id"
+      ],
+      "cleanup_policy": "preserve_artifacts_on_failure"
+    },
+    {
+      "scenario_id": "btrfs_multidev_raid5_unsupported_profile",
+      "kind": "unsupported_profile",
+      "profile": "raid5",
+      "device_count": 3,
+      "devices": [
+        {
+          "device_id": 1,
+          "fsid_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "image_path": "fixtures/btrfs/raid5_dev0.img",
+          "image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111122",
+          "byte_size": 134217728,
+          "stripe_index": 0,
+          "stale": false,
+          "present": true
+        },
+        {
+          "device_id": 2,
+          "fsid_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "image_path": "fixtures/btrfs/raid5_dev1.img",
+          "image_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222233",
+          "byte_size": 134217728,
+          "stripe_index": 1,
+          "stale": false,
+          "present": true
+        },
+        {
+          "device_id": 3,
+          "fsid_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "image_path": "fixtures/btrfs/raid5_dev2.img",
+          "image_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333344",
+          "byte_size": 134217728,
+          "stripe_index": 2,
+          "stale": false,
+          "present": true
+        }
+      ],
+      "chunk_layout": {
+        "chunk_size": 1073741824,
+        "stripe_size": 65536,
+        "stripes_per_chunk": 3,
+        "mirror_count": 1
+      },
+      "degraded_state": "healthy",
+      "expected_outcome": "refused_unsupported_profile",
+      "expected_refusal_remediation": "RAID5/RAID6 profiles are outside the V1 supported envelope; use RAID1 or single profile",
+      "mount_mode": "rw_unsupported",
+      "repair_scrub_boundary": {
+        "scrub_supported": false,
+        "repair_supported": false,
+        "follow_up_bead": "bd-rchk0.5.3"
+      },
+      "artifact_requirements": [
+        "scenario_id",
+        "device_image_hashes",
+        "expected_outcome",
+        "profile_classification"
+      ],
+      "cleanup_policy": "preserve_artifacts_on_failure"
+    }
+  ]
+}
