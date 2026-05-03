@@ -33,6 +33,7 @@ pub mod soak_canary_campaign;
 pub mod support_state_accounting;
 pub mod tabletop_drill;
 pub mod verification_runner;
+pub mod workload_corpus;
 pub mod xfstests;
 
 use anyhow::{Context, Result, bail};

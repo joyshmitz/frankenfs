@@ -1,0 +1,431 @@
+{
+  "schema_version": 1,
+  "corpus_id": "frankenfs_p1_user_risk_workloads",
+  "corpus_version": "2026-05-03.1",
+  "bead_id": "bd-rchk0.5.7.1",
+  "scenario_id_regex": "^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$",
+  "user_risks": [
+    "data_loss",
+    "metadata_incoherence",
+    "tail_latency",
+    "repair_overclaim",
+    "unsupported_scope_hidden",
+    "host_capability_ambiguity",
+    "permission_boundary"
+  ],
+  "operation_classes": [
+    "editor_save",
+    "package_extract",
+    "metadata_tree_churn",
+    "append_truncate",
+    "mount_reopen",
+    "ext4_specific",
+    "btrfs_specific",
+    "repair_corruption",
+    "unsupported_operation",
+    "permission_boundary",
+    "host_skip"
+  ],
+  "filesystem_flavors": [
+    "ext4",
+    "btrfs",
+    "native",
+    "mixed",
+    "not_applicable"
+  ],
+  "capability_vocabulary": [
+    "block_device_fixture",
+    "fuse_mount",
+    "host_capability_probe",
+    "default_permissions",
+    "user_xattr",
+    "metadata_ops",
+    "crash_replay",
+    "repair_symbol_decode",
+    "kernel_baseline",
+    "proof_bundle",
+    "release_gate",
+    "performance_dry_run",
+    "unsupported_v1_scope"
+  ],
+  "proof_consumers": [
+    "invariant_oracle",
+    "mounted_differential_oracle",
+    "repair_lab",
+    "crash_replay_lab",
+    "proof_bundle",
+    "release_gate",
+    "operational_readiness_report",
+    "performance_baseline"
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "workload_editor_save_atomic_ext4",
+      "title": "Atomic editor-save sequence on ext4",
+      "status": "positive",
+      "user_risk": "data_loss",
+      "operation_class": "editor_save",
+      "supported_filesystems": ["ext4"],
+      "required_capabilities": ["block_device_fixture", "metadata_ops", "crash_replay"],
+      "expected_artifacts": [
+        {
+          "path": "workload/editor_save_ext4/operation_trace.jsonl",
+          "kind": "operation_trace",
+          "required": true
+        },
+        {
+          "path": "workload/editor_save_ext4/survivor_manifest.json",
+          "kind": "survivor_manifest",
+          "required": true
+        }
+      ],
+      "expected_logs": [
+        {
+          "marker": "WORKLOAD_CORPUS_SCENARIO",
+          "required_fields": ["scenario_id", "user_risk", "reproduction_command"]
+        }
+      ],
+      "linked_proof_consumers": ["invariant_oracle", "crash_replay_lab", "proof_bundle"],
+      "linked_e2e_suites": [
+        "scripts/e2e/ffs_invariant_oracle_e2e.sh",
+        "scripts/e2e/ffs_crash_matrix_e2e.sh"
+      ],
+      "reproduction_command": "cargo run -p ffs-harness -- validate-workload-corpus --corpus tests/workload-corpus/p1_workload_corpus.json --select workload_editor_save_atomic_ext4"
+    },
+    {
+      "scenario_id": "workload_package_extract_parallel_mixed",
+      "title": "Package extraction fan-out with parallel creates",
+      "status": "positive",
+      "user_risk": "tail_latency",
+      "operation_class": "package_extract",
+      "supported_filesystems": ["mixed"],
+      "required_capabilities": ["block_device_fixture", "metadata_ops", "performance_dry_run"],
+      "expected_artifacts": [
+        {
+          "path": "workload/package_extract/latency_summary.json",
+          "kind": "latency_summary",
+          "required": true
+        },
+        {
+          "path": "workload/package_extract/proof_consumers.json",
+          "kind": "consumer_matrix",
+          "required": true
+        }
+      ],
+      "expected_logs": [
+        {
+          "marker": "WORKLOAD_CORPUS_SCENARIO",
+          "required_fields": ["scenario_id", "proof_consumers", "reproduction_command"]
+        }
+      ],
+      "linked_proof_consumers": [
+        "mounted_differential_oracle",
+        "performance_baseline",
+        "proof_bundle"
+      ],
+      "linked_e2e_suites": [
+        "scripts/e2e/ffs_mounted_differential_oracle_e2e.sh",
+        "scripts/e2e/ffs_performance_manifest_e2e.sh"
+      ],
+      "reproduction_command": "cargo run -p ffs-harness -- validate-performance-baseline-manifest --manifest benchmarks/performance_baseline_manifest.json"
+    },
+    {
+      "scenario_id": "workload_metadata_tree_churn_64core",
+      "title": "64-core metadata tree churn with directory fan-out",
+      "status": "positive",
+      "user_risk": "metadata_incoherence",
+      "operation_class": "metadata_tree_churn",
+      "supported_filesystems": ["ext4", "btrfs"],
+      "required_capabilities": ["fuse_mount", "metadata_ops", "performance_dry_run"],
+      "expected_artifacts": [
+        {
+          "path": "workload/metadata_churn_64core/fs_tree_before_after.json",
+          "kind": "tree_diff",
+          "required": true
+        },
+        {
+          "path": "workload/metadata_churn_64core/contention_summary.json",
+          "kind": "contention_summary",
+          "required": true
+        }
+      ],
+      "expected_logs": [
+        {
+          "marker": "WORKLOAD_CORPUS_SCENARIO",
+          "required_fields": ["scenario_id", "filesystems", "reproduction_command"]
+        }
+      ],
+      "linked_proof_consumers": [
+        "mounted_differential_oracle",
+        "operational_readiness_report",
+        "proof_bundle"
+      ],
+      "linked_e2e_suites": [
+        "scripts/e2e/ffs_mounted_write_workload_matrix.sh",
+        "scripts/e2e/ffs_operational_readiness_report_e2e.sh"
+      ],
+      "reproduction_command": "scripts/e2e/ffs_mounted_write_workload_matrix.sh --scenario mounted_write_ext4_parallel_metadata_churn"
+    },
+    {
+      "scenario_id": "workload_append_truncate_log_churn",
+      "title": "Append, truncate, and log replay pressure",
+      "status": "positive",
+      "user_risk": "data_loss",
+      "operation_class": "append_truncate",
+      "supported_filesystems": ["ext4", "native"],
+      "required_capabilities": ["block_device_fixture", "crash_replay", "metadata_ops"],
+      "expected_artifacts": [
+        {
+          "path": "workload/append_truncate/replay_schedule.json",
+          "kind": "crash_schedule",
+          "required": true
+        }
+      ],
+      "expected_logs": [
+        {
+          "marker": "WORKLOAD_CORPUS_SCENARIO",
+          "required_fields": ["scenario_id", "user_risk", "reproduction_command"]
+        }
+      ],
+      "linked_proof_consumers": ["invariant_oracle", "crash_replay_lab", "release_gate"],
+      "linked_e2e_suites": [
+        "scripts/e2e/ffs_wal_replay_e2e.sh",
+        "scripts/e2e/ffs_invariant_oracle_e2e.sh"
+      ],
+      "reproduction_command": "cargo run -p ffs-harness -- run-crash-replay --count 64 --seed 64001"
+    },
+    {
+      "scenario_id": "workload_mount_unmount_reopen_ext4",
+      "title": "Mount, unmount, and reopen survivor check",
+      "status": "positive",
+      "user_risk": "data_loss",
+      "operation_class": "mount_reopen",
+      "supported_filesystems": ["ext4"],
+      "required_capabilities": ["fuse_mount", "host_capability_probe", "crash_replay"],
+      "expected_artifacts": [
+        {
+          "path": "workload/mount_reopen_ext4/operational_manifest.json",
+          "kind": "operational_manifest",
+          "required": true
+        }
+      ],
+      "expected_logs": [
+        {
+          "marker": "WORKLOAD_CORPUS_SCENARIO",
+          "required_fields": ["scenario_id", "filesystems", "reproduction_command"]
+        }
+      ],
+      "linked_proof_consumers": [
+        "mounted_differential_oracle",
+        "crash_replay_lab",
+        "operational_readiness_report",
+        "proof_bundle"
+      ],
+      "linked_e2e_suites": [
+        "scripts/e2e/ffs_mounted_recovery_matrix_e2e.sh",
+        "scripts/e2e/ffs_operational_readiness_report_e2e.sh"
+      ],
+      "reproduction_command": "scripts/e2e/ffs_mounted_recovery_matrix_e2e.sh --scenario mounted_recovery_ext4_clean_unmount_reopen"
+    },
+    {
+      "scenario_id": "workload_ext4_dir_index_xattr_specific",
+      "title": "Ext4 dir-index and xattr preservation",
+      "status": "positive",
+      "user_risk": "metadata_incoherence",
+      "operation_class": "ext4_specific",
+      "supported_filesystems": ["ext4"],
+      "required_capabilities": ["block_device_fixture", "user_xattr", "metadata_ops"],
+      "expected_artifacts": [
+        {
+          "path": "workload/ext4_dir_index_xattr/ext4_feature_trace.json",
+          "kind": "feature_trace",
+          "required": true
+        }
+      ],
+      "expected_logs": [
+        {
+          "marker": "WORKLOAD_CORPUS_SCENARIO",
+          "required_fields": ["scenario_id", "user_risk", "reproduction_command"]
+        }
+      ],
+      "linked_proof_consumers": ["invariant_oracle", "mounted_differential_oracle", "proof_bundle"],
+      "linked_e2e_suites": [
+        "scripts/e2e/ffs_ext4_rw_smoke.sh",
+        "scripts/e2e/ffs_mounted_differential_oracle_e2e.sh"
+      ],
+      "reproduction_command": "scripts/e2e/ffs_ext4_rw_smoke.sh"
+    },
+    {
+      "scenario_id": "workload_btrfs_default_permissions_owner_diagnostic",
+      "title": "btrfs DefaultPermissions image ownership diagnostic",
+      "status": "host_skip",
+      "user_risk": "host_capability_ambiguity",
+      "operation_class": "btrfs_specific",
+      "supported_filesystems": ["btrfs"],
+      "required_capabilities": ["fuse_mount", "host_capability_probe", "default_permissions"],
+      "expected_artifacts": [
+        {
+          "path": "workload/btrfs_default_permissions/fuse_capability.json",
+          "kind": "host_capability_report",
+          "required": true
+        },
+        {
+          "path": "workload/btrfs_default_permissions/eacces_trace.json",
+          "kind": "permission_trace",
+          "required": true
+        }
+      ],
+      "expected_logs": [
+        {
+          "marker": "WORKLOAD_CORPUS_SCENARIO",
+          "required_fields": ["scenario_id", "filesystems", "reproduction_command"]
+        }
+      ],
+      "linked_proof_consumers": [
+        "mounted_differential_oracle",
+        "operational_readiness_report",
+        "proof_bundle"
+      ],
+      "linked_e2e_suites": [
+        "scripts/e2e/ffs_mounted_write_workload_matrix.sh",
+        "scripts/e2e/ffs_btrfs_capability_drift_e2e.sh"
+      ],
+      "reproduction_command": "cargo run -p ffs-harness -- fuse-capability-probe --default-permissions-eacces --out artifacts/e2e/fuse_capability.json",
+      "host_skip_reason": "Root-owned btrfs test directories mounted with default_permissions can reject writes before product code sees them."
+    },
+    {
+      "scenario_id": "workload_repair_corruption_scrub",
+      "title": "Repair corruption and dry-run scrub classification",
+      "status": "negative",
+      "user_risk": "repair_overclaim",
+      "operation_class": "repair_corruption",
+      "supported_filesystems": ["mixed"],
+      "required_capabilities": ["repair_symbol_decode", "block_device_fixture", "release_gate"],
+      "expected_artifacts": [
+        {
+          "path": "workload/repair_corruption/repair_confidence.json",
+          "kind": "repair_confidence",
+          "required": true
+        },
+        {
+          "path": "workload/repair_corruption/release_gate_row.json",
+          "kind": "release_gate_input",
+          "required": true
+        }
+      ],
+      "expected_logs": [
+        {
+          "marker": "WORKLOAD_CORPUS_SCENARIO",
+          "required_fields": ["scenario_id", "proof_consumers", "reproduction_command"]
+        }
+      ],
+      "linked_proof_consumers": ["repair_lab", "release_gate", "proof_bundle"],
+      "linked_e2e_suites": [
+        "scripts/e2e/ffs_repair_recovery_smoke.sh",
+        "scripts/e2e/ffs_release_gate_e2e.sh"
+      ],
+      "reproduction_command": "scripts/e2e/ffs_repair_recovery_smoke.sh",
+      "follow_up_bead": "bd-vf5kk"
+    },
+    {
+      "scenario_id": "workload_unsupported_device_node_reject",
+      "title": "Unsupported device-node creation rejects without mutation",
+      "status": "unsupported",
+      "user_risk": "unsupported_scope_hidden",
+      "operation_class": "unsupported_operation",
+      "supported_filesystems": ["ext4", "btrfs"],
+      "required_capabilities": ["fuse_mount", "unsupported_v1_scope", "metadata_ops"],
+      "expected_artifacts": [
+        {
+          "path": "workload/unsupported_device_node/rejection_trace.json",
+          "kind": "unsupported_scope_trace",
+          "required": true
+        }
+      ],
+      "expected_logs": [
+        {
+          "marker": "WORKLOAD_CORPUS_SCENARIO",
+          "required_fields": ["scenario_id", "reproduction_command", "user_risk"]
+        }
+      ],
+      "linked_proof_consumers": [
+        "mounted_differential_oracle",
+        "release_gate",
+        "proof_bundle"
+      ],
+      "linked_e2e_suites": [
+        "scripts/e2e/ffs_mounted_write_workload_matrix.sh",
+        "scripts/e2e/ffs_release_gate_e2e.sh"
+      ],
+      "reproduction_command": "scripts/e2e/ffs_mounted_write_workload_matrix.sh --scenario mounted_write_ext4_unsupported_mknod_reject",
+      "unsupported_reason": "Device-node creation is outside the current V1 mounted write support envelope.",
+      "follow_up_bead": "bd-rchk0.3.4"
+    },
+    {
+      "scenario_id": "workload_permission_boundary_non_owner",
+      "title": "Non-owner permission boundary and no partial mutation",
+      "status": "negative",
+      "user_risk": "permission_boundary",
+      "operation_class": "permission_boundary",
+      "supported_filesystems": ["ext4", "btrfs"],
+      "required_capabilities": ["fuse_mount", "default_permissions", "metadata_ops"],
+      "expected_artifacts": [
+        {
+          "path": "workload/permission_boundary/eacces_no_mutation.json",
+          "kind": "permission_trace",
+          "required": true
+        }
+      ],
+      "expected_logs": [
+        {
+          "marker": "WORKLOAD_CORPUS_SCENARIO",
+          "required_fields": ["scenario_id", "filesystems", "reproduction_command"]
+        }
+      ],
+      "linked_proof_consumers": [
+        "mounted_differential_oracle",
+        "operational_readiness_report",
+        "proof_bundle"
+      ],
+      "linked_e2e_suites": [
+        "scripts/e2e/ffs_fuse_production.sh",
+        "scripts/e2e/ffs_operational_readiness_report_e2e.sh"
+      ],
+      "reproduction_command": "scripts/e2e/ffs_fuse_production.sh --default-permissions",
+      "follow_up_bead": "bd-7mj5d"
+    },
+    {
+      "scenario_id": "workload_expected_host_skip_fuse_permission",
+      "title": "Expected host skip for missing FUSE access",
+      "status": "host_skip",
+      "user_risk": "host_capability_ambiguity",
+      "operation_class": "host_skip",
+      "supported_filesystems": ["not_applicable"],
+      "required_capabilities": ["host_capability_probe", "fuse_mount"],
+      "expected_artifacts": [
+        {
+          "path": "workload/host_skip/fuse_capability.json",
+          "kind": "host_capability_report",
+          "required": true
+        }
+      ],
+      "expected_logs": [
+        {
+          "marker": "WORKLOAD_CORPUS_SCENARIO",
+          "required_fields": ["scenario_id", "user_risk", "reproduction_command"]
+        }
+      ],
+      "linked_proof_consumers": [
+        "mounted_differential_oracle",
+        "operational_readiness_report",
+        "proof_bundle"
+      ],
+      "linked_e2e_suites": [
+        "scripts/e2e/ffs_mount_runtime_gate_e2e.sh",
+        "scripts/e2e/ffs_operational_readiness_report_e2e.sh"
+      ],
+      "reproduction_command": "cargo run -p ffs-harness -- fuse-capability-probe --require-mount-probe",
+      "host_skip_reason": "FUSE lanes must skip with explicit host capability evidence when /dev/fuse, fusermount, namespace, or mount permissions are unavailable."
+    }
+  ]
+}

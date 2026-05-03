@@ -1042,6 +1042,52 @@
           "evidence": "scenario_result \"proof_budget_unit_tests\" \"PASS\""
         }
       ]
+    },
+    {
+      "suite_id": "ffs_workload_corpus",
+      "script": "scripts/e2e/ffs_workload_corpus_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "workload_corpus_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"workload_corpus_cli_wired\" \"PASS\""
+        },
+        {
+          "id": "workload_corpus_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"workload_corpus_validates\" \"PASS\""
+        },
+        {
+          "id": "workload_corpus_proof_coverage",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"workload_corpus_proof_coverage\" \"PASS\""
+        },
+        {
+          "id": "workload_corpus_invalid_variants_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"workload_corpus_invalid_variants_rejected\" \"PASS\""
+        },
+        {
+          "id": "workload_corpus_docs_contract",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"workload_corpus_docs_contract\" \"PASS\""
+        },
+        {
+          "id": "workload_corpus_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"workload_corpus_unit_tests\" \"PASS\""
+        }
+      ]
     }
   ],
   "gate_minimums": [

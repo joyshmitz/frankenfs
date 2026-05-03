@@ -56,6 +56,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 # Run cross-oracle disagreement arbitration validation smoke
 ./scripts/e2e/ffs_cross_oracle_arbitration_e2e.sh
 
+# Run P1 workload corpus schema and proof-consumer coverage smoke
+./scripts/e2e/ffs_workload_corpus_e2e.sh
+
 # Run performance baseline manifest dry-run validation
 ./scripts/e2e/ffs_performance_manifest_e2e.sh
 
@@ -114,6 +117,34 @@ The catalog encodes minimum category coverage per hardening epic (`gate_minimums
 - `bd-h6nz.6` open-question closures
 - `bd-h6nz.7` operator tooling
 - `bd-h6nz.9` cross-epic verification contract
+
+## Workload Corpus Contract
+
+The P1 user-risk workload corpus lives in:
+
+- `tests/workload-corpus/p1_workload_corpus.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-workload-corpus \
+  --corpus tests/workload-corpus/p1_workload_corpus.json \
+  --out artifacts/workload_corpus/report.json \
+  --summary-out artifacts/workload_corpus/summary.md
+```
+
+Every new corpus scenario must include:
+
+- `scenario_id`: stable lowercase snake-case with at least three segments.
+- `user_risk`: one of the corpus risk classes, such as `data_loss`, `tail_latency`, `permission_boundary`, or `host_capability_ambiguity`.
+- `operation_class`: the workload family, such as `editor_save`, `package_extract`, `metadata_tree_churn`, `append_truncate`, `repair_corruption`, or `host_skip`.
+- `supported_filesystems`: explicit filesystem flavors, never implied from the title.
+- `required_capabilities`: host and product prerequisites such as `fuse_mount`, `host_capability_probe`, `default_permissions`, `repair_symbol_decode`, or `performance_dry_run`.
+- `expected_artifacts` and `expected_logs`: enough evidence for a proof runner to validate the scenario without rerunning immediately.
+- `linked_proof_consumers`: at least two consumers, commonly `invariant_oracle`, `mounted_differential_oracle`, `repair_lab`, `crash_replay_lab`, `proof_bundle`, `release_gate`, `operational_readiness_report`, or `performance_baseline`.
+- `reproduction_command`: an exact command template that preserves the workload identity in logs.
+
+Unsupported behavior must use `status: "unsupported"` with `unsupported_reason` plus either `follow_up_bead` or `non_goal_reason`. Host-only blockers must use `status: "host_skip"` with `host_skip_reason`; the required capabilities must include a host or FUSE capability so the skip cannot be mistaken for product success. The initial corpus intentionally includes the btrfs DefaultPermissions root-owned image-ownership diagnostic and a generic missing-FUSE host skip so mounted proof consumers keep host limitations separate from FrankenFS failures.
 
 ## Artifact Manifest Contract
 

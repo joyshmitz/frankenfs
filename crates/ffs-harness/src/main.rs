@@ -80,6 +80,10 @@ use ffs_harness::{
     },
     validate_btrfs_fixture, validate_ext4_fixture,
     verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
+    workload_corpus::{
+        DEFAULT_WORKLOAD_CORPUS_PATH, fail_on_workload_corpus_errors, load_workload_corpus,
+        render_workload_corpus_markdown, validate_workload_corpus,
+    },
     xfstests::{
         XfstestsStatus, apply_allowlist, compare_against_baseline, load_allowlist, load_baseline,
         load_selected_tests, parse_check_output, summarize_uniform, write_junit_xml,
@@ -171,6 +175,7 @@ fn run() -> Result<()> {
         Some("validate-repair-writeback-serialization") => {
             validate_repair_writeback_serialization_cmd(&args[1..])
         }
+        Some("validate-workload-corpus") => validate_workload_corpus_cmd(&args[1..]),
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
         Some("validate-mounted-write-matrix") => validate_mounted_write_matrix_cmd(&args[1..]),
         Some("validate-mounted-recovery-matrix") => {
@@ -243,6 +248,97 @@ struct RepairWritebackSerializationCmdArgs {
     out_path: Option<String>,
     artifact_out_path: Option<String>,
     summary_out_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct WorkloadCorpusCmdArgs {
+    corpus_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+fn validate_workload_corpus_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_workload_corpus_cmd_args(args)? else {
+        return Ok(());
+    };
+    let corpus = load_workload_corpus(Path::new(&cmd_args.corpus_path))?;
+    let report = validate_workload_corpus(&corpus);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_workload_corpus_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "workload corpus report written: {} valid={} scenarios={}",
+            path, report.valid, report.scenario_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_workload_corpus_markdown(&report)),
+        )?;
+        println!("workload corpus summary written: {path}");
+    }
+
+    fail_on_workload_corpus_errors(&report)
+}
+
+fn parse_workload_corpus_cmd_args(args: &[String]) -> Result<Option<WorkloadCorpusCmdArgs>> {
+    let mut corpus_path = DEFAULT_WORKLOAD_CORPUS_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--corpus" => {
+                i += 1;
+                corpus_path = args.get(i).context("--corpus requires a path")?.to_owned();
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--select" => {
+                i += 1;
+                let _ = args.get(i).context("--select requires a scenario id")?;
+            }
+            "--help" | "-h" => {
+                print_workload_corpus_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-workload-corpus argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(WorkloadCorpusCmdArgs {
+        corpus_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
 }
 
 fn operational_readiness_report_cmd(args: &[String]) -> Result<()> {
@@ -2102,6 +2198,7 @@ fn print_usage() {
     print_adversarial_threat_model_usage_summary();
     print_soak_canary_campaign_usage_summary();
     print_repair_writeback_serialization_usage_summary();
+    print_workload_corpus_usage_summary();
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
     println!("  ffs-harness validate-mounted-recovery-matrix [--matrix FILE] [--out FILE]");
     println!();
@@ -2175,6 +2272,7 @@ fn print_usage_examples() {
     print_adversarial_threat_model_example();
     print_soak_canary_campaign_example();
     print_repair_writeback_serialization_example();
+    print_workload_corpus_example();
     println!(
         "  ffs-harness validate-mounted-write-matrix --out artifacts/e2e/mounted_write_matrix.json"
     );
@@ -2228,6 +2326,18 @@ fn print_repair_writeback_serialization_usage_summary() {
 fn print_repair_writeback_serialization_example() {
     println!(
         "  ffs-harness validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --out artifacts/repair-writeback/contract_report.json --artifact-out artifacts/repair-writeback/sample_artifact_manifest.json --summary-out artifacts/repair-writeback/contract_summary.md"
+    );
+}
+
+fn print_workload_corpus_usage_summary() {
+    println!(
+        "  ffs-harness validate-workload-corpus [--corpus FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_workload_corpus_example() {
+    println!(
+        "  ffs-harness validate-workload-corpus --corpus tests/workload-corpus/p1_workload_corpus.json --out artifacts/workload_corpus/report.json --summary-out artifacts/workload_corpus/summary.md"
     );
 }
 
@@ -2383,6 +2493,19 @@ fn print_repair_writeback_serialization_usage() {
     println!("  --out FILE                         Write validation report JSON");
     println!("  --artifact-out FILE                Write sample shared QA artifact manifest JSON");
     println!("  --summary-out FILE                 Write Markdown contract summary");
+}
+
+fn print_workload_corpus_usage() {
+    println!("Usage: ffs-harness validate-workload-corpus [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --corpus FILE                      Read workload corpus JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report");
+    println!("  --summary-out FILE                 Write Markdown corpus summary");
+    println!(
+        "  --select SCENARIO_ID               Accepted by repro commands; validates the corpus envelope"
+    );
 }
 
 fn print_mounted_write_matrix_usage() {
