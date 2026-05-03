@@ -5,7 +5,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_alloc::succinct::SuccinctBitmap;
-use ffs_alloc::{bitmap_count_free, bitmap_find_free};
+use ffs_alloc::{bitmap_count_free, bitmap_find_contiguous, bitmap_find_free};
 use std::hint::black_box;
 
 /// Build a realistic ext4-like bitmap: 4096 bytes (32768 bits),
@@ -57,6 +57,25 @@ fn bench_find_free(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_find_contiguous(c: &mut Criterion) {
+    let bm = make_bitmap();
+
+    let mut group = c.benchmark_group("find_contiguous");
+
+    group.bench_function("plain_32_O(n)", |b| {
+        b.iter(|| {
+            black_box(bitmap_find_contiguous(
+                black_box(&bm),
+                32768,
+                black_box(32),
+                black_box(16000),
+            ))
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_rank(c: &mut Criterion) {
     let bm = make_bitmap();
     let sb = SuccinctBitmap::build(&bm, 32768);
@@ -88,6 +107,7 @@ criterion_group!(
     benches,
     bench_count_free,
     bench_find_free,
+    bench_find_contiguous,
     bench_rank,
     bench_select,
     bench_build,

@@ -229,14 +229,43 @@ fn bitmap_find_contiguous_linear(bitmap: &[u8], count: u32, n: u32, start: u32) 
     let mut idx = start;
 
     while idx < count {
-        // Optimization: if we are at a byte boundary and need more than 8 bits,
-        // we can skip full 0xFF bytes.
-        if idx % 8 == 0 && (idx + 8) <= count && run_len == 0 {
+        if idx % 8 == 0 && (idx + 8) <= count {
             let byte_idx = (idx / 8) as usize;
-            if bitmap.get(byte_idx).is_none_or(|byte| *byte == 0xFF) {
-                idx += 8;
-                run_start = idx;
-                continue;
+            match bitmap.get(byte_idx).copied() {
+                None | Some(0xFF) => {
+                    idx += 8;
+                    run_start = idx;
+                    run_len = 0;
+                    continue;
+                }
+                Some(0x00) => {
+                    if run_len == 0 {
+                        run_start = idx;
+                    }
+                    run_len = run_len.saturating_add(8);
+                    if run_len >= n {
+                        return Some(run_start);
+                    }
+                    idx += 8;
+                    continue;
+                }
+                Some(byte) => {
+                    let base = idx;
+                    for bit in 0..8 {
+                        let pos = base + bit;
+                        if (byte >> bit) & 1 == 1 {
+                            run_start = pos + 1;
+                            run_len = 0;
+                        } else {
+                            run_len += 1;
+                            if run_len >= n {
+                                return Some(run_start);
+                            }
+                        }
+                    }
+                    idx += 8;
+                    continue;
+                }
             }
         }
 
@@ -1903,6 +1932,18 @@ mod tests {
         bitmap_set(&mut bm, 1);
         // Free: 2,3,4,5,... contiguous from 2
         assert_eq!(bitmap_find_contiguous(&bm, 32, 4, 0), Some(2));
+    }
+
+    #[test]
+    fn bitmap_find_contiguous_byte_scan_extends_partial_run() {
+        let bm = vec![0b0000_0011, 0x00, 0xFF];
+        assert_eq!(bitmap_find_contiguous(&bm, 24, 10, 2), Some(2));
+    }
+
+    #[test]
+    fn bitmap_find_contiguous_overscan_treats_missing_bytes_as_allocated() {
+        let bm = vec![0x00];
+        assert_eq!(bitmap_find_contiguous(&bm, 16, 9, 0), None);
     }
 
     #[test]
