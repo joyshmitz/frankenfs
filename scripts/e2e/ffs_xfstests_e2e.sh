@@ -30,6 +30,8 @@ XFSTESTS_EXT4_LIST="${XFSTESTS_EXT4_LIST:-$REPO_ROOT/scripts/e2e/xfstests_ext4.l
 XFSTESTS_REGRESSION_GUARD_JSON="${XFSTESTS_REGRESSION_GUARD_JSON:-$REPO_ROOT/scripts/e2e/xfstests_regression_guard.json}"
 XFSTESTS_ALLOWLIST_JSON="${XFSTESTS_ALLOWLIST_JSON:-$REPO_ROOT/scripts/e2e/xfstests_allowlist.json}"
 XFSTESTS_BASELINE_JSON="${XFSTESTS_BASELINE_JSON:-}"
+XFSTESTS_PREFLIGHT_SCRIPT="${XFSTESTS_PREFLIGHT_SCRIPT:-$REPO_ROOT/scripts/e2e/ffs_xfstests_preflight_e2e.sh}"
+XFSTESTS_PREFLIGHT_MAX_AGE_SECS="${XFSTESTS_PREFLIGHT_MAX_AGE_SECS:-3600}"
 FFS_HARNESS_BIN="${FFS_HARNESS_BIN:-$REPO_ROOT/target/debug/ffs-harness}"
 
 ARTIFACT_DIR="$E2E_LOG_DIR/xfstests"
@@ -40,6 +42,7 @@ JUNIT_FILE="$ARTIFACT_DIR/junit.xml"
 CHECK_LOG="$ARTIFACT_DIR/check.log"
 POLICY_PLAN_JSON="$ARTIFACT_DIR/policy_plan.json"
 POLICY_REPORT_MD="$ARTIFACT_DIR/policy_report.md"
+XFSTESTS_PREFLIGHT_JSON="${XFSTESTS_PREFLIGHT_JSON:-$ARTIFACT_DIR/preflight.json}"
 mkdir -p "$ARTIFACT_DIR"
 
 declare -a GENERIC_TESTS=()
@@ -86,6 +89,7 @@ write_summary() {
     local safe_check_log="${CHECK_LOG//\"/\\\"}"
     local safe_policy_plan="${POLICY_PLAN_JSON//\"/\\\"}"
     local safe_policy_report="${POLICY_REPORT_MD//\"/\\\"}"
+    local safe_preflight="${XFSTESTS_PREFLIGHT_JSON//\"/\\\"}"
     local safe_summary="${SUMMARY_JSON//\"/\\\"}"
     local command_plan="./check"
     if [[ "$XFSTESTS_DRY_RUN" == "1" ]]; then
@@ -112,6 +116,7 @@ write_summary() {
   "results_json": "$safe_results",
   "junit_xml": "$safe_junit",
   "check_log": "$safe_check_log",
+  "preflight_json": "$safe_preflight",
   "policy_plan_json": "$safe_policy_plan",
   "policy_report_md": "$safe_policy_report",
   "command_plan": "$safe_command_plan",
@@ -121,6 +126,7 @@ write_summary() {
     "results_json": "$safe_results",
     "junit_xml": "$safe_junit",
     "check_log": "$safe_check_log",
+    "preflight_json": "$safe_preflight",
     "policy_plan_json": "$safe_policy_plan",
     "policy_report_md": "$safe_policy_report",
     "summary_json": "$safe_summary"
@@ -461,6 +467,99 @@ skip_or_fail() {
     e2e_skip "$reason"
 }
 
+ensure_xfstests_preflight() {
+    e2e_step "xfstests prerequisite preflight"
+
+    if [[ ! -f "$XFSTESTS_PREFLIGHT_JSON" ]]; then
+        if [[ ! -f "$XFSTESTS_PREFLIGHT_SCRIPT" ]]; then
+            skip_or_fail "xfstests prerequisite preflight script missing: $XFSTESTS_PREFLIGHT_SCRIPT"
+        fi
+        if ! "$XFSTESTS_PREFLIGHT_SCRIPT" --out "$XFSTESTS_PREFLIGHT_JSON" >"$ARTIFACT_DIR/preflight.stdout" 2>"$ARTIFACT_DIR/preflight.stderr"; then
+            skip_or_fail "xfstests prerequisite preflight failed to emit proof (stdout=$ARTIFACT_DIR/preflight.stdout stderr=$ARTIFACT_DIR/preflight.stderr)"
+        fi
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        skip_or_fail "python3 is required to validate xfstests prerequisite proof"
+    fi
+
+    local preflight_reason
+    if ! preflight_reason="$(python3 - "$XFSTESTS_PREFLIGHT_JSON" "$XFSTESTS_PREFLIGHT_MAX_AGE_SECS" <<'PY'
+import json
+import pathlib
+import sys
+from datetime import datetime, timezone
+
+manifest_path = pathlib.Path(sys.argv[1])
+max_age_secs = int(sys.argv[2])
+required = {
+    "xfs_headers",
+    "libaio",
+    "ltp_fsstress",
+    "xfstests_helpers",
+    "mkfs_mount_helpers",
+    "dev_fuse",
+    "fusermount3",
+    "user_namespace_or_mount_permissions",
+    "scratch_test_directories",
+    "dpkg_lock_state",
+    "rch_ci_worker_identity",
+}
+
+if not manifest_path.exists():
+    print(f"missing preflight manifest: {manifest_path}")
+    sys.exit(1)
+
+try:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+except Exception as exc:
+    print(f"invalid preflight manifest JSON: {exc}")
+    sys.exit(1)
+
+created_at = manifest.get("created_at")
+try:
+    created = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+except ValueError:
+    print(f"invalid preflight created_at: {created_at}")
+    sys.exit(1)
+age = (datetime.now(timezone.utc) - created).total_seconds()
+if age > max_age_secs:
+    print(f"stale preflight manifest: age_secs={age:.0f} max_age_secs={max_age_secs}")
+    sys.exit(1)
+
+prereqs = manifest.get("prerequisites")
+if not isinstance(prereqs, list):
+    print("preflight manifest prerequisites must be a list")
+    sys.exit(1)
+names = {row.get("name") for row in prereqs if isinstance(row, dict)}
+missing_names = sorted(required - names)
+if missing_names:
+    print(f"preflight manifest missing prerequisite probes: {', '.join(missing_names)}")
+    sys.exit(1)
+
+blocking = manifest.get("blocking_prerequisites", [])
+if manifest.get("verdict") != "pass" or blocking:
+    blocking_text = ", ".join(blocking) if isinstance(blocking, list) else str(blocking)
+    print(f"preflight verdict={manifest.get('verdict')} blocking={blocking_text}")
+    sys.exit(1)
+
+for row in prereqs:
+    if not isinstance(row, dict):
+        print("preflight prerequisite row must be an object")
+        sys.exit(1)
+    if row.get("blocks_real_xfstests") and row.get("status") != "present":
+        print(f"blocking prerequisite is not present: {row.get('name')} status={row.get('status')}")
+        sys.exit(1)
+
+print("preflight passed")
+PY
+)"; then
+        skip_or_fail "xfstests prerequisite proof unavailable for product baseline: $preflight_reason"
+    fi
+
+    e2e_log "Preflight manifest accepted: $XFSTESTS_PREFLIGHT_JSON ($preflight_reason)"
+}
+
 load_test_list() {
     local list_path="$1"
     local kind="$2"
@@ -784,6 +883,8 @@ fi
 if [[ "$EFFECTIVE_MODE" != "run" ]]; then
     e2e_fail "Invalid XFSTESTS_MODE='$XFSTESTS_MODE' (expected auto|plan|run)"
 fi
+
+ensure_xfstests_preflight
 
 if [[ -z "$XFSTESTS_DIR" ]]; then
     skip_or_fail "XFSTESTS_DIR is not set and no default xfstests checkout was found"
