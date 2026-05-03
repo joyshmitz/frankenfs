@@ -12,6 +12,7 @@ pub mod fuzz_dashboard;
 pub mod health_consistency;
 pub mod log_contract;
 pub mod metrics;
+pub mod mounted_recovery_matrix;
 pub mod mounted_write_matrix;
 pub mod open_ended_inventory;
 pub mod operational_readiness_report;

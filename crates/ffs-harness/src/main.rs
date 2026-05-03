@@ -13,6 +13,10 @@ use ffs_harness::{
     },
     e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
     extract_btrfs_superblock, extract_ext4_superblock, extract_region,
+    mounted_recovery_matrix::{
+        DEFAULT_RECOVERY_MATRIX_PATH, fail_on_mounted_recovery_matrix_errors,
+        load_mounted_recovery_matrix, validate_mounted_recovery_matrix,
+    },
     mounted_write_matrix::{
         DEFAULT_MATRIX_PATH, fail_on_mounted_write_matrix_errors, load_mounted_write_matrix,
         validate_mounted_write_matrix,
@@ -98,6 +102,9 @@ fn run() -> Result<()> {
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
         Some("validate-mounted-write-matrix") => validate_mounted_write_matrix_cmd(&args[1..]),
+        Some("validate-mounted-recovery-matrix") => {
+            validate_mounted_recovery_matrix_cmd(&args[1..])
+        }
         Some("--help" | "-h" | "help") | None => {
             print_usage();
             Ok(())
@@ -675,6 +682,57 @@ fn validate_mounted_write_matrix_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn validate_mounted_recovery_matrix_cmd(args: &[String]) -> Result<()> {
+    let mut matrix_path = DEFAULT_RECOVERY_MATRIX_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--matrix" => {
+                i += 1;
+                args.get(i)
+                    .context("--matrix requires a path")?
+                    .clone_into(&mut matrix_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--help" | "-h" => {
+                print_mounted_recovery_matrix_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-mounted-recovery-matrix argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let matrix = load_mounted_recovery_matrix(Path::new(&matrix_path))?;
+    let report = validate_mounted_recovery_matrix(&matrix);
+    fail_on_mounted_recovery_matrix_errors(&report)?;
+    let json = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = out_path {
+        let path = Path::new(&path);
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(path, format!("{json}\n"))
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        println!(
+            "mounted recovery matrix report written: {} scenarios={}",
+            path.display(),
+            report.scenario_count
+        );
+    } else {
+        println!("{json}");
+    }
+    Ok(())
+}
+
 fn fuse_capability_probe_cmd(args: &[String]) -> Result<()> {
     let mut out_path: Option<String> = None;
     let mut options = FuseHostProbeOptions::default();
@@ -924,6 +982,7 @@ fn print_usage() {
         "  ffs-harness validate-proof-overhead-budget --budget FILE --metrics FILE [--out FILE]"
     );
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
+    println!("  ffs-harness validate-mounted-recovery-matrix [--matrix FILE] [--out FILE]");
     println!();
     println!("FIXTURE GENERATION:");
     println!("  Extracts sparse JSON fixtures from real filesystem images.");
@@ -971,6 +1030,9 @@ fn print_usage() {
     );
     println!(
         "  ffs-harness validate-mounted-write-matrix --out artifacts/e2e/mounted_write_matrix.json"
+    );
+    println!(
+        "  ffs-harness validate-mounted-recovery-matrix --out artifacts/e2e/mounted_recovery_matrix.json"
     );
 }
 
@@ -1037,5 +1099,13 @@ fn print_mounted_write_matrix_usage() {
     println!();
     println!("Options:");
     println!("  --matrix FILE                      Read matrix JSON from FILE");
+    println!("  --out FILE                         Write JSON validation report to FILE");
+}
+
+fn print_mounted_recovery_matrix_usage() {
+    println!("Usage: ffs-harness validate-mounted-recovery-matrix [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --matrix FILE                      Read mounted recovery matrix JSON from FILE");
     println!("  --out FILE                         Write JSON validation report to FILE");
 }

@@ -17,6 +17,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 # Run btrfs read-write smoke + crash matrix + persistence checks
 ./scripts/e2e/ffs_btrfs_rw_smoke.sh
 
+# Run mounted recovery lifecycle matrix contract checks
+./scripts/e2e/ffs_mounted_recovery_matrix_e2e.sh
+
 # Run btrfs read-only FUSE smoke
 ./scripts/e2e/ffs_btrfs_ro_smoke.sh
 
@@ -357,6 +360,14 @@ The btrfs read-write smoke suite exercises:
 8. Structured sync observability checks at fsync boundaries (`btrfs_sync_applied` with `operation_id` + `scenario_id` in mount logs)
 9. CI artifacts: structured per-test timing logs, machine-parseable `SCENARIO_RESULT|scenario_id=...` markers, and a `junit.xml` report under the suite artifact directory
 
+The mounted recovery matrix suite exercises:
+
+1. Recovery matrix validation for `bd-rchk0.3.3`
+2. Clean unmount, forced unmount, process termination, fsync-file, fsync-dir, reopen, and cleanup lifecycle rows
+3. Safe process-control boundaries for temporary images and mount-daemon scoped termination
+4. Shared QA artifacts with pre-crash operations, crash/unmount point, recovery command, expected survivors, actual state artifact, stdout/stderr paths, cleanup status, and product/host/harness/unsupported classification vocabulary
+5. Fail-closed validation for missing lifecycle coverage and unsafe recovery commands
+
 The btrfs read-only smoke suite exercises:
 
 1. Runtime btrfs fixture generation via `scripts/fixtures/make_btrfs_reference_image.sh`
@@ -415,6 +426,7 @@ The current suites still emit their native logs/reports directly. The shared art
 | `FFS_USE_RCH` | `1` | For `ffs_degradation_stress.sh`, `ffs_fuse_production.sh`, `ffs_btrfs_rw_smoke.sh`, `ffs_ext4_ro_roundtrip.sh`, and `ffs_ext4_rw_smoke.sh`: offload cargo commands via `rch exec -- cargo ...` when available |
 | `FFS_RUN_BTRFS_LANE_PROBE` | `1` | For `ffs_fuse_production.sh`: if `1`, attempt a minimal btrfs mount/unmount in the permissioned-lane probe |
 | `FFS_REQUIRE_BTRFS_LANE_PROBE` | `0` | For `ffs_fuse_production.sh`: if `1`, fail the permissioned lane when btrfs fixture generation or btrfs mount/unmount probing cannot run |
+| `FFS_MOUNTED_RECOVERY_MATRIX` | `tests/workload-matrix/mounted_recovery_matrix.json` | Optional matrix path for `ffs_mounted_recovery_matrix_e2e.sh` |
 | `FFS_RUN_MOUNT_STRESS` | `0` | For `ffs_degradation_stress.sh`: if `1`, attempt optional live FUSE mount pressure probe |
 | `DEGRADATION_STRESS_DURATION_SECS` | `20` | Duration for host `stress-ng` probe in `ffs_degradation_stress.sh` |
 | `DEGRADATION_STRESS_CPU_WORKERS` | `4` | CPU workers for host `stress-ng` probe in `ffs_degradation_stress.sh` |

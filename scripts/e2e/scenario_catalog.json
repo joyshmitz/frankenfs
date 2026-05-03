@@ -16,8 +16,7 @@
       "script": "scripts/e2e/ffs_smoke.sh",
       "required_categories": [
         "happy",
-        "error",
-        "unsupported_op"
+        "error"
       ],
       "scenarios": [
         {
@@ -33,10 +32,10 @@
           "evidence": "cli_mount_runtime_invalid_standard_timeout"
         },
         {
-          "id": "cli_mount_runtime_unwired_managed_mode",
-          "category": "unsupported_op",
+          "id": "cli_mount_runtime_managed_bad_mountpoint",
+          "category": "error",
           "status": "active",
-          "evidence": "cli_mount_runtime_unwired_managed_mode"
+          "evidence": "cli_mount_runtime_managed_bad_mountpoint"
         },
         {
           "id": "cli_mount_runtime_benchmark_taxonomy_coverage",
@@ -362,6 +361,59 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=perf_comparison_envelope_integration|outcome=PASS"
+        }
+      ]
+    },
+    {
+      "suite_id": "ffs_mounted_recovery_matrix",
+      "script": "scripts/e2e/ffs_mounted_recovery_matrix_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "mounted_recovery_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"mounted_recovery_cli_wired\" \"PASS\""
+        },
+        {
+          "id": "mounted_recovery_matrix_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"mounted_recovery_matrix_validates\" \"PASS\""
+        },
+        {
+          "id": "mounted_recovery_artifacts_generated",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "scenario_result \"mounted_recovery_artifacts_generated\" \"PASS\""
+        },
+        {
+          "id": "mounted_recovery_artifact_contract",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "scenario_result \"mounted_recovery_artifact_contract\" \"PASS\""
+        },
+        {
+          "id": "mounted_recovery_missing_lifecycle_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"mounted_recovery_missing_lifecycle_rejected\" \"PASS\""
+        },
+        {
+          "id": "mounted_recovery_unsafe_command_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"mounted_recovery_unsafe_command_rejected\" \"PASS\""
+        },
+        {
+          "id": "mounted_recovery_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"mounted_recovery_unit_tests\" \"PASS\""
         }
       ]
     },
