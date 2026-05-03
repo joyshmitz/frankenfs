@@ -16,7 +16,7 @@ use ffs_types::{
     BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, ByteOffset, CommitSeq,
     EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE, TxnId,
 };
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::File;
@@ -24,7 +24,7 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, trace, warn};
@@ -802,6 +802,146 @@ pub struct CachePressureReport {
     pub target_size: usize,
     pub dirty_count: usize,
     pub eviction_rate: f64,
+}
+
+/// Number of page-lock shards to provision per available CPU.
+pub const PAGE_LOCK_SHARDS_PER_CORE: usize = 4;
+/// Minimum page-lock shard count.
+pub const MIN_PAGE_LOCK_SHARDS: usize = 16;
+/// Maximum page-lock shard count.
+pub const MAX_PAGE_LOCK_SHARDS: usize = 1024;
+
+struct PageLockShard {
+    in_flight: Mutex<Vec<BlockNumber>>,
+    ready: Condvar,
+    waiters: AtomicUsize,
+}
+
+impl PageLockShard {
+    fn new() -> Self {
+        Self {
+            in_flight: Mutex::new(Vec::with_capacity(4)),
+            ready: Condvar::new(),
+            waiters: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl std::fmt::Debug for PageLockShard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PageLockShard")
+            .field("in_flight", &self.in_flight.lock().len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Sharded per-block miss coalescer for cache read misses.
+///
+/// The table serializes only concurrent cold reads for the same block. Distinct
+/// blocks map to independent shards, so large readdir/readahead and metadata
+/// walks can continue to exploit device-level parallelism while avoiding a
+/// same-block stampede during hot metadata warm-up.
+pub struct PageLockTable {
+    shards: Vec<PageLockShard>,
+}
+
+impl PageLockTable {
+    /// Create a page-lock table with a rounded, bounded shard count.
+    #[must_use]
+    pub fn new(shard_count: usize) -> Self {
+        let shard_count = shard_count
+            .clamp(1, MAX_PAGE_LOCK_SHARDS)
+            .next_power_of_two();
+        let shards = (0..shard_count).map(|_| PageLockShard::new()).collect();
+        Self { shards }
+    }
+
+    /// Create a host-sized table (`available_parallelism * 4`, bounded).
+    #[must_use]
+    pub fn for_host_parallelism() -> Self {
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let shard_count = cores
+            .saturating_mul(PAGE_LOCK_SHARDS_PER_CORE)
+            .clamp(MIN_PAGE_LOCK_SHARDS, MAX_PAGE_LOCK_SHARDS);
+        Self::new(shard_count)
+    }
+
+    /// Number of lock shards in the table.
+    #[must_use]
+    pub fn shard_count(&self) -> usize {
+        self.shards.len()
+    }
+
+    /// Current number of blocks being loaded through this table.
+    #[must_use]
+    pub fn in_flight_len(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| shard.in_flight.lock().len())
+            .sum()
+    }
+
+    fn acquire(&self, block: BlockNumber) -> PageLockPermit<'_> {
+        let shard = &self.shards[self.shard_index(block)];
+        let mut in_flight = shard.in_flight.lock();
+        while in_flight.contains(&block) {
+            shard.waiters.fetch_add(1, Ordering::AcqRel);
+            shard.ready.wait(&mut in_flight);
+            shard.waiters.fetch_sub(1, Ordering::AcqRel);
+        }
+        in_flight.push(block);
+        drop(in_flight);
+        PageLockPermit { shard, block }
+    }
+
+    fn shard_index(&self, block: BlockNumber) -> usize {
+        let len = self.shards.len();
+        let mixed = mix_block_number(block.0);
+        let len_u64 = u64::try_from(len).unwrap_or(u64::MAX);
+        let idx = if len.is_power_of_two() {
+            mixed & len_u64.saturating_sub(1)
+        } else {
+            mixed % len_u64
+        };
+        usize::try_from(idx).unwrap_or(0)
+    }
+}
+
+impl std::fmt::Debug for PageLockTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PageLockTable")
+            .field("shard_count", &self.shard_count())
+            .field("in_flight", &self.in_flight_len())
+            .finish()
+    }
+}
+
+/// Held while a single block is being populated after a cache miss.
+pub struct PageLockPermit<'a> {
+    shard: &'a PageLockShard,
+    block: BlockNumber,
+}
+
+impl Drop for PageLockPermit<'_> {
+    fn drop(&mut self) {
+        let mut in_flight = self.shard.in_flight.lock();
+        let removed = in_flight
+            .iter()
+            .position(|block| *block == self.block)
+            .map(|idx| in_flight.swap_remove(idx))
+            .is_some();
+        drop(in_flight);
+        if removed && self.shard.waiters.load(Ordering::Acquire) > 0 {
+            self.shard.ready.notify_all();
+        }
+    }
+}
+
+#[inline]
+fn mix_block_number(mut value: u64) -> u64 {
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2078,8 +2218,10 @@ impl ArcState {
 /// # Concurrency design
 ///
 /// **Locking strategy:** A single `parking_lot::Mutex<ArcState>` protects all
-/// cache metadata (T1/T2/B1/B2 lists, resident map, counters).  This is
-/// sufficient because:
+/// cache metadata (T1/T2/B1/B2 lists, resident map, counters). A sharded
+/// [`PageLockTable`] coalesces concurrent cold reads for the same block so
+/// worker bursts do not stampede the underlying device. This is sufficient
+/// because:
 ///
 /// 1. The lock is **never held during I/O**.  `read_block` drops the lock
 ///    before issuing a device read and re-acquires it afterwards.
@@ -2089,17 +2231,18 @@ impl ArcState {
 ///    contention under typical FUSE workloads (many concurrent reads, few
 ///    writes) remains low.
 ///
-/// **Future sharding:** If profiling reveals lock contention under heavy
-/// parallel read workloads, the cache can be sharded by `BlockNumber` into N
-/// independent `Mutex<ArcState>` segments (e.g. `block.0 % N`).  The current
-/// single-lock design keeps the implementation simple and correct as a
-/// baseline.
+/// **Future sharding:** If profiling reveals metadata lock contention under
+/// heavy parallel read workloads, the resident maps/lists can be sharded by
+/// `BlockNumber` into N independent `Mutex<ArcState>` segments. The current
+/// state lock plus page-lock table keeps policy decisions centralized while
+/// eliminating duplicate same-block miss I/O.
 ///
 /// See [`DeferredArcCache`] for an integrated write-back + background flush variant.
 #[derive(Debug)]
 pub struct ArcCache<D: BlockDevice> {
     inner: D,
     state: Mutex<ArcState>,
+    page_locks: PageLockTable,
     write_policy: ArcWritePolicy,
     mvcc_flush_lifecycle: Arc<dyn MvccFlushLifecycle>,
     repair_flush_lifecycle: Arc<dyn RepairFlushLifecycle>,
@@ -2361,6 +2504,7 @@ impl<D: BlockDevice> ArcCache<D> {
         let cache = Self {
             inner,
             state: Mutex::new(ArcState::new(capacity_blocks)),
+            page_locks: PageLockTable::for_host_parallelism(),
             write_policy,
             mvcc_flush_lifecycle,
             repair_flush_lifecycle,
@@ -3015,6 +3159,16 @@ impl<D: BlockDevice> ArcCache<D> {
 impl<D: BlockDevice> BlockDevice for ArcCache<D> {
     fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
         cx_checkpoint(cx)?;
+        {
+            let mut guard = self.state.lock();
+            if let Some(buf) = guard.resident.get(&block).cloned() {
+                guard.on_hit(block);
+                drop(guard);
+                return Ok(buf);
+            }
+        }
+
+        let _page_lock = self.page_locks.acquire(block);
         {
             let mut guard = self.state.lock();
             if let Some(buf) = guard.resident.get(&block).cloned() {
@@ -3934,6 +4088,7 @@ mod tests {
     #[derive(Debug)]
     struct CountingBlockDevice<D: BlockDevice> {
         inner: D,
+        reads: AtomicUsize,
         writes: Mutex<Vec<BlockNumber>>,
         sync_calls: AtomicUsize,
     }
@@ -3942,9 +4097,14 @@ mod tests {
         fn new(inner: D) -> Self {
             Self {
                 inner,
+                reads: AtomicUsize::new(0),
                 writes: Mutex::new(Vec::new()),
                 sync_calls: AtomicUsize::new(0),
             }
+        }
+
+        fn read_count(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
         }
 
         fn write_count(&self) -> usize {
@@ -4016,6 +4176,7 @@ mod tests {
 
     impl<D: BlockDevice> BlockDevice for CountingBlockDevice<D> {
         fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
             self.inner.read_block(cx, block)
         }
 
@@ -6040,6 +6201,55 @@ mod tests {
         let total_ops = u64::try_from(NUM_THREADS * OPS_PER_THREAD).expect("fits u64");
         assert_eq!(m.hits + m.misses, total_ops);
         assert!(m.hits > 0, "should have some cache hits");
+    }
+
+    #[test]
+    fn arc_cache_same_block_concurrent_miss_coalesces_device_read() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        const THREADS: usize = 32;
+        const NUM_BLOCKS: usize = 16;
+        const BLOCK_SIZE: u32 = 4096;
+
+        let mem = MemoryByteDevice::new(BLOCK_SIZE as usize * NUM_BLOCKS);
+        let dev = ByteBlockDevice::new(mem, BLOCK_SIZE).expect("device");
+
+        let cx = Cx::for_testing();
+        let payload = vec![0x5A; BLOCK_SIZE as usize];
+        dev.write_block(&cx, BlockNumber(7), &payload)
+            .expect("seed");
+
+        let counted = CountingBlockDevice::new(dev);
+        let cache = StdArc::new(ArcCache::new(counted, 8).expect("cache"));
+        let barrier = StdArc::new(Barrier::new(THREADS));
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let cache = StdArc::clone(&cache);
+                let barrier = StdArc::clone(&barrier);
+                thread::spawn(move || {
+                    let cx = Cx::for_testing();
+                    barrier.wait();
+                    let buf = cache.read_block(&cx, BlockNumber(7)).expect("read");
+                    assert_eq!(buf.as_slice()[0], 0x5A);
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("thread panicked");
+        }
+
+        let metrics = cache.metrics();
+        assert_eq!(
+            cache.inner().read_count(),
+            1,
+            "same-block concurrent cold miss should hit the device once"
+        );
+        assert_eq!(metrics.misses, 1);
+        assert_eq!(metrics.hits, u64::try_from(THREADS - 1).expect("fits u64"));
+        assert_eq!(cache.page_locks.in_flight_len(), 0);
     }
 
     #[test]
