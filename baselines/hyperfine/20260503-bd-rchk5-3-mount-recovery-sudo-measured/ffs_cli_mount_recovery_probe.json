@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "sudo -n scripts/mount_benchmark_probe.sh --bin /data/tmp/rch_target_frankenfs_bd_rchk5_3_mount_warm/release-perf/ffs-cli --image baselines/hyperfine/20260503-bd-rchk5-3-mount-warm/mount_recovery_probe.ext4 --mount-root baselines/hyperfine/20260503-bd-rchk5-3-mount-recovery-sudo-measured/mount_probe_mounts --mode recovery --out-json baselines/hyperfine/20260503-bd-rchk5-3-mount-recovery-sudo-measured/ffs_cli_mount_recovery_probe_report.json",
+      "mean": 0.07070543809999999,
+      "stddev": 0.0033262967486884206,
+      "median": 0.06917530020000001,
+      "user": 0.03825152,
+      "system": 0.049522,
+      "min": 0.0670362107,
+      "max": 0.0780019007,
+      "times": [
+        0.0689721467,
+        0.06937845370000001,
+        0.0742167417,
+        0.0682417267,
+        0.0718604917,
+        0.0780019007,
+        0.0670362107,
+        0.0687702347,
+        0.0688244977,
+        0.07175197670000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

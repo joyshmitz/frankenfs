@@ -1,0 +1,36 @@
+{
+  "attempts": [
+    {
+      "cleanup_status": "unmounted",
+      "exit_code": 0,
+      "label": "cold",
+      "mountpoint": "baselines/hyperfine/20260503-bd-rchk5-3-mount-cold-sudo-measured/mount_probe_mounts/cold",
+      "ready": true,
+      "stderr_path": "baselines/hyperfine/20260503-bd-rchk5-3-mount-cold-sudo-measured/mount_probe_mounts/cold.stderr",
+      "stdout_path": "baselines/hyperfine/20260503-bd-rchk5-3-mount-cold-sudo-measured/mount_probe_mounts/cold.stdout",
+      "timed_out": false
+    }
+  ],
+  "classification": "measured",
+  "command": {
+    "ffs_bin": "/data/tmp/rch_target_frankenfs_bd_rchk5_3_mount_warm/release-perf/ffs-cli",
+    "image": "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm/mount_probe.ext4",
+    "mount_root": "baselines/hyperfine/20260503-bd-rchk5-3-mount-cold-sudo-measured/mount_probe_mounts"
+  },
+  "exit_code": 0,
+  "generated_at": "2026-05-03T21:16:13.887889Z",
+  "kernel_fuse_mode": "permissioned_required",
+  "mode": "cold",
+  "mount_options": {
+    "background_repair": "not_enabled_by_probe",
+    "writeback_cache": "disabled"
+  },
+  "outcome": "pass",
+  "probe_id": "mount_benchmark_probe",
+  "reason": "mounted benchmark probe completed",
+  "required_capabilities": [
+    "benchmark_host",
+    "fuse"
+  ],
+  "schema_version": 1
+}
