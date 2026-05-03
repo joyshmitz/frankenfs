@@ -36,8 +36,8 @@ use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::hash::Hash;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tracing::{debug, info, trace, warn};
 
 fn saturating_increment(counter: &AtomicU64) -> u64 {
@@ -398,7 +398,11 @@ impl AtomicWatermark {
     #[must_use]
     pub fn load(&self) -> Option<u64> {
         let v = self.value.load(Ordering::Acquire);
-        if v == WATERMARK_EMPTY { None } else { Some(v) }
+        if v == WATERMARK_EMPTY {
+            None
+        } else {
+            Some(v)
+        }
     }
 
     /// Store a new watermark value.
@@ -424,6 +428,261 @@ impl AtomicWatermark {
 impl Default for AtomicWatermark {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ─── Metadata Read-Path Proof Surface ──────────────────────────────────────
+
+/// Invariants that must hold before an RCU/QSBR metadata read path can move
+/// beyond design-only status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RcuQsbrInvariant {
+    ReaderSnapshotVisibility,
+    ReclamationEpochAdvancement,
+    WriterPublicationOrdering,
+    CancellationReleasesReader,
+    RollbackRestoresPriorPublication,
+    EpochSaturationFallsBack,
+    MemoryBudgetPressureFallsBack,
+}
+
+/// Complete invariant set for the metadata read-path prototype.
+pub const RCU_QSBR_METADATA_INVARIANTS: [RcuQsbrInvariant; 7] = [
+    RcuQsbrInvariant::ReaderSnapshotVisibility,
+    RcuQsbrInvariant::ReclamationEpochAdvancement,
+    RcuQsbrInvariant::WriterPublicationOrdering,
+    RcuQsbrInvariant::CancellationReleasesReader,
+    RcuQsbrInvariant::RollbackRestoresPriorPublication,
+    RcuQsbrInvariant::EpochSaturationFallsBack,
+    RcuQsbrInvariant::MemoryBudgetPressureFallsBack,
+];
+
+impl RcuQsbrInvariant {
+    /// Stable identifier for structured proof artifacts.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::ReaderSnapshotVisibility => "reader_snapshot_visibility",
+            Self::ReclamationEpochAdvancement => "reclamation_epoch_advancement",
+            Self::WriterPublicationOrdering => "writer_publication_ordering",
+            Self::CancellationReleasesReader => "cancellation_releases_reader",
+            Self::RollbackRestoresPriorPublication => "rollback_restores_prior_publication",
+            Self::EpochSaturationFallsBack => "epoch_saturation_falls_back",
+            Self::MemoryBudgetPressureFallsBack => "memory_budget_pressure_falls_back",
+        }
+    }
+}
+
+/// Reader lifecycle state used by the QSBR proof model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RcuReaderState {
+    Active { snapshot_epoch: u64 },
+    Cancelled { snapshot_epoch: u64 },
+    Quiescent { snapshot_epoch: u64 },
+}
+
+impl RcuReaderState {
+    #[must_use]
+    pub const fn snapshot_epoch(self) -> u64 {
+        match self {
+            Self::Active { snapshot_epoch }
+            | Self::Cancelled { snapshot_epoch }
+            | Self::Quiescent { snapshot_epoch } => snapshot_epoch,
+        }
+    }
+
+    /// A cancelled reader is a quiescent state: it can no longer dereference
+    /// the snapshot it previously observed.
+    #[must_use]
+    pub const fn permits_reclamation_at(self, reclaim_epoch: u64) -> bool {
+        match self {
+            Self::Active { .. } => false,
+            Self::Cancelled { snapshot_epoch } | Self::Quiescent { snapshot_epoch } => {
+                snapshot_epoch <= reclaim_epoch
+            }
+        }
+    }
+}
+
+/// Advance the publication epoch, refusing wraparound instead of reusing an id.
+#[must_use]
+pub const fn next_publication_epoch(current_epoch: u64) -> Option<u64> {
+    current_epoch.checked_add(1)
+}
+
+/// Gate evidence that controls whether the prototype can be selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RcuQsbrProofEvidence {
+    pub executable_model_tests: bool,
+    pub rollback_path: bool,
+    pub unsafe_code_forbidden: bool,
+    pub asupersync_only: bool,
+}
+
+impl RcuQsbrProofEvidence {
+    #[must_use]
+    pub const fn design_only() -> Self {
+        Self {
+            executable_model_tests: true,
+            rollback_path: false,
+            unsafe_code_forbidden: true,
+            asupersync_only: true,
+        }
+    }
+
+    #[must_use]
+    pub const fn complete() -> Self {
+        Self {
+            executable_model_tests: true,
+            rollback_path: true,
+            unsafe_code_forbidden: true,
+            asupersync_only: true,
+        }
+    }
+
+    #[must_use]
+    pub const fn safety_gates_pass(self) -> bool {
+        self.unsafe_code_forbidden && self.asupersync_only
+    }
+
+    #[must_use]
+    pub const fn promotion_gates_pass(self) -> bool {
+        self.safety_gates_pass() && self.executable_model_tests && self.rollback_path
+    }
+}
+
+/// Measured input for comparing the existing lock path against the epoch path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RcuReadPathMeasurements {
+    pub read_ops: u64,
+    pub contention_events: u64,
+    pub tail_latency_micros: u64,
+    pub memory_overhead_bytes: u64,
+    pub stalled_reader_count: u64,
+    pub complexity_risk: f64,
+}
+
+impl RcuReadPathMeasurements {
+    #[must_use]
+    pub fn contention_rate(self) -> f64 {
+        if self.read_ops == 0 {
+            0.0
+        } else {
+            self.contention_events as f64 / self.read_ops as f64
+        }
+    }
+}
+
+/// Weights for the expected-loss comparison.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RcuExpectedLossWeights {
+    pub contention_weight: f64,
+    pub tail_latency_weight: f64,
+    pub memory_mib_weight: f64,
+    pub stalled_reader_weight: f64,
+    pub complexity_weight: f64,
+}
+
+impl Default for RcuExpectedLossWeights {
+    fn default() -> Self {
+        Self {
+            contention_weight: 100.0,
+            tail_latency_weight: 0.01,
+            memory_mib_weight: 0.25,
+            stalled_reader_weight: 50.0,
+            complexity_weight: 25.0,
+        }
+    }
+}
+
+impl RcuExpectedLossWeights {
+    #[must_use]
+    pub fn expected_loss(self, measurements: RcuReadPathMeasurements) -> f64 {
+        let memory_mib = measurements.memory_overhead_bytes as f64 / 1_048_576.0;
+        self.contention_weight * measurements.contention_rate()
+            + self.tail_latency_weight * measurements.tail_latency_micros as f64
+            + self.memory_mib_weight * memory_mib
+            + self.stalled_reader_weight * measurements.stalled_reader_count as f64
+            + self.complexity_weight * measurements.complexity_risk.clamp(0.0, 1.0)
+    }
+}
+
+/// Selected mode after evaluating proof evidence and expected loss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RcuReadPathRecommendation {
+    KeepExistingLocks,
+    DesignOnlyPrototype,
+    CandidateEpochPath,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RcuReadPathDecision {
+    pub recommendation: RcuReadPathRecommendation,
+    pub lock_path_loss: f64,
+    pub epoch_path_loss: f64,
+    pub reason: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RcuReadPathDecisionInput {
+    pub lock_path: RcuReadPathMeasurements,
+    pub epoch_path: RcuReadPathMeasurements,
+    pub weights: RcuExpectedLossWeights,
+    pub memory_budget_bytes: u64,
+    pub proof_evidence: RcuQsbrProofEvidence,
+}
+
+impl RcuReadPathDecisionInput {
+    /// Evaluate the prototype without enabling it. The epoch path needs a 10%
+    /// expected-loss margin plus proof evidence before it can become a candidate.
+    #[must_use]
+    pub fn evaluate(self) -> RcuReadPathDecision {
+        const EPOCH_MARGIN: f64 = 0.90;
+
+        let lock_path_loss = self.weights.expected_loss(self.lock_path);
+        let epoch_path_loss = self.weights.expected_loss(self.epoch_path);
+        let decision = |recommendation, reason| RcuReadPathDecision {
+            recommendation,
+            lock_path_loss,
+            epoch_path_loss,
+            reason,
+        };
+
+        if !self.proof_evidence.safety_gates_pass() {
+            return decision(
+                RcuReadPathRecommendation::KeepExistingLocks,
+                "safety_gate_failed",
+            );
+        }
+        if !self.proof_evidence.promotion_gates_pass() {
+            return decision(
+                RcuReadPathRecommendation::DesignOnlyPrototype,
+                "missing_executable_evidence_or_rollback",
+            );
+        }
+        if self.epoch_path.stalled_reader_count != 0 {
+            return decision(
+                RcuReadPathRecommendation::KeepExistingLocks,
+                "stalled_reader_blocks_reclamation",
+            );
+        }
+        if self.epoch_path.memory_overhead_bytes > self.memory_budget_bytes {
+            return decision(
+                RcuReadPathRecommendation::KeepExistingLocks,
+                "memory_budget_exceeded",
+            );
+        }
+        if epoch_path_loss < lock_path_loss * EPOCH_MARGIN {
+            decision(
+                RcuReadPathRecommendation::CandidateEpochPath,
+                "epoch_path_lower_expected_loss",
+            )
+        } else {
+            decision(
+                RcuReadPathRecommendation::KeepExistingLocks,
+                "expected_loss_margin_not_met",
+            )
+        }
     }
 }
 
@@ -764,6 +1023,161 @@ mod tests {
         let wm = AtomicWatermark::new();
         assert_eq!(wm.load(), None);
         assert_eq!(wm.load_raw(), u64::MAX);
+    }
+
+    #[test]
+    fn rcu_qsbr_metadata_proof_surface_declares_required_invariants() {
+        let ids = RCU_QSBR_METADATA_INVARIANTS
+            .iter()
+            .map(|invariant| invariant.id())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(ids.len(), RCU_QSBR_METADATA_INVARIANTS.len());
+        assert!(ids.contains("reader_snapshot_visibility"));
+        assert!(ids.contains("reclamation_epoch_advancement"));
+        assert!(ids.contains("writer_publication_ordering"));
+        assert!(ids.contains("cancellation_releases_reader"));
+        assert!(ids.contains("rollback_restores_prior_publication"));
+        assert!(ids.contains("epoch_saturation_falls_back"));
+        assert!(ids.contains("memory_budget_pressure_falls_back"));
+    }
+
+    #[test]
+    fn rcu_qsbr_reader_lifecycle_models_cancellation_as_quiescence() {
+        let active = RcuReaderState::Active { snapshot_epoch: 7 };
+        let cancelled = RcuReaderState::Cancelled { snapshot_epoch: 7 };
+        let quiescent = RcuReaderState::Quiescent { snapshot_epoch: 7 };
+
+        assert_eq!(active.snapshot_epoch(), 7);
+        assert!(!active.permits_reclamation_at(7));
+        assert!(cancelled.permits_reclamation_at(7));
+        assert!(quiescent.permits_reclamation_at(8));
+        assert!(!cancelled.permits_reclamation_at(6));
+    }
+
+    #[test]
+    fn rcu_qsbr_publication_epoch_refuses_wraparound() {
+        assert_eq!(next_publication_epoch(41), Some(42));
+        assert_eq!(next_publication_epoch(u64::MAX), None);
+    }
+
+    #[test]
+    fn rcu_cell_writer_publication_and_rollback_keep_reader_snapshot() {
+        let cell = RcuCell::new("v1".to_string());
+        let reader_snapshot = cell.load_arc();
+
+        let prior_publication = cell.swap("v2".to_string());
+        assert_eq!(&**reader_snapshot, "v1");
+        assert_eq!(&**cell.load(), "v2");
+
+        cell.update_arc(prior_publication);
+        assert_eq!(&**reader_snapshot, "v1");
+        assert_eq!(&**cell.load(), "v1");
+    }
+
+    fn read_path_measurements(
+        read_ops: u64,
+        contention_events: u64,
+        tail_latency_micros: u64,
+        memory_overhead_bytes: u64,
+        stalled_reader_count: u64,
+        complexity_risk: f64,
+    ) -> RcuReadPathMeasurements {
+        RcuReadPathMeasurements {
+            read_ops,
+            contention_events,
+            tail_latency_micros,
+            memory_overhead_bytes,
+            stalled_reader_count,
+            complexity_risk,
+        }
+    }
+
+    #[test]
+    fn rcu_qsbr_expected_loss_rule_keeps_epoch_path_design_only_without_rollback() {
+        let decision = RcuReadPathDecisionInput {
+            lock_path: read_path_measurements(10_000, 1_200, 2_000, 0, 0, 0.05),
+            epoch_path: read_path_measurements(10_000, 5, 250, 512 * 1024, 0, 0.20),
+            weights: RcuExpectedLossWeights::default(),
+            memory_budget_bytes: 2 * 1024 * 1024,
+            proof_evidence: RcuQsbrProofEvidence::design_only(),
+        }
+        .evaluate();
+
+        assert_eq!(
+            decision.recommendation,
+            RcuReadPathRecommendation::DesignOnlyPrototype
+        );
+        assert_eq!(decision.reason, "missing_executable_evidence_or_rollback");
+        assert!(decision.epoch_path_loss < decision.lock_path_loss);
+    }
+
+    #[test]
+    fn rcu_qsbr_expected_loss_rule_rejects_stalled_readers_and_memory_pressure() {
+        let common = RcuReadPathDecisionInput {
+            lock_path: read_path_measurements(10_000, 2_000, 2_500, 0, 0, 0.05),
+            epoch_path: read_path_measurements(10_000, 10, 200, 512 * 1024, 1, 0.10),
+            weights: RcuExpectedLossWeights::default(),
+            memory_budget_bytes: 2 * 1024 * 1024,
+            proof_evidence: RcuQsbrProofEvidence::complete(),
+        };
+
+        let stalled = common.evaluate();
+        assert_eq!(
+            stalled.recommendation,
+            RcuReadPathRecommendation::KeepExistingLocks
+        );
+        assert_eq!(stalled.reason, "stalled_reader_blocks_reclamation");
+
+        let over_budget = RcuReadPathDecisionInput {
+            epoch_path: read_path_measurements(10_000, 10, 200, 4 * 1024 * 1024, 0, 0.10),
+            ..common
+        }
+        .evaluate();
+        assert_eq!(
+            over_budget.recommendation,
+            RcuReadPathRecommendation::KeepExistingLocks
+        );
+        assert_eq!(over_budget.reason, "memory_budget_exceeded");
+    }
+
+    #[test]
+    fn rcu_qsbr_expected_loss_rule_selects_epoch_only_with_margin_and_safety() {
+        let candidate = RcuReadPathDecisionInput {
+            lock_path: read_path_measurements(10_000, 2_000, 2_500, 0, 0, 0.05),
+            epoch_path: read_path_measurements(10_000, 10, 200, 512 * 1024, 0, 0.10),
+            weights: RcuExpectedLossWeights::default(),
+            memory_budget_bytes: 2 * 1024 * 1024,
+            proof_evidence: RcuQsbrProofEvidence::complete(),
+        }
+        .evaluate();
+        assert_eq!(
+            candidate.recommendation,
+            RcuReadPathRecommendation::CandidateEpochPath
+        );
+        assert_eq!(candidate.reason, "epoch_path_lower_expected_loss");
+
+        let safety_failure = RcuReadPathDecisionInput {
+            proof_evidence: RcuQsbrProofEvidence {
+                executable_model_tests: true,
+                rollback_path: true,
+                unsafe_code_forbidden: true,
+                asupersync_only: false,
+            },
+            ..RcuReadPathDecisionInput {
+                lock_path: read_path_measurements(10_000, 2_000, 2_500, 0, 0, 0.05),
+                epoch_path: read_path_measurements(10_000, 10, 200, 512 * 1024, 0, 0.10),
+                weights: RcuExpectedLossWeights::default(),
+                memory_budget_bytes: 2 * 1024 * 1024,
+                proof_evidence: RcuQsbrProofEvidence::complete(),
+            }
+        }
+        .evaluate();
+        assert_eq!(
+            safety_failure.recommendation,
+            RcuReadPathRecommendation::KeepExistingLocks
+        );
+        assert_eq!(safety_failure.reason, "safety_gate_failed");
     }
 
     #[test]
