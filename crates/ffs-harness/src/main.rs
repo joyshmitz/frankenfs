@@ -23,6 +23,11 @@ use ffs_harness::{
         render_invariant_oracle_markdown, validate_invariant_oracle_report,
         validate_invariant_trace,
     },
+    mounted_differential_oracle::{
+        DEFAULT_MOUNTED_DIFFERENTIAL_REPORT, fail_on_mounted_differential_oracle_errors,
+        load_mounted_differential_oracle_report, render_mounted_differential_oracle_markdown,
+        validate_mounted_differential_oracle_report,
+    },
     mounted_recovery_matrix::{
         DEFAULT_RECOVERY_MATRIX_PATH, fail_on_mounted_recovery_matrix_errors,
         load_mounted_recovery_matrix, validate_mounted_recovery_matrix,
@@ -151,6 +156,9 @@ fn run() -> Result<()> {
             validate_adversarial_threat_model_cmd(&args[1..])
         }
         Some("validate-invariant-oracle") => validate_invariant_oracle_cmd(&args[1..]),
+        Some("validate-mounted-differential-oracle") => {
+            validate_mounted_differential_oracle_cmd(&args[1..])
+        }
         Some("validate-soak-canary-campaigns") => validate_soak_canary_campaigns_cmd(&args[1..]),
         Some("validate-repair-writeback-serialization") => {
             validate_repair_writeback_serialization_cmd(&args[1..])
@@ -532,6 +540,58 @@ fn validate_invariant_oracle_report_cmd(
         );
     }
     Ok(())
+}
+
+fn validate_mounted_differential_oracle_cmd(args: &[String]) -> Result<()> {
+    let mut report_path = DEFAULT_MOUNTED_DIFFERENTIAL_REPORT.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--report" => {
+                i += 1;
+                args.get(i)
+                    .context("--report requires a path")?
+                    .clone_into(&mut report_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_mounted_differential_oracle_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-mounted-differential-oracle argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let report = load_mounted_differential_oracle_report(Path::new(&report_path))?;
+    let validation = validate_mounted_differential_oracle_report(&report);
+    let output = match format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&validation)?,
+        ProofBundleFormat::Markdown => render_mounted_differential_oracle_markdown(&validation),
+    };
+
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "mounted differential oracle report written: {} valid={} scenarios={} allowlists={}",
+            path, validation.valid, validation.scenario_count, validation.allowlist_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    fail_on_mounted_differential_oracle_errors(&validation)
 }
 
 fn evaluate_release_gates_cmd(args: &[String]) -> Result<()> {
@@ -1970,6 +2030,9 @@ fn print_usage() {
         "  ffs-harness validate-invariant-oracle --trace FILE|--report FILE [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
+        "  ffs-harness validate-mounted-differential-oracle [--report FILE] [--format json|markdown] [--out FILE]"
+    );
+    println!(
         "  ffs-harness evaluate-release-gates --bundle FILE --policy FILE [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE] [--wording-out FILE]"
     );
     print_performance_baseline_manifest_usage_summary();
@@ -2035,6 +2098,9 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness validate-invariant-oracle --trace artifacts/invariant/trace.json --out artifacts/invariant/oracle_report.json --summary-out artifacts/invariant/oracle_report.md"
+    );
+    println!(
+        "  ffs-harness validate-mounted-differential-oracle --report artifacts/e2e/mounted_differential_oracle/report.json --out artifacts/e2e/mounted_differential_oracle/validation.json"
     );
     println!(
         "  ffs-harness evaluate-release-gates --bundle artifacts/proof/bundle/manifest.json --policy artifacts/proof/release_gate_policy.json --out artifacts/proof/release_gate.json --wording-out artifacts/proof/release_gate_wording.tsv"
@@ -2259,6 +2325,15 @@ fn print_mounted_write_matrix_usage() {
     println!("Options:");
     println!("  --matrix FILE                      Read matrix JSON from FILE");
     println!("  --out FILE                         Write JSON validation report to FILE");
+}
+
+fn print_mounted_differential_oracle_usage() {
+    println!("Usage: ffs-harness validate-mounted-differential-oracle [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --report FILE                      Read mounted differential report JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report to FILE");
 }
 
 fn print_mounted_recovery_matrix_usage() {

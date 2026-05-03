@@ -873,6 +873,54 @@
       ]
     },
     {
+      "suite_id": "ffs_mounted_differential_oracle",
+      "script": "scripts/e2e/ffs_mounted_differential_oracle_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "unsupported_op"
+      ],
+      "scenarios": [
+        {
+          "id": "mounted_diff_ext4_create_readback",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_create_readback|outcome=PASS"
+        },
+        {
+          "id": "mounted_diff_ext4_fiemap_transport_errno",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fiemap_transport_errno|outcome=DIFF"
+        },
+        {
+          "id": "mounted_diff_ext4_fuse_permission_skip",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fuse_permission_skip|outcome=SKIP"
+        },
+        {
+          "id": "mounted_diff_btrfs_default_permissions_root_owned",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_default_permissions_root_owned|outcome=SKIP"
+        },
+        {
+          "id": "mounted_diff_btrfs_unsupported_clone_range",
+          "category": "unsupported_op",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_unsupported_clone_range|outcome=UNSUPPORTED"
+        },
+        {
+          "id": "mounted_diff_broad_allowlist_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_broad_allowlist_rejected|outcome=ERROR"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_proof_overhead_budget",
       "script": "scripts/e2e/ffs_proof_overhead_budget_e2e.sh",
       "required_categories": [

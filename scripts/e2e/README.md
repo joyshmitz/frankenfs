@@ -50,6 +50,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 # Run invariant-oracle replay/minimization and consumer-validation smoke
 ./scripts/e2e/ffs_invariant_oracle_e2e.sh
 
+# Run mounted differential oracle allowlist/host-skip validation smoke
+./scripts/e2e/ffs_mounted_differential_oracle_e2e.sh
+
 # Run performance baseline manifest dry-run validation
 ./scripts/e2e/ffs_performance_manifest_e2e.sh
 
@@ -164,6 +167,19 @@ capability state, mount/unmount probe exits, and the btrfs
 `DefaultPermissions` root-owned testdir `EACCES` case. Missing or denied host
 capabilities must produce a skip/error artifact with a remediation hint, not a
 silent success.
+
+Mounted differential oracle artifacts are validated with:
+
+```bash
+cargo run -p ffs-harness -- validate-mounted-differential-oracle \
+  --report artifacts/e2e/mounted_differential_oracle/report.json \
+  --out artifacts/e2e/mounted_differential_oracle/validation.json
+```
+
+The validator rejects broad or expired allowlists, unresolved kernel-vs-FrankenFS
+diffs, missing raw log paths, missing image hashes, unsupported-scope rows
+without an owner or non-goal, and host skips that blur FUSE permission or btrfs
+`DefaultPermissions` setup failures into product failures.
 
 ### Operational Readiness Report
 
