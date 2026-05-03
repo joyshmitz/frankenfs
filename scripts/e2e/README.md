@@ -71,6 +71,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 # Run docs status wording drift validation
 ./scripts/e2e/ffs_docs_status_drift_e2e.sh
 
+# Run repair confidence mutation-safety threshold validation
+./scripts/e2e/ffs_repair_confidence_lab_e2e.sh
+
 # Run repair/writeback serialization contract dry-run validation
 ./scripts/e2e/ffs_repair_writeback_serialization_e2e.sh
 
