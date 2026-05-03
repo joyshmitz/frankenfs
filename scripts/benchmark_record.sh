@@ -58,6 +58,30 @@ cargo_bench_cmd() {
         "$(cargo_cmd_prefix)" "$BENCH_PROFILE" "$*"
 }
 
+command_benchmarks_needed() {
+    if [ -z "$OP_FILTER" ]; then
+        return 0
+    fi
+
+    case "$OP_FILTER" in
+        metadata_parity_cli|metadata_parity_harness|fixture_validation)
+            return 0
+            ;;
+        read_metadata_inspect_ext4_reference|read_metadata_scrub_ext4_reference)
+            return 0
+            ;;
+        mount_cold|mount_warm|mount_recovery)
+            return 0
+            ;;
+        ffs_cli_*|ffs_harness_*|ffs-cli*|ffs-harness*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 extract_cache_report_from_log() {
     local log_file="$1"
     local report_tsv="$2"
@@ -281,15 +305,23 @@ echo "=== FrankenFS Baseline Recorder (${DATE_TAG}) ==="
 echo "Output directory: ${OUT_DIR}"
 echo ""
 
-echo "Building release binaries once..."
-cargo_exec build -p ffs-cli --profile "$BENCH_PROFILE" --quiet
-cargo_exec build -p ffs-harness --profile "$BENCH_PROFILE" --quiet
-echo ""
-
 CLI_BIN="${TARGET_DIR}/${BENCH_PROFILE}/ffs-cli"
 HARNESS_BIN="${TARGET_DIR}/${BENCH_PROFILE}/ffs-harness"
-USE_LOCAL_RELEASE_BINS=1
-if [ "$FORCE_REMOTE" -eq 1 ]; then
+COMMAND_BENCHMARKS_NEEDED=0
+USE_LOCAL_RELEASE_BINS=0
+if command_benchmarks_needed; then
+    COMMAND_BENCHMARKS_NEEDED=1
+    echo "Building release binaries once..."
+    cargo_exec build -p ffs-cli --profile "$BENCH_PROFILE" --quiet
+    cargo_exec build -p ffs-harness --profile "$BENCH_PROFILE" --quiet
+    echo ""
+
+    USE_LOCAL_RELEASE_BINS=1
+fi
+
+if [ "$COMMAND_BENCHMARKS_NEEDED" -eq 0 ]; then
+    echo "Skipping release binary prebuild for --op ${OP_FILTER}; selected operation does not use CLI/harness binaries."
+elif [ "$FORCE_REMOTE" -eq 1 ]; then
     USE_LOCAL_RELEASE_BINS=0
 elif [ ! -x "$CLI_BIN" ] || [ ! -x "$HARNESS_BIN" ]; then
     # In environments with a non-default CARGO_TARGET_DIR, rch artifact
@@ -602,6 +634,7 @@ configure_mount_benchmarks() {
     fi
 }
 
+if [ "$COMMAND_BENCHMARKS_NEEDED" -eq 1 ]; then
 if [ "$USE_LOCAL_RELEASE_BINS" -eq 1 ]; then
     add_bench "ffs-cli parity --json" \
         "${CLI_BIN} parity --json" \
@@ -710,6 +743,7 @@ if [ -f "$REF_IMAGE" ]; then
 else
     SKIPPED_LABELS+=("ffs-cli inspect ext4_8mb_reference.ext4 --json (missing ${REF_IMAGE})")
     SKIPPED_LABELS+=("ffs-cli scrub ext4_8mb_reference.ext4 --json (missing ${REF_IMAGE})")
+fi
 fi
 
 add_bench "ffs-block arc sequential scan (criterion)" \
@@ -854,8 +888,10 @@ add_bench "ffs-repair raptorq decode 16-block group (criterion)" \
     "raptorq_decode_group_16blocks" \
     "0"
 
-configure_mount_benchmarks
-record_mount_pending_labels
+if [ "$COMMAND_BENCHMARKS_NEEDED" -eq 1 ]; then
+    configure_mount_benchmarks
+    record_mount_pending_labels
+fi
 apply_op_filter
 
 json_mean() {
