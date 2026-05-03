@@ -77,10 +77,23 @@ None. All identified on-disk structures have conformance fixtures.
 | Btrfs extent allocator | ✅ | ✅ | deterministic adversarial mutation tests cover overflowing block-group range rejection without accounting side effects and exact block-group tail-fit allocation |
 | Btrfs COW tree mutations | ✅ | ✅ | deterministic COW tests cover positive internal split height growth, parent-rewrite update, and left/right delete-borrow success paths plus allocator-failure atomicity for duplicate/missing-key short-circuits, leaf split child allocation, internal split child allocation, internal-root allocation, root split, insert/update parent rewrite, update leaf, delete left/right borrow, and delete merge/root-shrink paths without publishing deferred frees for still-reachable nodes |
 
+## Open-Ended Fuzz and Conformance Inventory
+
+`ffs-harness validate-open-ended-inventory` parses this table, validates the
+proof-type and disposition vocabulary, and emits the machine-readable inventory
+report used to close `bd-rchk7.1`.
+
+| Row | Source location | Matched note | Risk surface | Current evidence | Required proof type | Unit-test coverage | E2E/fuzz-smoke coverage | Required logs | Required artifacts | Decision | Linked bead/artifact and owner/status |
+|-----|-----------------|--------------|--------------|------------------|---------------------|--------------------|-------------------------|---------------|--------------------|----------|----------------------------------------|
+| OEI-001 | conformance/COVERAGE.md#next-actions | Consider additional edge cases | Parser and mutation boundary cases can be lost behind a green aggregate coverage score | Coverage matrix lists covered structures and adversarial parser rows, but the historical note was too broad to prove | fuzz_smoke | `open_ended_inventory::tests::current_inventory_is_valid` plus future seed-manifest tests in `bd-rchk7.4` | Deterministic parser smoke gate with fixed seed IDs and panic/error-class drift checks | source_path; row_id; decision; artifact_paths; reproduction_command | report_json; run_log; source_path; row_id | linked_bead | bd-rchk7.4 / open |
+| OEI-002 | conformance/COVERAGE.md#next-actions | Continue targeted adversarial corpus expansion for remaining mutation surfaces | Remaining mutation surfaces need explicit corpus or fixture ownership instead of open prose | Btrfs delayed refs, transactions, allocator, and COW mutation rows are covered; repair corpus follow-up remains open | repair_corpus | Inventory row validation here plus repair corpus fixture-manifest tests in `bd-rchk7.2` | Repair/ledger corpus smoke with fixed seeds, checksum outcomes, and expected error classes | source_path; row_id; decision; artifact_paths; reproduction_command | report_json; run_log; source_path; row_id | linked_bead | bd-rchk7.2, bd-rchk7.4 / open |
+| OEI-003 | tests/fuzz_corpus/README.md#coverage-intent | Every sample is processed by ext4 and btrfs parser entry points without panics | Existing deterministic corpus intent must stay tied to executable parser checks | `crates/ffs-ondisk/tests/adversarial_corpus.rs` owns the corpus count and parser no-panic oracle | parser_unit | `open_ended_inventory::tests::parses_inventory_rows` validates completed-artifact rows and field vocabulary | Existing adversarial corpus test is the smoke artifact until `bd-rchk7.4` adds seed manifest reporting | source_path; row_id; decision; artifact_paths; reproduction_command | report_json; run_log; source_path; row_id | completed_artifact | tests/fuzz_corpus/README.md and crates/ffs-ondisk/tests/adversarial_corpus.rs / current |
+| OEI-004 | README.md#whats-next | Replace remaining open-ended corpus notes with completed fixtures or narrow beads | Public status must not imply unowned fuzz or conformance work is already closed | This inventory is now the docs-traceability artifact; dependent beads cover source-scope and stale-note refinements | docs_traceability | Current inventory validator checks row schema, linked beads, proof vocabulary, log fields, and artifact fields | `ffs-harness validate-open-ended-inventory --out artifacts/conformance/open_ended_inventory.json` emits the smoke report | source_path; row_id; decision; artifact_paths; reproduction_command | report_json; run_log; source_path; row_id | completed_artifact | conformance/COVERAGE.md#open-ended-fuzz-and-conformance-inventory / current |
+
 ## Next Actions
 
 - [x] Add ext4_mmp_block.json fixture - DONE
-- [ ] Consider additional edge cases (malformed structures, boundary conditions) — tracked by `bd-rchk7`; split any concrete remaining parser/mutation surface into a narrow fixture or fuzz bead instead of leaving this as open-ended prose.
+- [ ] OEI-001 / `bd-rchk7.4` tracks additional parser edge cases as fixed-seed fuzz-smoke work with log and artifact requirements.
 - [x] Add ext4 superblock adversarial corpus entries for fuzzing - DONE
 - [x] Add ext4 inline-data adversarial corpus entries for fuzzing - DONE
 - [x] Add ext4 inode checksum adversarial corpus entries for fuzzing - DONE
@@ -113,7 +126,7 @@ None. All identified on-disk structures have conformance fixtures.
 - [x] Add btrfs COW internal-split success coverage - DONE
 - [x] Add btrfs COW left-borrow delete success coverage - DONE
 - [x] Add btrfs COW parent-rewrite update success coverage - DONE
-- [ ] Continue targeted adversarial corpus expansion for remaining mutation surfaces — tracked by `bd-rchk7`; close this only with executable fixture additions or linked follow-up beads for each remaining surface.
+- [ ] OEI-002 / `bd-rchk7.2` and `bd-rchk7.4` track remaining repair corpus and deterministic fuzz-smoke expansion with fixed seeds and artifact requirements.
 
 ---
 
