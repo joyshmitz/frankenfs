@@ -19,11 +19,16 @@ pub const DEFAULT_BTRFS_MULTIDEV_CORPUS_PATH: &str =
 const DEFAULT_BTRFS_MULTIDEV_CORPUS_JSON: &str =
     include_str!("../../../tests/btrfs-multidevice-corpus/btrfs_multidevice_corpus.json");
 
-const ALLOWED_PROFILES: [&str; 7] =
-    ["single", "dup", "raid0", "raid1", "raid10", "raid5", "raid6"];
+const ALLOWED_PROFILES: [&str; 7] = [
+    "single", "dup", "raid0", "raid1", "raid10", "raid5", "raid6",
+];
 
-const ALLOWED_DEGRADED_STATES: [&str; 4] =
-    ["healthy", "missing_device", "stale_device", "duplicate_device_id"];
+const ALLOWED_DEGRADED_STATES: [&str; 4] = [
+    "healthy",
+    "missing_device",
+    "stale_device",
+    "duplicate_device_id",
+];
 
 const ALLOWED_OUTCOMES: [&str; 6] = [
     "assembly_success",
@@ -117,9 +122,8 @@ pub struct BtrfsMultidevCorpusReport {
 }
 
 pub fn parse_btrfs_multidev_corpus(text: &str) -> Result<BtrfsMultidevCorpus> {
-    serde_json::from_str(text).map_err(|err| {
-        anyhow::anyhow!("failed to parse btrfs multi-device corpus JSON: {err}")
-    })
+    serde_json::from_str(text)
+        .map_err(|err| anyhow::anyhow!("failed to parse btrfs multi-device corpus JSON: {err}"))
 }
 
 pub fn validate_default_btrfs_multidev_corpus() -> Result<BtrfsMultidevCorpusReport> {
@@ -136,9 +140,7 @@ pub fn validate_default_btrfs_multidev_corpus() -> Result<BtrfsMultidevCorpusRep
 }
 
 #[must_use]
-pub fn validate_btrfs_multidev_corpus(
-    corpus: &BtrfsMultidevCorpus,
-) -> BtrfsMultidevCorpusReport {
+pub fn validate_btrfs_multidev_corpus(corpus: &BtrfsMultidevCorpus) -> BtrfsMultidevCorpusReport {
     let mut errors = Vec::new();
     let mut ids = BTreeSet::new();
     let mut kinds_seen = BTreeSet::new();
@@ -147,7 +149,13 @@ pub fn validate_btrfs_multidev_corpus(
     validate_corpus_top_level(corpus, &mut errors);
 
     for scenario in &corpus.scenarios {
-        validate_scenario(scenario, &mut ids, &mut kinds_seen, &mut profiles_seen, &mut errors);
+        validate_scenario(
+            scenario,
+            &mut ids,
+            &mut kinds_seen,
+            &mut profiles_seen,
+            &mut errors,
+        );
     }
     validate_required_kinds(&kinds_seen, &mut errors);
 
@@ -163,10 +171,7 @@ pub fn validate_btrfs_multidev_corpus(
     }
 }
 
-fn validate_corpus_top_level(
-    corpus: &BtrfsMultidevCorpus,
-    errors: &mut Vec<String>,
-) {
+fn validate_corpus_top_level(corpus: &BtrfsMultidevCorpus, errors: &mut Vec<String>) {
     if corpus.schema_version != BTRFS_MULTIDEV_CORPUS_SCHEMA_VERSION {
         errors.push(format!(
             "btrfs multi-device corpus schema_version must be {BTRFS_MULTIDEV_CORPUS_SCHEMA_VERSION}, got {}",
@@ -200,10 +205,7 @@ fn validate_scenario(
             scenario.scenario_id
         ));
     }
-    if !scenario
-        .scenario_id
-        .starts_with("btrfs_multidev_")
-    {
+    if !scenario.scenario_id.starts_with("btrfs_multidev_") {
         errors.push(format!(
             "scenario_id `{}` must start with btrfs_multidev_",
             scenario.scenario_id
@@ -217,13 +219,13 @@ fn validate_scenario(
             scenario.scenario_id, scenario.kind
         ));
     }
-    if !ALLOWED_PROFILES.contains(&scenario.profile.as_str()) {
+    if ALLOWED_PROFILES.contains(&scenario.profile.as_str()) {
+        profiles.insert(scenario.profile.clone());
+    } else {
         errors.push(format!(
             "scenario `{}` has unsupported profile `{}`",
             scenario.scenario_id, scenario.profile
         ));
-    } else {
-        profiles.insert(scenario.profile.clone());
     }
 
     validate_devices(scenario, errors);
@@ -335,10 +337,7 @@ fn validate_chunk_layout(scenario: &BtrfsMultidevScenario, errors: &mut Vec<Stri
     }
 }
 
-fn validate_degraded_and_outcome(
-    scenario: &BtrfsMultidevScenario,
-    errors: &mut Vec<String>,
-) {
+fn validate_degraded_and_outcome(scenario: &BtrfsMultidevScenario, errors: &mut Vec<String>) {
     if !ALLOWED_DEGRADED_STATES.contains(&scenario.degraded_state.as_str()) {
         errors.push(format!(
             "scenario `{}` has unsupported degraded_state `{}`",
@@ -382,10 +381,7 @@ fn validate_degraded_and_outcome(
     }
 }
 
-fn validate_repair_scrub_boundary(
-    scenario: &BtrfsMultidevScenario,
-    errors: &mut Vec<String>,
-) {
+fn validate_repair_scrub_boundary(scenario: &BtrfsMultidevScenario, errors: &mut Vec<String>) {
     if scenario.repair_scrub_boundary.repair_supported
         && !scenario.repair_scrub_boundary.scrub_supported
     {
@@ -395,7 +391,10 @@ fn validate_repair_scrub_boundary(
         ));
     }
     if !scenario.repair_scrub_boundary.scrub_supported
-        && !scenario.repair_scrub_boundary.follow_up_bead.starts_with("bd-")
+        && !scenario
+            .repair_scrub_boundary
+            .follow_up_bead
+            .starts_with("bd-")
     {
         errors.push(format!(
             "scenario `{}` unsupported scrub must point to a follow_up_bead (bd-...)",
@@ -404,10 +403,7 @@ fn validate_repair_scrub_boundary(
     }
 }
 
-fn validate_scenario_envelope(
-    scenario: &BtrfsMultidevScenario,
-    errors: &mut Vec<String>,
-) {
+fn validate_scenario_envelope(scenario: &BtrfsMultidevScenario, errors: &mut Vec<String>) {
     if scenario.artifact_requirements.is_empty() {
         errors.push(format!(
             "scenario `{}` must declare artifact_requirements",
