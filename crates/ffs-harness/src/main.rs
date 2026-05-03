@@ -26,6 +26,10 @@ use ffs_harness::{
         OperationalReadinessReportConfig, build_operational_readiness_report,
         render_operational_readiness_markdown,
     },
+    proof_bundle::{
+        ProofBundleValidationConfig, fail_on_proof_bundle_errors, render_proof_bundle_markdown,
+        validate_proof_bundle,
+    },
     proof_overhead_budget::{
         evaluate_proof_overhead_budget, fail_on_proof_overhead_budget_errors,
         load_observed_proof_metrics, load_proof_overhead_budget_config,
@@ -100,6 +104,7 @@ fn run() -> Result<()> {
             validate_ambition_evidence_matrix_cmd(&args[1..])
         }
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
+        Some("validate-proof-bundle") => validate_proof_bundle_cmd(&args[1..]),
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
         Some("validate-mounted-write-matrix") => validate_mounted_write_matrix_cmd(&args[1..]),
         Some("validate-mounted-recovery-matrix") => {
@@ -118,6 +123,12 @@ fn run() -> Result<()> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReadinessReportFormat {
+    Json,
+    Markdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProofBundleFormat {
     Json,
     Markdown,
 }
@@ -193,6 +204,102 @@ fn parse_readiness_report_format(raw: &str) -> Result<ReadinessReportFormat> {
     match raw {
         "json" => Ok(ReadinessReportFormat::Json),
         "markdown" | "md" => Ok(ReadinessReportFormat::Markdown),
+        other => bail!("invalid --format value: {other}"),
+    }
+}
+
+fn validate_proof_bundle_cmd(args: &[String]) -> Result<()> {
+    let mut bundle_path: Option<String> = None;
+    let mut current_git_sha: Option<String> = None;
+    let mut max_age_days: Option<u64> = None;
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--bundle" => {
+                i += 1;
+                bundle_path = Some(args.get(i).context("--bundle requires a path")?.to_owned());
+            }
+            "--current-git-sha" => {
+                i += 1;
+                current_git_sha = Some(
+                    args.get(i)
+                        .context("--current-git-sha requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--max-age-days" => {
+                i += 1;
+                max_age_days = Some(
+                    args.get(i)
+                        .context("--max-age-days requires a value")?
+                        .parse()
+                        .context("invalid --max-age-days value")?,
+                );
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_proof_bundle_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-proof-bundle argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let bundle_path = bundle_path.context("--bundle is required")?;
+    let mut config = ProofBundleValidationConfig::new(&bundle_path);
+    config.current_git_sha = current_git_sha;
+    config.max_age_days = max_age_days;
+
+    let report = validate_proof_bundle(&config)?;
+    let output = match format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_proof_bundle_markdown(&report),
+    };
+
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "proof bundle report written: {} valid={} lanes={} artifacts={}",
+            path, report.valid, report.totals.lanes, report.totals.artifacts
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = summary_out_path {
+        let summary = render_proof_bundle_markdown(&report);
+        write_text_file(Path::new(&path), &format!("{summary}\n"))?;
+        println!("proof bundle summary written: {path}");
+    }
+
+    fail_on_proof_bundle_errors(&report)
+}
+
+fn parse_proof_bundle_format(raw: &str) -> Result<ProofBundleFormat> {
+    match raw {
+        "json" => Ok(ProofBundleFormat::Json),
+        "markdown" | "md" => Ok(ProofBundleFormat::Markdown),
         other => bail!("invalid --format value: {other}"),
     }
 }
@@ -354,6 +461,16 @@ fn parse_xfstests_report_config(args: &[String]) -> Result<XfstestsReportConfig>
 fn require_value<'a>(args: &'a [String], index: usize, flag: &str) -> Result<&'a String> {
     args.get(index + 1)
         .with_context(|| format!("{flag} requires a value"))
+}
+
+fn write_text_file(path: &Path, text: &str) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn parse_xfstests_status(raw: &str) -> Result<XfstestsStatus> {
@@ -981,6 +1098,9 @@ fn print_usage() {
     println!(
         "  ffs-harness validate-proof-overhead-budget --budget FILE --metrics FILE [--out FILE]"
     );
+    println!(
+        "  ffs-harness validate-proof-bundle --bundle FILE [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
     println!("  ffs-harness validate-mounted-recovery-matrix [--matrix FILE] [--out FILE]");
     println!();
@@ -1027,6 +1147,9 @@ fn print_usage() {
     );
     println!(
         "  ffs-harness validate-proof-overhead-budget --budget artifacts/proof/budget.json --metrics artifacts/proof/metrics.json --out artifacts/proof/budget_report.json"
+    );
+    println!(
+        "  ffs-harness validate-proof-bundle --bundle artifacts/proof/bundle/manifest.json --out artifacts/proof/bundle/report.json --summary-out artifacts/proof/bundle/summary.md"
     );
     println!(
         "  ffs-harness validate-mounted-write-matrix --out artifacts/e2e/mounted_write_matrix.json"
@@ -1092,6 +1215,20 @@ fn print_proof_overhead_budget_usage() {
     println!("  --budget FILE                      Read proof overhead budget schema JSON");
     println!("  --metrics FILE                     Read observed proof workflow metrics JSON");
     println!("  --out FILE                         Write JSON release-gate report to FILE");
+}
+
+fn print_proof_bundle_usage() {
+    println!("Usage: ffs-harness validate-proof-bundle [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --bundle FILE                      Read proof bundle manifest JSON");
+    println!("  --current-git-sha SHA              Flag manifest captured from a different SHA");
+    println!("  --max-age-days N                   Fail when generated_at is older than N days");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!(
+        "  --out FILE                         Write selected-format validation report to FILE"
+    );
+    println!("  --summary-out FILE                 Write Markdown inspection summary to FILE");
 }
 
 fn print_mounted_write_matrix_usage() {

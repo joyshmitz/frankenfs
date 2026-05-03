@@ -418,6 +418,59 @@
       ]
     },
     {
+      "suite_id": "ffs_proof_bundle",
+      "script": "scripts/e2e/ffs_proof_bundle_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "proof_bundle_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"proof_bundle_cli_wired\" \"PASS\""
+        },
+        {
+          "id": "proof_bundle_sample_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"proof_bundle_sample_validates\" \"PASS\""
+        },
+        {
+          "id": "proof_bundle_summary_links",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "scenario_result \"proof_bundle_summary_links\" \"PASS\""
+        },
+        {
+          "id": "proof_bundle_hash_drift_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"proof_bundle_hash_drift_rejected\" \"PASS\""
+        },
+        {
+          "id": "proof_bundle_stale_sha_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"proof_bundle_stale_sha_rejected\" \"PASS\""
+        },
+        {
+          "id": "proof_bundle_missing_artifact_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"proof_bundle_missing_artifact_rejected\" \"PASS\""
+        },
+        {
+          "id": "proof_bundle_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"proof_bundle_unit_tests\" \"PASS\""
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_proof_overhead_budget",
       "script": "scripts/e2e/ffs_proof_overhead_budget_e2e.sh",
       "required_categories": [

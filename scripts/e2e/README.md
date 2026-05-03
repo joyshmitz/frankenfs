@@ -40,6 +40,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 
 # Run proof overhead budget release-gate smoke
 ./scripts/e2e/ffs_proof_overhead_budget_e2e.sh
+
+# Run proof bundle offline validation smoke
+./scripts/e2e/ffs_proof_bundle_e2e.sh
 ```
 
 ## Scenario Catalog Contract
@@ -278,6 +281,46 @@ It captures a small proof-style harness run, writes metrics, evaluates the
 sample budget, verifies the release-gate log fields, and runs the module unit
 tests.
 
+### Proof Bundle Validation
+
+Proof bundles are offline inspection packs for readiness claims. Each bundle is
+a directory rooted at a versioned `manifest.json` that records the schema
+version, bundle id, generation timestamp, git SHA, toolchain, kernel, mount
+capability, required lanes, raw logs, summaries, gate inputs, artifact paths,
+SHA-256 hashes, scenario ids, and redaction policy. The required lanes are
+`conformance`, `xfstests`, `fuse`, `differential_oracle`, `repair_lab`,
+`crash_replay`, `performance`, `writeback_cache`, and `release_gates`.
+
+Validate a bundle with:
+
+```bash
+rch exec -- cargo run -p ffs-harness -- validate-proof-bundle \
+  --bundle artifacts/proof/bundle/manifest.json \
+  --current-git-sha "$(git rev-parse HEAD)" \
+  --max-age-days 14 \
+  --out artifacts/proof/bundle/report.json \
+  --summary-out artifacts/proof/bundle/summary.md
+```
+
+The JSON report includes pass/fail/skip/error totals, missing required lanes,
+duplicate lane/scenario ids, stale SHA or timestamp diagnostics, broken links,
+artifact hash mismatches, redaction errors, and per-lane raw-log/summary links.
+The Markdown summary is the human inspection view and must preserve the
+`validate-proof-bundle` reproduction command. Validation is fail-closed: stale
+schema versions, stale git SHAs, old timestamps, absolute or parent-traversal
+paths, missing files, wrong SHA-256 hashes, duplicate scenario ids, and
+redaction policies that remove reproduction fields all fail the gate.
+
+The E2E smoke is:
+
+```bash
+./scripts/e2e/ffs_proof_bundle_e2e.sh
+```
+
+It builds a sample bundle with every required lane, validates it, writes
+JSON/Markdown inspection artifacts, rejects hash drift, stale SHA, and missing
+artifact links, then runs the module unit tests.
+
 ### Redaction Policy
 
 The default redaction policy is designed for shareable audit packs:
@@ -367,6 +410,15 @@ The mounted recovery matrix suite exercises:
 3. Safe process-control boundaries for temporary images and mount-daemon scoped termination
 4. Shared QA artifacts with pre-crash operations, crash/unmount point, recovery command, expected survivors, actual state artifact, stdout/stderr paths, cleanup status, and product/host/harness/unsupported classification vocabulary
 5. Fail-closed validation for missing lifecycle coverage and unsafe recovery commands
+
+The proof bundle suite exercises:
+
+1. `validate-proof-bundle` CLI wiring and module export
+2. Sample bundle generation with every required readiness lane
+3. JSON report and Markdown summary generation with pass/fail/skip/error totals
+4. Raw log, summary, gate input, and artifact link preservation for offline inspection
+5. Fail-closed validation for artifact hash drift, stale git SHA, and missing artifact links
+6. Redaction policy unit coverage that preserves reproduction commands and artifact/scenario fields
 
 The btrfs read-only smoke suite exercises:
 
