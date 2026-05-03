@@ -18,6 +18,8 @@ FFS_USE_RCH="${FFS_USE_RCH:-1}"
 FORCE_REMOTE="${FFS_BENCH_FORCE_REMOTE:-0}"
 BENCH_PROFILE="${FFS_BENCH_PROFILE:-release-perf}"
 MOUNT_PROBE_USE_SUDO="${FFS_MOUNT_PROBE_USE_SUDO:-0}"
+MOUNT_PROBE_IMAGE_OVERRIDE="${FFS_MOUNT_PROBE_IMAGE:-}"
+MOUNT_RECOVERY_PROBE_IMAGE_OVERRIDE="${FFS_MOUNT_RECOVERY_PROBE_IMAGE:-}"
 PERF_BASELINE_PATH="artifacts/baselines/perf_baseline.json"
 THRESHOLDS_PATH="benchmarks/thresholds.toml"
 BENCHMARK_BASELINE_LATEST_PATH="benchmarks/baselines/latest.json"
@@ -107,7 +109,7 @@ extract_cache_report_from_log() {
 usage() {
     cat <<'USAGE'
 Usage:
-  scripts/benchmark_record.sh [--date YYYYMMDD] [--op OPERATION] [--warmup N] [--runs N] [--compare] [--skip-verify-golden] [--thresholds PATH] [--p99-fail-threshold N] [--profile PROFILE] [--force-remote] [--mount-probe-use-sudo] [--out-json PATH]
+  scripts/benchmark_record.sh [--date YYYYMMDD] [--op OPERATION] [--warmup N] [--runs N] [--compare] [--skip-verify-golden] [--thresholds PATH] [--p99-fail-threshold N] [--profile PROFILE] [--force-remote] [--mount-probe-use-sudo] [--mount-probe-image PATH] [--mount-recovery-probe-image PATH] [--out-json PATH]
 
 Options:
   --date YYYYMMDD          Override date-tag for output paths (default: today)
@@ -122,6 +124,9 @@ Options:
   --profile PROFILE        Cargo profile for build/run/bench commands (default: release-perf)
   --force-remote           Disable local release-binary execution and use cargo run via the configured cargo executor
   --mount-probe-use-sudo   Run mount probe helper via `sudo -n` (or set FFS_MOUNT_PROBE_USE_SUDO=1)
+  --mount-probe-image PATH Reuse an existing ext4 image for cold/warm mount probes (or set FFS_MOUNT_PROBE_IMAGE)
+  --mount-recovery-probe-image PATH
+                           Reuse an existing journaled ext4 image for recovery mount probes (or set FFS_MOUNT_RECOVERY_PROBE_IMAGE)
   --out-json PATH          Structured baseline JSON output path (default: artifacts/baselines/perf_baseline.json)
   -h, --help               Show this help
 USAGE
@@ -174,6 +179,16 @@ while [ $# -gt 0 ]; do
         --mount-probe-use-sudo)
             MOUNT_PROBE_USE_SUDO=1
             shift
+            ;;
+        --mount-probe-image)
+            [ $# -ge 2 ] || { echo "missing value for --mount-probe-image" >&2; exit 2; }
+            MOUNT_PROBE_IMAGE_OVERRIDE="$2"
+            shift 2
+            ;;
+        --mount-recovery-probe-image)
+            [ $# -ge 2 ] || { echo "missing value for --mount-recovery-probe-image" >&2; exit 2; }
+            MOUNT_RECOVERY_PROBE_IMAGE_OVERRIDE="$2"
+            shift 2
             ;;
         --thresholds)
             [ $# -ge 2 ] || { echo "missing value for --thresholds" >&2; exit 2; }
@@ -408,6 +423,15 @@ pending_entry_matches_filter() {
     [ -z "$OP_FILTER" ] || [ "$operation" = "$OP_FILTER" ]
 }
 
+recovery_mount_benchmark_needed() {
+    [ -z "$OP_FILTER" ] || [ "$OP_FILTER" = "mount_recovery" ]
+}
+
+mount_image_creation_needs_mkfs() {
+    [ -z "$MOUNT_PROBE_IMAGE_OVERRIDE" ] \
+        || { recovery_mount_benchmark_needed && [ -z "$MOUNT_RECOVERY_PROBE_IMAGE_OVERRIDE" ]; }
+}
+
 apply_op_filter() {
     [ -n "$OP_FILTER" ] || return 0
 
@@ -545,7 +569,7 @@ configure_mount_benchmarks() {
         return
     fi
 
-    if ! command -v mkfs.ext4 >/dev/null 2>&1; then
+    if mount_image_creation_needs_mkfs && ! command -v mkfs.ext4 >/dev/null 2>&1; then
         set_mount_pending_reasons \
             "mkfs.ext4 is required for mount probe image generation" \
             "$recovery_reason"
@@ -566,37 +590,63 @@ configure_mount_benchmarks() {
         return
     fi
 
-    MOUNT_BENCH_IMAGE="${OUT_DIR}/mount_probe.ext4"
-    MOUNT_RECOVERY_IMAGE="${OUT_DIR}/mount_recovery_probe.ext4"
+    if [ -n "$MOUNT_PROBE_IMAGE_OVERRIDE" ]; then
+        MOUNT_BENCH_IMAGE="$MOUNT_PROBE_IMAGE_OVERRIDE"
+    else
+        MOUNT_BENCH_IMAGE="${OUT_DIR}/mount_probe.ext4"
+    fi
+    if [ -n "$MOUNT_RECOVERY_PROBE_IMAGE_OVERRIDE" ]; then
+        MOUNT_RECOVERY_IMAGE="$MOUNT_RECOVERY_PROBE_IMAGE_OVERRIDE"
+    else
+        MOUNT_RECOVERY_IMAGE="${OUT_DIR}/mount_recovery_probe.ext4"
+    fi
     MOUNT_BENCH_ROOT="${OUT_DIR}/mount_probe_mounts"
     mkdir -p "$MOUNT_BENCH_ROOT"
 
-    if ! dd if=/dev/zero of="$MOUNT_BENCH_IMAGE" bs=1M count=16 status=none; then
-        set_mount_pending_reasons \
-            "failed to create mount probe image at ${MOUNT_BENCH_IMAGE}" \
-            "$recovery_reason"
-        return
+    if [ -n "$MOUNT_PROBE_IMAGE_OVERRIDE" ]; then
+        if [ ! -f "$MOUNT_BENCH_IMAGE" ]; then
+            set_mount_pending_reasons \
+                "mount probe image override does not exist: ${MOUNT_BENCH_IMAGE}" \
+                "$recovery_reason"
+            return
+        fi
+    else
+        if ! dd if=/dev/zero of="$MOUNT_BENCH_IMAGE" bs=1M count=16 status=none; then
+            set_mount_pending_reasons \
+                "failed to create mount probe image at ${MOUNT_BENCH_IMAGE}" \
+                "$recovery_reason"
+            return
+        fi
+
+        if ! mkfs.ext4 -F -O extent,filetype,^has_journal -L ffs_mount_probe "$MOUNT_BENCH_IMAGE" >/dev/null 2>&1; then
+            set_mount_pending_reasons \
+                "mkfs.ext4 failed while preparing mount probe image" \
+                "$recovery_reason"
+            return
+        fi
     fi
 
-    if ! mkfs.ext4 -F -O extent,filetype,^has_journal -L ffs_mount_probe "$MOUNT_BENCH_IMAGE" >/dev/null 2>&1; then
-        set_mount_pending_reasons \
-            "mkfs.ext4 failed while preparing mount probe image" \
-            "$recovery_reason"
-        return
-    fi
+    if recovery_mount_benchmark_needed; then
+        if [ -n "$MOUNT_RECOVERY_PROBE_IMAGE_OVERRIDE" ]; then
+            if [ ! -f "$MOUNT_RECOVERY_IMAGE" ]; then
+                PENDING_REASONS["mount_recovery"]="recovery mount probe image override does not exist: ${MOUNT_RECOVERY_IMAGE}"
+                return
+            fi
+        else
+            if ! dd if=/dev/zero of="$MOUNT_RECOVERY_IMAGE" bs=1M count=32 status=none; then
+                set_mount_pending_reasons \
+                    "failed to create recovery mount probe image at ${MOUNT_RECOVERY_IMAGE}" \
+                    "$recovery_reason"
+                return
+            fi
 
-    if ! dd if=/dev/zero of="$MOUNT_RECOVERY_IMAGE" bs=1M count=32 status=none; then
-        set_mount_pending_reasons \
-            "failed to create recovery mount probe image at ${MOUNT_RECOVERY_IMAGE}" \
-            "$recovery_reason"
-        return
-    fi
-
-    if ! mkfs.ext4 -F -O extent,filetype -L ffs_mount_recovery_probe "$MOUNT_RECOVERY_IMAGE" >/dev/null 2>&1; then
-        set_mount_pending_reasons \
-            "mkfs.ext4 failed while preparing recovery mount probe image" \
-            "$recovery_reason"
-        return
+            if ! mkfs.ext4 -F -O extent,filetype -L ffs_mount_recovery_probe "$MOUNT_RECOVERY_IMAGE" >/dev/null 2>&1; then
+                set_mount_pending_reasons \
+                    "mkfs.ext4 failed while preparing recovery mount probe image" \
+                    "$recovery_reason"
+                return
+            fi
+        fi
     fi
 
     local probe_err
@@ -634,31 +684,33 @@ configure_mount_benchmarks() {
         unset 'PENDING_SOURCE_JSON[mount_cold]'
         unset 'PENDING_SOURCE_JSON[mount_warm]'
 
-        local recovery_probe_err
-        recovery_probe_err="${OUT_DIR}/ffs_cli_mount_recovery_probe.stderr"
-        local recovery_cmd_base
-        recovery_cmd_base="${mount_probe_prefix_str}scripts/mount_benchmark_probe.sh --bin $(printf '%q' "$CLI_BIN") --image $(printf '%q' "$MOUNT_RECOVERY_IMAGE") --mount-root $(printf '%q' "$MOUNT_BENCH_ROOT")"
-        if "${mount_probe_prefix[@]}" scripts/mount_benchmark_probe.sh \
-            --bin "$CLI_BIN" \
-            --image "$MOUNT_RECOVERY_IMAGE" \
-            --mount-root "$MOUNT_BENCH_ROOT" \
-            --mode recovery \
-            --out-json "$recovery_probe_report" \
-            >/dev/null 2>"$recovery_probe_err"; then
-            add_bench "ffs-cli mount recovery ext4 probe (journal replay)" \
-                "${recovery_cmd_base} --mode recovery --out-json $(printf '%q' "$recovery_probe_report")" \
-                "ffs_cli_mount_recovery_probe.json" \
-                "mount_recovery" \
-                "0"
-            unset 'PENDING_REASONS[mount_recovery]'
-            unset 'PENDING_SOURCE_JSON[mount_recovery]'
-        else
-            local recovery_probe_reason
-            recovery_probe_reason="$(single_line_text < "$recovery_probe_err")"
-            if [ -z "$recovery_probe_reason" ]; then
-                recovery_probe_reason="mount recovery probe failed with unknown error"
+        if recovery_mount_benchmark_needed; then
+            local recovery_probe_err
+            recovery_probe_err="${OUT_DIR}/ffs_cli_mount_recovery_probe.stderr"
+            local recovery_cmd_base
+            recovery_cmd_base="${mount_probe_prefix_str}scripts/mount_benchmark_probe.sh --bin $(printf '%q' "$CLI_BIN") --image $(printf '%q' "$MOUNT_RECOVERY_IMAGE") --mount-root $(printf '%q' "$MOUNT_BENCH_ROOT")"
+            if "${mount_probe_prefix[@]}" scripts/mount_benchmark_probe.sh \
+                --bin "$CLI_BIN" \
+                --image "$MOUNT_RECOVERY_IMAGE" \
+                --mount-root "$MOUNT_BENCH_ROOT" \
+                --mode recovery \
+                --out-json "$recovery_probe_report" \
+                >/dev/null 2>"$recovery_probe_err"; then
+                add_bench "ffs-cli mount recovery ext4 probe (journal replay)" \
+                    "${recovery_cmd_base} --mode recovery --out-json $(printf '%q' "$recovery_probe_report")" \
+                    "ffs_cli_mount_recovery_probe.json" \
+                    "mount_recovery" \
+                    "0"
+                unset 'PENDING_REASONS[mount_recovery]'
+                unset 'PENDING_SOURCE_JSON[mount_recovery]'
+            else
+                local recovery_probe_reason
+                recovery_probe_reason="$(single_line_text < "$recovery_probe_err")"
+                if [ -z "$recovery_probe_reason" ]; then
+                    recovery_probe_reason="mount recovery probe failed with unknown error"
+                fi
+                PENDING_REASONS["mount_recovery"]="mount recovery probe failed on this host: ${recovery_probe_reason} (set FFS_MOUNT_PROBE_USE_SUDO=1 or --mount-probe-use-sudo if passwordless sudo is available)"
             fi
-            PENDING_REASONS["mount_recovery"]="mount recovery probe failed on this host: ${recovery_probe_reason} (set FFS_MOUNT_PROBE_USE_SUDO=1 or --mount-probe-use-sudo if passwordless sudo is available)"
         fi
     else
         local probe_reason

@@ -1,0 +1,43 @@
+{
+  "generated_at": "2026-05-03T21:14:12Z",
+  "date_tag": "20260503-bd-rchk5-3-mount-warm-sudo-measured",
+  "commit": "13271f096188daf9513db841eee7d720d137260e",
+  "branch": "",
+  "environment": {
+    "hostname": "thinkstation2",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5995WX 64-Cores",
+    "kernel": "Linux 6.17.0-22-generic x86_64 GNU/Linux",
+    "memory_total_kib": 259257084,
+    "memory_total_gib": 247.247,
+    "cargo_target_dir": "/data/tmp/rch_target_frankenfs_bd_rchk5_3_mount_warm",
+    "rustc": "rustc 1.97.0-nightly (f53b654a8 2026-04-30)",
+    "cargo": "cargo 1.97.0-nightly (eb9b60f1f 2026-04-24)",
+    "hyperfine": "hyperfine 1.19.0"
+  },
+  "warmup_runs": 3,
+  "measured_runs": 10,
+  "thresholds_file": "benchmarks/thresholds.toml",
+  "p99_warn_threshold_percent": 10,
+  "p99_fail_threshold_percent": 20,
+  "measurement_coverage": {
+    "measured_count": 1,
+    "pending_count": 0,
+    "cache_workload_metric_count": 0
+  },
+  "measurements": [
+    {
+      "operation": "mount_warm",
+      "metric": "latency",
+      "command": "sudo -n scripts/mount_benchmark_probe.sh --bin /data/tmp/rch_target_frankenfs_bd_rchk5_3_mount_warm/release-perf/ffs-cli --image baselines/hyperfine/20260503-bd-rchk5-3-mount-warm/mount_probe.ext4 --mount-root baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/mount_probe_mounts --mode warm --out-json baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/ffs_cli_mount_warm_probe_report.json",
+      "benchmark_mode": "hyperfine",
+      "source_json": "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/ffs_cli_mount_warm_probe.json",
+      "p50_us": 291845,
+      "p95_us": 300114,
+      "p99_us": 300114,
+      "throughput_ops_sec": 3.407422,
+      "throughput_mb_sec": 0,
+      "status": "measured"
+    }
+  ],
+  "cache_workload_metrics": []
+}

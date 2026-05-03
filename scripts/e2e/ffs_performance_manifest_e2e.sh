@@ -54,6 +54,9 @@ MOUNT_PROBE_JSON="$E2E_LOG_DIR/mount_benchmark_probe_input_error.json"
 MOUNT_PROBE_RAW="$E2E_LOG_DIR/mount_benchmark_probe_input_error.raw"
 MOUNT_PENDING_BASELINE_JSON="$REPO_ROOT/benchmarks/baselines/history/20260503-bd-rchk5-3-mount-warm-pending.json"
 MOUNT_PENDING_PROBE_JSON="$REPO_ROOT/baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/ffs_cli_mount_cold_probe_report.json"
+MOUNT_MEASURED_BASELINE_JSON="$REPO_ROOT/benchmarks/baselines/history/20260503-bd-rchk5-3-mount-warm-sudo-measured.json"
+MOUNT_MEASURED_HYPERFINE_JSON="$REPO_ROOT/baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/ffs_cli_mount_warm_probe.json"
+MOUNT_MEASURED_PROBE_JSON="$REPO_ROOT/baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/ffs_cli_mount_warm_probe_report.json"
 
 e2e_step "Scenario 1: performance manifest module and CLI are wired"
 if grep -q "pub mod performance_baseline_manifest" crates/ffs-harness/src/lib.rs \
@@ -303,6 +306,56 @@ then
     scenario_result "performance_mount_pending_artifact_preserves_probe" "PASS" "targeted mount_warm pending row points at structured FUSE denial report"
 else
     scenario_result "performance_mount_pending_artifact_preserves_probe" "FAIL" "checked-in mount pending artifact lost probe evidence"
+fi
+
+e2e_step "Scenario 3d: mounted benchmark measured artifact preserves sudo FUSE evidence"
+if python3 - "$MOUNT_MEASURED_BASELINE_JSON" "$MOUNT_MEASURED_HYPERFINE_JSON" "$MOUNT_MEASURED_PROBE_JSON" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+baseline_path = pathlib.Path(sys.argv[1])
+hyperfine_path = pathlib.Path(sys.argv[2])
+probe_path = pathlib.Path(sys.argv[3])
+baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+hyperfine = json.loads(hyperfine_path.read_text(encoding="utf-8"))
+probe = json.loads(probe_path.read_text(encoding="utf-8"))
+
+coverage = baseline["measurement_coverage"]
+if coverage["measured_count"] != 1 or coverage["pending_count"] != 0:
+    raise SystemExit(f"unexpected coverage: {coverage}")
+measurements = baseline["measurements"]
+if len(measurements) != 1:
+    raise SystemExit(f"expected one targeted measured row, got {len(measurements)}")
+row = measurements[0]
+if row["operation"] != "mount_warm" or row["status"] != "measured":
+    raise SystemExit(f"wrong measured row: {row}")
+if row["benchmark_mode"] != "hyperfine":
+    raise SystemExit(f"wrong benchmark mode: {row}")
+expected_hyperfine = "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/ffs_cli_mount_warm_probe.json"
+if row["source_json"] != expected_hyperfine:
+    raise SystemExit(f"measured row lost hyperfine source path: {row}")
+if "sudo -n scripts/mount_benchmark_probe.sh" not in row["command"]:
+    raise SystemExit("measured command did not preserve sudo FUSE lane")
+if not (row["p50_us"] > 0 and row["p99_us"] >= row["p50_us"]):
+    raise SystemExit(f"invalid measured latency summary: {row}")
+times = hyperfine["results"][0]["times"]
+if len(times) != 10 or min(times) <= 0:
+    raise SystemExit(f"hyperfine run count/values invalid: {times}")
+if probe["classification"] != "measured" or probe["outcome"] != "pass":
+    raise SystemExit(f"wrong probe result: {probe}")
+labels = [attempt["label"] for attempt in probe["attempts"]]
+if labels != ["warm_prepare", "warm_measure"]:
+    raise SystemExit(f"warm probe attempts not preserved: {labels}")
+if any(not attempt["ready"] or attempt["cleanup_status"] != "unmounted" for attempt in probe["attempts"]):
+    raise SystemExit(f"warm probe cleanup failed: {probe['attempts']}")
+PY
+then
+    scenario_result "performance_mount_measured_artifact_preserves_probe" "PASS" "targeted mount_warm measured row points at sudo FUSE hyperfine and probe reports"
+else
+    scenario_result "performance_mount_measured_artifact_preserves_probe" "FAIL" "checked-in mount measured artifact lost sudo FUSE evidence"
 fi
 
 e2e_step "Scenario 4: invalid manifest variants fail closed"
