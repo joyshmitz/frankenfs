@@ -88,6 +88,12 @@ warn_percent = 20
 fail_percent = 40
 noise_floor_percent = 10
 
+[operation_thresholds.block_cache_sharded_arc_concurrent_hot_read_64threads]
+# 64-thread hot-cache bursts are scheduler- and NUMA-sensitive.
+warn_percent = 20
+fail_percent = 40
+noise_floor_percent = 10
+
 [operation_thresholds.block_cache_arc_compile_like]
 warn_percent = 12
 fail_percent = 25
@@ -116,6 +122,12 @@ fail_percent = 25
 noise_floor_percent = 5
 
 [operation_thresholds.block_cache_s3fifo_concurrent_hot_read_64threads]
+# 64-thread hot-cache bursts are scheduler- and NUMA-sensitive.
+warn_percent = 20
+fail_percent = 40
+noise_floor_percent = 10
+
+[operation_thresholds.block_cache_sharded_s3fifo_concurrent_hot_read_64threads]
 # 64-thread hot-cache bursts are scheduler- and NUMA-sensitive.
 warn_percent = 20
 fail_percent = 40

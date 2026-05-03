@@ -453,6 +453,22 @@ impl Taxonomy {
                 );
             }
         }
+        for policy in ["arc", "s3fifo"] {
+            let id = format!("block_cache_sharded_{policy}_concurrent_hot_read_64threads");
+            ops.insert(
+                id.clone(),
+                BenchmarkEntry {
+                    operation_id: id,
+                    family: BenchmarkFamily::BlockCache,
+                    metric: MetricType::Latency,
+                    owning_crate: "ffs-block".to_owned(),
+                    description: format!(
+                        "sharded {policy} policy: 64-thread hot-cache read burst"
+                    ),
+                    envelope_override: None,
+                },
+            );
+        }
     }
 
     fn register_write_path_ops(ops: &mut BTreeMap<String, BenchmarkEntry>) {
@@ -851,12 +867,14 @@ mod tests {
             "block_cache_arc_zipf_distribution",
             "block_cache_arc_mixed_seq70_hot30",
             "block_cache_arc_concurrent_hot_read_64threads",
+            "block_cache_sharded_arc_concurrent_hot_read_64threads",
             "block_cache_arc_compile_like",
             "block_cache_arc_database_like",
             "block_cache_s3fifo_sequential_scan",
             "block_cache_s3fifo_zipf_distribution",
             "block_cache_s3fifo_mixed_seq70_hot30",
             "block_cache_s3fifo_concurrent_hot_read_64threads",
+            "block_cache_sharded_s3fifo_concurrent_hot_read_64threads",
             "block_cache_s3fifo_compile_like",
             "block_cache_s3fifo_database_like",
             "write_seq_4k",
@@ -912,12 +930,14 @@ mod tests {
             "block_cache_arc_zipf_distribution",
             "block_cache_arc_mixed_seq70_hot30",
             "block_cache_arc_concurrent_hot_read_64threads",
+            "block_cache_sharded_arc_concurrent_hot_read_64threads",
             "block_cache_arc_compile_like",
             "block_cache_arc_database_like",
             "block_cache_s3fifo_sequential_scan",
             "block_cache_s3fifo_zipf_distribution",
             "block_cache_s3fifo_mixed_seq70_hot30",
             "block_cache_s3fifo_concurrent_hot_read_64threads",
+            "block_cache_sharded_s3fifo_concurrent_hot_read_64threads",
             "block_cache_s3fifo_compile_like",
             "block_cache_s3fifo_database_like",
             "wal_commit_4k_sync",
@@ -1101,6 +1121,8 @@ mod tests {
             "cli_metadata_parse_conformance",
             "block_cache_arc_concurrent_hot_read_64threads",
             "block_cache_s3fifo_concurrent_hot_read_64threads",
+            "block_cache_sharded_arc_concurrent_hot_read_64threads",
+            "block_cache_sharded_s3fifo_concurrent_hot_read_64threads",
             "wal_commit_4k_sync",
             "wal_write_amplification_1block",
             "wal_write_amplification_16block",
