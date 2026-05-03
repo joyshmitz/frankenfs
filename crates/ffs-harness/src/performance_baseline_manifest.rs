@@ -1505,6 +1505,7 @@ mod tests {
         assert!(report.command_expansions.iter().any(|row| row.workload_id
             == "fuse_metadata_readdir_1k"
             && row.command.contains("artifacts/performance/dry-run")
+            && row.command.contains("--out-json")
             && row.target_dir.contains("fuse_metadata_readdir_1k")
             && row.kernel_fuse_mode == PerformanceKernelFuseMode::PermissionedRequired));
         assert!(report.command_expansions.iter().any(|row| {

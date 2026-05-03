@@ -575,22 +575,27 @@ configure_mount_benchmarks() {
 
     local probe_err
     probe_err="${OUT_DIR}/ffs_cli_mount_probe.stderr"
+    local cold_probe_report warm_probe_report recovery_probe_report
+    cold_probe_report="${OUT_DIR}/ffs_cli_mount_cold_probe_report.json"
+    warm_probe_report="${OUT_DIR}/ffs_cli_mount_warm_probe_report.json"
+    recovery_probe_report="${OUT_DIR}/ffs_cli_mount_recovery_probe_report.json"
     if "${mount_probe_prefix[@]}" scripts/mount_benchmark_probe.sh \
         --bin "$CLI_BIN" \
         --image "$MOUNT_BENCH_IMAGE" \
         --mount-root "$MOUNT_BENCH_ROOT" \
         --mode cold \
+        --out-json "$cold_probe_report" \
         >/dev/null 2>"$probe_err"; then
         local cmd_base
         cmd_base="${mount_probe_prefix_str}scripts/mount_benchmark_probe.sh --bin $(printf '%q' "$CLI_BIN") --image $(printf '%q' "$MOUNT_BENCH_IMAGE") --mount-root $(printf '%q' "$MOUNT_BENCH_ROOT")"
 
         add_bench "ffs-cli mount cold ext4 probe (fuse)" \
-            "${cmd_base} --mode cold" \
+            "${cmd_base} --mode cold --out-json $(printf '%q' "$cold_probe_report")" \
             "ffs_cli_mount_cold_probe.json" \
             "mount_cold" \
             "0"
         add_bench "ffs-cli mount warm ext4 probe (fuse)" \
-            "${cmd_base} --mode warm" \
+            "${cmd_base} --mode warm --out-json $(printf '%q' "$warm_probe_report")" \
             "ffs_cli_mount_warm_probe.json" \
             "mount_warm" \
             "0"
@@ -607,9 +612,10 @@ configure_mount_benchmarks() {
             --image "$MOUNT_RECOVERY_IMAGE" \
             --mount-root "$MOUNT_BENCH_ROOT" \
             --mode recovery \
+            --out-json "$recovery_probe_report" \
             >/dev/null 2>"$recovery_probe_err"; then
             add_bench "ffs-cli mount recovery ext4 probe (journal replay)" \
-                "${recovery_cmd_base} --mode recovery" \
+                "${recovery_cmd_base} --mode recovery --out-json $(printf '%q' "$recovery_probe_report")" \
                 "ffs_cli_mount_recovery_probe.json" \
                 "mount_recovery" \
                 "0"
