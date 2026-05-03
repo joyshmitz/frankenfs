@@ -128,7 +128,13 @@ A block write that never triggers repair symbol refresh for its group is a spec-
 > the same recovery/writeback pipeline when explicitly started with
 > `--background-repair --background-scrub-ledger <jsonl>` on a client read-only
 > mount. Mounted read-write automatic repair remains out of scope until repair
-> writeback and client writes share a serialization point.
+> writeback and client writes share a serialization point. The normative V1.x
+> fail-closed contract is data-backed in
+> `docs/repair-writeback-serialization-contract.json` and validated by
+> `ffs-harness validate-repair-writeback-serialization`; a read-write mounted
+> mutation request must emit `rw_repair_serialization_missing` with MVCC epoch,
+> lease, repair-symbol generation, artifact paths, cleanup status, reproduction
+> command, and follow-up bead evidence.
 
 ### 0.5 Table of Contents
 

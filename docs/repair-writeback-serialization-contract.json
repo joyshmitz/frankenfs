@@ -1,0 +1,808 @@
+{
+  "schema_version": 1,
+  "contract_id": "bd-rchk0.1.1-repair-writeback-serialization-v1",
+  "bead_id": "bd-rchk0.1.1",
+  "current_policy": {
+    "policy_id": "rw-repair-fail-closed-v1",
+    "read_write_repair_state": "fail_closed",
+    "mutating_rw_repair_enabled": false,
+    "serialization_point": "not_implemented",
+    "fail_closed_error_class": "rw_repair_serialization_missing",
+    "docs_wording_id": "readme.repair.rw.writeback"
+  },
+  "artifact_consumers": [
+    "operator_proof_bundle",
+    "release_gate_evaluator",
+    "operational_readiness_report",
+    "mounted_write_matrix"
+  ],
+  "required_evidence_fields": [
+    "operation_id",
+    "scenario_id",
+    "snapshot_epoch",
+    "lease_id",
+    "repair_symbol_version",
+    "expected_state",
+    "observed_state",
+    "error_class",
+    "artifact_paths",
+    "cleanup_status",
+    "reproduction_command",
+    "follow_up_bead"
+  ],
+  "invariants": [
+    {
+      "invariant_id": "I1_snapshot_epoch_cut",
+      "description": "Every mounted request and repair attempt observes a single MVCC snapshot epoch; repair cannot write back data decoded from an epoch older than the client-visible block generation.",
+      "required_log_fields": [
+        "operation_id",
+        "scenario_id",
+        "snapshot_epoch",
+        "expected_state",
+        "observed_state"
+      ],
+      "failure_error_class": "mvcc_snapshot_boundary_violation"
+    },
+    {
+      "invariant_id": "I2_single_writer_serializer",
+      "description": "Client writes and repair writeback for overlapping blocks must enter the same serializer before either path may mutate live image state.",
+      "required_log_fields": [
+        "operation_id",
+        "scenario_id",
+        "expected_state",
+        "observed_state",
+        "error_class"
+      ],
+      "failure_error_class": "rw_repair_serialization_missing"
+    },
+    {
+      "invariant_id": "I3_dirty_cache_before_repair",
+      "description": "Repair writeback must not overwrite a block with dirty client data that has not crossed the fsync/fsyncdir durability boundary.",
+      "required_log_fields": [
+        "operation_id",
+        "scenario_id",
+        "snapshot_epoch",
+        "error_class"
+      ],
+      "failure_error_class": "dirty_cache_not_fsynced"
+    },
+    {
+      "invariant_id": "I4_fsync_fsyncdir_boundary",
+      "description": "Only fsync and fsyncdir can publish durability evidence that a repair writeback may rely on; flush remains non-durable.",
+      "required_log_fields": [
+        "operation_id",
+        "scenario_id",
+        "expected_state",
+        "observed_state",
+        "error_class"
+      ],
+      "failure_error_class": "flush_non_durable"
+    },
+    {
+      "invariant_id": "I5_repair_lease_exclusive",
+      "description": "Mutating repair must hold an active per-image ownership lease before replacing source blocks or refreshing repair symbols.",
+      "required_log_fields": [
+        "operation_id",
+        "scenario_id",
+        "lease_id",
+        "error_class"
+      ],
+      "failure_error_class": "lease_expired_or_missing"
+    },
+    {
+      "invariant_id": "I6_repair_symbol_freshness",
+      "description": "Repair symbols must match the current block generation before repair writeback can proceed.",
+      "required_log_fields": [
+        "operation_id",
+        "scenario_id",
+        "repair_symbol_version",
+        "snapshot_epoch",
+        "error_class"
+      ],
+      "failure_error_class": "stale_repair_symbol"
+    },
+    {
+      "invariant_id": "I7_cancel_cleanup_no_partial_mutation",
+      "description": "Cancellation must leave either no mutation or a fully ledgered cleanup state with no hidden partial repair.",
+      "required_log_fields": [
+        "operation_id",
+        "scenario_id",
+        "cleanup_status",
+        "artifact_paths",
+        "reproduction_command"
+      ],
+      "failure_error_class": "cancelled_repair_cleanup"
+    },
+    {
+      "invariant_id": "I8_failure_refuses_symbol_refresh",
+      "description": "A failed or halfway source-block writeback must not refresh repair symbols, because that would make stale parity look authoritative.",
+      "required_log_fields": [
+        "operation_id",
+        "scenario_id",
+        "repair_symbol_version",
+        "error_class",
+        "artifact_paths"
+      ],
+      "failure_error_class": "writeback_failure_no_refresh"
+    }
+  ],
+  "states": [
+    {
+      "state_id": "detection_only_scrub",
+      "description": "Mounted scrub can observe corruption and write evidence, but cannot mutate source blocks or symbols.",
+      "client_writes_allowed": true,
+      "repair_writeback_allowed": false,
+      "mutates_image": false
+    },
+    {
+      "state_id": "repair_planning",
+      "description": "Corruption evidence is converted into a repair plan and confidence decision before any mutation is attempted.",
+      "client_writes_allowed": true,
+      "repair_writeback_allowed": false,
+      "mutates_image": false
+    },
+    {
+      "state_id": "repair_lease_held",
+      "description": "A mutating repair path owns the per-image repair lease and can perform preflight checks.",
+      "client_writes_allowed": false,
+      "repair_writeback_allowed": false,
+      "mutates_image": false
+    },
+    {
+      "state_id": "client_write_in_flight",
+      "description": "Mounted read-write client data or metadata mutation is active or dirty in cache.",
+      "client_writes_allowed": true,
+      "repair_writeback_allowed": false,
+      "mutates_image": true
+    },
+    {
+      "state_id": "fsync_boundary",
+      "description": "All relevant client writes reached an fsync or fsyncdir boundary and are eligible for repair preflight.",
+      "client_writes_allowed": true,
+      "repair_writeback_allowed": false,
+      "mutates_image": false
+    },
+    {
+      "state_id": "repair_writeback_blocked_rw",
+      "description": "Read-write mounted repair requested mutation, but the unified serializer does not exist, so the path fails closed.",
+      "client_writes_allowed": true,
+      "repair_writeback_allowed": false,
+      "mutates_image": false
+    },
+    {
+      "state_id": "repair_writeback_staged",
+      "description": "Future state: decoded block writeback is staged behind the same serializer used by client writes.",
+      "client_writes_allowed": false,
+      "repair_writeback_allowed": true,
+      "mutates_image": false
+    },
+    {
+      "state_id": "repair_symbol_refresh",
+      "description": "Future state: repair symbols are refreshed only after source block writeback is verified durable.",
+      "client_writes_allowed": false,
+      "repair_writeback_allowed": true,
+      "mutates_image": true
+    },
+    {
+      "state_id": "writeback_failure",
+      "description": "Repair writeback failed or was interrupted; symbol refresh is refused and reproduction artifacts are preserved.",
+      "client_writes_allowed": false,
+      "repair_writeback_allowed": false,
+      "mutates_image": false
+    },
+    {
+      "state_id": "cleanup_complete",
+      "description": "Lease, staging rows, and temporary artifacts reached a ledgered cleanup state.",
+      "client_writes_allowed": true,
+      "repair_writeback_allowed": false,
+      "mutates_image": false
+    }
+  ],
+  "transitions": [
+    {
+      "transition_id": "detect_to_plan",
+      "from_state": "detection_only_scrub",
+      "event": "corruption_detected",
+      "to_state": "repair_planning",
+      "allowed": true,
+      "mutation_allowed": false,
+      "error_class": "none",
+      "guard": "detection-only evidence may be planned without mutation",
+      "requires_active_lease": false,
+      "requires_fresh_symbol": false,
+      "requires_fsync_boundary": false,
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "snapshot_epoch",
+        "artifact_paths",
+        "reproduction_command"
+      ]
+    },
+    {
+      "transition_id": "plan_to_lease",
+      "from_state": "repair_planning",
+      "event": "lease_acquired",
+      "to_state": "repair_lease_held",
+      "allowed": true,
+      "mutation_allowed": false,
+      "error_class": "none",
+      "guard": "mutating repair may proceed to preflight only after exclusive lease acquisition",
+      "requires_active_lease": true,
+      "requires_fresh_symbol": false,
+      "requires_fsync_boundary": false,
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "lease_id",
+        "expected_state",
+        "observed_state"
+      ]
+    },
+    {
+      "transition_id": "rw_repair_fail_closed",
+      "from_state": "client_write_in_flight",
+      "event": "repair_writeback_requested",
+      "to_state": "repair_writeback_blocked_rw",
+      "allowed": false,
+      "mutation_allowed": false,
+      "error_class": "rw_repair_serialization_missing",
+      "guard": "read-write mounted automatic repair has no unified serializer with client writes",
+      "requires_active_lease": true,
+      "requires_fresh_symbol": true,
+      "requires_fsync_boundary": true,
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "snapshot_epoch",
+        "lease_id",
+        "repair_symbol_version",
+        "expected_state",
+        "observed_state",
+        "error_class",
+        "artifact_paths",
+        "cleanup_status",
+        "reproduction_command",
+        "follow_up_bead"
+      ],
+      "follow_up_bead": "bd-rchk0.1.2"
+    },
+    {
+      "transition_id": "flush_non_durable_rejects_repair",
+      "from_state": "client_write_in_flight",
+      "event": "flush_observed",
+      "to_state": "client_write_in_flight",
+      "allowed": false,
+      "mutation_allowed": false,
+      "error_class": "flush_non_durable",
+      "guard": "flush cannot advance visible/durable state for repair writeback",
+      "requires_active_lease": false,
+      "requires_fresh_symbol": false,
+      "requires_fsync_boundary": true,
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "expected_state",
+        "observed_state",
+        "error_class",
+        "reproduction_command"
+      ],
+      "follow_up_bead": "bd-rchk0.1.1.1"
+    },
+    {
+      "transition_id": "fsync_boundary_reaches_preflight",
+      "from_state": "client_write_in_flight",
+      "event": "fsync_or_fsyncdir_completed",
+      "to_state": "fsync_boundary",
+      "allowed": true,
+      "mutation_allowed": false,
+      "error_class": "none",
+      "guard": "fsync/fsyncdir creates durable evidence but still does not authorize RW repair mutation",
+      "requires_active_lease": false,
+      "requires_fresh_symbol": false,
+      "requires_fsync_boundary": true,
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "snapshot_epoch",
+        "expected_state",
+        "observed_state",
+        "reproduction_command"
+      ]
+    },
+    {
+      "transition_id": "missing_boundary_rejects_repair",
+      "from_state": "repair_lease_held",
+      "event": "fsync_boundary_missing",
+      "to_state": "repair_writeback_blocked_rw",
+      "allowed": false,
+      "mutation_allowed": false,
+      "error_class": "dirty_cache_not_fsynced",
+      "guard": "repair cannot use dirty or merely flushed client data as authoritative",
+      "requires_active_lease": true,
+      "requires_fresh_symbol": true,
+      "requires_fsync_boundary": true,
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "snapshot_epoch",
+        "lease_id",
+        "error_class",
+        "artifact_paths",
+        "cleanup_status",
+        "reproduction_command",
+        "follow_up_bead"
+      ],
+      "follow_up_bead": "bd-rchk0.1.1.1"
+    },
+    {
+      "transition_id": "stale_symbol_rejects_repair",
+      "from_state": "repair_lease_held",
+      "event": "repair_symbol_stale",
+      "to_state": "repair_writeback_blocked_rw",
+      "allowed": false,
+      "mutation_allowed": false,
+      "error_class": "stale_repair_symbol",
+      "guard": "repair symbol generation must match the block generation after client write serialization",
+      "requires_active_lease": true,
+      "requires_fresh_symbol": true,
+      "requires_fsync_boundary": true,
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "snapshot_epoch",
+        "lease_id",
+        "repair_symbol_version",
+        "error_class",
+        "artifact_paths",
+        "cleanup_status",
+        "reproduction_command",
+        "follow_up_bead"
+      ],
+      "follow_up_bead": "bd-rchk0.1.3"
+    },
+    {
+      "transition_id": "lease_missing_rejects_repair",
+      "from_state": "repair_planning",
+      "event": "lease_missing_or_expired",
+      "to_state": "cleanup_complete",
+      "allowed": false,
+      "mutation_allowed": false,
+      "error_class": "lease_expired_or_missing",
+      "guard": "mutating repair cannot proceed without active ownership",
+      "requires_active_lease": true,
+      "requires_fresh_symbol": false,
+      "requires_fsync_boundary": false,
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "lease_id",
+        "error_class",
+        "cleanup_status",
+        "artifact_paths",
+        "reproduction_command",
+        "follow_up_bead"
+      ],
+      "follow_up_bead": "bd-rchk0.1.1.1"
+    },
+    {
+      "transition_id": "future_stage_after_serializer",
+      "from_state": "fsync_boundary",
+      "event": "unified_serializer_available",
+      "to_state": "repair_writeback_staged",
+      "allowed": true,
+      "mutation_allowed": false,
+      "error_class": "none",
+      "guard": "future path only; current policy keeps the serializer unavailable",
+      "requires_active_lease": true,
+      "requires_fresh_symbol": true,
+      "requires_fsync_boundary": true,
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "snapshot_epoch",
+        "lease_id",
+        "repair_symbol_version",
+        "expected_state",
+        "observed_state",
+        "reproduction_command"
+      ],
+      "follow_up_bead": "bd-rchk0.1.2"
+    },
+    {
+      "transition_id": "writeback_verified_refreshes_symbols",
+      "from_state": "repair_writeback_staged",
+      "event": "writeback_verified",
+      "to_state": "repair_symbol_refresh",
+      "allowed": true,
+      "mutation_allowed": true,
+      "error_class": "none",
+      "guard": "source block writeback must be verified durable before symbol refresh",
+      "requires_active_lease": true,
+      "requires_fresh_symbol": true,
+      "requires_fsync_boundary": true,
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "snapshot_epoch",
+        "lease_id",
+        "repair_symbol_version",
+        "expected_state",
+        "observed_state",
+        "artifact_paths",
+        "cleanup_status",
+        "reproduction_command"
+      ],
+      "follow_up_bead": "bd-rchk0.1.4"
+    },
+    {
+      "transition_id": "writeback_failure_blocks_refresh",
+      "from_state": "repair_writeback_staged",
+      "event": "writeback_failed",
+      "to_state": "writeback_failure",
+      "allowed": true,
+      "mutation_allowed": false,
+      "error_class": "writeback_failure_no_refresh",
+      "guard": "halfway repair failure must preserve repro artifacts and refuse symbol refresh",
+      "requires_active_lease": true,
+      "requires_fresh_symbol": true,
+      "requires_fsync_boundary": true,
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "snapshot_epoch",
+        "lease_id",
+        "repair_symbol_version",
+        "error_class",
+        "artifact_paths",
+        "cleanup_status",
+        "reproduction_command",
+        "follow_up_bead"
+      ],
+      "follow_up_bead": "bd-rchk0.1.4"
+    },
+    {
+      "transition_id": "repair_cancelled_cleanup",
+      "from_state": "repair_writeback_staged",
+      "event": "repair_cancelled",
+      "to_state": "cleanup_complete",
+      "allowed": true,
+      "mutation_allowed": false,
+      "error_class": "cancelled_repair_cleanup",
+      "guard": "cancellation releases the lease and preserves ledgered cleanup artifacts",
+      "requires_active_lease": true,
+      "requires_fresh_symbol": false,
+      "requires_fsync_boundary": false,
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "lease_id",
+        "cleanup_status",
+        "artifact_paths",
+        "reproduction_command",
+        "follow_up_bead"
+      ],
+      "follow_up_bead": "bd-rchk0.1.1.1"
+    }
+  ],
+  "rejection_cases": [
+    {
+      "case_id": "rw_repair_serializer_missing",
+      "error_class": "rw_repair_serialization_missing",
+      "state": "client_write_in_flight",
+      "condition": "read-write mounted automatic repair requested before a unified serializer exists",
+      "no_mutation_required": true,
+      "preserves_reproduction_data": true,
+      "follow_up_bead": "bd-rchk0.1.2"
+    },
+    {
+      "case_id": "client_write_in_flight",
+      "error_class": "rw_repair_serialization_missing",
+      "state": "client_write_in_flight",
+      "condition": "client write overlaps the repaired block range",
+      "no_mutation_required": true,
+      "preserves_reproduction_data": true,
+      "follow_up_bead": "bd-rchk0.1.2"
+    },
+    {
+      "case_id": "dirty_cache_not_fsynced",
+      "error_class": "dirty_cache_not_fsynced",
+      "state": "repair_lease_held",
+      "condition": "dirty client data reached flush but not fsync/fsyncdir",
+      "no_mutation_required": true,
+      "preserves_reproduction_data": true,
+      "follow_up_bead": "bd-rchk0.1.1.1"
+    },
+    {
+      "case_id": "stale_repair_symbol",
+      "error_class": "stale_repair_symbol",
+      "state": "repair_lease_held",
+      "condition": "repair symbol generation does not match the current source block generation",
+      "no_mutation_required": true,
+      "preserves_reproduction_data": true,
+      "follow_up_bead": "bd-rchk0.1.3"
+    },
+    {
+      "case_id": "lease_expired_or_missing",
+      "error_class": "lease_expired_or_missing",
+      "state": "repair_planning",
+      "condition": "mutating repair lacks an active per-image ownership lease",
+      "no_mutation_required": true,
+      "preserves_reproduction_data": true,
+      "follow_up_bead": "bd-rchk0.1.1.1"
+    },
+    {
+      "case_id": "writeback_failure_no_refresh",
+      "error_class": "writeback_failure_no_refresh",
+      "state": "repair_writeback_staged",
+      "condition": "source block writeback failed before verification",
+      "no_mutation_required": true,
+      "preserves_reproduction_data": true,
+      "follow_up_bead": "bd-rchk0.1.4"
+    },
+    {
+      "case_id": "cancelled_repair_cleanup",
+      "error_class": "cancelled_repair_cleanup",
+      "state": "repair_writeback_staged",
+      "condition": "repair cancellation interrupts staged writeback",
+      "no_mutation_required": true,
+      "preserves_reproduction_data": true,
+      "follow_up_bead": "bd-rchk0.1.1.1"
+    }
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "repair_writeback_rw_fail_closed",
+      "title": "Read-write mounted repair writeback fails closed while a client write is in flight",
+      "coverage_tags": [
+        "fail_closed_rw_repair",
+        "mvcc_snapshot_boundary"
+      ],
+      "initial_state": "client_write_in_flight",
+      "events": [
+        "repair_writeback_requested"
+      ],
+      "expected_final_state": "repair_writeback_blocked_rw",
+      "expected_outcome": "rejected",
+      "expected_error_class": "rw_repair_serialization_missing",
+      "requires_lease": true,
+      "requires_fsync_boundary": true,
+      "requires_symbol_freshness": true,
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/rw_fail_closed.json",
+        "artifacts/repair-writeback/dry-run/rw_fail_closed.log"
+      ],
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json",
+      "follow_up_bead": "bd-rchk0.1.2"
+    },
+    {
+      "scenario_id": "repair_writeback_mvcc_snapshot_boundary",
+      "title": "Repair plan must name the MVCC snapshot epoch before any mutation decision",
+      "coverage_tags": [
+        "mvcc_snapshot_boundary"
+      ],
+      "initial_state": "detection_only_scrub",
+      "events": [
+        "corruption_detected"
+      ],
+      "expected_final_state": "repair_planning",
+      "expected_outcome": "accepted",
+      "expected_error_class": "none",
+      "requires_lease": false,
+      "requires_fsync_boundary": false,
+      "requires_symbol_freshness": false,
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/mvcc_snapshot_boundary.json"
+      ],
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json"
+    },
+    {
+      "scenario_id": "repair_writeback_flush_non_durable",
+      "title": "Flush cannot authorize repair writeback or symbol refresh",
+      "coverage_tags": [
+        "dirty_cache_flush"
+      ],
+      "initial_state": "client_write_in_flight",
+      "events": [
+        "flush_observed"
+      ],
+      "expected_final_state": "client_write_in_flight",
+      "expected_outcome": "rejected",
+      "expected_error_class": "flush_non_durable",
+      "requires_lease": false,
+      "requires_fsync_boundary": true,
+      "requires_symbol_freshness": false,
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/flush_non_durable.json"
+      ],
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json",
+      "follow_up_bead": "bd-rchk0.1.1.1"
+    },
+    {
+      "scenario_id": "repair_writeback_fsync_boundary_required",
+      "title": "Repair preflight rejects dirty client data that has not crossed fsync or fsyncdir",
+      "coverage_tags": [
+        "fsync_fsyncdir_boundary",
+        "dirty_cache_flush"
+      ],
+      "initial_state": "repair_lease_held",
+      "events": [
+        "fsync_boundary_missing"
+      ],
+      "expected_final_state": "repair_writeback_blocked_rw",
+      "expected_outcome": "rejected",
+      "expected_error_class": "dirty_cache_not_fsynced",
+      "requires_lease": true,
+      "requires_fsync_boundary": true,
+      "requires_symbol_freshness": true,
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/fsync_boundary_required.json"
+      ],
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json",
+      "follow_up_bead": "bd-rchk0.1.1.1"
+    },
+    {
+      "scenario_id": "repair_writeback_lease_required",
+      "title": "Mutating repair refuses missing or expired ownership leases",
+      "coverage_tags": [
+        "repair_lease"
+      ],
+      "initial_state": "repair_planning",
+      "events": [
+        "lease_missing_or_expired"
+      ],
+      "expected_final_state": "cleanup_complete",
+      "expected_outcome": "rejected",
+      "expected_error_class": "lease_expired_or_missing",
+      "requires_lease": true,
+      "requires_fsync_boundary": false,
+      "requires_symbol_freshness": false,
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/lease_required.json"
+      ],
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json",
+      "follow_up_bead": "bd-rchk0.1.1.1"
+    },
+    {
+      "scenario_id": "repair_writeback_stale_symbol_rejected",
+      "title": "Stale repair symbols are rejected before source block writeback",
+      "coverage_tags": [
+        "stale_repair_symbol"
+      ],
+      "initial_state": "repair_lease_held",
+      "events": [
+        "repair_symbol_stale"
+      ],
+      "expected_final_state": "repair_writeback_blocked_rw",
+      "expected_outcome": "rejected",
+      "expected_error_class": "stale_repair_symbol",
+      "requires_lease": true,
+      "requires_fsync_boundary": true,
+      "requires_symbol_freshness": true,
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/stale_symbol_rejected.json"
+      ],
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json",
+      "follow_up_bead": "bd-rchk0.1.3"
+    },
+    {
+      "scenario_id": "repair_writeback_cancellation_cleanup",
+      "title": "Cancellation preserves cleanup evidence and does not refresh repair symbols",
+      "coverage_tags": [
+        "cancellation"
+      ],
+      "initial_state": "repair_writeback_staged",
+      "events": [
+        "repair_cancelled"
+      ],
+      "expected_final_state": "cleanup_complete",
+      "expected_outcome": "accepted",
+      "expected_error_class": "cancelled_repair_cleanup",
+      "requires_lease": true,
+      "requires_fsync_boundary": false,
+      "requires_symbol_freshness": false,
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/cancellation_cleanup.json"
+      ],
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json",
+      "follow_up_bead": "bd-rchk0.1.1.1"
+    },
+    {
+      "scenario_id": "repair_writeback_halfway_failure",
+      "title": "Halfway writeback failure refuses repair-symbol refresh",
+      "coverage_tags": [
+        "writeback_failure",
+        "halfway_recovery_failure"
+      ],
+      "initial_state": "repair_writeback_staged",
+      "events": [
+        "writeback_failed"
+      ],
+      "expected_final_state": "writeback_failure",
+      "expected_outcome": "error",
+      "expected_error_class": "writeback_failure_no_refresh",
+      "requires_lease": true,
+      "requires_fsync_boundary": true,
+      "requires_symbol_freshness": true,
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/halfway_failure.json",
+        "artifacts/repair-writeback/dry-run/halfway_failure_repro.log"
+      ],
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json",
+      "follow_up_bead": "bd-rchk0.1.4"
+    }
+  ],
+  "risk_decision": {
+    "decision_id": "rw-repair-expected-loss-v1",
+    "chosen_option": "fail_closed_until_unified_serializer",
+    "rejected_option": "enable_rw_repair_without_serializer",
+    "options": [
+      {
+        "option_id": "fail_closed_until_unified_serializer",
+        "decision": "Reject read-write mounted automatic repair mutation until client writes and repair writeback share one serializer.",
+        "semantic_failure_probability_ppm": 500,
+        "severity_points": 5,
+        "operational_cost_points": 20,
+        "expected_loss_points": 25,
+        "rationale": "Operator-visible refusal is inconvenient but does not risk silent user-data overwrite."
+      },
+      {
+        "option_id": "enable_rw_repair_without_serializer",
+        "decision": "Enable repair writeback during read-write mounts without a shared serializer.",
+        "semantic_failure_probability_ppm": 120000,
+        "severity_points": 5,
+        "operational_cost_points": 5,
+        "expected_loss_points": 605,
+        "rationale": "A repair writeback can overwrite newer client data or refresh symbols from stale source blocks."
+      },
+      {
+        "option_id": "future_unified_serializer",
+        "decision": "Enable only after bd-rchk0.1.2 through bd-rchk0.1.4 produce model, mounted, and crash evidence.",
+        "semantic_failure_probability_ppm": 3000,
+        "severity_points": 5,
+        "operational_cost_points": 60,
+        "expected_loss_points": 75,
+        "rationale": "A single serializer is admissible after evidence exists, but it carries implementation complexity and performance costs."
+      }
+    ]
+  },
+  "follow_up_beads": [
+    {
+      "bead_id": "bd-rchk0.1.1.1",
+      "reason": "Refine this contract into executable trace/state tests with shrinking and false-positive guards.",
+      "required_before_state": "repair_writeback_staged"
+    },
+    {
+      "bead_id": "bd-rchk0.1.2",
+      "reason": "Implement or prove the unified serializer used by client writes and repair writeback.",
+      "required_before_state": "repair_writeback_staged"
+    },
+    {
+      "bead_id": "bd-rchk0.1.3",
+      "reason": "Prove repair-symbol freshness and stale-generation refusal through the mounted write path.",
+      "required_before_state": "repair_symbol_refresh"
+    },
+    {
+      "bead_id": "bd-rchk0.1.4",
+      "reason": "Prove halfway writeback failure, cleanup, and symbol-refresh refusal under interruption.",
+      "required_before_state": "repair_symbol_refresh"
+    }
+  ],
+  "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --out artifacts/repair-writeback/dry-run/contract_report.json --artifact-out artifacts/repair-writeback/dry-run/artifact_manifest.json --summary-out artifacts/repair-writeback/dry-run/contract_summary.md"
+}

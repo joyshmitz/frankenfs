@@ -50,6 +50,26 @@ SHA, workload IDs, seeds, duration, resource usage, cleanup status, and the
 reproduction command. Recurring flakes must preserve a repro pack and link a
 follow-up bead; they are not allowed to silently soften release gates.
 
+## Read-Write Repair Writeback
+
+Read-write mounted automatic repair is fail-closed until client writes and
+repair writeback share one serializer. The executable contract is:
+
+```bash
+cargo run -p ffs-harness -- validate-repair-writeback-serialization \
+  --contract docs/repair-writeback-serialization-contract.json \
+  --artifact-root artifacts/repair-writeback/dry-run \
+  --out artifacts/repair-writeback/contract_report.json \
+  --artifact-out artifacts/repair-writeback/sample_artifact_manifest.json \
+  --summary-out artifacts/repair-writeback/contract_summary.md
+```
+
+The contract requires MVCC snapshot epoch evidence, an active repair lease
+before mutation, `fsync`/`fsyncdir` as the durability boundary, stale-symbol
+refusal, cancellation cleanup, halfway writeback failure handling, and
+`rw_repair_serialization_missing` when a read-write mounted repair mutation is
+requested before the serializer exists. `flush` is not a durability boundary.
+
 ## Startup Banner
 
 The CLI prints the active runtime mode in the startup banner:

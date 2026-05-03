@@ -1390,6 +1390,7 @@ the suite artifact directory:
 | `mount_*.log` | every mounted scenario | Raw `ffs-cli mount` stdout/stderr for postmortem debugging |
 | operational manifest JSON | readiness report consumers | `pass`/`fail`/`skip`/`error` records using the shared artifact schema |
 | `soak_canary_campaign_report.json` | endurance and canary gates | Campaign profile, workload IDs, seeds, heartbeat summaries, resource caps, pass/fail/skip/error/flake classification, and reproduction links |
+| `repair_writeback_serialization_report.json` | `repair.rw.writeback` gate | State-machine, lease, MVCC epoch, fsync/fsyncdir, stale-symbol, cancellation, failure, and expected-loss proof for the current fail-closed read-write repair policy |
 
 ### Readiness Gates
 
@@ -1401,7 +1402,7 @@ the suite artifact directory:
 | `mount.rw.btrfs` | btrfs `--rw` can handle representative write workflows under the experimental contract | Mounted core mutations, fsync/fsyncdir, crash-point reopen checks, and explicit unsupported-path classifications; exact scenario expansion is owned by `bd-rchk0.3.2` | `bd-rchk0.3.2`, `bd-rchk0.1.1`, `bd-rchk0.3.4` |
 | `durability.sync` | `fsync` and `fsyncdir` are the durability boundaries users can reason about | Logs classify `flush` as non-durable, `fsync`/`fsyncdir` as durable boundaries, and crash/reopen checks preserve fsync-backed data | `bd-rchk0.1.1`, `bd-rchk0.3.2` |
 | `repair.ro.auto` | read-only mounted automatic repair is operator-usable when explicitly enabled | `--background-repair --background-scrub-ledger <jsonl>` produces a repair ledger, verifies recovered reads, and keeps read-only mount mutation rules explicit | `bd-rchk6`, `bd-rchk7.3` |
-| `repair.rw.writeback` | repair writeback can safely coexist with client writes | No user-facing upgrade until repair mutation is serialized through the mounted write path with unit and E2E evidence | `bd-rchk0.1.1`, `bd-rchk0.1.2`, `bd-rchk0.1.3` |
+| `repair.rw.writeback` | repair writeback can safely coexist with client writes | `validate-repair-writeback-serialization` proves the current fail-closed contract; no user-facing upgrade until repair mutation is serialized through the mounted write path with follow-up unit and E2E evidence | `bd-rchk0.1.1`, `bd-rchk0.1.2`, `bd-rchk0.1.3` |
 | `security.hostile_image` | hostile images and hostile proof artifacts cannot escape the safety envelope or create misleading readiness claims | `validate-adversarial-threat-model` plus the security E2E smoke prove path traversal/symlink refusal, critical fail-closed handling, resource caps, repair-ledger tamper refusal, and docs-safe wording | `bd-rchk0.5.11`, `bd-0qx9b` |
 | `writeback_cache` | kernel FUSE writeback-cache mode can be enabled | Remains unsupported until the epoch-barrier acceptance gate, opt-in wiring, crash matrix, and docs are complete | `bd-rchk0.2.1`, `bd-rchk0.2.2`, `bd-rchk0.2.3` |
 | `errors.evidence` | mounted failures are actionable rather than opaque | Every failure path reports `operation_id`, `scenario_id`, `outcome`, `error_class`, remediation hint where applicable, raw logs, and cleanup status | `bd-rchk0.3.4`, `bd-rchk0.4.3` |
@@ -1516,6 +1517,7 @@ A: Repair symbols become stale when source blocks are modified. FrankenFS suppor
 | Document | What it covers |
 |----------|----------------|
 | [design-writeback-cache-mvcc.md](docs/design-writeback-cache-mvcc.md) | FUSE writeback-cache reordering model, 6 formal invariants, epoch fence state machine, expected-loss decision matrix |
+| [design-repair-writeback-serialization.md](docs/design-repair-writeback-serialization.md) | Fail-closed contract for read-write mounted repair writeback vs client writes, including invariants, evidence fields, and expected-loss decision |
 | [design-safe-merge-taxonomy.md](docs/design-safe-merge-taxonomy.md) | Safe-merge proof obligations for concurrent block writes |
 | [design-adaptive-refresh.md](docs/design-adaptive-refresh.md) | Expected-loss model for age-only vs block-count vs hybrid refresh triggers |
 | [design-multi-host-repair.md](docs/design-multi-host-repair.md) | Optimistic lease-based repair ownership for shared storage |

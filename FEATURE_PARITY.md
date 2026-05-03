@@ -347,7 +347,7 @@ project can honestly claim operational readiness beyond the current V1 contract.
 | `bd-rchk3` | xfstests baseline | In progress: 2026-05-01 subset/regression gate recorded; real execution blocked by unbuilt xfstests helpers and a dpkg lock blocking `xfslibs-dev`/`libaio-dev` install |
 | `bd-rchk4` | CI-compatible mounted FUSE coverage | Open: make critical mounted-path tests run in a permissioned environment with explicit skip diagnostics |
 | `bd-rchk5` | Performance baselines | Open: re-measure throughput/latency claims against current code |
-| `bd-rchk6` | Mounted self-healing lifecycle | Complete: automatic mounted repair is implemented for explicit client read-only `--background-repair --background-scrub-ledger <jsonl>` mounts; read-write repair remains blocked until repair writeback is serialized with mounted write traffic |
+| `bd-rchk6` | Mounted self-healing lifecycle | Complete: automatic mounted repair is implemented for explicit client read-only `--background-repair --background-scrub-ledger <jsonl>` mounts; read-write repair remains blocked and now has an executable `validate-repair-writeback-serialization` fail-closed contract until repair writeback is serialized with mounted write traffic |
 | `bd-rchk7` | Fuzz/conformance expansion | Open: close or bead remaining open-ended corpus expansion notes |
 
 ## 5. Update Rule

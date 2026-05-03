@@ -47,6 +47,13 @@ use ffs_harness::{
         evaluate_release_gates, fail_on_release_gate_errors, load_release_gate_policy,
         render_release_gate_markdown,
     },
+    repair_writeback_serialization::{
+        build_repair_writeback_serialization_sample_artifact_manifest,
+        fail_on_repair_writeback_serialization_errors,
+        load_repair_writeback_serialization_contract,
+        render_repair_writeback_serialization_markdown,
+        validate_repair_writeback_serialization_contract,
+    },
     soak_canary_campaign::{
         build_soak_canary_sample_artifact_manifest, fail_on_soak_canary_campaign_errors,
         load_soak_canary_campaign_manifest, render_soak_canary_campaign_markdown,
@@ -131,6 +138,9 @@ fn run() -> Result<()> {
             validate_adversarial_threat_model_cmd(&args[1..])
         }
         Some("validate-soak-canary-campaigns") => validate_soak_canary_campaigns_cmd(&args[1..]),
+        Some("validate-repair-writeback-serialization") => {
+            validate_repair_writeback_serialization_cmd(&args[1..])
+        }
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
         Some("validate-mounted-write-matrix") => validate_mounted_write_matrix_cmd(&args[1..]),
         Some("validate-mounted-recovery-matrix") => {
@@ -190,6 +200,15 @@ struct AdversarialThreatModelCmdArgs {
 #[derive(Debug)]
 struct SoakCanaryCampaignCmdArgs {
     manifest_path: String,
+    artifact_root: String,
+    out_path: Option<String>,
+    artifact_out_path: Option<String>,
+    summary_out_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct RepairWritebackSerializationCmdArgs {
+    contract_path: String,
     artifact_root: String,
     out_path: Option<String>,
     artifact_out_path: Option<String>,
@@ -801,6 +820,115 @@ fn parse_soak_canary_campaign_cmd_args(
     Ok(Some(SoakCanaryCampaignCmdArgs {
         manifest_path: manifest_path
             .context("--manifest is required for soak/canary campaign validation")?,
+        artifact_root,
+        out_path,
+        artifact_out_path,
+        summary_out_path,
+    }))
+}
+
+fn validate_repair_writeback_serialization_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_repair_writeback_serialization_cmd_args(args)? else {
+        return Ok(());
+    };
+    let contract =
+        load_repair_writeback_serialization_contract(Path::new(&cmd_args.contract_path))?;
+    let report =
+        validate_repair_writeback_serialization_contract(&contract, &cmd_args.artifact_root);
+    let output = serde_json::to_string_pretty(&report)?;
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "repair/writeback serialization report written: {} valid={} scenarios={} transitions={}",
+            path, report.valid, report.scenario_count, report.transition_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.artifact_out_path {
+        let artifact_manifest = build_repair_writeback_serialization_sample_artifact_manifest(
+            &contract,
+            &cmd_args.artifact_root,
+            &report,
+        );
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", serde_json::to_string_pretty(&artifact_manifest)?),
+        )?;
+        println!("repair/writeback sample artifact manifest written: {path}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &render_repair_writeback_serialization_markdown(&report),
+        )?;
+        println!("repair/writeback serialization summary written: {path}");
+    }
+
+    fail_on_repair_writeback_serialization_errors(&report)
+}
+
+fn parse_repair_writeback_serialization_cmd_args(
+    args: &[String],
+) -> Result<Option<RepairWritebackSerializationCmdArgs>> {
+    let mut contract_path: Option<String> = None;
+    let mut artifact_root = "artifacts/repair-writeback/dry-run".to_owned();
+    let mut out_path: Option<String> = None;
+    let mut artifact_out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--contract" => {
+                i += 1;
+                contract_path = Some(
+                    args.get(i)
+                        .context("--contract requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--artifact-root" => {
+                i += 1;
+                args.get(i)
+                    .context("--artifact-root requires a path")?
+                    .clone_into(&mut artifact_root);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--artifact-out" => {
+                i += 1;
+                artifact_out_path = Some(
+                    args.get(i)
+                        .context("--artifact-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_repair_writeback_serialization_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-repair-writeback-serialization argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(RepairWritebackSerializationCmdArgs {
+        contract_path: contract_path
+            .context("--contract is required for repair/writeback serialization validation")?,
         artifact_root,
         out_path,
         artifact_out_path,
@@ -1611,6 +1739,7 @@ fn print_usage() {
     print_performance_baseline_manifest_usage_summary();
     print_adversarial_threat_model_usage_summary();
     print_soak_canary_campaign_usage_summary();
+    print_repair_writeback_serialization_usage_summary();
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
     println!("  ffs-harness validate-mounted-recovery-matrix [--matrix FILE] [--out FILE]");
     println!();
@@ -1671,6 +1800,7 @@ fn print_usage_examples() {
     print_performance_baseline_manifest_example();
     print_adversarial_threat_model_example();
     print_soak_canary_campaign_example();
+    print_repair_writeback_serialization_example();
     println!(
         "  ffs-harness validate-mounted-write-matrix --out artifacts/e2e/mounted_write_matrix.json"
     );
@@ -1712,6 +1842,18 @@ fn print_soak_canary_campaign_usage_summary() {
 fn print_soak_canary_campaign_example() {
     println!(
         "  ffs-harness validate-soak-canary-campaigns --manifest benchmarks/soak_canary_campaign_manifest.json --out artifacts/soak/campaign_report.json --artifact-out artifacts/soak/sample_artifact_manifest.json --summary-out artifacts/soak/campaign_summary.md"
+    );
+}
+
+fn print_repair_writeback_serialization_usage_summary() {
+    println!(
+        "  ffs-harness validate-repair-writeback-serialization --contract FILE [--artifact-root DIR] [--out FILE] [--artifact-out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_repair_writeback_serialization_example() {
+    println!(
+        "  ffs-harness validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --out artifacts/repair-writeback/contract_report.json --artifact-out artifacts/repair-writeback/sample_artifact_manifest.json --summary-out artifacts/repair-writeback/contract_summary.md"
     );
 }
 
@@ -1830,6 +1972,19 @@ fn print_soak_canary_campaign_usage() {
     println!("  --out FILE                         Write validation report JSON");
     println!("  --artifact-out FILE                Write sample shared QA artifact manifest JSON");
     println!("  --summary-out FILE                 Write Markdown campaign summary");
+}
+
+fn print_repair_writeback_serialization_usage() {
+    println!("Usage: ffs-harness validate-repair-writeback-serialization [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!(
+        "  --contract FILE                    Read repair/writeback serialization contract JSON"
+    );
+    println!("  --artifact-root DIR                Root for dry-run serialization artifacts");
+    println!("  --out FILE                         Write validation report JSON");
+    println!("  --artifact-out FILE                Write sample shared QA artifact manifest JSON");
+    println!("  --summary-out FILE                 Write Markdown contract summary");
 }
 
 fn print_mounted_write_matrix_usage() {

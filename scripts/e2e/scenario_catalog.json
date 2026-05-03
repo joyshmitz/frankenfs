@@ -321,6 +321,53 @@
       ]
     },
     {
+      "suite_id": "ffs_repair_writeback_serialization",
+      "script": "scripts/e2e/ffs_repair_writeback_serialization_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "repair_writeback_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_writeback_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "repair_writeback_contract_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_writeback_contract_validates|outcome=PASS"
+        },
+        {
+          "id": "repair_writeback_fail_closed_report",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_writeback_fail_closed_report|outcome=PASS"
+        },
+        {
+          "id": "repair_writeback_invalid_variants_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_writeback_invalid_variants_rejected|outcome=PASS"
+        },
+        {
+          "id": "repair_writeback_fail_closed_artifact",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_writeback_fail_closed_artifact|outcome=PASS"
+        },
+        {
+          "id": "repair_writeback_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_writeback_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_expansion",
       "script": "scripts/e2e/ffs_benchmark_expansion_e2e.sh",
       "required_categories": [

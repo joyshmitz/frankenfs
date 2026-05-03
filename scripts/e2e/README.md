@@ -55,6 +55,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 
 # Run soak/canary campaign manifest dry-run validation
 ./scripts/e2e/ffs_soak_canary_campaign_e2e.sh
+
+# Run repair/writeback serialization contract dry-run validation
+./scripts/e2e/ffs_repair_writeback_serialization_e2e.sh
 ```
 
 ## Scenario Catalog Contract
@@ -207,6 +210,36 @@ record kernel, FUSE capability, toolchain, git SHA, workload IDs, seeds,
 duration, resource usage, cleanup status, and reproduction command. Recurring
 flakes are never swallowed: campaign output must preserve reproduction data and
 link a follow-up bead.
+
+### Repair Writeback Serialization
+
+The repair/writeback serialization contract freezes the read-write mounted
+automatic-repair policy: mutating repair must fail closed until repair
+writeback and client writes share one serializer. The validator checks the
+state machine, MVCC snapshot and fsync/fsyncdir boundaries, repair ownership
+lease checks, stale-symbol refusal, cancellation cleanup, halfway writeback
+failure handling, required evidence fields, and the expected-loss decision that
+keeps `repair.rw.writeback` disabled.
+
+```bash
+cargo run -p ffs-harness -- validate-repair-writeback-serialization \
+  --contract docs/repair-writeback-serialization-contract.json \
+  --artifact-root artifacts/repair-writeback/dry-run \
+  --out artifacts/repair-writeback/contract_report.json \
+  --artifact-out artifacts/repair-writeback/sample_artifact_manifest.json \
+  --summary-out artifacts/repair-writeback/contract_summary.md
+```
+
+The E2E smoke is bounded and does not require a permissioned FUSE host:
+
+```bash
+./scripts/e2e/ffs_repair_writeback_serialization_e2e.sh
+```
+
+The fail-closed artifact must include `operation_id`, `scenario_id`,
+`snapshot_epoch`, `lease_id`, `repair_symbol_version`, `expected_state`,
+`observed_state`, `error_class`, `artifact_paths`, `cleanup_status`,
+`reproduction_command`, and `follow_up_bead`.
 
 ### Permissioned FUSE Lane
 
