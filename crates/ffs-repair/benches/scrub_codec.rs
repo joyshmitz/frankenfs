@@ -8,10 +8,10 @@
 //! - RaptorQ encode/decode throughput for 16-block repair groups.
 
 use asupersync::Cx;
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ffs_block::{BlockBuf, BlockDevice, ByteBlockDevice, ByteDevice};
 use ffs_error::Result;
-use ffs_repair::codec::{decode_group, encode_group};
+use ffs_repair::codec::{decode_group, decode_group_with_owned_repair_symbols, encode_group};
 use ffs_repair::scrub::{BlockValidator, BlockVerdict, Scrubber, ZeroCheckValidator};
 use ffs_types::{BlockNumber, ByteOffset, GroupNumber};
 use parking_lot::Mutex;
@@ -201,6 +201,27 @@ fn bench_raptorq_codec(c: &mut Criterion) {
             .expect("decode");
             assert!(outcome.complete);
         });
+    });
+
+    c.bench_function("raptorq_decode_group_owned_symbols_16blocks", |b| {
+        b.iter_batched(
+            || repair_symbols.clone(),
+            |symbols| {
+                let outcome = decode_group_with_owned_repair_symbols(
+                    &cx,
+                    &device,
+                    &fs_uuid,
+                    group,
+                    BlockNumber(0),
+                    RAPTORQ_SOURCE_BLOCKS,
+                    &corrupt_indices,
+                    symbols,
+                )
+                .expect("decode");
+                assert!(outcome.complete);
+            },
+            BatchSize::SmallInput,
+        );
     });
 
     c.bench_function("raptorq_decode_group_no_corruption_16blocks", |b| {

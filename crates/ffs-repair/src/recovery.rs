@@ -15,7 +15,7 @@ use ffs_error::{FfsError, Result};
 use ffs_types::{BlockNumber, GroupNumber};
 use serde::{Deserialize, Serialize};
 
-use crate::codec::{DecodeOutcome, decode_group};
+use crate::codec::{DecodeOutcome, decode_group_with_owned_repair_symbols};
 use crate::storage::{RepairGroupLayout, RepairGroupStorage};
 
 /// Decode stats captured in the recovery evidence ledger.
@@ -212,7 +212,7 @@ impl<'a> GroupRecoveryOrchestrator<'a> {
         };
 
         let symbols_available = symbols.len();
-        let decode = match decode_group(
+        let decode = match decode_group_with_owned_repair_symbols(
             cx,
             self.device,
             &self.fs_uuid,
@@ -220,7 +220,7 @@ impl<'a> GroupRecoveryOrchestrator<'a> {
             self.source_first_block,
             self.source_block_count,
             &normalized,
-            &symbols,
+            symbols,
         ) {
             Ok(outcome) => outcome,
             Err(err) => {

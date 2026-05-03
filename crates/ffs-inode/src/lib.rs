@@ -3050,7 +3050,7 @@ mod tests {
                 ctime,
                 mtime,
                 dtime: 0,
-                atime_extra: if advertise(0x90) { 0xC0FFEE } else { 0 },
+                atime_extra: if advertise(0x90) { 0x00C0_FFEE } else { 0 },
                 ctime_extra: if advertise(0x88) { 0xCAFE_BABE } else { 0 },
                 mtime_extra: if advertise(0x8C) { 0xDEAD_BEEF } else { 0 },
                 crtime: if advertise(0x94) { 1_700_000_000 } else { 0 },

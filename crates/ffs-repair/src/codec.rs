@@ -77,7 +77,7 @@ pub fn encode_group(
             ))
         })?);
         let buf = device.read_block(cx, block_num)?;
-        source_symbols.push(buf.as_slice().to_vec());
+        source_symbols.push(buf.into_inner());
     }
 
     // Create systematic encoder.
@@ -123,6 +123,80 @@ pub struct DecodeOutcome {
     pub complete: bool,
 }
 
+#[derive(Debug)]
+struct CorruptIndexSet {
+    unique: Vec<u32>,
+}
+
+impl CorruptIndexSet {
+    fn new(indices: &[u32], source_block_count: u32, group: GroupNumber) -> Result<Self> {
+        let mut unique = Vec::with_capacity(indices.len());
+        for &idx in indices {
+            if idx >= source_block_count {
+                return Err(FfsError::RepairFailed(format!(
+                    "decode_group: corrupt index {idx} out of range for group {} with {source_block_count} source blocks",
+                    group.0
+                )));
+            }
+            unique.push(idx);
+        }
+        unique.sort_unstable();
+        unique.dedup();
+        Ok(Self { unique })
+    }
+
+    fn len(&self) -> usize {
+        self.unique.len()
+    }
+
+    fn contains(&self, index: u32) -> bool {
+        self.unique.binary_search(&index).is_ok()
+    }
+}
+
+enum RepairSymbolInput<'a> {
+    Borrowed(&'a [(u32, Vec<u8>)]),
+    Owned(Vec<(u32, Vec<u8>)>),
+}
+
+impl RepairSymbolInput<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Borrowed(symbols) => symbols.len(),
+            Self::Owned(symbols) => symbols.len(),
+        }
+    }
+
+    fn validate_lengths(&self, block_size: usize, group: GroupNumber) -> Result<()> {
+        match self {
+            Self::Borrowed(symbols) => {
+                validate_repair_symbol_lengths(symbols.iter(), block_size, group)
+            }
+            Self::Owned(symbols) => {
+                validate_repair_symbol_lengths(symbols.iter(), block_size, group)
+            }
+        }
+    }
+}
+
+fn validate_repair_symbol_lengths<'a>(
+    symbols: impl Iterator<Item = &'a (u32, Vec<u8>)>,
+    block_size: usize,
+    group: GroupNumber,
+) -> Result<()> {
+    for (esi, data) in symbols {
+        if data.len() != block_size {
+            return Err(FfsError::RepairFailed(format!(
+                "decode_group: repair symbol esi={esi} for group {} has payload length {} \
+                 but device block_size is {block_size}; refusing to decode malformed symbol",
+                group.0,
+                data.len(),
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Attempt to reconstruct corrupt blocks using available source blocks and
 /// repair symbols.
 ///
@@ -158,6 +232,62 @@ pub fn decode_group(
     corrupt_indices: &[u32],
     repair_symbols: &[(u32, Vec<u8>)],
 ) -> Result<DecodeOutcome> {
+    decode_group_impl(
+        cx,
+        device,
+        fs_uuid,
+        group,
+        first_block,
+        source_block_count,
+        corrupt_indices,
+        RepairSymbolInput::Borrowed(repair_symbols),
+    )
+}
+
+/// Attempt to reconstruct corrupt blocks while taking ownership of loaded
+/// repair-symbol payloads.
+///
+/// This is equivalent to [`decode_group`] but avoids cloning each repair symbol
+/// into decoder inputs. Use it on recovery paths that read a fresh symbol batch
+/// and do not need to retain that batch after decode.
+///
+/// # Errors
+///
+/// Returns the same errors as [`decode_group`].
+#[allow(clippy::too_many_arguments)]
+pub fn decode_group_with_owned_repair_symbols(
+    cx: &Cx,
+    device: &dyn BlockDevice,
+    fs_uuid: &[u8; 16],
+    group: GroupNumber,
+    first_block: BlockNumber,
+    source_block_count: u32,
+    corrupt_indices: &[u32],
+    repair_symbols: Vec<(u32, Vec<u8>)>,
+) -> Result<DecodeOutcome> {
+    decode_group_impl(
+        cx,
+        device,
+        fs_uuid,
+        group,
+        first_block,
+        source_block_count,
+        corrupt_indices,
+        RepairSymbolInput::Owned(repair_symbols),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_group_impl(
+    cx: &Cx,
+    device: &dyn BlockDevice,
+    fs_uuid: &[u8; 16],
+    group: GroupNumber,
+    first_block: BlockNumber,
+    source_block_count: u32,
+    corrupt_indices: &[u32],
+    repair_symbols: RepairSymbolInput<'_>,
+) -> Result<DecodeOutcome> {
     let block_size = device.block_size() as usize;
     let k = source_block_count as usize;
     let seed = repair_seed(fs_uuid, group);
@@ -170,13 +300,7 @@ pub fn decode_group(
         });
     }
 
-    let decoder = InactivationDecoder::new(k, block_size, seed);
-
-    // Start with constraint symbols (LDPC + HDPC with zero data).
-    let mut received: Vec<ReceivedSymbol> = decoder.constraint_symbols();
-
-    // Add available (non-corrupt) source blocks.
-    let corrupt_set: std::collections::HashSet<u32> = corrupt_indices.iter().copied().collect();
+    let corrupt_set = CorruptIndexSet::new(corrupt_indices, source_block_count, group)?;
     if corrupt_set.len() >= source_block_count as usize && source_block_count > 0 {
         return Err(FfsError::RepairFailed(format!(
             "decode_group: group {} has no intact source blocks; refusing full reconstruction from repair symbols alone",
@@ -192,17 +316,31 @@ pub fn decode_group(
     // zero. Surface a fast, named error instead. (The decoder still does
     // its full constraint solve on the borderline case where the count
     // matches exactly; only the strictly-impossible case is short-circuited.)
-    if corrupt_set.len() > repair_symbols.len() {
+    let repair_symbol_count = repair_symbols.len();
+    if corrupt_set.len() > repair_symbol_count {
         return Err(FfsError::RepairFailed(format!(
             "decode_group: group {} has {} corrupt blocks but only {} repair symbols available; \
              insufficient redundancy",
             group.0,
             corrupt_set.len(),
-            repair_symbols.len(),
+            repair_symbol_count,
         )));
     }
+
+    // Every repair symbol payload MUST be exactly block_size bytes — that is
+    // the encode-side contract. Validate before reading intact source blocks so
+    // malformed symbol bundles fail without wasting I/O or decoder setup.
+    repair_symbols.validate_lengths(block_size, group)?;
+
+    let decoder = InactivationDecoder::new(k, block_size, seed);
+
+    // Start with constraint symbols (LDPC + HDPC with zero data).
+    let mut received: Vec<ReceivedSymbol> = decoder.constraint_symbols();
+    received.reserve(k.saturating_sub(corrupt_set.len()) + repair_symbol_count);
+
+    // Add available (non-corrupt) source blocks.
     for i in 0..source_block_count {
-        if corrupt_set.contains(&i) {
+        if corrupt_set.contains(i) {
             continue;
         }
         let block_num = BlockNumber(first_block.0.checked_add(u64::from(i)).ok_or_else(|| {
@@ -212,28 +350,23 @@ pub fn decode_group(
             ))
         })?);
         let buf = device.read_block(cx, block_num)?;
-        received.push(ReceivedSymbol::source(i, buf.as_slice().to_vec()));
+        received.push(ReceivedSymbol::source(i, buf.into_inner()));
     }
 
     // Add repair symbols with their equations.
-    //
-    // Every repair symbol payload MUST be exactly block_size bytes — that is
-    // the encode-side contract. Feeding a shorter or longer payload to the
-    // InactivationDecoder pushes the inactivation step into pathological
-    // work (60+s on tiny inputs in fuzz_repair_codec_roundtrip). Reject
-    // malformed lengths up-front so the caller gets a fast, named error
-    // instead of a wallclock hang.
-    for (esi, data) in repair_symbols {
-        if data.len() != block_size {
-            return Err(FfsError::RepairFailed(format!(
-                "decode_group: repair symbol esi={esi} for group {} has payload length {} \
-                 but device block_size is {block_size}; refusing to decode malformed symbol",
-                group.0,
-                data.len(),
-            )));
+    match repair_symbols {
+        RepairSymbolInput::Borrowed(symbols) => {
+            for (esi, data) in symbols {
+                let (cols, coefs) = decoder.repair_equation(*esi);
+                received.push(ReceivedSymbol::repair(*esi, cols, coefs, data.clone()));
+            }
         }
-        let (cols, coefs) = decoder.repair_equation(*esi);
-        received.push(ReceivedSymbol::repair(*esi, cols, coefs, data.clone()));
+        RepairSymbolInput::Owned(symbols) => {
+            for (esi, data) in symbols {
+                let (cols, coefs) = decoder.repair_equation(esi);
+                received.push(ReceivedSymbol::repair(esi, cols, coefs, data));
+            }
+        }
     }
 
     // Attempt decode.
@@ -456,6 +589,42 @@ mod tests {
     }
 
     #[test]
+    fn decode_owned_repair_symbols_recovers_single_corrupt_block() {
+        let cx = Cx::for_testing();
+        let k = 8;
+        let block_size = 64;
+        let device = setup_device(k, block_size);
+        let uuid = test_uuid();
+        let group = GroupNumber(0);
+
+        let encoded = encode_group(&cx, &device, &uuid, group, BlockNumber(0), k, k)
+            .expect("encode should succeed");
+        let repair_data: Vec<(u32, Vec<u8>)> = encoded
+            .repair_symbols
+            .into_iter()
+            .map(|symbol| (symbol.esi, symbol.data))
+            .collect();
+
+        let original = make_deterministic_block(3, block_size);
+        let outcome = decode_group_with_owned_repair_symbols(
+            &cx,
+            &device,
+            &uuid,
+            group,
+            BlockNumber(0),
+            k,
+            &[3],
+            repair_data,
+        )
+        .expect("decode should succeed");
+
+        assert!(outcome.complete);
+        assert_eq!(outcome.recovered.len(), 1);
+        assert_eq!(outcome.recovered[0].block, BlockNumber(3));
+        assert_eq!(outcome.recovered[0].data, original);
+    }
+
+    #[test]
     fn decode_recovers_multiple_corrupt_blocks() {
         let cx = Cx::for_testing();
         let k = 16;
@@ -573,6 +742,7 @@ mod tests {
         repair_data[0].1.truncate(8); // 8 bytes instead of block_size=64
 
         let corrupt = [0_u32];
+        let reads_before_decode = device.read_count();
         let result = decode_group(
             &cx,
             &device,
@@ -592,6 +762,39 @@ mod tests {
                     if msg.contains("malformed") || msg.contains("payload length")
             ),
             "expected RepairFailed about malformed payload, got: {error:?}"
+        );
+        assert_eq!(
+            device.read_count(),
+            reads_before_decode,
+            "malformed repair symbol decode must fail before reading source blocks"
+        );
+    }
+
+    #[test]
+    fn decode_rejects_out_of_range_corrupt_index_without_reads() {
+        let cx = Cx::for_testing();
+        let k = 4;
+        let block_size = 64;
+        let device = setup_device(k, block_size);
+        let uuid = test_uuid();
+        let group = GroupNumber(0);
+
+        let reads_before_decode = device.read_count();
+        let result = decode_group(&cx, &device, &uuid, group, BlockNumber(0), k, &[k], &[]);
+
+        let error = result.expect_err("decode must reject out-of-range corrupt index");
+        assert!(
+            matches!(
+                &error,
+                FfsError::RepairFailed(msg)
+                    if msg.contains("corrupt index") && msg.contains("out of range")
+            ),
+            "expected RepairFailed about corrupt index bounds, got: {error:?}"
+        );
+        assert_eq!(
+            device.read_count(),
+            reads_before_decode,
+            "out-of-range corrupt index must fail before reading source blocks"
         );
     }
 
