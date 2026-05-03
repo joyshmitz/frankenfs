@@ -80,15 +80,39 @@ mod gf256 {
         table
     };
 
-    /// Multiply two elements in GF(256).
-    #[must_use]
-    pub fn mul(a: u8, b: u8) -> u8 {
+    #[expect(clippy::cast_possible_truncation)] // loop indices stay in 0..256
+    static MUL: [[u8; 256]; 256] = {
+        let mut table = [[0_u8; 256]; 256];
+        let mut a = 0;
+        while a < 256 {
+            let mut b = 0;
+            while b < 256 {
+                table[a][b] = mul_log_exp(a as u8, b as u8);
+                b += 1;
+            }
+            a += 1;
+        }
+        table
+    };
+
+    const fn mul_log_exp(a: u8, b: u8) -> u8 {
         if a == 0 || b == 0 {
             return 0;
         }
         let log_a = LOG[a as usize] as usize;
         let log_b = LOG[b as usize] as usize;
         EXP[log_a + log_b]
+    }
+
+    /// Multiply two elements in GF(256).
+    #[must_use]
+    pub fn mul(a: u8, b: u8) -> u8 {
+        MUL[a as usize][b as usize]
+    }
+
+    #[must_use]
+    pub fn mul_row(coeff: u8) -> &'static [u8; 256] {
+        &MUL[coeff as usize]
     }
 
     /// Compute generator^exponent in GF(256).
@@ -541,8 +565,9 @@ pub fn repair_global(
         for coeff in &mut coeff_matrix[col][..m] {
             *coeff = gf256::mul(*coeff, pivot_inv);
         }
+        let pivot_mul = gf256::mul_row(pivot_inv);
         for byte in &mut rhs[col] {
-            *byte = gf256::mul(*byte, pivot_inv);
+            *byte = pivot_mul[*byte as usize];
         }
 
         // Eliminate other rows.
@@ -561,9 +586,9 @@ pub fn repair_global(
                 coeff_matrix[row][c] ^= gf256::mul(coeff_matrix[col][c], factor);
             }
             // Same: reading rhs[col] while writing rhs[row].
-            #[expect(clippy::needless_range_loop)]
+            let factor_mul = gf256::mul_row(factor);
             for byte_idx in 0..block_size {
-                rhs[row][byte_idx] ^= gf256::mul(rhs[col][byte_idx], factor);
+                rhs[row][byte_idx] ^= factor_mul[rhs[col][byte_idx] as usize];
             }
         }
     }
@@ -630,8 +655,9 @@ fn gf256_mul_xor_into(dst: &mut [u8], src: &[u8], coeff: u8) {
         xor_into(dst, src);
         return;
     }
+    let coeff_mul = gf256::mul_row(coeff);
     for (d, s) in dst.iter_mut().zip(src.iter()) {
-        *d ^= gf256::mul(*s, coeff);
+        *d ^= coeff_mul[*s as usize];
     }
 }
 

@@ -12,6 +12,7 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ffs_block::{BlockBuf, BlockDevice, ByteBlockDevice, ByteDevice};
 use ffs_error::Result;
 use ffs_repair::codec::{decode_group, decode_group_with_owned_repair_symbols, encode_group};
+use ffs_repair::lrc::{LrcConfig, encode_global};
 use ffs_repair::scrub::{BlockValidator, BlockVerdict, Scrubber, ZeroCheckValidator};
 use ffs_types::{BlockNumber, ByteOffset, GroupNumber};
 use parking_lot::Mutex;
@@ -20,6 +21,9 @@ const BLOCK_SIZE: u32 = 4096;
 const SCRUB_BLOCK_COUNT: u64 = 256;
 const RAPTORQ_SOURCE_BLOCKS: u32 = 16;
 const RAPTORQ_REPAIR_COUNT: u32 = 4;
+const LRC_DATA_BLOCKS: u32 = 64;
+const LRC_LOCAL_GROUP_SIZE: u32 = 8;
+const LRC_GLOBAL_PARITY_COUNT: u32 = 8;
 
 // ── In-memory ByteDevice ──────────────────────────────────────────────────
 
@@ -243,5 +247,41 @@ fn bench_raptorq_codec(c: &mut Criterion) {
     });
 }
 
-criterion_group!(repair_benches, bench_scrub, bench_raptorq_codec);
+// ── LRC global parity benchmarks ───────────────────────────────────────────
+
+fn make_lrc_data(block_count: u32, block_size: usize) -> Vec<Vec<u8>> {
+    (0..block_count)
+        .map(|block| {
+            (0..block_size)
+                .map(|byte| {
+                    u8::try_from((u64::from(block) * 131 + byte as u64 * 17 + 29) % 251)
+                        .expect("pattern byte fits")
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn bench_lrc_codec(c: &mut Criterion) {
+    let config = LrcConfig::new(
+        LRC_DATA_BLOCKS,
+        LRC_LOCAL_GROUP_SIZE,
+        LRC_GLOBAL_PARITY_COUNT,
+    );
+    let data = make_lrc_data(LRC_DATA_BLOCKS, BLOCK_SIZE as usize);
+
+    c.bench_function("lrc_encode_global_64blocks_8parity", |b| {
+        b.iter(|| {
+            let global = encode_global(&config, &data);
+            assert_eq!(global.len(), LRC_GLOBAL_PARITY_COUNT as usize);
+        });
+    });
+}
+
+criterion_group!(
+    repair_benches,
+    bench_scrub,
+    bench_raptorq_codec,
+    bench_lrc_codec
+);
 criterion_main!(repair_benches);
