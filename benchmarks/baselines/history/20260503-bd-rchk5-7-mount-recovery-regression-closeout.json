@@ -1,0 +1,77 @@
+{
+  "artifact_id": "20260503-bd-rchk5-7-mount-recovery-regression-closeout",
+  "bead_id": "bd-rchk5.7",
+  "checked_in_current_20260503_before": {
+    "p50_us": 68972,
+    "p99_us": 74217,
+    "probe_report_json": "baselines/hyperfine/20260503-bd-rchk5-3-mount-recovery-sudo-measured/ffs_cli_mount_recovery_probe_report.json",
+    "source_json": "baselines/hyperfine/20260503-bd-rchk5-3-mount-recovery-sudo-measured/ffs_cli_mount_recovery_probe.json",
+    "throughput_ops_sec": 14.143184
+  },
+  "deltas": {
+    "vs_checked_current_p50_percent": 10.485,
+    "vs_checked_current_p99_percent": 10.754,
+    "vs_checked_current_throughput_percent": -7.975,
+    "vs_reference_p50_percent": 117.601,
+    "vs_reference_p99_percent": 134.717,
+    "vs_reference_throughput_percent": -54.266
+  },
+  "final_after": {
+    "attempt_labels": [
+      "recovery"
+    ],
+    "cleanup_statuses": [
+      "unmounted"
+    ],
+    "max_us": 82198,
+    "mean_us": 76833,
+    "median_us": 76204,
+    "min_us": 73004,
+    "mount_options": {
+      "background_repair": "not_enabled_by_probe",
+      "background_scrub": "disabled_by_probe",
+      "writeback_cache": "disabled"
+    },
+    "p99_us": 82198,
+    "probe_report_json": "baselines/hyperfine/20260503-bd-rchk5-7-after-rerun/ffs_cli_mount_recovery_probe_report.json",
+    "readiness_poll": {
+      "interval_secs": 0.005,
+      "max_polls": 2000,
+      "max_wait_secs": 10.0
+    },
+    "runs": 10,
+    "source_json": "baselines/hyperfine/20260503-bd-rchk5-7-after-rerun/ffs_cli_mount_recovery_probe.json",
+    "throughput_ops_sec": 13.015201,
+    "times_us": [
+      76129,
+      73471,
+      79178,
+      79543,
+      73004,
+      75992,
+      75734,
+      82198,
+      76805,
+      76279
+    ]
+  },
+  "generated_at": "2026-05-03T22:15:16.944193Z",
+  "input_change_source": "bd-rchk5.5 updated scripts/mount_benchmark_probe.sh to disable background scrub and use 5 ms readiness polling",
+  "isomorphism": {
+    "floating_point": "not applicable to filesystem behavior; timing calculations are reporting only",
+    "golden_outputs": "probe attempt label remained recovery and cleanup_status remained unmounted",
+    "ordering_preserved": "yes: recovery mode still performs one recovery mount attempt, readiness check, unmount, child wait, and cleanup evidence",
+    "rng_seeds": "unchanged/not applicable",
+    "tie_breaking_unchanged": "not applicable"
+  },
+  "operation": "mount_recovery",
+  "reference_20260218": {
+    "p50_us": 35020,
+    "p99_us": 35020,
+    "source_json": "baselines/hyperfine/20260218/ffs_cli_mount_recovery_probe.json",
+    "throughput_ops_sec": 28.458766
+  },
+  "residual_explanation": "The updated probe removes background scrub and records unmounted cleanup, but recovery end-to-end latency remains bounded by sudo/bash/FUSE lifecycle overhead and does not beat the checked-in 20260503 p99. The recovery performance claim remains downgraded pending a product-level readiness metric or a lower-overhead permissioned runner.",
+  "schema_version": 1,
+  "verdict": "tail_latency_still_regressed_quarantined"
+}
