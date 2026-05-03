@@ -68,6 +68,27 @@ const REQUIRED_EVIDENCE_FIELDS: [&str; 12] = [
     "follow_up_bead",
 ];
 
+const REQUIRED_IDENTITY_EVIDENCE_FIELDS: [&str; 8] = [
+    "transition_id",
+    "epoch_id",
+    "lease_generation",
+    "snapshot_id",
+    "repair_symbol_generation",
+    "block_range",
+    "stale_refusal_reason",
+    "ledger_row_ids",
+];
+
+const REQUIRED_IDENTITY_GUARDS: [&str; 7] = [
+    "epoch_generation_monotonic",
+    "lease_generation_monotonic",
+    "snapshot_id_mismatch_rejected",
+    "repair_symbol_generation_monotonic",
+    "block_range_epoch_guard",
+    "retry_generation_advances_after_abort",
+    "halfway_failure_preserves_generation",
+];
+
 const REQUIRED_REJECTION_CASES: [&str; 7] = [
     "rw_repair_serializer_missing",
     "client_write_in_flight",
@@ -138,6 +159,7 @@ pub struct RepairWritebackSerializationContract {
     pub states: Vec<SerializationState>,
     pub transitions: Vec<SerializationTransition>,
     pub rejection_cases: Vec<SerializationRejectionCase>,
+    pub identity_guards: Vec<SerializationIdentityGuard>,
     pub scenarios: Vec<SerializationScenario>,
     pub race_schedule_manifest: RepairRaceScheduleManifest,
     pub risk_decision: SerializationRiskDecision,
@@ -203,6 +225,19 @@ pub struct SerializationRejectionCase {
     pub preserves_reproduction_data: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up_bead: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerializationIdentityGuard {
+    pub guard_id: String,
+    pub identity_kind: String,
+    pub monotonic_field: String,
+    pub aba_fixture_id: String,
+    pub refusal_error_class: String,
+    pub persisted_across_reopen: bool,
+    pub rejects_structural_aba: bool,
+    pub required_log_fields: Vec<String>,
+    pub downstream_beads: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -341,6 +376,7 @@ pub struct RepairWritebackSerializationReport {
     pub state_count: usize,
     pub transition_count: usize,
     pub rejection_case_count: usize,
+    pub identity_guard_count: usize,
     pub scenario_count: usize,
     pub schedule_count: usize,
     pub required_states: Vec<String>,
@@ -349,12 +385,14 @@ pub struct RepairWritebackSerializationReport {
     pub missing_required_invariants: Vec<String>,
     pub missing_required_evidence_fields: Vec<String>,
     pub missing_required_rejection_cases: Vec<String>,
+    pub missing_required_identity_guards: Vec<String>,
     pub missing_required_coverage_tags: Vec<String>,
     pub missing_required_consumers: Vec<String>,
     pub missing_required_race_coverage: Vec<String>,
     pub missing_required_schedule_log_fields: Vec<String>,
     pub duplicate_ids: Vec<String>,
     pub transition_evaluations: Vec<TransitionEvaluation>,
+    pub identity_guard_reports: Vec<SerializationIdentityGuardReport>,
     pub scenario_reports: Vec<SerializationScenarioReport>,
     pub schedule_reports: Vec<RepairRaceScheduleReport>,
     pub risk_report: SerializationRiskReport,
@@ -387,6 +425,20 @@ pub struct SerializationScenarioReport {
     pub artifact_paths: Vec<String>,
     pub proves_no_lost_client_write: bool,
     pub preserves_reproduction_data: bool,
+    pub valid: bool,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerializationIdentityGuardReport {
+    pub guard_id: String,
+    pub identity_kind: String,
+    pub monotonic_field: String,
+    pub aba_fixture_id: String,
+    pub refusal_error_class: String,
+    pub persisted_across_reopen: bool,
+    pub rejects_structural_aba: bool,
+    pub downstream_beads: Vec<String>,
     pub valid: bool,
     pub diagnostics: Vec<String>,
 }
@@ -444,6 +496,7 @@ pub struct RepairWritebackProofSummary {
     pub transition_guards: Vec<ProofTransitionGuard>,
     pub scenario_inputs: Vec<ProofScenarioInput>,
     pub race_schedule_inputs: Vec<ProofRaceScheduleInput>,
+    pub identity_guard_inputs: Vec<ProofIdentityGuardInput>,
     pub downstream_inputs: Vec<ProofDownstreamInput>,
     pub reproduction_command: String,
     pub errors: Vec<String>,
@@ -478,6 +531,17 @@ pub struct ProofRaceScheduleInput {
     pub timeout_decision: String,
     pub liveness_decision: String,
     pub follow_up_bead: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofIdentityGuardInput {
+    pub guard_id: String,
+    pub identity_kind: String,
+    pub monotonic_field: String,
+    pub aba_fixture_id: String,
+    pub refusal_error_class: String,
+    pub persisted_across_reopen: bool,
+    pub downstream_beads: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -520,6 +584,7 @@ pub fn validate_repair_writeback_serialization_contract(
     let state_ids = collect_state_ids(contract);
     let invariant_ids = collect_invariant_ids(contract);
     let rejection_case_ids = collect_rejection_case_ids(contract);
+    let identity_guard_ids = collect_identity_guard_ids(contract);
     let coverage_tags = collect_coverage_tags(contract);
     let race_coverage_cases = collect_race_coverage_cases(contract);
     let consumers = collect_strings(&contract.artifact_consumers);
@@ -528,10 +593,16 @@ pub fn validate_repair_writeback_serialization_contract(
 
     let missing_required_states = missing_required(&state_ids, &REQUIRED_STATES);
     let missing_required_invariants = missing_required(&invariant_ids, &REQUIRED_INVARIANTS);
-    let missing_required_evidence_fields =
+    let mut missing_required_evidence_fields =
         missing_required(&evidence_fields, &REQUIRED_EVIDENCE_FIELDS);
+    missing_required_evidence_fields.extend(missing_required(
+        &evidence_fields,
+        &REQUIRED_IDENTITY_EVIDENCE_FIELDS,
+    ));
     let missing_required_rejection_cases =
         missing_required(&rejection_case_ids, &REQUIRED_REJECTION_CASES);
+    let missing_required_identity_guards =
+        missing_required(&identity_guard_ids, &REQUIRED_IDENTITY_GUARDS);
     let missing_required_coverage_tags = missing_required(&coverage_tags, &REQUIRED_COVERAGE_TAGS);
     let missing_required_consumers = missing_required(&consumers, &REQUIRED_CONSUMERS);
     let missing_required_race_coverage =
@@ -561,6 +632,11 @@ pub fn validate_repair_writeback_serialization_contract(
     );
     extend_missing(
         &mut errors,
+        "missing required identity guard",
+        &missing_required_identity_guards,
+    );
+    extend_missing(
+        &mut errors,
         "missing required coverage tag",
         &missing_required_coverage_tags,
     );
@@ -584,6 +660,7 @@ pub fn validate_repair_writeback_serialization_contract(
     validate_transitions(contract, &state_ids, &evidence_fields, &mut errors);
     validate_rejection_cases(contract, &mut errors);
 
+    let identity_guard_reports = validate_identity_guards(contract, &evidence_fields, &mut errors);
     let scenario_reports = validate_scenarios(contract, &state_ids, artifact_root, &mut errors);
     let schedule_reports = validate_schedule_manifest(contract, artifact_root, &mut errors);
     let risk_report = validate_risk_decision(contract, &mut errors);
@@ -602,6 +679,7 @@ pub fn validate_repair_writeback_serialization_contract(
         state_count: contract.states.len(),
         transition_count: contract.transitions.len(),
         rejection_case_count: contract.rejection_cases.len(),
+        identity_guard_count: contract.identity_guards.len(),
         scenario_count: contract.scenarios.len(),
         schedule_count: contract.race_schedule_manifest.schedules.len(),
         required_states: REQUIRED_STATES.iter().map(ToString::to_string).collect(),
@@ -613,12 +691,14 @@ pub fn validate_repair_writeback_serialization_contract(
         missing_required_invariants,
         missing_required_evidence_fields,
         missing_required_rejection_cases,
+        missing_required_identity_guards,
         missing_required_coverage_tags,
         missing_required_consumers,
         missing_required_race_coverage,
         missing_required_schedule_log_fields,
         duplicate_ids,
         transition_evaluations,
+        identity_guard_reports,
         scenario_reports,
         schedule_reports,
         risk_report,
@@ -678,10 +758,11 @@ pub fn render_repair_writeback_serialization_markdown(
     writeln!(&mut out, "- Valid: `{}`", report.valid).ok();
     writeln!(
         &mut out,
-        "- Counts: states={} transitions={} rejection_cases={} scenarios={} schedules={}",
+        "- Counts: states={} transitions={} rejection_cases={} identity_guards={} scenarios={} schedules={}",
         report.state_count,
         report.transition_count,
         report.rejection_case_count,
+        report.identity_guard_count,
         report.scenario_count,
         report.schedule_count
     )
@@ -708,6 +789,22 @@ pub fn render_repair_writeback_serialization_markdown(
             transition.allowed,
             transition.mutation_allowed,
             transition.error_class
+        )
+        .ok();
+    }
+    writeln!(&mut out).ok();
+    writeln!(&mut out, "## Identity Guards").ok();
+    for guard in &report.identity_guard_reports {
+        writeln!(
+            &mut out,
+            "- `{}` kind=`{}` field=`{}` fixture=`{}` refusal=`{}` persisted={} aba_rejected={}",
+            guard.guard_id,
+            guard.identity_kind,
+            guard.monotonic_field,
+            guard.aba_fixture_id,
+            guard.refusal_error_class,
+            guard.persisted_across_reopen,
+            guard.rejects_structural_aba
         )
         .ok();
     }
@@ -910,6 +1007,19 @@ pub fn build_repair_writeback_proof_summary(
                 follow_up_bead: schedule.follow_up_bead.clone(),
             })
             .collect(),
+        identity_guard_inputs: report
+            .identity_guard_reports
+            .iter()
+            .map(|guard| ProofIdentityGuardInput {
+                guard_id: guard.guard_id.clone(),
+                identity_kind: guard.identity_kind.clone(),
+                monotonic_field: guard.monotonic_field.clone(),
+                aba_fixture_id: guard.aba_fixture_id.clone(),
+                refusal_error_class: guard.refusal_error_class.clone(),
+                persisted_across_reopen: guard.persisted_across_reopen,
+                downstream_beads: guard.downstream_beads.clone(),
+            })
+            .collect(),
         downstream_inputs,
         reproduction_command: report.reproduction_command.clone(),
         errors: report.errors.clone(),
@@ -1064,6 +1174,93 @@ fn validate_rejection_cases(
             errors.push(format!("{} must link a follow-up bead", case.case_id));
         }
     }
+}
+
+fn validate_identity_guards(
+    contract: &RepairWritebackSerializationContract,
+    evidence_fields: &BTreeSet<String>,
+    errors: &mut Vec<String>,
+) -> Vec<SerializationIdentityGuardReport> {
+    let mut reports = Vec::new();
+    for guard in &contract.identity_guards {
+        let mut diagnostics = Vec::new();
+        if !matches!(
+            guard.identity_kind.as_str(),
+            "epoch" | "lease" | "snapshot" | "repair_symbol" | "block_range" | "retry"
+        ) {
+            diagnostics.push(format!("unsupported identity_kind {}", guard.identity_kind));
+        }
+        if guard.monotonic_field.is_empty() {
+            diagnostics.push("monotonic_field is required".to_owned());
+        }
+        if guard.aba_fixture_id.is_empty() || !guard.aba_fixture_id.starts_with("aba_") {
+            diagnostics.push("aba_fixture_id must be nonempty and start with aba_".to_owned());
+        }
+        if guard.refusal_error_class == "none" || guard.refusal_error_class.is_empty() {
+            diagnostics.push("refusal_error_class must fail closed".to_owned());
+        }
+        if !guard.rejects_structural_aba {
+            diagnostics.push("identity guard must reject structural ABA reuse".to_owned());
+        }
+        if guard.required_log_fields.is_empty() {
+            diagnostics.push("identity guard must name required_log_fields".to_owned());
+        }
+        if !guard.required_log_fields.contains(&guard.monotonic_field) {
+            diagnostics.push(format!(
+                "required_log_fields must include monotonic field {}",
+                guard.monotonic_field
+            ));
+        }
+        for required in [
+            "operation_id",
+            "scenario_id",
+            "transition_id",
+            "stale_refusal_reason",
+            "ledger_row_ids",
+        ] {
+            if !guard
+                .required_log_fields
+                .iter()
+                .any(|field| field == required)
+            {
+                diagnostics.push(format!("required_log_fields missing {required}"));
+            }
+        }
+        for field in &guard.required_log_fields {
+            if !evidence_fields.contains(field) {
+                diagnostics.push(format!("requires undeclared evidence field {field}"));
+            }
+        }
+        if guard.downstream_beads.is_empty() {
+            diagnostics.push("identity guard must name downstream_beads".to_owned());
+        }
+        if guard
+            .downstream_beads
+            .iter()
+            .any(|bead| !bead.starts_with("bd-"))
+        {
+            diagnostics.push("downstream_beads must contain bead ids".to_owned());
+        }
+
+        errors.extend(
+            diagnostics
+                .iter()
+                .map(|diagnostic| format!("{}: {diagnostic}", guard.guard_id)),
+        );
+        reports.push(SerializationIdentityGuardReport {
+            guard_id: guard.guard_id.clone(),
+            identity_kind: guard.identity_kind.clone(),
+            monotonic_field: guard.monotonic_field.clone(),
+            aba_fixture_id: guard.aba_fixture_id.clone(),
+            refusal_error_class: guard.refusal_error_class.clone(),
+            persisted_across_reopen: guard.persisted_across_reopen,
+            rejects_structural_aba: guard.rejects_structural_aba,
+            downstream_beads: guard.downstream_beads.clone(),
+            valid: diagnostics.is_empty(),
+            diagnostics,
+        });
+    }
+    reports
 }
 
 fn validate_scenarios(
@@ -1613,6 +1810,14 @@ fn collect_rejection_case_ids(contract: &RepairWritebackSerializationContract) -
         .collect()
 }
 
+fn collect_identity_guard_ids(contract: &RepairWritebackSerializationContract) -> BTreeSet<String> {
+    contract
+        .identity_guards
+        .iter()
+        .map(|guard| guard.guard_id.clone())
+        .collect()
+}
+
 fn collect_coverage_tags(contract: &RepairWritebackSerializationContract) -> BTreeSet<String> {
     contract
         .scenarios
@@ -1675,6 +1880,13 @@ fn collect_duplicate_ids(contract: &RepairWritebackSerializationContract) -> Vec
             .rejection_cases
             .iter()
             .map(|item| item.case_id.as_str()),
+        &mut duplicates,
+    );
+    collect_duplicate_namespace(
+        contract
+            .identity_guards
+            .iter()
+            .map(|item| item.guard_id.as_str()),
         &mut duplicates,
     );
     collect_duplicate_namespace(
@@ -1814,6 +2026,11 @@ mod tests {
             report.missing_required_schedule_log_fields,
             Vec::<String>::new()
         );
+        assert_eq!(
+            report.missing_required_identity_guards,
+            Vec::<String>::new()
+        );
+        assert_eq!(report.identity_guard_count, REQUIRED_IDENTITY_GUARDS.len());
         assert!(report.risk_report.fail_closed_is_lower_loss);
     }
 
@@ -1992,6 +2209,61 @@ mod tests {
     }
 
     #[test]
+    fn missing_identity_guard_is_rejected() {
+        let mut contract = sample_contract();
+        contract
+            .identity_guards
+            .retain(|guard| guard.guard_id != "lease_generation_monotonic");
+        let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
+        assert!(!report.valid);
+        assert!(
+            report
+                .missing_required_identity_guards
+                .contains(&"lease_generation_monotonic".to_owned())
+        );
+    }
+
+    #[test]
+    fn identity_guard_must_reject_structural_aba() {
+        let mut contract = sample_contract();
+        let guard = contract
+            .identity_guards
+            .iter_mut()
+            .find(|guard| guard.guard_id == "epoch_generation_monotonic")
+            .expect("epoch guard exists");
+        guard.rejects_structural_aba = false;
+        let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("must reject structural ABA reuse"))
+        );
+    }
+
+    #[test]
+    fn identity_guard_log_fields_must_be_declared() {
+        let mut contract = sample_contract();
+        let guard = contract
+            .identity_guards
+            .iter_mut()
+            .find(|guard| guard.guard_id == "snapshot_id_mismatch_rejected")
+            .expect("snapshot guard exists");
+        guard
+            .required_log_fields
+            .push("undeclared_identity".to_owned());
+        let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("undeclared evidence field"))
+        );
+    }
+
+    #[test]
     fn invalid_contract_missing_evidence_field_fails() {
         let mut contract = sample_contract();
         contract
@@ -2089,6 +2361,15 @@ mod tests {
                     .any(|schedule| schedule.coverage_case == *coverage_case)
             }),
             "summary must expose all required race coverage cases"
+        );
+        assert!(
+            REQUIRED_IDENTITY_GUARDS.iter().all(|guard_id| {
+                summary
+                    .identity_guard_inputs
+                    .iter()
+                    .any(|guard| guard.guard_id == *guard_id)
+            }),
+            "summary must expose all required identity guards"
         );
     }
 }

@@ -22,6 +22,14 @@
     "snapshot_epoch",
     "lease_id",
     "repair_symbol_version",
+    "transition_id",
+    "epoch_id",
+    "lease_generation",
+    "snapshot_id",
+    "repair_symbol_generation",
+    "block_range",
+    "stale_refusal_reason",
+    "ledger_row_ids",
     "expected_state",
     "observed_state",
     "error_class",
@@ -548,6 +556,144 @@
       "no_mutation_required": true,
       "preserves_reproduction_data": true,
       "follow_up_bead": "bd-rchk0.1.1.1"
+    }
+  ],
+  "identity_guards": [
+    {
+      "guard_id": "epoch_generation_monotonic",
+      "identity_kind": "epoch",
+      "monotonic_field": "epoch_id",
+      "aba_fixture_id": "aba_old_epoch_reused_after_reopen",
+      "refusal_error_class": "snapshot_epoch_mismatch",
+      "persisted_across_reopen": true,
+      "rejects_structural_aba": true,
+      "required_log_fields": [
+        "operation_id",
+        "scenario_id",
+        "transition_id",
+        "epoch_id",
+        "snapshot_id",
+        "stale_refusal_reason",
+        "ledger_row_ids"
+      ],
+      "downstream_beads": ["bd-rchk0.1.2", "bd-rchk0.1.3", "bd-rchk0.1.4"]
+    },
+    {
+      "guard_id": "lease_generation_monotonic",
+      "identity_kind": "lease",
+      "monotonic_field": "lease_generation",
+      "aba_fixture_id": "aba_old_lease_id_reacquired_with_new_generation",
+      "refusal_error_class": "stale_lease_generation",
+      "persisted_across_reopen": true,
+      "rejects_structural_aba": true,
+      "required_log_fields": [
+        "operation_id",
+        "scenario_id",
+        "transition_id",
+        "lease_id",
+        "lease_generation",
+        "stale_refusal_reason",
+        "ledger_row_ids"
+      ],
+      "downstream_beads": ["bd-rchk0.1.2", "bd-rchk0.1.4"]
+    },
+    {
+      "guard_id": "snapshot_id_mismatch_rejected",
+      "identity_kind": "snapshot",
+      "monotonic_field": "snapshot_id",
+      "aba_fixture_id": "aba_snapshot_id_reused_after_unmount_reopen",
+      "refusal_error_class": "snapshot_id_mismatch",
+      "persisted_across_reopen": true,
+      "rejects_structural_aba": true,
+      "required_log_fields": [
+        "operation_id",
+        "scenario_id",
+        "transition_id",
+        "snapshot_epoch",
+        "snapshot_id",
+        "block_range",
+        "stale_refusal_reason",
+        "ledger_row_ids"
+      ],
+      "downstream_beads": ["bd-rchk0.1.2", "bd-rchk0.1.3"]
+    },
+    {
+      "guard_id": "repair_symbol_generation_monotonic",
+      "identity_kind": "repair_symbol",
+      "monotonic_field": "repair_symbol_generation",
+      "aba_fixture_id": "aba_symbol_generation_matches_value_but_not_epoch",
+      "refusal_error_class": "stale_repair_symbol",
+      "persisted_across_reopen": true,
+      "rejects_structural_aba": true,
+      "required_log_fields": [
+        "operation_id",
+        "scenario_id",
+        "transition_id",
+        "repair_symbol_version",
+        "repair_symbol_generation",
+        "epoch_id",
+        "stale_refusal_reason",
+        "ledger_row_ids"
+      ],
+      "downstream_beads": ["bd-rchk0.1.3", "bd-rchk0.1.4"]
+    },
+    {
+      "guard_id": "block_range_epoch_guard",
+      "identity_kind": "block_range",
+      "monotonic_field": "block_range",
+      "aba_fixture_id": "aba_block_range_same_address_new_epoch",
+      "refusal_error_class": "block_range_epoch_mismatch",
+      "persisted_across_reopen": true,
+      "rejects_structural_aba": true,
+      "required_log_fields": [
+        "operation_id",
+        "scenario_id",
+        "transition_id",
+        "block_range",
+        "epoch_id",
+        "snapshot_id",
+        "stale_refusal_reason",
+        "ledger_row_ids"
+      ],
+      "downstream_beads": ["bd-rchk0.1.2", "bd-rchk0.1.3"]
+    },
+    {
+      "guard_id": "retry_generation_advances_after_abort",
+      "identity_kind": "retry",
+      "monotonic_field": "epoch_id",
+      "aba_fixture_id": "aba_retry_after_abort_reuses_old_plan_identity",
+      "refusal_error_class": "retry_generation_stale",
+      "persisted_across_reopen": false,
+      "rejects_structural_aba": true,
+      "required_log_fields": [
+        "operation_id",
+        "scenario_id",
+        "transition_id",
+        "epoch_id",
+        "lease_generation",
+        "stale_refusal_reason",
+        "ledger_row_ids"
+      ],
+      "downstream_beads": ["bd-rchk0.1.3", "bd-rchk0.1.4"]
+    },
+    {
+      "guard_id": "halfway_failure_preserves_generation",
+      "identity_kind": "repair_symbol",
+      "monotonic_field": "repair_symbol_generation",
+      "aba_fixture_id": "aba_halfway_failure_reuses_failed_symbol_generation",
+      "refusal_error_class": "writeback_failure_no_refresh",
+      "persisted_across_reopen": true,
+      "rejects_structural_aba": true,
+      "required_log_fields": [
+        "operation_id",
+        "scenario_id",
+        "transition_id",
+        "repair_symbol_generation",
+        "block_range",
+        "stale_refusal_reason",
+        "ledger_row_ids"
+      ],
+      "downstream_beads": ["bd-rchk0.1.4"]
     }
   ],
   "scenarios": [

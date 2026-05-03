@@ -191,6 +191,23 @@ if not any(
     raise SystemExit("proof summary missing fail-closed transition guard")
 if not required_cases <= {row["coverage_case"] for row in proof_summary["race_schedule_inputs"]}:
     raise SystemExit("proof summary missing race schedule coverage")
+required_identity_guards = {
+    "epoch_generation_monotonic",
+    "lease_generation_monotonic",
+    "snapshot_id_mismatch_rejected",
+    "repair_symbol_generation_monotonic",
+    "block_range_epoch_guard",
+    "retry_generation_advances_after_abort",
+    "halfway_failure_preserves_generation",
+}
+observed_identity_guards = {row["guard_id"] for row in proof_summary["identity_guard_inputs"]}
+if not required_identity_guards <= observed_identity_guards:
+    raise SystemExit(f"proof summary missing identity guards: {sorted(required_identity_guards - observed_identity_guards)}")
+for row in proof_summary["identity_guard_inputs"]:
+    if not row["aba_fixture_id"].startswith("aba_"):
+        raise SystemExit(f"identity guard lacks ABA fixture: {row['guard_id']}")
+    if row["refusal_error_class"] == "none":
+        raise SystemExit(f"identity guard does not fail closed: {row['guard_id']}")
 PY
 then
     scenario_result "repair_writeback_fail_closed_report" "PASS" "report, proof summary, and sample artifact verified"
@@ -288,11 +305,19 @@ record = {
     "observed_survivor_set": schedule["observed_survivor_set"],
     "ledger_outcomes": schedule["ledger_outcomes"],
     "snapshot_epoch": 42,
+    "transition_id": "rw_repair_fail_closed",
+    "epoch_id": "epoch-42-generation-9",
     "lease_id": "lease-dry-run-001",
+    "lease_generation": "lease-generation-17",
+    "snapshot_id": "snapshot-42-epoch-9",
     "repair_symbol_version": "group-7-generation-12",
+    "repair_symbol_generation": "symbol-generation-12",
+    "block_range": "block=42 len=1",
     "expected_state": "repair_writeback_blocked_rw",
     "observed_state": scenario["final_state"],
     "error_class": scenario["expected_error_class"],
+    "stale_refusal_reason": "rw repair plan lacks a current epoch/lease/snapshot identity accepted by the unified serializer",
+    "ledger_row_ids": ["ledger-rw-repair-fail-closed-001"],
     "artifact_paths": [str(artifact_path), str(log_path)],
     "cleanup_status": "preserved_artifacts",
     "reproduction_command": report["reproduction_command"],
@@ -312,11 +337,19 @@ required = [
     "operation_id",
     "scenario_id",
     "snapshot_epoch",
+    "transition_id",
+    "epoch_id",
     "lease_id",
+    "lease_generation",
+    "snapshot_id",
     "repair_symbol_version",
+    "repair_symbol_generation",
+    "block_range",
     "expected_state",
     "observed_state",
     "error_class",
+    "stale_refusal_reason",
+    "ledger_row_ids",
     "artifact_paths",
     "cleanup_status",
     "reproduction_command",
