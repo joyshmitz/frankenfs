@@ -1206,6 +1206,58 @@
       ]
     },
     {
+      "suite_id": "ffs_swarm_workload_harness",
+      "script": "scripts/e2e/ffs_swarm_workload_harness_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "swarm_workload_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"swarm_workload_cli_wired\" \"PASS\""
+        },
+        {
+          "id": "swarm_workload_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"swarm_workload_unit_tests\" \"PASS\""
+        },
+        {
+          "id": "swarm_workload_default_manifest",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"swarm_workload_default_manifest\" \"PASS\""
+        },
+        {
+          "id": "swarm_workload_markdown",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"swarm_workload_markdown\" \"PASS\""
+        },
+        {
+          "id": "swarm_workload_small_host_fail_closed",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"swarm_workload_small_host_fail_closed\" \"PASS\""
+        },
+        {
+          "id": "swarm_workload_numa_reason_fail_closed",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"swarm_workload_numa_reason_fail_closed\" \"PASS\""
+        },
+        {
+          "id": "swarm_workload_mutating_command_fail_closed",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"swarm_workload_mutating_command_fail_closed\" \"PASS\""
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_repair_confidence_lab",
       "script": "scripts/e2e/ffs_repair_confidence_lab_e2e.sh",
       "required_categories": [

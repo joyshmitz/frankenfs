@@ -59,6 +59,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 # Run P1 workload corpus schema and proof-consumer coverage smoke
 ./scripts/e2e/ffs_workload_corpus_e2e.sh
 
+# Run NUMA-aware swarm workload harness dry-run validation
+./scripts/e2e/ffs_swarm_workload_harness_e2e.sh
+
 # Run performance baseline manifest dry-run validation
 ./scripts/e2e/ffs_performance_manifest_e2e.sh
 
@@ -151,6 +154,23 @@ Every new corpus scenario must include:
 - `reproduction_command`: an exact command template that preserves the workload identity in logs.
 
 Unsupported behavior must use `status: "unsupported"` with `unsupported_reason` plus either `follow_up_bead` or `non_goal_reason`. Host-only blockers must use `status: "host_skip"` with `host_skip_reason`; the required capabilities must include a host or FUSE capability so the skip cannot be mistaken for product success. The initial corpus intentionally includes the btrfs DefaultPermissions root-owned image-ownership diagnostic and a generic missing-FUSE host skip so mounted proof consumers keep host limitations separate from FrankenFS failures.
+
+## Swarm Workload Harness Contract
+
+The 64-core/256GB swarm workload harness plan lives in:
+
+- `benchmarks/swarm_workload_harness_manifest.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-swarm-workload-harness \
+  --manifest benchmarks/swarm_workload_harness_manifest.json \
+  --out artifacts/performance/swarm_workload_harness.json \
+  --summary-out artifacts/performance/swarm_workload_harness.md
+```
+
+The manifest is a dry-run proof contract, not a real workload execution grant. It must include a host fingerprint, CPU/RAM/NUMA visibility, storage class, FUSE capability, kernel, RCH/local lane, worker isolation notes, exact command plan, resource caps, queue/backpressure counters, cleanup policy, expected artifacts, raw logs, and release-claim state. Local hosts or lanes without enough CPU, RAM, or NUMA visibility must use `capability_skip` or `small_host_smoke`; they cannot produce a 64-core/256GB pass claim.
 
 ## Repair Confidence Lab Contract
 

@@ -1,0 +1,320 @@
+{
+  "schema_version": 1,
+  "manifest_id": "bd-p2j3e.2-swarm-workload-harness-v1",
+  "generated_at": "2026-05-03T23:20:00Z",
+  "target_host": {
+    "min_cpu_cores_logical": 64,
+    "min_ram_total_gb": 256,
+    "min_ram_available_gb": 192,
+    "min_numa_nodes": 2
+  },
+  "workload_profiles": [
+    {
+      "workload_profile_id": "metadata_storm_dry_run",
+      "workload_class": "metadata_storm",
+      "description": "Dry-run command plan for metadata-heavy create/stat/rename/unlink pressure across isolated shard queues.",
+      "command_plan": {
+        "plan_id": "metadata_storm_command_plan",
+        "plan_mode": "dry_run",
+        "exact_command": "cargo run -p ffs-harness -- validate-swarm-workload-harness --manifest benchmarks/swarm_workload_harness_manifest.json",
+        "dry_run_only": true,
+        "mutates_host_filesystems": false,
+        "expected_artifacts": [
+          {
+            "path": "artifacts/performance/swarm-workload/metadata_storm/report.json",
+            "kind": "json_report",
+            "required": true
+          },
+          {
+            "path": "artifacts/performance/swarm-workload/metadata_storm/run.log",
+            "kind": "raw_log",
+            "required": true
+          }
+        ],
+        "resource_caps": {
+          "max_duration_secs": 600,
+          "max_threads": 64,
+          "max_memory_gb": 64.0,
+          "max_temp_storage_gb": 16.0,
+          "max_queue_depth": 4096
+        }
+      },
+      "placement": {
+        "shard_count": 64,
+        "core_allocation": "spread metadata workers across isolated worker core groups",
+        "numa_policy": "pin metadata shards to observed NUMA nodes; downgrade if unavailable",
+        "queue_isolation": "metadata queue separate from write and repair queues",
+        "cleanup_policy": "no_host_mutation"
+      }
+    },
+    {
+      "workload_profile_id": "append_fsync_dry_run",
+      "workload_class": "append_fsync",
+      "description": "Dry-run command plan for append plus fsync/fdatasync pressure that feeds WAL and tail-latency proof lanes.",
+      "command_plan": {
+        "plan_id": "append_fsync_command_plan",
+        "plan_mode": "dry_run",
+        "exact_command": "cargo run -p ffs-harness -- validate-swarm-workload-harness --manifest benchmarks/swarm_workload_harness_manifest.json",
+        "dry_run_only": true,
+        "mutates_host_filesystems": false,
+        "expected_artifacts": [
+          {
+            "path": "artifacts/performance/swarm-workload/append_fsync/report.json",
+            "kind": "json_report",
+            "required": true
+          },
+          {
+            "path": "artifacts/performance/swarm-workload/append_fsync/run.log",
+            "kind": "raw_log",
+            "required": true
+          }
+        ],
+        "resource_caps": {
+          "max_duration_secs": 900,
+          "max_threads": 64,
+          "max_memory_gb": 48.0,
+          "max_temp_storage_gb": 24.0,
+          "max_queue_depth": 2048
+        }
+      },
+      "placement": {
+        "shard_count": 64,
+        "core_allocation": "reserve fsync lane workers on cores distinct from metadata storm workers",
+        "numa_policy": "co-locate WAL shard and fsync workers per NUMA node when observable",
+        "queue_isolation": "append/fsync queue has its own backpressure counters",
+        "cleanup_policy": "no_host_mutation"
+      }
+    },
+    {
+      "workload_profile_id": "mixed_read_write_dry_run",
+      "workload_class": "mixed_read_write",
+      "description": "Dry-run command plan for mixed reader/writer pressure with snapshot visibility and queue/backpressure counters.",
+      "command_plan": {
+        "plan_id": "mixed_read_write_command_plan",
+        "plan_mode": "dry_run",
+        "exact_command": "cargo run -p ffs-harness -- validate-swarm-workload-harness --manifest benchmarks/swarm_workload_harness_manifest.json",
+        "dry_run_only": true,
+        "mutates_host_filesystems": false,
+        "expected_artifacts": [
+          {
+            "path": "artifacts/performance/swarm-workload/mixed_read_write/report.json",
+            "kind": "json_report",
+            "required": true
+          },
+          {
+            "path": "artifacts/performance/swarm-workload/mixed_read_write/run.log",
+            "kind": "raw_log",
+            "required": true
+          }
+        ],
+        "resource_caps": {
+          "max_duration_secs": 900,
+          "max_threads": 96,
+          "max_memory_gb": 96.0,
+          "max_temp_storage_gb": 32.0,
+          "max_queue_depth": 8192
+        }
+      },
+      "placement": {
+        "shard_count": 96,
+        "core_allocation": "split readers and writers by shard group with fixed queue ownership",
+        "numa_policy": "reader shards prefer local NUMA memory; writers pin to owning shard node",
+        "queue_isolation": "separate reader, writer, retry, and backpressure queues",
+        "cleanup_policy": "no_host_mutation"
+      }
+    },
+    {
+      "workload_profile_id": "scrub_repair_overlap_dry_run",
+      "workload_class": "scrub_repair_overlap",
+      "description": "Dry-run command plan for foreground filesystem traffic overlapped with morsel-driven scrub/repair scheduling.",
+      "command_plan": {
+        "plan_id": "scrub_repair_overlap_command_plan",
+        "plan_mode": "dry_run",
+        "exact_command": "cargo run -p ffs-harness -- validate-swarm-workload-harness --manifest benchmarks/swarm_workload_harness_manifest.json",
+        "dry_run_only": true,
+        "mutates_host_filesystems": false,
+        "expected_artifacts": [
+          {
+            "path": "artifacts/performance/swarm-workload/scrub_repair_overlap/report.json",
+            "kind": "json_report",
+            "required": true
+          },
+          {
+            "path": "artifacts/performance/swarm-workload/scrub_repair_overlap/run.log",
+            "kind": "raw_log",
+            "required": true
+          }
+        ],
+        "resource_caps": {
+          "max_duration_secs": 900,
+          "max_threads": 80,
+          "max_memory_gb": 80.0,
+          "max_temp_storage_gb": 24.0,
+          "max_queue_depth": 4096
+        }
+      },
+      "placement": {
+        "shard_count": 64,
+        "core_allocation": "reserve scrub/repair workers below foreground thread priority",
+        "numa_policy": "repair morsels stay on the NUMA node owning the block-group shard",
+        "queue_isolation": "foreground queue owns preemption over repair queue",
+        "cleanup_policy": "no_host_mutation"
+      }
+    },
+    {
+      "workload_profile_id": "cache_pressure_dry_run",
+      "workload_class": "cache_pressure",
+      "description": "Dry-run command plan for 256GB cache-pressure lanes with dirty-ratio and eviction-pressure accounting.",
+      "command_plan": {
+        "plan_id": "cache_pressure_command_plan",
+        "plan_mode": "dry_run",
+        "exact_command": "cargo run -p ffs-harness -- validate-swarm-workload-harness --manifest benchmarks/swarm_workload_harness_manifest.json",
+        "dry_run_only": true,
+        "mutates_host_filesystems": false,
+        "expected_artifacts": [
+          {
+            "path": "artifacts/performance/swarm-workload/cache_pressure/report.json",
+            "kind": "json_report",
+            "required": true
+          },
+          {
+            "path": "artifacts/performance/swarm-workload/cache_pressure/run.log",
+            "kind": "raw_log",
+            "required": true
+          }
+        ],
+        "resource_caps": {
+          "max_duration_secs": 900,
+          "max_threads": 96,
+          "max_memory_gb": 192.0,
+          "max_temp_storage_gb": 32.0,
+          "max_queue_depth": 8192
+        }
+      },
+      "placement": {
+        "shard_count": 128,
+        "core_allocation": "spread cache-admission probes across all observed worker core groups",
+        "numa_policy": "cache shards allocate from local NUMA node; cross-node fallback is logged",
+        "queue_isolation": "cache pressure queue records dirty, eviction, and backpressure counters",
+        "cleanup_policy": "no_host_mutation"
+      }
+    }
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "swarm_workload_64c_256gb_dry_run_plan",
+      "host": {
+        "host_fingerprint": "synthetic-96c-512gb-2numa-plan-lane",
+        "cpu_cores_logical": 96,
+        "numa": {
+          "observable": true,
+          "node_count": 2,
+          "placement_intent": "2-node spread with per-node shard groups"
+        },
+        "ram_total_gb": 512.0,
+        "ram_available_gb": 420.0,
+        "storage_class": "nvme",
+        "fuse_capability": {
+          "state": "available",
+          "detail": "permissioned lane reports /dev/fuse and fusermount3"
+        },
+        "kernel": "Linux 6.17.0-14-generic x86_64 GNU/Linux",
+        "lane": "permissioned_large_host",
+        "rch_or_local_lane": "rch",
+        "worker_isolation_notes": "reserved worker with isolated target dir"
+      },
+      "workload_profile_ids": [
+        "metadata_storm_dry_run",
+        "append_fsync_dry_run",
+        "mixed_read_write_dry_run",
+        "scrub_repair_overlap_dry_run",
+        "cache_pressure_dry_run"
+      ],
+      "counters": {
+        "max_queue_depth": 8192,
+        "average_queue_depth": 768.0,
+        "backpressure_state": "healthy",
+        "throttle_events": 0,
+        "rejected_writes": 0,
+        "p99_latency_budget_us": 12000.0
+      },
+      "classification": "pass",
+      "release_claim_state": "plan_ready",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-swarm-workload-harness --manifest benchmarks/swarm_workload_harness_manifest.json",
+      "raw_logs": [
+        "artifacts/performance/swarm-workload/large-host/run.log"
+      ],
+      "artifact_paths": [
+        "artifacts/performance/swarm-workload/large-host/report.json"
+      ]
+    },
+    {
+      "scenario_id": "swarm_workload_small_host_smoke",
+      "host": {
+        "host_fingerprint": "developer-smoke-16c-64gb-no-numa",
+        "cpu_cores_logical": 16,
+        "numa": {
+          "observable": false,
+          "placement_intent": "single-node smoke; no placement claim",
+          "missing_reason": "NUMA topology not visible in developer lane"
+        },
+        "ram_total_gb": 64.0,
+        "ram_available_gb": 40.0,
+        "storage_class": "nvme",
+        "fuse_capability": {
+          "state": "unknown",
+          "detail": "developer smoke does not require mounted execution"
+        },
+        "kernel": "Linux developer-smoke",
+        "lane": "developer_smoke",
+        "rch_or_local_lane": "local",
+        "worker_isolation_notes": "uses dry-run-only artifacts"
+      },
+      "workload_profile_ids": [
+        "metadata_storm_dry_run"
+      ],
+      "counters": {
+        "max_queue_depth": 128,
+        "average_queue_depth": 4.0,
+        "backpressure_state": "healthy",
+        "throttle_events": 0,
+        "rejected_writes": 0,
+        "p99_latency_budget_us": 25000.0
+      },
+      "classification": "capability_skip",
+      "release_claim_state": "small_host_smoke",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-swarm-workload-harness --manifest benchmarks/swarm_workload_harness_manifest.json",
+      "raw_logs": [
+        "artifacts/performance/swarm-workload/small-host/run.log"
+      ],
+      "artifact_paths": [
+        "artifacts/performance/swarm-workload/small-host/report.json"
+      ]
+    }
+  ],
+  "required_log_fields": [
+    "scenario_id",
+    "host_fingerprint",
+    "cpu_cores_logical",
+    "numa_nodes",
+    "ram_total_gb",
+    "ram_available_gb",
+    "storage_class",
+    "fuse_capability",
+    "kernel",
+    "rch_or_local_lane",
+    "worker_isolation_notes",
+    "workload_profile_id",
+    "queue_depth",
+    "backpressure_state",
+    "release_claim_state",
+    "reproduction_command"
+  ],
+  "proof_consumers": [
+    "bd-p2j3e.2",
+    "bd-p2j3e",
+    "bd-rchk0.5.7",
+    "proof-bundle",
+    "release-gates"
+  ]
+}

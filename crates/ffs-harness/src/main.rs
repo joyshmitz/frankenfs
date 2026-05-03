@@ -111,6 +111,11 @@ use ffs_harness::{
         load_swarm_cache_controller_contract, render_swarm_cache_controller_markdown,
         validate_swarm_cache_controller_contract,
     },
+    swarm_workload_harness::{
+        DEFAULT_SWARM_WORKLOAD_HARNESS_MANIFEST, fail_on_swarm_workload_harness_errors,
+        load_swarm_workload_harness_manifest, render_swarm_workload_harness_markdown,
+        validate_swarm_workload_harness_manifest,
+    },
     validate_btrfs_fixture, validate_ext4_fixture,
     verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
     workload_corpus::{
@@ -198,6 +203,7 @@ fn run() -> Result<()> {
         }
         Some("performance-delta-closeout") => performance_delta_closeout_cmd(&args[1..]),
         Some("validate-swarm-cache-controller") => validate_swarm_cache_controller_cmd(&args[1..]),
+        Some("validate-swarm-workload-harness") => validate_swarm_workload_harness_cmd(&args[1..]),
         Some("validate-scrub-repair-scheduler") => validate_scrub_repair_scheduler_cmd(&args[1..]),
         Some("validate-adversarial-threat-model") => {
             validate_adversarial_threat_model_cmd(&args[1..])
@@ -329,6 +335,14 @@ struct WorkloadCorpusCmdArgs {
 #[derive(Debug)]
 struct SwarmCacheControllerCmdArgs {
     contract_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
+struct SwarmWorkloadHarnessCmdArgs {
+    manifest_path: String,
     out_path: Option<String>,
     summary_out_path: Option<String>,
     format: ProofBundleFormat,
@@ -1224,6 +1238,89 @@ fn parse_swarm_cache_controller_cmd_args(
 
     Ok(Some(SwarmCacheControllerCmdArgs {
         contract_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
+fn validate_swarm_workload_harness_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_swarm_workload_harness_cmd_args(args)? else {
+        return Ok(());
+    };
+    let manifest = load_swarm_workload_harness_manifest(Path::new(&cmd_args.manifest_path))?;
+    let report = validate_swarm_workload_harness_manifest(&manifest);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_swarm_workload_harness_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "swarm workload harness report written: {} valid={} profiles={} scenarios={}",
+            path, report.valid, report.profile_count, report.scenario_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_swarm_workload_harness_markdown(&report)),
+        )?;
+        println!("swarm workload harness summary written: {path}");
+    }
+
+    fail_on_swarm_workload_harness_errors(&report)
+}
+
+fn parse_swarm_workload_harness_cmd_args(
+    args: &[String],
+) -> Result<Option<SwarmWorkloadHarnessCmdArgs>> {
+    let mut manifest_path = DEFAULT_SWARM_WORKLOAD_HARNESS_MANIFEST.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                args.get(i)
+                    .context("--manifest requires a path")?
+                    .clone_into(&mut manifest_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_swarm_workload_harness_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-swarm-workload-harness argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(SwarmWorkloadHarnessCmdArgs {
+        manifest_path,
         out_path,
         summary_out_path,
         format,
@@ -2921,6 +3018,7 @@ fn print_usage() {
     print_performance_baseline_manifest_usage_summary();
     print_performance_delta_closeout_usage_summary();
     print_swarm_cache_controller_usage_summary();
+    print_swarm_workload_harness_usage_summary();
     print_scrub_repair_scheduler_usage_summary();
     print_adversarial_threat_model_usage_summary();
     print_soak_canary_campaign_usage_summary();
@@ -3006,6 +3104,7 @@ fn print_usage_examples() {
     print_performance_baseline_manifest_example();
     print_performance_delta_closeout_example();
     print_swarm_cache_controller_example();
+    print_swarm_workload_harness_example();
     print_scrub_repair_scheduler_example();
     print_adversarial_threat_model_example();
     print_soak_canary_campaign_example();
@@ -3054,6 +3153,18 @@ fn print_swarm_cache_controller_usage_summary() {
 fn print_swarm_cache_controller_example() {
     println!(
         "  ffs-harness validate-swarm-cache-controller --contract benchmarks/swarm_cache_controller_contract.json --out artifacts/performance/swarm_cache_controller.json --summary-out artifacts/performance/swarm_cache_controller.md"
+    );
+}
+
+fn print_swarm_workload_harness_usage_summary() {
+    println!(
+        "  ffs-harness validate-swarm-workload-harness [--manifest FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_swarm_workload_harness_example() {
+    println!(
+        "  ffs-harness validate-swarm-workload-harness --manifest benchmarks/swarm_workload_harness_manifest.json --out artifacts/performance/swarm_workload_harness.json --summary-out artifacts/performance/swarm_workload_harness.md"
     );
 }
 
@@ -3300,6 +3411,16 @@ fn print_swarm_cache_controller_usage() {
     println!();
     println!("Options:");
     println!("  --contract FILE                    Read swarm cache controller contract JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write selected-format validation report");
+    println!("  --summary-out FILE                 Write Markdown inspection summary");
+}
+
+fn print_swarm_workload_harness_usage() {
+    println!("Usage: ffs-harness validate-swarm-workload-harness [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --manifest FILE                    Read swarm workload harness manifest JSON");
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write selected-format validation report");
     println!("  --summary-out FILE                 Write Markdown inspection summary");
