@@ -177,8 +177,10 @@ cargo run -p ffs-harness -- validate-mounted-differential-oracle \
 ```
 
 The validator rejects broad or expired allowlists, unresolved kernel-vs-FrankenFS
-diffs, missing raw log paths, missing image hashes, unsupported-scope rows
-without an owner or non-goal, and host skips that blur FUSE permission or btrfs
+diffs, missing raw log paths, missing image hashes, missing kernel baseline
+provenance, shared kernel/FrankenFS images or mountpoints, unsupported-scope rows
+without an owner or non-goal, and host skips that blur `/dev/fuse`,
+`fusermount`, kernel mount permission, `mkfs` helper, or btrfs
 `DefaultPermissions` setup failures into product failures.
 
 ### Operational Readiness Report

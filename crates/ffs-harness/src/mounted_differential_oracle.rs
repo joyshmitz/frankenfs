@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-pub const MOUNTED_DIFFERENTIAL_SCHEMA_VERSION: u32 = 1;
+pub const MOUNTED_DIFFERENTIAL_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_MOUNTED_DIFFERENTIAL_REPORT: &str =
     "artifacts/e2e/mounted_differential_oracle/report.json";
 const BEAD_ID: &str = "bd-rchk0.5.2.1";
@@ -36,6 +36,7 @@ pub struct MountedDifferentialOracleReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MountedDifferentialCapability {
     pub fuse: CapabilityState,
+    pub fusermount: CapabilityState,
     pub kernel_mount: CapabilityState,
     pub mkfs_ext4: CapabilityState,
     pub mkfs_btrfs: CapabilityState,
@@ -66,6 +67,102 @@ pub struct MountedDifferentialAllowlistRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MountedDifferentialBaselineManifest {
+    pub baseline_id: String,
+    pub kernel_release: String,
+    pub filesystem: MountedDifferentialFilesystem,
+    pub mkfs_command: String,
+    pub image_seed: String,
+    pub image_hash: String,
+    pub mount_options: Vec<String>,
+    pub uid: u32,
+    pub gid: u32,
+    pub root_ownership: MountedDifferentialRootOwnership,
+    pub capability_probe: MountedDifferentialCapabilityProbe,
+    pub allowed_errno_normalization: Vec<MountedDifferentialErrnoNormalizationRule>,
+    pub cleanup_requirements: MountedDifferentialCleanupRequirements,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MountedDifferentialRootOwnership {
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: String,
+    pub default_permissions: bool,
+    pub root_owned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MountedDifferentialCapabilityProbe {
+    pub probe_id: String,
+    pub dev_fuse: CapabilityState,
+    pub fusermount: CapabilityState,
+    pub kernel_mount: CapabilityState,
+    pub mkfs_helper: CapabilityState,
+    pub stdout_path: String,
+    pub stderr_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MountedDifferentialErrnoNormalizationRule {
+    pub rule_id: String,
+    pub operation_id: String,
+    pub kernel_errno: String,
+    pub frankenfs_errno: String,
+    pub normalized_errno: String,
+    pub rationale: String,
+    pub owner_bead: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MountedDifferentialCleanupRequirements {
+    pub unmount: MountedDifferentialCleanupRequirement,
+    pub mountpoints: MountedDifferentialCleanupRequirement,
+    pub images_on_success: MountedDifferentialCleanupSuccessImagePolicy,
+    pub images_on_failure: MountedDifferentialCleanupFailureImagePolicy,
+    pub raw_logs: MountedDifferentialRawLogPolicy,
+    pub cleanup_status_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MountedDifferentialCleanupRequirement {
+    Required,
+    NotRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MountedDifferentialCleanupSuccessImagePolicy {
+    Remove,
+    Preserve,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MountedDifferentialCleanupFailureImagePolicy {
+    Preserve,
+    Remove,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MountedDifferentialRawLogPolicy {
+    Preserve,
+    Discard,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MountedDifferentialLaneIsolation {
+    pub kernel_image_path: String,
+    pub frankenfs_image_path: String,
+    pub kernel_mountpoint: String,
+    pub frankenfs_mountpoint: String,
+    pub kernel_output_root: String,
+    pub frankenfs_output_root: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MountedDifferentialScenario {
     pub scenario_id: String,
     pub operation_id: String,
@@ -82,6 +179,8 @@ pub struct MountedDifferentialScenario {
     pub non_goal_reason: Option<String>,
     pub kernel_observation: MountedDifferentialObservation,
     pub frankenfs_observation: MountedDifferentialObservation,
+    pub baseline_manifest: MountedDifferentialBaselineManifest,
+    pub lane_isolation: MountedDifferentialLaneIsolation,
     pub normalized_diff: Vec<MountedDifferentialDiff>,
     pub cleanup_status: CleanupStatus,
     pub reproduction_command: String,
@@ -144,7 +243,8 @@ pub enum MountedDifferentialHostSkipClass {
     FuseMissing,
     FusePermissionDenied,
     KernelMountPermissionDenied,
-    MkfsMissing,
+    MkfsExt4Missing,
+    MkfsBtrfsMissing,
     BtrfsDefaultPermissionsRootOwned,
     UnsupportedScope,
 }
@@ -156,7 +256,8 @@ impl MountedDifferentialHostSkipClass {
             Self::FuseMissing => "fuse_missing",
             Self::FusePermissionDenied => "fuse_permission_denied",
             Self::KernelMountPermissionDenied => "kernel_mount_permission_denied",
-            Self::MkfsMissing => "mkfs_missing",
+            Self::MkfsExt4Missing => "mkfs_ext4_missing",
+            Self::MkfsBtrfsMissing => "mkfs_btrfs_missing",
             Self::BtrfsDefaultPermissionsRootOwned => "btrfs_default_permissions_root_owned",
             Self::UnsupportedScope => "unsupported_scope",
         }
@@ -175,6 +276,7 @@ pub struct MountedDifferentialObservation {
     pub image_hash_after: String,
     pub mount_options: Vec<String>,
     pub uid: u32,
+    pub gid: u32,
 }
 
 impl MountedDifferentialObservation {
@@ -232,6 +334,7 @@ pub struct MountedDifferentialValidationReport {
     pub scenario_count: usize,
     pub filesystems: Vec<String>,
     pub classification_counts: BTreeMap<String, usize>,
+    pub host_skip_classes: Vec<String>,
     pub allowlist_count: usize,
     pub unresolved_public_claims: Vec<String>,
     pub errors: Vec<String>,
@@ -255,6 +358,7 @@ pub fn validate_mounted_differential_oracle_report(
     let mut warnings = Vec::new();
     let mut unresolved_public_claims = Vec::new();
     let mut filesystems = BTreeSet::new();
+    let mut host_skip_classes = BTreeSet::new();
     let mut classification_counts = BTreeMap::new();
     let allowlists = validate_allowlist_records(&report.allowlist, &mut errors);
     let mut scenario_ids = BTreeSet::new();
@@ -264,9 +368,11 @@ pub fn validate_mounted_differential_oracle_report(
     for scenario in &report.scenarios {
         validate_scenario(
             scenario,
+            report,
             &allowlists,
             &mut scenario_ids,
             &mut filesystems,
+            &mut host_skip_classes,
             &mut classification_counts,
             &mut unresolved_public_claims,
             &mut errors,
@@ -288,6 +394,7 @@ pub fn validate_mounted_differential_oracle_report(
         scenario_count: report.scenarios.len(),
         filesystems: filesystems.into_iter().collect(),
         classification_counts,
+        host_skip_classes: host_skip_classes.into_iter().collect(),
         allowlist_count: report.allowlist.len(),
         unresolved_public_claims,
         errors,
@@ -322,6 +429,12 @@ pub fn render_mounted_differential_oracle_markdown(
     output.push_str("\n## Classifications\n\n");
     for (classification, count) in &report.classification_counts {
         let _ = writeln!(output, "- `{classification}`: {count}");
+    }
+    if !report.host_skip_classes.is_empty() {
+        output.push_str("\n## Host Skip Classes\n\n");
+        for skip_class in &report.host_skip_classes {
+            let _ = writeln!(output, "- `{skip_class}`");
+        }
     }
     if !report.unresolved_public_claims.is_empty() {
         output.push_str("\n## Release Gate Blocks\n\n");
@@ -441,9 +554,11 @@ fn validate_allowlist_records<'a>(
 #[allow(clippy::too_many_arguments)]
 fn validate_scenario(
     scenario: &MountedDifferentialScenario,
+    report: &MountedDifferentialOracleReport,
     allowlists: &BTreeMap<String, &MountedDifferentialAllowlistRecord>,
     scenario_ids: &mut BTreeSet<String>,
     filesystems: &mut BTreeSet<String>,
+    host_skip_classes: &mut BTreeSet<String>,
     classification_counts: &mut BTreeMap<String, usize>,
     unresolved_public_claims: &mut Vec<String>,
     errors: &mut Vec<String>,
@@ -468,7 +583,12 @@ fn validate_scenario(
     *classification_counts
         .entry(scenario.classification.label().to_owned())
         .or_default() += 1;
+    if let Some(skip_class) = scenario.host_skip_class {
+        host_skip_classes.insert(skip_class.label().to_owned());
+    }
 
+    validate_baseline_manifest(scenario, report, errors);
+    validate_lane_isolation(scenario, errors);
     validate_observation(
         scenario,
         &scenario.kernel_observation,
@@ -585,6 +705,410 @@ fn validate_observation(
     }
 }
 
+fn validate_baseline_manifest(
+    scenario: &MountedDifferentialScenario,
+    report: &MountedDifferentialOracleReport,
+    errors: &mut Vec<String>,
+) {
+    let baseline = &scenario.baseline_manifest;
+    if !baseline.baseline_id.starts_with("baseline_") {
+        errors.push(format!(
+            "scenario {} baseline_id {} must start with baseline_",
+            scenario.scenario_id, baseline.baseline_id
+        ));
+    }
+    if baseline.kernel_release != report.kernel_release {
+        errors.push(format!(
+            "scenario {} baseline kernel_release {} must match report kernel_release {}",
+            scenario.scenario_id, baseline.kernel_release, report.kernel_release
+        ));
+    }
+    if baseline.filesystem != scenario.filesystem {
+        errors.push(format!(
+            "scenario {} baseline filesystem {:?} does not match scenario {:?}",
+            scenario.scenario_id, baseline.filesystem, scenario.filesystem
+        ));
+    }
+    let expected_mkfs = match scenario.filesystem {
+        MountedDifferentialFilesystem::Ext4 => "mkfs.ext4",
+        MountedDifferentialFilesystem::Btrfs => "mkfs.btrfs",
+    };
+    if !baseline.mkfs_command.contains(expected_mkfs) {
+        errors.push(format!(
+            "scenario {} mkfs_command must include {expected_mkfs}",
+            scenario.scenario_id
+        ));
+    }
+    if baseline.image_seed.trim().is_empty() {
+        errors.push(format!(
+            "scenario {} baseline missing image_seed",
+            scenario.scenario_id
+        ));
+    }
+    if !is_sha256_hex(&baseline.image_hash) {
+        errors.push(format!(
+            "scenario {} baseline image_hash must be SHA-256 hex",
+            scenario.scenario_id
+        ));
+    }
+    if baseline.image_hash != scenario.kernel_observation.image_hash_before
+        || baseline.image_hash != scenario.frankenfs_observation.image_hash_before
+    {
+        errors.push(format!(
+            "scenario {} baseline image_hash must match both lane pre-run image hashes",
+            scenario.scenario_id
+        ));
+    }
+    if baseline.mount_options.is_empty() {
+        errors.push(format!(
+            "scenario {} baseline must record intended mount_options",
+            scenario.scenario_id
+        ));
+    }
+    if baseline.uid != scenario.kernel_observation.uid
+        || baseline.uid != scenario.frankenfs_observation.uid
+    {
+        errors.push(format!(
+            "scenario {} baseline uid must match both observations",
+            scenario.scenario_id
+        ));
+    }
+    if baseline.gid != scenario.kernel_observation.gid
+        || baseline.gid != scenario.frankenfs_observation.gid
+    {
+        errors.push(format!(
+            "scenario {} baseline gid must match both observations",
+            scenario.scenario_id
+        ));
+    }
+    validate_root_ownership(scenario, &baseline.root_ownership, errors);
+    validate_capability_probe(scenario, &baseline.capability_probe, report, errors);
+    validate_errno_normalization_rules(scenario, &baseline.allowed_errno_normalization, errors);
+    validate_cleanup_requirements(scenario, &baseline.cleanup_requirements, errors);
+}
+
+fn validate_root_ownership(
+    scenario: &MountedDifferentialScenario,
+    ownership: &MountedDifferentialRootOwnership,
+    errors: &mut Vec<String>,
+) {
+    if ownership.mode.trim().is_empty() {
+        errors.push(format!(
+            "scenario {} root_ownership missing mode",
+            scenario.scenario_id
+        ));
+    }
+    if scenario.host_skip_class
+        == Some(MountedDifferentialHostSkipClass::BtrfsDefaultPermissionsRootOwned)
+        && (!ownership.root_owned || !ownership.default_permissions)
+    {
+        errors.push(format!(
+            "scenario {} btrfs DefaultPermissions skip requires root_owned default_permissions root",
+            scenario.scenario_id
+        ));
+    }
+}
+
+fn validate_capability_probe(
+    scenario: &MountedDifferentialScenario,
+    probe: &MountedDifferentialCapabilityProbe,
+    report: &MountedDifferentialOracleReport,
+    errors: &mut Vec<String>,
+) {
+    if !probe.probe_id.starts_with("capability_") {
+        errors.push(format!(
+            "scenario {} capability probe_id {} must start with capability_",
+            scenario.scenario_id, probe.probe_id
+        ));
+    }
+    if scenario.scenario_kind != MountedDifferentialScenarioKind::HostSkip {
+        if probe.dev_fuse != report.capability.fuse {
+            errors.push(format!(
+                "scenario {} capability probe dev_fuse does not match report fuse state",
+                scenario.scenario_id
+            ));
+        }
+        if probe.fusermount != report.capability.fusermount {
+            errors.push(format!(
+                "scenario {} capability probe fusermount does not match report fusermount state",
+                scenario.scenario_id
+            ));
+        }
+        if probe.kernel_mount != report.capability.kernel_mount {
+            errors.push(format!(
+                "scenario {} capability probe kernel_mount does not match report kernel_mount state",
+                scenario.scenario_id
+            ));
+        }
+        let expected_mkfs_state = match scenario.filesystem {
+            MountedDifferentialFilesystem::Ext4 => report.capability.mkfs_ext4,
+            MountedDifferentialFilesystem::Btrfs => report.capability.mkfs_btrfs,
+        };
+        if probe.mkfs_helper != expected_mkfs_state {
+            errors.push(format!(
+                "scenario {} capability probe mkfs_helper does not match report helper state",
+                scenario.scenario_id
+            ));
+        }
+    } else if let Some(skip_class) = scenario.host_skip_class {
+        match skip_class {
+            MountedDifferentialHostSkipClass::FuseMissing
+                if probe.dev_fuse != CapabilityState::Missing =>
+            {
+                errors.push(format!(
+                    "scenario {} fuse_missing skip requires missing /dev/fuse probe",
+                    scenario.scenario_id
+                ));
+            }
+            MountedDifferentialHostSkipClass::FusePermissionDenied
+                if probe.fusermount != CapabilityState::PermissionDenied =>
+            {
+                errors.push(format!(
+                    "scenario {} fuse_permission_denied skip requires fusermount permission denial",
+                    scenario.scenario_id
+                ));
+            }
+            MountedDifferentialHostSkipClass::KernelMountPermissionDenied
+                if probe.kernel_mount != CapabilityState::PermissionDenied =>
+            {
+                errors.push(format!(
+                    "scenario {} kernel_mount_permission_denied skip requires kernel mount permission denial",
+                    scenario.scenario_id
+                ));
+            }
+            MountedDifferentialHostSkipClass::MkfsExt4Missing
+            | MountedDifferentialHostSkipClass::MkfsBtrfsMissing
+                if probe.mkfs_helper != CapabilityState::Missing =>
+            {
+                errors.push(format!(
+                    "scenario {} mkfs missing skip requires missing mkfs helper probe",
+                    scenario.scenario_id
+                ));
+            }
+            _ => {}
+        }
+    }
+    validate_artifact_path(
+        &scenario.scenario_id,
+        "capability stdout_path",
+        &probe.stdout_path,
+        errors,
+    );
+    validate_artifact_path(
+        &scenario.scenario_id,
+        "capability stderr_path",
+        &probe.stderr_path,
+        errors,
+    );
+}
+
+fn validate_errno_normalization_rules(
+    scenario: &MountedDifferentialScenario,
+    rules: &[MountedDifferentialErrnoNormalizationRule],
+    errors: &mut Vec<String>,
+) {
+    for rule in rules {
+        if !rule.rule_id.starts_with("errno_") {
+            errors.push(format!(
+                "scenario {} errno normalization rule {} must start with errno_",
+                scenario.scenario_id, rule.rule_id
+            ));
+        }
+        if rule.operation_id != scenario.operation_id {
+            errors.push(format!(
+                "scenario {} errno normalization rule {} operation mismatch",
+                scenario.scenario_id, rule.rule_id
+            ));
+        }
+        reject_broad_allowlist_value(&rule.rule_id, "kernel_errno", &rule.kernel_errno, errors);
+        reject_broad_allowlist_value(
+            &rule.rule_id,
+            "frankenfs_errno",
+            &rule.frankenfs_errno,
+            errors,
+        );
+        reject_broad_allowlist_value(
+            &rule.rule_id,
+            "normalized_errno",
+            &rule.normalized_errno,
+            errors,
+        );
+        if rule.rationale.trim().is_empty() {
+            errors.push(format!(
+                "scenario {} errno normalization rule {} missing rationale",
+                scenario.scenario_id, rule.rule_id
+            ));
+        }
+        if !rule.owner_bead.starts_with("bd-") {
+            errors.push(format!(
+                "scenario {} errno normalization rule {} owner_bead must start with bd-",
+                scenario.scenario_id, rule.rule_id
+            ));
+        }
+    }
+    if scenario.classification == MountedDifferentialClassification::AllowedDiff
+        && scenario
+            .normalized_diff
+            .iter()
+            .any(|diff| diff.field == "result")
+        && rules.is_empty()
+    {
+        errors.push(format!(
+            "scenario {} allowed errno/result diff needs explicit normalization rule",
+            scenario.scenario_id
+        ));
+    }
+}
+
+fn validate_cleanup_requirements(
+    scenario: &MountedDifferentialScenario,
+    cleanup: &MountedDifferentialCleanupRequirements,
+    errors: &mut Vec<String>,
+) {
+    if cleanup.unmount != MountedDifferentialCleanupRequirement::Required {
+        errors.push(format!(
+            "scenario {} cleanup requirements must require unmount",
+            scenario.scenario_id
+        ));
+    }
+    if cleanup.mountpoints != MountedDifferentialCleanupRequirement::Required {
+        errors.push(format!(
+            "scenario {} cleanup requirements must remove mountpoints",
+            scenario.scenario_id
+        ));
+    }
+    if cleanup.images_on_success != MountedDifferentialCleanupSuccessImagePolicy::Remove {
+        errors.push(format!(
+            "scenario {} cleanup requirements must remove images on success",
+            scenario.scenario_id
+        ));
+    }
+    if cleanup.images_on_failure != MountedDifferentialCleanupFailureImagePolicy::Preserve {
+        errors.push(format!(
+            "scenario {} cleanup requirements must preserve images on failure",
+            scenario.scenario_id
+        ));
+    }
+    if cleanup.raw_logs != MountedDifferentialRawLogPolicy::Preserve {
+        errors.push(format!(
+            "scenario {} cleanup requirements must preserve raw logs",
+            scenario.scenario_id
+        ));
+    }
+    validate_artifact_path(
+        &scenario.scenario_id,
+        "cleanup_status_path",
+        &cleanup.cleanup_status_path,
+        errors,
+    );
+}
+
+fn validate_lane_isolation(scenario: &MountedDifferentialScenario, errors: &mut Vec<String>) {
+    let isolation = &scenario.lane_isolation;
+    validate_artifact_path(
+        &scenario.scenario_id,
+        "kernel_image_path",
+        &isolation.kernel_image_path,
+        errors,
+    );
+    validate_artifact_path(
+        &scenario.scenario_id,
+        "frankenfs_image_path",
+        &isolation.frankenfs_image_path,
+        errors,
+    );
+    validate_artifact_path(
+        &scenario.scenario_id,
+        "kernel_mountpoint",
+        &isolation.kernel_mountpoint,
+        errors,
+    );
+    validate_artifact_path(
+        &scenario.scenario_id,
+        "frankenfs_mountpoint",
+        &isolation.frankenfs_mountpoint,
+        errors,
+    );
+    validate_artifact_path(
+        &scenario.scenario_id,
+        "kernel_output_root",
+        &isolation.kernel_output_root,
+        errors,
+    );
+    validate_artifact_path(
+        &scenario.scenario_id,
+        "frankenfs_output_root",
+        &isolation.frankenfs_output_root,
+        errors,
+    );
+    if isolation.kernel_image_path == isolation.frankenfs_image_path {
+        errors.push(format!(
+            "scenario {} kernel and FrankenFS image paths must be distinct",
+            scenario.scenario_id
+        ));
+    }
+    if isolation.kernel_mountpoint == isolation.frankenfs_mountpoint {
+        errors.push(format!(
+            "scenario {} kernel and FrankenFS mountpoints must be distinct",
+            scenario.scenario_id
+        ));
+    }
+    if isolation.kernel_output_root == isolation.frankenfs_output_root {
+        errors.push(format!(
+            "scenario {} kernel and FrankenFS output roots must be distinct",
+            scenario.scenario_id
+        ));
+    }
+    validate_observation_log_roots(
+        scenario,
+        &scenario.kernel_observation,
+        &isolation.kernel_output_root,
+        MountedDifferentialSide::Kernel,
+        errors,
+    );
+    validate_observation_log_roots(
+        scenario,
+        &scenario.frankenfs_observation,
+        &isolation.frankenfs_output_root,
+        MountedDifferentialSide::Frankenfs,
+        errors,
+    );
+    for required in [
+        &scenario.kernel_observation.stdout_path,
+        &scenario.kernel_observation.stderr_path,
+        &scenario.frankenfs_observation.stdout_path,
+        &scenario.frankenfs_observation.stderr_path,
+    ] {
+        if !scenario.artifact_paths.iter().any(|path| path == required) {
+            errors.push(format!(
+                "scenario {} artifact_paths must preserve raw log {}",
+                scenario.scenario_id, required
+            ));
+        }
+    }
+}
+
+fn validate_observation_log_roots(
+    scenario: &MountedDifferentialScenario,
+    observation: &MountedDifferentialObservation,
+    root: &str,
+    side: MountedDifferentialSide,
+    errors: &mut Vec<String>,
+) {
+    if !path_has_prefix(&observation.stdout_path, root) {
+        errors.push(format!(
+            "scenario {} {:?} stdout_path crosses lane root",
+            scenario.scenario_id, side
+        ));
+    }
+    if !path_has_prefix(&observation.stderr_path, root) {
+        errors.push(format!(
+            "scenario {} {:?} stderr_path crosses lane root",
+            scenario.scenario_id, side
+        ));
+    }
+}
+
 fn validate_reproduction(scenario: &MountedDifferentialScenario, errors: &mut Vec<String>) {
     if scenario.reproduction_command.trim().is_empty() {
         errors.push(format!(
@@ -612,12 +1136,7 @@ fn validate_artifacts(scenario: &MountedDifferentialScenario, errors: &mut Vec<S
         ));
     }
     for path in &scenario.artifact_paths {
-        if path.trim().is_empty() || path.contains("..") {
-            errors.push(format!(
-                "scenario {} has invalid artifact path {}",
-                scenario.scenario_id, path
-            ));
-        }
+        validate_artifact_path(&scenario.scenario_id, "artifact path", path, errors);
     }
 }
 
@@ -724,6 +1243,22 @@ fn validate_host_skip_scenario(scenario: &MountedDifferentialScenario, errors: &
             scenario.scenario_id
         ));
     }
+    if skip_class == MountedDifferentialHostSkipClass::MkfsExt4Missing
+        && scenario.filesystem != MountedDifferentialFilesystem::Ext4
+    {
+        errors.push(format!(
+            "scenario {} mkfs.ext4 missing diagnosis used on non-ext4 scenario",
+            scenario.scenario_id
+        ));
+    }
+    if skip_class == MountedDifferentialHostSkipClass::MkfsBtrfsMissing
+        && scenario.filesystem != MountedDifferentialFilesystem::Btrfs
+    {
+        errors.push(format!(
+            "scenario {} mkfs.btrfs missing diagnosis used on non-btrfs scenario",
+            scenario.scenario_id
+        ));
+    }
     if ![
         scenario.kernel_observation.result,
         scenario.frankenfs_observation.result,
@@ -818,6 +1353,19 @@ fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn validate_artifact_path(scenario_id: &str, field: &str, path: &str, errors: &mut Vec<String>) {
+    if path.trim().is_empty() || path.contains("..") {
+        errors.push(format!("scenario {scenario_id} has invalid {field} {path}"));
+    }
+}
+
+fn path_has_prefix(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 fn diff_map(diffs: &[MountedDifferentialDiff]) -> BTreeMap<&str, &MountedDifferentialDiff> {
     diffs
         .iter()
@@ -833,16 +1381,21 @@ mod tests {
     const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     fn observation(
+        scenario_id: &str,
         side: MountedDifferentialSide,
         result: MountedDifferentialObservationResult,
         errno: Option<&str>,
     ) -> MountedDifferentialObservation {
+        let lane = match side {
+            MountedDifferentialSide::Kernel => "kernel",
+            MountedDifferentialSide::Frankenfs => "frankenfs",
+        };
         MountedDifferentialObservation {
             side,
             result,
             errno: errno.map(str::to_owned),
-            stdout_path: format!("logs/{side:?}.out"),
-            stderr_path: format!("logs/{side:?}.err"),
+            stdout_path: format!("artifacts/{scenario_id}/{lane}/stdout.log"),
+            stderr_path: format!("artifacts/{scenario_id}/{lane}/stderr.log"),
             image_hash_before: HASH_A.to_owned(),
             image_hash_after: HASH_B.to_owned(),
             mount_options: if result == MountedDifferentialObservationResult::Skip {
@@ -851,6 +1404,87 @@ mod tests {
                 vec!["rw".to_owned(), "default_permissions".to_owned()]
             },
             uid: 1000,
+            gid: 1000,
+        }
+    }
+
+    fn baseline_manifest(
+        scenario_id: &str,
+        _operation_id: &str,
+        filesystem: MountedDifferentialFilesystem,
+        errno_rules: Vec<MountedDifferentialErrnoNormalizationRule>,
+        host_skip_class: Option<MountedDifferentialHostSkipClass>,
+    ) -> MountedDifferentialBaselineManifest {
+        let mkfs_command = match filesystem {
+            MountedDifferentialFilesystem::Ext4 => {
+                format!("mkfs.ext4 -F -U test-seed artifacts/{scenario_id}/kernel.img")
+            }
+            MountedDifferentialFilesystem::Btrfs => {
+                format!("mkfs.btrfs -f -U test-seed artifacts/{scenario_id}/kernel.img")
+            }
+        };
+        let root_owned = host_skip_class
+            == Some(MountedDifferentialHostSkipClass::BtrfsDefaultPermissionsRootOwned);
+        let dev_fuse = if host_skip_class == Some(MountedDifferentialHostSkipClass::FuseMissing) {
+            CapabilityState::Missing
+        } else {
+            CapabilityState::PermissionDenied
+        };
+        let fusermount = CapabilityState::PermissionDenied;
+        let kernel_mount = CapabilityState::PermissionDenied;
+        let mkfs_helper = match host_skip_class {
+            Some(
+                MountedDifferentialHostSkipClass::MkfsExt4Missing
+                | MountedDifferentialHostSkipClass::MkfsBtrfsMissing,
+            ) => CapabilityState::Missing,
+            _ => CapabilityState::Available,
+        };
+        MountedDifferentialBaselineManifest {
+            baseline_id: format!("baseline_{scenario_id}"),
+            kernel_release: "6.19.0-test".to_owned(),
+            filesystem,
+            mkfs_command,
+            image_seed: format!("seed-{scenario_id}"),
+            image_hash: HASH_A.to_owned(),
+            mount_options: vec!["rw".to_owned(), "default_permissions".to_owned()],
+            uid: 1000,
+            gid: 1000,
+            root_ownership: MountedDifferentialRootOwnership {
+                uid: if root_owned { 0 } else { 1000 },
+                gid: if root_owned { 0 } else { 1000 },
+                mode: "0755".to_owned(),
+                default_permissions: true,
+                root_owned,
+            },
+            capability_probe: MountedDifferentialCapabilityProbe {
+                probe_id: format!("capability_{scenario_id}"),
+                dev_fuse,
+                fusermount,
+                kernel_mount,
+                mkfs_helper,
+                stdout_path: format!("artifacts/{scenario_id}/capability/stdout.log"),
+                stderr_path: format!("artifacts/{scenario_id}/capability/stderr.log"),
+            },
+            allowed_errno_normalization: errno_rules,
+            cleanup_requirements: MountedDifferentialCleanupRequirements {
+                unmount: MountedDifferentialCleanupRequirement::Required,
+                mountpoints: MountedDifferentialCleanupRequirement::Required,
+                images_on_success: MountedDifferentialCleanupSuccessImagePolicy::Remove,
+                images_on_failure: MountedDifferentialCleanupFailureImagePolicy::Preserve,
+                raw_logs: MountedDifferentialRawLogPolicy::Preserve,
+                cleanup_status_path: format!("artifacts/{scenario_id}/cleanup.json"),
+            },
+        }
+    }
+
+    fn lane_isolation(scenario_id: &str) -> MountedDifferentialLaneIsolation {
+        MountedDifferentialLaneIsolation {
+            kernel_image_path: format!("artifacts/{scenario_id}/kernel/image.img"),
+            frankenfs_image_path: format!("artifacts/{scenario_id}/frankenfs/image.img"),
+            kernel_mountpoint: format!("artifacts/{scenario_id}/kernel/mnt"),
+            frankenfs_mountpoint: format!("artifacts/{scenario_id}/frankenfs/mnt"),
+            kernel_output_root: format!("artifacts/{scenario_id}/kernel"),
+            frankenfs_output_root: format!("artifacts/{scenario_id}/frankenfs"),
         }
     }
 
@@ -873,11 +1507,60 @@ mod tests {
             non_goal_reason: None,
             kernel_observation: kernel,
             frankenfs_observation: frankenfs,
+            baseline_manifest: baseline_manifest(
+                scenario_id,
+                "open_readback",
+                filesystem,
+                Vec::new(),
+                None,
+            ),
+            lane_isolation: lane_isolation(scenario_id),
             normalized_diff: Vec::new(),
             cleanup_status: CleanupStatus::Clean,
             reproduction_command: format!("{RUNNER_PATH} --scenario {scenario_id}"),
-            artifact_paths: vec![format!("artifacts/{scenario_id}.json")],
+            artifact_paths: vec![
+                format!("artifacts/{scenario_id}.json"),
+                format!("artifacts/{scenario_id}/kernel/stdout.log"),
+                format!("artifacts/{scenario_id}/kernel/stderr.log"),
+                format!("artifacts/{scenario_id}/frankenfs/stdout.log"),
+                format!("artifacts/{scenario_id}/frankenfs/stderr.log"),
+            ],
         }
+    }
+
+    fn host_skip_scenario(
+        scenario_id: &str,
+        filesystem: MountedDifferentialFilesystem,
+        skip_class: MountedDifferentialHostSkipClass,
+    ) -> MountedDifferentialScenario {
+        let mut scenario = base_scenario(
+            scenario_id,
+            filesystem,
+            MountedDifferentialClassification::HostSkip,
+            observation(
+                scenario_id,
+                MountedDifferentialSide::Kernel,
+                MountedDifferentialObservationResult::Skip,
+                Some(skip_class.label()),
+            ),
+            observation(
+                scenario_id,
+                MountedDifferentialSide::Frankenfs,
+                MountedDifferentialObservationResult::Skip,
+                Some(skip_class.label()),
+            ),
+        );
+        scenario.operation_id = format!("{}_probe", skip_class.label());
+        scenario.scenario_kind = MountedDifferentialScenarioKind::HostSkip;
+        scenario.host_skip_class = Some(skip_class);
+        scenario.baseline_manifest = baseline_manifest(
+            scenario_id,
+            &scenario.operation_id,
+            filesystem,
+            Vec::new(),
+            Some(skip_class),
+        );
+        scenario
     }
 
     #[allow(clippy::too_many_lines)]
@@ -901,11 +1584,13 @@ mod tests {
             MountedDifferentialFilesystem::Ext4,
             MountedDifferentialClassification::Pass,
             observation(
+                "mounted_diff_ext4_create_readback",
                 MountedDifferentialSide::Kernel,
                 MountedDifferentialObservationResult::Ok,
                 None,
             ),
             observation(
+                "mounted_diff_ext4_create_readback",
                 MountedDifferentialSide::Frankenfs,
                 MountedDifferentialObservationResult::Ok,
                 None,
@@ -917,11 +1602,13 @@ mod tests {
             MountedDifferentialFilesystem::Ext4,
             MountedDifferentialClassification::AllowedDiff,
             observation(
+                "mounted_diff_ext4_fiemap_transport_errno",
                 MountedDifferentialSide::Kernel,
                 MountedDifferentialObservationResult::Errno,
                 Some("EOPNOTSUPP"),
             ),
             observation(
+                "mounted_diff_ext4_fiemap_transport_errno",
                 MountedDifferentialSide::Frankenfs,
                 MountedDifferentialObservationResult::Errno,
                 Some("ENOTTY"),
@@ -929,41 +1616,76 @@ mod tests {
         );
         allowed.operation_id = "fiemap_probe".to_owned();
         allowed.allowlist_id = Some(allowlist.allowlist_id.clone());
+        allowed.baseline_manifest = baseline_manifest(
+            "mounted_diff_ext4_fiemap_transport_errno",
+            "fiemap_probe",
+            MountedDifferentialFilesystem::Ext4,
+            vec![MountedDifferentialErrnoNormalizationRule {
+                rule_id: "errno_ext4_fiemap_transport".to_owned(),
+                operation_id: "fiemap_probe".to_owned(),
+                kernel_errno: "EOPNOTSUPP".to_owned(),
+                frankenfs_errno: "ENOTTY".to_owned(),
+                normalized_errno: "fiemap_transport_unsupported".to_owned(),
+                rationale: "transport and userspace dispatch reject the same unsupported probe"
+                    .to_owned(),
+                owner_bead: "bd-29cpd".to_owned(),
+            }],
+            None,
+        );
         allowed.normalized_diff = vec![MountedDifferentialDiff {
             field: "result".to_owned(),
             kernel_value: "EOPNOTSUPP".to_owned(),
             frankenfs_value: "ENOTTY".to_owned(),
         }];
 
-        let mut host_skip = base_scenario(
+        let fuse_missing = host_skip_scenario(
+            "mounted_diff_ext4_fuse_missing",
+            MountedDifferentialFilesystem::Ext4,
+            MountedDifferentialHostSkipClass::FuseMissing,
+        );
+        let fuse_permission = host_skip_scenario(
+            "mounted_diff_ext4_fuse_permission_skip",
+            MountedDifferentialFilesystem::Ext4,
+            MountedDifferentialHostSkipClass::FusePermissionDenied,
+        );
+        let kernel_mount = host_skip_scenario(
+            "mounted_diff_ext4_kernel_mount_permission_skip",
+            MountedDifferentialFilesystem::Ext4,
+            MountedDifferentialHostSkipClass::KernelMountPermissionDenied,
+        );
+        let mkfs_ext4 = host_skip_scenario(
+            "mounted_diff_ext4_mkfs_missing",
+            MountedDifferentialFilesystem::Ext4,
+            MountedDifferentialHostSkipClass::MkfsExt4Missing,
+        );
+        let mkfs_btrfs = host_skip_scenario(
+            "mounted_diff_btrfs_mkfs_missing",
+            MountedDifferentialFilesystem::Btrfs,
+            MountedDifferentialHostSkipClass::MkfsBtrfsMissing,
+        );
+        let btrfs_root_owned = host_skip_scenario(
             "mounted_diff_btrfs_default_permissions_root_owned",
             MountedDifferentialFilesystem::Btrfs,
-            MountedDifferentialClassification::HostSkip,
-            observation(
-                MountedDifferentialSide::Kernel,
-                MountedDifferentialObservationResult::Skip,
-                Some("btrfs_default_permissions_root_owned"),
-            ),
-            observation(
-                MountedDifferentialSide::Frankenfs,
-                MountedDifferentialObservationResult::Skip,
-                Some("btrfs_default_permissions_root_owned"),
-            ),
+            MountedDifferentialHostSkipClass::BtrfsDefaultPermissionsRootOwned,
         );
-        host_skip.scenario_kind = MountedDifferentialScenarioKind::HostSkip;
-        host_skip.host_skip_class =
-            Some(MountedDifferentialHostSkipClass::BtrfsDefaultPermissionsRootOwned);
+        let unsupported_scope_skip = host_skip_scenario(
+            "mounted_diff_ext4_unsupported_scope_skip",
+            MountedDifferentialFilesystem::Ext4,
+            MountedDifferentialHostSkipClass::UnsupportedScope,
+        );
 
         let mut unsupported = base_scenario(
             "mounted_diff_btrfs_unsupported_clone_range",
             MountedDifferentialFilesystem::Btrfs,
             MountedDifferentialClassification::Unsupported,
             observation(
+                "mounted_diff_btrfs_unsupported_clone_range",
                 MountedDifferentialSide::Kernel,
                 MountedDifferentialObservationResult::Errno,
                 Some("EOPNOTSUPP"),
             ),
             observation(
+                "mounted_diff_btrfs_unsupported_clone_range",
                 MountedDifferentialSide::Frankenfs,
                 MountedDifferentialObservationResult::Errno,
                 Some("EOPNOTSUPP"),
@@ -982,12 +1704,24 @@ mod tests {
             execute_permissioned: false,
             capability: MountedDifferentialCapability {
                 fuse: CapabilityState::PermissionDenied,
+                fusermount: CapabilityState::PermissionDenied,
                 kernel_mount: CapabilityState::PermissionDenied,
                 mkfs_ext4: CapabilityState::Available,
                 mkfs_btrfs: CapabilityState::Available,
             },
             allowlist: vec![allowlist],
-            scenarios: vec![pass, allowed, host_skip, unsupported],
+            scenarios: vec![
+                pass,
+                allowed,
+                fuse_missing,
+                fuse_permission,
+                kernel_mount,
+                mkfs_ext4,
+                mkfs_btrfs,
+                btrfs_root_owned,
+                unsupported_scope_skip,
+                unsupported,
+            ],
         }
     }
 
@@ -995,10 +1729,22 @@ mod tests {
     fn valid_report_covers_strict_allowlist_and_host_skip_contract() {
         let validation = validate_mounted_differential_oracle_report(&valid_report());
         assert!(validation.valid, "{:?}", validation.errors);
-        assert_eq!(validation.scenario_count, 4);
+        assert_eq!(validation.scenario_count, 10);
         assert_eq!(validation.filesystems, vec!["btrfs", "ext4"]);
         assert_eq!(validation.classification_counts["allowed_diff"], 1);
-        assert_eq!(validation.classification_counts["host_skip"], 1);
+        assert_eq!(validation.classification_counts["host_skip"], 7);
+        assert_eq!(
+            validation.host_skip_classes,
+            vec![
+                "btrfs_default_permissions_root_owned",
+                "fuse_missing",
+                "fuse_permission_denied",
+                "kernel_mount_permission_denied",
+                "mkfs_btrfs_missing",
+                "mkfs_ext4_missing",
+                "unsupported_scope",
+            ]
+        );
     }
 
     #[test]
@@ -1040,7 +1786,7 @@ mod tests {
     #[test]
     fn btrfs_default_permissions_skip_cannot_mask_product_failure() {
         let mut report = valid_report();
-        report.scenarios[2].filesystem = MountedDifferentialFilesystem::Ext4;
+        report.scenarios[7].filesystem = MountedDifferentialFilesystem::Ext4;
         let validation = validate_mounted_differential_oracle_report(&report);
         assert!(!validation.valid);
         assert!(
@@ -1052,10 +1798,50 @@ mod tests {
     }
 
     #[test]
+    fn baseline_manifest_and_lane_isolation_fail_closed() {
+        let mut report = valid_report();
+        report.scenarios[0].baseline_manifest.mkfs_command = "mkfs.btrfs -f wrong.img".to_owned();
+        report.scenarios[0]
+            .baseline_manifest
+            .cleanup_requirements
+            .raw_logs = MountedDifferentialRawLogPolicy::Discard;
+        report.scenarios[0].lane_isolation.frankenfs_mountpoint =
+            report.scenarios[0].lane_isolation.kernel_mountpoint.clone();
+        report.scenarios[0].frankenfs_observation.stdout_path =
+            report.scenarios[0].kernel_observation.stdout_path.clone();
+        let validation = validate_mounted_differential_oracle_report(&report);
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| error.contains("mkfs_command must include mkfs.ext4"))
+        );
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| error.contains("preserve raw logs"))
+        );
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| error.contains("mountpoints must be distinct"))
+        );
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| error.contains("stdout_path crosses lane root"))
+        );
+    }
+
+    #[test]
     fn unsupported_scope_requires_owner_or_non_goal() {
         let mut report = valid_report();
-        report.scenarios[3].owner_bead = None;
-        report.scenarios[3].non_goal_reason = None;
+        report.scenarios[9].owner_bead = None;
+        report.scenarios[9].non_goal_reason = None;
         let validation = validate_mounted_differential_oracle_report(&report);
         assert!(!validation.valid);
         assert!(
@@ -1075,6 +1861,7 @@ mod tests {
         let markdown = render_mounted_differential_oracle_markdown(&validation);
         assert!(markdown.contains("Mounted Differential Oracle Report"));
         assert!(markdown.contains("`diff`: 1"));
+        assert!(markdown.contains("Host Skip Classes"));
         assert!(markdown.contains("Release Gate Blocks"));
     }
 }

@@ -895,16 +895,46 @@
           "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fiemap_transport_errno|outcome=DIFF"
         },
         {
+          "id": "mounted_diff_ext4_fuse_missing",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fuse_missing|outcome=SKIP"
+        },
+        {
           "id": "mounted_diff_ext4_fuse_permission_skip",
           "category": "edge",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fuse_permission_skip|outcome=SKIP"
         },
         {
+          "id": "mounted_diff_ext4_kernel_mount_permission_skip",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_kernel_mount_permission_skip|outcome=SKIP"
+        },
+        {
+          "id": "mounted_diff_ext4_mkfs_missing",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_mkfs_missing|outcome=SKIP"
+        },
+        {
+          "id": "mounted_diff_btrfs_mkfs_missing",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_mkfs_missing|outcome=SKIP"
+        },
+        {
           "id": "mounted_diff_btrfs_default_permissions_root_owned",
           "category": "edge",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_default_permissions_root_owned|outcome=SKIP"
+        },
+        {
+          "id": "mounted_diff_ext4_unsupported_scope_skip",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_unsupported_scope_skip|outcome=SKIP"
         },
         {
           "id": "mounted_diff_btrfs_unsupported_clone_range",

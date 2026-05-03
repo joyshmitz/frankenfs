@@ -41,18 +41,119 @@ hash_a = "a" * 64
 hash_b = "b" * 64
 
 
-def observation(side: str, result: str, errno: str | None = None) -> dict[str, object]:
+def observation(
+    scenario_id: str,
+    side: str,
+    result: str,
+    errno: str | None = None,
+) -> dict[str, object]:
     return {
         "side": side,
         "result": result,
         "errno": errno,
-        "stdout_path": f"{report_path.parent}/stdout/{side}.log",
-        "stderr_path": f"{report_path.parent}/stderr/{side}.log",
+        "stdout_path": f"{report_path.parent}/{scenario_id}/{side}/stdout.log",
+        "stderr_path": f"{report_path.parent}/{scenario_id}/{side}/stderr.log",
         "image_hash_before": hash_a,
         "image_hash_after": hash_b,
         "mount_options": [] if result == "skip" else ["rw", "default_permissions"],
         "uid": os.getuid(),
+        "gid": os.getgid(),
     }
+
+
+def capability_probe(skip_class: str | None) -> dict[str, object]:
+    dev_fuse = "missing" if skip_class == "fuse_missing" else "permission_denied"
+    mkfs_helper = "missing" if skip_class in {"mkfs_ext4_missing", "mkfs_btrfs_missing"} else "available"
+    return {
+        "probe_id": "capability_probe",
+        "dev_fuse": dev_fuse,
+        "fusermount": "permission_denied",
+        "kernel_mount": "permission_denied",
+        "mkfs_helper": mkfs_helper,
+        "stdout_path": "capability/stdout.log",
+        "stderr_path": "capability/stderr.log",
+    }
+
+
+def baseline_manifest(scenario: dict[str, object]) -> dict[str, object]:
+    scenario_id = str(scenario["scenario_id"])
+    filesystem = str(scenario["filesystem"])
+    skip_class = scenario.get("host_skip_class")
+    root_owned = skip_class == "btrfs_default_permissions_root_owned"
+    mkfs_binary = "mkfs.ext4" if filesystem == "ext4" else "mkfs.btrfs"
+    errno_rules: list[dict[str, str]] = []
+    if scenario.get("classification") == "allowed_diff":
+        errno_rules.append(
+            {
+                "rule_id": "errno_ext4_fiemap_transport",
+                "operation_id": str(scenario["operation_id"]),
+                "kernel_errno": "EOPNOTSUPP",
+                "frankenfs_errno": "ENOTTY",
+                "normalized_errno": "fiemap_transport_unsupported",
+                "rationale": "kernel and FrankenFS both reject unsupported FIEMAP through different layers",
+                "owner_bead": "bd-29cpd",
+            }
+        )
+    probe = capability_probe(str(skip_class) if skip_class else None)
+    probe["probe_id"] = f"capability_{scenario_id}"
+    probe["stdout_path"] = f"{report_path.parent}/{scenario_id}/capability/stdout.log"
+    probe["stderr_path"] = f"{report_path.parent}/{scenario_id}/capability/stderr.log"
+    return {
+        "baseline_id": f"baseline_{scenario_id}",
+        "kernel_release": platform.release(),
+        "filesystem": filesystem,
+        "mkfs_command": f"{mkfs_binary} -F {report_path.parent}/{scenario_id}/kernel/image.img",
+        "image_seed": f"seed-{scenario_id}",
+        "image_hash": hash_a,
+        "mount_options": ["rw", "default_permissions"],
+        "uid": os.getuid(),
+        "gid": os.getgid(),
+        "root_ownership": {
+            "uid": 0 if root_owned else os.getuid(),
+            "gid": 0 if root_owned else os.getgid(),
+            "mode": "0755",
+            "default_permissions": True,
+            "root_owned": root_owned,
+        },
+        "capability_probe": probe,
+        "allowed_errno_normalization": errno_rules,
+        "cleanup_requirements": {
+            "unmount": "required",
+            "mountpoints": "required",
+            "images_on_success": "remove",
+            "images_on_failure": "preserve",
+            "raw_logs": "preserve",
+            "cleanup_status_path": f"{report_path.parent}/{scenario_id}/cleanup.json",
+        },
+    }
+
+
+def lane_isolation(scenario_id: str) -> dict[str, str]:
+    return {
+        "kernel_image_path": f"{report_path.parent}/{scenario_id}/kernel/image.img",
+        "frankenfs_image_path": f"{report_path.parent}/{scenario_id}/frankenfs/image.img",
+        "kernel_mountpoint": f"{report_path.parent}/{scenario_id}/kernel/mnt",
+        "frankenfs_mountpoint": f"{report_path.parent}/{scenario_id}/frankenfs/mnt",
+        "kernel_output_root": f"{report_path.parent}/{scenario_id}/kernel",
+        "frankenfs_output_root": f"{report_path.parent}/{scenario_id}/frankenfs",
+    }
+
+
+def with_contract(scenario: dict[str, object]) -> dict[str, object]:
+    scenario_id = str(scenario["scenario_id"])
+    scenario["baseline_manifest"] = baseline_manifest(scenario)
+    scenario["lane_isolation"] = lane_isolation(scenario_id)
+    scenario["artifact_paths"] = [
+        str(report_path),
+        f"{report_path.parent}/{scenario_id}/kernel/stdout.log",
+        f"{report_path.parent}/{scenario_id}/kernel/stderr.log",
+        f"{report_path.parent}/{scenario_id}/frankenfs/stdout.log",
+        f"{report_path.parent}/{scenario_id}/frankenfs/stderr.log",
+        f"{report_path.parent}/{scenario_id}/capability/stdout.log",
+        f"{report_path.parent}/{scenario_id}/capability/stderr.log",
+        f"{report_path.parent}/{scenario_id}/cleanup.json",
+    ]
+    return scenario
 
 
 allowlist = {
@@ -75,12 +176,11 @@ scenarios = [
         "filesystem": "ext4",
         "scenario_kind": "positive",
         "classification": "pass",
-        "kernel_observation": observation("kernel", "ok"),
-        "frankenfs_observation": observation("frankenfs", "ok"),
+        "kernel_observation": observation("mounted_diff_ext4_create_readback", "kernel", "ok"),
+        "frankenfs_observation": observation("mounted_diff_ext4_create_readback", "frankenfs", "ok"),
         "normalized_diff": [],
         "cleanup_status": "clean",
         "reproduction_command": "scripts/e2e/ffs_mounted_differential_oracle_e2e.sh --scenario mounted_diff_ext4_create_readback",
-        "artifact_paths": [str(report_path)],
     },
     {
         "scenario_id": "mounted_diff_ext4_fiemap_transport_errno",
@@ -89,8 +189,8 @@ scenarios = [
         "scenario_kind": "positive",
         "classification": "allowed_diff",
         "allowlist_id": "allow_ext4_fiemap_transport_errno",
-        "kernel_observation": observation("kernel", "errno", "EOPNOTSUPP"),
-        "frankenfs_observation": observation("frankenfs", "errno", "ENOTTY"),
+        "kernel_observation": observation("mounted_diff_ext4_fiemap_transport_errno", "kernel", "errno", "EOPNOTSUPP"),
+        "frankenfs_observation": observation("mounted_diff_ext4_fiemap_transport_errno", "frankenfs", "errno", "ENOTTY"),
         "normalized_diff": [
             {
                 "field": "result",
@@ -100,7 +200,19 @@ scenarios = [
         ],
         "cleanup_status": "clean",
         "reproduction_command": "scripts/e2e/ffs_mounted_differential_oracle_e2e.sh --scenario mounted_diff_ext4_fiemap_transport_errno",
-        "artifact_paths": [str(report_path), str(report_path.parent / "stdout/kernel.log")],
+    },
+    {
+        "scenario_id": "mounted_diff_ext4_fuse_missing",
+        "operation_id": "fuse_missing_probe",
+        "filesystem": "ext4",
+        "scenario_kind": "host_skip",
+        "classification": "host_skip",
+        "host_skip_class": "fuse_missing",
+        "kernel_observation": observation("mounted_diff_ext4_fuse_missing", "kernel", "skip", "fuse_missing"),
+        "frankenfs_observation": observation("mounted_diff_ext4_fuse_missing", "frankenfs", "skip", "fuse_missing"),
+        "normalized_diff": [],
+        "cleanup_status": "not_run",
+        "reproduction_command": "scripts/e2e/ffs_mounted_differential_oracle_e2e.sh --scenario mounted_diff_ext4_fuse_missing",
     },
     {
         "scenario_id": "mounted_diff_ext4_fuse_permission_skip",
@@ -109,12 +221,50 @@ scenarios = [
         "scenario_kind": "host_skip",
         "classification": "host_skip",
         "host_skip_class": "fuse_permission_denied",
-        "kernel_observation": observation("kernel", "skip", "fuse_permission_denied"),
-        "frankenfs_observation": observation("frankenfs", "skip", "fuse_permission_denied"),
+        "kernel_observation": observation("mounted_diff_ext4_fuse_permission_skip", "kernel", "skip", "fuse_permission_denied"),
+        "frankenfs_observation": observation("mounted_diff_ext4_fuse_permission_skip", "frankenfs", "skip", "fuse_permission_denied"),
         "normalized_diff": [],
         "cleanup_status": "not_run",
         "reproduction_command": "scripts/e2e/ffs_mounted_differential_oracle_e2e.sh --scenario mounted_diff_ext4_fuse_permission_skip",
-        "artifact_paths": [str(report_path)],
+    },
+    {
+        "scenario_id": "mounted_diff_ext4_kernel_mount_permission_skip",
+        "operation_id": "kernel_mount_permission_probe",
+        "filesystem": "ext4",
+        "scenario_kind": "host_skip",
+        "classification": "host_skip",
+        "host_skip_class": "kernel_mount_permission_denied",
+        "kernel_observation": observation("mounted_diff_ext4_kernel_mount_permission_skip", "kernel", "skip", "kernel_mount_permission_denied"),
+        "frankenfs_observation": observation("mounted_diff_ext4_kernel_mount_permission_skip", "frankenfs", "skip", "kernel_mount_permission_denied"),
+        "normalized_diff": [],
+        "cleanup_status": "not_run",
+        "reproduction_command": "scripts/e2e/ffs_mounted_differential_oracle_e2e.sh --scenario mounted_diff_ext4_kernel_mount_permission_skip",
+    },
+    {
+        "scenario_id": "mounted_diff_ext4_mkfs_missing",
+        "operation_id": "mkfs_ext4_probe",
+        "filesystem": "ext4",
+        "scenario_kind": "host_skip",
+        "classification": "host_skip",
+        "host_skip_class": "mkfs_ext4_missing",
+        "kernel_observation": observation("mounted_diff_ext4_mkfs_missing", "kernel", "skip", "mkfs_ext4_missing"),
+        "frankenfs_observation": observation("mounted_diff_ext4_mkfs_missing", "frankenfs", "skip", "mkfs_ext4_missing"),
+        "normalized_diff": [],
+        "cleanup_status": "not_run",
+        "reproduction_command": "scripts/e2e/ffs_mounted_differential_oracle_e2e.sh --scenario mounted_diff_ext4_mkfs_missing",
+    },
+    {
+        "scenario_id": "mounted_diff_btrfs_mkfs_missing",
+        "operation_id": "mkfs_btrfs_probe",
+        "filesystem": "btrfs",
+        "scenario_kind": "host_skip",
+        "classification": "host_skip",
+        "host_skip_class": "mkfs_btrfs_missing",
+        "kernel_observation": observation("mounted_diff_btrfs_mkfs_missing", "kernel", "skip", "mkfs_btrfs_missing"),
+        "frankenfs_observation": observation("mounted_diff_btrfs_mkfs_missing", "frankenfs", "skip", "mkfs_btrfs_missing"),
+        "normalized_diff": [],
+        "cleanup_status": "not_run",
+        "reproduction_command": "scripts/e2e/ffs_mounted_differential_oracle_e2e.sh --scenario mounted_diff_btrfs_mkfs_missing",
     },
     {
         "scenario_id": "mounted_diff_btrfs_default_permissions_root_owned",
@@ -123,12 +273,24 @@ scenarios = [
         "scenario_kind": "host_skip",
         "classification": "host_skip",
         "host_skip_class": "btrfs_default_permissions_root_owned",
-        "kernel_observation": observation("kernel", "skip", "btrfs_default_permissions_root_owned"),
-        "frankenfs_observation": observation("frankenfs", "skip", "btrfs_default_permissions_root_owned"),
+        "kernel_observation": observation("mounted_diff_btrfs_default_permissions_root_owned", "kernel", "skip", "btrfs_default_permissions_root_owned"),
+        "frankenfs_observation": observation("mounted_diff_btrfs_default_permissions_root_owned", "frankenfs", "skip", "btrfs_default_permissions_root_owned"),
         "normalized_diff": [],
         "cleanup_status": "not_run",
         "reproduction_command": "scripts/e2e/ffs_mounted_differential_oracle_e2e.sh --scenario mounted_diff_btrfs_default_permissions_root_owned",
-        "artifact_paths": [str(report_path)],
+    },
+    {
+        "scenario_id": "mounted_diff_ext4_unsupported_scope_skip",
+        "operation_id": "unsupported_scope_probe",
+        "filesystem": "ext4",
+        "scenario_kind": "host_skip",
+        "classification": "host_skip",
+        "host_skip_class": "unsupported_scope",
+        "kernel_observation": observation("mounted_diff_ext4_unsupported_scope_skip", "kernel", "skip", "unsupported_scope"),
+        "frankenfs_observation": observation("mounted_diff_ext4_unsupported_scope_skip", "frankenfs", "skip", "unsupported_scope"),
+        "normalized_diff": [],
+        "cleanup_status": "not_run",
+        "reproduction_command": "scripts/e2e/ffs_mounted_differential_oracle_e2e.sh --scenario mounted_diff_ext4_unsupported_scope_skip",
     },
     {
         "scenario_id": "mounted_diff_btrfs_unsupported_clone_range",
@@ -137,17 +299,17 @@ scenarios = [
         "scenario_kind": "unsupported",
         "classification": "unsupported",
         "owner_bead": "bd-rchk0.5.2",
-        "kernel_observation": observation("kernel", "errno", "EOPNOTSUPP"),
-        "frankenfs_observation": observation("frankenfs", "errno", "EOPNOTSUPP"),
+        "kernel_observation": observation("mounted_diff_btrfs_unsupported_clone_range", "kernel", "errno", "EOPNOTSUPP"),
+        "frankenfs_observation": observation("mounted_diff_btrfs_unsupported_clone_range", "frankenfs", "errno", "EOPNOTSUPP"),
         "normalized_diff": [],
         "cleanup_status": "clean",
         "reproduction_command": "scripts/e2e/ffs_mounted_differential_oracle_e2e.sh --scenario mounted_diff_btrfs_unsupported_clone_range",
-        "artifact_paths": [str(report_path)],
     },
 ]
+scenarios = [with_contract(scenario) for scenario in scenarios]
 
 report = {
-    "schema_version": 1,
+    "schema_version": 2,
     "bead_id": "bd-rchk0.5.2.1",
     "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     "kernel_release": platform.release(),
@@ -155,6 +317,7 @@ report = {
     "execute_permissioned": execute,
     "capability": {
         "fuse": "permission_denied",
+        "fusermount": "permission_denied",
         "kernel_mount": "permission_denied",
         "mkfs_ext4": "available",
         "mkfs_btrfs": "available",
@@ -178,8 +341,13 @@ e2e_assert "${RCH_BIN:-rch}" exec -- cargo run -p ffs-harness -- \
 
 echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_create_readback|outcome=PASS|detail=normalized observations match" | tee -a "$E2E_LOG_FILE"
 echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fiemap_transport_errno|outcome=DIFF|detail=exact expiring allowlist accepted" | tee -a "$E2E_LOG_FILE"
+echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fuse_missing|outcome=SKIP|detail=missing dev fuse is host skip" | tee -a "$E2E_LOG_FILE"
 echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fuse_permission_skip|outcome=SKIP|detail=permission denied is host skip" | tee -a "$E2E_LOG_FILE"
+echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_kernel_mount_permission_skip|outcome=SKIP|detail=kernel mount permission denied is host skip" | tee -a "$E2E_LOG_FILE"
+echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_mkfs_missing|outcome=SKIP|detail=mkfs.ext4 helper missing is host skip" | tee -a "$E2E_LOG_FILE"
+echo "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_mkfs_missing|outcome=SKIP|detail=mkfs.btrfs helper missing is host skip" | tee -a "$E2E_LOG_FILE"
 echo "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_default_permissions_root_owned|outcome=SKIP|detail=btrfs DefaultPermissions root-owned EACCES isolated" | tee -a "$E2E_LOG_FILE"
+echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_unsupported_scope_skip|outcome=SKIP|detail=unsupported-scope host skip preserved" | tee -a "$E2E_LOG_FILE"
 echo "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_unsupported_clone_range|outcome=UNSUPPORTED|detail=unsupported scope has owner bead" | tee -a "$E2E_LOG_FILE"
 
 e2e_step "Reject broad allowlist fixture"
