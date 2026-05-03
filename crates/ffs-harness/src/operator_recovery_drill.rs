@@ -988,6 +988,128 @@ fn validate_stable_id(field: &str, value: &str, errors: &mut Vec<String>) {
     }
 }
 
+/// Mutation precondition gate for the operator repair workflow.
+///
+/// Tracks bd-x63b9: ensures no irreversible image mutation runs until preflight
+/// freshness, artifact schema, image hash agreement, rollback artifact, operator
+/// confirmation, confidence threshold, and backup-strategy guidance all agree.
+/// Each refusal carries a stable reason code so release gates and remediation
+/// catalog entries can fail closed without parsing prose.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MutationPreconditionGate {
+    pub preflight_evaluated_at_unix: u64,
+    pub preflight_freshness_ttl_seconds: u64,
+    pub now_unix: u64,
+    pub artifact_schema_version: u32,
+    pub expected_artifact_schema_version: u32,
+    pub planned_image_hash: String,
+    pub current_image_hash: String,
+    pub operator_confirmation_hash: String,
+    pub rollback_artifact_path: String,
+    pub rollback_artifact_present: bool,
+    pub backup_strategy: String,
+    pub confidence_score: f64,
+    pub min_confidence_for_mutation: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum MutationPreconditionDecision {
+    Allow,
+    Refuse {
+        reason: String,
+        remediation: String,
+    },
+}
+
+const ALLOWED_BACKUP_STRATEGIES: [&str; 4] = [
+    "snapshot",
+    "copy_on_write_image",
+    "external_backup_verified",
+    "image_clone_verified",
+];
+
+#[must_use]
+pub fn evaluate_mutation_preconditions(
+    gate: &MutationPreconditionGate,
+) -> MutationPreconditionDecision {
+    if gate.preflight_freshness_ttl_seconds == 0 {
+        return refuse(
+            "stale_preflight",
+            "rerun preflight checks before requesting mutation",
+        );
+    }
+    let elapsed = gate.now_unix.saturating_sub(gate.preflight_evaluated_at_unix);
+    if elapsed > gate.preflight_freshness_ttl_seconds {
+        return refuse(
+            "stale_preflight",
+            "rerun preflight checks within the freshness window",
+        );
+    }
+    if gate.artifact_schema_version != gate.expected_artifact_schema_version {
+        return refuse(
+            "stale_artifact_schema",
+            "regenerate proof artifacts against the current schema before mutating",
+        );
+    }
+    if gate.planned_image_hash.is_empty() || gate.current_image_hash.is_empty() {
+        return refuse(
+            "image_hash_unknown",
+            "re-hash the image and rebuild the dry-run plan",
+        );
+    }
+    if gate.current_image_hash != gate.planned_image_hash {
+        return refuse(
+            "image_hash_drifted",
+            "image hash changed since dry-run; rebuild the plan against the current image",
+        );
+    }
+    if !gate.rollback_artifact_present || gate.rollback_artifact_path.trim().is_empty() {
+        return refuse(
+            "rollback_unavailable",
+            "stage a rollback artifact (snapshot, image copy) before mutating",
+        );
+    }
+    if gate.operator_confirmation_hash != gate.planned_image_hash {
+        return refuse(
+            "operator_confirmation_mismatch",
+            "operator must confirm the planned image hash before mutating",
+        );
+    }
+    if gate.min_confidence_for_mutation <= 0.0 {
+        return refuse(
+            "low_confidence",
+            "configure a positive minimum mutation confidence before mutating",
+        );
+    }
+    if gate.confidence_score < gate.min_confidence_for_mutation {
+        return refuse(
+            "low_confidence",
+            "raise repair confidence above the configured threshold or stay in dry-run",
+        );
+    }
+    if gate.backup_strategy.trim().is_empty() || gate.backup_strategy == "none" {
+        return refuse(
+            "missing_backup",
+            "select a backup strategy (snapshot, copy_on_write_image, external backup) before mutating",
+        );
+    }
+    if !ALLOWED_BACKUP_STRATEGIES.contains(&gate.backup_strategy.as_str()) {
+        return refuse(
+            "unsupported_backup_strategy",
+            "use one of: snapshot, copy_on_write_image, external_backup_verified, image_clone_verified",
+        );
+    }
+    MutationPreconditionDecision::Allow
+}
+
+fn refuse(reason: &str, remediation: &str) -> MutationPreconditionDecision {
+    MutationPreconditionDecision::Refuse {
+        reason: reason.to_owned(),
+        remediation: remediation.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1116,5 +1238,163 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("proof_bundle artifact consumer"))
         );
+    }
+
+    fn happy_gate() -> MutationPreconditionGate {
+        MutationPreconditionGate {
+            preflight_evaluated_at_unix: 1_000,
+            preflight_freshness_ttl_seconds: 600,
+            now_unix: 1_300,
+            artifact_schema_version: 1,
+            expected_artifact_schema_version: 1,
+            planned_image_hash:
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+            current_image_hash:
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+            operator_confirmation_hash:
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+            rollback_artifact_path: "artifacts/rollback/<image_hash>.snapshot".to_owned(),
+            rollback_artifact_present: true,
+            backup_strategy: "snapshot".to_owned(),
+            confidence_score: 0.97,
+            min_confidence_for_mutation: 0.95,
+        }
+    }
+
+    fn refusal_reason(decision: &MutationPreconditionDecision) -> Option<&str> {
+        if let MutationPreconditionDecision::Refuse { reason, .. } = decision {
+            Some(reason.as_str())
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn happy_path_allows_mutation() {
+        let decision = evaluate_mutation_preconditions(&happy_gate());
+        assert!(matches!(decision, MutationPreconditionDecision::Allow));
+    }
+
+    #[test]
+    fn stale_preflight_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.now_unix = gate.preflight_evaluated_at_unix + gate.preflight_freshness_ttl_seconds + 1;
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("stale_preflight"));
+    }
+
+    #[test]
+    fn zero_ttl_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.preflight_freshness_ttl_seconds = 0;
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("stale_preflight"));
+    }
+
+    #[test]
+    fn stale_artifact_schema_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.artifact_schema_version = 0;
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("stale_artifact_schema"));
+    }
+
+    #[test]
+    fn newer_artifact_schema_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.expected_artifact_schema_version = 2;
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("stale_artifact_schema"));
+    }
+
+    #[test]
+    fn image_hash_drift_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.current_image_hash =
+            "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_owned();
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("image_hash_drifted"));
+    }
+
+    #[test]
+    fn missing_image_hash_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.current_image_hash = String::new();
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("image_hash_unknown"));
+    }
+
+    #[test]
+    fn rollback_unavailable_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.rollback_artifact_present = false;
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("rollback_unavailable"));
+    }
+
+    #[test]
+    fn empty_rollback_path_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.rollback_artifact_path = String::new();
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("rollback_unavailable"));
+    }
+
+    #[test]
+    fn operator_confirmation_mismatch_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.operator_confirmation_hash =
+            "sha256:abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc"
+                .to_owned();
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("operator_confirmation_mismatch"));
+    }
+
+    #[test]
+    fn low_confidence_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.confidence_score = 0.5;
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("low_confidence"));
+    }
+
+    #[test]
+    fn zero_min_confidence_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.min_confidence_for_mutation = 0.0;
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("low_confidence"));
+    }
+
+    #[test]
+    fn missing_backup_strategy_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.backup_strategy = String::new();
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("missing_backup"));
+    }
+
+    #[test]
+    fn none_backup_strategy_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.backup_strategy = "none".to_owned();
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("missing_backup"));
+    }
+
+    #[test]
+    fn unsupported_backup_strategy_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.backup_strategy = "rsync_to_thumb_drive".to_owned();
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("unsupported_backup_strategy"));
+    }
+
+    #[test]
+    fn allowed_backup_strategies_include_external_backup_verified() {
+        let mut gate = happy_gate();
+        gate.backup_strategy = "external_backup_verified".to_owned();
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert!(matches!(decision, MutationPreconditionDecision::Allow));
     }
 }
