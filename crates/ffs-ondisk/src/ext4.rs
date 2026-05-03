@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 const EXT4_EXTENT_MAGIC: u16 = 0xF30A;
 pub const EXT_INIT_MAX_LEN: u16 = 1_u16 << 15;
+pub const EXT4_MAX_NAME_BYTES: usize = 255;
 // This i_flags bit is historically aliased with the old compression namespace.
 // Modern ext4 uses it as FS_ENCRYPT_FL / EXT4_ENCRYPT_FL on encrypted inodes.
 const EXT4_ENCRYPT_INODE_FL: u32 = 0x0000_0800;
@@ -3163,10 +3164,75 @@ pub fn lookup_in_dir_block_casefold(
     target: &[u8],
 ) -> Result<Option<Ext4DirEntry>, ParseError> {
     let (entries, _) = parse_dir_block(block, block_size)?;
-    let target_lower = casefold_name(target);
+    let target_lower = ext4_casefold_key(target);
     Ok(entries
         .into_iter()
-        .find(|e| casefold_name(&e.name) == target_lower))
+        .find(|e| ext4_casefold_key(&e.name) == target_lower))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ext4CasefoldNameDiagnostics {
+    pub source_len: usize,
+    pub folded_key: Vec<u8>,
+    pub encoding: Ext4CasefoldEncoding,
+}
+
+impl Ext4CasefoldNameDiagnostics {
+    #[must_use]
+    pub fn utf8_valid(&self) -> bool {
+        self.encoding == Ext4CasefoldEncoding::Utf8
+    }
+
+    #[must_use]
+    pub fn ascii_fallback(&self) -> bool {
+        self.encoding == Ext4CasefoldEncoding::InvalidUtf8AsciiFallback
+    }
+
+    #[must_use]
+    pub fn source_exceeds_ext4_name_limit(&self) -> bool {
+        self.source_len > EXT4_MAX_NAME_BYTES
+    }
+
+    #[must_use]
+    pub fn folded_key_exceeds_ext4_name_limit(&self) -> bool {
+        self.folded_key.len() > EXT4_MAX_NAME_BYTES
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ext4CasefoldEncoding {
+    Utf8,
+    InvalidUtf8AsciiFallback,
+}
+
+/// Return the comparison key used by FrankenFS for ext4 casefold lookup.
+///
+/// The key is suitable for collision checks before create or rename: two names
+/// that produce the same key would resolve to the same casefold directory
+/// entry in this clean-room model.
+#[must_use]
+pub fn ext4_casefold_key(name: &[u8]) -> Vec<u8> {
+    casefold_name(name)
+}
+
+#[must_use]
+pub fn ext4_casefold_names_collide(left: &[u8], right: &[u8]) -> bool {
+    ext4_casefold_key(left) == ext4_casefold_key(right)
+}
+
+#[must_use]
+pub fn ext4_casefold_name_diagnostics(name: &[u8]) -> Ext4CasefoldNameDiagnostics {
+    let utf8_valid = std::str::from_utf8(name).is_ok();
+    let folded_key = ext4_casefold_key(name);
+    Ext4CasefoldNameDiagnostics {
+        source_len: name.len(),
+        folded_key,
+        encoding: if utf8_valid {
+            Ext4CasefoldEncoding::Utf8
+        } else {
+            Ext4CasefoldEncoding::InvalidUtf8AsciiFallback
+        },
+    }
 }
 
 /// Apply Unicode casefold to a filename for case-insensitive comparison.
@@ -6368,6 +6434,46 @@ mod tests {
             lookup_in_dir_block_casefold(&block, block_size, "STRAẞE.txt".as_bytes()).unwrap();
         assert!(found_upper_sharp_s.is_some());
         assert_eq!(found_upper_sharp_s.unwrap().inode, 77);
+    }
+
+    #[test]
+    fn ext4_casefold_key_exposes_collision_contract() {
+        assert!(ext4_casefold_names_collide(
+            "Straße.TXT".as_bytes(),
+            b"STRASSE.txt",
+        ));
+        assert!(ext4_casefold_names_collide(
+            "STRAẞE.txt".as_bytes(),
+            b"strasse.TXT",
+        ));
+        assert!(!ext4_casefold_names_collide(b"strasse-a", b"strasse-b"));
+    }
+
+    #[test]
+    fn ext4_casefold_diagnostics_reports_invalid_utf8_ascii_fallback() {
+        let diagnostics = ext4_casefold_name_diagnostics(b"ABC\xff");
+
+        assert_eq!(diagnostics.source_len, 4);
+        assert_eq!(diagnostics.folded_key, b"abc\xff");
+        assert!(!diagnostics.utf8_valid());
+        assert!(diagnostics.ascii_fallback());
+        assert!(!diagnostics.source_exceeds_ext4_name_limit());
+        assert!(!diagnostics.folded_key_exceeds_ext4_name_limit());
+        assert!(ext4_casefold_names_collide(b"ABC\xff", b"abc\xff"));
+        assert!(!ext4_casefold_names_collide(b"ABC\xff", b"abc\xfe"));
+    }
+
+    #[test]
+    fn ext4_casefold_diagnostics_reports_folded_key_overflow() {
+        let name = "ß".repeat(128);
+        let diagnostics = ext4_casefold_name_diagnostics(name.as_bytes());
+
+        assert_eq!(diagnostics.source_len, 256);
+        assert!(diagnostics.utf8_valid());
+        assert!(!diagnostics.ascii_fallback());
+        assert!(diagnostics.source_exceeds_ext4_name_limit());
+        assert!(diagnostics.folded_key_exceeds_ext4_name_limit());
+        assert_eq!(diagnostics.folded_key.len(), 256);
     }
 
     #[test]
