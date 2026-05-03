@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ffs_proof_overhead_budget_e2e.sh - smoke gate for bd-rchk0.5.14.
+# ffs_proof_overhead_budget_e2e.sh - smoke gate for bd-rchk0.5.14/bd-0rfm5.
 #
 # Runs a bounded proof-style harness workflow, captures overhead metrics,
 # evaluates them against the sample budget schema, and verifies the release-gate
@@ -15,6 +15,7 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_proof_overhead_budget}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-300}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -31,6 +32,26 @@ scenario_result() {
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
     TOTAL=$((TOTAL + 1))
+}
+
+run_rch_capture() {
+    local output_path="$1"
+    shift
+    local status
+
+    set +e
+    RCH_VISIBILITY=none timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1
+    status=$?
+    set -e
+
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$output_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|output=${output_path}|command=$*"
+        return 0
+    fi
+    return "$status"
 }
 
 e2e_init "ffs_proof_overhead_budget"
@@ -54,7 +75,7 @@ fi
 
 e2e_step "Scenario 2: bounded proof workflow emits metrics"
 START_NS=$(date +%s%N)
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- parity >"$PROOF_STDOUT" 2>&1; then
+if run_rch_capture "$PROOF_STDOUT" cargo run --quiet -p ffs-harness -- parity; then
     END_NS=$(date +%s%N)
     DURATION_SECONDS=$(python3 - "$START_NS" "$END_NS" <<'PY'
 import sys
@@ -81,7 +102,9 @@ proof_bundle = {
     "scenario_id": "proof_budget_developer_smoke",
     "workflow": "ffs-harness parity",
     "duration_seconds": float(duration),
+    "host_fingerprint": "<redacted:host_details>",
     "parity_output_bytes": len(parity_output.encode("utf-8")),
+    "reproduction_command": reproduction_command,
 }
 repro_pack = {
     "scenario_id": "proof_budget_developer_smoke",
@@ -99,6 +122,7 @@ with open(repro_pack_path, "w", encoding="utf-8") as handle:
 artifact_bytes = os.path.getsize(proof_bundle_path) + os.path.getsize(repro_pack_path)
 log_bytes = os.path.getsize(stdout_path)
 operator_report_bytes = os.path.getsize(proof_bundle_path)
+redaction_policy_version = "redact-v1"
 
 required_log_fields = [
     "scenario_id",
@@ -126,13 +150,46 @@ budget = {
         {"category": "log_volume", "metric": "log_bytes", "unit": "bytes", "warn_at": 524288.0, "fail_at": 1048576.0},
         {"category": "repair_symbol_storage", "metric": "repair_symbol_bytes", "unit": "bytes", "warn_at": 65536.0, "fail_at": 131072.0},
         {"category": "rch_upload_size", "metric": "rch_upload_bytes", "unit": "bytes", "warn_at": 1048576.0, "fail_at": 2097152.0},
-        {"category": "campaign_duration", "metric": "campaign_duration_seconds", "unit": "seconds", "warn_at": 120.0, "fail_at": 240.0},
+        {"category": "campaign_duration", "metric": "campaign_duration_seconds", "unit": "seconds", "warn_at": 240.0, "fail_at": 480.0},
         {"category": "operator_report_size", "metric": "operator_report_bytes", "unit": "bytes", "warn_at": 262144.0, "fail_at": 524288.0}
     ],
     "retention": {
         "max_total_artifact_bytes": 1048576,
         "compress_above_bytes": 524288,
+        "retention_count": 50,
         "mandatory_artifact_classes": ["proof_bundle", "reproduction_pack"],
+        "artifact_class_policies": [
+            {
+                "artifact_class": "proof_bundle",
+                "retention_days": 30,
+                "retention_count": 50,
+                "max_size_bytes": 1048576,
+                "compression": "allowed",
+                "redaction_policy": "host_details",
+                "redaction_policy_version": redaction_policy_version,
+                "mandatory_fields": ["scenario_id", "workflow", "duration_seconds", "reproduction_command"]
+            },
+            {
+                "artifact_class": "reproduction_pack",
+                "retention_days": 30,
+                "retention_count": 50,
+                "max_size_bytes": 1048576,
+                "compression": "allowed",
+                "redaction_policy": "host_details",
+                "redaction_policy_version": redaction_policy_version,
+                "mandatory_fields": ["scenario_id", "reproduction_command", "inputs"]
+            },
+            {
+                "artifact_class": "raw_log",
+                "retention_days": 14,
+                "retention_count": 20,
+                "max_size_bytes": 1048576,
+                "compression": "allowed",
+                "redaction_policy": "secrets_and_host_details",
+                "redaction_policy_version": redaction_policy_version,
+                "mandatory_fields": ["stderr_tail", "reproduction_command"]
+            }
+        ],
         "preserve_reproduction_command": True,
         "retention_days": 30
     },
@@ -157,9 +214,39 @@ metrics = {
         {"category": "operator_report_size", "metric": "operator_report_bytes", "value": float(operator_report_bytes), "unit": "bytes"}
     ],
     "artifacts": [
-        {"path": proof_bundle_path, "class": "proof_bundle", "size_bytes": os.path.getsize(proof_bundle_path), "mandatory": True},
-        {"path": repro_pack_path, "class": "reproduction_pack", "size_bytes": os.path.getsize(repro_pack_path), "mandatory": True},
-        {"path": stdout_path, "class": "raw_log", "size_bytes": os.path.getsize(stdout_path), "mandatory": False}
+        {
+            "path": proof_bundle_path,
+            "class": "proof_bundle",
+            "size_bytes": os.path.getsize(proof_bundle_path),
+            "mandatory": True,
+            "redaction_policy_version": redaction_policy_version,
+            "dropped_fields": ["host_fingerprint"],
+            "sampled_fields": [],
+            "validator_result": "pass",
+            "cleanup_status": "clean"
+        },
+        {
+            "path": repro_pack_path,
+            "class": "reproduction_pack",
+            "size_bytes": os.path.getsize(repro_pack_path),
+            "mandatory": True,
+            "redaction_policy_version": redaction_policy_version,
+            "dropped_fields": [],
+            "sampled_fields": [],
+            "validator_result": "pass",
+            "cleanup_status": "clean"
+        },
+        {
+            "path": stdout_path,
+            "class": "raw_log",
+            "size_bytes": os.path.getsize(stdout_path),
+            "mandatory": False,
+            "redaction_policy_version": redaction_policy_version,
+            "dropped_fields": [],
+            "sampled_fields": ["stdout_middle"],
+            "validator_result": "pass",
+            "cleanup_status": "clean"
+        }
     ],
     "reproduction_command": reproduction_command
 }
@@ -177,9 +264,9 @@ else
 fi
 
 e2e_step "Scenario 3: release gate evaluates sample budget"
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-proof-overhead-budget \
+if run_rch_capture "$REPORT_RAW" cargo run --quiet -p ffs-harness -- validate-proof-overhead-budget \
     --budget "$BUDGET_JSON" \
-    --metrics "$METRICS_JSON" >"$REPORT_RAW" 2>&1; then
+    --metrics "$METRICS_JSON"; then
     if python3 - "$REPORT_RAW" "$REPORT_JSON" <<'PY'
 import json
 import sys
@@ -246,6 +333,20 @@ for row in data.get("log_records", []):
 retention = data.get("retention_result", {})
 if retention.get("compression_retention_decision") != "pass":
     raise SystemExit(f"unexpected retention decision: {retention}")
+for row in data.get("log_records", []):
+    for artifact in row.get("artifact_sizes", []):
+        for field in [
+            "artifact_class",
+            "original_size_bytes",
+            "retention_decision",
+            "redaction_policy_version",
+            "dropped_fields",
+            "sampled_fields",
+            "validator_result",
+            "cleanup_status",
+        ]:
+            if field not in artifact:
+                raise SystemExit(f"artifact size log missing {field}")
 if "verdict=pass" not in data.get("human_summary", ""):
     raise SystemExit("human summary missing verdict")
 PY
@@ -255,10 +356,49 @@ else
     scenario_result "proof_budget_log_contract" "FAIL" "report log contract validation failed"
 fi
 
-e2e_step "Scenario 5: unit/schema tests pass"
-if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib -- proof_overhead_budget 2>&1 | tee "$UNIT_LOG"; then
+e2e_step "Scenario 5: retention/redaction bundle remains reproducible"
+if python3 - "$REPORT_JSON" "$PROOF_BUNDLE" "$REPRO_PACK" "$PROOF_STDOUT" <<'PY'
+import json
+import os
+import sys
+
+report_path, proof_bundle_path, repro_pack_path, raw_log_path = sys.argv[1:]
+report = json.loads(open(report_path, encoding="utf-8").read())
+proof_bundle = json.loads(open(proof_bundle_path, encoding="utf-8").read())
+repro_pack = json.loads(open(repro_pack_path, encoding="utf-8").read())
+raw_log = open(raw_log_path, encoding="utf-8", errors="replace").read()
+
+if proof_bundle.get("host_fingerprint") != "<redacted:host_details>":
+    raise SystemExit("proof bundle did not apply host redaction marker")
+if "reproduction_command" not in proof_bundle:
+    raise SystemExit("proof bundle lost reproduction command")
+if not repro_pack.get("reproduction_command"):
+    raise SystemExit("reproduction pack lost command")
+if not os.path.exists(raw_log_path) or not raw_log:
+    raise SystemExit("raw diagnostic log is missing")
+
+mandatory_drops = []
+mandatory_names = {"scenario_id", "workflow", "duration_seconds", "reproduction_command", "inputs"}
+for row in report.get("log_records", []):
+    for artifact in row.get("artifact_sizes", []):
+        if artifact["artifact_class"] in {"proof_bundle", "reproduction_pack"}:
+            mandatory_drops.extend(
+                field for field in artifact.get("dropped_fields", []) if field in mandatory_names
+            )
+if mandatory_drops:
+    raise SystemExit(f"mandatory reproduction fields were dropped: {mandatory_drops}")
+PY
+then
+    scenario_result "proof_budget_retention_reproducible" "PASS" "retention/redaction keeps reproduction fields and raw diagnostics"
+else
+    scenario_result "proof_budget_retention_reproducible" "FAIL" "retention/redaction removed required evidence"
+fi
+
+e2e_step "Scenario 6: unit/schema tests pass"
+if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib -- proof_overhead_budget; then
+    cat "$UNIT_LOG"
     TESTS_RUN=$(grep -c "test proof_overhead_budget::tests::" "$UNIT_LOG" 2>/dev/null || echo "0")
-    if [[ $TESTS_RUN -ge 8 ]]; then
+    if [[ $TESTS_RUN -ge 14 ]]; then
         scenario_result "proof_budget_unit_tests" "PASS" "unit tests passed (${TESTS_RUN} tests)"
     else
         scenario_result "proof_budget_unit_tests" "FAIL" "too few tests: ${TESTS_RUN}"

@@ -359,19 +359,26 @@ rch exec -- cargo run -p ffs-harness -- validate-proof-overhead-budget \
 
 The budget JSON declares the profile, baseline id and capture timestamp,
 pass/warn/fail thresholds, exception ids, retention policy, required log
-fields, and release-gate consumers. The metrics JSON records one bounded proof
+fields, and release-gate consumers. The retention policy is class-specific:
+each artifact class declares retention duration, retention count, maximum size,
+compression mode, redaction policy/version, and mandatory fields that cannot be
+dropped before remediation, cross-lane correlation, tamper validation, and
+reproduction consumers finish. The metrics JSON records one bounded proof
 workflow with scenario id, profile, baseline id, observed metric values,
-artifact sizes, compression candidates, and the reproduction command.
+artifact sizes, compression candidates, redaction/sampling decisions, validator
+results, cleanup status, and the reproduction command.
 
 Failures mean either a required metric is missing, the baseline is stale, a
 threshold moved past `fail_at`, an exception expired or lacks user-impact
-metadata, or retention would drop mandatory proof/reproduction evidence.
-Warnings mean the gate can continue but the report must stay visible, usually
-because a metric crossed `warn_at`, compression is required, or a valid
-time-limited exception is active. To update a baseline, rerun the bounded proof
-workflow, write a new baseline id and `baseline_captured_at`, keep the previous
-report for comparison, and do not raise thresholds without recording the user
-impact and follow-up bead.
+metadata, compression is corrupt or disabled for a compressed class, cleanup
+failed, redaction used the wrong policy version, or retention would drop
+mandatory proof/reproduction evidence. Warnings mean the gate can continue but
+the report must stay visible, usually because a metric crossed `warn_at`,
+compression is required, sampling/redaction changed optional diagnostics, or a
+valid time-limited exception is active. To update a baseline, rerun the bounded
+proof workflow, write a new baseline id and `baseline_captured_at`, keep the
+previous report for comparison, and do not raise thresholds without recording
+the user impact and follow-up bead.
 
 The E2E smoke is:
 
@@ -380,8 +387,9 @@ The E2E smoke is:
 ```
 
 It captures a small proof-style harness run, writes metrics, evaluates the
-sample budget, verifies the release-gate log fields, and runs the module unit
-tests.
+sample budget, verifies the release-gate log fields, checks that retention and
+redaction preserved mandatory reproduction fields plus raw diagnostics, and
+runs the module unit tests.
 
 ### Proof Bundle Validation
 

@@ -28,6 +28,9 @@ const REQUIRED_LOG_FIELDS: [&str; 10] = [
     "reproduction_command",
 ];
 
+const RETENTION_VALIDATOR_PASS: &str = "pass";
+const RETENTION_CLEANUP_CLEAN: &str = "clean";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetProfile {
@@ -110,6 +113,44 @@ pub enum BudgetDecision {
     Excepted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionCompressionSetting {
+    Disabled,
+    Allowed,
+    Required,
+}
+
+impl RetentionCompressionSetting {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Allowed => "allowed",
+            Self::Required => "required",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionRedactionPolicy {
+    None,
+    HostDetails,
+    SecretsAndHostDetails,
+}
+
+impl RetentionRedactionPolicy {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::HostDetails => "host_details",
+            Self::SecretsAndHostDetails => "secrets_and_host_details",
+        }
+    }
+}
+
 impl BudgetDecision {
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -161,10 +202,25 @@ pub struct MetricBudget {
 pub struct ProofRetentionPolicy {
     pub max_total_artifact_bytes: u64,
     pub compress_above_bytes: u64,
+    pub retention_count: u32,
     #[serde(default)]
     pub mandatory_artifact_classes: Vec<String>,
+    #[serde(default)]
+    pub artifact_class_policies: Vec<RetentionArtifactClassPolicy>,
     pub preserve_reproduction_command: bool,
     pub retention_days: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetentionArtifactClassPolicy {
+    pub artifact_class: String,
+    pub retention_days: u32,
+    pub retention_count: u32,
+    pub max_size_bytes: u64,
+    pub compression: RetentionCompressionSetting,
+    pub redaction_policy: RetentionRedactionPolicy,
+    pub redaction_policy_version: String,
+    pub mandatory_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +262,15 @@ pub struct ObservedArtifact {
     pub compressed_size_bytes: Option<u64>,
     #[serde(default)]
     pub mandatory: bool,
+    pub redaction_policy_version: String,
+    #[serde(default)]
+    pub dropped_fields: Vec<String>,
+    #[serde(default)]
+    pub sampled_fields: Vec<String>,
+    pub validator_result: String,
+    pub cleanup_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exception_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -249,6 +314,7 @@ pub struct RetentionBudgetResult {
     pub compressed_total_artifact_bytes: u64,
     pub max_total_artifact_bytes: u64,
     pub compress_above_bytes: u64,
+    pub retention_count: u32,
     pub retention_days: u32,
     pub compression_retention_decision: BudgetDecision,
     pub action: String,
@@ -267,6 +333,8 @@ pub struct BudgetLogRecord {
     pub budget_value: f64,
     pub unit: BudgetUnit,
     pub threshold_decision: BudgetDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exception_id: Option<String>,
     pub artifact_sizes: Vec<ArtifactSizeLog>,
     pub compression_retention_decision: BudgetDecision,
     pub reproduction_command: String,
@@ -276,10 +344,20 @@ pub struct BudgetLogRecord {
 pub struct ArtifactSizeLog {
     pub path: String,
     pub class: String,
+    pub artifact_class: String,
+    pub original_size_bytes: u64,
     pub size_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compressed_size_bytes: Option<u64>,
     pub retention_action: String,
+    pub retention_decision: String,
+    pub redaction_policy_version: String,
+    pub dropped_fields: Vec<String>,
+    pub sampled_fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exception_id: Option<String>,
+    pub validator_result: String,
+    pub cleanup_status: String,
 }
 
 fn default_release_gate_required() -> bool {
@@ -368,7 +446,7 @@ pub fn validate_observed_proof_metrics(
         errors.push("reproduction_command is required".to_owned());
     }
     validate_observed_metric_rows(observed, &mut errors);
-    validate_observed_artifacts(observed, &mut errors);
+    validate_observed_artifacts(config, observed, &mut errors);
     errors
 }
 
@@ -519,8 +597,67 @@ fn validate_retention_policy(policy: &ProofRetentionPolicy, errors: &mut Vec<Str
     if policy.retention_days == 0 {
         errors.push("retention_days must be greater than zero".to_owned());
     }
+    if policy.retention_count == 0 {
+        errors.push("retention_count must be greater than zero".to_owned());
+    }
     if !policy.preserve_reproduction_command {
         errors.push("retention must preserve reproduction_command".to_owned());
+    }
+    if policy.artifact_class_policies.is_empty() {
+        errors.push("retention artifact_class_policies must not be empty".to_owned());
+    }
+    validate_artifact_class_policies(policy, errors);
+}
+
+fn validate_artifact_class_policies(policy: &ProofRetentionPolicy, errors: &mut Vec<String>) {
+    let mut seen = BTreeSet::new();
+    for class_policy in &policy.artifact_class_policies {
+        if class_policy.artifact_class.trim().is_empty() {
+            errors.push("retention artifact class is required".to_owned());
+        }
+        if !seen.insert(class_policy.artifact_class.clone()) {
+            errors.push(format!(
+                "duplicate retention artifact class {}",
+                class_policy.artifact_class
+            ));
+        }
+        if class_policy.retention_days == 0 {
+            errors.push(format!(
+                "retention artifact class {} retention_days must be greater than zero",
+                class_policy.artifact_class
+            ));
+        }
+        if class_policy.retention_count == 0 {
+            errors.push(format!(
+                "retention artifact class {} retention_count must be greater than zero",
+                class_policy.artifact_class
+            ));
+        }
+        if class_policy.max_size_bytes == 0 {
+            errors.push(format!(
+                "retention artifact class {} max_size_bytes must be greater than zero",
+                class_policy.artifact_class
+            ));
+        }
+        if class_policy.redaction_policy_version.trim().is_empty() {
+            errors.push(format!(
+                "retention artifact class {} redaction_policy_version is required",
+                class_policy.artifact_class
+            ));
+        }
+        if class_policy.mandatory_fields.is_empty() {
+            errors.push(format!(
+                "retention artifact class {} mandatory_fields must not be empty",
+                class_policy.artifact_class
+            ));
+        }
+    }
+    for mandatory_class in &policy.mandatory_artifact_classes {
+        if !seen.contains(mandatory_class) {
+            errors.push(format!(
+                "mandatory artifact class {mandatory_class} has no retention class policy"
+            ));
+        }
     }
 }
 
@@ -578,8 +715,18 @@ fn validate_observed_metric_rows(observed: &ObservedProofMetrics, errors: &mut V
     }
 }
 
-fn validate_observed_artifacts(observed: &ObservedProofMetrics, errors: &mut Vec<String>) {
+fn validate_observed_artifacts(
+    config: &ProofOverheadBudgetConfig,
+    observed: &ObservedProofMetrics,
+    errors: &mut Vec<String>,
+) {
     let mut seen = BTreeSet::new();
+    let class_policies: BTreeMap<&str, &RetentionArtifactClassPolicy> = config
+        .retention
+        .artifact_class_policies
+        .iter()
+        .map(|policy| (policy.artifact_class.as_str(), policy))
+        .collect();
     for artifact in &observed.artifacts {
         if artifact.path.trim().is_empty() {
             errors.push("artifact path is required".to_owned());
@@ -589,6 +736,109 @@ fn validate_observed_artifacts(observed: &ObservedProofMetrics, errors: &mut Vec
         }
         if !seen.insert(artifact.path.clone()) {
             errors.push(format!("duplicate artifact {}", artifact.path));
+        }
+        let Some(policy) = class_policies.get(artifact.class.as_str()).copied() else {
+            errors.push(format!(
+                "artifact {} class {} has no retention policy",
+                artifact.path, artifact.class
+            ));
+            continue;
+        };
+        if artifact.redaction_policy_version.trim().is_empty() {
+            errors.push(format!(
+                "artifact {} redaction_policy_version is required",
+                artifact.path
+            ));
+        } else if artifact.redaction_policy_version != policy.redaction_policy_version {
+            errors.push(format!(
+                "artifact {} redaction policy mismatch observed={} expected={}",
+                artifact.path, artifact.redaction_policy_version, policy.redaction_policy_version
+            ));
+        }
+        if artifact.validator_result.trim().is_empty() {
+            errors.push(format!(
+                "artifact {} validator_result is required",
+                artifact.path
+            ));
+        } else if !matches!(
+            artifact.validator_result.as_str(),
+            RETENTION_VALIDATOR_PASS | "warn" | "fail"
+        ) {
+            errors.push(format!(
+                "artifact {} validator_result={} is not supported",
+                artifact.path, artifact.validator_result
+            ));
+        } else if artifact.validator_result == "fail" {
+            errors.push(format!(
+                "artifact {} retention validator failed",
+                artifact.path
+            ));
+        }
+        if artifact.cleanup_status.trim().is_empty() {
+            errors.push(format!(
+                "artifact {} cleanup_status is required",
+                artifact.path
+            ));
+        } else if !matches!(
+            artifact.cleanup_status.as_str(),
+            RETENTION_CLEANUP_CLEAN | "preserved_artifacts" | "failed" | "not_run"
+        ) {
+            errors.push(format!(
+                "artifact {} cleanup_status={} is not supported",
+                artifact.path, artifact.cleanup_status
+            ));
+        } else if matches!(artifact.cleanup_status.as_str(), "failed" | "not_run") {
+            errors.push(format!(
+                "artifact {} cleanup_status={} is not release-gate safe",
+                artifact.path, artifact.cleanup_status
+            ));
+        }
+        if artifact.size_bytes > policy.max_size_bytes
+            && artifact
+                .compressed_size_bytes
+                .is_none_or(|compressed| compressed > policy.max_size_bytes)
+        {
+            errors.push(format!(
+                "artifact {} exceeds class max_size_bytes {}",
+                artifact.path, policy.max_size_bytes
+            ));
+        }
+        if artifact
+            .compressed_size_bytes
+            .is_some_and(|compressed| compressed > artifact.size_bytes)
+        {
+            errors.push(format!(
+                "artifact {} compressed_size_bytes exceeds original size",
+                artifact.path
+            ));
+        }
+        if policy.compression == RetentionCompressionSetting::Required
+            && artifact.compressed_size_bytes.is_none()
+        {
+            errors.push(format!(
+                "artifact {} requires compression but compressed_size_bytes is missing",
+                artifact.path
+            ));
+        }
+        if policy.compression == RetentionCompressionSetting::Disabled
+            && artifact.compressed_size_bytes.is_some()
+        {
+            errors.push(format!(
+                "artifact {} records compression but class policy disables compression",
+                artifact.path
+            ));
+        }
+        for mandatory_field in &policy.mandatory_fields {
+            if artifact
+                .dropped_fields
+                .iter()
+                .any(|field| field == mandatory_field)
+            {
+                errors.push(format!(
+                    "artifact {} dropped mandatory field {}",
+                    artifact.path, mandatory_field
+                ));
+            }
         }
     }
 }
@@ -800,6 +1050,7 @@ fn evaluate_retention_policy(
         compressed_total_artifact_bytes,
         max_total_artifact_bytes: policy.max_total_artifact_bytes,
         compress_above_bytes: policy.compress_above_bytes,
+        retention_count: policy.retention_count,
         retention_days: policy.retention_days,
         compression_retention_decision,
         action: action.to_owned(),
@@ -827,9 +1078,18 @@ fn artifact_size_logs(
             ArtifactSizeLog {
                 path: artifact.path.clone(),
                 class: artifact.class.clone(),
+                artifact_class: artifact.class.clone(),
+                original_size_bytes: artifact.size_bytes,
                 size_bytes: artifact.size_bytes,
                 compressed_size_bytes: artifact.compressed_size_bytes,
                 retention_action: retention_action.to_owned(),
+                retention_decision: retention_action.to_owned(),
+                redaction_policy_version: artifact.redaction_policy_version.clone(),
+                dropped_fields: artifact.dropped_fields.clone(),
+                sampled_fields: artifact.sampled_fields.clone(),
+                exception_id: artifact.exception_id.clone(),
+                validator_result: artifact.validator_result.clone(),
+                cleanup_status: artifact.cleanup_status.clone(),
             }
         })
         .collect()
@@ -853,6 +1113,7 @@ fn build_log_records(
             budget_value: result.budget_value,
             unit: result.unit,
             threshold_decision: result.threshold_decision,
+            exception_id: result.exception_id.clone(),
             artifact_sizes: artifact_sizes.to_vec(),
             compression_retention_decision: retention.compression_retention_decision,
             reproduction_command: observed.reproduction_command.clone(),
@@ -1072,9 +1333,35 @@ mod tests {
             retention: ProofRetentionPolicy {
                 max_total_artifact_bytes: 8_192,
                 compress_above_bytes: 3_000,
+                retention_count: 20,
                 mandatory_artifact_classes: vec![
                     "proof_bundle".to_owned(),
                     "reproduction_pack".to_owned(),
+                ],
+                artifact_class_policies: vec![
+                    retention_class_policy(
+                        "proof_bundle",
+                        RetentionCompressionSetting::Allowed,
+                        RetentionRedactionPolicy::HostDetails,
+                        &[
+                            "scenario_id",
+                            "workflow",
+                            "duration_seconds",
+                            "reproduction_command",
+                        ],
+                    ),
+                    retention_class_policy(
+                        "reproduction_pack",
+                        RetentionCompressionSetting::Allowed,
+                        RetentionRedactionPolicy::HostDetails,
+                        &["scenario_id", "reproduction_command", "inputs"],
+                    ),
+                    retention_class_policy(
+                        "raw_log",
+                        RetentionCompressionSetting::Allowed,
+                        RetentionRedactionPolicy::SecretsAndHostDetails,
+                        &["stderr_tail", "reproduction_command"],
+                    ),
                 ],
                 preserve_reproduction_command: true,
                 retention_days: 30,
@@ -1103,6 +1390,24 @@ mod tests {
             fail_at,
             release_gate_required: true,
             exception_ids: Vec::new(),
+        }
+    }
+
+    fn retention_class_policy(
+        artifact_class: &str,
+        compression: RetentionCompressionSetting,
+        redaction_policy: RetentionRedactionPolicy,
+        mandatory_fields: &[&str],
+    ) -> RetentionArtifactClassPolicy {
+        RetentionArtifactClassPolicy {
+            artifact_class: artifact_class.to_owned(),
+            retention_days: 30,
+            retention_count: 20,
+            max_size_bytes: 8_192,
+            compression,
+            redaction_policy,
+            redaction_policy_version: "redact-v1".to_owned(),
+            mandatory_fields: mandatory_fields.iter().map(ToString::to_string).collect(),
         }
     }
 
@@ -1166,6 +1471,12 @@ mod tests {
             size_bytes,
             compressed_size_bytes,
             mandatory: true,
+            redaction_policy_version: "redact-v1".to_owned(),
+            dropped_fields: Vec::new(),
+            sampled_fields: Vec::new(),
+            validator_result: RETENTION_VALIDATOR_PASS.to_owned(),
+            cleanup_status: RETENTION_CLEANUP_CLEAN.to_owned(),
+            exception_id: None,
         }
     }
 
@@ -1380,6 +1691,147 @@ mod tests {
     }
 
     #[test]
+    fn retention_policy_schema_rejects_missing_class_controls() {
+        let mut config = budget_config();
+        config.retention.retention_count = 0;
+        config.retention.artifact_class_policies[0].retention_days = 0;
+        config.retention.artifact_class_policies[0].retention_count = 0;
+        config.retention.artifact_class_policies[0].max_size_bytes = 0;
+        config.retention.artifact_class_policies[0]
+            .redaction_policy_version
+            .clear();
+        config.retention.artifact_class_policies[0]
+            .mandatory_fields
+            .clear();
+
+        let errors = validate_proof_overhead_budget_config(&config);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error == "retention_count must be greater than zero")
+        );
+        assert!(errors.iter().any(|error| {
+            error.contains("proof_bundle retention_days must be greater than zero")
+        }));
+        assert!(errors.iter().any(|error| {
+            error.contains("proof_bundle retention_count must be greater than zero")
+        }));
+        assert!(errors.iter().any(|error| {
+            error.contains("proof_bundle max_size_bytes must be greater than zero")
+        }));
+        assert!(
+            errors.iter().any(|error| {
+                error.contains("proof_bundle redaction_policy_version is required")
+            })
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| { error.contains("proof_bundle mandatory_fields must not be empty") })
+        );
+    }
+
+    #[test]
+    fn observed_artifact_validation_rejects_compression_corruption() {
+        let config = budget_config();
+        let mut observed = observed_metrics();
+        observed.artifacts[0].compressed_size_bytes = Some(observed.artifacts[0].size_bytes + 1);
+
+        let report = evaluate_proof_overhead_budget(&config, &observed);
+
+        assert_eq!(report.release_gate_verdict, BudgetDecision::Fail);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("compressed_size_bytes exceeds original size") })
+        );
+    }
+
+    #[test]
+    fn observed_artifact_validation_rejects_redaction_mismatch_and_mandatory_drop() {
+        let config = budget_config();
+        let mut observed = observed_metrics();
+        observed.artifacts[0].redaction_policy_version = "redact-v0".to_owned();
+        observed.artifacts[0]
+            .dropped_fields
+            .push("scenario_id".to_owned());
+
+        let report = evaluate_proof_overhead_budget(&config, &observed);
+
+        assert_eq!(report.release_gate_verdict, BudgetDecision::Fail);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("redaction policy mismatch") })
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("dropped mandatory field scenario_id") })
+        );
+    }
+
+    #[test]
+    fn observed_artifact_validation_rejects_cleanup_and_validator_failures() {
+        let config = budget_config();
+        let mut observed = observed_metrics();
+        observed.artifacts[0].validator_result = "fail".to_owned();
+        observed.artifacts[1].cleanup_status = "failed".to_owned();
+
+        let report = evaluate_proof_overhead_budget(&config, &observed);
+
+        assert_eq!(report.release_gate_verdict, BudgetDecision::Fail);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("retention validator failed") })
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("cleanup_status=failed is not release-gate safe") })
+        );
+    }
+
+    #[test]
+    fn reproduction_command_loss_fails_release_gate() {
+        let config = budget_config();
+        let mut observed = observed_metrics();
+        observed.reproduction_command.clear();
+
+        let report = evaluate_proof_overhead_budget(&config, &observed);
+
+        assert_eq!(report.release_gate_verdict, BudgetDecision::Fail);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("reproduction_command is required") })
+        );
+        assert!(!report.retention_result.reproduction_command_preserved);
+    }
+
+    #[test]
+    fn required_log_field_loss_fails_schema_validation() {
+        let mut config = budget_config();
+        config
+            .required_log_fields
+            .retain(|field| field != "compression_retention_decision");
+
+        let errors = validate_proof_overhead_budget_config(&config);
+
+        assert!(errors.iter().any(|error| {
+            error.contains("required_log_fields missing compression_retention_decision")
+        }));
+    }
+
+    #[test]
     fn human_summary_and_logs_expose_release_gate_contract() {
         let report = evaluate_proof_overhead_budget(&budget_config(), &observed_metrics());
 
@@ -1396,6 +1848,14 @@ mod tests {
                 && !record.baseline_id.is_empty()
                 && !record.reproduction_command.is_empty()
                 && !record.artifact_sizes.is_empty()
+        }));
+        assert!(report.log_records.iter().all(|record| {
+            record.artifact_sizes.iter().all(|artifact| {
+                artifact.original_size_bytes == artifact.size_bytes
+                    && artifact.redaction_policy_version == "redact-v1"
+                    && artifact.validator_result == RETENTION_VALIDATOR_PASS
+                    && artifact.cleanup_status == RETENTION_CLEANUP_CLEAN
+            })
         }));
         assert!(report.human_summary.contains("verdict=pass"));
         assert!(report.human_summary.contains("retention_action=retain"));
