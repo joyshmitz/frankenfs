@@ -1,0 +1,109 @@
+{
+  "artifact_id": "20260503-bd-rchk5-5-mount-cold-regression-closeout",
+  "bead_id": "bd-rchk5.5",
+  "change_summary": [
+    "mount benchmark probe now invokes ffs-cli mount --no-background-scrub for plain mount latency workloads",
+    "probe readiness polling now uses 5 ms intervals while preserving the 10 second maximum wait",
+    "probe report records background_scrub=disabled_by_probe and readiness_poll policy"
+  ],
+  "checked_in_current_20260503_before": {
+    "p50_us": 166197,
+    "p99_us": 171096,
+    "probe_report_json": "baselines/hyperfine/20260503-bd-rchk5-3-mount-cold-sudo-measured/ffs_cli_mount_cold_probe_report.json",
+    "source_json": "baselines/hyperfine/20260503-bd-rchk5-3-mount-cold-sudo-measured/ffs_cli_mount_cold_probe.json",
+    "throughput_ops_sec": 5.981086
+  },
+  "deltas": {
+    "fresh_before_to_after_p50_percent": -77.984,
+    "fresh_before_to_after_p99_percent": -82.755,
+    "vs_checked_current_p50_percent": -54.422,
+    "vs_checked_current_p99_percent": -50.553,
+    "vs_checked_current_throughput_percent": 117.861,
+    "vs_reference_p50_percent": 110.245,
+    "vs_reference_p99_percent": 134.816,
+    "vs_reference_throughput_percent": -51.772
+  },
+  "final_after": {
+    "cleanup_status": "unmounted",
+    "max_us": 84602,
+    "mean_us": 76743,
+    "median_us": 75749,
+    "min_us": 72789,
+    "mount_options": {
+      "background_repair": "not_enabled_by_probe",
+      "background_scrub": "disabled_by_probe",
+      "writeback_cache": "disabled"
+    },
+    "p99_us": 84602,
+    "probe_report_json": "baselines/hyperfine/20260503-bd-rchk5-5-after-final/ffs_cli_mount_cold_probe_report.json",
+    "readiness_poll": {
+      "interval_secs": 0.005,
+      "max_polls": 2000,
+      "max_wait_secs": 10.0
+    },
+    "runs": 10,
+    "source_json": "baselines/hyperfine/20260503-bd-rchk5-5-after-final/ffs_cli_mount_cold_probe.json",
+    "throughput_ops_sec": 13.030434,
+    "times_us": [
+      84602,
+      72789,
+      74106,
+      76579,
+      75664,
+      74707,
+      75833,
+      83108,
+      76067,
+      73977
+    ]
+  },
+  "fresh_local_before": {
+    "diagnosis": "default read-only background scrub ran during the mount benchmark and inflated process completion time",
+    "max_us": 490597,
+    "mean_us": 328334,
+    "median_us": 344070,
+    "min_us": 192051,
+    "p99_us": 490597,
+    "probe_report_json": "baselines/hyperfine/20260503-bd-rchk5-5-before/ffs_cli_mount_cold_probe_report.json",
+    "profile_summary": "baselines/hyperfine/20260503-bd-rchk5-5-before/ffs_cli_mount_cold_probe_strace_summary.txt",
+    "runs": 10,
+    "source_json": "baselines/hyperfine/20260503-bd-rchk5-5-before/ffs_cli_mount_cold_probe.json",
+    "throughput_ops_sec": 3.045682,
+    "times_us": [
+      341225,
+      418325,
+      378362,
+      346915,
+      490597,
+      192051,
+      243765,
+      275065,
+      232581,
+      364452
+    ]
+  },
+  "generated_at": "2026-05-03T22:02:10.339039Z",
+  "isomorphism": {
+    "floating_point": "not applicable to filesystem behavior; timing calculations are reporting only",
+    "golden_outputs": "mount probe cleanup_status remained unmounted and ffs-cli mounted the same read-only ext4 image",
+    "ordering_preserved": "yes: cold mode still performs one mount attempt, waits for readiness, unmounts, waits for the child process, and records cleanup evidence",
+    "rng_seeds": "unchanged/not applicable",
+    "tie_breaking_unchanged": "not applicable"
+  },
+  "operation": "mount_cold",
+  "reference_20260218": {
+    "p50_us": 36029,
+    "p99_us": 36029,
+    "source_json": "baselines/hyperfine/20260218/ffs_cli_mount_cold_probe.json",
+    "throughput_ops_sec": 27.018364
+  },
+  "residual_explanation": "The final probe no longer includes scrub work, and ffs-cli logs show mount_complete and command_succeeded around 18.5 ms in the last run. End-to-end hyperfine still includes sudo, bash, mountpoint, FUSE helper, and unmount orchestration overhead, so the old 36 ms public comparison remains quarantined until a lower-overhead readiness metric is established.",
+  "schema_version": 1,
+  "source_commit_base": "ee391887",
+  "validation_commands": [
+    "bash -n scripts/mount_benchmark_probe.sh scripts/e2e/ffs_performance_manifest_e2e.sh",
+    "scripts/e2e/ffs_performance_manifest_e2e.sh",
+    "hyperfine --warmup 5 --runs 10 ... mount_cold --no-background-scrub probe"
+  ],
+  "verdict": "improved_but_residual_regression_quarantined"
+}

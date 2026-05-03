@@ -22,6 +22,8 @@ MOUNT_ROOT=""
 MODE=""
 OUT_JSON=""
 ATTEMPTS=()
+MOUNT_READY_POLL_INTERVAL_SECS="0.005"
+MOUNT_READY_MAX_POLLS=2000
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -72,7 +74,7 @@ write_report() {
     command -v python3 >/dev/null 2>&1 || return 0
     mkdir -p "$(dirname "$OUT_JSON")"
 
-    python3 - "$OUT_JSON" "$outcome" "$classification" "$reason" "$exit_code" "$MODE" "$FFS_BIN" "$IMAGE" "$MOUNT_ROOT" "${ATTEMPTS[@]}" <<'PY'
+    python3 - "$OUT_JSON" "$outcome" "$classification" "$reason" "$exit_code" "$MODE" "$FFS_BIN" "$IMAGE" "$MOUNT_ROOT" "$MOUNT_READY_POLL_INTERVAL_SECS" "$MOUNT_READY_MAX_POLLS" "${ATTEMPTS[@]}" <<'PY'
 from __future__ import annotations
 
 import json
@@ -90,8 +92,12 @@ from datetime import datetime, timezone
     ffs_bin,
     image,
     mount_root,
+    poll_interval_secs,
+    max_polls,
     *attempt_rows,
 ) = sys.argv[1:]
+poll_interval_secs_float = float(poll_interval_secs)
+max_polls_int = int(max_polls)
 
 attempts = []
 for row in attempt_rows:
@@ -122,7 +128,13 @@ artifact = {
     "required_capabilities": ["benchmark_host", "fuse"],
     "mount_options": {
         "writeback_cache": "disabled",
+        "background_scrub": "disabled_by_probe",
         "background_repair": "not_enabled_by_probe",
+    },
+    "readiness_poll": {
+        "interval_secs": poll_interval_secs_float,
+        "max_polls": max_polls_int,
+        "max_wait_secs": poll_interval_secs_float * max_polls_int,
     },
     "command": {
         "ffs_bin": ffs_bin,
@@ -209,10 +221,10 @@ mount_once() {
     : >"$stdout_log"
     : >"$stderr_log"
 
-    FFS_AUTO_UNMOUNT=0 "$FFS_BIN" mount "$IMAGE" "$mnt" >"$stdout_log" 2>"$stderr_log" &
+    FFS_AUTO_UNMOUNT=0 "$FFS_BIN" mount --no-background-scrub "$IMAGE" "$mnt" >"$stdout_log" 2>"$stderr_log" &
     local pid=$!
 
-    for _ in $(seq 1 200); do
+    for _ in $(seq 1 "$MOUNT_READY_MAX_POLLS"); do
         if mountpoint -q "$mnt" 2>/dev/null; then
             if stat "$mnt" >/dev/null 2>&1; then
                 ready=1
@@ -222,7 +234,7 @@ mount_once() {
         if ! kill -0 "$pid" 2>/dev/null; then
             break
         fi
-        sleep 0.05
+        sleep "$MOUNT_READY_POLL_INTERVAL_SECS"
     done
 
     if [ "$ready" -eq 0 ] && kill -0 "$pid" 2>/dev/null; then

@@ -52,6 +52,9 @@ BAD_RAW="$E2E_LOG_DIR/performance_manifest_bad.raw"
 UNIT_LOG="$E2E_LOG_DIR/performance_manifest_unit_tests.log"
 MOUNT_PROBE_JSON="$E2E_LOG_DIR/mount_benchmark_probe_input_error.json"
 MOUNT_PROBE_RAW="$E2E_LOG_DIR/mount_benchmark_probe_input_error.raw"
+MOUNT_PROBE_POLICY_JSON="$E2E_LOG_DIR/mount_benchmark_probe_scrub_policy.json"
+MOUNT_PROBE_POLICY_RAW="$E2E_LOG_DIR/mount_benchmark_probe_scrub_policy.raw"
+MOUNT_PROBE_ARGS_LOG="$E2E_LOG_DIR/mount_benchmark_probe_ffs_args.log"
 MOUNT_PENDING_BASELINE_JSON="$REPO_ROOT/benchmarks/baselines/history/20260503-bd-rchk5-3-mount-warm-pending.json"
 MOUNT_PENDING_PROBE_JSON="$REPO_ROOT/baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-pending/ffs_cli_mount_cold_probe_report.json"
 MOUNT_MEASURED_BASELINE_JSON="$REPO_ROOT/benchmarks/baselines/history/20260503-bd-rchk5-3-mount-warm-sudo-measured.json"
@@ -253,6 +256,11 @@ if "fuse" not in report["required_capabilities"]:
     raise SystemExit("missing FUSE required capability")
 if report["mount_options"]["writeback_cache"] != "disabled":
     raise SystemExit("writeback-cache policy missing")
+if report["mount_options"]["background_scrub"] != "disabled_by_probe":
+    raise SystemExit("background scrub policy missing")
+poll = report["readiness_poll"]
+if poll["interval_secs"] != 0.005 or poll["max_wait_secs"] != 10.0:
+    raise SystemExit(f"unexpected readiness poll policy: {poll}")
 if report["attempts"]:
     raise SystemExit("input validation error should not create mount attempts")
 if "ffs-cli binary is not executable" not in report["reason"]:
@@ -263,6 +271,59 @@ then
 else
     cat "$MOUNT_PROBE_RAW"
     scenario_result "performance_mount_probe_structured_failure" "FAIL" "mount benchmark probe structured failure contract failed"
+fi
+
+e2e_step "Scenario 3bb: mounted benchmark probe disables background scrub for mount latency runs"
+FAKE_FFS_CLI="$E2E_TEMP_DIR/fake-ffs-cli"
+FAKE_PROBE_IMAGE="$E2E_TEMP_DIR/fake-probe.ext4"
+: >"$FAKE_PROBE_IMAGE"
+cat >"$FAKE_FFS_CLI" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" > "$MOUNT_PROBE_ARGS_LOG"
+printf 'fake mount rejected after argument capture\n' >&2
+exit 43
+SH
+chmod +x "$FAKE_FFS_CLI"
+
+set +e
+scripts/mount_benchmark_probe.sh \
+    --bin "$FAKE_FFS_CLI" \
+    --image "$FAKE_PROBE_IMAGE" \
+    --mount-root "$E2E_TEMP_DIR/mount-benchmark-policy" \
+    --mode cold \
+    --out-json "$MOUNT_PROBE_POLICY_JSON" >"$MOUNT_PROBE_POLICY_RAW" 2>&1
+MOUNT_PROBE_POLICY_RC=$?
+set -e
+
+if python3 - "$MOUNT_PROBE_POLICY_JSON" "$MOUNT_PROBE_ARGS_LOG" "$MOUNT_PROBE_POLICY_RC" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+args = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").strip()
+rc = int(sys.argv[3])
+
+if rc != 1:
+    raise SystemExit(f"expected mount failure exit 1, got {rc}")
+if "mount --no-background-scrub " not in args:
+    raise SystemExit(f"probe did not disable background scrub: {args}")
+if report["mount_options"]["background_scrub"] != "disabled_by_probe":
+    raise SystemExit(f"probe report lost scrub policy: {report['mount_options']}")
+if report["readiness_poll"]["interval_secs"] != 0.005:
+    raise SystemExit(f"probe report lost fast polling policy: {report['readiness_poll']}")
+if report["classification"] != "mount_failed":
+    raise SystemExit(f"fake binary failure should classify as mount_failed: {report['classification']}")
+if len(report["attempts"]) != 1 or report["attempts"][0]["cleanup_status"] != "unmounted":
+    raise SystemExit(f"probe cleanup evidence missing: {report['attempts']}")
+PY
+then
+    scenario_result "performance_mount_probe_disables_background_scrub" "PASS" "mount probe passes --no-background-scrub and records the policy"
+else
+    cat "$MOUNT_PROBE_POLICY_RAW"
+    scenario_result "performance_mount_probe_disables_background_scrub" "FAIL" "mount benchmark probe did not preserve scrub-disabled latency policy"
 fi
 
 e2e_step "Scenario 3c: mounted benchmark pending artifact preserves probe evidence"
