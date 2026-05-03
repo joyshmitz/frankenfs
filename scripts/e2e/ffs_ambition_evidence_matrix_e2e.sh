@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# ffs_ambition_evidence_matrix_e2e.sh - smoke gate for bd-rchk0.5.10.1.
+# ffs_ambition_evidence_matrix_e2e.sh - smoke gate for bd-rchk0.5.10.1 / bd-vp5v7.
 #
 # Validates that the ambition evidence matrix is exported, renders a report,
-# groups rows by acceptance dimensions, exposes required log tokens, and keeps
-# its unit/schema tests green.
+# groups rows by acceptance dimensions, exposes required log tokens, checks
+# consumer contracts, proves stale/missing links fail closed, and keeps tests green.
 
 set -euo pipefail
 
@@ -38,7 +38,11 @@ e2e_init "ffs_ambition_evidence_matrix"
 REPORT_JSON="${E2E_LOG_DIR}/ambition_evidence_matrix_report.json"
 REPORT_RAW="${E2E_LOG_DIR}/ambition_evidence_matrix_report.raw"
 ISSUES_JSONL="${E2E_LOG_DIR}/issues.jsonl"
-UNIT_LOG="$(mktemp)"
+STALE_ISSUES_JSONL="${E2E_LOG_DIR}/issues_stale_reference.jsonl"
+MISSING_ARTIFACT_JSONL="${E2E_LOG_DIR}/issues_missing_artifact.jsonl"
+STALE_RAW="${E2E_LOG_DIR}/stale_reference.raw"
+MISSING_ARTIFACT_RAW="${E2E_LOG_DIR}/missing_artifact.raw"
+UNIT_LOG="${E2E_LOG_DIR}/ambition_evidence_matrix_unit_tests.log"
 cp .beads/issues.jsonl "$ISSUES_JSONL"
 
 e2e_step "Scenario 1: module and CLI are wired"
@@ -96,12 +100,13 @@ required = [
     "grouped_by_demo_coverage",
     "grouped_by_budget_status",
     "grouped_by_release_gate_consumer",
+    "grouped_by_matrix_status",
 ]
 missing = [key for key in required if not data.get(key)]
 if missing:
     raise SystemExit(f"missing groups: {missing}")
-if "bd-rchk0.5.14" not in data["grouped_by_budget_status"].get("applicable", []):
-    raise SystemExit("budget bead not grouped as applicable")
+if "bd-rchk0.5.14" not in data["grouped_by_budget_status"].get("validated", []):
+    raise SystemExit("budget bead not grouped as validated")
 PY
 then
     scenario_result "ambition_matrix_grouping" "PASS" "all grouping dimensions populated"
@@ -114,8 +119,10 @@ TOKENS_FOUND=0
 for token in \
     "matrix_version" \
     "source_bead_ids" \
+    "consumer_versions" \
     "stale_reference_checks" \
     "missing_field_diagnostics" \
+    "downgrade_decisions" \
     "generated_artifact_paths" \
     "reproduction_command"; do
     if grep -q "\"${token}\"" "$REPORT_JSON"; then
@@ -123,10 +130,10 @@ for token in \
     fi
 done
 
-if [[ $TOKENS_FOUND -eq 6 ]]; then
+if [[ $TOKENS_FOUND -eq 8 ]]; then
     scenario_result "ambition_matrix_log_tokens" "PASS" "all log tokens present"
 else
-    scenario_result "ambition_matrix_log_tokens" "FAIL" "only ${TOKENS_FOUND}/6 log tokens present"
+    scenario_result "ambition_matrix_log_tokens" "FAIL" "only ${TOKENS_FOUND}/8 log tokens present"
 fi
 
 e2e_step "Scenario 5: required downstream outputs are represented"
@@ -165,11 +172,99 @@ else
     scenario_result "ambition_matrix_required_outputs" "FAIL" "required output coverage missing"
 fi
 
-e2e_step "Scenario 6: unit/schema tests pass"
+e2e_step "Scenario 6: consumer contracts and downgrade decisions are emitted"
+if python3 - "$REPORT_JSON" <<'PY'
+import json
+import sys
+
+data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+required_consumers = {
+    "proof-bundle",
+    "release-gates",
+    "remediation-catalog",
+    "README/FEATURE_PARITY",
+    "follow-up-bead",
+}
+summary_consumers = {
+    row["consumer_name"]
+    for row in data.get("consumer_summaries", [])
+}
+contract_consumers = {
+    row["consumer_name"]
+    for row in data.get("consumer_contracts", [])
+}
+missing_summaries = required_consumers - summary_consumers
+missing_contracts = required_consumers - contract_consumers
+if missing_summaries or missing_contracts:
+    raise SystemExit(
+        f"missing_summaries={sorted(missing_summaries)} "
+        f"missing_contracts={sorted(missing_contracts)}"
+    )
+if not data.get("downgrade_decisions"):
+    raise SystemExit("missing downgrade decisions")
+for summary in data.get("consumer_summaries", []):
+    if not summary.get("consumer_version"):
+        raise SystemExit(f"missing consumer version: {summary}")
+PY
+then
+    scenario_result "ambition_matrix_consumer_contracts" "PASS" "consumer summaries and downgrade decisions emitted"
+else
+    scenario_result "ambition_matrix_consumer_contracts" "FAIL" "consumer contract validation failed"
+fi
+
+e2e_step "Scenario 7: stale reference injection fails closed"
+python3 - "$ISSUES_JSONL" "$STALE_ISSUES_JSONL" <<'PY'
+import json
+import sys
+
+source, dest = sys.argv[1], sys.argv[2]
+with open(source, encoding="utf-8") as src, open(dest, "w", encoding="utf-8") as out:
+    for line in src:
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("id") == "bd-rchk0.5.14":
+            continue
+        out.write(json.dumps(row, separators=(",", ":")) + "\n")
+PY
+if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
+    --issues "$STALE_ISSUES_JSONL" >"$STALE_RAW" 2>&1; then
+    scenario_result "ambition_matrix_stale_reference_fails" "FAIL" "stale reference unexpectedly passed"
+elif grep -q "bd-rchk0.5.14" "$STALE_RAW"; then
+    scenario_result "ambition_matrix_stale_reference_fails" "PASS" "stale reference failed closed"
+else
+    scenario_result "ambition_matrix_stale_reference_fails" "FAIL" "expected stale reference diagnostic missing"
+fi
+
+e2e_step "Scenario 8: missing artifact injection fails closed"
+python3 - "$ISSUES_JSONL" "$MISSING_ARTIFACT_JSONL" <<'PY'
+import json
+import sys
+
+source, dest = sys.argv[1], sys.argv[2]
+with open(source, encoding="utf-8") as src, open(dest, "w", encoding="utf-8") as out:
+    for line in src:
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("id") == "bd-rchk0.5.10.1":
+            row["artifact_path"] = ""
+        out.write(json.dumps(row, separators=(",", ":")) + "\n")
+PY
+if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
+    --issues "$MISSING_ARTIFACT_JSONL" >"$MISSING_ARTIFACT_RAW" 2>&1; then
+    scenario_result "ambition_matrix_missing_artifact_fails" "FAIL" "missing artifact unexpectedly passed"
+elif grep -q "artifact_path" "$MISSING_ARTIFACT_RAW"; then
+    scenario_result "ambition_matrix_missing_artifact_fails" "PASS" "missing artifact failed closed"
+else
+    scenario_result "ambition_matrix_missing_artifact_fails" "FAIL" "expected missing artifact diagnostic missing"
+fi
+
+e2e_step "Scenario 9: unit/schema tests pass"
 if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib -- ambition_evidence_matrix \
     2>"$UNIT_LOG" | tee -a "$UNIT_LOG"; then
     TESTS_RUN=$(grep -c "test ambition_evidence_matrix::tests::" "$UNIT_LOG" 2>/dev/null || echo "0")
-    if [[ $TESTS_RUN -ge 5 ]]; then
+    if [[ $TESTS_RUN -ge 10 ]]; then
         scenario_result "ambition_matrix_unit_tests" "PASS" "unit tests passed (${TESTS_RUN} tests)"
     else
         scenario_result "ambition_matrix_unit_tests" "FAIL" "too few tests: ${TESTS_RUN}"
@@ -177,8 +272,6 @@ if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib -- ambition_evidenc
 else
     scenario_result "ambition_matrix_unit_tests" "FAIL" "unit tests failed"
 fi
-
-rm -f "$UNIT_LOG"
 
 e2e_step "Summary"
 e2e_log "SUMMARY|total=${TOTAL}|passed=${PASS_COUNT}|failed=${FAIL_COUNT}"
