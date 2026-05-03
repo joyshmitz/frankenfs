@@ -1,0 +1,29 @@
+{
+  "results": [
+    {
+      "command": "rch exec -- cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- mvcc_contention_8writers",
+      "mean": 0.000010288000,
+      "stddev": 2.09056E-7,
+      "median": 0.000010288000,
+      "min": 0.000009911500,
+      "max": 0.000010731000,
+      "times": [
+        0.000009911500,
+        0.000010288000,
+        0.000010731000
+      ],
+      "exit_codes": [
+        0
+      ]
+    }
+  ],
+  "benchmark_mode": "criterion_once",
+  "measurement_source": "criterion_estimate",
+  "criterion_estimate_source": "baselines/hyperfine/20260503-mvcc8/ffs_mvcc_contention_8writers.stderr",
+  "wall_time_seconds": 24.993295616,
+  "command_stdout": "baselines/hyperfine/20260503-mvcc8/ffs_mvcc_contention_8writers.stdout",
+  "command_stderr": "baselines/hyperfine/20260503-mvcc8/ffs_mvcc_contention_8writers.stderr",
+  "text_report": "baselines/hyperfine/20260503-mvcc8/ffs_mvcc_contention_8writers.txt",
+  "started_at": "2026-05-03T18:51:51Z",
+  "finished_at": "2026-05-03T18:52:16Z"
+}
