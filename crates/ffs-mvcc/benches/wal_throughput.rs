@@ -21,6 +21,7 @@ use ffs_types::{BlockNumber, CommitSeq, TxnId};
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::fs;
+use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
@@ -1031,6 +1032,57 @@ fn bench_mvcc_contention(c: &mut Criterion) {
     }
 }
 
+/// Measure sharded MVCC commit throughput on disjoint writer-owned block ranges.
+///
+/// This is the high-core counterpart to `bench_mvcc_contention`: it keeps the
+/// same one-block transaction shape but removes the external `Mutex<MvccStore>`
+/// serialization so the benchmark captures per-shard commit scaling and ordered
+/// publication overhead.
+fn bench_sharded_mvcc_contention(c: &mut Criterion) {
+    use ffs_mvcc::sharded::ShardedMvccStore;
+
+    let block_data = vec![0xAB_u8; 4096];
+    let blocks_per_writer = 4096_u64;
+    let ops_per_writer = 64_u64;
+
+    for &writers in &[8_usize, 16, 32] {
+        let bench_name = format!("sharded_mvcc_disjoint_{writers}writers");
+
+        c.bench_function(&bench_name, |b| {
+            b.iter(|| {
+                let store = Arc::new(ShardedMvccStore::for_host_parallelism());
+                let barrier = Arc::new(std::sync::Barrier::new(writers));
+
+                let mut handles = Vec::with_capacity(writers);
+                for writer_id in 0..writers {
+                    let store = Arc::clone(&store);
+                    let barrier = Arc::clone(&barrier);
+                    let data = block_data.clone();
+                    handles.push(thread::spawn(move || {
+                        barrier.wait();
+                        let writer_id = u64::try_from(writer_id).expect("writer id fits");
+                        let block_base = writer_id.saturating_mul(blocks_per_writer);
+                        for i in 0..ops_per_writer {
+                            let mut txn = store.begin();
+                            txn.stage_write(
+                                BlockNumber(block_base + (i % blocks_per_writer)),
+                                data.clone(),
+                            );
+                            let seq = store.commit(txn).expect("disjoint commit");
+                            black_box(seq);
+                        }
+                    }));
+                }
+
+                for handle in handles {
+                    handle.join().expect("writer thread");
+                }
+                black_box(store.current_snapshot());
+            });
+        });
+    }
+}
+
 fn bench_pruning_throughput(c: &mut Criterion) {
     let block_data = vec![0xAB_u8; 4096];
     let num_blocks = 256_u64;
@@ -1207,6 +1259,7 @@ criterion_group!(
     bench_rcu_read_throughput,
     bench_write_amplification,
     bench_mvcc_contention,
+    bench_sharded_mvcc_contention,
     bench_pruning_throughput,
     bench_coalesced_append
 );

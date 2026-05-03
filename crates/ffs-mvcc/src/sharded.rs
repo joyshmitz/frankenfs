@@ -15,10 +15,64 @@ use crate::{
     validate_transaction_id,
 };
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
-use parking_lot::{RwLock, RwLockWriteGuard};
+use parking_lot::{Condvar, Mutex, RwLock, RwLockWriteGuard};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tracing::{debug, info, trace};
+
+/// Number of MVCC version-store shards to provision per available CPU.
+pub const MVCC_SHARDS_PER_CORE: usize = 4;
+/// Minimum shard count for host-sized sharded stores.
+pub const MIN_MVCC_SHARDS: usize = 16;
+/// Maximum shard count for host-sized sharded stores.
+pub const MAX_MVCC_SHARDS: usize = 1024;
+
+struct CommitPublicationGate {
+    completed_commit: AtomicU64,
+    wait_lock: Mutex<()>,
+    ready: Condvar,
+    waiters: AtomicUsize,
+}
+
+impl CommitPublicationGate {
+    fn new() -> Self {
+        Self {
+            completed_commit: AtomicU64::new(0),
+            wait_lock: Mutex::new(()),
+            ready: Condvar::new(),
+            waiters: AtomicUsize::new(0),
+        }
+    }
+
+    fn completed(&self) -> u64 {
+        self.completed_commit.load(Ordering::Acquire)
+    }
+
+    fn publish(&self, commit_seq: CommitSeq) {
+        let predecessor = commit_seq.0.saturating_sub(1);
+        let mut guard = self.wait_lock.lock();
+        while self.completed() != predecessor {
+            self.waiters.fetch_add(1, Ordering::AcqRel);
+            self.ready.wait(&mut guard);
+            self.waiters.fetch_sub(1, Ordering::AcqRel);
+        }
+
+        self.completed_commit.store(commit_seq.0, Ordering::Release);
+        if self.waiters.load(Ordering::Acquire) > 0 {
+            self.ready.notify_all();
+        }
+        drop(guard);
+    }
+}
+
+impl std::fmt::Debug for CommitPublicationGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommitPublicationGate")
+            .field("completed_commit", &self.completed())
+            .field("waiters", &self.waiters.load(Ordering::Acquire))
+            .finish_non_exhaustive()
+    }
+}
 
 /// A single shard of the version store.
 #[derive(Debug, Default)]
@@ -62,8 +116,7 @@ pub struct ShardedMvccStore {
     shard_count: usize,
     next_txn: AtomicU64,
     next_commit: AtomicU64,
-    /// Latest commit sequence number that has completed installation.
-    completed_commit: AtomicU64,
+    publication_gate: CommitPublicationGate,
     /// Inline snapshot tracking (for callers who don't use SnapshotRegistry).
     active_snapshots: RwLock<BTreeMap<CommitSeq, u64>>,
     /// Compression policy for version chains.
@@ -85,10 +138,30 @@ impl ShardedMvccStore {
         Self::with_compression_policy(shard_count, CompressionPolicy::default())
     }
 
+    /// Create a host-sized store (`available_parallelism * 4`, bounded).
+    ///
+    /// This is the default constructor to prefer for high-core deployments: it
+    /// creates enough independent version-store locks for 64+ core writer
+    /// bursts without allowing unbounded shard metadata growth.
+    #[must_use]
+    pub fn for_host_parallelism() -> Self {
+        Self::new(Self::host_parallelism_shard_count())
+    }
+
+    /// Recommended shard count for this host.
+    #[must_use]
+    pub fn host_parallelism_shard_count() -> usize {
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        cores
+            .saturating_mul(MVCC_SHARDS_PER_CORE)
+            .clamp(MIN_MVCC_SHARDS, MAX_MVCC_SHARDS)
+            .next_power_of_two()
+    }
+
     /// Create a new sharded store with a custom compression policy.
     #[must_use]
     pub fn with_compression_policy(shard_count: usize, policy: CompressionPolicy) -> Self {
-        let shard_count = shard_count.max(1);
+        let shard_count = shard_count.clamp(1, MAX_MVCC_SHARDS).next_power_of_two();
         info!(shard_count, "sharded_mvcc_store: initializing");
         let shards = (0..shard_count)
             .map(|_| RwLock::new(MvccShard::default()))
@@ -98,7 +171,7 @@ impl ShardedMvccStore {
             shard_count,
             next_txn: AtomicU64::new(1),
             next_commit: AtomicU64::new(1),
-            completed_commit: AtomicU64::new(0),
+            publication_gate: CommitPublicationGate::new(),
             active_snapshots: RwLock::new(BTreeMap::new()),
             compression_policy: policy,
             conflict_policy: RwLock::new(ConflictPolicy::default()),
@@ -433,7 +506,7 @@ impl ShardedMvccStore {
     /// The current snapshot (latest committed version).
     #[must_use]
     pub fn current_snapshot(&self) -> Snapshot {
-        let high = self.completed_commit.load(Ordering::Acquire);
+        let high = self.publication_gate.completed();
         Snapshot {
             high: CommitSeq(high),
         }
@@ -578,16 +651,11 @@ impl ShardedMvccStore {
             );
         }
 
-        // Release shard locks before the ordering spin-wait to avoid holding
-        // write locks while yielding. All version data is already installed;
-        // the spin-wait only gates the commit_seq publication order.
+        // Release shard locks before ordered publication. All version data is
+        // already installed; the gate only preserves monotonic snapshot
+        // visibility without burning CPU when commits finish out of order.
         drop(shard_guards);
-
-        // Wait for previous transactions to complete before publishing our commit_seq.
-        while self.completed_commit.load(Ordering::Acquire) != commit_seq.0.saturating_sub(1) {
-            std::thread::yield_now();
-        }
-        self.completed_commit.store(commit_seq.0, Ordering::Release);
+        self.publication_gate.publish(commit_seq);
 
         Ok(commit_seq)
     }
@@ -658,16 +726,12 @@ impl ShardedMvccStore {
         };
         Self::append_ssi_record_locked(&mut shard_guards, &ssi_record);
 
-        // Release shard locks before the ordering spin-wait to avoid holding
-        // write locks while yielding. All version data and SSI records are
-        // already installed; the spin-wait only gates commit_seq publication.
+        // Release shard locks before ordered publication. All version data and
+        // SSI records are already installed; the gate only preserves monotonic
+        // snapshot visibility without burning CPU when commits finish out of
+        // order.
         drop(shard_guards);
-
-        // Wait for previous transactions to complete before publishing our commit_seq.
-        while self.completed_commit.load(Ordering::Acquire) != commit_seq.0.saturating_sub(1) {
-            std::thread::yield_now();
-        }
-        self.completed_commit.store(commit_seq.0, Ordering::Release);
+        self.publication_gate.publish(commit_seq);
 
         Ok(commit_seq)
     }
@@ -819,6 +883,54 @@ mod tests {
 
     fn make_store(shards: usize) -> ShardedMvccStore {
         ShardedMvccStore::new(shards)
+    }
+
+    #[test]
+    fn sharded_store_rounds_and_bounds_shard_count() {
+        assert_eq!(ShardedMvccStore::new(0).shard_count(), 1);
+        assert_eq!(ShardedMvccStore::new(3).shard_count(), 4);
+        assert_eq!(
+            ShardedMvccStore::new(MAX_MVCC_SHARDS + 1).shard_count(),
+            MAX_MVCC_SHARDS
+        );
+
+        let host_shards = ShardedMvccStore::host_parallelism_shard_count();
+        assert!(host_shards.is_power_of_two());
+        assert!((MIN_MVCC_SHARDS..=MAX_MVCC_SHARDS).contains(&host_shards));
+        assert_eq!(
+            ShardedMvccStore::for_host_parallelism().shard_count(),
+            host_shards
+        );
+    }
+
+    #[test]
+    fn commit_publication_gate_preserves_order_without_busy_spin() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let gate = Arc::new(CommitPublicationGate::new());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker_gate = Arc::clone(&gate);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("send started");
+            worker_gate.publish(CommitSeq(2));
+            done_tx.send(()).expect("send done");
+        });
+
+        started_rx.recv().expect("worker started");
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "commit 2 must not publish before commit 1"
+        );
+        assert_eq!(gate.completed(), 0);
+
+        gate.publish(CommitSeq(1));
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("commit 2 published after predecessor");
+        worker.join().expect("worker joined");
+        assert_eq!(gate.completed(), 2);
     }
 
     #[test]

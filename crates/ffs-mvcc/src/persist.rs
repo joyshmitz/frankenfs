@@ -2350,7 +2350,7 @@ mod tests {
 
         let cx = test_cx();
         for _ in 0..16 {
-            let n_commits = 1 + (next() as usize) % 12; // 1..12 commits
+            let n_commits = 1 + usize::try_from(next() % 12).expect("commit count fits usize");
             let tmp = NamedTempFile::new().expect("create temp file");
             let path = tmp.path().to_path_buf();
             std::fs::remove_file(&path).ok();
@@ -2359,35 +2359,52 @@ mod tests {
             {
                 let store = PersistentMvccStore::open(&cx, &path).expect("open");
                 for c in 0..n_commits {
-                    let writes_in_commit = 1 + (next() as usize) % 4; // 1..4 writes
+                    let writes_in_commit =
+                        1 + usize::try_from(next() % 4).expect("write count fits usize");
                     let mut txn = store.begin();
                     for w in 0..writes_in_commit {
-                        let block = ((c * 100 + w) as u64).wrapping_mul(31);
-                        let data: Vec<u8> = (0..16)
-                            .map(|i| ((next() as u8).wrapping_add(i)))
+                        let logical_block = c.saturating_mul(100).saturating_add(w);
+                        let block = u64::try_from(logical_block)
+                            .expect("logical block fits u64")
+                            .wrapping_mul(31);
+                        let data: Vec<u8> = (0_u8..16)
+                            .map(|i| {
+                                u8::try_from(next() & 0xFF)
+                                    .expect("masked byte fits u8")
+                                    .wrapping_add(i)
+                            })
                             .collect();
                         txn.stage_write(BlockNumber(block), data);
                     }
                     store.commit(txn).expect("commit");
                     total_writes += writes_in_commit;
                 }
-                let stats = store.wal_stats();
-                assert_eq!(stats.commits_written, n_commits as u64);
+                let wal_written_stats = store.wal_stats();
+                assert_eq!(
+                    wal_written_stats.commits_written,
+                    u64::try_from(n_commits).expect("commit count fits u64")
+                );
             }
 
             // Reopen: every commit's data must be replayed.
             {
                 let store = PersistentMvccStore::open(&cx, &path).expect("reopen");
-                let stats = store.wal_stats();
+                let reopened_wal_stats = store.wal_stats();
                 assert_eq!(
-                    stats.replayed_commits, n_commits as u64,
+                    reopened_wal_stats.replayed_commits,
+                    u64::try_from(n_commits).expect("commit count fits u64"),
                     "n={}: replayed_commits {} != expected {}",
-                    n_commits, stats.replayed_commits, n_commits
+                    n_commits,
+                    reopened_wal_stats.replayed_commits,
+                    n_commits
                 );
                 assert_eq!(
-                    stats.replayed_versions, total_writes as u64,
+                    reopened_wal_stats.replayed_versions,
+                    u64::try_from(total_writes).expect("write count fits u64"),
                     "n={}: replayed_versions {} != expected {}",
-                    n_commits, stats.replayed_versions, total_writes
+                    n_commits,
+                    reopened_wal_stats.replayed_versions,
+                    total_writes
                 );
             }
 
