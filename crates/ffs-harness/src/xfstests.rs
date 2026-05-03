@@ -135,8 +135,11 @@ pub struct XfstestsAllowlistEntry {
 pub struct XfstestsCommandPlan {
     pub plan_id: String,
     pub execution_lane: String,
+    pub image_path: String,
     pub scratch_path: String,
     pub mountpoint: String,
+    pub test_device: String,
+    pub scratch_device: String,
     pub image_hash: String,
     #[serde(default)]
     pub helper_binaries: Vec<String>,
@@ -149,6 +152,7 @@ pub struct XfstestsCommandPlan {
     #[serde(default)]
     pub destructive: bool,
     pub expected_plan_outcome: String,
+    pub command_summary: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -545,6 +549,13 @@ fn validate_command_plan_paths(
     plan: &XfstestsCommandPlan,
     errors: &mut Vec<String>,
 ) {
+    if !is_temp_scoped_path(&plan.image_path) {
+        errors.push(format!(
+            "xfstests policy {} command plan uses non-temporary image path: {}",
+            entry.test_id, plan.image_path
+        ));
+    }
+
     if !is_temp_scoped_path(&plan.scratch_path) {
         errors.push(format!(
             "xfstests policy {} command plan uses non-temporary scratch path: {}",
@@ -556,6 +567,20 @@ fn validate_command_plan_paths(
         errors.push(format!(
             "xfstests policy {} command plan uses non-temporary mountpoint: {}",
             entry.test_id, plan.mountpoint
+        ));
+    }
+
+    if !is_temp_scoped_path(&plan.test_device) {
+        errors.push(format!(
+            "xfstests policy {} command plan uses non-temporary test device placeholder: {}",
+            entry.test_id, plan.test_device
+        ));
+    }
+
+    if !is_temp_scoped_path(&plan.scratch_device) {
+        errors.push(format!(
+            "xfstests policy {} command plan uses non-temporary scratch device placeholder: {}",
+            entry.test_id, plan.scratch_device
         ));
     }
 
@@ -612,6 +637,13 @@ fn validate_command_plan_helpers(
     if plan.mutation_surface.trim().is_empty() {
         errors.push(format!(
             "xfstests policy {} command plan is missing mutation surface",
+            entry.test_id
+        ));
+    }
+
+    if plan.command_summary.trim().is_empty() {
+        errors.push(format!(
+            "xfstests policy {} command plan is missing human-readable command summary",
             entry.test_id
         ));
     }
@@ -1141,12 +1173,24 @@ mod tests {
             command_plan: Some(XfstestsCommandPlan {
                 plan_id: format!("xfstests-plan-{}", test_id.replace('/', "-")),
                 execution_lane: "dry_run_only".to_owned(),
+                image_path: format!(
+                    "${{TMPDIR:-/tmp}}/frankenfs-xfstests/images/{}.img",
+                    test_id.replace('/', "-")
+                ),
                 scratch_path: format!(
                     "${{TMPDIR:-/tmp}}/frankenfs-xfstests/scratch/{}",
                     test_id.replace('/', "-")
                 ),
                 mountpoint: format!(
                     "${{TMPDIR:-/tmp}}/frankenfs-xfstests/mnt/{}",
+                    test_id.replace('/', "-")
+                ),
+                test_device: format!(
+                    "${{TMPDIR:-/tmp}}/frankenfs-xfstests/devices/{}.test.img",
+                    test_id.replace('/', "-")
+                ),
+                scratch_device: format!(
+                    "${{TMPDIR:-/tmp}}/frankenfs-xfstests/devices/{}.scratch.img",
                     test_id.replace('/', "-")
                 ),
                 image_hash: format!("sha256:test-fixture-{}", test_id.replace('/', "-")),
@@ -1162,6 +1206,7 @@ mod tests {
                 argv: vec!["./check".to_owned(), "-n".to_owned(), test_id.to_owned()],
                 destructive: false,
                 expected_plan_outcome: "dry_run_only".to_owned(),
+                command_summary: format!("dry-run xfstests plan for {test_id} under temp root"),
             }),
         }
     }
@@ -1443,23 +1488,31 @@ generic/001  2s ... pass\n";
         let selected = vec!["generic/001".to_owned()];
         let mut entry = valid_policy_entry("generic/001");
         let plan = entry.command_plan.as_mut().expect("command plan");
+        plan.image_path = "/var/lib/frankenfs/fixture.img".to_owned();
         plan.scratch_path = "/srv/xfstests/scratch".to_owned();
         plan.mountpoint.clear();
+        plan.test_device = "/dev/loop0".to_owned();
+        plan.scratch_device = "/dev/loop1".to_owned();
         plan.image_hash.clear();
         plan.helper_binaries = vec!["bash".to_owned()];
         plan.required_privileges = vec!["magic_admin".to_owned()];
         plan.cleanup_action.clear();
+        plan.command_summary.clear();
         plan.argv = vec!["bash".to_owned(), "-c".to_owned(), "rm *".to_owned()];
 
         let errors = validate_xfstests_policy(&selected, &[entry]);
 
         for expected in [
+            "non-temporary image path",
             "non-temporary scratch path",
             "non-temporary mountpoint",
+            "non-temporary test device placeholder",
+            "non-temporary scratch device placeholder",
             "missing image hash",
             "unresolved helper binary",
             "unknown privilege requirement",
             "missing cleanup action",
+            "missing human-readable command summary",
             "does not name the test id",
             "broad shell command token",
         ] {

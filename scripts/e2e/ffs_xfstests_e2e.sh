@@ -234,8 +234,11 @@ def validate_command_plan(test_id, plan):
     for field in [
         "plan_id",
         "execution_lane",
+        "image_path",
         "scratch_path",
         "mountpoint",
+        "test_device",
+        "scratch_device",
         "image_hash",
         "helper_binaries",
         "required_privileges",
@@ -243,6 +246,7 @@ def validate_command_plan(test_id, plan):
         "cleanup_action",
         "argv",
         "expected_plan_outcome",
+        "command_summary",
     ]:
         value = plan.get(field)
         if value is None or value == "":
@@ -252,10 +256,16 @@ def validate_command_plan(test_id, plan):
         plan_errors.append(f"policy {test_id} command plan has malformed plan_id")
     if plan.get("execution_lane") not in allowed_plan_lanes:
         plan_errors.append(f"policy {test_id} command plan has unknown execution_lane")
+    if not is_temp_path(plan.get("image_path")):
+        plan_errors.append(f"policy {test_id} command plan has non-temporary image_path")
     if not is_temp_path(plan.get("scratch_path")):
         plan_errors.append(f"policy {test_id} command plan has non-temporary scratch_path")
     if not is_temp_path(plan.get("mountpoint")):
         plan_errors.append(f"policy {test_id} command plan has non-temporary mountpoint")
+    if not is_temp_path(plan.get("test_device")):
+        plan_errors.append(f"policy {test_id} command plan has non-temporary test_device")
+    if not is_temp_path(plan.get("scratch_device")):
+        plan_errors.append(f"policy {test_id} command plan has non-temporary scratch_device")
     if not str(plan.get("image_hash", "")).startswith("sha256:"):
         plan_errors.append(f"policy {test_id} command plan missing image_hash")
 
@@ -398,7 +408,10 @@ for test_id in selected:
             "risk_category": entry.get("user_risk_category"),
             "selected_or_skipped": entry.get("selection_decision"),
             "capability_requirement": required,
+            "image_path": command_plan.get("image_path"),
             "image_hash": command_plan.get("image_hash"),
+            "test_device": command_plan.get("test_device"),
+            "scratch_device": command_plan.get("scratch_device"),
             "helper_versions": {
                 helper: "not_resolved_in_plan_mode"
                 for helper in command_plan.get("helper_binaries", [])
@@ -407,6 +420,7 @@ for test_id in selected:
             "required_privileges": command_plan.get("required_privileges"),
             "mutation_surface": command_plan.get("mutation_surface"),
             "execution_lane": command_plan.get("execution_lane"),
+            "command_summary": command_plan.get("command_summary"),
             "cleanup_status": "not_started_plan_mode",
             "linked_artifact_or_bead": entry.get("tracker_id"),
             "docs_scope_citation": entry.get("v1_scope_mapping") or entry.get("scope_reference"),
@@ -444,7 +458,11 @@ payload = {
         "default_non_destructive": all(not plan.get("destructive") for plan in command_plans),
         "temp_root": "${TMPDIR:-/tmp}/frankenfs-xfstests",
         "paths_verified_temp_scoped": all(
-            is_temp_path(plan.get("scratch_path")) and is_temp_path(plan.get("mountpoint"))
+            is_temp_path(plan.get("image_path"))
+            and is_temp_path(plan.get("scratch_path"))
+            and is_temp_path(plan.get("mountpoint"))
+            and is_temp_path(plan.get("test_device"))
+            and is_temp_path(plan.get("scratch_device"))
             for plan in command_plans
         ),
         "broad_shell_commands_rejected": True,
@@ -481,14 +499,14 @@ for label, counter in [
 report_lines.extend([
     "## Rows",
     "",
-    "| Policy row | Plan | Test id | Flavor | Operation | Risk | Outcome | Lane | Decision | Capability requirement | Artifact/bead | Scope | Reproduction |",
-    "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+    "| Policy row | Plan | Test id | Flavor | Operation | Risk | Outcome | Lane | Summary | Decision | Capability requirement | Artifact/bead | Scope | Reproduction |",
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
 ])
 for test in tests:
     capability = ", ".join(test["required_capabilities"])
     plan = test.get("command_plan", {})
     report_lines.append(
-        "| {policy_row_id} | {plan_id} | {test_id} | {filesystem_flavor} | {operation} | {risk} | {outcome} | {lane} | {decision} | {capability} | {artifact} | {scope} | `{repro}` |".format(
+        "| {policy_row_id} | {plan_id} | {test_id} | {filesystem_flavor} | {operation} | {risk} | {outcome} | {lane} | {summary} | {decision} | {capability} | {artifact} | {scope} | `{repro}` |".format(
             policy_row_id=test.get("policy_row_id") or "",
             plan_id=plan.get("plan_id") or "",
             test_id=test["test_id"],
@@ -497,6 +515,7 @@ for test in tests:
             risk=test.get("user_risk_category") or "",
             outcome=test.get("expected_outcome") or "",
             lane=plan.get("execution_lane") or "",
+            summary=plan.get("command_summary") or "",
             decision=test.get("selection_decision") or "",
             capability=capability,
             artifact=test.get("tracker_id") or "",

@@ -33,8 +33,11 @@
     "command_plan": {
       "plan_id": "xfstests-plan-generic-001",
       "execution_lane": "dry_run_only",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/generic-001.img",
       "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-001",
       "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-001",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-001.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-001.scratch.img",
       "image_hash": "sha256:plan-fixture-generic-001",
       "helper_binaries": [
         "xfstests/check",
@@ -53,7 +56,8 @@
         "generic/001"
       ],
       "destructive": false,
-      "expected_plan_outcome": "dry_run_only"
+      "expected_plan_outcome": "dry_run_only",
+      "command_summary": "dry-run generic/001 xfstests command under temp-root FUSE placeholders"
     }
   },
   {
@@ -89,8 +93,11 @@
     "command_plan": {
       "plan_id": "xfstests-plan-generic-003",
       "execution_lane": "host_skip",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/generic-003.img",
       "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-003",
       "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-003",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-003.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-003.scratch.img",
       "image_hash": "sha256:plan-fixture-generic-003",
       "helper_binaries": [
         "xfstests/check",
@@ -110,7 +117,8 @@
         "generic/003"
       ],
       "destructive": false,
-      "expected_plan_outcome": "host_skip"
+      "expected_plan_outcome": "host_skip",
+      "command_summary": "host-skip generic/003 xfstests command until readonly remount prerequisites exist"
     }
   },
   {
@@ -148,8 +156,11 @@
     "command_plan": {
       "plan_id": "xfstests-plan-generic-013",
       "execution_lane": "dry_run_only",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/generic-013.img",
       "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-013",
       "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-013",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-013.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-013.scratch.img",
       "image_hash": "sha256:plan-fixture-generic-013",
       "helper_binaries": [
         "xfstests/check",
@@ -168,7 +179,8 @@
         "generic/013"
       ],
       "destructive": false,
-      "expected_plan_outcome": "dry_run_only"
+      "expected_plan_outcome": "dry_run_only",
+      "command_summary": "dry-run generic/013 fsstress command under temp-root FUSE placeholders"
     }
   },
   {
@@ -204,8 +216,11 @@
     "command_plan": {
       "plan_id": "xfstests-plan-generic-030",
       "execution_lane": "dry_run_only",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/generic-030.img",
       "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-030",
       "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-030",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-030.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-030.scratch.img",
       "image_hash": "sha256:plan-fixture-generic-030",
       "helper_binaries": [
         "xfstests/check",
@@ -225,7 +240,8 @@
         "generic/030"
       ],
       "destructive": false,
-      "expected_plan_outcome": "product_failure"
+      "expected_plan_outcome": "product_failure",
+      "command_summary": "dry-run generic/030 mmap consistency command with product-failure classification"
     }
   },
   {
@@ -262,8 +278,11 @@
     "command_plan": {
       "plan_id": "xfstests-plan-generic-035",
       "execution_lane": "dry_run_only",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/generic-035.img",
       "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-035",
       "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-035",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-035.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-035.scratch.img",
       "image_hash": "sha256:plan-fixture-generic-035",
       "helper_binaries": [
         "xfstests/check",
@@ -282,7 +301,8 @@
         "generic/035"
       ],
       "destructive": false,
-      "expected_plan_outcome": "dry_run_only"
+      "expected_plan_outcome": "dry_run_only",
+      "command_summary": "dry-run generic/035 rename overwrite command under temp-root placeholders"
     }
   },
   {
@@ -319,8 +339,11 @@
     "command_plan": {
       "plan_id": "xfstests-plan-generic-062",
       "execution_lane": "host_skip",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/generic-062.img",
       "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-062",
       "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-062",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-062.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-062.scratch.img",
       "image_hash": "sha256:plan-fixture-generic-062",
       "helper_binaries": [
         "xfstests/check",
@@ -340,7 +363,8 @@
         "generic/062"
       ],
       "destructive": false,
-      "expected_plan_outcome": "host_skip"
+      "expected_plan_outcome": "host_skip",
+      "command_summary": "host-skip generic/062 xattr command until attr helpers are available"
     }
   },
   {
@@ -375,8 +399,11 @@
     "command_plan": {
       "plan_id": "xfstests-plan-generic-068",
       "execution_lane": "unsupported_by_scope",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/generic-068.img",
       "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-068",
       "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-068",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-068.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-068.scratch.img",
       "image_hash": "sha256:plan-fixture-generic-068",
       "helper_binaries": [
         "xfstests/check",
@@ -396,7 +423,8 @@
         "generic/068"
       ],
       "destructive": false,
-      "expected_plan_outcome": "unsupported_by_scope"
+      "expected_plan_outcome": "unsupported_by_scope",
+      "command_summary": "scope-skip generic/068 freeze command before any host mutation"
     }
   },
   {
@@ -432,8 +460,11 @@
     "command_plan": {
       "plan_id": "xfstests-plan-generic-112",
       "execution_lane": "host_skip",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/generic-112.img",
       "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-112",
       "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-112",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-112.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-112.scratch.img",
       "image_hash": "sha256:plan-fixture-generic-112",
       "helper_binaries": [
         "xfstests/check",
@@ -453,7 +484,8 @@
         "generic/112"
       ],
       "destructive": false,
-      "expected_plan_outcome": "host_skip"
+      "expected_plan_outcome": "host_skip",
+      "command_summary": "host-skip generic/112 aio/preallocation command until helpers are available"
     }
   },
   {
@@ -488,8 +520,11 @@
     "command_plan": {
       "plan_id": "xfstests-plan-generic-231",
       "execution_lane": "unsupported_by_scope",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/generic-231.img",
       "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-231",
       "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-231",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-231.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-231.scratch.img",
       "image_hash": "sha256:plan-fixture-generic-231",
       "helper_binaries": [
         "xfstests/check",
@@ -509,7 +544,8 @@
         "generic/231"
       ],
       "destructive": false,
-      "expected_plan_outcome": "unsupported_by_scope"
+      "expected_plan_outcome": "unsupported_by_scope",
+      "command_summary": "scope-skip generic/231 quota command before any host mutation"
     }
   },
   {
@@ -547,8 +583,11 @@
     "command_plan": {
       "plan_id": "xfstests-plan-generic-321",
       "execution_lane": "host_skip",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/generic-321.img",
       "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-321",
       "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-321",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-321.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-321.scratch.img",
       "image_hash": "sha256:plan-fixture-generic-321",
       "helper_binaries": [
         "xfstests/check",
@@ -568,7 +607,8 @@
         "generic/321"
       ],
       "destructive": false,
-      "expected_plan_outcome": "host_skip"
+      "expected_plan_outcome": "host_skip",
+      "command_summary": "host-skip generic/321 fsyncdir command until helpers are available"
     }
   },
   {
@@ -604,8 +644,11 @@
     "command_plan": {
       "plan_id": "xfstests-plan-generic-524",
       "execution_lane": "unsupported_by_scope",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/generic-524.img",
       "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-524",
       "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-524",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-524.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/generic-524.scratch.img",
       "image_hash": "sha256:plan-fixture-generic-524",
       "helper_binaries": [
         "xfstests/check",
@@ -625,7 +668,8 @@
         "generic/524"
       ],
       "destructive": false,
-      "expected_plan_outcome": "unsupported_by_scope"
+      "expected_plan_outcome": "unsupported_by_scope",
+      "command_summary": "scope-skip generic/524 writeback-cache command before any host mutation"
     }
   },
   {
@@ -662,8 +706,11 @@
     "command_plan": {
       "plan_id": "xfstests-plan-ext4-001",
       "execution_lane": "host_skip",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/ext4-001.img",
       "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/ext4-001",
       "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/ext4-001",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/ext4-001.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/ext4-001.scratch.img",
       "image_hash": "sha256:plan-fixture-ext4-001",
       "helper_binaries": [
         "xfstests/check",
@@ -683,7 +730,8 @@
         "ext4/001"
       ],
       "destructive": false,
-      "expected_plan_outcome": "host_skip"
+      "expected_plan_outcome": "host_skip",
+      "command_summary": "host-skip ext4/001 ioctl command until ext4 xfstests helpers are available"
     }
   },
   {
@@ -719,8 +767,11 @@
     "command_plan": {
       "plan_id": "xfstests-plan-ext4-003",
       "execution_lane": "host_skip",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/ext4-003.img",
       "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/ext4-003",
       "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/ext4-003",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/ext4-003.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/ext4-003.scratch.img",
       "image_hash": "sha256:plan-fixture-ext4-003",
       "helper_binaries": [
         "xfstests/check",
@@ -741,7 +792,8 @@
         "ext4/003"
       ],
       "destructive": false,
-      "expected_plan_outcome": "host_skip"
+      "expected_plan_outcome": "host_skip",
+      "command_summary": "host-skip ext4/003 ioctl command until ext4 xfstests helpers are available"
     }
   },
   {
@@ -777,8 +829,11 @@
     "command_plan": {
       "plan_id": "xfstests-plan-ext4-005",
       "execution_lane": "unsupported_by_scope",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/ext4-005.img",
       "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/ext4-005",
       "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/ext4-005",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/ext4-005.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/ext4-005.scratch.img",
       "image_hash": "sha256:plan-fixture-ext4-005",
       "helper_binaries": [
         "xfstests/check",
@@ -798,7 +853,8 @@
         "ext4/005"
       ],
       "destructive": false,
-      "expected_plan_outcome": "unsupported_by_scope"
+      "expected_plan_outcome": "unsupported_by_scope",
+      "command_summary": "scope-skip ext4/005 extent-flag conversion command before host mutation"
     }
   },
   {
@@ -834,8 +890,11 @@
     "command_plan": {
       "plan_id": "xfstests-plan-ext4-013",
       "execution_lane": "unsupported_by_scope",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/ext4-013.img",
       "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/ext4-013",
       "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/ext4-013",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/ext4-013.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/ext4-013.scratch.img",
       "image_hash": "sha256:plan-fixture-ext4-013",
       "helper_binaries": [
         "xfstests/check",
@@ -856,7 +915,8 @@
         "ext4/013"
       ],
       "destructive": false,
-      "expected_plan_outcome": "unsupported_by_scope"
+      "expected_plan_outcome": "unsupported_by_scope",
+      "command_summary": "scope-skip ext4/013 module-level command before host mutation"
     }
   }
 ]
