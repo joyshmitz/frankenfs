@@ -47,6 +47,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 # Run release-gate policy evaluator smoke
 ./scripts/e2e/ffs_release_gate_e2e.sh
 
+# Run invariant-oracle replay/minimization smoke
+./scripts/e2e/ffs_invariant_oracle_e2e.sh
+
 # Run performance baseline manifest dry-run validation
 ./scripts/e2e/ffs_performance_manifest_e2e.sh
 
@@ -685,6 +688,15 @@ The release gate suite exercises:
 4. Fail-closed validation for missing evidence, stale evidence, and threshold failures
 5. Required log fields for downgrade findings, remediation ids, docs wording ids, and reproduction commands
 6. Unit coverage for feature-state transitions, kill switches, capability skips, explicit deferrals, and hand-edit-resistant wording
+
+The invariant oracle suite exercises:
+
+1. `validate-invariant-oracle` CLI wiring and module export
+2. Replayable trace schema validation for a create/write/fsync operation sequence
+3. Deterministic replay ids, artifact references, and reproduction commands in the JSON report
+4. Expected invariant failure reporting with failure class, violated invariant, operation index, expected/observed state, and minimized trace prefix
+5. Fail-closed validation for unexpected production/model mismatches
+6. Unit coverage for schema parsing, deterministic replay, false-positive guards, expected failures, minimization, classification, and Markdown rendering
 
 The performance manifest suite exercises:
 

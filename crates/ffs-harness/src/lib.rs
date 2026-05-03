@@ -11,6 +11,7 @@ pub mod e2e;
 pub mod error_taxonomy;
 pub mod fuzz_dashboard;
 pub mod health_consistency;
+pub mod invariant_oracle;
 pub mod log_contract;
 pub mod metrics;
 pub mod mounted_recovery_matrix;

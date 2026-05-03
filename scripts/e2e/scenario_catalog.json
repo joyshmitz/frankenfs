@@ -820,6 +820,53 @@
       ]
     },
     {
+      "suite_id": "ffs_invariant_oracle",
+      "script": "scripts/e2e/ffs_invariant_oracle_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "invariant_oracle_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"invariant_oracle_wired\" \"PASS\""
+        },
+        {
+          "id": "invariant_oracle_real_write_sequence",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"invariant_oracle_real_write_sequence\" \"PASS\""
+        },
+        {
+          "id": "invariant_oracle_report_contract",
+          "category": "edge",
+          "status": "active",
+          "evidence": "scenario_result \"invariant_oracle_report_contract\" \"PASS\""
+        },
+        {
+          "id": "invariant_oracle_expected_failure_minimized",
+          "category": "edge",
+          "status": "active",
+          "evidence": "scenario_result \"invariant_oracle_expected_failure_minimized\" \"PASS\""
+        },
+        {
+          "id": "invariant_oracle_unexpected_failure_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"invariant_oracle_unexpected_failure_rejected\" \"PASS\""
+        },
+        {
+          "id": "invariant_oracle_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"invariant_oracle_unit_tests\" \"PASS\""
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_proof_overhead_budget",
       "script": "scripts/e2e/ffs_proof_overhead_budget_e2e.sh",
       "required_categories": [
