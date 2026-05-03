@@ -996,7 +996,7 @@ fn validate_confidence_input_values(
     errors: &mut Vec<String>,
 ) {
     if inputs.required_symbols == 0 {
-        errors.push(format!("{owner} required_symbols must be positive",));
+        errors.push(format!("{owner} required_symbols must be positive"));
     }
     validate_ratio(
         "confidence_inputs.ledger_integrity_score",

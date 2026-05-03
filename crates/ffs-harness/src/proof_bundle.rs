@@ -18,7 +18,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const PROOF_BUNDLE_SCHEMA_VERSION: u32 = 1;
-pub const REQUIRED_PROOF_BUNDLE_LANES: [&str; 9] = [
+pub const REQUIRED_PROOF_BUNDLE_LANES: [&str; 11] = [
     "conformance",
     "xfstests",
     "fuse",
@@ -27,6 +27,8 @@ pub const REQUIRED_PROOF_BUNDLE_LANES: [&str; 9] = [
     "crash_replay",
     "performance",
     "writeback_cache",
+    "scrub_repair_status",
+    "known_deferrals",
     "release_gates",
 ];
 
@@ -1221,9 +1223,32 @@ mod tests {
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.totals.lanes, REQUIRED_PROOF_BUNDLE_LANES.len());
         assert_eq!(report.totals.pass, 3);
-        assert_eq!(report.totals.fail, 2);
-        assert_eq!(report.totals.skip, 2);
+        assert_eq!(report.totals.fail, 3);
+        assert_eq!(report.totals.skip, 3);
         assert_eq!(report.totals.error, 2);
+    }
+
+    #[test]
+    fn required_lanes_cover_operator_readiness_sections() {
+        let lanes = proof_bundle_required_lanes();
+        for required in [
+            "conformance",
+            "xfstests",
+            "fuse",
+            "differential_oracle",
+            "repair_lab",
+            "crash_replay",
+            "performance",
+            "writeback_cache",
+            "scrub_repair_status",
+            "known_deferrals",
+            "release_gates",
+        ] {
+            assert!(
+                lanes.iter().any(|lane| lane == required),
+                "missing required proof-bundle lane {required}"
+            );
+        }
     }
 
     #[test]
@@ -1232,13 +1257,13 @@ mod tests {
         sample
             .manifest
             .lanes
-            .retain(|lane| lane.lane_id != "xfstests");
+            .retain(|lane| lane.lane_id != "known_deferrals");
         let report = validate_sample(&sample);
         assert!(!report.valid);
         assert!(
             report
                 .missing_required_lanes
-                .contains(&"xfstests".to_owned())
+                .contains(&"known_deferrals".to_owned())
         );
     }
 
@@ -1455,8 +1480,10 @@ mod tests {
         let sample = sample_bundle();
         let report = validate_sample(&sample);
         let summary = render_proof_bundle_markdown(&report);
-        assert!(summary.contains("Totals: pass=3 fail=2 skip=2 error=2"));
+        assert!(summary.contains("Totals: pass=3 fail=3 skip=3 error=2"));
         assert!(summary.contains("[logs/conformance.log](logs/conformance.log)"));
+        assert!(summary.contains("scrub_repair_status"));
+        assert!(summary.contains("known_deferrals"));
         assert!(summary.contains("writeback_cache"));
         assert!(summary.contains("Artifact hash chain"));
     }

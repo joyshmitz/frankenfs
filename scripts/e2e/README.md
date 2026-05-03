@@ -540,7 +540,8 @@ capability, required lanes, raw logs, summaries, gate inputs, artifact paths,
 SHA-256 hashes, scenario ids, redaction policy, and optional artifact
 hash-chain integrity fields. The required lanes are `conformance`, `xfstests`,
 `fuse`, `differential_oracle`, `repair_lab`, `crash_replay`, `performance`,
-`writeback_cache`, and `release_gates`.
+`writeback_cache`, `scrub_repair_status`, `known_deferrals`, and
+`release_gates`.
 
 Validate a bundle with:
 
@@ -848,7 +849,8 @@ The proof bundle suite exercises:
 3. JSON report and Markdown summary generation with pass/fail/skip/error totals
 4. Raw log, summary, gate input, and artifact link preservation for offline inspection
 5. Fail-closed validation for artifact hash drift, stale git SHA, and missing artifact links
-6. Redaction policy unit coverage that preserves reproduction commands and artifact/scenario fields
+6. Explicit scrub/repair status and known-deferral lanes so readiness summaries preserve uncomfortable facts
+7. Redaction policy unit coverage that preserves reproduction commands and artifact/scenario fields
 
 The release gate suite exercises:
 

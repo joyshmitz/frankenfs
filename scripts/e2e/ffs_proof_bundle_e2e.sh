@@ -88,6 +88,8 @@ lanes = [
     "crash_replay",
     "performance",
     "writeback_cache",
+    "scrub_repair_status",
+    "known_deferrals",
     "release_gates",
 ]
 statuses = ["pass", "fail", "skip", "error"]
@@ -225,6 +227,8 @@ required_lanes = {
     "crash_replay",
     "performance",
     "writeback_cache",
+    "scrub_repair_status",
+    "known_deferrals",
     "release_gates",
 }
 observed_lanes = {lane["lane_id"] for lane in report["lanes"]}

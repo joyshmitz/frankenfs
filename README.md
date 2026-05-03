@@ -1278,6 +1278,14 @@ cargo run -p ffs-harness -- check-fixtures
 # Generate feature parity report
 cargo run -p ffs-harness -- parity
 
+# Validate an operator proof bundle and render the inspection summary
+cargo run -p ffs-harness -- validate-proof-bundle \
+  --bundle artifacts/proof/bundle/manifest.json \
+  --current-git-sha "$(git rev-parse HEAD)" \
+  --max-age-days 14 \
+  --out artifacts/proof/bundle/report.json \
+  --summary-out artifacts/proof/bundle/summary.md
+
 # Run benchmarks
 cargo bench -p ffs-harness
 ```
@@ -1398,6 +1406,37 @@ the suite artifact directory:
 | `soak_canary_campaign_report.json` | endurance and canary gates | Campaign profile, workload IDs, seeds, heartbeat summaries, resource caps, pass/fail/skip/error/flake classification, and reproduction links |
 | `repair_writeback_serialization_report.json` and `repair_writeback_route_artifact.json` | `repair.rw.writeback` gate | State-machine, lease, MVCC epoch, fsync/fsyncdir, stale-symbol, cancellation, failure, route, stale-snapshot rejection, and writeback-cache-disabled proof for read-write mounted repair |
 | `operator_recovery_drill_report.json` | automatic repair operator workflow | Detection-only, dry-run, verified opt-in mutation, unsafe-refusal, rollback, verification, cleanup, and proof-bundle lane evidence |
+
+### Operator Proof Bundles
+
+The portable readiness artifact is a proof bundle rooted at
+`artifacts/proof/bundle/manifest.json`. To generate a local sample bundle and
+validate the offline inspection path, run:
+
+```bash
+./scripts/e2e/ffs_proof_bundle_e2e.sh
+```
+
+To inspect a real bundle without depending on ambient build state, run:
+
+```bash
+cargo run -p ffs-harness -- validate-proof-bundle \
+  --bundle artifacts/proof/bundle/manifest.json \
+  --current-git-sha "$(git rev-parse HEAD)" \
+  --max-age-days 14 \
+  --out artifacts/proof/bundle/report.json \
+  --summary-out artifacts/proof/bundle/summary.md
+```
+
+The JSON report and Markdown summary preserve the bundle id, git SHA,
+toolchain, kernel, mount capability, raw logs, gate inputs, artifact hashes,
+redaction policy, and reproduction command. Lane outcomes mean: `pass` evidence
+met the lane contract, `fail` is product or policy failure evidence, `skip` is
+an explicit capability/scope deferral, and `error` is harness or evidence
+production failure. Required lanes are `conformance`, `xfstests`, `fuse`,
+`differential_oracle`, `repair_lab`, `crash_replay`, `performance`,
+`writeback_cache`, `scrub_repair_status`, `known_deferrals`, and
+`release_gates`.
 
 ### Readiness Gates
 

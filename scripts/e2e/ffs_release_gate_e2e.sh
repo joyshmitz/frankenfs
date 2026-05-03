@@ -125,6 +125,8 @@ lanes = [
     "crash_replay",
     "performance",
     "writeback_cache",
+    "scrub_repair_status",
+    "known_deferrals",
     "release_gates",
 ]
 

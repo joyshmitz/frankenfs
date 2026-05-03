@@ -1010,30 +1010,22 @@ mod tests {
     use super::*;
     use crate::proof_bundle::{
         ProofBundleBrokenLink, ProofBundleLaneReport, ProofBundleTotals, StaleProofBundleGitSha,
+        proof_bundle_required_lanes,
     };
 
     fn passing_proof() -> ProofBundleValidationReport {
-        let lanes = [
-            "conformance",
-            "xfstests",
-            "fuse",
-            "differential_oracle",
-            "repair_lab",
-            "crash_replay",
-            "performance",
-            "writeback_cache",
-            "release_gates",
-        ]
-        .into_iter()
-        .map(|lane| ProofBundleLaneReport {
-            lane_id: lane.to_owned(),
-            status: ProofBundleOutcome::Pass,
-            raw_log_path: format!("logs/{lane}.log"),
-            summary_path: format!("summaries/{lane}.md"),
-            scenario_count: 1,
-            artifact_count: 1,
-        })
-        .collect();
+        let lanes = proof_bundle_required_lanes()
+            .into_iter()
+            .map(|lane| ProofBundleLaneReport {
+                lane_id: lane.clone(),
+                status: ProofBundleOutcome::Pass,
+                raw_log_path: format!("logs/{lane}.log"),
+                summary_path: format!("summaries/{lane}.md"),
+                scenario_count: 1,
+                artifact_count: 1,
+            })
+            .collect::<Vec<_>>();
+        let lane_count = lanes.len();
 
         ProofBundleValidationReport {
             schema_version: 1,
@@ -1041,13 +1033,13 @@ mod tests {
             manifest_path: "manifest.json".to_owned(),
             valid: true,
             totals: ProofBundleTotals {
-                pass: 9,
+                pass: lane_count,
                 fail: 0,
                 skip: 0,
                 error: 0,
-                lanes: 9,
-                scenarios: 9,
-                artifacts: 9,
+                lanes: lane_count,
+                scenarios: lane_count,
+                artifacts: lane_count,
             },
             missing_required_lanes: Vec::new(),
             duplicate_lane_ids: Vec::new(),

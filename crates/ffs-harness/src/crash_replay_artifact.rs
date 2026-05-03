@@ -19,8 +19,12 @@ pub const DEFAULT_CRASH_REPLAY_ARTIFACT_PATH: &str =
 const DEFAULT_CRASH_REPLAY_ARTIFACT_JSON: &str =
     include_str!("../../../tests/crash-replay-artifact/crash_replay_artifact.json");
 
-const ALLOWED_LANE_TYPES: [&str; 4] =
-    ["core_labruntime", "mounted_e2e", "fixture_dry_run", "host_skip"];
+const ALLOWED_LANE_TYPES: [&str; 4] = [
+    "core_labruntime",
+    "mounted_e2e",
+    "fixture_dry_run",
+    "host_skip",
+];
 
 const ALLOWED_CRASH_TAXONOMY: [&str; 8] = [
     "pre_commit_crash",
@@ -136,9 +140,7 @@ pub fn validate_default_crash_replay_artifact() -> Result<CrashReplayArtifactRep
 }
 
 #[must_use]
-pub fn validate_crash_replay_artifact(
-    artifact: &CrashReplayArtifact,
-) -> CrashReplayArtifactReport {
+pub fn validate_crash_replay_artifact(artifact: &CrashReplayArtifact) -> CrashReplayArtifactReport {
     let mut errors = Vec::new();
     validate_artifact_top_level(artifact, &mut errors);
     validate_artifact_vocabulary(artifact, &mut errors);
@@ -159,10 +161,7 @@ pub fn validate_crash_replay_artifact(
     }
 }
 
-fn validate_artifact_top_level(
-    artifact: &CrashReplayArtifact,
-    errors: &mut Vec<String>,
-) {
+fn validate_artifact_top_level(artifact: &CrashReplayArtifact, errors: &mut Vec<String>) {
     if artifact.schema_version != CRASH_REPLAY_ARTIFACT_SCHEMA_VERSION {
         errors.push(format!(
             "crash replay artifact schema_version must be {CRASH_REPLAY_ARTIFACT_SCHEMA_VERSION}, got {}",
@@ -186,10 +185,7 @@ fn validate_artifact_top_level(
     }
 }
 
-fn validate_artifact_vocabulary(
-    artifact: &CrashReplayArtifact,
-    errors: &mut Vec<String>,
-) {
+fn validate_artifact_vocabulary(artifact: &CrashReplayArtifact, errors: &mut Vec<String>) {
     if !ALLOWED_LANE_TYPES.contains(&artifact.lane_type.as_str()) {
         errors.push(format!(
             "crash replay artifact `{}` has unsupported lane_type `{}`",
@@ -216,10 +212,7 @@ fn validate_artifact_vocabulary(
     }
 }
 
-fn validate_artifact_required_text(
-    artifact: &CrashReplayArtifact,
-    errors: &mut Vec<String>,
-) {
+fn validate_artifact_required_text(artifact: &CrashReplayArtifact, errors: &mut Vec<String>) {
     let required = [
         ("raw_log_path", &artifact.raw_log_path),
         ("reproduction_command", &artifact.reproduction_command),
@@ -234,10 +227,7 @@ fn validate_artifact_required_text(
     }
 }
 
-fn validate_artifact_image_hashes(
-    artifact: &CrashReplayArtifact,
-    errors: &mut Vec<String>,
-) {
+fn validate_artifact_image_hashes(artifact: &CrashReplayArtifact, errors: &mut Vec<String>) {
     if !is_valid_sha256(&artifact.pre_crash_image_hash) {
         errors.push(format!(
             "crash replay artifact `{}` pre_crash_image_hash must be sha256:<64-hex>",
@@ -255,10 +245,7 @@ fn validate_artifact_image_hashes(
     }
 }
 
-fn validate_artifact_operation_trace(
-    artifact: &CrashReplayArtifact,
-    errors: &mut Vec<String>,
-) {
+fn validate_artifact_operation_trace(artifact: &CrashReplayArtifact, errors: &mut Vec<String>) {
     if artifact.lane_type != "host_skip"
         && artifact.oracle_verdict != "unsupported_host_skip"
         && artifact.operation_trace.is_empty()
@@ -299,11 +286,10 @@ fn validate_artifact_operation_trace(
     }
 }
 
-fn validate_artifact_follow_up(
-    artifact: &CrashReplayArtifact,
-    errors: &mut Vec<String>,
-) {
-    if artifact.oracle_verdict == "exact_match" || artifact.oracle_verdict == "allowed_repaired_divergence" {
+fn validate_artifact_follow_up(artifact: &CrashReplayArtifact, errors: &mut Vec<String>) {
+    if artifact.oracle_verdict == "exact_match"
+        || artifact.oracle_verdict == "allowed_repaired_divergence"
+    {
         if !artifact.follow_up_bead.is_empty() {
             errors.push(format!(
                 "crash replay artifact `{}` passing verdict must leave follow_up_bead empty",
@@ -321,7 +307,8 @@ fn validate_artifact_follow_up(
         }
         return;
     }
-    if artifact.follow_up_bead.trim().is_empty() && artifact.follow_up_skip_reason.trim().is_empty() {
+    if artifact.follow_up_bead.trim().is_empty() && artifact.follow_up_skip_reason.trim().is_empty()
+    {
         errors.push(format!(
             "crash replay artifact `{}` failing verdict must declare follow_up_bead or follow_up_skip_reason",
             artifact.artifact_id
@@ -396,16 +383,10 @@ pub fn classify_survivor_divergence(
         };
     }
 
-    let expected_absent: BTreeSet<&str> = expected
-        .absent_paths
-        .iter()
-        .map(String::as_str)
-        .collect();
-    let observed_absent: BTreeSet<&str> = observed
-        .absent_paths
-        .iter()
-        .map(String::as_str)
-        .collect();
+    let expected_absent: BTreeSet<&str> =
+        expected.absent_paths.iter().map(String::as_str).collect();
+    let observed_absent: BTreeSet<&str> =
+        observed.absent_paths.iter().map(String::as_str).collect();
     let missing_absent: Vec<String> = expected_absent
         .difference(&observed_absent)
         .map(|path| (*path).to_owned())
@@ -470,7 +451,12 @@ mod tests {
         let mut artifact = fixture_artifact();
         artifact.schedule_id = String::new();
         let report = validate_crash_replay_artifact(&artifact);
-        assert!(report.errors.iter().any(|err| err.contains("missing schedule_id")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing schedule_id"))
+        );
     }
 
     #[test]
@@ -478,7 +464,12 @@ mod tests {
         let mut artifact = fixture_artifact();
         artifact.seed = 0;
         let report = validate_crash_replay_artifact(&artifact);
-        assert!(report.errors.iter().any(|err| err.contains("seed must be positive")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("seed must be positive"))
+        );
     }
 
     #[test]
@@ -486,7 +477,12 @@ mod tests {
         let mut artifact = fixture_artifact();
         artifact.lane_type = "speculative_simulation".to_owned();
         let report = validate_crash_replay_artifact(&artifact);
-        assert!(report.errors.iter().any(|err| err.contains("unsupported lane_type")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported lane_type"))
+        );
     }
 
     #[test]
@@ -494,7 +490,12 @@ mod tests {
         let mut artifact = fixture_artifact();
         artifact.crash_taxonomy = "vibes_taxonomy".to_owned();
         let report = validate_crash_replay_artifact(&artifact);
-        assert!(report.errors.iter().any(|err| err.contains("unsupported crash_taxonomy")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported crash_taxonomy"))
+        );
     }
 
     #[test]
@@ -502,7 +503,12 @@ mod tests {
         let mut artifact = fixture_artifact();
         artifact.oracle_verdict = "kinda_passed".to_owned();
         let report = validate_crash_replay_artifact(&artifact);
-        assert!(report.errors.iter().any(|err| err.contains("unsupported oracle_verdict")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported oracle_verdict"))
+        );
     }
 
     #[test]
@@ -510,7 +516,12 @@ mod tests {
         let mut artifact = fixture_artifact();
         artifact.minimization_status = "guesswork".to_owned();
         let report = validate_crash_replay_artifact(&artifact);
-        assert!(report.errors.iter().any(|err| err.contains("unsupported minimization_status")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported minimization_status"))
+        );
     }
 
     #[test]
@@ -518,7 +529,12 @@ mod tests {
         let mut artifact = fixture_artifact();
         artifact.pre_crash_image_hash = "md5:not-supported".to_owned();
         let report = validate_crash_replay_artifact(&artifact);
-        assert!(report.errors.iter().any(|err| err.contains("pre_crash_image_hash must be sha256")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("pre_crash_image_hash must be sha256"))
+        );
     }
 
     #[test]
@@ -526,7 +542,12 @@ mod tests {
         let mut artifact = fixture_artifact();
         artifact.post_replay_image_hash = String::new();
         let report = validate_crash_replay_artifact(&artifact);
-        assert!(report.errors.iter().any(|err| err.contains("post_replay_image_hash must be sha256")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("post_replay_image_hash must be sha256"))
+        );
     }
 
     #[test]
@@ -550,7 +571,12 @@ mod tests {
         let mut artifact = fixture_artifact();
         artifact.operation_trace.clear();
         let report = validate_crash_replay_artifact(&artifact);
-        assert!(report.errors.iter().any(|err| err.contains("must declare operation_trace")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must declare operation_trace"))
+        );
     }
 
     #[test]
