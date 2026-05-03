@@ -22,6 +22,10 @@ use ffs_harness::{
         OperationalReadinessReportConfig, build_operational_readiness_report,
         render_operational_readiness_markdown,
     },
+    proof_overhead_budget::{
+        evaluate_proof_overhead_budget, fail_on_proof_overhead_budget_errors,
+        load_observed_proof_metrics, load_proof_overhead_budget_config,
+    },
     validate_btrfs_fixture, validate_ext4_fixture,
     verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
     xfstests::{
@@ -91,6 +95,7 @@ fn run() -> Result<()> {
         Some("validate-ambition-evidence-matrix") => {
             validate_ambition_evidence_matrix_cmd(&args[1..])
         }
+        Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
         Some("validate-mounted-write-matrix") => validate_mounted_write_matrix_cmd(&args[1..]),
         Some("--help" | "-h" | "help") | None => {
@@ -183,6 +188,66 @@ fn parse_readiness_report_format(raw: &str) -> Result<ReadinessReportFormat> {
         "markdown" | "md" => Ok(ReadinessReportFormat::Markdown),
         other => bail!("invalid --format value: {other}"),
     }
+}
+
+fn validate_proof_overhead_budget_cmd(args: &[String]) -> Result<()> {
+    let mut budget_path: Option<String> = None;
+    let mut metrics_path: Option<String> = None;
+    let mut out_path: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--budget" => {
+                i += 1;
+                budget_path = Some(args.get(i).context("--budget requires a path")?.to_owned());
+            }
+            "--metrics" => {
+                i += 1;
+                metrics_path = Some(args.get(i).context("--metrics requires a path")?.to_owned());
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--help" | "-h" => {
+                print_proof_overhead_budget_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-proof-overhead-budget argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let budget = load_proof_overhead_budget_config(Path::new(
+        budget_path.as_deref().context("--budget is required")?,
+    ))?;
+    let metrics = load_observed_proof_metrics(Path::new(
+        metrics_path.as_deref().context("--metrics is required")?,
+    ))?;
+    let report = evaluate_proof_overhead_budget(&budget, &metrics);
+    let json = serde_json::to_string_pretty(&report)?;
+
+    if let Some(path) = out_path {
+        let path = Path::new(&path);
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(path, format!("{json}\n"))
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        println!(
+            "proof overhead budget report written: {} verdict={}",
+            path.display(),
+            report.release_gate_verdict.label()
+        );
+    } else {
+        println!("{json}");
+    }
+
+    fail_on_proof_overhead_budget_errors(&report)
 }
 
 fn xfstests_report(args: &[String]) -> Result<()> {
@@ -855,6 +920,9 @@ fn print_usage() {
         "  ffs-harness validate-deferred-parity-audit [--issues FILE] [--report FILE] [--doc FILE] [--out FILE]"
     );
     println!("  ffs-harness validate-ambition-evidence-matrix [--issues FILE] [--out FILE]");
+    println!(
+        "  ffs-harness validate-proof-overhead-budget --budget FILE --metrics FILE [--out FILE]"
+    );
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
     println!();
     println!("FIXTURE GENERATION:");
@@ -897,6 +965,9 @@ fn print_usage() {
     );
     println!(
         "  ffs-harness validate-ambition-evidence-matrix --out artifacts/ambition/evidence_matrix.json"
+    );
+    println!(
+        "  ffs-harness validate-proof-overhead-budget --budget artifacts/proof/budget.json --metrics artifacts/proof/metrics.json --out artifacts/proof/budget_report.json"
     );
     println!(
         "  ffs-harness validate-mounted-write-matrix --out artifacts/e2e/mounted_write_matrix.json"
@@ -950,6 +1021,15 @@ fn print_ambition_evidence_matrix_usage() {
     println!("Options:");
     println!("  --issues FILE                      Read bead JSONL from FILE");
     println!("  --out FILE                         Write JSON report to FILE");
+}
+
+fn print_proof_overhead_budget_usage() {
+    println!("Usage: ffs-harness validate-proof-overhead-budget [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --budget FILE                      Read proof overhead budget schema JSON");
+    println!("  --metrics FILE                     Read observed proof workflow metrics JSON");
+    println!("  --out FILE                         Write JSON release-gate report to FILE");
 }
 
 fn print_mounted_write_matrix_usage() {

@@ -19,6 +19,7 @@ pub mod oq_decision_matrix;
 pub mod perf_comparison;
 pub mod perf_regression;
 pub mod perf_triage;
+pub mod proof_overhead_budget;
 pub mod tabletop_drill;
 pub mod verification_runner;
 pub mod xfstests;

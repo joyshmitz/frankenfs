@@ -364,6 +364,46 @@
           "evidence": "SCENARIO_RESULT|scenario_id=perf_comparison_envelope_integration|outcome=PASS"
         }
       ]
+    },
+    {
+      "suite_id": "ffs_proof_overhead_budget",
+      "script": "scripts/e2e/ffs_proof_overhead_budget_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "proof_budget_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"proof_budget_cli_wired\" \"PASS\""
+        },
+        {
+          "id": "proof_budget_metrics_captured",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"proof_budget_metrics_captured\" \"PASS\""
+        },
+        {
+          "id": "proof_budget_release_gate_evaluates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"proof_budget_release_gate_evaluates\" \"PASS\""
+        },
+        {
+          "id": "proof_budget_log_contract",
+          "category": "edge",
+          "status": "active",
+          "evidence": "scenario_result \"proof_budget_log_contract\" \"PASS\""
+        },
+        {
+          "id": "proof_budget_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"proof_budget_unit_tests\" \"PASS\""
+        }
+      ]
     }
   ],
   "gate_minimums": [
