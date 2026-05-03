@@ -35,6 +35,7 @@ pub mod remediation_catalog;
 pub mod repair_confidence_lab;
 pub mod repair_corpus;
 pub mod repair_writeback_serialization;
+pub mod rw_background_repair_gate;
 pub mod soak_canary_campaign;
 pub mod support_state_accounting;
 pub mod tabletop_drill;
