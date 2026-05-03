@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "manifest_id": "bd-p2j3e.6-scrub-repair-scheduler-v1",
+  "generated_at": "2026-05-03T22:58:00Z",
+  "policy": {
+    "max_foreground_p99_regression_pct": 12.0,
+    "max_repair_backlog_age_secs": 900,
+    "max_stale_symbol_age_secs": 600,
+    "min_fairness_index": 0.7,
+    "default_release_claim_state": "experimental",
+    "expected_loss_weights": {
+      "repair_freshness_weight": 20.0,
+      "foreground_latency_weight": 1.0,
+      "stale_symbol_weight": 30.0,
+      "fairness_weight": 15.0
+    }
+  },
+  "scenarios": [
+    {
+      "scenario_id": "scrub_repair_overlap_256gb_authoritative_fixture",
+      "workload_class": "scrub_repair_overlap",
+      "scheduler_mode": "morsel_driven",
+      "lane": "permissioned_large_host",
+      "baseline_foreground_p99_us": 5000.0,
+      "observed_foreground_p99_us": 5300.0,
+      "repair_backlog_age_secs": 300,
+      "stale_symbol_age_secs": 120,
+      "fairness": {
+        "foreground_morsels": 1000,
+        "repair_morsels": 850,
+        "yielded_to_foreground": 144,
+        "throttled_repair_morsels": 21,
+        "cancellation": "cancellation_observed"
+      },
+      "ledger": {
+        "mutation_route": "mounted_mutation_authority",
+        "ledger_state": "complete",
+        "stale_symbol_policy": "refuse_mutation",
+        "rollback_policy": "abort_and_rollback"
+      },
+      "classification": "pass",
+      "release_claim_state": "measured_authoritative",
+      "reproduction_command": "ffs-harness validate-scrub-repair-scheduler --manifest benchmarks/scrub_repair_scheduler_manifest.json",
+      "raw_logs": [
+        "artifacts/performance/scrub-repair-scheduler/large-host/run.log"
+      ],
+      "artifact_paths": [
+        "artifacts/performance/scrub-repair-scheduler/large-host/report.json"
+      ],
+      "proof_bundle_artifact_paths": [
+        "artifacts/proof/scrub-repair-scheduler/large-host.json"
+      ]
+    },
+    {
+      "scenario_id": "scrub_repair_overlap_fixture_smoke",
+      "workload_class": "fixture_smoke",
+      "scheduler_mode": "foreground_first",
+      "lane": "developer_smoke",
+      "baseline_foreground_p99_us": 8000.0,
+      "observed_foreground_p99_us": 8100.0,
+      "repair_backlog_age_secs": 60,
+      "stale_symbol_age_secs": 30,
+      "fairness": {
+        "foreground_morsels": 100,
+        "repair_morsels": 40,
+        "yielded_to_foreground": 12,
+        "throttled_repair_morsels": 8,
+        "cancellation": "not_exercised"
+      },
+      "ledger": {
+        "mutation_route": "detection_only",
+        "ledger_state": "complete",
+        "stale_symbol_policy": "refuse_mutation",
+        "rollback_policy": "detection_only_no_write"
+      },
+      "classification": "skip",
+      "release_claim_state": "fixture_smoke_only",
+      "reproduction_command": "ffs-harness validate-scrub-repair-scheduler --manifest benchmarks/scrub_repair_scheduler_manifest.json",
+      "raw_logs": [
+        "artifacts/performance/scrub-repair-scheduler/smoke/run.log"
+      ],
+      "artifact_paths": [
+        "artifacts/performance/scrub-repair-scheduler/smoke/report.json"
+      ],
+      "proof_bundle_artifact_paths": [
+        "artifacts/proof/scrub-repair-scheduler/smoke.json"
+      ]
+    }
+  ],
+  "required_invariants": [
+    "no_repair_writeback_bypass",
+    "bounded_foreground_interference",
+    "cancellation_safe",
+    "ledger_complete",
+    "stale_symbols_refused"
+  ],
+  "proof_bundle_consumers": [
+    "bd-p2j3e",
+    "bd-rchk0.5",
+    "proof-bundle",
+    "release-gates"
+  ]
+}

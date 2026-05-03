@@ -92,6 +92,11 @@ use ffs_harness::{
         render_repair_writeback_serialization_markdown,
         validate_repair_writeback_serialization_contract,
     },
+    scrub_repair_scheduler::{
+        DEFAULT_SCRUB_REPAIR_SCHEDULER_MANIFEST, fail_on_scrub_repair_scheduler_errors,
+        load_scrub_repair_scheduler_manifest, render_scrub_repair_scheduler_markdown,
+        validate_scrub_repair_scheduler_manifest,
+    },
     soak_canary_campaign::{
         build_soak_canary_sample_artifact_manifest, fail_on_soak_canary_campaign_errors,
         load_soak_canary_campaign_manifest, render_soak_canary_campaign_markdown,
@@ -193,6 +198,7 @@ fn run() -> Result<()> {
         }
         Some("performance-delta-closeout") => performance_delta_closeout_cmd(&args[1..]),
         Some("validate-swarm-cache-controller") => validate_swarm_cache_controller_cmd(&args[1..]),
+        Some("validate-scrub-repair-scheduler") => validate_scrub_repair_scheduler_cmd(&args[1..]),
         Some("validate-adversarial-threat-model") => {
             validate_adversarial_threat_model_cmd(&args[1..])
         }
@@ -323,6 +329,14 @@ struct WorkloadCorpusCmdArgs {
 #[derive(Debug)]
 struct SwarmCacheControllerCmdArgs {
     contract_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
+struct ScrubRepairSchedulerCmdArgs {
+    manifest_path: String,
     out_path: Option<String>,
     summary_out_path: Option<String>,
     format: ProofBundleFormat,
@@ -1210,6 +1224,89 @@ fn parse_swarm_cache_controller_cmd_args(
 
     Ok(Some(SwarmCacheControllerCmdArgs {
         contract_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
+fn validate_scrub_repair_scheduler_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_scrub_repair_scheduler_cmd_args(args)? else {
+        return Ok(());
+    };
+    let manifest = load_scrub_repair_scheduler_manifest(Path::new(&cmd_args.manifest_path))?;
+    let report = validate_scrub_repair_scheduler_manifest(&manifest);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_scrub_repair_scheduler_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "scrub/repair scheduler report written: {} valid={} scenarios={}",
+            path, report.valid, report.scenario_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_scrub_repair_scheduler_markdown(&report)),
+        )?;
+        println!("scrub/repair scheduler summary written: {path}");
+    }
+
+    fail_on_scrub_repair_scheduler_errors(&report)
+}
+
+fn parse_scrub_repair_scheduler_cmd_args(
+    args: &[String],
+) -> Result<Option<ScrubRepairSchedulerCmdArgs>> {
+    let mut manifest_path = DEFAULT_SCRUB_REPAIR_SCHEDULER_MANIFEST.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                args.get(i)
+                    .context("--manifest requires a path")?
+                    .clone_into(&mut manifest_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_scrub_repair_scheduler_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-scrub-repair-scheduler argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(ScrubRepairSchedulerCmdArgs {
+        manifest_path,
         out_path,
         summary_out_path,
         format,
@@ -2824,6 +2921,7 @@ fn print_usage() {
     print_performance_baseline_manifest_usage_summary();
     print_performance_delta_closeout_usage_summary();
     print_swarm_cache_controller_usage_summary();
+    print_scrub_repair_scheduler_usage_summary();
     print_adversarial_threat_model_usage_summary();
     print_soak_canary_campaign_usage_summary();
     print_repair_confidence_lab_usage_summary();
@@ -2908,6 +3006,7 @@ fn print_usage_examples() {
     print_performance_baseline_manifest_example();
     print_performance_delta_closeout_example();
     print_swarm_cache_controller_example();
+    print_scrub_repair_scheduler_example();
     print_adversarial_threat_model_example();
     print_soak_canary_campaign_example();
     print_repair_confidence_lab_example();
@@ -2955,6 +3054,18 @@ fn print_swarm_cache_controller_usage_summary() {
 fn print_swarm_cache_controller_example() {
     println!(
         "  ffs-harness validate-swarm-cache-controller --contract benchmarks/swarm_cache_controller_contract.json --out artifacts/performance/swarm_cache_controller.json --summary-out artifacts/performance/swarm_cache_controller.md"
+    );
+}
+
+fn print_scrub_repair_scheduler_usage_summary() {
+    println!(
+        "  ffs-harness validate-scrub-repair-scheduler [--manifest FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_scrub_repair_scheduler_example() {
+    println!(
+        "  ffs-harness validate-scrub-repair-scheduler --manifest benchmarks/scrub_repair_scheduler_manifest.json --out artifacts/performance/scrub_repair_scheduler.json --summary-out artifacts/performance/scrub_repair_scheduler.md"
     );
 }
 
@@ -3189,6 +3300,16 @@ fn print_swarm_cache_controller_usage() {
     println!();
     println!("Options:");
     println!("  --contract FILE                    Read swarm cache controller contract JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write selected-format validation report");
+    println!("  --summary-out FILE                 Write Markdown inspection summary");
+}
+
+fn print_scrub_repair_scheduler_usage() {
+    println!("Usage: ffs-harness validate-scrub-repair-scheduler [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --manifest FILE                    Read scrub/repair scheduler manifest JSON");
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write selected-format validation report");
     println!("  --summary-out FILE                 Write Markdown inspection summary");
