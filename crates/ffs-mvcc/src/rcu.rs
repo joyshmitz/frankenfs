@@ -36,8 +36,8 @@ use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::hash::Hash;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, trace, warn};
 
 fn saturating_increment(counter: &AtomicU64) -> u64 {
@@ -398,11 +398,7 @@ impl AtomicWatermark {
     #[must_use]
     pub fn load(&self) -> Option<u64> {
         let v = self.value.load(Ordering::Acquire);
-        if v == WATERMARK_EMPTY {
-            None
-        } else {
-            Some(v)
-        }
+        if v == WATERMARK_EMPTY { None } else { Some(v) }
     }
 
     /// Store a new watermark value.
@@ -510,44 +506,80 @@ pub const fn next_publication_epoch(current_epoch: u64) -> Option<u64> {
     current_epoch.checked_add(1)
 }
 
-/// Gate evidence that controls whether the prototype can be selected.
+/// Evidence gates that control whether the prototype can be selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RcuQsbrProofGate {
+    ExecutableModelTests,
+    RollbackPath,
+    UnsafeCodeForbidden,
+    AsupersyncOnly,
+}
+
+impl RcuQsbrProofGate {
+    const fn bit(self) -> u8 {
+        match self {
+            Self::ExecutableModelTests => 1 << 0,
+            Self::RollbackPath => 1 << 1,
+            Self::UnsafeCodeForbidden => 1 << 2,
+            Self::AsupersyncOnly => 1 << 3,
+        }
+    }
+}
+
+/// Compact gate mask for RCU/QSBR proof evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RcuQsbrProofEvidence {
-    pub executable_model_tests: bool,
-    pub rollback_path: bool,
-    pub unsafe_code_forbidden: bool,
-    pub asupersync_only: bool,
+    bits: u8,
 }
 
 impl RcuQsbrProofEvidence {
+    /// Executable model and safety gates are present, but rollback evidence is
+    /// intentionally missing, so the path remains design-only.
     #[must_use]
     pub const fn design_only() -> Self {
         Self {
-            executable_model_tests: true,
-            rollback_path: false,
-            unsafe_code_forbidden: true,
-            asupersync_only: true,
+            bits: RcuQsbrProofGate::ExecutableModelTests.bit()
+                | RcuQsbrProofGate::UnsafeCodeForbidden.bit()
+                | RcuQsbrProofGate::AsupersyncOnly.bit(),
         }
     }
 
+    /// Every gate required for promotion is present.
     #[must_use]
     pub const fn complete() -> Self {
         Self {
-            executable_model_tests: true,
-            rollback_path: true,
-            unsafe_code_forbidden: true,
-            asupersync_only: true,
+            bits: RcuQsbrProofGate::ExecutableModelTests.bit()
+                | RcuQsbrProofGate::RollbackPath.bit()
+                | RcuQsbrProofGate::UnsafeCodeForbidden.bit()
+                | RcuQsbrProofGate::AsupersyncOnly.bit(),
+        }
+    }
+
+    /// Return true if this evidence contains `gate`.
+    #[must_use]
+    pub const fn contains(self, gate: RcuQsbrProofGate) -> bool {
+        self.bits & gate.bit() != 0
+    }
+
+    /// Return a copy with `gate` removed.
+    #[must_use]
+    pub const fn without(self, gate: RcuQsbrProofGate) -> Self {
+        Self {
+            bits: self.bits & !gate.bit(),
         }
     }
 
     #[must_use]
     pub const fn safety_gates_pass(self) -> bool {
-        self.unsafe_code_forbidden && self.asupersync_only
+        self.contains(RcuQsbrProofGate::UnsafeCodeForbidden)
+            && self.contains(RcuQsbrProofGate::AsupersyncOnly)
     }
 
     #[must_use]
     pub const fn promotion_gates_pass(self) -> bool {
-        self.safety_gates_pass() && self.executable_model_tests && self.rollback_path
+        self.safety_gates_pass()
+            && self.contains(RcuQsbrProofGate::ExecutableModelTests)
+            && self.contains(RcuQsbrProofGate::RollbackPath)
     }
 }
 
@@ -599,11 +631,18 @@ impl RcuExpectedLossWeights {
     #[must_use]
     pub fn expected_loss(self, measurements: RcuReadPathMeasurements) -> f64 {
         let memory_mib = measurements.memory_overhead_bytes as f64 / 1_048_576.0;
-        self.contention_weight * measurements.contention_rate()
-            + self.tail_latency_weight * measurements.tail_latency_micros as f64
-            + self.memory_mib_weight * memory_mib
-            + self.stalled_reader_weight * measurements.stalled_reader_count as f64
-            + self.complexity_weight * measurements.complexity_risk.clamp(0.0, 1.0)
+        let loss = self
+            .tail_latency_weight
+            .mul_add(measurements.tail_latency_micros as f64, 0.0);
+        let loss = self
+            .contention_weight
+            .mul_add(measurements.contention_rate(), loss);
+        let loss = self.memory_mib_weight.mul_add(memory_mib, loss);
+        let loss = self
+            .stalled_reader_weight
+            .mul_add(measurements.stalled_reader_count as f64, loss);
+        self.complexity_weight
+            .mul_add(measurements.complexity_risk.clamp(0.0, 1.0), loss)
     }
 }
 
@@ -1158,12 +1197,8 @@ mod tests {
         assert_eq!(candidate.reason, "epoch_path_lower_expected_loss");
 
         let safety_failure = RcuReadPathDecisionInput {
-            proof_evidence: RcuQsbrProofEvidence {
-                executable_model_tests: true,
-                rollback_path: true,
-                unsafe_code_forbidden: true,
-                asupersync_only: false,
-            },
+            proof_evidence: RcuQsbrProofEvidence::complete()
+                .without(RcuQsbrProofGate::AsupersyncOnly),
             ..RcuReadPathDecisionInput {
                 lock_path: read_path_measurements(10_000, 2_000, 2_500, 0, 0, 0.05),
                 epoch_path: read_path_measurements(10_000, 10, 200, 512 * 1024, 0, 0.10),
