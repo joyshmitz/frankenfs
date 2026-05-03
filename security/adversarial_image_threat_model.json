@@ -14,10 +14,20 @@
     "parser_capability",
     "mount_capability",
     "repair_capability",
+    "resource_controls",
     "expected_safe_behavior",
+    "expected_classification",
     "observed_classification",
     "resource_limits",
+    "observed_input_bytes",
+    "observed_cpu_ms",
+    "observed_wall_ms",
+    "observed_memory_mib",
+    "observed_disk_bytes",
+    "enforcement_point",
     "cleanup_status",
+    "artifact_paths",
+    "remediation_id",
     "reproduction_command"
   ],
   "required_threat_classes": [
@@ -44,7 +54,52 @@
       "hostile_path_kind": "normal",
       "expected_path_decision": "accept_confined",
       "expected_safe_behavior": "reject_before_mount",
+      "expected_classification": "rejected",
       "observed_classification": "rejected",
+      "resource_controls": [
+        {
+          "resource_class": "input_bytes",
+          "limit_value": 1048576,
+          "limit_unit": "bytes",
+          "enforcement_point": "ext4_parser",
+          "cleanup_policy": "clean_workspace"
+        },
+        {
+          "resource_class": "wall_time",
+          "limit_value": 250,
+          "limit_unit": "milliseconds",
+          "enforcement_point": "ext4_parser",
+          "cleanup_policy": "clean_workspace"
+        },
+        {
+          "resource_class": "memory",
+          "limit_value": 64,
+          "limit_unit": "mib",
+          "enforcement_point": "ext4_parser",
+          "cleanup_policy": "clean_workspace"
+        },
+        {
+          "resource_class": "artifact_space",
+          "limit_value": 1048576,
+          "limit_unit": "bytes",
+          "enforcement_point": "ext4_parser",
+          "cleanup_policy": "clean_workspace"
+        },
+        {
+          "resource_class": "log_output",
+          "limit_value": 262144,
+          "limit_unit": "bytes",
+          "enforcement_point": "ext4_parser",
+          "cleanup_policy": "clean_workspace"
+        },
+        {
+          "resource_class": "file_descriptors",
+          "limit_value": 8,
+          "limit_unit": "count",
+          "enforcement_point": "ext4_parser",
+          "cleanup_policy": "clean_workspace"
+        }
+      ],
       "resource_limits": {
         "max_input_bytes": 1048576,
         "max_wall_ms": 250,
@@ -53,7 +108,19 @@
         "max_log_bytes": 262144,
         "max_file_descriptors": 8
       },
+      "observed_resource_counters": {
+        "input_bytes": 4096,
+        "wall_ms": 12,
+        "cpu_ms": 10,
+        "memory_mib": 24,
+        "artifact_bytes": 32768,
+        "log_bytes": 8192,
+        "file_descriptors": 3
+      },
       "cleanup_status": "clean",
+      "artifact_paths": [
+        "artifacts/security/logs/malformed_ext4_superblock_reject_before_mount.json"
+      ],
       "release_gate_effect": "fail_closed",
       "remediation_id": "bd-0qx9b",
       "reproduction_command": "ffs-harness validate-adversarial-threat-model --model security/adversarial_image_threat_model.json",
@@ -73,7 +140,38 @@
       "hostile_path_kind": "normal",
       "expected_path_decision": "refuse_traversal",
       "expected_safe_behavior": "refuse_host_path",
+      "expected_classification": "host_path_refused",
       "observed_classification": "host_path_refused",
+      "resource_controls": [
+        {
+          "resource_class": "input_bytes",
+          "limit_value": 65536,
+          "limit_unit": "bytes",
+          "enforcement_point": "proof_bundle_validation",
+          "cleanup_policy": "preserve_evidence"
+        },
+        {
+          "resource_class": "wall_time",
+          "limit_value": 100,
+          "limit_unit": "milliseconds",
+          "enforcement_point": "proof_bundle_validation",
+          "cleanup_policy": "preserve_evidence"
+        },
+        {
+          "resource_class": "artifact_space",
+          "limit_value": 65536,
+          "limit_unit": "bytes",
+          "enforcement_point": "proof_bundle_validation",
+          "cleanup_policy": "preserve_evidence"
+        },
+        {
+          "resource_class": "log_output",
+          "limit_value": 65536,
+          "limit_unit": "bytes",
+          "enforcement_point": "proof_bundle_validation",
+          "cleanup_policy": "preserve_evidence"
+        }
+      ],
       "resource_limits": {
         "max_input_bytes": 65536,
         "max_wall_ms": 100,
@@ -82,7 +180,17 @@
         "max_log_bytes": 65536,
         "max_file_descriptors": 4
       },
+      "observed_resource_counters": {
+        "input_bytes": 2048,
+        "wall_ms": 8,
+        "artifact_bytes": 12288,
+        "log_bytes": 4096
+      },
       "cleanup_status": "preserved_artifacts",
+      "artifact_paths": [
+        "artifacts/security/logs/hostile_proof_bundle_traversal_refused.json",
+        "artifacts/security/quarantine/hostile_proof_bundle_traversal_refused.manifest.json"
+      ],
       "release_gate_effect": "fail_closed",
       "remediation_id": "bd-rchk0.5.12",
       "reproduction_command": "ffs-harness validate-proof-bundle --bundle hostile/path-traversal/manifest.json",
@@ -102,7 +210,38 @@
       "hostile_path_kind": "symlink",
       "expected_path_decision": "refuse_symlink",
       "expected_safe_behavior": "refuse_host_path",
+      "expected_classification": "host_path_refused",
       "observed_classification": "host_path_refused",
+      "resource_controls": [
+        {
+          "resource_class": "input_bytes",
+          "limit_value": 65536,
+          "limit_unit": "bytes",
+          "enforcement_point": "proof_bundle_validation",
+          "cleanup_policy": "preserve_evidence"
+        },
+        {
+          "resource_class": "wall_time",
+          "limit_value": 100,
+          "limit_unit": "milliseconds",
+          "enforcement_point": "proof_bundle_validation",
+          "cleanup_policy": "preserve_evidence"
+        },
+        {
+          "resource_class": "artifact_space",
+          "limit_value": 65536,
+          "limit_unit": "bytes",
+          "enforcement_point": "proof_bundle_validation",
+          "cleanup_policy": "preserve_evidence"
+        },
+        {
+          "resource_class": "log_output",
+          "limit_value": 65536,
+          "limit_unit": "bytes",
+          "enforcement_point": "proof_bundle_validation",
+          "cleanup_policy": "preserve_evidence"
+        }
+      ],
       "resource_limits": {
         "max_input_bytes": 65536,
         "max_wall_ms": 100,
@@ -111,7 +250,17 @@
         "max_log_bytes": 65536,
         "max_file_descriptors": 4
       },
+      "observed_resource_counters": {
+        "input_bytes": 2048,
+        "wall_ms": 7,
+        "artifact_bytes": 12288,
+        "log_bytes": 4096
+      },
       "cleanup_status": "preserved_artifacts",
+      "artifact_paths": [
+        "artifacts/security/logs/hostile_proof_bundle_symlink_refused.json",
+        "artifacts/security/quarantine/hostile_proof_bundle_symlink_refused.manifest.json"
+      ],
       "release_gate_effect": "fail_closed",
       "remediation_id": "bd-rchk0.5.12",
       "reproduction_command": "ffs-harness validate-proof-bundle --bundle proof/current_bundle.json",
@@ -131,7 +280,38 @@
       "hostile_path_kind": "normal",
       "expected_path_decision": "accept_confined",
       "expected_safe_behavior": "classify_unsupported",
+      "expected_classification": "unsupported",
       "observed_classification": "unsupported",
+      "resource_controls": [
+        {
+          "resource_class": "input_bytes",
+          "limit_value": 65536,
+          "limit_unit": "bytes",
+          "enforcement_point": "mount_preflight",
+          "cleanup_policy": "clean_workspace"
+        },
+        {
+          "resource_class": "wall_time",
+          "limit_value": 100,
+          "limit_unit": "milliseconds",
+          "enforcement_point": "mount_preflight",
+          "cleanup_policy": "clean_workspace"
+        },
+        {
+          "resource_class": "artifact_space",
+          "limit_value": 65536,
+          "limit_unit": "bytes",
+          "enforcement_point": "mount_preflight",
+          "cleanup_policy": "clean_workspace"
+        },
+        {
+          "resource_class": "log_output",
+          "limit_value": 65536,
+          "limit_unit": "bytes",
+          "enforcement_point": "mount_preflight",
+          "cleanup_policy": "clean_workspace"
+        }
+      ],
       "resource_limits": {
         "max_input_bytes": 65536,
         "max_wall_ms": 100,
@@ -140,14 +320,23 @@
         "max_log_bytes": 65536,
         "max_file_descriptors": 4
       },
+      "observed_resource_counters": {
+        "input_bytes": 1024,
+        "wall_ms": 10,
+        "artifact_bytes": 8192,
+        "log_bytes": 4096
+      },
       "cleanup_status": "clean",
+      "artifact_paths": [
+        "artifacts/security/logs/missing_fuse_capability_classified_unsupported.json"
+      ],
       "release_gate_effect": "downgrade_to_detection_only",
       "remediation_id": "bd-rchk4.1",
       "reproduction_command": "ffs-harness fuse-capability-probe --require-mount-probe",
       "public_status_context": "Missing FUSE capability is a host limitation, not mounted hostile-image readiness."
     },
     {
-      "scenario_id": "resource_corpus_bomb_capped",
+      "scenario_id": "oversized_metadata_seed_capped",
       "threat_class": "resource_exhaustion",
       "severity": "critical",
       "review_status": "reviewed",
@@ -160,7 +349,59 @@
       "hostile_path_kind": "normal",
       "expected_path_decision": "accept_confined",
       "expected_safe_behavior": "cap_resources",
+      "expected_classification": "capped",
       "observed_classification": "capped",
+      "resource_controls": [
+        {
+          "resource_class": "input_bytes",
+          "limit_value": 2097152,
+          "limit_unit": "bytes",
+          "enforcement_point": "fuzz_corpus_smoke",
+          "cleanup_policy": "preserve_evidence"
+        },
+        {
+          "resource_class": "cpu_time",
+          "limit_value": 450,
+          "limit_unit": "milliseconds",
+          "enforcement_point": "fuzz_corpus_smoke",
+          "cleanup_policy": "preserve_evidence"
+        },
+        {
+          "resource_class": "wall_time",
+          "limit_value": 500,
+          "limit_unit": "milliseconds",
+          "enforcement_point": "fuzz_corpus_smoke",
+          "cleanup_policy": "preserve_evidence"
+        },
+        {
+          "resource_class": "memory",
+          "limit_value": 128,
+          "limit_unit": "mib",
+          "enforcement_point": "fuzz_corpus_smoke",
+          "cleanup_policy": "preserve_evidence"
+        },
+        {
+          "resource_class": "artifact_space",
+          "limit_value": 2097152,
+          "limit_unit": "bytes",
+          "enforcement_point": "fuzz_corpus_smoke",
+          "cleanup_policy": "preserve_evidence"
+        },
+        {
+          "resource_class": "log_output",
+          "limit_value": 262144,
+          "limit_unit": "bytes",
+          "enforcement_point": "fuzz_corpus_smoke",
+          "cleanup_policy": "preserve_evidence"
+        },
+        {
+          "resource_class": "file_descriptors",
+          "limit_value": 8,
+          "limit_unit": "count",
+          "enforcement_point": "fuzz_corpus_smoke",
+          "cleanup_policy": "preserve_evidence"
+        }
+      ],
       "resource_limits": {
         "max_input_bytes": 2097152,
         "max_wall_ms": 500,
@@ -169,11 +410,326 @@
         "max_log_bytes": 262144,
         "max_file_descriptors": 8
       },
+      "observed_resource_counters": {
+        "input_bytes": 2097152,
+        "wall_ms": 92,
+        "cpu_ms": 87,
+        "memory_mib": 72,
+        "artifact_bytes": 524288,
+        "log_bytes": 32768,
+        "file_descriptors": 4
+      },
       "cleanup_status": "preserved_artifacts",
+      "artifact_paths": [
+        "artifacts/security/logs/oversized_metadata_seed_capped.json",
+        "artifacts/security/quarantine/oversized_metadata_seed_capped.seed"
+      ],
       "release_gate_effect": "fail_closed",
       "remediation_id": "bd-0qx9b",
       "reproduction_command": "ffs-harness validate-adversarial-threat-model --model security/adversarial_image_threat_model.json",
       "public_status_context": "Resource-exhaustion seeds must be capped or quarantined; hangs and unbounded artifacts fail readiness gates."
+    },
+    {
+      "scenario_id": "cyclic_metadata_reference_quarantined",
+      "threat_class": "resource_exhaustion",
+      "severity": "critical",
+      "review_status": "reviewed",
+      "input_kind": "btrfs_image",
+      "input_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "parser_capability": "available",
+      "mount_capability": "not_applicable",
+      "repair_capability": "not_applicable",
+      "hostile_path": "security/fixtures/cyclic_metadata_reference.btrfs",
+      "hostile_path_kind": "normal",
+      "expected_path_decision": "accept_confined",
+      "expected_safe_behavior": "quarantine",
+      "expected_classification": "quarantined",
+      "observed_classification": "quarantined",
+      "resource_controls": [
+        {"resource_class": "input_bytes", "limit_value": 2097152, "limit_unit": "bytes", "enforcement_point": "btrfs_parser", "cleanup_policy": "quarantine_artifacts"},
+        {"resource_class": "cpu_time", "limit_value": 450, "limit_unit": "milliseconds", "enforcement_point": "btrfs_parser", "cleanup_policy": "quarantine_artifacts"},
+        {"resource_class": "wall_time", "limit_value": 500, "limit_unit": "milliseconds", "enforcement_point": "btrfs_parser", "cleanup_policy": "quarantine_artifacts"},
+        {"resource_class": "memory", "limit_value": 128, "limit_unit": "mib", "enforcement_point": "btrfs_parser", "cleanup_policy": "quarantine_artifacts"},
+        {"resource_class": "disk_space", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "btrfs_parser", "cleanup_policy": "quarantine_artifacts"},
+        {"resource_class": "artifact_space", "limit_value": 2097152, "limit_unit": "bytes", "enforcement_point": "btrfs_parser", "cleanup_policy": "quarantine_artifacts"},
+        {"resource_class": "log_output", "limit_value": 262144, "limit_unit": "bytes", "enforcement_point": "btrfs_parser", "cleanup_policy": "quarantine_artifacts"},
+        {"resource_class": "file_descriptors", "limit_value": 8, "limit_unit": "count", "enforcement_point": "btrfs_parser", "cleanup_policy": "quarantine_artifacts"}
+      ],
+      "resource_limits": {"max_input_bytes": 2097152, "max_wall_ms": 500, "max_memory_mib": 128, "max_artifact_bytes": 2097152, "max_log_bytes": 262144, "max_file_descriptors": 8},
+      "observed_resource_counters": {"input_bytes": 524288, "wall_ms": 110, "cpu_ms": 104, "memory_mib": 80, "disk_bytes": 131072, "artifact_bytes": 262144, "log_bytes": 32768, "file_descriptors": 4},
+      "cleanup_status": "quarantined",
+      "artifact_paths": ["artifacts/security/logs/cyclic_metadata_reference_quarantined.json", "artifacts/security/quarantine/cyclic_metadata_reference_quarantined.btrfs"],
+      "release_gate_effect": "fail_closed",
+      "remediation_id": "bd-0qx9b",
+      "reproduction_command": "ffs-harness validate-adversarial-threat-model --model security/adversarial_image_threat_model.json",
+      "public_status_context": "Cyclic metadata references must terminate under parser caps and quarantine the fixture evidence."
+    },
+    {
+      "scenario_id": "deeply_nested_directory_capped",
+      "threat_class": "resource_exhaustion",
+      "severity": "critical",
+      "review_status": "reviewed",
+      "input_kind": "ext4_image",
+      "input_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+      "parser_capability": "available",
+      "mount_capability": "not_applicable",
+      "repair_capability": "not_applicable",
+      "hostile_path": "security/fixtures/deeply_nested_directory.ext4",
+      "hostile_path_kind": "normal",
+      "expected_path_decision": "accept_confined",
+      "expected_safe_behavior": "cap_resources",
+      "expected_classification": "capped",
+      "observed_classification": "capped",
+      "resource_controls": [
+        {"resource_class": "input_bytes", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "ext4_parser", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "cpu_time", "limit_value": 250, "limit_unit": "milliseconds", "enforcement_point": "ext4_parser", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "wall_time", "limit_value": 300, "limit_unit": "milliseconds", "enforcement_point": "ext4_parser", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "memory", "limit_value": 96, "limit_unit": "mib", "enforcement_point": "ext4_parser", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "artifact_space", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "ext4_parser", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "log_output", "limit_value": 131072, "limit_unit": "bytes", "enforcement_point": "ext4_parser", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "file_descriptors", "limit_value": 8, "limit_unit": "count", "enforcement_point": "ext4_parser", "cleanup_policy": "preserve_evidence"}
+      ],
+      "resource_limits": {"max_input_bytes": 1048576, "max_wall_ms": 300, "max_memory_mib": 96, "max_artifact_bytes": 1048576, "max_log_bytes": 131072, "max_file_descriptors": 8},
+      "observed_resource_counters": {"input_bytes": 262144, "wall_ms": 71, "cpu_ms": 68, "memory_mib": 48, "artifact_bytes": 131072, "log_bytes": 16384, "file_descriptors": 3},
+      "cleanup_status": "preserved_artifacts",
+      "artifact_paths": ["artifacts/security/logs/deeply_nested_directory_capped.json"],
+      "release_gate_effect": "fail_closed",
+      "remediation_id": "bd-0qx9b",
+      "reproduction_command": "ffs-harness validate-adversarial-threat-model --model security/adversarial_image_threat_model.json",
+      "public_status_context": "Directory traversal depth must be capped so nested hostile trees cannot create unbounded parser work."
+    },
+    {
+      "scenario_id": "huge_xattr_payload_capped",
+      "threat_class": "resource_exhaustion",
+      "severity": "critical",
+      "review_status": "reviewed",
+      "input_kind": "ext4_image",
+      "input_hash": "5555555555555555555555555555555555555555555555555555555555555555",
+      "parser_capability": "available",
+      "mount_capability": "not_applicable",
+      "repair_capability": "not_applicable",
+      "hostile_path": "security/fixtures/huge_xattr_payload.ext4",
+      "hostile_path_kind": "normal",
+      "expected_path_decision": "accept_confined",
+      "expected_safe_behavior": "cap_resources",
+      "expected_classification": "capped",
+      "observed_classification": "capped",
+      "resource_controls": [
+        {"resource_class": "input_bytes", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "ext4_parser", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "cpu_time", "limit_value": 250, "limit_unit": "milliseconds", "enforcement_point": "ext4_parser", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "wall_time", "limit_value": 300, "limit_unit": "milliseconds", "enforcement_point": "ext4_parser", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "memory", "limit_value": 96, "limit_unit": "mib", "enforcement_point": "ext4_parser", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "artifact_space", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "ext4_parser", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "log_output", "limit_value": 131072, "limit_unit": "bytes", "enforcement_point": "ext4_parser", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "file_descriptors", "limit_value": 8, "limit_unit": "count", "enforcement_point": "ext4_parser", "cleanup_policy": "preserve_evidence"}
+      ],
+      "resource_limits": {"max_input_bytes": 1048576, "max_wall_ms": 300, "max_memory_mib": 96, "max_artifact_bytes": 1048576, "max_log_bytes": 131072, "max_file_descriptors": 8},
+      "observed_resource_counters": {"input_bytes": 524288, "wall_ms": 66, "cpu_ms": 60, "memory_mib": 64, "artifact_bytes": 131072, "log_bytes": 16384, "file_descriptors": 3},
+      "cleanup_status": "preserved_artifacts",
+      "artifact_paths": ["artifacts/security/logs/huge_xattr_payload_capped.json"],
+      "release_gate_effect": "fail_closed",
+      "remediation_id": "bd-0qx9b",
+      "reproduction_command": "ffs-harness validate-adversarial-threat-model --model security/adversarial_image_threat_model.json",
+      "public_status_context": "Huge xattr payloads must be bounded before they can inflate memory, log, or proof-artifact usage."
+    },
+    {
+      "scenario_id": "truncated_repair_ledger_quarantined",
+      "threat_class": "repair_ledger_tamper",
+      "severity": "critical",
+      "review_status": "reviewed",
+      "input_kind": "repair_ledger",
+      "input_hash": "6666666666666666666666666666666666666666666666666666666666666666",
+      "parser_capability": "available",
+      "mount_capability": "not_applicable",
+      "repair_capability": "available",
+      "hostile_path": "security/fixtures/truncated_repair_ledger.jsonl",
+      "hostile_path_kind": "normal",
+      "expected_path_decision": "accept_confined",
+      "expected_safe_behavior": "refuse_mutation",
+      "expected_classification": "quarantined",
+      "observed_classification": "quarantined",
+      "resource_controls": [
+        {"resource_class": "input_bytes", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "repair_ledger_ingestion", "cleanup_policy": "quarantine_artifacts"},
+        {"resource_class": "wall_time", "limit_value": 250, "limit_unit": "milliseconds", "enforcement_point": "repair_ledger_ingestion", "cleanup_policy": "quarantine_artifacts"},
+        {"resource_class": "artifact_space", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "repair_ledger_ingestion", "cleanup_policy": "quarantine_artifacts"},
+        {"resource_class": "log_output", "limit_value": 262144, "limit_unit": "bytes", "enforcement_point": "repair_ledger_ingestion", "cleanup_policy": "quarantine_artifacts"}
+      ],
+      "resource_limits": {"max_input_bytes": 1048576, "max_wall_ms": 250, "max_memory_mib": 64, "max_artifact_bytes": 1048576, "max_log_bytes": 262144, "max_file_descriptors": 8},
+      "observed_resource_counters": {"input_bytes": 16384, "wall_ms": 18, "artifact_bytes": 65536, "log_bytes": 8192},
+      "cleanup_status": "quarantined",
+      "artifact_paths": ["artifacts/security/logs/truncated_repair_ledger_quarantined.json", "artifacts/security/quarantine/truncated_repair_ledger_quarantined.jsonl"],
+      "release_gate_effect": "fail_closed",
+      "remediation_id": "bd-0qx9b",
+      "reproduction_command": "ffs repair --dry-run --ledger security/fixtures/truncated_repair_ledger.jsonl <image>",
+      "public_status_context": "Truncated repair ledgers must be quarantined and must never advance mutation or readiness claims."
+    },
+    {
+      "scenario_id": "corrupt_repair_ledger_quarantined",
+      "threat_class": "repair_ledger_tamper",
+      "severity": "critical",
+      "review_status": "reviewed",
+      "input_kind": "repair_ledger",
+      "input_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+      "parser_capability": "available",
+      "mount_capability": "not_applicable",
+      "repair_capability": "available",
+      "hostile_path": "security/fixtures/corrupt_repair_ledger.jsonl",
+      "hostile_path_kind": "normal",
+      "expected_path_decision": "accept_confined",
+      "expected_safe_behavior": "refuse_mutation",
+      "expected_classification": "quarantined",
+      "observed_classification": "quarantined",
+      "resource_controls": [
+        {"resource_class": "input_bytes", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "repair_ledger_ingestion", "cleanup_policy": "quarantine_artifacts"},
+        {"resource_class": "wall_time", "limit_value": 250, "limit_unit": "milliseconds", "enforcement_point": "repair_ledger_ingestion", "cleanup_policy": "quarantine_artifacts"},
+        {"resource_class": "artifact_space", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "repair_ledger_ingestion", "cleanup_policy": "quarantine_artifacts"},
+        {"resource_class": "log_output", "limit_value": 262144, "limit_unit": "bytes", "enforcement_point": "repair_ledger_ingestion", "cleanup_policy": "quarantine_artifacts"}
+      ],
+      "resource_limits": {"max_input_bytes": 1048576, "max_wall_ms": 250, "max_memory_mib": 64, "max_artifact_bytes": 1048576, "max_log_bytes": 262144, "max_file_descriptors": 8},
+      "observed_resource_counters": {"input_bytes": 24576, "wall_ms": 19, "artifact_bytes": 65536, "log_bytes": 8192},
+      "cleanup_status": "quarantined",
+      "artifact_paths": ["artifacts/security/logs/corrupt_repair_ledger_quarantined.json", "artifacts/security/quarantine/corrupt_repair_ledger_quarantined.jsonl"],
+      "release_gate_effect": "fail_closed",
+      "remediation_id": "bd-0qx9b",
+      "reproduction_command": "ffs repair --dry-run --ledger security/fixtures/corrupt_repair_ledger.jsonl <image>",
+      "public_status_context": "Corrupt repair ledgers must be quarantined with raw diagnostics preserved."
+    },
+    {
+      "scenario_id": "excessive_log_output_capped",
+      "threat_class": "resource_exhaustion",
+      "severity": "critical",
+      "review_status": "reviewed",
+      "input_kind": "corpus_seed",
+      "input_hash": "8888888888888888888888888888888888888888888888888888888888888888",
+      "parser_capability": "available",
+      "mount_capability": "not_applicable",
+      "repair_capability": "not_applicable",
+      "hostile_path": "security/fixtures/excessive_log_output.seed",
+      "hostile_path_kind": "normal",
+      "expected_path_decision": "accept_confined",
+      "expected_safe_behavior": "cap_resources",
+      "expected_classification": "capped",
+      "observed_classification": "capped",
+      "resource_controls": [
+        {"resource_class": "input_bytes", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "fuzz_corpus_smoke", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "cpu_time", "limit_value": 250, "limit_unit": "milliseconds", "enforcement_point": "fuzz_corpus_smoke", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "wall_time", "limit_value": 300, "limit_unit": "milliseconds", "enforcement_point": "fuzz_corpus_smoke", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "memory", "limit_value": 96, "limit_unit": "mib", "enforcement_point": "fuzz_corpus_smoke", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "artifact_space", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "fuzz_corpus_smoke", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "log_output", "limit_value": 65536, "limit_unit": "bytes", "enforcement_point": "fuzz_corpus_smoke", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "file_descriptors", "limit_value": 8, "limit_unit": "count", "enforcement_point": "fuzz_corpus_smoke", "cleanup_policy": "preserve_evidence"}
+      ],
+      "resource_limits": {"max_input_bytes": 1048576, "max_wall_ms": 300, "max_memory_mib": 96, "max_artifact_bytes": 1048576, "max_log_bytes": 65536, "max_file_descriptors": 8},
+      "observed_resource_counters": {"input_bytes": 65536, "wall_ms": 40, "cpu_ms": 36, "memory_mib": 40, "artifact_bytes": 65536, "log_bytes": 65536, "file_descriptors": 3},
+      "cleanup_status": "preserved_artifacts",
+      "artifact_paths": ["artifacts/security/logs/excessive_log_output_capped.json"],
+      "release_gate_effect": "fail_closed",
+      "remediation_id": "bd-0qx9b",
+      "reproduction_command": "ffs-harness validate-adversarial-threat-model --model security/adversarial_image_threat_model.json",
+      "public_status_context": "Hostile fixtures that generate excessive logs must cap log output and keep the cap visible."
+    },
+    {
+      "scenario_id": "excessive_artifact_count_capped",
+      "threat_class": "resource_exhaustion",
+      "severity": "critical",
+      "review_status": "reviewed",
+      "input_kind": "proof_bundle",
+      "input_hash": "9999999999999999999999999999999999999999999999999999999999999999",
+      "parser_capability": "not_applicable",
+      "mount_capability": "not_applicable",
+      "repair_capability": "not_applicable",
+      "hostile_path": "security/fixtures/excessive_artifact_count_bundle.json",
+      "hostile_path_kind": "normal",
+      "expected_path_decision": "accept_confined",
+      "expected_safe_behavior": "cap_resources",
+      "expected_classification": "capped",
+      "observed_classification": "capped",
+      "resource_controls": [
+        {"resource_class": "input_bytes", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "proof_bundle_validation", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "cpu_time", "limit_value": 250, "limit_unit": "milliseconds", "enforcement_point": "proof_bundle_validation", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "wall_time", "limit_value": 300, "limit_unit": "milliseconds", "enforcement_point": "proof_bundle_validation", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "memory", "limit_value": 96, "limit_unit": "mib", "enforcement_point": "proof_bundle_validation", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "artifact_space", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "proof_bundle_validation", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "artifact_count", "limit_value": 32, "limit_unit": "count", "enforcement_point": "proof_bundle_validation", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "log_output", "limit_value": 65536, "limit_unit": "bytes", "enforcement_point": "proof_bundle_validation", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "file_descriptors", "limit_value": 8, "limit_unit": "count", "enforcement_point": "proof_bundle_validation", "cleanup_policy": "preserve_evidence"}
+      ],
+      "resource_limits": {"max_input_bytes": 1048576, "max_wall_ms": 300, "max_memory_mib": 96, "max_artifact_bytes": 1048576, "max_log_bytes": 65536, "max_file_descriptors": 8},
+      "observed_resource_counters": {"input_bytes": 32768, "wall_ms": 35, "cpu_ms": 31, "memory_mib": 32, "artifact_bytes": 262144, "artifact_count": 32, "log_bytes": 8192, "file_descriptors": 4},
+      "cleanup_status": "preserved_artifacts",
+      "artifact_paths": ["artifacts/security/logs/excessive_artifact_count_capped.json"],
+      "release_gate_effect": "fail_closed",
+      "remediation_id": "bd-0qx9b",
+      "reproduction_command": "ffs-harness validate-proof-bundle --bundle security/fixtures/excessive_artifact_count_bundle.json",
+      "public_status_context": "Proof bundles with excessive artifact entries must cap the count before expanding paths."
+    },
+    {
+      "scenario_id": "timeout_capped",
+      "threat_class": "resource_exhaustion",
+      "severity": "critical",
+      "review_status": "reviewed",
+      "input_kind": "corpus_seed",
+      "input_hash": "abababababababababababababababababababababababababababababababab",
+      "parser_capability": "available",
+      "mount_capability": "not_applicable",
+      "repair_capability": "not_applicable",
+      "hostile_path": "security/fixtures/timeout.seed",
+      "hostile_path_kind": "normal",
+      "expected_path_decision": "accept_confined",
+      "expected_safe_behavior": "cap_resources",
+      "expected_classification": "capped",
+      "observed_classification": "capped",
+      "resource_controls": [
+        {"resource_class": "input_bytes", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "fuzz_corpus_smoke", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "cpu_time", "limit_value": 250, "limit_unit": "milliseconds", "enforcement_point": "fuzz_corpus_smoke", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "wall_time", "limit_value": 300, "limit_unit": "milliseconds", "enforcement_point": "fuzz_corpus_smoke", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "memory", "limit_value": 96, "limit_unit": "mib", "enforcement_point": "fuzz_corpus_smoke", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "artifact_space", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "fuzz_corpus_smoke", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "log_output", "limit_value": 65536, "limit_unit": "bytes", "enforcement_point": "fuzz_corpus_smoke", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "file_descriptors", "limit_value": 8, "limit_unit": "count", "enforcement_point": "fuzz_corpus_smoke", "cleanup_policy": "preserve_evidence"}
+      ],
+      "resource_limits": {"max_input_bytes": 1048576, "max_wall_ms": 300, "max_memory_mib": 96, "max_artifact_bytes": 1048576, "max_log_bytes": 65536, "max_file_descriptors": 8},
+      "observed_resource_counters": {"input_bytes": 65536, "wall_ms": 300, "cpu_ms": 240, "memory_mib": 40, "artifact_bytes": 65536, "log_bytes": 16384, "file_descriptors": 3},
+      "cleanup_status": "preserved_artifacts",
+      "artifact_paths": ["artifacts/security/logs/timeout_capped.json"],
+      "release_gate_effect": "fail_closed",
+      "remediation_id": "bd-0qx9b",
+      "reproduction_command": "ffs-harness validate-adversarial-threat-model --model security/adversarial_image_threat_model.json",
+      "public_status_context": "Timeout fixtures must end at the declared deadline with a capped classification."
+    },
+    {
+      "scenario_id": "file_descriptor_exhaustion_capped",
+      "threat_class": "resource_exhaustion",
+      "severity": "critical",
+      "review_status": "reviewed",
+      "input_kind": "proof_bundle",
+      "input_hash": "bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc",
+      "parser_capability": "not_applicable",
+      "mount_capability": "not_applicable",
+      "repair_capability": "not_applicable",
+      "hostile_path": "security/fixtures/file_descriptor_exhaustion_bundle.json",
+      "hostile_path_kind": "normal",
+      "expected_path_decision": "accept_confined",
+      "expected_safe_behavior": "cap_resources",
+      "expected_classification": "capped",
+      "observed_classification": "capped",
+      "resource_controls": [
+        {"resource_class": "input_bytes", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "proof_bundle_validation", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "cpu_time", "limit_value": 250, "limit_unit": "milliseconds", "enforcement_point": "proof_bundle_validation", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "wall_time", "limit_value": 300, "limit_unit": "milliseconds", "enforcement_point": "proof_bundle_validation", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "memory", "limit_value": 96, "limit_unit": "mib", "enforcement_point": "proof_bundle_validation", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "artifact_space", "limit_value": 1048576, "limit_unit": "bytes", "enforcement_point": "proof_bundle_validation", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "log_output", "limit_value": 65536, "limit_unit": "bytes", "enforcement_point": "proof_bundle_validation", "cleanup_policy": "preserve_evidence"},
+        {"resource_class": "file_descriptors", "limit_value": 8, "limit_unit": "count", "enforcement_point": "proof_bundle_validation", "cleanup_policy": "preserve_evidence"}
+      ],
+      "resource_limits": {"max_input_bytes": 1048576, "max_wall_ms": 300, "max_memory_mib": 96, "max_artifact_bytes": 1048576, "max_log_bytes": 65536, "max_file_descriptors": 8},
+      "observed_resource_counters": {"input_bytes": 32768, "wall_ms": 32, "cpu_ms": 28, "memory_mib": 32, "artifact_bytes": 65536, "log_bytes": 8192, "file_descriptors": 8},
+      "cleanup_status": "preserved_artifacts",
+      "artifact_paths": ["artifacts/security/logs/file_descriptor_exhaustion_capped.json"],
+      "release_gate_effect": "fail_closed",
+      "remediation_id": "bd-0qx9b",
+      "reproduction_command": "ffs-harness validate-proof-bundle --bundle security/fixtures/file_descriptor_exhaustion_bundle.json",
+      "public_status_context": "Hostile bundles cannot force unbounded descriptor fan-out during proof validation."
     },
     {
       "scenario_id": "tampered_repair_ledger_refuses_mutation",
@@ -189,7 +745,38 @@
       "hostile_path_kind": "normal",
       "expected_path_decision": "accept_confined",
       "expected_safe_behavior": "refuse_mutation",
+      "expected_classification": "mutation_refused",
       "observed_classification": "mutation_refused",
+      "resource_controls": [
+        {
+          "resource_class": "input_bytes",
+          "limit_value": 1048576,
+          "limit_unit": "bytes",
+          "enforcement_point": "repair_ledger_ingestion",
+          "cleanup_policy": "preserve_evidence"
+        },
+        {
+          "resource_class": "wall_time",
+          "limit_value": 250,
+          "limit_unit": "milliseconds",
+          "enforcement_point": "repair_ledger_ingestion",
+          "cleanup_policy": "preserve_evidence"
+        },
+        {
+          "resource_class": "artifact_space",
+          "limit_value": 1048576,
+          "limit_unit": "bytes",
+          "enforcement_point": "repair_ledger_ingestion",
+          "cleanup_policy": "preserve_evidence"
+        },
+        {
+          "resource_class": "log_output",
+          "limit_value": 262144,
+          "limit_unit": "bytes",
+          "enforcement_point": "repair_ledger_ingestion",
+          "cleanup_policy": "preserve_evidence"
+        }
+      ],
       "resource_limits": {
         "max_input_bytes": 1048576,
         "max_wall_ms": 250,
@@ -198,7 +785,17 @@
         "max_log_bytes": 262144,
         "max_file_descriptors": 8
       },
+      "observed_resource_counters": {
+        "input_bytes": 32768,
+        "wall_ms": 22,
+        "artifact_bytes": 65536,
+        "log_bytes": 16384
+      },
       "cleanup_status": "preserved_artifacts",
+      "artifact_paths": [
+        "artifacts/security/logs/tampered_repair_ledger_refuses_mutation.json",
+        "artifacts/security/quarantine/tampered_repair_ledger_refuses_mutation.jsonl"
+      ],
       "release_gate_effect": "fail_closed",
       "remediation_id": "bd-0xa7h",
       "reproduction_command": "ffs repair --dry-run --ledger security/fixtures/tampered_repair_ledger.jsonl <image>",
@@ -218,7 +815,38 @@
       "hostile_path_kind": "normal",
       "expected_path_decision": "accept_confined",
       "expected_safe_behavior": "classify_unsupported",
+      "expected_classification": "unsupported",
       "observed_classification": "unsupported",
+      "resource_controls": [
+        {
+          "resource_class": "input_bytes",
+          "limit_value": 65536,
+          "limit_unit": "bytes",
+          "enforcement_point": "mount_preflight",
+          "cleanup_policy": "clean_workspace"
+        },
+        {
+          "resource_class": "wall_time",
+          "limit_value": 100,
+          "limit_unit": "milliseconds",
+          "enforcement_point": "mount_preflight",
+          "cleanup_policy": "clean_workspace"
+        },
+        {
+          "resource_class": "artifact_space",
+          "limit_value": 65536,
+          "limit_unit": "bytes",
+          "enforcement_point": "mount_preflight",
+          "cleanup_policy": "clean_workspace"
+        },
+        {
+          "resource_class": "log_output",
+          "limit_value": 65536,
+          "limit_unit": "bytes",
+          "enforcement_point": "mount_preflight",
+          "cleanup_policy": "clean_workspace"
+        }
+      ],
       "resource_limits": {
         "max_input_bytes": 65536,
         "max_wall_ms": 100,
@@ -227,7 +855,16 @@
         "max_log_bytes": 65536,
         "max_file_descriptors": 4
       },
+      "observed_resource_counters": {
+        "input_bytes": 1024,
+        "wall_ms": 9,
+        "artifact_bytes": 8192,
+        "log_bytes": 4096
+      },
       "cleanup_status": "clean",
+      "artifact_paths": [
+        "artifacts/security/logs/unsupported_writeback_cache_option_rejected.json"
+      ],
       "release_gate_effect": "block_mutating_claim",
       "remediation_id": "bd-rchk0.2.1",
       "reproduction_command": "ffs mount --runtime-mode managed --writeback-cache <image> <mountpoint>",
@@ -247,7 +884,38 @@
       "hostile_path_kind": "normal",
       "expected_path_decision": "accept_confined",
       "expected_safe_behavior": "refuse_mutation",
+      "expected_classification": "mutation_refused",
       "observed_classification": "mutation_refused",
+      "resource_controls": [
+        {
+          "resource_class": "input_bytes",
+          "limit_value": 65536,
+          "limit_unit": "bytes",
+          "enforcement_point": "operator_command_preflight",
+          "cleanup_policy": "refuse_before_mutation"
+        },
+        {
+          "resource_class": "wall_time",
+          "limit_value": 100,
+          "limit_unit": "milliseconds",
+          "enforcement_point": "operator_command_preflight",
+          "cleanup_policy": "refuse_before_mutation"
+        },
+        {
+          "resource_class": "artifact_space",
+          "limit_value": 65536,
+          "limit_unit": "bytes",
+          "enforcement_point": "operator_command_preflight",
+          "cleanup_policy": "refuse_before_mutation"
+        },
+        {
+          "resource_class": "log_output",
+          "limit_value": 65536,
+          "limit_unit": "bytes",
+          "enforcement_point": "operator_command_preflight",
+          "cleanup_policy": "refuse_before_mutation"
+        }
+      ],
       "resource_limits": {
         "max_input_bytes": 65536,
         "max_wall_ms": 100,
@@ -256,7 +924,16 @@
         "max_log_bytes": 65536,
         "max_file_descriptors": 4
       },
+      "observed_resource_counters": {
+        "input_bytes": 2048,
+        "wall_ms": 8,
+        "artifact_bytes": 8192,
+        "log_bytes": 4096
+      },
       "cleanup_status": "clean",
+      "artifact_paths": [
+        "artifacts/security/logs/unsafe_repair_operator_command_refused.json"
+      ],
       "release_gate_effect": "fail_closed",
       "remediation_id": "bd-x63b9",
       "reproduction_command": "ffs repair --yes --background-repair --rw <image>",

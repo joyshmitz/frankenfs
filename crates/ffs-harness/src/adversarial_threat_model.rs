@@ -20,16 +20,26 @@ use std::path::{Component, Path};
 
 pub const ADVERSARIAL_THREAT_MODEL_SCHEMA_VERSION: u32 = 1;
 
-const REQUIRED_LOG_FIELDS: [&str; 10] = [
+const REQUIRED_LOG_FIELDS: [&str; 20] = [
     "threat_scenario_id",
     "input_hash",
     "parser_capability",
     "mount_capability",
     "repair_capability",
+    "resource_controls",
     "expected_safe_behavior",
+    "expected_classification",
     "observed_classification",
     "resource_limits",
+    "observed_input_bytes",
+    "observed_cpu_ms",
+    "observed_wall_ms",
+    "observed_memory_mib",
+    "observed_disk_bytes",
+    "enforcement_point",
     "cleanup_status",
+    "artifact_paths",
+    "remediation_id",
     "reproduction_command",
 ];
 
@@ -77,9 +87,13 @@ pub struct ThreatScenario {
     pub hostile_path_kind: HostileArtifactPathKind,
     pub expected_path_decision: ArtifactPathDecision,
     pub expected_safe_behavior: ExpectedSafeBehavior,
+    pub expected_classification: ObservedThreatClassification,
     pub observed_classification: ObservedThreatClassification,
+    pub resource_controls: Vec<ThreatResourceControl>,
     pub resource_limits: ThreatResourceLimits,
+    pub observed_resource_counters: ThreatObservedResourceCounters,
     pub cleanup_status: ThreatCleanupStatus,
+    pub artifact_paths: Vec<String>,
     pub release_gate_effect: ReleaseGateEffect,
     pub remediation_id: String,
     pub reproduction_command: String,
@@ -196,6 +210,7 @@ pub enum ExpectedSafeBehavior {
     ClassifyUnsupported,
     DegradeToReadOnly,
     CapResources,
+    Quarantine,
     RefuseMutation,
     RefuseHostPath,
     PreserveEvidence,
@@ -209,6 +224,7 @@ impl ExpectedSafeBehavior {
             Self::ClassifyUnsupported => "classify_unsupported",
             Self::DegradeToReadOnly => "degrade_to_read_only",
             Self::CapResources => "cap_resources",
+            Self::Quarantine => "quarantine",
             Self::RefuseMutation => "refuse_mutation",
             Self::RefuseHostPath => "refuse_host_path",
             Self::PreserveEvidence => "preserve_evidence",
@@ -223,6 +239,7 @@ pub enum ObservedThreatClassification {
     Unsupported,
     DetectionOnly,
     Capped,
+    Quarantined,
     MutationRefused,
     HostPathRefused,
     EvidencePreserved,
@@ -236,6 +253,7 @@ impl ObservedThreatClassification {
             Self::Unsupported => "unsupported",
             Self::DetectionOnly => "detection_only",
             Self::Capped => "capped",
+            Self::Quarantined => "quarantined",
             Self::MutationRefused => "mutation_refused",
             Self::HostPathRefused => "host_path_refused",
             Self::EvidencePreserved => "evidence_preserved",
@@ -253,11 +271,117 @@ pub struct ThreatResourceLimits {
     pub max_file_descriptors: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreatResourceControl {
+    pub resource_class: ThreatResourceClass,
+    pub limit_value: u64,
+    pub limit_unit: ThreatResourceLimitUnit,
+    pub enforcement_point: ThreatEnforcementPoint,
+    pub cleanup_policy: ThreatCleanupPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreatResourceClass {
+    InputBytes,
+    CpuTime,
+    WallTime,
+    Memory,
+    DiskSpace,
+    ArtifactSpace,
+    ArtifactCount,
+    LogOutput,
+    FileDescriptors,
+}
+
+impl ThreatResourceClass {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::InputBytes => "input_bytes",
+            Self::CpuTime => "cpu_time",
+            Self::WallTime => "wall_time",
+            Self::Memory => "memory",
+            Self::DiskSpace => "disk_space",
+            Self::ArtifactSpace => "artifact_space",
+            Self::ArtifactCount => "artifact_count",
+            Self::LogOutput => "log_output",
+            Self::FileDescriptors => "file_descriptors",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreatResourceLimitUnit {
+    Bytes,
+    Milliseconds,
+    Mib,
+    Count,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreatEnforcementPoint {
+    Ext4Parser,
+    BtrfsParser,
+    MountPreflight,
+    RepairLedgerIngestion,
+    ProofBundleValidation,
+    OperatorCommandPreflight,
+    FuzzCorpusSmoke,
+}
+
+impl ThreatEnforcementPoint {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Ext4Parser => "ext4_parser",
+            Self::BtrfsParser => "btrfs_parser",
+            Self::MountPreflight => "mount_preflight",
+            Self::RepairLedgerIngestion => "repair_ledger_ingestion",
+            Self::ProofBundleValidation => "proof_bundle_validation",
+            Self::OperatorCommandPreflight => "operator_command_preflight",
+            Self::FuzzCorpusSmoke => "fuzz_corpus_smoke",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreatCleanupPolicy {
+    CleanWorkspace,
+    QuarantineArtifacts,
+    PreserveEvidence,
+    RefuseBeforeMutation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreatObservedResourceCounters {
+    pub input_bytes: u64,
+    pub wall_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mib: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_descriptors: Option<u32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreatCleanupStatus {
     Clean,
     PreservedArtifacts,
+    Quarantined,
     Failed,
     NotRun,
 }
@@ -315,11 +439,16 @@ pub struct ThreatScenarioEvaluation {
     pub mount_capability: String,
     pub repair_capability: String,
     pub expected_safe_behavior: String,
+    pub expected_classification: String,
     pub observed_classification: String,
     pub path_decision: String,
+    pub resource_controls: Vec<ThreatResourceControl>,
     pub release_gate_effect: String,
     pub cleanup_status: ThreatCleanupStatus,
     pub resource_limits: ThreatResourceLimits,
+    pub observed_resource_counters: ThreatObservedResourceCounters,
+    pub primary_enforcement_point: String,
+    pub artifact_paths: Vec<String>,
     pub remediation_id: String,
     pub reproduction_command: String,
 }
@@ -461,7 +590,7 @@ pub fn build_adversarial_threat_model_sample_artifact_manifest(
         "adversarial_threat_model",
         "2026-05-03T00:00:00Z",
     )
-    .bead_id("bd-rchk0.5.11")
+    .bead_id("bd-0qx9b")
     .git_context("dry-run", "main", true)
     .environment(EnvironmentFingerprint {
         hostname: "dry-run-host".to_owned(),
@@ -487,7 +616,7 @@ pub fn build_adversarial_threat_model_sample_artifact_manifest(
         redacted: false,
         metadata: BTreeMap::from([
             ("model_id".to_owned(), model.model_id.clone()),
-            ("bead_id".to_owned(), "bd-rchk0.5.11".to_owned()),
+            ("bead_id".to_owned(), "bd-0qx9b".to_owned()),
         ]),
     });
 
@@ -512,6 +641,14 @@ pub fn build_adversarial_threat_model_sample_artifact_manifest(
                 (
                     "release_gate_effect".to_owned(),
                     evaluation.release_gate_effect.clone(),
+                ),
+                (
+                    "primary_enforcement_point".to_owned(),
+                    evaluation.primary_enforcement_point.clone(),
+                ),
+                (
+                    "artifact_path_count".to_owned(),
+                    evaluation.artifact_paths.len().to_string(),
                 ),
             ]),
         });
@@ -677,9 +814,63 @@ fn validate_scenario(
         ));
     }
 
+    if scenario.expected_classification != scenario.observed_classification {
+        errors.push(format!(
+            "scenario {} expected classification {} but observed {}",
+            scenario.scenario_id,
+            scenario.expected_classification.label(),
+            scenario.observed_classification.label()
+        ));
+    }
+
+    validate_artifact_paths(scenario, errors);
+    validate_cleanup_contract(scenario, errors);
     validate_resource_limits(scenario, errors);
+    validate_resource_controls(scenario, errors);
+    validate_observed_resource_counters(scenario, errors);
     validate_fail_closed_contract(scenario, errors);
     validate_safe_behavior_matches_threat_class(scenario, errors);
+}
+
+fn validate_artifact_paths(scenario: &ThreatScenario, errors: &mut Vec<String>) {
+    if scenario.artifact_paths.is_empty() {
+        errors.push(format!(
+            "scenario {} artifact_paths must not be empty",
+            scenario.scenario_id
+        ));
+    }
+    for artifact_path in &scenario.artifact_paths {
+        let decision =
+            classify_hostile_artifact_path(artifact_path, HostileArtifactPathKind::Normal);
+        if decision != ArtifactPathDecision::AcceptConfined {
+            errors.push(format!(
+                "scenario {} artifact path {} is not confined: {}",
+                scenario.scenario_id,
+                artifact_path,
+                decision.label()
+            ));
+        }
+    }
+}
+
+fn validate_cleanup_contract(scenario: &ThreatScenario, errors: &mut Vec<String>) {
+    match scenario.cleanup_status {
+        ThreatCleanupStatus::Clean
+        | ThreatCleanupStatus::PreservedArtifacts
+        | ThreatCleanupStatus::Quarantined => {}
+        ThreatCleanupStatus::Failed | ThreatCleanupStatus::NotRun => errors.push(format!(
+            "scenario {} cleanup_status must be clean, preserved_artifacts, or quarantined",
+            scenario.scenario_id
+        )),
+    }
+    if scenario.observed_classification == ObservedThreatClassification::Quarantined
+        && scenario.cleanup_status != ThreatCleanupStatus::Quarantined
+    {
+        errors.push(format!(
+            "scenario {} quarantined classification requires quarantined cleanup status",
+            scenario.scenario_id
+        ));
+    }
 }
 
 fn validate_resource_limits(scenario: &ThreatScenario, errors: &mut Vec<String>) {
@@ -697,11 +888,274 @@ fn validate_resource_limits(scenario: &ThreatScenario, errors: &mut Vec<String>)
         ));
     }
     if scenario.threat_class == ThreatClass::ResourceExhaustion
-        && scenario.expected_safe_behavior != ExpectedSafeBehavior::CapResources
+        && !matches!(
+            scenario.expected_safe_behavior,
+            ExpectedSafeBehavior::CapResources | ExpectedSafeBehavior::Quarantine
+        )
     {
         errors.push(format!(
-            "scenario {} resource exhaustion must cap resources",
+            "scenario {} resource exhaustion must cap or quarantine resources",
             scenario.scenario_id
+        ));
+    }
+}
+
+fn validate_resource_controls(scenario: &ThreatScenario, errors: &mut Vec<String>) {
+    if scenario.resource_controls.is_empty() {
+        errors.push(format!(
+            "scenario {} resource_controls must not be empty",
+            scenario.scenario_id
+        ));
+        return;
+    }
+
+    let mut classes = BTreeSet::new();
+    let mut has_wall_time = false;
+    let mut has_artifact_space = false;
+
+    for control in &scenario.resource_controls {
+        if control.limit_value == 0 {
+            errors.push(format!(
+                "scenario {} resource control {} limit_value must be positive",
+                scenario.scenario_id,
+                control.resource_class.label()
+            ));
+        }
+        if !classes.insert(control.resource_class) {
+            errors.push(format!(
+                "scenario {} duplicates resource control {}",
+                scenario.scenario_id,
+                control.resource_class.label()
+            ));
+        }
+        if !resource_unit_matches_class(control.resource_class, control.limit_unit) {
+            errors.push(format!(
+                "scenario {} resource control {} uses incompatible unit {:?}",
+                scenario.scenario_id,
+                control.resource_class.label(),
+                control.limit_unit
+            ));
+        }
+        validate_resource_control_with_limits(scenario, control, errors);
+        has_wall_time |= control.resource_class == ThreatResourceClass::WallTime;
+        has_artifact_space |= control.resource_class == ThreatResourceClass::ArtifactSpace;
+    }
+
+    if !has_wall_time {
+        errors.push(format!(
+            "scenario {} resource_controls missing wall_time",
+            scenario.scenario_id
+        ));
+    }
+    if !has_artifact_space {
+        errors.push(format!(
+            "scenario {} resource_controls missing artifact_space",
+            scenario.scenario_id
+        ));
+    }
+    if scenario.threat_class == ThreatClass::ResourceExhaustion {
+        for required in [
+            ThreatResourceClass::InputBytes,
+            ThreatResourceClass::WallTime,
+            ThreatResourceClass::Memory,
+            ThreatResourceClass::ArtifactSpace,
+            ThreatResourceClass::LogOutput,
+            ThreatResourceClass::FileDescriptors,
+        ] {
+            if !classes.contains(&required) {
+                errors.push(format!(
+                    "scenario {} resource exhaustion missing {} control",
+                    scenario.scenario_id,
+                    required.label()
+                ));
+            }
+        }
+    }
+}
+
+fn resource_unit_matches_class(
+    resource_class: ThreatResourceClass,
+    unit: ThreatResourceLimitUnit,
+) -> bool {
+    matches!(
+        (resource_class, unit),
+        (
+            ThreatResourceClass::InputBytes
+                | ThreatResourceClass::DiskSpace
+                | ThreatResourceClass::ArtifactSpace
+                | ThreatResourceClass::LogOutput,
+            ThreatResourceLimitUnit::Bytes
+        ) | (
+            ThreatResourceClass::CpuTime | ThreatResourceClass::WallTime,
+            ThreatResourceLimitUnit::Milliseconds
+        ) | (ThreatResourceClass::Memory, ThreatResourceLimitUnit::Mib)
+            | (
+                ThreatResourceClass::ArtifactCount | ThreatResourceClass::FileDescriptors,
+                ThreatResourceLimitUnit::Count
+            )
+    )
+}
+
+fn validate_resource_control_with_limits(
+    scenario: &ThreatScenario,
+    control: &ThreatResourceControl,
+    errors: &mut Vec<String>,
+) {
+    let limit = match control.resource_class {
+        ThreatResourceClass::InputBytes => Some(scenario.resource_limits.max_input_bytes),
+        ThreatResourceClass::WallTime => Some(scenario.resource_limits.max_wall_ms),
+        ThreatResourceClass::Memory => Some(u64::from(scenario.resource_limits.max_memory_mib)),
+        ThreatResourceClass::ArtifactSpace => Some(scenario.resource_limits.max_artifact_bytes),
+        ThreatResourceClass::LogOutput => Some(scenario.resource_limits.max_log_bytes),
+        ThreatResourceClass::FileDescriptors => {
+            Some(u64::from(scenario.resource_limits.max_file_descriptors))
+        }
+        ThreatResourceClass::CpuTime
+        | ThreatResourceClass::DiskSpace
+        | ThreatResourceClass::ArtifactCount => None,
+    };
+    if let Some(limit) = limit
+        && control.limit_value > limit
+    {
+        errors.push(format!(
+            "scenario {} resource control {} limit {} exceeds coarse limit {}",
+            scenario.scenario_id,
+            control.resource_class.label(),
+            control.limit_value,
+            limit
+        ));
+    }
+}
+
+fn validate_observed_resource_counters(scenario: &ThreatScenario, errors: &mut Vec<String>) {
+    let counters = &scenario.observed_resource_counters;
+    if counters.input_bytes > scenario.resource_limits.max_input_bytes {
+        errors.push(format!(
+            "scenario {} observed input bytes {} exceed max_input_bytes {}",
+            scenario.scenario_id, counters.input_bytes, scenario.resource_limits.max_input_bytes
+        ));
+    }
+    if counters.wall_ms > scenario.resource_limits.max_wall_ms {
+        errors.push(format!(
+            "scenario {} observed wall_ms {} exceed max_wall_ms {}",
+            scenario.scenario_id, counters.wall_ms, scenario.resource_limits.max_wall_ms
+        ));
+    }
+
+    for control in &scenario.resource_controls {
+        validate_observed_counter_for_control(scenario, control, errors);
+    }
+}
+
+fn validate_observed_counter_for_control(
+    scenario: &ThreatScenario,
+    control: &ThreatResourceControl,
+    errors: &mut Vec<String>,
+) {
+    let counters = &scenario.observed_resource_counters;
+    match control.resource_class {
+        ThreatResourceClass::InputBytes => {
+            validate_u64_observed_counter(
+                scenario,
+                control,
+                "input_bytes",
+                Some(counters.input_bytes),
+                errors,
+            );
+        }
+        ThreatResourceClass::CpuTime => {
+            validate_u64_observed_counter(scenario, control, "cpu_ms", counters.cpu_ms, errors);
+        }
+        ThreatResourceClass::WallTime => {
+            validate_u64_observed_counter(
+                scenario,
+                control,
+                "wall_ms",
+                Some(counters.wall_ms),
+                errors,
+            );
+        }
+        ThreatResourceClass::Memory => {
+            validate_u64_observed_counter(
+                scenario,
+                control,
+                "memory_mib",
+                counters.memory_mib.map(u64::from),
+                errors,
+            );
+        }
+        ThreatResourceClass::DiskSpace => {
+            validate_u64_observed_counter(
+                scenario,
+                control,
+                "disk_bytes",
+                counters.disk_bytes,
+                errors,
+            );
+        }
+        ThreatResourceClass::ArtifactSpace => {
+            validate_u64_observed_counter(
+                scenario,
+                control,
+                "artifact_bytes",
+                counters.artifact_bytes,
+                errors,
+            );
+        }
+        ThreatResourceClass::ArtifactCount => {
+            validate_u64_observed_counter(
+                scenario,
+                control,
+                "artifact_count",
+                counters.artifact_count.map(u64::from),
+                errors,
+            );
+        }
+        ThreatResourceClass::LogOutput => {
+            validate_u64_observed_counter(
+                scenario,
+                control,
+                "log_bytes",
+                counters.log_bytes,
+                errors,
+            );
+        }
+        ThreatResourceClass::FileDescriptors => {
+            validate_u64_observed_counter(
+                scenario,
+                control,
+                "file_descriptors",
+                counters.file_descriptors.map(u64::from),
+                errors,
+            );
+        }
+    }
+}
+
+fn validate_u64_observed_counter(
+    scenario: &ThreatScenario,
+    control: &ThreatResourceControl,
+    counter_name: &str,
+    observed: Option<u64>,
+    errors: &mut Vec<String>,
+) {
+    let Some(observed) = observed else {
+        errors.push(format!(
+            "scenario {} missing observed counter {} for {}",
+            scenario.scenario_id,
+            counter_name,
+            control.resource_class.label()
+        ));
+        return;
+    };
+    if observed > control.limit_value {
+        errors.push(format!(
+            "scenario {} observed counter {}={} exceeds {} limit {}",
+            scenario.scenario_id,
+            counter_name,
+            observed,
+            control.resource_class.label(),
+            control.limit_value
         ));
     }
 }
@@ -720,6 +1174,18 @@ fn validate_fail_closed_contract(scenario: &ThreatScenario, errors: &mut Vec<Str
     {
         errors.push(format!(
             "critical threat scenario {} must use fail_closed release gate effect",
+            scenario.scenario_id
+        ));
+    }
+    if scenario.severity == ThreatSeverity::Critical
+        && matches!(
+            scenario.observed_classification,
+            ObservedThreatClassification::DetectionOnly
+                | ObservedThreatClassification::EvidencePreserved
+        )
+    {
+        errors.push(format!(
+            "critical threat scenario {} must reject, cap, quarantine, refuse, or classify unsupported",
             scenario.scenario_id
         ));
     }
@@ -760,7 +1226,17 @@ fn validate_safe_behavior_matches_threat_class(
                 ));
             }
         }
-        ThreatClass::ResourceExhaustion => {}
+        ThreatClass::ResourceExhaustion => {
+            if !matches!(
+                scenario.expected_safe_behavior,
+                ExpectedSafeBehavior::CapResources | ExpectedSafeBehavior::Quarantine
+            ) {
+                errors.push(format!(
+                    "scenario {} resource exhaustion must cap or quarantine resources",
+                    scenario.scenario_id
+                ));
+            }
+        }
         ThreatClass::RepairLedgerTamper | ThreatClass::UnsafeOperatorCommand => {
             if scenario.expected_safe_behavior != ExpectedSafeBehavior::RefuseMutation {
                 errors.push(format!(
@@ -781,11 +1257,19 @@ fn evaluate_scenario(scenario: &ThreatScenario) -> ThreatScenarioEvaluation {
         mount_capability: scenario.mount_capability.label().to_owned(),
         repair_capability: scenario.repair_capability.label().to_owned(),
         expected_safe_behavior: scenario.expected_safe_behavior.label().to_owned(),
+        expected_classification: scenario.expected_classification.label().to_owned(),
         observed_classification: scenario.observed_classification.label().to_owned(),
         path_decision: scenario.expected_path_decision.label().to_owned(),
+        resource_controls: scenario.resource_controls.clone(),
         release_gate_effect: scenario.release_gate_effect.label().to_owned(),
         cleanup_status: scenario.cleanup_status,
         resource_limits: scenario.resource_limits,
+        observed_resource_counters: scenario.observed_resource_counters.clone(),
+        primary_enforcement_point: scenario.resource_controls.first().map_or_else(
+            || "missing".to_owned(),
+            |control| control.enforcement_point.label().to_owned(),
+        ),
+        artifact_paths: scenario.artifact_paths.clone(),
         remediation_id: scenario.remediation_id.clone(),
         reproduction_command: redact_host_path(&scenario.reproduction_command),
     }
@@ -848,7 +1332,7 @@ mod tests {
         let model = sample_model();
         let report = validate_adversarial_threat_model(&model, "artifacts/security/dry-run");
         assert!(report.valid, "{:?}", report.errors);
-        assert_eq!(report.scenario_count, 8);
+        assert_eq!(report.scenario_count, 17);
         assert_eq!(report.sample_artifact_manifest_errors, Vec::<String>::new());
         assert!(
             report
@@ -1013,12 +1497,127 @@ mod tests {
         let errors = validate_manifest(&artifact_manifest);
         assert_eq!(errors, Vec::new());
         assert_eq!(artifact_manifest.gate_id, "adversarial_threat_model");
-        assert_eq!(artifact_manifest.bead_id.as_deref(), Some("bd-rchk0.5.11"));
+        assert_eq!(artifact_manifest.bead_id.as_deref(), Some("bd-0qx9b"));
         assert!(
             artifact_manifest
                 .artifacts
                 .iter()
                 .any(|artifact| artifact.category == ArtifactCategory::ReproPack)
+        );
+    }
+
+    #[test]
+    fn checked_in_model_covers_bounded_hostile_fixture_matrix() {
+        let model = sample_model();
+        let report = validate_adversarial_threat_model(&model, "artifacts/security/dry-run");
+        assert!(report.valid, "{:?}", report.errors);
+        let scenario_ids = report
+            .evaluated_scenarios
+            .iter()
+            .map(|scenario| scenario.scenario_id.as_str())
+            .collect::<BTreeSet<_>>();
+        for required in [
+            "oversized_metadata_seed_capped",
+            "cyclic_metadata_reference_quarantined",
+            "deeply_nested_directory_capped",
+            "huge_xattr_payload_capped",
+            "truncated_repair_ledger_quarantined",
+            "corrupt_repair_ledger_quarantined",
+            "hostile_proof_bundle_traversal_refused",
+            "hostile_proof_bundle_symlink_refused",
+            "excessive_log_output_capped",
+            "excessive_artifact_count_capped",
+            "timeout_capped",
+            "file_descriptor_exhaustion_capped",
+        ] {
+            assert!(scenario_ids.contains(required), "missing {required}");
+        }
+    }
+
+    #[test]
+    fn rejects_missing_resource_controls() {
+        let mut model = sample_model();
+        model.scenarios[0].resource_controls.clear();
+        let report = validate_adversarial_threat_model(&model, "artifacts/security");
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("resource_controls must not be empty"))
+        );
+    }
+
+    #[test]
+    fn rejects_resource_control_unit_mismatch() {
+        let mut model = sample_model();
+        model.scenarios[0].resource_controls[0].limit_unit = ThreatResourceLimitUnit::Count;
+        let report = validate_adversarial_threat_model(&model, "artifacts/security");
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("uses incompatible unit"))
+        );
+    }
+
+    #[test]
+    fn rejects_expected_classification_mismatch() {
+        let mut model = sample_model();
+        model.scenarios[0].expected_classification = ObservedThreatClassification::Capped;
+        let report = validate_adversarial_threat_model(&model, "artifacts/security");
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("expected classification capped but observed rejected"))
+        );
+    }
+
+    #[test]
+    fn rejects_observed_counter_over_limit() {
+        let mut model = sample_model();
+        model.scenarios[0].observed_resource_counters.wall_ms =
+            model.scenarios[0].resource_limits.max_wall_ms + 1;
+        let report = validate_adversarial_threat_model(&model, "artifacts/security");
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("observed wall_ms"))
+        );
+    }
+
+    #[test]
+    fn rejects_artifact_path_traversal() {
+        let mut model = sample_model();
+        model.scenarios[0]
+            .artifact_paths
+            .push("artifacts/security/../../host_escape.json".to_owned());
+        let report = validate_adversarial_threat_model(&model, "artifacts/security");
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("is not confined"))
+        );
+    }
+
+    #[test]
+    fn rejects_cleanup_failure() {
+        let mut model = sample_model();
+        model.scenarios[0].cleanup_status = ThreatCleanupStatus::Failed;
+        let report = validate_adversarial_threat_model(&model, "artifacts/security");
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("cleanup_status must be clean"))
         );
     }
 }

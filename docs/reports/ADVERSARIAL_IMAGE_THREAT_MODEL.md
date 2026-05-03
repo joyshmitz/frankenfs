@@ -18,6 +18,12 @@ hostile proof-bundle paths, symlinked artifacts, missing FUSE capability,
 resource-exhaustion corpus seeds, tampered repair ledgers, unsupported mount
 options, and unsafe operator-command combinations.
 
+The bd-0qx9b containment refinement makes resource limits executable per
+scenario. Each hostile fixture records the resource class, limit value/unit,
+enforcement point, cleanup policy, expected classification, observed counters,
+and confined artifact paths that prove the fixture ended as rejected,
+quarantined, capped, unsupported, or mutation-refused.
+
 Every critical threat class is release-gate controlled. Unreviewed critical
 classes fail closed, and public docs cannot promote `security.hostile_image`
 from prose alone. A fresh validation artifact must show the expected safe
@@ -42,10 +48,20 @@ Each scenario log must include:
 - `parser_capability`
 - `mount_capability`
 - `repair_capability`
+- `resource_controls`
 - `expected_safe_behavior`
+- `expected_classification`
 - `observed_classification`
 - `resource_limits`
+- `observed_input_bytes`
+- `observed_cpu_ms`
+- `observed_wall_ms`
+- `observed_memory_mib`
+- `observed_disk_bytes`
+- `enforcement_point`
 - `cleanup_status`
+- `artifact_paths`
+- `remediation_id`
 - `reproduction_command`
 
 ## Smoke Coverage
@@ -57,6 +73,6 @@ Run the bounded security smoke with:
 ```
 
 The smoke validates the checked-in model, emits a shared QA artifact manifest,
-writes docs-safe wording, rejects malformed variants, and runs the focused unit
-tests. Longer fuzz campaigns and hostile-image containment proofs build on this
-contract rather than replacing it.
+writes docs-safe wording, rejects malformed variants, verifies bounded hostile
+fixture classifications, and runs the focused unit tests. Longer fuzz campaigns
+build on this containment contract rather than replacing it.

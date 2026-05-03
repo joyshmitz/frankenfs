@@ -276,8 +276,11 @@ Hostile-image safety is a separate release-gated claim. The adversarial threat
 model in `security/adversarial_image_threat_model.json` defines how malformed
 images, hostile proof bundles, tampered repair ledgers, resource-exhaustion
 seeds, unsupported mount options, and unsafe operator-command combinations must
-be rejected, capped, downgraded to detection-only, or preserved as evidence
-before any hostile-image readiness wording can improve.
+be rejected, quarantined, capped, downgraded to detection-only, or preserved as evidence
+before any hostile-image readiness wording can improve. Each containment
+scenario also records the resource class, limit value/unit, enforcement point,
+observed counters, cleanup policy, and confined artifact paths used by release
+gates.
 
 ### RaptorQ Fountain Codes (RFC 6330)
 
@@ -1406,7 +1409,7 @@ the suite artifact directory:
 | `durability.sync` | `fsync` and `fsyncdir` are the durability boundaries users can reason about | Logs classify `flush` as non-durable, `fsync`/`fsyncdir` as durable boundaries, and crash/reopen checks preserve fsync-backed data | `bd-rchk0.1.1`, `bd-rchk0.3.2` |
 | `repair.ro.auto` | read-only mounted automatic repair is operator-usable when explicitly enabled | `--background-repair --background-scrub-ledger <jsonl>` produces a repair ledger, verifies recovered reads, and keeps read-only mount mutation rules explicit | `bd-rchk6`, `bd-rchk7.3` |
 | `repair.rw.writeback` | repair writeback can safely coexist with client writes | `ffs_repair_writeback_route_e2e.sh` proves mounted MVCC repair-writeback routing, deterministic repair/client-write race schedules, stale-symbol refresh suppression, flush/reopen visibility, CLI read-write enablement, ledger-required rejection, and writeback-cache-disabled mount options | `bd-rchk0.1.1`, `bd-rchk0.1.2`, `bd-rchk0.1.3`, `bd-rchk0.1.4` |
-| `security.hostile_image` | hostile images and hostile proof artifacts cannot escape the safety envelope or create misleading readiness claims | `validate-adversarial-threat-model` plus the security E2E smoke prove path traversal/symlink refusal, critical fail-closed handling, resource caps, repair-ledger tamper refusal, and docs-safe wording | `bd-rchk0.5.11`, `bd-0qx9b` |
+| `security.hostile_image` | hostile images and hostile proof artifacts cannot escape the safety envelope or create misleading readiness claims | `validate-adversarial-threat-model` plus the security E2E smoke prove path traversal/symlink refusal, critical fail-closed handling, resource caps with observed counters, bounded hostile fixture classifications, repair-ledger tamper refusal, and docs-safe wording | `bd-rchk0.5.11`, `bd-0qx9b` |
 | `writeback_cache` | kernel FUSE writeback-cache mode can be enabled | Remains unsupported until the epoch-barrier acceptance gate, opt-in wiring, crash matrix, and docs are complete | `bd-rchk0.2.1`, `bd-rchk0.2.2`, `bd-rchk0.2.3` |
 | `errors.evidence` | mounted failures are actionable rather than opaque | Every failure path reports `operation_id`, `scenario_id`, `outcome`, `error_class`, remediation hint where applicable, raw logs, and cleanup status | `bd-rchk0.3.4`, `bd-rchk0.4.3` |
 | `performance.baseline` | performance claims are current for representative workloads | Fresh dated throughput/latency artifacts with host/runtime metadata; no readiness wording may imply performance tuning is complete before this lands | `bd-rchk5`, `bd-rchk5.1`, `bd-rchk5.3` |
