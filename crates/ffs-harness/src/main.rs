@@ -21,6 +21,10 @@ use ffs_harness::{
     deferred_parity_audit::{
         DeferredParityAuditConfig, fail_on_audit_errors, run_deferred_parity_audit,
     },
+    docs_status_drift::{
+        DocsStatusDriftConfig, fail_on_docs_status_drift_errors, render_docs_status_drift_markdown,
+        run_docs_status_drift,
+    },
     e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
     extract_btrfs_superblock, extract_ext4_superblock, extract_region,
     invariant_oracle::{
@@ -160,6 +164,7 @@ fn run() -> Result<()> {
         Some("validate-support-state-accounting") => {
             validate_support_state_accounting_cmd(&args[1..])
         }
+        Some("validate-docs-status-drift") => validate_docs_status_drift_cmd(&args[1..]),
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
         Some("validate-proof-bundle") => validate_proof_bundle_cmd(&args[1..]),
         Some("evaluate-release-gates") => evaluate_release_gates_cmd(&args[1..]),
@@ -1933,6 +1938,91 @@ fn validate_support_state_accounting_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn validate_docs_status_drift_cmd(args: &[String]) -> Result<()> {
+    let mut config = DocsStatusDriftConfig::default();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--issues" => {
+                i += 1;
+                config.issues_jsonl =
+                    Path::new(args.get(i).context("--issues requires a path")?).to_path_buf();
+            }
+            "--feature-parity" => {
+                i += 1;
+                config.feature_parity_markdown =
+                    Path::new(args.get(i).context("--feature-parity requires a path")?)
+                        .to_path_buf();
+            }
+            "--snippets" => {
+                i += 1;
+                config.snippets_json = Some(
+                    Path::new(args.get(i).context("--snippets requires a path")?).to_path_buf(),
+                );
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_docs_status_drift_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-docs-status-drift argument: {other}"),
+        }
+        i += 1;
+    }
+
+    config.generated_artifact_paths = match (&out_path, &summary_out_path) {
+        (Some(json), Some(markdown)) => vec![json.clone(), markdown.clone()],
+        (Some(json), None) => vec![json.clone()],
+        (None, Some(markdown)) => vec![markdown.clone()],
+        (None, None) => config.generated_artifact_paths,
+    };
+
+    let report = run_docs_status_drift(&config)?;
+    let json = serde_json::to_string_pretty(&report)?;
+    let output = match format {
+        ProofBundleFormat::Json => json,
+        ProofBundleFormat::Markdown => render_docs_status_drift_markdown(&report),
+    };
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "docs status drift report written: {} rules={} observations={} release_gate_pass={}",
+            path, report.rule_count, report.observation_count, report.release_gate_pass
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_docs_status_drift_markdown(&report)),
+        )?;
+        println!("docs status drift markdown written: {path}");
+    }
+    fail_on_docs_status_drift_errors(&report)
+}
+
 fn validate_mounted_write_matrix_cmd(args: &[String]) -> Result<()> {
     let mut matrix_path = DEFAULT_MATRIX_PATH.to_owned();
     let mut out_path: Option<String> = None;
@@ -2284,6 +2374,9 @@ fn print_usage() {
         "  ffs-harness validate-support-state-accounting [--issues FILE] [--feature-parity FILE] [--out FILE] [--summary-out FILE]"
     );
     println!(
+        "  ffs-harness validate-docs-status-drift [--issues FILE] [--feature-parity FILE] [--snippets FILE] [--out FILE] [--summary-out FILE]"
+    );
+    println!(
         "  ffs-harness validate-proof-overhead-budget --budget FILE --metrics FILE [--out FILE]"
     );
     println!(
@@ -2357,6 +2450,9 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness validate-support-state-accounting --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
+    );
+    println!(
+        "  ffs-harness validate-docs-status-drift --out artifacts/docs-status/docs_status_drift.json --summary-out artifacts/docs-status/docs_status_drift.md"
     );
     println!(
         "  ffs-harness validate-proof-overhead-budget --budget artifacts/proof/budget.json --metrics artifacts/proof/metrics.json --out artifacts/proof/budget_report.json"
@@ -2522,6 +2618,18 @@ fn print_support_state_accounting_usage() {
         "  --out FILE                         Write selected-format support-state report to FILE"
     );
     println!("  --summary-out FILE                 Write Markdown inspection summary");
+}
+
+fn print_docs_status_drift_usage() {
+    println!("Usage: ffs-harness validate-docs-status-drift [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --issues FILE                      Read bead JSONL from FILE");
+    println!("  --feature-parity FILE              Read FEATURE_PARITY markdown from FILE");
+    println!("  --snippets FILE                    Read observed docs-status snippets JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write selected-format drift report to FILE");
+    println!("  --summary-out FILE                 Write Markdown docs-status summary");
 }
 
 fn print_proof_overhead_budget_usage() {

@@ -68,6 +68,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 # Run soak/canary campaign manifest dry-run validation
 ./scripts/e2e/ffs_soak_canary_campaign_e2e.sh
 
+# Run docs status wording drift validation
+./scripts/e2e/ffs_docs_status_drift_e2e.sh
+
 # Run repair/writeback serialization contract dry-run validation
 ./scripts/e2e/ffs_repair_writeback_serialization_e2e.sh
 
@@ -625,6 +628,39 @@ The E2E smoke is:
 It writes JSON and Markdown reports, checks historical 86/86, 90/90, and 100
 percent migration classifications, injects unsafe flat parity wording, injects
 missing owner beads, and runs the module unit tests.
+
+## Docs Status Drift
+
+Docs status drift validation consumes support-state accounting plus the ambition
+evidence matrix, then checks generated wording snippets for README,
+FEATURE_PARITY, required spec documents, CLI/help text, operator docs, and
+proof-bundle summaries. It preserves feature claims by downgrading or scoping
+wording rather than deleting capability rows.
+
+Validate the current control surface with:
+
+```bash
+cargo run -p ffs-harness -- validate-docs-status-drift \
+  --issues .beads/issues.jsonl \
+  --feature-parity FEATURE_PARITY.md \
+  --out artifacts/docs-status/docs_status_drift.json \
+  --summary-out artifacts/docs-status/docs_status_drift.md
+```
+
+Observed snippet fixtures can be supplied with `--snippets <json>`. The gate
+rejects hand-upgraded claims, stale flat-parity wording, missing support-state
+or evidence-matrix references, missing remediation beads, and public statuses
+stronger than the controlling support-state/gate outputs allow.
+
+The E2E smoke is:
+
+```bash
+./scripts/e2e/ffs_docs_status_drift_e2e.sh
+```
+
+It checks default generated snippets across all required public surfaces,
+injects a hand-upgraded read-write repair claim, injects stale flat parity
+wording, verifies structured drift log fields, and runs the module unit tests.
 
 ## Release Gate Evaluation
 

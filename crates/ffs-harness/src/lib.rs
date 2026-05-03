@@ -8,6 +8,7 @@ pub mod btrfs_capability_drift;
 pub mod crash_promotion;
 pub mod cross_oracle_arbitration;
 pub mod deferred_parity_audit;
+pub mod docs_status_drift;
 pub mod e2e;
 pub mod error_taxonomy;
 pub mod fuzz_dashboard;

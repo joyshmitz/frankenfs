@@ -1068,6 +1068,58 @@
       ]
     },
     {
+      "suite_id": "ffs_docs_status_drift",
+      "script": "scripts/e2e/ffs_docs_status_drift_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "docs_status_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=docs_status_wired|outcome=PASS"
+        },
+        {
+          "id": "docs_status_report_renders",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=docs_status_report_renders|outcome=PASS"
+        },
+        {
+          "id": "docs_status_surface_status_coverage",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=docs_status_surface_status_coverage|outcome=PASS"
+        },
+        {
+          "id": "docs_status_log_tokens",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=docs_status_log_tokens|outcome=PASS"
+        },
+        {
+          "id": "docs_status_hand_upgrade_fails",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=docs_status_hand_upgrade_fails|outcome=PASS"
+        },
+        {
+          "id": "docs_status_flat_parity_fails",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=docs_status_flat_parity_fails|outcome=PASS"
+        },
+        {
+          "id": "docs_status_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=docs_status_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_proof_overhead_budget",
       "script": "scripts/e2e/ffs_proof_overhead_budget_e2e.sh",
       "required_categories": [
