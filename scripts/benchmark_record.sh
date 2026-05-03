@@ -25,6 +25,7 @@ BENCHMARK_BASELINE_HISTORY_PATH=""
 declare -A OP_WARN_THRESHOLDS=()
 declare -A OP_FAIL_THRESHOLDS=()
 CACHE_WORKLOAD_METRICS_JSON='[]'
+WROTE_BENCHMARK_BASELINE_LATEST=0
 
 have_rch() {
     [[ "$FFS_USE_RCH" == "1" ]] && command -v rch >/dev/null 2>&1
@@ -906,14 +907,22 @@ json_percentile() {
     local json_file="$1"
     local percentile="$2"
     jq -r --argjson p "$percentile" '
-        .results[0].times as $times
-        | ($times | length) as $n
-        | if $n == 0 then
-              0
+        if (.benchmark_mode == "criterion_once" and .measurement_source == "criterion_estimate") then
+              if $p >= 0.95 then
+                  .results[0].max
+              else
+                  .results[0].median
+              end
           else
-              ($times | sort) as $sorted
-              | ((($n - 1) * $p) | floor) as $idx
-              | $sorted[$idx]
+              .results[0].times as $times
+              | ($times | length) as $n
+              | if $n == 0 then
+                    0
+                else
+                    ($times | sort) as $sorted
+                    | ((($n - 1) * $p) | floor) as $idx
+                    | $sorted[$idx]
+                end
           end
     ' "$json_file"
 }
@@ -1096,6 +1105,67 @@ run_hyperfine_benchmark() {
         "$cmd" | tee "$txt_file"
 }
 
+scale_criterion_time_seconds() {
+    local value="$1"
+    local unit="$2"
+    awk -v value="$value" -v unit="$unit" 'BEGIN {
+        if (unit == "s") {
+            scale = 1.0;
+        } else if (unit == "ms") {
+            scale = 0.001;
+        } else if (unit == "us" || unit == "µs" || unit == "μs") {
+            scale = 0.000001;
+        } else if (unit == "ns") {
+            scale = 0.000000001;
+        } else if (unit == "ps") {
+            scale = 0.000000000001;
+        } else {
+            exit 2;
+        }
+        printf "%.12f", value * scale;
+    }'
+}
+
+criterion_time_estimates() {
+    local output_file="$1"
+    local line
+    line="$(grep -E '^[[:space:]]*time:[[:space:]]+\[' "$output_file" | tail -n 1 || true)"
+    [ -n "$line" ] || return 1
+
+    local low
+    local low_unit
+    local mean
+    local mean_unit
+    local high
+    local high_unit
+    read -r low low_unit mean mean_unit high high_unit < <(
+        printf '%s\n' "$line" | awk '
+            {
+                for (i = 1; i <= NF; i += 1) {
+                    gsub(/\[/, "", $i);
+                    gsub(/\]/, "", $i);
+                }
+                for (i = 1; i <= NF; i += 1) {
+                    if ($i == "time:") {
+                        print $(i + 1), $(i + 2), $(i + 3), $(i + 4), $(i + 5), $(i + 6);
+                        exit;
+                    }
+                }
+            }
+        '
+    )
+
+    [ -n "${low:-}" ] && [ -n "${low_unit:-}" ] \
+        && [ -n "${mean:-}" ] && [ -n "${mean_unit:-}" ] \
+        && [ -n "${high:-}" ] && [ -n "${high_unit:-}" ] || return 1
+    valid_number "$low" && valid_number "$mean" && valid_number "$high" || return 1
+
+    printf '%s\t%s\t%s\n' \
+        "$(scale_criterion_time_seconds "$low" "$low_unit")" \
+        "$(scale_criterion_time_seconds "$mean" "$mean_unit")" \
+        "$(scale_criterion_time_seconds "$high" "$high_unit")"
+}
+
 run_criterion_once_benchmark() {
     local label="$1"
     local cmd="$2"
@@ -1109,6 +1179,13 @@ run_criterion_once_benchmark() {
     local end_ns
     local duration_s
     local exit_status
+    local criterion_estimates
+    local criterion_source
+    local result_min_s
+    local result_mean_s
+    local result_max_s
+    local result_stddev_s
+    local measurement_source
 
     echo "--- ${label} ---"
     echo "Criterion benchmark detected; running once and preserving Criterion's own sample report."
@@ -1120,13 +1197,36 @@ run_criterion_once_benchmark() {
     end_ns="$(date +%s%N)"
     finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     duration_s="$(awk -v start="$start_ns" -v end="$end_ns" 'BEGIN { printf "%.9f", (end - start) / 1000000000.0 }')"
+    criterion_estimates=""
+    criterion_source=""
+    if criterion_estimates="$(criterion_time_estimates "$stderr_file" 2>/dev/null)"; then
+        criterion_source="$stderr_file"
+    elif criterion_estimates="$(criterion_time_estimates "$stdout_file" 2>/dev/null)"; then
+        criterion_source="$stdout_file"
+    fi
+
+    if [ -n "$criterion_estimates" ]; then
+        read -r result_min_s result_mean_s result_max_s <<<"$criterion_estimates"
+        measurement_source="criterion_estimate"
+    else
+        result_min_s="$duration_s"
+        result_mean_s="$duration_s"
+        result_max_s="$duration_s"
+        measurement_source="wall_time_fallback"
+    fi
+    result_stddev_s="$(awk -v low="$result_min_s" -v high="$result_max_s" 'BEGIN { printf "%.12f", (high - low) / 3.92 }')"
 
     {
         echo "benchmark_mode: criterion_once"
         echo "command: ${cmd}"
         echo "started_at_utc: ${started_at}"
         echo "finished_at_utc: ${finished_at}"
-        echo "duration_seconds: ${duration_s}"
+        echo "wall_time_seconds: ${duration_s}"
+        echo "measurement_source: ${measurement_source}"
+        if [ -n "$criterion_source" ]; then
+            echo "criterion_estimate_source: ${criterion_source}"
+            echo "criterion_estimate_seconds: [${result_min_s}, ${result_mean_s}, ${result_max_s}]"
+        fi
         echo "exit_status: ${exit_status}"
         echo ""
         echo "## stdout"
@@ -1144,20 +1244,29 @@ run_criterion_once_benchmark() {
         --arg text_report "$txt_file" \
         --arg started_at "$started_at" \
         --arg finished_at "$finished_at" \
-        --argjson duration_seconds "$duration_s" \
+        --arg measurement_source "$measurement_source" \
+        --arg criterion_source "$criterion_source" \
+        --argjson wall_time_seconds "$duration_s" \
+        --argjson result_min_seconds "$result_min_s" \
+        --argjson result_mean_seconds "$result_mean_s" \
+        --argjson result_max_seconds "$result_max_s" \
+        --argjson result_stddev_seconds "$result_stddev_s" \
         --argjson exit_status "$exit_status" \
         '{
             results: [{
                 command: $command,
-                mean: $duration_seconds,
-                stddev: 0,
-                median: $duration_seconds,
-                min: $duration_seconds,
-                max: $duration_seconds,
-                times: [$duration_seconds],
+                mean: $result_mean_seconds,
+                stddev: $result_stddev_seconds,
+                median: $result_mean_seconds,
+                min: $result_min_seconds,
+                max: $result_max_seconds,
+                times: [$result_min_seconds, $result_mean_seconds, $result_max_seconds],
                 exit_codes: [$exit_status]
             }],
             benchmark_mode: $benchmark_mode,
+            measurement_source: $measurement_source,
+            criterion_estimate_source: $criterion_source,
+            wall_time_seconds: $wall_time_seconds,
             command_stdout: $stdout_file,
             command_stderr: $stderr_file,
             text_report: $text_report,
@@ -1196,6 +1305,11 @@ done
 echo ""
 
 build_pending_json() {
+    if [ -n "$OP_FILTER" ]; then
+        echo '[]'
+        return
+    fi
+
     local pending_json
     pending_json='[]'
     local operation
@@ -1334,7 +1448,12 @@ write_perf_baseline_json() {
         }' > "$PERF_BASELINE_PATH"
 
     cp "$PERF_BASELINE_PATH" "$PERF_BASELINE_DATED_PATH"
-    cp "$PERF_BASELINE_PATH" "$BENCHMARK_BASELINE_LATEST_PATH"
+    if [ -z "$OP_FILTER" ]; then
+        cp "$PERF_BASELINE_PATH" "$BENCHMARK_BASELINE_LATEST_PATH"
+        WROTE_BENCHMARK_BASELINE_LATEST=1
+    else
+        WROTE_BENCHMARK_BASELINE_LATEST=0
+    fi
     cp "$PERF_BASELINE_PATH" "$BENCHMARK_BASELINE_HISTORY_PATH"
     rm -f "$tmp_measurements"
 }
@@ -1368,6 +1487,10 @@ date_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "- Cargo profile: \`${BENCH_PROFILE}\`"
     echo "- Cargo executor: \`$(cargo_cmd_prefix)\`"
     echo "- Benchmark runners: \`hyperfine\` for command probes, \`criterion_once\` for \`cargo bench\` workloads"
+    if [ -n "$OP_FILTER" ]; then
+        echo "- Operation filter: \`${OP_FILTER}\`"
+        echo "- Baseline latest update: skipped for targeted operation run"
+    fi
     echo "- Warmup runs: \`${WARMUP}\`"
     echo "- Measured runs: \`${RUNS}\`"
     echo "- Thresholds file: \`${THRESHOLDS_PATH}\`"
@@ -1521,7 +1644,11 @@ fi
 echo "Wrote baseline report: ${REPORT_PATH}"
 echo "Wrote structured baseline JSON: ${PERF_BASELINE_PATH}"
 echo "Wrote dated structured baseline JSON: ${PERF_BASELINE_DATED_PATH}"
-echo "Wrote baseline latest JSON: ${BENCHMARK_BASELINE_LATEST_PATH}"
+if [ "$WROTE_BENCHMARK_BASELINE_LATEST" -eq 1 ]; then
+    echo "Wrote baseline latest JSON: ${BENCHMARK_BASELINE_LATEST_PATH}"
+else
+    echo "Skipped baseline latest JSON for targeted --op run: ${BENCHMARK_BASELINE_LATEST_PATH}"
+fi
 echo "Wrote baseline history JSON: ${BENCHMARK_BASELINE_HISTORY_PATH}"
 echo "Wrote benchmark exports:"
 for i in "${!BENCH_LABELS[@]}"; do

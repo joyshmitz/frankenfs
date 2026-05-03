@@ -1,0 +1,39 @@
+{
+  "generated_at": "2026-05-03T18:50:20Z",
+  "date_tag": "20260503-wal1",
+  "commit": "7d12fd4c3f3855e565fbf257ff753f018fef61dc",
+  "branch": "main",
+  "environment": {
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "kernel": "Linux 6.17.0-14-generic x86_64 GNU/Linux",
+    "rustc": "rustc 1.97.0-nightly (37d85e592 2026-04-28)",
+    "cargo": "cargo 1.97.0-nightly (eb9b60f1f 2026-04-24)",
+    "hyperfine": "hyperfine 1.19.0"
+  },
+  "warmup_runs": 3,
+  "measured_runs": 10,
+  "thresholds_file": "benchmarks/thresholds.toml",
+  "p99_warn_threshold_percent": 10,
+  "p99_fail_threshold_percent": 20,
+  "measurement_coverage": {
+    "measured_count": 1,
+    "pending_count": 0,
+    "cache_workload_metric_count": 0
+  },
+  "measurements": [
+    {
+      "operation": "wal_write_amplification_1block",
+      "metric": "latency",
+      "command": "rch exec -- cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- wal_write_amplification_1block",
+      "benchmark_mode": "criterion_once",
+      "source_json": "baselines/hyperfine/20260503-wal1/ffs_mvcc_wal_write_amplification_1block.json",
+      "p50_us": 6649,
+      "p95_us": 6870,
+      "p99_us": 6870,
+      "throughput_ops_sec": 150.400818,
+      "throughput_mb_sec": 0.587503,
+      "status": "measured"
+    }
+  ],
+  "cache_workload_metrics": []
+}
