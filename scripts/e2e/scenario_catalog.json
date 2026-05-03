@@ -471,6 +471,59 @@
       ]
     },
     {
+      "suite_id": "ffs_release_gate",
+      "script": "scripts/e2e/ffs_release_gate_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "release_gate_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"release_gate_cli_wired\" \"PASS\""
+        },
+        {
+          "id": "release_gate_sample_passes",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"release_gate_sample_passes\" \"PASS\""
+        },
+        {
+          "id": "release_gate_generated_wording",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "scenario_result \"release_gate_generated_wording\" \"PASS\""
+        },
+        {
+          "id": "release_gate_missing_evidence_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"release_gate_missing_evidence_rejected\" \"PASS\""
+        },
+        {
+          "id": "release_gate_stale_evidence_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"release_gate_stale_evidence_rejected\" \"PASS\""
+        },
+        {
+          "id": "release_gate_threshold_failure_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"release_gate_threshold_failure_rejected\" \"PASS\""
+        },
+        {
+          "id": "release_gate_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"release_gate_unit_tests\" \"PASS\""
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_proof_overhead_budget",
       "script": "scripts/e2e/ffs_proof_overhead_budget_e2e.sh",
       "required_categories": [

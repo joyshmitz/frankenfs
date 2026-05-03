@@ -43,6 +43,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 
 # Run proof bundle offline validation smoke
 ./scripts/e2e/ffs_proof_bundle_e2e.sh
+
+# Run release-gate policy evaluator smoke
+./scripts/e2e/ffs_release_gate_e2e.sh
 ```
 
 ## Scenario Catalog Contract
@@ -321,6 +324,48 @@ It builds a sample bundle with every required lane, validates it, writes
 JSON/Markdown inspection artifacts, rejects hash drift, stale SHA, and missing
 artifact links, then runs the module unit tests.
 
+## Release Gate Evaluation
+
+Release gates are executable policy files that consume a validated proof bundle
+and emit feature states plus generated public wording. The evaluator is
+fail-closed: stale proof bundles, missing required lanes, lane failures, broken
+artifacts, and threshold failures downgrade or block user-facing claims.
+
+Evaluate a bundle with:
+
+```bash
+rch exec -- cargo run -p ffs-harness -- evaluate-release-gates \
+  --bundle artifacts/proof/bundle/manifest.json \
+  --policy artifacts/proof/release_gate_policy.json \
+  --current-git-sha "$(git rev-parse HEAD)" \
+  --max-age-days 14 \
+  --out artifacts/proof/release_gate.json \
+  --wording-out artifacts/proof/release_gate_wording.tsv
+```
+
+Policy features declare `previous_state`, `target_state`, required proof-bundle
+lanes, threshold checks, kill switches, docs wording ids, and remediation beads
+or explicit non-goal rationale. Supported states are `hidden`, `disabled`,
+`deprecated_blocked`, `dry_run_only`, `detection_only`, `experimental`,
+`opt_in_mutating`, and `validated`.
+
+The JSON report records the final feature state, whether an upgrade is allowed,
+all downgrade findings, controlling lane or artifact, threshold value,
+observed value, remediation id, docs wording id, required log fields, and the
+reproduction command. README and FEATURE_PARITY-safe wording should be copied
+from `generated_wording` or `--wording-out`, not hand-written ahead of gate
+data.
+
+The E2E smoke is:
+
+```bash
+./scripts/e2e/ffs_release_gate_e2e.sh
+```
+
+It builds a passing proof bundle and policy, verifies generated wording, then
+proves missing evidence, stale SHA, and threshold failures are rejected with
+machine-readable diagnostics.
+
 ### Redaction Policy
 
 The default redaction policy is designed for shareable audit packs:
@@ -419,6 +464,15 @@ The proof bundle suite exercises:
 4. Raw log, summary, gate input, and artifact link preservation for offline inspection
 5. Fail-closed validation for artifact hash drift, stale git SHA, and missing artifact links
 6. Redaction policy unit coverage that preserves reproduction commands and artifact/scenario fields
+
+The release gate suite exercises:
+
+1. `evaluate-release-gates` CLI wiring and module export
+2. Passing proof-bundle evidence consumed through policy-as-data
+3. Generated README/FEATURE_PARITY-safe wording from final feature states
+4. Fail-closed validation for missing evidence, stale evidence, and threshold failures
+5. Required log fields for downgrade findings, remediation ids, docs wording ids, and reproduction commands
+6. Unit coverage for feature-state transitions, kill switches, capability skips, explicit deferrals, and hand-edit-resistant wording
 
 The btrfs read-only smoke suite exercises:
 

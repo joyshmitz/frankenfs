@@ -34,6 +34,10 @@ use ffs_harness::{
         evaluate_proof_overhead_budget, fail_on_proof_overhead_budget_errors,
         load_observed_proof_metrics, load_proof_overhead_budget_config,
     },
+    release_gate::{
+        evaluate_release_gates, fail_on_release_gate_errors, load_release_gate_policy,
+        render_release_gate_markdown,
+    },
     validate_btrfs_fixture, validate_ext4_fixture,
     verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
     xfstests::{
@@ -105,6 +109,7 @@ fn run() -> Result<()> {
         }
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
         Some("validate-proof-bundle") => validate_proof_bundle_cmd(&args[1..]),
+        Some("evaluate-release-gates") => evaluate_release_gates_cmd(&args[1..]),
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
         Some("validate-mounted-write-matrix") => validate_mounted_write_matrix_cmd(&args[1..]),
         Some("validate-mounted-recovery-matrix") => {
@@ -131,6 +136,17 @@ enum ReadinessReportFormat {
 enum ProofBundleFormat {
     Json,
     Markdown,
+}
+
+#[derive(Debug)]
+struct ReleaseGateCmdArgs {
+    bundle_path: String,
+    policy_path: String,
+    current_git_sha: Option<String>,
+    max_age_days: Option<u64>,
+    out_path: Option<String>,
+    wording_out_path: Option<String>,
+    format: ProofBundleFormat,
 }
 
 fn operational_readiness_report_cmd(args: &[String]) -> Result<()> {
@@ -302,6 +318,138 @@ fn parse_proof_bundle_format(raw: &str) -> Result<ProofBundleFormat> {
         "markdown" | "md" => Ok(ProofBundleFormat::Markdown),
         other => bail!("invalid --format value: {other}"),
     }
+}
+
+fn evaluate_release_gates_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_release_gate_cmd_args(args)? else {
+        return Ok(());
+    };
+
+    let mut bundle_config = ProofBundleValidationConfig::new(&cmd_args.bundle_path);
+    bundle_config.current_git_sha = cmd_args.current_git_sha;
+    bundle_config.max_age_days = cmd_args.max_age_days;
+
+    let policy = load_release_gate_policy(Path::new(&cmd_args.policy_path))?;
+    let proof_report = validate_proof_bundle(&bundle_config)?;
+    let report = evaluate_release_gates(&policy, &proof_report);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_release_gate_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "release gate report written: {} valid={} features={} findings={}",
+            path,
+            report.valid,
+            report.feature_reports.len(),
+            report.findings.len()
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.wording_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", release_gate_wording(&report)),
+        )?;
+        println!("release gate wording written: {path}");
+    }
+
+    fail_on_release_gate_errors(&report)
+}
+
+fn parse_release_gate_cmd_args(args: &[String]) -> Result<Option<ReleaseGateCmdArgs>> {
+    let mut bundle_path: Option<String> = None;
+    let mut policy_path: Option<String> = None;
+    let mut current_git_sha: Option<String> = None;
+    let mut max_age_days: Option<u64> = None;
+    let mut out_path: Option<String> = None;
+    let mut wording_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--bundle" => {
+                i += 1;
+                bundle_path = Some(args.get(i).context("--bundle requires a path")?.to_owned());
+            }
+            "--policy" => {
+                i += 1;
+                policy_path = Some(args.get(i).context("--policy requires a path")?.to_owned());
+            }
+            "--current-git-sha" => {
+                i += 1;
+                current_git_sha = Some(
+                    args.get(i)
+                        .context("--current-git-sha requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--max-age-days" => {
+                i += 1;
+                max_age_days = Some(
+                    args.get(i)
+                        .context("--max-age-days requires a value")?
+                        .parse()
+                        .context("invalid --max-age-days value")?,
+                );
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--wording-out" => {
+                i += 1;
+                wording_out_path = Some(
+                    args.get(i)
+                        .context("--wording-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_release_gate_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown evaluate-release-gates argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(ReleaseGateCmdArgs {
+        bundle_path: bundle_path.context("--bundle is required for release gate evaluation")?,
+        policy_path: policy_path.context("--policy is required for release gate evaluation")?,
+        current_git_sha,
+        max_age_days,
+        out_path,
+        wording_out_path,
+        format,
+    }))
+}
+
+fn release_gate_wording(report: &ffs_harness::release_gate::ReleaseGateEvaluationReport) -> String {
+    report
+        .generated_wording
+        .iter()
+        .map(|entry| {
+            format!(
+                "{}\t{}\t{}\t{}",
+                entry.feature_id,
+                entry.docs_wording_id,
+                entry.state.label(),
+                entry.wording
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn validate_proof_overhead_budget_cmd(args: &[String]) -> Result<()> {
@@ -1101,6 +1249,9 @@ fn print_usage() {
     println!(
         "  ffs-harness validate-proof-bundle --bundle FILE [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
+    println!(
+        "  ffs-harness evaluate-release-gates --bundle FILE --policy FILE [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE] [--wording-out FILE]"
+    );
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
     println!("  ffs-harness validate-mounted-recovery-matrix [--matrix FILE] [--out FILE]");
     println!();
@@ -1150,6 +1301,9 @@ fn print_usage() {
     );
     println!(
         "  ffs-harness validate-proof-bundle --bundle artifacts/proof/bundle/manifest.json --out artifacts/proof/bundle/report.json --summary-out artifacts/proof/bundle/summary.md"
+    );
+    println!(
+        "  ffs-harness evaluate-release-gates --bundle artifacts/proof/bundle/manifest.json --policy artifacts/proof/release_gate_policy.json --out artifacts/proof/release_gate.json --wording-out artifacts/proof/release_gate_wording.tsv"
     );
     println!(
         "  ffs-harness validate-mounted-write-matrix --out artifacts/e2e/mounted_write_matrix.json"
@@ -1229,6 +1383,19 @@ fn print_proof_bundle_usage() {
         "  --out FILE                         Write selected-format validation report to FILE"
     );
     println!("  --summary-out FILE                 Write Markdown inspection summary to FILE");
+}
+
+fn print_release_gate_usage() {
+    println!("Usage: ffs-harness evaluate-release-gates [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --bundle FILE                      Read proof bundle manifest JSON");
+    println!("  --policy FILE                      Read release-gate policy JSON");
+    println!("  --current-git-sha SHA              Fail when bundle SHA differs");
+    println!("  --max-age-days N                   Fail when bundle generated_at is stale");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write release-gate report to FILE");
+    println!("  --wording-out FILE                 Write generated docs-safe wording TSV");
 }
 
 fn print_mounted_write_matrix_usage() {
