@@ -232,6 +232,47 @@
       ]
     },
     {
+      "suite_id": "ffs_adversarial_threat_model",
+      "script": "scripts/e2e/ffs_adversarial_threat_model_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "adversarial_threat_model_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adversarial_threat_model_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "adversarial_threat_model_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adversarial_threat_model_validates|outcome=PASS"
+        },
+        {
+          "id": "adversarial_threat_model_dry_run_expands",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adversarial_threat_model_dry_run_expands|outcome=PASS"
+        },
+        {
+          "id": "adversarial_threat_model_invalid_variants_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adversarial_threat_model_invalid_variants_rejected|outcome=PASS"
+        },
+        {
+          "id": "adversarial_threat_model_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adversarial_threat_model_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_expansion",
       "script": "scripts/e2e/ffs_benchmark_expansion_e2e.sh",
       "required_categories": [

@@ -8,6 +8,23 @@
 | `managed` | `--runtime-mode managed` | Background mount with graceful Ctrl+C shutdown and metrics. |
 | `per-core` | `--runtime-mode per-core` | Managed mount with thread-per-core dispatch and per-core metrics. |
 
+## Hostile-Image Boundary
+
+Mount runtime mode does not upgrade hostile-image readiness by itself. Malformed
+images, hostile proof artifacts, tampered repair ledgers, resource-exhaustion
+seeds, unsupported mount options, and unsafe operator command combinations are
+controlled by `security/adversarial_image_threat_model.json`.
+
+Operators should distinguish:
+
+| Case | Expected public status |
+|------|------------------------|
+| Hostile or malformed image containment | Evidence-gated by `validate-adversarial-threat-model` and security E2E artifacts. |
+| Ordinary corruption repair | Covered by scrub/repair evidence; does not imply hostile-image containment. |
+| Unsupported mount option or unavailable host capability | Deterministic unsupported/skip classification, not readiness. |
+| Detection-only scrub | May inspect and log findings but must not mutate the image. |
+| Mutating repair | Requires explicit opt-in plus fresh preflight, ledger, backup/rollback, and release-gate evidence. |
+
 ## Startup Banner
 
 The CLI prints the active runtime mode in the startup banner:

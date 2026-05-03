@@ -272,6 +272,13 @@ For multi-threaded workloads, `ShardedMvccStore` partitions version chains acros
 
 FrankenFS can detect corruption during scrub cycles and recover corrupted data from fountain-coded repair symbols through the explicit `ffs repair` / `ffs fsck --repair` paths. The `ffs mount` path also owns the background scrub lifecycle for read-only mounts: by default it remains detection-only, and `--background-repair --background-scrub-ledger <jsonl>` explicitly grants the daemon permission to write recovered blocks and refreshed repair symbols while recording a durable evidence trail.
 
+Hostile-image safety is a separate release-gated claim. The adversarial threat
+model in `security/adversarial_image_threat_model.json` defines how malformed
+images, hostile proof bundles, tampered repair ledgers, resource-exhaustion
+seeds, unsupported mount options, and unsafe operator-command combinations must
+be rejected, capped, downgraded to detection-only, or preserved as evidence
+before any hostile-image readiness wording can improve.
+
 ### RaptorQ Fountain Codes (RFC 6330)
 
 Each block group stores a configurable overhead of repair symbols alongside its source data blocks. RaptorQ is a rateless erasure code: given `K` source blocks, it generates as many repair symbols as needed. Any `K` of the combined source + repair symbols are sufficient to recover all `K` source blocks. This means FrankenFS can recover from arbitrary corruption patterns as long as the total number of lost blocks doesn't exceed the repair overhead.
@@ -1394,6 +1401,7 @@ the suite artifact directory:
 | `durability.sync` | `fsync` and `fsyncdir` are the durability boundaries users can reason about | Logs classify `flush` as non-durable, `fsync`/`fsyncdir` as durable boundaries, and crash/reopen checks preserve fsync-backed data | `bd-rchk0.1.1`, `bd-rchk0.3.2` |
 | `repair.ro.auto` | read-only mounted automatic repair is operator-usable when explicitly enabled | `--background-repair --background-scrub-ledger <jsonl>` produces a repair ledger, verifies recovered reads, and keeps read-only mount mutation rules explicit | `bd-rchk6`, `bd-rchk7.3` |
 | `repair.rw.writeback` | repair writeback can safely coexist with client writes | No user-facing upgrade until repair mutation is serialized through the mounted write path with unit and E2E evidence | `bd-rchk0.1.1`, `bd-rchk0.1.2`, `bd-rchk0.1.3` |
+| `security.hostile_image` | hostile images and hostile proof artifacts cannot escape the safety envelope or create misleading readiness claims | `validate-adversarial-threat-model` plus the security E2E smoke prove path traversal/symlink refusal, critical fail-closed handling, resource caps, repair-ledger tamper refusal, and docs-safe wording | `bd-rchk0.5.11`, `bd-0qx9b` |
 | `writeback_cache` | kernel FUSE writeback-cache mode can be enabled | Remains unsupported until the epoch-barrier acceptance gate, opt-in wiring, crash matrix, and docs are complete | `bd-rchk0.2.1`, `bd-rchk0.2.2`, `bd-rchk0.2.3` |
 | `errors.evidence` | mounted failures are actionable rather than opaque | Every failure path reports `operation_id`, `scenario_id`, `outcome`, `error_class`, remediation hint where applicable, raw logs, and cleanup status | `bd-rchk0.3.4`, `bd-rchk0.4.3` |
 | `performance.baseline` | performance claims are current for representative workloads | Fresh dated throughput/latency artifacts with host/runtime metadata; no readiness wording may imply performance tuning is complete before this lands | `bd-rchk5`, `bd-rchk5.1`, `bd-rchk5.3` |
@@ -1409,6 +1417,10 @@ the suite artifact directory:
   but they must not imply a current xfstests pass rate.
 - Performance readiness is explicitly delegated to `bd-rchk5`; correctness
   gates cannot silently upgrade throughput or latency claims.
+- Hostile-image safety is explicitly delegated to the adversarial threat model
+  and later containment/fuzz proofs. Ordinary corruption repair, unsupported
+  formats, detection-only scrub, and mutating repair readiness remain distinct
+  claims.
 - Kernel FUSE `writeback_cache` remains unsupported until the dedicated
   writeback-cache beads close. The current mount path must not enable it.
 - Read-write mounted automatic repair remains blocked until repair writeback is

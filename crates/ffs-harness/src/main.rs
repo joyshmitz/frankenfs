@@ -3,6 +3,11 @@
 use anyhow::{Context, Result, bail};
 use ffs_harness::{
     ParityReport,
+    adversarial_threat_model::{
+        build_adversarial_threat_model_sample_artifact_manifest,
+        fail_on_adversarial_threat_model_errors, load_adversarial_threat_model,
+        validate_adversarial_threat_model,
+    },
     ambition_evidence_matrix::{
         AmbitionEvidenceMatrixConfig, fail_on_ambition_evidence_matrix_errors,
         run_ambition_evidence_matrix,
@@ -117,6 +122,9 @@ fn run() -> Result<()> {
         Some("validate-performance-baseline-manifest") => {
             validate_performance_baseline_manifest_cmd(&args[1..])
         }
+        Some("validate-adversarial-threat-model") => {
+            validate_adversarial_threat_model_cmd(&args[1..])
+        }
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
         Some("validate-mounted-write-matrix") => validate_mounted_write_matrix_cmd(&args[1..]),
         Some("validate-mounted-recovery-matrix") => {
@@ -162,6 +170,15 @@ struct PerformanceManifestCmdArgs {
     artifact_root: String,
     out_path: Option<String>,
     artifact_out_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct AdversarialThreatModelCmdArgs {
+    model_path: String,
+    artifact_root: String,
+    out_path: Option<String>,
+    artifact_out_path: Option<String>,
+    wording_out_path: Option<String>,
 }
 
 fn operational_readiness_report_cmd(args: &[String]) -> Result<()> {
@@ -550,6 +567,122 @@ fn parse_performance_manifest_cmd_args(
         artifact_root,
         out_path,
         artifact_out_path,
+    }))
+}
+
+fn validate_adversarial_threat_model_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_adversarial_threat_model_cmd_args(args)? else {
+        return Ok(());
+    };
+    let model = load_adversarial_threat_model(Path::new(&cmd_args.model_path))?;
+    let report = validate_adversarial_threat_model(&model, &cmd_args.artifact_root);
+    let output = serde_json::to_string_pretty(&report)?;
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "adversarial threat model report written: {} valid={} scenarios={}",
+            path, report.valid, report.scenario_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.artifact_out_path {
+        let artifact_manifest = build_adversarial_threat_model_sample_artifact_manifest(
+            &model,
+            &cmd_args.artifact_root,
+            &report.evaluated_scenarios,
+        );
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", serde_json::to_string_pretty(&artifact_manifest)?),
+        )?;
+        println!("adversarial threat model sample artifact manifest written: {path}");
+    }
+
+    if let Some(path) = cmd_args.wording_out_path {
+        write_text_file(Path::new(&path), &adversarial_threat_model_wording(&report))?;
+        println!("adversarial threat model wording written: {path}");
+    }
+
+    fail_on_adversarial_threat_model_errors(&report)
+}
+
+fn adversarial_threat_model_wording(
+    report: &ffs_harness::adversarial_threat_model::AdversarialThreatModelReport,
+) -> String {
+    let mut lines = report
+        .generated_security_wording
+        .iter()
+        .map(|entry| {
+            format!(
+                "{}\t{}\t{}\t{}",
+                entry.feature_id, entry.docs_wording_id, entry.state, entry.wording
+            )
+        })
+        .collect::<Vec<_>>();
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+fn parse_adversarial_threat_model_cmd_args(
+    args: &[String],
+) -> Result<Option<AdversarialThreatModelCmdArgs>> {
+    let mut model_path: Option<String> = None;
+    let mut artifact_root = "artifacts/security/dry-run".to_owned();
+    let mut out_path: Option<String> = None;
+    let mut artifact_out_path: Option<String> = None;
+    let mut wording_out_path: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--model" => {
+                i += 1;
+                model_path = Some(args.get(i).context("--model requires a path")?.to_owned());
+            }
+            "--artifact-root" => {
+                i += 1;
+                args.get(i)
+                    .context("--artifact-root requires a path")?
+                    .clone_into(&mut artifact_root);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--artifact-out" => {
+                i += 1;
+                artifact_out_path = Some(
+                    args.get(i)
+                        .context("--artifact-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--wording-out" => {
+                i += 1;
+                wording_out_path = Some(
+                    args.get(i)
+                        .context("--wording-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_adversarial_threat_model_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-adversarial-threat-model argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(AdversarialThreatModelCmdArgs {
+        model_path: model_path.context("--model is required for threat model validation")?,
+        artifact_root,
+        out_path,
+        artifact_out_path,
+        wording_out_path,
     }))
 }
 
@@ -1354,6 +1487,7 @@ fn print_usage() {
         "  ffs-harness evaluate-release-gates --bundle FILE --policy FILE [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE] [--wording-out FILE]"
     );
     print_performance_baseline_manifest_usage_summary();
+    print_adversarial_threat_model_usage_summary();
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
     println!("  ffs-harness validate-mounted-recovery-matrix [--matrix FILE] [--out FILE]");
     println!();
@@ -1376,6 +1510,10 @@ fn print_usage() {
     );
     println!();
     println!("EXAMPLES:");
+    print_usage_examples();
+}
+
+fn print_usage_examples() {
     println!("  ffs-harness generate-fixture my_ext4.img > conformance/fixtures/my_ext4.json");
     println!(
         "  ffs-harness generate-fixture my_ext4.img region 2048 32 > conformance/fixtures/gd.json"
@@ -1408,6 +1546,7 @@ fn print_usage() {
         "  ffs-harness evaluate-release-gates --bundle artifacts/proof/bundle/manifest.json --policy artifacts/proof/release_gate_policy.json --out artifacts/proof/release_gate.json --wording-out artifacts/proof/release_gate_wording.tsv"
     );
     print_performance_baseline_manifest_example();
+    print_adversarial_threat_model_example();
     println!(
         "  ffs-harness validate-mounted-write-matrix --out artifacts/e2e/mounted_write_matrix.json"
     );
@@ -1425,6 +1564,18 @@ fn print_performance_baseline_manifest_usage_summary() {
 fn print_performance_baseline_manifest_example() {
     println!(
         "  ffs-harness validate-performance-baseline-manifest --manifest benchmarks/performance_baseline_manifest.json --out artifacts/performance/manifest_report.json --artifact-out artifacts/performance/sample_artifact_manifest.json"
+    );
+}
+
+fn print_adversarial_threat_model_usage_summary() {
+    println!(
+        "  ffs-harness validate-adversarial-threat-model --model FILE [--artifact-root DIR] [--out FILE] [--artifact-out FILE] [--wording-out FILE]"
+    );
+}
+
+fn print_adversarial_threat_model_example() {
+    println!(
+        "  ffs-harness validate-adversarial-threat-model --model security/adversarial_image_threat_model.json --out artifacts/security/threat_model_report.json --artifact-out artifacts/security/sample_artifact_manifest.json --wording-out artifacts/security/security_wording.tsv"
     );
 }
 
@@ -1521,6 +1672,17 @@ fn print_performance_manifest_usage() {
     println!("  --artifact-root DIR                Root for dry-run expanded artifacts");
     println!("  --out FILE                         Write validation report JSON");
     println!("  --artifact-out FILE                Write sample shared QA artifact manifest JSON");
+}
+
+fn print_adversarial_threat_model_usage() {
+    println!("Usage: ffs-harness validate-adversarial-threat-model [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --model FILE                       Read adversarial threat model JSON");
+    println!("  --artifact-root DIR                Root for dry-run security artifacts");
+    println!("  --out FILE                         Write validation report JSON");
+    println!("  --artifact-out FILE                Write sample shared QA artifact manifest JSON");
+    println!("  --wording-out FILE                 Write generated docs-safe wording TSV");
 }
 
 fn print_mounted_write_matrix_usage() {

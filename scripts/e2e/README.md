@@ -49,6 +49,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 
 # Run performance baseline manifest dry-run validation
 ./scripts/e2e/ffs_performance_manifest_e2e.sh
+
+# Run adversarial-image threat model dry-run validation
+./scripts/e2e/ffs_adversarial_threat_model_e2e.sh
 ```
 
 ## Scenario Catalog Contract
@@ -327,6 +330,35 @@ It builds a sample bundle with every required lane, validates it, writes
 JSON/Markdown inspection artifacts, rejects hash drift, stale SHA, and missing
 artifact links, then runs the module unit tests.
 
+## Adversarial Image Threat Model
+
+The adversarial-image threat model is the executable security contract for
+hostile filesystem images, hostile proof artifacts, tampered repair ledgers,
+resource-exhaustion seeds, unsupported mount options, and unsafe operator
+commands. It is a bounded CI smoke, not a replacement for long fuzz campaigns.
+
+Validate the checked-in model without mounting hostile inputs:
+
+```bash
+cargo run -p ffs-harness -- validate-adversarial-threat-model \
+  --model security/adversarial_image_threat_model.json \
+  --artifact-root artifacts/security/dry-run \
+  --out artifacts/security/threat_model_report.json \
+  --artifact-out artifacts/security/sample_artifact_manifest.json \
+  --wording-out artifacts/security/security_wording.tsv
+```
+
+The validator rejects traversal and symlink artifact paths, missing log fields,
+unreviewed critical threat classes, missing resource caps, unsafe operator
+promotion, and any public wording that would let docs alone promote
+hostile-image readiness.
+
+The E2E smoke is:
+
+```bash
+./scripts/e2e/ffs_adversarial_threat_model_e2e.sh
+```
+
 ## Performance Baseline Manifest
 
 The performance baseline manifest is the executable contract for benchmark
@@ -517,6 +549,15 @@ The performance manifest suite exercises:
 4. Sample shared QA artifact manifest emission for benchmark baseline/report outputs
 5. Fail-closed validation for unknown capabilities, missing environment fields, invalid metric units, and non-aggregatable artifact fields
 6. Unit coverage for workload ids, thresholds, capability vocabulary, metric units, artifact aggregation, and shared QA schema mapping
+
+The adversarial threat model suite exercises:
+
+1. `validate-adversarial-threat-model` CLI wiring and module export
+2. Checked-in hostile-image and hostile-artifact model validation
+3. Dry-run coverage for malformed image, hostile proof path, missing host capability, resource cap, repair-ledger tamper, unsupported mount option, and unsafe operator command cases
+4. Sample shared QA artifact manifest and generated docs-safe wording
+5. Fail-closed validation for path traversal, unreviewed critical threats, missing log fields, zero resource caps, and unsafe operator-command promotion
+6. Unit coverage for path canonicalization, symlink refusal, redaction, release-gate fail-closed behavior, and shared QA schema mapping
 
 The btrfs read-only smoke suite exercises:
 
