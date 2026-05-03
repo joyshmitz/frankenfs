@@ -96,6 +96,35 @@ const REQUIRED_CONSUMERS: [&str; 4] = [
     "mounted_write_matrix",
 ];
 
+const REQUIRED_RACE_COVERAGE_CASES: [&str; 11] = [
+    "repair_before_write",
+    "write_before_repair",
+    "overlapping_writes",
+    "disjoint_writes",
+    "fsync_during_repair",
+    "cancellation_during_decode",
+    "cancellation_during_writeback",
+    "symbol_refresh_races_client_write",
+    "unmount_pending_repair",
+    "reopen_after_failed_repair",
+    "retry_after_abort",
+];
+
+const REQUIRED_SCHEDULE_LOG_FIELDS: [&str; 12] = [
+    "scheduler_version",
+    "schedule_id",
+    "seed",
+    "explored_schedule_count",
+    "pruned_schedule_count",
+    "timeout_decision",
+    "liveness_decision",
+    "operation_trace",
+    "classification",
+    "artifact_paths",
+    "follow_up_bead",
+    "reproduction_command",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepairWritebackSerializationContract {
     pub schema_version: u32,
@@ -109,6 +138,7 @@ pub struct RepairWritebackSerializationContract {
     pub transitions: Vec<SerializationTransition>,
     pub rejection_cases: Vec<SerializationRejectionCase>,
     pub scenarios: Vec<SerializationScenario>,
+    pub race_schedule_manifest: RepairRaceScheduleManifest,
     pub risk_decision: SerializationRiskDecision,
     pub follow_up_beads: Vec<SerializationFollowUp>,
     pub reproduction_command: String,
@@ -196,6 +226,86 @@ pub struct SerializationScenario {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairRaceScheduleManifest {
+    pub scheduler_version: String,
+    pub exploration_strategy: String,
+    pub max_explored_schedules: u32,
+    pub max_pruned_schedules: u32,
+    pub liveness_timeout_ms: u64,
+    pub allowed_yield_points: Vec<String>,
+    pub required_log_fields: Vec<String>,
+    pub operation_dependencies: Vec<ScheduleDependency>,
+    pub schedules: Vec<RepairRaceSchedule>,
+    #[serde(default)]
+    pub deferred_coverage: Vec<DeferredRaceCoverage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleDependency {
+    pub before_operation: String,
+    pub after_operation: String,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairRaceSchedule {
+    pub schedule_id: String,
+    pub coverage_case: String,
+    pub seed: u64,
+    pub operation_trace: Vec<String>,
+    pub yield_points: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation_injection: Option<CancellationInjection>,
+    pub minimization: ScheduleMinimization,
+    pub expected_survivor_set: Vec<String>,
+    pub observed_survivor_set: Vec<String>,
+    pub ledger_outcomes: Vec<String>,
+    pub classification: String,
+    pub explored_schedule_count: u32,
+    pub pruned_schedule_count: u32,
+    pub timeout_decision: String,
+    pub liveness_decision: String,
+    pub artifact_paths: Vec<String>,
+    pub cleanup_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness_quarantine: Option<LivenessQuarantine>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up_bead: Option<String>,
+    pub reproduction_command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancellationInjection {
+    pub operation: String,
+    pub yield_point: String,
+    pub expected_cleanup: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleMinimization {
+    pub minimized: bool,
+    pub minimized_trace: Vec<String>,
+    pub original_trace_len: u32,
+    pub minimized_trace_len: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LivenessQuarantine {
+    pub owner: String,
+    pub expires_at: String,
+    pub user_risk_rationale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredRaceCoverage {
+    pub coverage_case: String,
+    pub follow_up_bead: String,
+    pub owner: String,
+    pub expires_at: String,
+    pub user_risk_rationale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SerializationRiskDecision {
     pub decision_id: String,
     pub chosen_option: String,
@@ -231,16 +341,21 @@ pub struct RepairWritebackSerializationReport {
     pub transition_count: usize,
     pub rejection_case_count: usize,
     pub scenario_count: usize,
+    pub schedule_count: usize,
     pub required_states: Vec<String>,
+    pub required_race_coverage_cases: Vec<String>,
     pub missing_required_states: Vec<String>,
     pub missing_required_invariants: Vec<String>,
     pub missing_required_evidence_fields: Vec<String>,
     pub missing_required_rejection_cases: Vec<String>,
     pub missing_required_coverage_tags: Vec<String>,
     pub missing_required_consumers: Vec<String>,
+    pub missing_required_race_coverage: Vec<String>,
+    pub missing_required_schedule_log_fields: Vec<String>,
     pub duplicate_ids: Vec<String>,
     pub transition_evaluations: Vec<TransitionEvaluation>,
     pub scenario_reports: Vec<SerializationScenarioReport>,
+    pub schedule_reports: Vec<RepairRaceScheduleReport>,
     pub risk_report: SerializationRiskReport,
     pub artifact_root: String,
     pub errors: Vec<String>,
@@ -271,6 +386,30 @@ pub struct SerializationScenarioReport {
     pub artifact_paths: Vec<String>,
     pub proves_no_lost_client_write: bool,
     pub preserves_reproduction_data: bool,
+    pub valid: bool,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairRaceScheduleReport {
+    pub schedule_id: String,
+    pub coverage_case: String,
+    pub seed: u64,
+    pub operation_trace: Vec<String>,
+    pub yield_points: Vec<String>,
+    pub explored_schedule_count: u32,
+    pub pruned_schedule_count: u32,
+    pub classification: String,
+    pub timeout_decision: String,
+    pub liveness_decision: String,
+    pub expected_survivor_set: Vec<String>,
+    pub observed_survivor_set: Vec<String>,
+    pub ledger_outcomes: Vec<String>,
+    pub minimized: bool,
+    pub artifact_paths: Vec<String>,
+    pub cleanup_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up_bead: Option<String>,
     pub valid: bool,
     pub diagnostics: Vec<String>,
 }
@@ -320,8 +459,10 @@ pub fn validate_repair_writeback_serialization_contract(
     let invariant_ids = collect_invariant_ids(contract);
     let rejection_case_ids = collect_rejection_case_ids(contract);
     let coverage_tags = collect_coverage_tags(contract);
+    let race_coverage_cases = collect_race_coverage_cases(contract);
     let consumers = collect_strings(&contract.artifact_consumers);
     let evidence_fields = collect_strings(&contract.required_evidence_fields);
+    let schedule_log_fields = collect_strings(&contract.race_schedule_manifest.required_log_fields);
 
     let missing_required_states = missing_required(&state_ids, &REQUIRED_STATES);
     let missing_required_invariants = missing_required(&invariant_ids, &REQUIRED_INVARIANTS);
@@ -331,6 +472,10 @@ pub fn validate_repair_writeback_serialization_contract(
         missing_required(&rejection_case_ids, &REQUIRED_REJECTION_CASES);
     let missing_required_coverage_tags = missing_required(&coverage_tags, &REQUIRED_COVERAGE_TAGS);
     let missing_required_consumers = missing_required(&consumers, &REQUIRED_CONSUMERS);
+    let missing_required_race_coverage =
+        missing_required(&race_coverage_cases, &REQUIRED_RACE_COVERAGE_CASES);
+    let missing_required_schedule_log_fields =
+        missing_required(&schedule_log_fields, &REQUIRED_SCHEDULE_LOG_FIELDS);
 
     extend_missing(
         &mut errors,
@@ -362,12 +507,23 @@ pub fn validate_repair_writeback_serialization_contract(
         "missing required artifact consumer",
         &missing_required_consumers,
     );
+    extend_missing(
+        &mut errors,
+        "missing required race coverage case",
+        &missing_required_race_coverage,
+    );
+    extend_missing(
+        &mut errors,
+        "missing required schedule log field",
+        &missing_required_schedule_log_fields,
+    );
 
     validate_states(contract, &state_ids, &mut errors);
     validate_transitions(contract, &state_ids, &evidence_fields, &mut errors);
     validate_rejection_cases(contract, &mut errors);
 
     let scenario_reports = validate_scenarios(contract, &state_ids, artifact_root, &mut errors);
+    let schedule_reports = validate_schedule_manifest(contract, artifact_root, &mut errors);
     let risk_report = validate_risk_decision(contract, &mut errors);
     if !risk_report.fail_closed_is_lower_loss {
         warnings
@@ -385,16 +541,24 @@ pub fn validate_repair_writeback_serialization_contract(
         transition_count: contract.transitions.len(),
         rejection_case_count: contract.rejection_cases.len(),
         scenario_count: contract.scenarios.len(),
+        schedule_count: contract.race_schedule_manifest.schedules.len(),
         required_states: REQUIRED_STATES.iter().map(ToString::to_string).collect(),
+        required_race_coverage_cases: REQUIRED_RACE_COVERAGE_CASES
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
         missing_required_states,
         missing_required_invariants,
         missing_required_evidence_fields,
         missing_required_rejection_cases,
         missing_required_coverage_tags,
         missing_required_consumers,
+        missing_required_race_coverage,
+        missing_required_schedule_log_fields,
         duplicate_ids,
         transition_evaluations,
         scenario_reports,
+        schedule_reports,
         risk_report,
         artifact_root: artifact_root.to_owned(),
         errors,
@@ -452,11 +616,12 @@ pub fn render_repair_writeback_serialization_markdown(
     writeln!(&mut out, "- Valid: `{}`", report.valid).ok();
     writeln!(
         &mut out,
-        "- Counts: states={} transitions={} rejection_cases={} scenarios={}",
+        "- Counts: states={} transitions={} rejection_cases={} scenarios={} schedules={}",
         report.state_count,
         report.transition_count,
         report.rejection_case_count,
-        report.scenario_count
+        report.scenario_count,
+        report.schedule_count
     )
     .ok();
     writeln!(
@@ -496,6 +661,23 @@ pub fn render_repair_writeback_serialization_markdown(
             scenario.final_state,
             scenario.proves_no_lost_client_write,
             scenario.preserves_reproduction_data
+        )
+        .ok();
+    }
+    writeln!(&mut out).ok();
+    writeln!(&mut out, "## Race Schedules").ok();
+    for schedule in &report.schedule_reports {
+        writeln!(
+            &mut out,
+            "- `{}` coverage=`{}` classification=`{}` seed={} explored={} pruned={} liveness=`{}` cleanup=`{}`",
+            schedule.schedule_id,
+            schedule.coverage_case,
+            schedule.classification,
+            schedule.seed,
+            schedule.explored_schedule_count,
+            schedule.pruned_schedule_count,
+            schedule.liveness_decision,
+            schedule.cleanup_status
         )
         .ok();
     }
@@ -831,6 +1013,360 @@ fn validate_scenarios(
     reports
 }
 
+fn validate_schedule_manifest(
+    contract: &RepairWritebackSerializationContract,
+    artifact_root: &str,
+    errors: &mut Vec<String>,
+) -> Vec<RepairRaceScheduleReport> {
+    let manifest = &contract.race_schedule_manifest;
+    let mut manifest_diagnostics = Vec::new();
+
+    if manifest.scheduler_version.is_empty() {
+        manifest_diagnostics.push("scheduler_version is required".to_owned());
+    }
+    if !matches!(
+        manifest.exploration_strategy.as_str(),
+        "bounded_dpor" | "seeded_trace_replay"
+    ) {
+        manifest_diagnostics.push(format!(
+            "unsupported exploration_strategy {}",
+            manifest.exploration_strategy
+        ));
+    }
+    if manifest.max_explored_schedules == 0 {
+        manifest_diagnostics.push("max_explored_schedules must be positive".to_owned());
+    }
+    if manifest.liveness_timeout_ms == 0 {
+        manifest_diagnostics.push("liveness_timeout_ms must be positive".to_owned());
+    }
+    if manifest.allowed_yield_points.is_empty() {
+        manifest_diagnostics.push("allowed_yield_points must be nonempty".to_owned());
+    }
+    let allowed_yield_points = collect_strings(&manifest.allowed_yield_points);
+    if allowed_yield_points.len() != manifest.allowed_yield_points.len() {
+        manifest_diagnostics.push("allowed_yield_points must not contain duplicates".to_owned());
+    }
+    if manifest.schedules.is_empty() {
+        manifest_diagnostics.push("at least one race schedule is required".to_owned());
+    }
+    if !manifest.schedules.is_empty()
+        && manifest
+            .schedules
+            .iter()
+            .all(|schedule| schedule.classification == "accepted")
+    {
+        manifest_diagnostics.push(
+            "race schedule coverage must include rejected or unsupported interleavings".to_owned(),
+        );
+    }
+
+    let operation_ids = collect_schedule_operations(manifest);
+    validate_schedule_dependencies(manifest, &operation_ids, &mut manifest_diagnostics);
+    validate_deferred_coverage(manifest, &mut manifest_diagnostics);
+
+    errors.extend(
+        manifest_diagnostics
+            .iter()
+            .map(|diagnostic| format!("race_schedule_manifest: {diagnostic}")),
+    );
+
+    let mut reports = Vec::new();
+    for schedule in &manifest.schedules {
+        let diagnostics =
+            validate_race_schedule(schedule, manifest, &allowed_yield_points, artifact_root);
+        errors.extend(
+            diagnostics
+                .iter()
+                .map(|diagnostic| format!("{}: {diagnostic}", schedule.schedule_id)),
+        );
+        reports.push(RepairRaceScheduleReport {
+            schedule_id: schedule.schedule_id.clone(),
+            coverage_case: schedule.coverage_case.clone(),
+            seed: schedule.seed,
+            operation_trace: schedule.operation_trace.clone(),
+            yield_points: schedule.yield_points.clone(),
+            explored_schedule_count: schedule.explored_schedule_count,
+            pruned_schedule_count: schedule.pruned_schedule_count,
+            classification: schedule.classification.clone(),
+            timeout_decision: schedule.timeout_decision.clone(),
+            liveness_decision: schedule.liveness_decision.clone(),
+            expected_survivor_set: schedule.expected_survivor_set.clone(),
+            observed_survivor_set: schedule.observed_survivor_set.clone(),
+            ledger_outcomes: schedule.ledger_outcomes.clone(),
+            minimized: schedule.minimization.minimized,
+            artifact_paths: schedule.artifact_paths.clone(),
+            cleanup_status: schedule.cleanup_status.clone(),
+            follow_up_bead: schedule.follow_up_bead.clone(),
+            valid: diagnostics.is_empty(),
+            diagnostics,
+        });
+    }
+    reports
+}
+
+fn validate_schedule_dependencies(
+    manifest: &RepairRaceScheduleManifest,
+    operation_ids: &BTreeSet<String>,
+    diagnostics: &mut Vec<String>,
+) {
+    let mut dependency_edges = BTreeSet::new();
+    for dependency in &manifest.operation_dependencies {
+        if dependency.before_operation.is_empty()
+            || dependency.after_operation.is_empty()
+            || dependency.rationale.is_empty()
+        {
+            diagnostics.push(
+                "operation dependencies must name both operations and a rationale".to_owned(),
+            );
+        }
+        if !operation_ids.contains(&dependency.before_operation) {
+            diagnostics.push(format!(
+                "dependency references unknown before_operation {}",
+                dependency.before_operation
+            ));
+        }
+        if !operation_ids.contains(&dependency.after_operation) {
+            diagnostics.push(format!(
+                "dependency references unknown after_operation {}",
+                dependency.after_operation
+            ));
+        }
+        if !dependency_edges.insert((
+            dependency.before_operation.clone(),
+            dependency.after_operation.clone(),
+        )) {
+            diagnostics.push(format!(
+                "duplicate dependency edge {} -> {}",
+                dependency.before_operation, dependency.after_operation
+            ));
+        }
+    }
+    if dependency_graph_has_cycle(&manifest.operation_dependencies) {
+        diagnostics.push("operation dependency graph must be acyclic".to_owned());
+    }
+}
+
+fn validate_deferred_coverage(
+    manifest: &RepairRaceScheduleManifest,
+    diagnostics: &mut Vec<String>,
+) {
+    for deferred in &manifest.deferred_coverage {
+        if deferred.coverage_case.is_empty()
+            || deferred.follow_up_bead.is_empty()
+            || deferred.owner.is_empty()
+            || deferred.expires_at.is_empty()
+            || deferred.user_risk_rationale.is_empty()
+        {
+            diagnostics.push("deferred coverage must include case, follow-up, owner, expiry, and user-risk rationale".to_owned());
+        }
+        if REQUIRED_RACE_COVERAGE_CASES.contains(&deferred.coverage_case.as_str()) {
+            diagnostics.push(format!(
+                "required race coverage case {} cannot be deferred",
+                deferred.coverage_case
+            ));
+        }
+    }
+}
+
+fn validate_race_schedule(
+    schedule: &RepairRaceSchedule,
+    manifest: &RepairRaceScheduleManifest,
+    allowed_yield_points: &BTreeSet<String>,
+    artifact_root: &str,
+) -> Vec<String> {
+    let mut diagnostics = Vec::new();
+    if schedule.schedule_id.is_empty() {
+        diagnostics.push("schedule_id is required".to_owned());
+    }
+    if schedule.coverage_case.is_empty() {
+        diagnostics.push("coverage_case is required".to_owned());
+    }
+    if schedule.seed == 0 {
+        diagnostics.push("seed must be nonzero".to_owned());
+    }
+    if schedule.operation_trace.is_empty() {
+        diagnostics.push("operation_trace must be nonempty".to_owned());
+    }
+    if schedule.yield_points.is_empty() {
+        diagnostics.push("yield_points must be nonempty".to_owned());
+    }
+    for yield_point in &schedule.yield_points {
+        if !allowed_yield_points.contains(yield_point) {
+            diagnostics.push(format!("yield point {yield_point} is not allowed"));
+        }
+    }
+    if !is_valid_schedule_classification(&schedule.classification) {
+        diagnostics.push(format!(
+            "invalid classification {}",
+            schedule.classification
+        ));
+    }
+    if !matches!(
+        schedule.timeout_decision.as_str(),
+        "completed" | "not_applicable" | "timeout_quarantined"
+    ) {
+        diagnostics.push(format!(
+            "invalid timeout_decision {}",
+            schedule.timeout_decision
+        ));
+    }
+    if !matches!(
+        schedule.liveness_decision.as_str(),
+        "within_deadline" | "timeout_quarantined" | "deferred_long_campaign"
+    ) {
+        diagnostics.push(format!(
+            "invalid liveness_decision {}",
+            schedule.liveness_decision
+        ));
+    }
+    if schedule.explored_schedule_count == 0 {
+        diagnostics.push("explored_schedule_count must be positive".to_owned());
+    }
+    if schedule.pruned_schedule_count > schedule.explored_schedule_count {
+        diagnostics.push("pruned_schedule_count cannot exceed explored_schedule_count".to_owned());
+    }
+    if schedule.explored_schedule_count > manifest.max_explored_schedules {
+        diagnostics.push("explored_schedule_count exceeds manifest cap".to_owned());
+    }
+    if schedule.pruned_schedule_count > manifest.max_pruned_schedules {
+        diagnostics.push("pruned_schedule_count exceeds manifest cap".to_owned());
+    }
+    if schedule.expected_survivor_set.is_empty() {
+        diagnostics.push("expected_survivor_set must be nonempty".to_owned());
+    }
+    if schedule.observed_survivor_set.is_empty() {
+        diagnostics.push("observed_survivor_set must be nonempty".to_owned());
+    }
+    if matches!(schedule.classification.as_str(), "accepted" | "rejected")
+        && schedule.expected_survivor_set != schedule.observed_survivor_set
+    {
+        diagnostics.push("expected and observed survivor sets must match".to_owned());
+    }
+    if schedule.ledger_outcomes.is_empty() {
+        diagnostics.push("ledger_outcomes must be nonempty".to_owned());
+    }
+    validate_minimization(&schedule.minimization, &mut diagnostics);
+    validate_schedule_cancellation(schedule, allowed_yield_points, &mut diagnostics);
+    validate_schedule_liveness_quarantine(schedule, &mut diagnostics);
+    validate_schedule_follow_up(schedule, &mut diagnostics);
+    if schedule.artifact_paths.is_empty() {
+        diagnostics.push("schedule must list artifact paths".to_owned());
+    }
+    for path in &schedule.artifact_paths {
+        if !is_safe_relative_artifact_path(path) {
+            diagnostics.push(format!("unsafe artifact path {path}"));
+        }
+        if !path.starts_with(artifact_root) {
+            diagnostics.push(format!(
+                "artifact path {path} must live under artifact root {artifact_root}"
+            ));
+        }
+    }
+    if schedule.cleanup_status.is_empty() {
+        diagnostics.push("cleanup_status is required".to_owned());
+    }
+    if schedule.reproduction_command.is_empty() {
+        diagnostics.push("reproduction_command is required".to_owned());
+    }
+    diagnostics
+}
+
+fn validate_minimization(minimization: &ScheduleMinimization, diagnostics: &mut Vec<String>) {
+    if minimization.original_trace_len == 0 {
+        diagnostics.push("minimization original_trace_len must be positive".to_owned());
+    }
+    if minimization.minimized_trace_len == 0 {
+        diagnostics.push("minimization minimized_trace_len must be positive".to_owned());
+    }
+    if minimization.minimized_trace_len > minimization.original_trace_len {
+        diagnostics.push("minimized_trace_len cannot exceed original_trace_len".to_owned());
+    }
+    if minimization.minimized && minimization.minimized_trace.is_empty() {
+        diagnostics.push("minimized schedules must preserve a minimized_trace".to_owned());
+    }
+    if minimization.minimized {
+        match u32::try_from(minimization.minimized_trace.len()) {
+            Ok(trace_len) if trace_len == minimization.minimized_trace_len => {}
+            Ok(trace_len) => diagnostics.push(format!(
+                "minimized_trace_len {} does not match minimized_trace length {trace_len}",
+                minimization.minimized_trace_len
+            )),
+            Err(_) => diagnostics.push("minimized_trace length exceeds u32".to_owned()),
+        }
+    }
+}
+
+fn validate_schedule_cancellation(
+    schedule: &RepairRaceSchedule,
+    allowed_yield_points: &BTreeSet<String>,
+    diagnostics: &mut Vec<String>,
+) {
+    if !schedule.coverage_case.contains("cancellation") {
+        return;
+    }
+    let Some(injection) = &schedule.cancellation_injection else {
+        diagnostics.push("cancellation coverage requires cancellation_injection".to_owned());
+        return;
+    };
+    if injection.operation.is_empty()
+        || injection.yield_point.is_empty()
+        || injection.expected_cleanup.is_empty()
+    {
+        diagnostics.push(
+            "cancellation_injection must name operation, yield point, and cleanup".to_owned(),
+        );
+    }
+    if !schedule.operation_trace.contains(&injection.operation) {
+        diagnostics.push(format!(
+            "cancellation operation {} is not in operation_trace",
+            injection.operation
+        ));
+    }
+    if !allowed_yield_points.contains(&injection.yield_point) {
+        diagnostics.push(format!(
+            "cancellation yield point {} is not allowed",
+            injection.yield_point
+        ));
+    }
+}
+
+fn validate_schedule_liveness_quarantine(
+    schedule: &RepairRaceSchedule,
+    diagnostics: &mut Vec<String>,
+) {
+    let needs_quarantine = schedule.classification == "quarantined_liveness"
+        || schedule.timeout_decision == "timeout_quarantined"
+        || schedule.liveness_decision == "timeout_quarantined";
+    if !needs_quarantine {
+        return;
+    }
+    let Some(quarantine) = &schedule.liveness_quarantine else {
+        diagnostics
+            .push("liveness quarantine requires owner, expiry, and user-risk rationale".to_owned());
+        return;
+    };
+    if quarantine.owner.is_empty()
+        || quarantine.expires_at.is_empty()
+        || quarantine.user_risk_rationale.is_empty()
+    {
+        diagnostics.push(
+            "liveness quarantine must include owner, expiry, and user-risk rationale".to_owned(),
+        );
+    }
+}
+
+fn validate_schedule_follow_up(schedule: &RepairRaceSchedule, diagnostics: &mut Vec<String>) {
+    if matches!(
+        schedule.classification.as_str(),
+        "unsupported_interleaving" | "quarantined_liveness" | "deferred_long_campaign"
+    ) && schedule.follow_up_bead.is_none()
+    {
+        diagnostics.push(
+            "unsupported, quarantined, or deferred schedules require follow_up_bead".to_owned(),
+        );
+    }
+}
+
 fn validate_risk_decision(
     contract: &RepairWritebackSerializationContract,
     errors: &mut Vec<String>,
@@ -942,8 +1478,33 @@ fn collect_coverage_tags(contract: &RepairWritebackSerializationContract) -> BTr
         .collect()
 }
 
+fn collect_race_coverage_cases(
+    contract: &RepairWritebackSerializationContract,
+) -> BTreeSet<String> {
+    contract
+        .race_schedule_manifest
+        .schedules
+        .iter()
+        .filter(|schedule| {
+            !matches!(
+                schedule.classification.as_str(),
+                "quarantined_liveness" | "deferred_long_campaign"
+            )
+        })
+        .map(|schedule| schedule.coverage_case.clone())
+        .collect()
+}
+
 fn collect_strings(values: &[String]) -> BTreeSet<String> {
     values.iter().cloned().collect()
+}
+
+fn collect_schedule_operations(manifest: &RepairRaceScheduleManifest) -> BTreeSet<String> {
+    manifest
+        .schedules
+        .iter()
+        .flat_map(|schedule| schedule.operation_trace.iter().cloned())
+        .collect()
 }
 
 fn collect_duplicate_ids(contract: &RepairWritebackSerializationContract) -> Vec<String> {
@@ -987,6 +1548,14 @@ fn collect_duplicate_ids(contract: &RepairWritebackSerializationContract) -> Vec
             .map(|item| item.bead_id.as_str()),
         &mut duplicates,
     );
+    collect_duplicate_namespace(
+        contract
+            .race_schedule_manifest
+            .schedules
+            .iter()
+            .map(|item| item.schedule_id.as_str()),
+        &mut duplicates,
+    );
     duplicates.into_iter().collect()
 }
 
@@ -1022,6 +1591,61 @@ fn is_safe_relative_artifact_path(path: &str) -> bool {
             .any(|component| matches!(component, "" | "." | ".."))
 }
 
+fn is_valid_schedule_classification(classification: &str) -> bool {
+    matches!(
+        classification,
+        "accepted"
+            | "rejected"
+            | "unsupported_interleaving"
+            | "quarantined_liveness"
+            | "deferred_long_campaign"
+    )
+}
+
+fn dependency_graph_has_cycle(dependencies: &[ScheduleDependency]) -> bool {
+    let mut graph = BTreeMap::<String, Vec<String>>::new();
+    for dependency in dependencies {
+        graph
+            .entry(dependency.before_operation.clone())
+            .or_default()
+            .push(dependency.after_operation.clone());
+        graph.entry(dependency.after_operation.clone()).or_default();
+    }
+
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    for node in graph.keys() {
+        if dependency_visit_has_cycle(node, &graph, &mut visiting, &mut visited) {
+            return true;
+        }
+    }
+    false
+}
+
+fn dependency_visit_has_cycle(
+    node: &str,
+    graph: &BTreeMap<String, Vec<String>>,
+    visiting: &mut BTreeSet<String>,
+    visited: &mut BTreeSet<String>,
+) -> bool {
+    if visited.contains(node) {
+        return false;
+    }
+    if !visiting.insert(node.to_owned()) {
+        return true;
+    }
+    if let Some(children) = graph.get(node) {
+        for child in children {
+            if dependency_visit_has_cycle(child, graph, visiting, visited) {
+                return true;
+            }
+        }
+    }
+    visiting.remove(node);
+    visited.insert(node.to_owned());
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1042,6 +1666,11 @@ mod tests {
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.missing_required_states, Vec::<String>::new());
         assert_eq!(report.missing_required_invariants, Vec::<String>::new());
+        assert_eq!(report.missing_required_race_coverage, Vec::<String>::new());
+        assert_eq!(
+            report.missing_required_schedule_log_fields,
+            Vec::<String>::new()
+        );
         assert!(report.risk_report.fail_closed_is_lower_loss);
     }
 
@@ -1107,6 +1736,116 @@ mod tests {
         assert!(!transition.mutation_allowed);
         assert_eq!(transition.to_state, "writeback_failure");
         assert_eq!(transition.error_class, "writeback_failure_no_refresh");
+    }
+
+    #[test]
+    fn race_schedule_manifest_covers_required_interleavings() {
+        let contract = sample_contract();
+        let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
+        assert!(report.valid, "{:?}", report.errors);
+        assert!(report.schedule_count >= REQUIRED_RACE_COVERAGE_CASES.len());
+        assert!(report.missing_required_race_coverage.is_empty());
+        assert!(
+            report
+                .schedule_reports
+                .iter()
+                .any(|schedule| schedule.classification == "unsupported_interleaving")
+        );
+        assert!(
+            report
+                .schedule_reports
+                .iter()
+                .any(|schedule| schedule.coverage_case == "cancellation_during_decode")
+        );
+        assert!(
+            report
+                .schedule_reports
+                .iter()
+                .any(|schedule| schedule.coverage_case == "cancellation_during_writeback")
+        );
+    }
+
+    #[test]
+    fn dependency_cycle_in_race_manifest_fails() {
+        let mut contract = sample_contract();
+        contract
+            .race_schedule_manifest
+            .operation_dependencies
+            .push(ScheduleDependency {
+                before_operation: "repair_decode".to_owned(),
+                after_operation: "repair_detect_corruption".to_owned(),
+                rationale: "synthetic cycle".to_owned(),
+            });
+        let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("dependency graph must be acyclic"))
+        );
+    }
+
+    #[test]
+    fn cancellation_schedule_requires_injection_metadata() {
+        let mut contract = sample_contract();
+        let schedule = contract
+            .race_schedule_manifest
+            .schedules
+            .iter_mut()
+            .find(|schedule| schedule.coverage_case == "cancellation_during_decode")
+            .expect("cancellation decode schedule exists");
+        schedule.cancellation_injection = None;
+        let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("requires cancellation_injection"))
+        );
+    }
+
+    #[test]
+    fn unsupported_interleaving_requires_follow_up() {
+        let mut contract = sample_contract();
+        let schedule = contract
+            .race_schedule_manifest
+            .schedules
+            .iter_mut()
+            .find(|schedule| schedule.classification == "unsupported_interleaving")
+            .expect("unsupported schedule exists");
+        schedule.follow_up_bead = None;
+        let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("require follow_up_bead"))
+        );
+    }
+
+    #[test]
+    fn survivor_set_mismatch_fails_for_deterministic_schedule() {
+        let mut contract = sample_contract();
+        let schedule = contract
+            .race_schedule_manifest
+            .schedules
+            .iter_mut()
+            .find(|schedule| schedule.classification == "accepted")
+            .expect("accepted schedule exists");
+        schedule
+            .observed_survivor_set
+            .push("unexpected_block".to_owned());
+        let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("survivor sets must match"))
+        );
     }
 
     #[test]

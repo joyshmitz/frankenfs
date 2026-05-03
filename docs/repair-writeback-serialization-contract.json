@@ -748,6 +748,682 @@
       "follow_up_bead": "bd-rchk0.1.4"
     }
   ],
+  "race_schedule_manifest": {
+    "scheduler_version": "ffs-repair-dpor-v1",
+    "exploration_strategy": "bounded_dpor",
+    "max_explored_schedules": 4096,
+    "max_pruned_schedules": 4096,
+    "liveness_timeout_ms": 250,
+    "allowed_yield_points": [
+      "repair_detected",
+      "repair_decode_started",
+      "repair_decode_completed",
+      "repair_writeback_requested",
+      "repair_writeback_staged",
+      "client_write_begin",
+      "client_write_committed",
+      "fsync_boundary",
+      "symbol_refresh",
+      "cancellation_checkpoint",
+      "unmount_checkpoint",
+      "reopen_checkpoint",
+      "retry_checkpoint"
+    ],
+    "required_log_fields": [
+      "scheduler_version",
+      "schedule_id",
+      "seed",
+      "explored_schedule_count",
+      "pruned_schedule_count",
+      "timeout_decision",
+      "liveness_decision",
+      "operation_trace",
+      "classification",
+      "artifact_paths",
+      "follow_up_bead",
+      "reproduction_command"
+    ],
+    "operation_dependencies": [
+      {
+        "before_operation": "repair_detect_corruption",
+        "after_operation": "repair_decode",
+        "rationale": "decode cannot start until the scrub ledger names the corrupted source block"
+      },
+      {
+        "before_operation": "repair_decode",
+        "after_operation": "repair_writeback",
+        "rationale": "source-block writeback requires a decoded candidate block"
+      },
+      {
+        "before_operation": "client_write",
+        "after_operation": "fsync",
+        "rationale": "fsync can only publish client data that was already staged"
+      },
+      {
+        "before_operation": "repair_writeback",
+        "after_operation": "symbol_refresh",
+        "rationale": "symbols may refresh only after source block writeback is verified"
+      },
+      {
+        "before_operation": "unmount",
+        "after_operation": "reopen",
+        "rationale": "reopen checks observe the durable state left by unmount cleanup"
+      },
+      {
+        "before_operation": "abort_repair",
+        "after_operation": "retry_repair",
+        "rationale": "retry evidence must be tied to a prior abort record"
+      }
+    ],
+    "schedules": [
+      {
+        "schedule_id": "rw-repair-race-repair-before-write",
+        "coverage_case": "repair_before_write",
+        "seed": 9001,
+        "operation_trace": [
+          "repair_detect_corruption",
+          "repair_decode",
+          "repair_writeback",
+          "client_write",
+          "fsync"
+        ],
+        "yield_points": [
+          "repair_detected",
+          "repair_decode_completed",
+          "repair_writeback_requested",
+          "client_write_begin",
+          "fsync_boundary"
+        ],
+        "minimization": {
+          "minimized": true,
+          "minimized_trace": [
+            "repair_writeback",
+            "client_write",
+            "fsync"
+          ],
+          "original_trace_len": 5,
+          "minimized_trace_len": 3
+        },
+        "expected_survivor_set": [
+          "repaired_block_42",
+          "client_write_block_42_after_repair"
+        ],
+        "observed_survivor_set": [
+          "repaired_block_42",
+          "client_write_block_42_after_repair"
+        ],
+        "ledger_outcomes": [
+          "repair_writeback_serialized",
+          "client_write_committed_after_repair",
+          "fsync_durable"
+        ],
+        "classification": "accepted",
+        "explored_schedule_count": 96,
+        "pruned_schedule_count": 64,
+        "timeout_decision": "completed",
+        "liveness_decision": "within_deadline",
+        "artifact_paths": [
+          "artifacts/repair-writeback/dry-run/races/repair_before_write.json",
+          "artifacts/repair-writeback/dry-run/races/repair_before_write.trace"
+        ],
+        "cleanup_status": "preserved_trace_and_ledger",
+        "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --schedule rw-repair-race-repair-before-write"
+      },
+      {
+        "schedule_id": "rw-repair-race-write-before-repair",
+        "coverage_case": "write_before_repair",
+        "seed": 9002,
+        "operation_trace": [
+          "client_write",
+          "fsync",
+          "repair_detect_corruption",
+          "repair_decode",
+          "repair_writeback"
+        ],
+        "yield_points": [
+          "client_write_begin",
+          "client_write_committed",
+          "fsync_boundary",
+          "repair_detected",
+          "repair_writeback_requested"
+        ],
+        "minimization": {
+          "minimized": true,
+          "minimized_trace": [
+            "client_write",
+            "fsync",
+            "repair_writeback"
+          ],
+          "original_trace_len": 5,
+          "minimized_trace_len": 3
+        },
+        "expected_survivor_set": [
+          "fsynced_client_block_42"
+        ],
+        "observed_survivor_set": [
+          "fsynced_client_block_42"
+        ],
+        "ledger_outcomes": [
+          "repair_snapshot_rebased",
+          "stale_candidate_rejected",
+          "client_write_survived"
+        ],
+        "classification": "rejected",
+        "explored_schedule_count": 128,
+        "pruned_schedule_count": 87,
+        "timeout_decision": "completed",
+        "liveness_decision": "within_deadline",
+        "artifact_paths": [
+          "artifacts/repair-writeback/dry-run/races/write_before_repair.json"
+        ],
+        "cleanup_status": "no_mutation_after_stale_candidate",
+        "follow_up_bead": "bd-rchk0.1.3",
+        "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --schedule rw-repair-race-write-before-repair"
+      },
+      {
+        "schedule_id": "rw-repair-race-overlapping-writes",
+        "coverage_case": "overlapping_writes",
+        "seed": 9003,
+        "operation_trace": [
+          "client_write",
+          "repair_writeback",
+          "client_write",
+          "fsync"
+        ],
+        "yield_points": [
+          "client_write_begin",
+          "repair_writeback_requested",
+          "repair_writeback_staged",
+          "client_write_committed",
+          "fsync_boundary"
+        ],
+        "minimization": {
+          "minimized": true,
+          "minimized_trace": [
+            "client_write",
+            "repair_writeback",
+            "client_write"
+          ],
+          "original_trace_len": 4,
+          "minimized_trace_len": 3
+        },
+        "expected_survivor_set": [
+          "latest_client_write_block_42"
+        ],
+        "observed_survivor_set": [
+          "latest_client_write_block_42"
+        ],
+        "ledger_outcomes": [
+          "overlap_detected",
+          "repair_writeback_rejected",
+          "latest_client_write_survived"
+        ],
+        "classification": "rejected",
+        "explored_schedule_count": 192,
+        "pruned_schedule_count": 121,
+        "timeout_decision": "completed",
+        "liveness_decision": "within_deadline",
+        "artifact_paths": [
+          "artifacts/repair-writeback/dry-run/races/overlapping_writes.json"
+        ],
+        "cleanup_status": "overlap_rejection_preserved",
+        "follow_up_bead": "bd-rchk0.1.2",
+        "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --schedule rw-repair-race-overlapping-writes"
+      },
+      {
+        "schedule_id": "rw-repair-race-disjoint-writes",
+        "coverage_case": "disjoint_writes",
+        "seed": 9004,
+        "operation_trace": [
+          "client_write",
+          "repair_detect_corruption",
+          "repair_decode",
+          "repair_writeback",
+          "fsync"
+        ],
+        "yield_points": [
+          "client_write_begin",
+          "repair_detected",
+          "repair_decode_completed",
+          "repair_writeback_staged",
+          "fsync_boundary"
+        ],
+        "minimization": {
+          "minimized": false,
+          "minimized_trace": [],
+          "original_trace_len": 5,
+          "minimized_trace_len": 5
+        },
+        "expected_survivor_set": [
+          "client_write_block_10",
+          "repaired_block_20"
+        ],
+        "observed_survivor_set": [
+          "client_write_block_10",
+          "repaired_block_20"
+        ],
+        "ledger_outcomes": [
+          "disjoint_ranges_proven",
+          "repair_writeback_serialized",
+          "client_write_survived"
+        ],
+        "classification": "accepted",
+        "explored_schedule_count": 72,
+        "pruned_schedule_count": 48,
+        "timeout_decision": "completed",
+        "liveness_decision": "within_deadline",
+        "artifact_paths": [
+          "artifacts/repair-writeback/dry-run/races/disjoint_writes.json"
+        ],
+        "cleanup_status": "disjoint_survivors_verified",
+        "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --schedule rw-repair-race-disjoint-writes"
+      },
+      {
+        "schedule_id": "rw-repair-race-fsync-during-repair",
+        "coverage_case": "fsync_during_repair",
+        "seed": 9005,
+        "operation_trace": [
+          "repair_detect_corruption",
+          "repair_decode",
+          "client_write",
+          "fsync",
+          "repair_writeback"
+        ],
+        "yield_points": [
+          "repair_detected",
+          "repair_decode_started",
+          "client_write_begin",
+          "fsync_boundary",
+          "repair_writeback_requested"
+        ],
+        "minimization": {
+          "minimized": true,
+          "minimized_trace": [
+            "repair_decode",
+            "client_write",
+            "fsync",
+            "repair_writeback"
+          ],
+          "original_trace_len": 5,
+          "minimized_trace_len": 4
+        },
+        "expected_survivor_set": [
+          "fsynced_client_block_42"
+        ],
+        "observed_survivor_set": [
+          "fsynced_client_block_42"
+        ],
+        "ledger_outcomes": [
+          "fsync_boundary_observed",
+          "repair_candidate_stale",
+          "repair_writeback_rejected"
+        ],
+        "classification": "rejected",
+        "explored_schedule_count": 224,
+        "pruned_schedule_count": 150,
+        "timeout_decision": "completed",
+        "liveness_decision": "within_deadline",
+        "artifact_paths": [
+          "artifacts/repair-writeback/dry-run/races/fsync_during_repair.json"
+        ],
+        "cleanup_status": "fsync_survivor_preserved",
+        "follow_up_bead": "bd-rchk0.1.3",
+        "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --schedule rw-repair-race-fsync-during-repair"
+      },
+      {
+        "schedule_id": "rw-repair-race-cancel-decode",
+        "coverage_case": "cancellation_during_decode",
+        "seed": 9006,
+        "operation_trace": [
+          "repair_detect_corruption",
+          "repair_decode",
+          "abort_repair"
+        ],
+        "yield_points": [
+          "repair_detected",
+          "repair_decode_started",
+          "cancellation_checkpoint"
+        ],
+        "cancellation_injection": {
+          "operation": "repair_decode",
+          "yield_point": "repair_decode_started",
+          "expected_cleanup": "decoder_buffers_released_no_source_mutation"
+        },
+        "minimization": {
+          "minimized": true,
+          "minimized_trace": [
+            "repair_decode",
+            "abort_repair"
+          ],
+          "original_trace_len": 3,
+          "minimized_trace_len": 2
+        },
+        "expected_survivor_set": [
+          "pre_decode_source_block_42"
+        ],
+        "observed_survivor_set": [
+          "pre_decode_source_block_42"
+        ],
+        "ledger_outcomes": [
+          "decode_cancelled",
+          "cleanup_complete",
+          "no_symbol_refresh"
+        ],
+        "classification": "accepted",
+        "explored_schedule_count": 64,
+        "pruned_schedule_count": 41,
+        "timeout_decision": "completed",
+        "liveness_decision": "within_deadline",
+        "artifact_paths": [
+          "artifacts/repair-writeback/dry-run/races/cancellation_during_decode.json"
+        ],
+        "cleanup_status": "decoder_buffers_released_no_source_mutation",
+        "follow_up_bead": "bd-rchk0.1.4",
+        "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --schedule rw-repair-race-cancel-decode"
+      },
+      {
+        "schedule_id": "rw-repair-race-cancel-writeback",
+        "coverage_case": "cancellation_during_writeback",
+        "seed": 9007,
+        "operation_trace": [
+          "repair_detect_corruption",
+          "repair_decode",
+          "repair_writeback",
+          "abort_repair"
+        ],
+        "yield_points": [
+          "repair_decode_completed",
+          "repair_writeback_staged",
+          "cancellation_checkpoint"
+        ],
+        "cancellation_injection": {
+          "operation": "repair_writeback",
+          "yield_point": "repair_writeback_staged",
+          "expected_cleanup": "staged_write_discarded_symbols_not_refreshed"
+        },
+        "minimization": {
+          "minimized": true,
+          "minimized_trace": [
+            "repair_writeback",
+            "abort_repair"
+          ],
+          "original_trace_len": 4,
+          "minimized_trace_len": 2
+        },
+        "expected_survivor_set": [
+          "pre_writeback_source_block_42"
+        ],
+        "observed_survivor_set": [
+          "pre_writeback_source_block_42"
+        ],
+        "ledger_outcomes": [
+          "writeback_cancelled",
+          "staged_write_discarded",
+          "no_symbol_refresh"
+        ],
+        "classification": "rejected",
+        "explored_schedule_count": 88,
+        "pruned_schedule_count": 57,
+        "timeout_decision": "completed",
+        "liveness_decision": "within_deadline",
+        "artifact_paths": [
+          "artifacts/repair-writeback/dry-run/races/cancellation_during_writeback.json"
+        ],
+        "cleanup_status": "staged_write_discarded_symbols_not_refreshed",
+        "follow_up_bead": "bd-rchk0.1.4",
+        "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --schedule rw-repair-race-cancel-writeback"
+      },
+      {
+        "schedule_id": "rw-repair-race-symbol-refresh-client-write",
+        "coverage_case": "symbol_refresh_races_client_write",
+        "seed": 9008,
+        "operation_trace": [
+          "repair_writeback",
+          "client_write",
+          "symbol_refresh",
+          "fsync"
+        ],
+        "yield_points": [
+          "repair_writeback_staged",
+          "client_write_begin",
+          "symbol_refresh",
+          "fsync_boundary"
+        ],
+        "minimization": {
+          "minimized": true,
+          "minimized_trace": [
+            "client_write",
+            "symbol_refresh"
+          ],
+          "original_trace_len": 4,
+          "minimized_trace_len": 2
+        },
+        "expected_survivor_set": [
+          "client_write_block_42",
+          "previous_symbol_generation"
+        ],
+        "observed_survivor_set": [
+          "client_write_block_42",
+          "previous_symbol_generation"
+        ],
+        "ledger_outcomes": [
+          "symbol_refresh_suppressed",
+          "stale_symbol_rejected",
+          "client_write_survived"
+        ],
+        "classification": "rejected",
+        "explored_schedule_count": 256,
+        "pruned_schedule_count": 173,
+        "timeout_decision": "completed",
+        "liveness_decision": "within_deadline",
+        "artifact_paths": [
+          "artifacts/repair-writeback/dry-run/races/symbol_refresh_client_write.json"
+        ],
+        "cleanup_status": "symbol_refresh_suppressed",
+        "follow_up_bead": "bd-rchk0.1.3",
+        "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --schedule rw-repair-race-symbol-refresh-client-write"
+      },
+      {
+        "schedule_id": "rw-repair-race-unmount-pending-repair",
+        "coverage_case": "unmount_pending_repair",
+        "seed": 9009,
+        "operation_trace": [
+          "repair_detect_corruption",
+          "repair_decode",
+          "repair_writeback",
+          "unmount"
+        ],
+        "yield_points": [
+          "repair_detected",
+          "repair_decode_started",
+          "repair_writeback_staged",
+          "unmount_checkpoint"
+        ],
+        "minimization": {
+          "minimized": true,
+          "minimized_trace": [
+            "repair_writeback",
+            "unmount"
+          ],
+          "original_trace_len": 4,
+          "minimized_trace_len": 2
+        },
+        "expected_survivor_set": [
+          "last_durable_client_state"
+        ],
+        "observed_survivor_set": [
+          "last_durable_client_state"
+        ],
+        "ledger_outcomes": [
+          "unmount_cancelled_pending_repair",
+          "cleanup_complete",
+          "no_partial_writeback"
+        ],
+        "classification": "rejected",
+        "explored_schedule_count": 144,
+        "pruned_schedule_count": 95,
+        "timeout_decision": "completed",
+        "liveness_decision": "within_deadline",
+        "artifact_paths": [
+          "artifacts/repair-writeback/dry-run/races/unmount_pending_repair.json"
+        ],
+        "cleanup_status": "unmount_cleanup_joined_pending_repair",
+        "follow_up_bead": "bd-rchk0.1.4",
+        "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --schedule rw-repair-race-unmount-pending-repair"
+      },
+      {
+        "schedule_id": "rw-repair-race-reopen-after-failed-repair",
+        "coverage_case": "reopen_after_failed_repair",
+        "seed": 9010,
+        "operation_trace": [
+          "repair_detect_corruption",
+          "repair_decode",
+          "repair_writeback",
+          "unmount",
+          "reopen"
+        ],
+        "yield_points": [
+          "repair_decode_completed",
+          "repair_writeback_staged",
+          "unmount_checkpoint",
+          "reopen_checkpoint"
+        ],
+        "minimization": {
+          "minimized": true,
+          "minimized_trace": [
+            "repair_writeback",
+            "unmount",
+            "reopen"
+          ],
+          "original_trace_len": 5,
+          "minimized_trace_len": 3
+        },
+        "expected_survivor_set": [
+          "last_durable_client_state",
+          "failed_repair_ledger_record"
+        ],
+        "observed_survivor_set": [
+          "last_durable_client_state",
+          "failed_repair_ledger_record"
+        ],
+        "ledger_outcomes": [
+          "writeback_failure_no_refresh",
+          "reopen_observed_failure_ledger",
+          "no_hidden_partial_repair"
+        ],
+        "classification": "accepted",
+        "explored_schedule_count": 112,
+        "pruned_schedule_count": 73,
+        "timeout_decision": "completed",
+        "liveness_decision": "within_deadline",
+        "artifact_paths": [
+          "artifacts/repair-writeback/dry-run/races/reopen_after_failed_repair.json"
+        ],
+        "cleanup_status": "failed_repair_visible_after_reopen",
+        "follow_up_bead": "bd-rchk0.1.4",
+        "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --schedule rw-repair-race-reopen-after-failed-repair"
+      },
+      {
+        "schedule_id": "rw-repair-race-retry-after-abort",
+        "coverage_case": "retry_after_abort",
+        "seed": 9011,
+        "operation_trace": [
+          "repair_detect_corruption",
+          "abort_repair",
+          "retry_repair",
+          "repair_decode",
+          "repair_writeback"
+        ],
+        "yield_points": [
+          "repair_detected",
+          "cancellation_checkpoint",
+          "retry_checkpoint",
+          "repair_decode_completed",
+          "repair_writeback_requested"
+        ],
+        "minimization": {
+          "minimized": true,
+          "minimized_trace": [
+            "abort_repair",
+            "retry_repair",
+            "repair_writeback"
+          ],
+          "original_trace_len": 5,
+          "minimized_trace_len": 3
+        },
+        "expected_survivor_set": [
+          "retried_repair_block_42"
+        ],
+        "observed_survivor_set": [
+          "retried_repair_block_42"
+        ],
+        "ledger_outcomes": [
+          "abort_record_preserved",
+          "retry_rebased_on_current_epoch",
+          "repair_writeback_serialized"
+        ],
+        "classification": "accepted",
+        "explored_schedule_count": 168,
+        "pruned_schedule_count": 109,
+        "timeout_decision": "completed",
+        "liveness_decision": "within_deadline",
+        "artifact_paths": [
+          "artifacts/repair-writeback/dry-run/races/retry_after_abort.json"
+        ],
+        "cleanup_status": "retry_ledger_preserved",
+        "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --schedule rw-repair-race-retry-after-abort"
+      },
+      {
+        "schedule_id": "rw-repair-race-unsupported-epoch-rewind",
+        "coverage_case": "unsupported_nested_repair_epoch_rewind",
+        "seed": 9012,
+        "operation_trace": [
+          "repair_writeback",
+          "symbol_refresh",
+          "client_write",
+          "fsync"
+        ],
+        "yield_points": [
+          "repair_writeback_staged",
+          "symbol_refresh",
+          "client_write_begin",
+          "fsync_boundary"
+        ],
+        "minimization": {
+          "minimized": true,
+          "minimized_trace": [
+            "symbol_refresh",
+            "client_write"
+          ],
+          "original_trace_len": 4,
+          "minimized_trace_len": 2
+        },
+        "expected_survivor_set": [
+          "pre_unsupported_interleaving_state"
+        ],
+        "observed_survivor_set": [
+          "pre_unsupported_interleaving_state"
+        ],
+        "ledger_outcomes": [
+          "unsupported_interleaving_classified",
+          "no_readiness_upgrade",
+          "follow_up_bead_recorded"
+        ],
+        "classification": "unsupported_interleaving",
+        "explored_schedule_count": 32,
+        "pruned_schedule_count": 31,
+        "timeout_decision": "not_applicable",
+        "liveness_decision": "within_deadline",
+        "artifact_paths": [
+          "artifacts/repair-writeback/dry-run/races/unsupported_epoch_rewind.json"
+        ],
+        "cleanup_status": "unsupported_interleaving_preserved_for_follow_up",
+        "follow_up_bead": "bd-rchk0.1.2",
+        "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --schedule rw-repair-race-unsupported-epoch-rewind"
+      }
+    ],
+    "deferred_coverage": []
+  },
   "risk_decision": {
     "decision_id": "rw-repair-expected-loss-v1",
     "chosen_option": "fail_closed_until_unified_serializer",

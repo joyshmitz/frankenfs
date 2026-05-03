@@ -32,6 +32,17 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+run_rch_capture() {
+    local log_path="$1"
+    shift
+    local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-240}"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${timeout_secs}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1
+    else
+        "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1
+    fi
+}
+
 e2e_init "ffs_repair_writeback_serialization"
 
 CONTRACT_JSON="$REPO_ROOT/docs/repair-writeback-serialization-contract.json"
@@ -43,6 +54,7 @@ BAD_MISSING_EVIDENCE="$E2E_LOG_DIR/bad_missing_evidence.json"
 BAD_UNSAFE_RISK="$E2E_LOG_DIR/bad_unsafe_risk.json"
 BAD_MUTATION_ALLOWED="$E2E_LOG_DIR/bad_mutation_allowed.json"
 BAD_MISSING_REPRO="$E2E_LOG_DIR/bad_missing_repro.json"
+BAD_BAD_SCHEDULE="$E2E_LOG_DIR/bad_bad_schedule.json"
 BAD_RAW="$E2E_LOG_DIR/repair_writeback_bad.raw"
 FAIL_CLOSED_ARTIFACT="$E2E_LOG_DIR/repair_writeback_rw_fail_closed_artifact.json"
 FAIL_CLOSED_LOG="$E2E_LOG_DIR/repair_writeback_rw_fail_closed.log"
@@ -89,8 +101,14 @@ if report["missing_required_evidence_fields"]:
     raise SystemExit(f"missing evidence fields: {report['missing_required_evidence_fields']}")
 if report["missing_required_coverage_tags"]:
     raise SystemExit(f"missing coverage: {report['missing_required_coverage_tags']}")
+if report["missing_required_race_coverage"]:
+    raise SystemExit(f"missing race coverage: {report['missing_required_race_coverage']}")
+if report["missing_required_schedule_log_fields"]:
+    raise SystemExit(f"missing schedule log fields: {report['missing_required_schedule_log_fields']}")
 if not report["risk_report"]["fail_closed_is_lower_loss"]:
     raise SystemExit("fail-closed option is not lower loss")
+if report["schedule_count"] < 12:
+    raise SystemExit("not enough deterministic race schedules")
 
 transition = next(
     row for row in report["transition_evaluations"]
@@ -110,6 +128,35 @@ if not scenario["proves_no_lost_client_write"] or not scenario["preserves_reprod
 if scenario["expected_error_class"] != "rw_repair_serialization_missing":
     raise SystemExit("wrong scenario error class")
 
+required_cases = {
+    "repair_before_write",
+    "write_before_repair",
+    "overlapping_writes",
+    "disjoint_writes",
+    "fsync_during_repair",
+    "cancellation_during_decode",
+    "cancellation_during_writeback",
+    "symbol_refresh_races_client_write",
+    "unmount_pending_repair",
+    "reopen_after_failed_repair",
+    "retry_after_abort",
+}
+schedules = report["schedule_reports"]
+observed_cases = {row["coverage_case"] for row in schedules}
+if not required_cases <= observed_cases:
+    raise SystemExit(f"missing schedule cases: {sorted(required_cases - observed_cases)}")
+if not any(row["classification"] == "unsupported_interleaving" for row in schedules):
+    raise SystemExit("unsupported-interleaving classification missing")
+if not any(row["classification"] == "rejected" for row in schedules):
+    raise SystemExit("race schedules only prove happy paths")
+for row in schedules:
+    if row["classification"] in {"accepted", "rejected"} and row["expected_survivor_set"] != row["observed_survivor_set"]:
+        raise SystemExit(f"survivor mismatch for {row['schedule_id']}")
+    if not row["operation_trace"]:
+        raise SystemExit(f"missing operation trace for {row['schedule_id']}")
+    if not row["artifact_paths"] or not row["cleanup_status"]:
+        raise SystemExit(f"missing artifacts or cleanup for {row['schedule_id']}")
+
 metadata = [entry.get("metadata", {}) for entry in artifact["artifacts"]]
 if not any(row.get("proof_bundle_lane") == "repair_rw_writeback" for row in metadata):
     raise SystemExit("missing proof-bundle lane metadata")
@@ -125,12 +172,12 @@ else
 fi
 
 e2e_step "Scenario 4: invalid contract variants fail closed"
-python3 - "$CONTRACT_JSON" "$BAD_MISSING_EVIDENCE" "$BAD_UNSAFE_RISK" "$BAD_MUTATION_ALLOWED" "$BAD_MISSING_REPRO" <<'PY'
+python3 - "$CONTRACT_JSON" "$BAD_MISSING_EVIDENCE" "$BAD_UNSAFE_RISK" "$BAD_MUTATION_ALLOWED" "$BAD_MISSING_REPRO" "$BAD_BAD_SCHEDULE" <<'PY'
 import json
 import pathlib
 import sys
 
-source, missing_evidence, unsafe_risk, mutation_allowed, missing_repro = map(pathlib.Path, sys.argv[1:])
+source, missing_evidence, unsafe_risk, mutation_allowed, missing_repro, bad_schedule = map(pathlib.Path, sys.argv[1:])
 base = json.loads(source.read_text(encoding="utf-8"))
 
 variant = json.loads(json.dumps(base))
@@ -156,10 +203,18 @@ for scenario in variant["scenarios"]:
     if scenario["scenario_id"] == "repair_writeback_rw_fail_closed":
         scenario["preserves_reproduction_data"] = False
 missing_repro.write_text(json.dumps(variant, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+variant = json.loads(json.dumps(base))
+variant["race_schedule_manifest"]["required_log_fields"] = [
+    field for field in variant["race_schedule_manifest"]["required_log_fields"]
+    if field != "seed"
+]
+variant["race_schedule_manifest"]["schedules"][0]["yield_points"].append("not_an_allowed_yield")
+bad_schedule.write_text(json.dumps(variant, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
 invalid_failures=0
-for bad in "$BAD_MISSING_EVIDENCE" "$BAD_UNSAFE_RISK" "$BAD_MUTATION_ALLOWED" "$BAD_MISSING_REPRO"; do
+for bad in "$BAD_MISSING_EVIDENCE" "$BAD_UNSAFE_RISK" "$BAD_MUTATION_ALLOWED" "$BAD_MISSING_REPRO" "$BAD_BAD_SCHEDULE"; do
     if cargo run --quiet -p ffs-harness -- validate-repair-writeback-serialization \
         --contract "$bad" \
         --out "$E2E_LOG_DIR/$(basename "$bad" .json).report.json" >"$BAD_RAW" 2>&1; then
@@ -172,7 +227,7 @@ for bad in "$BAD_MISSING_EVIDENCE" "$BAD_UNSAFE_RISK" "$BAD_MUTATION_ALLOWED" "$
 done
 
 if ((invalid_failures == 0)); then
-    scenario_result "repair_writeback_invalid_variants_rejected" "PASS" "bad evidence/risk/mutation/repro variants rejected"
+    scenario_result "repair_writeback_invalid_variants_rejected" "PASS" "bad evidence/risk/mutation/repro/schedule variants rejected"
 else
     scenario_result "repair_writeback_invalid_variants_rejected" "FAIL" "invalid_failures=${invalid_failures}"
 fi
@@ -188,10 +243,23 @@ report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 artifact_path = pathlib.Path(sys.argv[2])
 log_path = pathlib.Path(sys.argv[3])
 scenario = next(row for row in report["scenario_reports"] if row["scenario_id"] == "repair_writeback_rw_fail_closed")
+schedule = next(row for row in report["schedule_reports"] if row["coverage_case"] == "overlapping_writes")
 record = {
     "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     "operation_id": "op-rw-repair-fail-closed-001",
     "scenario_id": scenario["scenario_id"],
+    "scheduler_version": "ffs-repair-dpor-v1",
+    "schedule_id": schedule["schedule_id"],
+    "seed": schedule["seed"],
+    "explored_schedule_count": schedule["explored_schedule_count"],
+    "pruned_schedule_count": schedule["pruned_schedule_count"],
+    "timeout_decision": schedule["timeout_decision"],
+    "liveness_decision": schedule["liveness_decision"],
+    "operation_trace": schedule["operation_trace"],
+    "classification": schedule["classification"],
+    "expected_survivor_set": schedule["expected_survivor_set"],
+    "observed_survivor_set": schedule["observed_survivor_set"],
+    "ledger_outcomes": schedule["ledger_outcomes"],
     "snapshot_epoch": 42,
     "lease_id": "lease-dry-run-001",
     "repair_symbol_version": "group-7-generation-12",
@@ -201,7 +269,7 @@ record = {
     "artifact_paths": [str(artifact_path), str(log_path)],
     "cleanup_status": "preserved_artifacts",
     "reproduction_command": report["reproduction_command"],
-    "follow_up_bead": "bd-rchk0.1.2",
+    "follow_up_bead": schedule.get("follow_up_bead") or "bd-rchk0.1.2",
     "mutation_attempted": False,
     "lost_client_write_possible": False,
 }
@@ -226,6 +294,18 @@ required = [
     "cleanup_status",
     "reproduction_command",
     "follow_up_bead",
+    "scheduler_version",
+    "schedule_id",
+    "seed",
+    "explored_schedule_count",
+    "pruned_schedule_count",
+    "timeout_decision",
+    "liveness_decision",
+    "operation_trace",
+    "classification",
+    "expected_survivor_set",
+    "observed_survivor_set",
+    "ledger_outcomes",
 ]
 missing = [field for field in required if field not in record]
 if missing:
@@ -236,15 +316,17 @@ if record["mutation_attempted"]:
     raise SystemExit("fail-closed artifact claims mutation")
 if record["lost_client_write_possible"]:
     raise SystemExit("fail-closed artifact does not prove no lost client write")
+if record["expected_survivor_set"] != record["observed_survivor_set"]:
+    raise SystemExit("schedule survivor set mismatch")
 PY
 then
-    scenario_result "repair_writeback_fail_closed_artifact" "PASS" "fail-closed artifact preserves required fields"
+    scenario_result "repair_writeback_fail_closed_artifact" "PASS" "fail-closed artifact preserves required scenario and schedule fields"
 else
     scenario_result "repair_writeback_fail_closed_artifact" "FAIL" "fail-closed artifact contract failed"
 fi
 
 e2e_step "Scenario 6: repair/writeback serialization unit tests pass"
-if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib repair_writeback_serialization -- --nocapture >"$UNIT_LOG" 2>&1; then
+if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib repair_writeback_serialization -- --nocapture; then
     cat "$UNIT_LOG"
     scenario_result "repair_writeback_unit_tests" "PASS" "repair/writeback unit tests passed"
 else
