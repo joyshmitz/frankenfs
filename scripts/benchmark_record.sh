@@ -9,6 +9,7 @@ RUNS=10
 COMPARE=0
 VERIFY_GOLDEN=1
 DATE_TAG="$(date -u +%Y%m%d)"
+OP_FILTER=""
 REF_IMAGE="conformance/golden/ext4_8mb_reference.ext4"
 P99_WARN_THRESHOLD=10
 P99_FAIL_THRESHOLD=20
@@ -81,13 +82,15 @@ extract_cache_report_from_log() {
 usage() {
     cat <<'USAGE'
 Usage:
-  scripts/benchmark_record.sh [--date YYYYMMDD] [--warmup N] [--runs N] [--compare] [--skip-verify-golden] [--thresholds PATH] [--p99-fail-threshold N] [--profile PROFILE] [--force-remote] [--mount-probe-use-sudo] [--out-json PATH]
+  scripts/benchmark_record.sh [--date YYYYMMDD] [--op OPERATION] [--warmup N] [--runs N] [--compare] [--skip-verify-golden] [--thresholds PATH] [--p99-fail-threshold N] [--profile PROFILE] [--force-remote] [--mount-probe-use-sudo] [--out-json PATH]
 
 Options:
   --date YYYYMMDD          Override date-tag for output paths (default: today)
+  --op OPERATION           Run only the exact benchmark operation, label, or JSON stem
   --warmup N               Hyperfine warmup runs (default: 3)
   --runs N                 Hyperfine measured runs (default: 10)
   --compare                Compare current p99 against latest prior baseline (warn >10%, fail >20%)
+  --compare-baseline       Alias for --compare used by perf triage follow-up commands
   --skip-verify-golden     Skip scripts/verify_golden.sh preflight
   --thresholds PATH        Read warn/fail thresholds from TOML (default: benchmarks/thresholds.toml)
   --p99-fail-threshold N   Fail compare if p99 regression exceeds N percent (default: 20)
@@ -106,6 +109,11 @@ while [ $# -gt 0 ]; do
             DATE_TAG="$2"
             shift 2
             ;;
+        --op)
+            [ $# -ge 2 ] || { echo "missing value for --op" >&2; exit 2; }
+            OP_FILTER="$2"
+            shift 2
+            ;;
         --warmup)
             [ $# -ge 2 ] || { echo "missing value for --warmup" >&2; exit 2; }
             WARMUP="$2"
@@ -116,7 +124,7 @@ while [ $# -gt 0 ]; do
             RUNS="$2"
             shift 2
             ;;
-        --compare)
+        --compare|--compare-baseline)
             COMPARE=1
             shift
             ;;
@@ -338,6 +346,65 @@ add_bench() {
     BENCH_OPERATIONS+=("$4")
     BENCH_PAYLOAD_MB+=("${5:-0}")
     BENCH_RUNNERS+=("$(bench_runner_for_command "$2")")
+}
+
+bench_entry_matches_filter() {
+    local index="$1"
+    local filter="$2"
+    local json_stem="${BENCH_FILES[$index]%.json}"
+
+    [ "${BENCH_OPERATIONS[$index]}" = "$filter" ] \
+        || [ "${BENCH_LABELS[$index]}" = "$filter" ] \
+        || [ "$json_stem" = "$filter" ]
+}
+
+print_available_ops() {
+    local i
+    for i in "${!BENCH_LABELS[@]}"; do
+        printf '  - %s (%s, %s)\n' \
+            "${BENCH_OPERATIONS[$i]}" \
+            "${BENCH_LABELS[$i]}" \
+            "${BENCH_FILES[$i]%.json}"
+    done
+}
+
+apply_op_filter() {
+    [ -n "$OP_FILTER" ] || return 0
+
+    local -a filtered_labels=()
+    local -a filtered_commands=()
+    local -a filtered_files=()
+    local -a filtered_operations=()
+    local -a filtered_payload_mb=()
+    local -a filtered_runners=()
+    local matched=0
+    local i
+
+    for i in "${!BENCH_LABELS[@]}"; do
+        if bench_entry_matches_filter "$i" "$OP_FILTER"; then
+            filtered_labels+=("${BENCH_LABELS[$i]}")
+            filtered_commands+=("${BENCH_COMMANDS[$i]}")
+            filtered_files+=("${BENCH_FILES[$i]}")
+            filtered_operations+=("${BENCH_OPERATIONS[$i]}")
+            filtered_payload_mb+=("${BENCH_PAYLOAD_MB[$i]}")
+            filtered_runners+=("${BENCH_RUNNERS[$i]}")
+            matched=1
+        fi
+    done
+
+    if [ "$matched" -ne 1 ]; then
+        echo "unknown benchmark operation for --op: ${OP_FILTER}" >&2
+        echo "available operations:" >&2
+        print_available_ops >&2
+        exit 2
+    fi
+
+    BENCH_LABELS=("${filtered_labels[@]}")
+    BENCH_COMMANDS=("${filtered_commands[@]}")
+    BENCH_FILES=("${filtered_files[@]}")
+    BENCH_OPERATIONS=("${filtered_operations[@]}")
+    BENCH_PAYLOAD_MB=("${filtered_payload_mb[@]}")
+    BENCH_RUNNERS=("${filtered_runners[@]}")
 }
 
 single_line_text() {
@@ -789,6 +856,7 @@ add_bench "ffs-repair raptorq decode 16-block group (criterion)" \
 
 configure_mount_benchmarks
 record_mount_pending_labels
+apply_op_filter
 
 json_mean() {
     jq -r '.results[0].mean' "$1"
@@ -954,8 +1022,28 @@ collect_cache_workload_metrics_json() {
     rm -f "$tmp_json"
 }
 
-run_cache_workload_report "arc" "${OUT_DIR}/ffs_block_cache_workloads_arc.tsv"
-run_cache_workload_report "s3fifo" "${OUT_DIR}/ffs_block_cache_workloads_s3fifo.tsv"
+should_collect_cache_workload_metrics() {
+    if [ -z "$OP_FILTER" ]; then
+        return 0
+    fi
+
+    local operation
+    for operation in "${BENCH_OPERATIONS[@]}"; do
+        case "$operation" in
+            block_cache_*)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+if should_collect_cache_workload_metrics; then
+    run_cache_workload_report "arc" "${OUT_DIR}/ffs_block_cache_workloads_arc.tsv"
+    run_cache_workload_report "s3fifo" "${OUT_DIR}/ffs_block_cache_workloads_s3fifo.tsv"
+else
+    SKIPPED_LABELS+=("ffs-block cache metrics skipped by --op ${OP_FILTER}")
+fi
 CACHE_WORKLOAD_METRICS_JSON="$(collect_cache_workload_metrics_json)"
 
 run_hyperfine_benchmark() {
