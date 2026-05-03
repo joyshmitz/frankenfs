@@ -30,6 +30,65 @@ use ffs_types::{BlockNumber, GroupNumber, InodeNumber};
 const GD_FLAG_INODE_UNINIT: u16 = 0x0001;
 const GD_FLAG_BLOCK_UNINIT: u16 = 0x0002;
 
+#[derive(Clone, Copy)]
+struct ByteZeroRun {
+    prefix: u8,
+    suffix: u8,
+    best: u8,
+}
+
+const BYTE_ZERO_RUNS: [ByteZeroRun; 256] = build_byte_zero_runs();
+
+const fn build_byte_zero_runs() -> [ByteZeroRun; 256] {
+    let mut runs = [ByteZeroRun {
+        prefix: 0,
+        suffix: 0,
+        best: 0,
+    }; 256];
+    let mut byte = 0_u8;
+    loop {
+        runs[byte as usize] = byte_zero_run(byte);
+        if byte == u8::MAX {
+            break;
+        }
+        byte += 1;
+    }
+    runs
+}
+
+const fn byte_zero_run(byte: u8) -> ByteZeroRun {
+    let mut prefix = 0;
+    while prefix < 8 && ((byte >> prefix) & 1) == 0 {
+        prefix += 1;
+    }
+
+    let mut suffix = 0;
+    while suffix < 8 && ((byte >> (7 - suffix)) & 1) == 0 {
+        suffix += 1;
+    }
+
+    let mut best = 0;
+    let mut run = 0;
+    let mut bit = 0;
+    while bit < 8 {
+        if ((byte >> bit) & 1) == 0 {
+            run += 1;
+            if run > best {
+                best = run;
+            }
+        } else {
+            run = 0;
+        }
+        bit += 1;
+    }
+
+    ByteZeroRun {
+        prefix,
+        suffix,
+        best,
+    }
+}
+
 /// Get bit `idx` from a bitmap byte slice.
 #[must_use]
 pub fn bitmap_get(bitmap: &[u8], idx: u32) -> bool {
@@ -181,46 +240,33 @@ pub fn bitmap_largest_free_run(bitmap: &[u8], count: u32) -> u32 {
             run = 0;
             continue;
         };
-        if byte == 0 {
-            run = run.saturating_add(8);
-            if run > best {
-                best = run;
-            }
-            continue;
-        }
-        if byte == 0xFF {
-            run = 0;
-            continue;
-        }
-        for bit in 0..8 {
-            if (byte >> bit) & 1 == 0 {
-                run = run.saturating_add(1);
-                if run > best {
-                    best = run;
-                }
-            } else {
-                run = 0;
-            }
-        }
+        apply_byte_zero_run(BYTE_ZERO_RUNS[byte as usize], &mut run, &mut best);
     }
 
     if remainder > 0 {
         if let Some(&byte) = bitmap.get(full_bytes) {
-            for bit in 0..remainder {
-                if (byte >> bit) & 1 == 0 {
-                    run = run.saturating_add(1);
-                    if run > best {
-                        best = run;
-                    }
-                } else {
-                    run = 0;
-                }
-            }
+            let mask = u8::MAX >> (8 - remainder);
+            let bounded_byte = byte | !mask;
+            apply_byte_zero_run(BYTE_ZERO_RUNS[bounded_byte as usize], &mut run, &mut best);
         }
         // No bitmap byte for the remainder → cannot extend; leave `best` unchanged.
     }
 
     best
+}
+
+fn apply_byte_zero_run(stats: ByteZeroRun, run: &mut u32, best: &mut u32) {
+    if stats.prefix == 8 {
+        *run = run.saturating_add(8);
+        *best = (*best).max(*run);
+        return;
+    }
+
+    if stats.prefix > 0 {
+        *best = (*best).max(run.saturating_add(u32::from(stats.prefix)));
+    }
+    *best = (*best).max(u32::from(stats.best));
+    *run = u32::from(stats.suffix);
 }
 
 /// Linear scan for `n` contiguous free bits in `[start, count)`.

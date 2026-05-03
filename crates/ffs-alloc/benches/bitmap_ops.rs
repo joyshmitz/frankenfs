@@ -5,7 +5,9 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_alloc::succinct::SuccinctBitmap;
-use ffs_alloc::{bitmap_count_free, bitmap_find_contiguous, bitmap_find_free};
+use ffs_alloc::{
+    bitmap_count_free, bitmap_find_contiguous, bitmap_find_free, bitmap_largest_free_run,
+};
 use std::hint::black_box;
 
 /// Build a realistic ext4-like bitmap: 4096 bytes (32768 bits),
@@ -21,6 +23,13 @@ fn make_bitmap() -> Vec<u8> {
         pos += 650;
     }
     bm
+}
+
+/// Build a fragmented bitmap dominated by mixed bytes, where byte-level run
+/// summaries should beat per-bit inspection.
+fn make_fragmented_bitmap() -> Vec<u8> {
+    let pattern = [0b1110_0001, 0b1000_1111, 0b1111_1000, 0b1100_0011];
+    pattern.into_iter().cycle().take(4096).collect()
 }
 
 fn bench_count_free(c: &mut Criterion) {
@@ -76,6 +85,18 @@ fn bench_find_contiguous(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_largest_free_run(c: &mut Criterion) {
+    let bm = make_fragmented_bitmap();
+
+    let mut group = c.benchmark_group("largest_free_run");
+
+    group.bench_function("fragmented_mixed_bytes", |b| {
+        b.iter(|| black_box(bitmap_largest_free_run(black_box(&bm), 32768)));
+    });
+
+    group.finish();
+}
+
 fn bench_rank(c: &mut Criterion) {
     let bm = make_bitmap();
     let sb = SuccinctBitmap::build(&bm, 32768);
@@ -108,6 +129,7 @@ criterion_group!(
     bench_count_free,
     bench_find_free,
     bench_find_contiguous,
+    bench_largest_free_run,
     bench_rank,
     bench_select,
     bench_build,
