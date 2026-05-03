@@ -1472,7 +1472,7 @@ mod tests {
         let report =
             validate_performance_baseline_manifest(&manifest, "artifacts/performance/dry-run");
         assert!(report.valid, "{:?}", report.errors);
-        assert_eq!(report.workload_count, 10);
+        assert_eq!(report.workload_count, 12);
         assert_eq!(report.missing_required_workload_kinds, Vec::<String>::new());
         assert_eq!(
             report
@@ -1507,6 +1507,24 @@ mod tests {
             && row.command.contains("artifacts/performance/dry-run")
             && row.target_dir.contains("fuse_metadata_readdir_1k")
             && row.kernel_fuse_mode == PerformanceKernelFuseMode::PermissionedRequired));
+        assert!(report.command_expansions.iter().any(|row| {
+            row.workload_id == "block_cache_sharded_arc_concurrent_hot_read_64threads"
+                && row
+                    .command
+                    .contains("block_cache_sharded_arc_concurrent_hot_read_64threads")
+                && row
+                    .target_dir
+                    .contains("block_cache_sharded_arc_concurrent_hot_read_64threads")
+                && row.kernel_fuse_mode == PerformanceKernelFuseMode::NotRequired
+        }));
+        assert!(report.command_expansions.iter().any(|row| {
+            row.workload_id == "block_cache_sharded_s3fifo_concurrent_hot_read_64threads"
+                && row
+                    .command
+                    .contains("block_cache_sharded_s3fifo_concurrent_hot_read_64threads")
+                && row.command.contains("--features s3fifo")
+                && row.kernel_fuse_mode == PerformanceKernelFuseMode::NotRequired
+        }));
     }
 
     #[test]
