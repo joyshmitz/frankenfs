@@ -511,6 +511,45 @@
       }
     },
     {
+      "scenario_id": "mounted_write_multihandle_ext4_symlink_read_after_rename",
+      "kind": "symlink_read_after_rename",
+      "filesystem": "ext4",
+      "image_setup": "ext4 image with /sym -> /target/data and /target pre-populated",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["dir_index"],
+      "handles": [
+        {"handle_id": "h_symlink_holder", "purpose": "holds_symlink_path_via_O_PATH", "open_flags": ["O_PATH", "O_NOFOLLOW"]},
+        {"handle_id": "h_renamer", "purpose": "renames_symlink_directory_entry", "open_flags": ["O_DIRECTORY"]}
+      ],
+      "operation_trace": [
+        {"step": 1, "handle_id": "h_renamer", "op": "rename", "args": ["from=/sym", "to=/sym_renamed"], "expected_result": "success"},
+        {"step": 2, "handle_id": "h_symlink_holder", "op": "readlink", "args": [], "expected_result": "target_path_unchanged"},
+        {"step": 3, "handle_id": "h_renamer", "op": "readlink", "args": ["path=/sym_renamed"], "expected_result": "target_path_unchanged"},
+        {"step": 4, "handle_id": "h_renamer", "op": "readlink", "args": ["path=/sym"], "expected_result": "ENOENT"}
+      ],
+      "cache_visibility": {
+        "other_handle_state": "renamed_symlink_target_unchanged",
+        "stat_must_match": true,
+        "data_must_match": false
+      },
+      "reopen": {
+        "kind": "close_open",
+        "expected_state": "reopened symlink at new path resolves to original target"
+      },
+      "survivor_set": {
+        "present_paths": ["/sym_renamed", "/target/data"],
+        "absent_paths": ["/sym"],
+        "xattr_state": []
+      },
+      "cleanup_policy": "teardown_image",
+      "artifact_requirements": ["scenario_id", "operation_trace_path", "expected_visibility", "observed_visibility"],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
       "scenario_id": "mounted_write_multihandle_ext4_rejected_open_unlink_with_open_dir_handle",
       "kind": "rejected_op_no_partial_mutation",
       "filesystem": "ext4",
