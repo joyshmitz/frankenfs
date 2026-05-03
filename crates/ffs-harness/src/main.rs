@@ -62,6 +62,11 @@ use ffs_harness::{
         evaluate_release_gates, fail_on_release_gate_errors, load_release_gate_policy,
         render_release_gate_markdown,
     },
+    repair_confidence_lab::{
+        DEFAULT_REPAIR_CONFIDENCE_LAB_PATH, fail_on_repair_confidence_lab_errors,
+        load_repair_confidence_lab_spec, render_repair_confidence_lab_markdown,
+        validate_repair_confidence_lab,
+    },
     repair_writeback_serialization::{
         build_repair_writeback_serialization_sample_artifact_manifest,
         fail_on_repair_writeback_serialization_errors,
@@ -172,6 +177,7 @@ fn run() -> Result<()> {
             validate_cross_oracle_arbitration_cmd(&args[1..])
         }
         Some("validate-soak-canary-campaigns") => validate_soak_canary_campaigns_cmd(&args[1..]),
+        Some("validate-repair-confidence-lab") => validate_repair_confidence_lab_cmd(&args[1..]),
         Some("validate-repair-writeback-serialization") => {
             validate_repair_writeback_serialization_cmd(&args[1..])
         }
@@ -248,6 +254,14 @@ struct RepairWritebackSerializationCmdArgs {
     out_path: Option<String>,
     artifact_out_path: Option<String>,
     summary_out_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct RepairConfidenceLabCmdArgs {
+    spec_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
 }
 
 #[derive(Debug)]
@@ -1190,6 +1204,97 @@ fn parse_soak_canary_campaign_cmd_args(
         out_path,
         artifact_out_path,
         summary_out_path,
+    }))
+}
+
+fn validate_repair_confidence_lab_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_repair_confidence_lab_cmd_args(args)? else {
+        return Ok(());
+    };
+    let spec = load_repair_confidence_lab_spec(Path::new(&cmd_args.spec_path))?;
+    let report = validate_repair_confidence_lab(&spec);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_repair_confidence_lab_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "repair confidence lab report written: {} valid={} scenarios={} mutation_allowed={} mutation_refused={}",
+            path,
+            report.valid,
+            report.scenario_count,
+            report.mutation_allowed_count,
+            report.mutation_refused_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &render_repair_confidence_lab_markdown(&report),
+        )?;
+        println!("repair confidence lab summary written: {path}");
+    }
+
+    fail_on_repair_confidence_lab_errors(&report)
+}
+
+fn parse_repair_confidence_lab_cmd_args(
+    args: &[String],
+) -> Result<Option<RepairConfidenceLabCmdArgs>> {
+    let mut spec_path = DEFAULT_REPAIR_CONFIDENCE_LAB_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--spec" => {
+                i += 1;
+                args.get(i)
+                    .context("--spec requires a path")?
+                    .clone_into(&mut spec_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--select" => {
+                i += 1;
+                let _ = args.get(i).context("--select requires a scenario id")?;
+            }
+            "--help" | "-h" => {
+                print_repair_confidence_lab_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-repair-confidence-lab argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(RepairConfidenceLabCmdArgs {
+        spec_path,
+        out_path,
+        summary_out_path,
+        format,
     }))
 }
 
@@ -2199,6 +2304,7 @@ fn print_usage() {
     print_performance_baseline_manifest_usage_summary();
     print_adversarial_threat_model_usage_summary();
     print_soak_canary_campaign_usage_summary();
+    print_repair_confidence_lab_usage_summary();
     print_repair_writeback_serialization_usage_summary();
     print_workload_corpus_usage_summary();
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
@@ -2273,6 +2379,7 @@ fn print_usage_examples() {
     print_performance_baseline_manifest_example();
     print_adversarial_threat_model_example();
     print_soak_canary_campaign_example();
+    print_repair_confidence_lab_example();
     print_repair_writeback_serialization_example();
     print_workload_corpus_example();
     println!(
@@ -2316,6 +2423,18 @@ fn print_soak_canary_campaign_usage_summary() {
 fn print_soak_canary_campaign_example() {
     println!(
         "  ffs-harness validate-soak-canary-campaigns --manifest benchmarks/soak_canary_campaign_manifest.json --out artifacts/soak/campaign_report.json --artifact-out artifacts/soak/sample_artifact_manifest.json --summary-out artifacts/soak/campaign_summary.md"
+    );
+}
+
+fn print_repair_confidence_lab_usage_summary() {
+    println!(
+        "  ffs-harness validate-repair-confidence-lab [--spec FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_repair_confidence_lab_example() {
+    println!(
+        "  ffs-harness validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json --out artifacts/repair-confidence/lab_report.json --summary-out artifacts/repair-confidence/lab_summary.md"
     );
 }
 
@@ -2482,6 +2601,19 @@ fn print_soak_canary_campaign_usage() {
     println!("  --out FILE                         Write validation report JSON");
     println!("  --artifact-out FILE                Write sample shared QA artifact manifest JSON");
     println!("  --summary-out FILE                 Write Markdown campaign summary");
+}
+
+fn print_repair_confidence_lab_usage() {
+    println!("Usage: ffs-harness validate-repair-confidence-lab [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --spec FILE                        Read repair confidence lab JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report");
+    println!("  --summary-out FILE                 Write Markdown lab summary");
+    println!(
+        "  --select SCENARIO_ID               Accepted by repro commands; validates the lab envelope"
+    );
 }
 
 fn print_repair_writeback_serialization_usage() {

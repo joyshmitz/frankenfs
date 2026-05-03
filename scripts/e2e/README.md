@@ -146,6 +146,31 @@ Every new corpus scenario must include:
 
 Unsupported behavior must use `status: "unsupported"` with `unsupported_reason` plus either `follow_up_bead` or `non_goal_reason`. Host-only blockers must use `status: "host_skip"` with `host_skip_reason`; the required capabilities must include a host or FUSE capability so the skip cannot be mistaken for product success. The initial corpus intentionally includes the btrfs DefaultPermissions root-owned image-ownership diagnostic and a generic missing-FUSE host skip so mounted proof consumers keep host limitations separate from FrankenFS failures.
 
+## Repair Confidence Lab Contract
+
+The repair confidence mutation-safety contract lives in:
+
+- `docs/repair-confidence-mutation-safety.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-repair-confidence-lab \
+  --spec docs/repair-confidence-mutation-safety.json \
+  --out artifacts/repair-confidence/lab_report.json \
+  --summary-out artifacts/repair-confidence/lab_summary.md
+```
+
+Every scenario must declare the corruption class, repair-symbol budget, evidence-ledger state, candidate repair plan, pre/post image hashes where applicable, threshold id, verification verdict, artifact paths, structured log fields, and reproduction command. The validator requires coverage for detection-only scrub, successful dry-run, verified opt-in mutation, unsafe-to-repair refusal, and failed-verification refusal.
+
+Public wording must keep these states distinct:
+
+- automatic mutating repair: only when dry-run, rollback, ledger integrity, repair-symbol coverage, confidence score, residual-risk threshold, and final verification all pass.
+- detection-only scrub: corruption was found or classified, but no image mutation is proposed.
+- unsupported corruption classes: the lab must refuse or mark detection-only, link a follow-up measurement bead when thresholds are experimental, and preserve reproduction artifacts.
+
+Thresholds chosen without enough evidence must be marked `experimental: true` and must link a follow-up bead. Non-experimental mutation thresholds require an evidence artifact and fail closed when any precondition is missing.
+
 ## Artifact Manifest Contract
 
 The canonical verification artifact manifest schema lives in:

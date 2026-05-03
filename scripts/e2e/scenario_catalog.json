@@ -1152,6 +1152,54 @@
           "evidence": "scenario_result \"workload_corpus_unit_tests\" \"PASS\""
         }
       ]
+    },
+    {
+      "suite_id": "ffs_repair_confidence_lab",
+      "script": "scripts/e2e/ffs_repair_confidence_lab_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error",
+        "corruption",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "repair_confidence_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_confidence_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "repair_confidence_lab_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_confidence_lab_validates|outcome=PASS"
+        },
+        {
+          "id": "repair_confidence_decision_coverage",
+          "category": "corruption",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_confidence_decision_coverage|outcome=PASS"
+        },
+        {
+          "id": "repair_confidence_invalid_variants_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_confidence_invalid_variants_rejected|outcome=PASS"
+        },
+        {
+          "id": "repair_confidence_docs_contract",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_confidence_docs_contract|outcome=PASS"
+        },
+        {
+          "id": "repair_confidence_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_confidence_unit_tests|outcome=PASS"
+        }
+      ]
     }
   ],
   "gate_minimums": [
