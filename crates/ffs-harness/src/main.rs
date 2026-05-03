@@ -18,6 +18,10 @@ use ffs_harness::{
         validate_mounted_write_matrix,
     },
     open_ended_inventory::validate_current_inventory,
+    operational_readiness_report::{
+        OperationalReadinessReportConfig, build_operational_readiness_report,
+        render_operational_readiness_markdown,
+    },
     validate_btrfs_fixture, validate_ext4_fixture,
     verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
     xfstests::{
@@ -87,6 +91,7 @@ fn run() -> Result<()> {
         Some("validate-ambition-evidence-matrix") => {
             validate_ambition_evidence_matrix_cmd(&args[1..])
         }
+        Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
         Some("validate-mounted-write-matrix") => validate_mounted_write_matrix_cmd(&args[1..]),
         Some("--help" | "-h" | "help") | None => {
             print_usage();
@@ -96,6 +101,87 @@ fn run() -> Result<()> {
             print_usage();
             bail!("unknown command: {other}")
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadinessReportFormat {
+    Json,
+    Markdown,
+}
+
+fn operational_readiness_report_cmd(args: &[String]) -> Result<()> {
+    let mut config = OperationalReadinessReportConfig::new("artifacts/e2e");
+    let mut out_path: Option<String> = None;
+    let mut format = ReadinessReportFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--artifacts" => {
+                i += 1;
+                config.artifacts_dir =
+                    Path::new(args.get(i).context("--artifacts requires a path")?).to_path_buf();
+            }
+            "--current-git-sha" => {
+                i += 1;
+                config.current_git_sha = Some(
+                    args.get(i)
+                        .context("--current-git-sha requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format = parse_readiness_report_format(
+                    args.get(i).context("--format requires json or markdown")?,
+                )?;
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--help" | "-h" => {
+                print_operational_readiness_report_usage();
+                return Ok(());
+            }
+            other => bail!("unknown operational-readiness-report argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let report = build_operational_readiness_report(&config)?;
+    let output = match format {
+        ReadinessReportFormat::Json => serde_json::to_string_pretty(&report)?,
+        ReadinessReportFormat::Markdown => render_operational_readiness_markdown(&report),
+    };
+
+    if let Some(path) = out_path {
+        let path = Path::new(&path);
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(path, format!("{output}\n"))
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        println!(
+            "operational readiness report written: {} scenarios={}",
+            path.display(),
+            report.scenario_count
+        );
+    } else {
+        println!("{output}");
+    }
+    Ok(())
+}
+
+fn parse_readiness_report_format(raw: &str) -> Result<ReadinessReportFormat> {
+    match raw {
+        "json" => Ok(ReadinessReportFormat::Json),
+        "markdown" | "md" => Ok(ReadinessReportFormat::Markdown),
+        other => bail!("invalid --format value: {other}"),
     }
 }
 
@@ -759,6 +845,9 @@ fn print_usage() {
     );
     println!("  ffs-harness validate-operational-manifest <manifest.json>");
     println!(
+        "  ffs-harness operational-readiness-report [--artifacts DIR] [--current-git-sha SHA] [--format json|markdown] [--out FILE]"
+    );
+    println!(
         "  ffs-harness fuse-capability-probe [--out FILE] [--require-mount-probe] [--mount-probe-exit N] [--unmount-probe-exit N] [--user-disabled] [--default-permissions-eacces]"
     );
     println!("  ffs-harness validate-open-ended-inventory [--out FILE]");
@@ -796,6 +885,9 @@ fn print_usage() {
     println!(
         "  ffs-harness validate-operational-manifest artifacts/e2e/run/operational_manifest.json"
     );
+    println!(
+        "  ffs-harness operational-readiness-report --artifacts artifacts/e2e --format markdown --out artifacts/e2e/readiness.md"
+    );
     println!("  ffs-harness fuse-capability-probe --out artifacts/e2e/run/fuse_capability.json");
     println!(
         "  ffs-harness validate-open-ended-inventory --out artifacts/conformance/open_ended_inventory.json"
@@ -823,6 +915,16 @@ fn print_fuse_capability_probe_usage() {
     println!(
         "  --default-permissions-eacces       Classify btrfs DefaultPermissions root-owned EACCES"
     );
+}
+
+fn print_operational_readiness_report_usage() {
+    println!("Usage: ffs-harness operational-readiness-report [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --artifacts DIR                    Read manifest/result JSON under DIR");
+    println!("  --current-git-sha SHA              Flag sources captured from a different SHA");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write report to FILE");
 }
 
 fn print_open_ended_inventory_usage() {

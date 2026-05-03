@@ -135,6 +135,28 @@ capability state, mount/unmount probe exits, and the btrfs
 capabilities must produce a skip/error artifact with a remediation hint, not a
 silent success.
 
+### Operational Readiness Report
+
+Use the readiness aggregator when closing operational hardening beads. It scans
+an artifact directory for versioned `ArtifactManifest` files and legacy
+`result.json` summaries, then emits a single JSON or Markdown report that
+groups scenarios by workstream, counts pass/fail/skip/error outcomes, preserves
+links to raw logs and artifacts, flags duplicate scenario IDs, detects stale git
+SHAs when `--current-git-sha` is provided, and separates product failures from
+environment-only blockers.
+
+```bash
+cargo run -p ffs-harness -- operational-readiness-report \
+  --artifacts artifacts/e2e \
+  --current-git-sha "$(git rev-parse --short HEAD)" \
+  --format markdown \
+  --out artifacts/e2e/operational_readiness.md
+```
+
+Attach the JSON or Markdown report path to the bead close reason when a bead
+claims operational readiness evidence. The report is an aggregator; it does not
+replace the raw per-suite logs, manifests, or reproduction commands.
+
 ### Permissioned FUSE Lane
 
 The durable mounted-test lane is the production FUSE runner on a Linux worker
