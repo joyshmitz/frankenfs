@@ -1,0 +1,4 @@
+Benchmark 1: rch exec -- cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_arc_zipf_distribution
+  Time (mean ± σ):     19.752 s ±  0.620 s    [User: 0.903 s, System: 0.998 s]
+  Range (min … max):   18.797 s … 20.613 s    10 runs
+ 

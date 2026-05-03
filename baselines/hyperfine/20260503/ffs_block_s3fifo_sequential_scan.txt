@@ -1,0 +1,1 @@
+Benchmark 1: rch exec -- cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_sequential_scan

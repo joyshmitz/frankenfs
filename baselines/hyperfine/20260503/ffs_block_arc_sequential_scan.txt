@@ -1,0 +1,4 @@
+Benchmark 1: rch exec -- cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_arc_sequential_scan
+  Time (mean ± σ):     20.470 s ±  0.167 s    [User: 0.899 s, System: 1.001 s]
+  Range (min … max):   20.233 s … 20.733 s    10 runs
+ 
