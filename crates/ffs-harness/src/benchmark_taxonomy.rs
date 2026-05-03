@@ -462,9 +462,7 @@ impl Taxonomy {
                     family: BenchmarkFamily::BlockCache,
                     metric: MetricType::Latency,
                     owning_crate: "ffs-block".to_owned(),
-                    description: format!(
-                        "sharded {policy} policy: 64-thread hot-cache read burst"
-                    ),
+                    description: format!("sharded {policy} policy: 64-thread hot-cache read burst"),
                     envelope_override: None,
                 },
             );

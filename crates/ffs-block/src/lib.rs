@@ -6579,7 +6579,12 @@ mod tests {
         assert_eq!(metrics.hits, 8);
         assert_eq!(metrics.resident, 8);
         assert_eq!(metrics.capacity, 8);
-        assert!(cache.shard_metrics().iter().all(|shard| shard.capacity == 2));
+        assert!(
+            cache
+                .shard_metrics()
+                .iter()
+                .all(|shard| shard.capacity == 2)
+        );
     }
 
     #[test]
