@@ -842,6 +842,415 @@ pub struct CacheRuntimeMetricsSnapshot {
     pub hit_rate: f64,
 }
 
+/// Minimum host RAM required before a cache result can be described as a
+/// large-RAM swarm-host proof.
+pub const LARGE_RAM_CACHE_PROOF_FLOOR_BYTES: u64 = 256 * 1024 * 1024 * 1024;
+
+/// Cache admission policy represented in large-RAM proof artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheAdmissionPolicy {
+    /// Existing ARC implementation and the required fallback path.
+    CurrentArc,
+    /// Segmented FIFO/S3-FIFO-style admission candidate.
+    SegmentedS3Fifo,
+}
+
+/// Explicit artifact gates required before cache tuning can be accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheAdmissionEvidenceGate {
+    ReproductionCommand,
+    RawLogs,
+    ReleaseClaimState,
+    BackpressurePolicy,
+    FlushPolicy,
+}
+
+impl CacheAdmissionEvidenceGate {
+    const ALL: [Self; 5] = [
+        Self::ReproductionCommand,
+        Self::RawLogs,
+        Self::ReleaseClaimState,
+        Self::BackpressurePolicy,
+        Self::FlushPolicy,
+    ];
+}
+
+/// JSON-friendly proof gates attached to a cache-admission artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheAdmissionArtifactEvidence {
+    pub gates: Vec<CacheAdmissionEvidenceGate>,
+}
+
+impl CacheAdmissionArtifactEvidence {
+    /// Evidence packet with every required artifact gate present.
+    #[must_use]
+    pub fn complete() -> Self {
+        Self {
+            gates: CacheAdmissionEvidenceGate::ALL.to_vec(),
+        }
+    }
+
+    /// Evidence packet with no required gates present.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self { gates: Vec::new() }
+    }
+
+    /// Return a copy with `gate` removed.
+    #[must_use]
+    pub fn without(mut self, gate: CacheAdmissionEvidenceGate) -> Self {
+        self.gates.retain(|candidate| *candidate != gate);
+        self
+    }
+
+    /// Return true when `gate` is present.
+    #[must_use]
+    pub fn contains(&self, gate: CacheAdmissionEvidenceGate) -> bool {
+        self.gates.contains(&gate)
+    }
+
+    /// First missing gate in stable policy order.
+    #[must_use]
+    pub fn first_missing(&self) -> Option<CacheAdmissionEvidenceGate> {
+        CacheAdmissionEvidenceGate::ALL
+            .into_iter()
+            .find(|gate| !self.contains(*gate))
+    }
+}
+
+impl Default for CacheAdmissionArtifactEvidence {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// Observed host memory fields used to classify large-RAM proof claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheHostMemoryObservation {
+    pub total_ram_bytes: Option<u64>,
+    pub available_ram_bytes: Option<u64>,
+    pub numa_nodes: Option<u32>,
+}
+
+/// Expected-loss weights for comparing cache admission policies.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CacheAdmissionLossWeights {
+    pub miss_penalty_weight: f64,
+    pub p99_latency_weight: f64,
+    pub dirty_pressure_weight: f64,
+    pub writeback_queue_weight: f64,
+    pub eviction_pressure_weight: f64,
+    pub memory_overhead_weight: f64,
+}
+
+impl Default for CacheAdmissionLossWeights {
+    fn default() -> Self {
+        Self {
+            miss_penalty_weight: 100.0,
+            p99_latency_weight: 0.01,
+            dirty_pressure_weight: 60.0,
+            writeback_queue_weight: 0.25,
+            eviction_pressure_weight: 40.0,
+            memory_overhead_weight: 50.0,
+        }
+    }
+}
+
+/// Budget and safety thresholds for the large-RAM cache admission contract.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LargeRamCacheBudgetConfig {
+    pub min_host_ram_bytes: u64,
+    pub cache_budget_bytes: u64,
+    pub max_dirty_ratio: f64,
+    pub max_eviction_pressure: f64,
+    pub max_memory_overhead_ratio: f64,
+    pub max_writeback_queue_depth: u64,
+    pub min_hit_rate_gain: f64,
+    pub max_p99_latency_regression_ratio: f64,
+    pub loss_weights: CacheAdmissionLossWeights,
+}
+
+impl Default for LargeRamCacheBudgetConfig {
+    fn default() -> Self {
+        Self {
+            min_host_ram_bytes: LARGE_RAM_CACHE_PROOF_FLOOR_BYTES,
+            cache_budget_bytes: 16 * 1024 * 1024 * 1024,
+            max_dirty_ratio: 0.40,
+            max_eviction_pressure: 0.20,
+            max_memory_overhead_ratio: 0.10,
+            max_writeback_queue_depth: 1_000_000,
+            min_hit_rate_gain: 0.03,
+            max_p99_latency_regression_ratio: 0.05,
+            loss_weights: CacheAdmissionLossWeights::default(),
+        }
+    }
+}
+
+/// Observed policy sample for ARC versus a candidate admission policy.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CacheAdmissionPolicySample {
+    pub policy: CacheAdmissionPolicy,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_evictions: u64,
+    pub p99_latency_micros: u64,
+    pub memory_overhead_bytes: u64,
+    pub dirty_ratio: f64,
+    pub writeback_queue_depth: u64,
+}
+
+impl CacheAdmissionPolicySample {
+    /// Hit rate in [0.0, 1.0], or 0.0 when no accesses were observed.
+    #[must_use]
+    pub fn hit_rate(self) -> f64 {
+        let total = self.cache_hits.saturating_add(self.cache_misses);
+        if total == 0 {
+            return 0.0;
+        }
+        self.cache_hits as f64 / total as f64
+    }
+
+    /// Evictions per observed access.
+    #[must_use]
+    pub fn eviction_pressure(self) -> f64 {
+        let total = self.cache_hits.saturating_add(self.cache_misses);
+        if total == 0 {
+            return 0.0;
+        }
+        self.cache_evictions as f64 / total as f64
+    }
+
+    fn memory_overhead_ratio(self, config: LargeRamCacheBudgetConfig) -> f64 {
+        if config.cache_budget_bytes == 0 {
+            return f64::INFINITY;
+        }
+        self.memory_overhead_bytes as f64 / config.cache_budget_bytes as f64
+    }
+
+    fn expected_loss(self, config: LargeRamCacheBudgetConfig) -> f64 {
+        let weights = config.loss_weights;
+        let miss_ratio = 1.0 - self.hit_rate();
+        let memory_ratio = self.memory_overhead_ratio(config);
+        let loss = weights.miss_penalty_weight.mul_add(miss_ratio, 0.0);
+        let loss = weights
+            .p99_latency_weight
+            .mul_add(self.p99_latency_micros as f64, loss);
+        let loss = weights
+            .dirty_pressure_weight
+            .mul_add(self.dirty_ratio, loss);
+        let loss = weights
+            .writeback_queue_weight
+            .mul_add(self.writeback_queue_depth as f64, loss);
+        let loss = weights
+            .eviction_pressure_weight
+            .mul_add(self.eviction_pressure(), loss);
+        weights.memory_overhead_weight.mul_add(memory_ratio, loss)
+    }
+}
+
+/// Input artifact for the large-RAM cache admission evaluator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LargeRamCacheAdmissionInput {
+    pub config: LargeRamCacheBudgetConfig,
+    pub host_memory: CacheHostMemoryObservation,
+    pub artifact_evidence: CacheAdmissionArtifactEvidence,
+    pub current_arc: CacheAdmissionPolicySample,
+    pub candidate: CacheAdmissionPolicySample,
+}
+
+/// Public claim state emitted by the cache contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheAdmissionClaimState {
+    MissingReference,
+    SmallHostSmoke,
+    Experimental,
+}
+
+/// Contract decision for the candidate cache admission policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheAdmissionMode {
+    KeepCurrentArc,
+    CandidateDesignOnly,
+    CapabilitySkip,
+}
+
+/// Stable reason code for cache admission decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheAdmissionReason {
+    MissingHostMemory,
+    HostBelowLargeRamFloor,
+    MissingArtifactGate(CacheAdmissionEvidenceGate),
+    CandidateDirtyPressureTooHigh,
+    CandidateWritebackQueueTooDeep,
+    CandidateEvictionPressureTooHigh,
+    CandidateMemoryOverheadTooHigh,
+    CandidateP99LatencyRegressed,
+    CandidateHitRateGainTooSmall,
+    CandidateExpectedLossNotLower,
+    CandidateLowerExpectedLoss,
+}
+
+/// Evaluated cache admission report.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CacheAdmissionDecisionReport {
+    pub mode: CacheAdmissionMode,
+    pub reason: CacheAdmissionReason,
+    pub selected_policy: CacheAdmissionPolicy,
+    pub fallback_policy: CacheAdmissionPolicy,
+    pub claim_state: CacheAdmissionClaimState,
+    pub hit_rate_gain: f64,
+    pub p99_latency_regression_ratio: f64,
+    pub candidate_memory_overhead_ratio: f64,
+    pub candidate_eviction_pressure: f64,
+    pub candidate_dirty_ratio: f64,
+    pub current_expected_loss: f64,
+    pub candidate_expected_loss: f64,
+}
+
+/// Evaluate the large-RAM cache admission contract without changing runtime
+/// policy selection.
+#[must_use]
+pub fn evaluate_large_ram_cache_admission(
+    input: &LargeRamCacheAdmissionInput,
+) -> CacheAdmissionDecisionReport {
+    if let Some((reason, claim_state)) = cache_host_capability_skip(input) {
+        return cache_admission_report(
+            input,
+            CacheAdmissionMode::CapabilitySkip,
+            reason,
+            CacheAdmissionPolicy::CurrentArc,
+            claim_state,
+        );
+    }
+    if let Some(gate) = input.artifact_evidence.first_missing() {
+        return cache_admission_report(
+            input,
+            CacheAdmissionMode::KeepCurrentArc,
+            CacheAdmissionReason::MissingArtifactGate(gate),
+            CacheAdmissionPolicy::CurrentArc,
+            CacheAdmissionClaimState::MissingReference,
+        );
+    }
+    if let Some(reason) = cache_candidate_limit_rejection(input) {
+        return cache_admission_report(
+            input,
+            CacheAdmissionMode::KeepCurrentArc,
+            reason,
+            CacheAdmissionPolicy::CurrentArc,
+            CacheAdmissionClaimState::Experimental,
+        );
+    }
+    let candidate_expected_loss = input.candidate.expected_loss(input.config);
+    let current_expected_loss = input.current_arc.expected_loss(input.config);
+    if candidate_expected_loss >= current_expected_loss {
+        return cache_admission_report(
+            input,
+            CacheAdmissionMode::KeepCurrentArc,
+            CacheAdmissionReason::CandidateExpectedLossNotLower,
+            CacheAdmissionPolicy::CurrentArc,
+            CacheAdmissionClaimState::Experimental,
+        );
+    }
+
+    cache_admission_report(
+        input,
+        CacheAdmissionMode::CandidateDesignOnly,
+        CacheAdmissionReason::CandidateLowerExpectedLoss,
+        input.candidate.policy,
+        CacheAdmissionClaimState::Experimental,
+    )
+}
+
+fn cache_host_capability_skip(
+    input: &LargeRamCacheAdmissionInput,
+) -> Option<(CacheAdmissionReason, CacheAdmissionClaimState)> {
+    let Some(total_ram_bytes) = input.host_memory.total_ram_bytes else {
+        return Some((
+            CacheAdmissionReason::MissingHostMemory,
+            CacheAdmissionClaimState::MissingReference,
+        ));
+    };
+    if input.host_memory.available_ram_bytes.is_none() {
+        return Some((
+            CacheAdmissionReason::MissingHostMemory,
+            CacheAdmissionClaimState::MissingReference,
+        ));
+    }
+    if total_ram_bytes < input.config.min_host_ram_bytes {
+        return Some((
+            CacheAdmissionReason::HostBelowLargeRamFloor,
+            CacheAdmissionClaimState::SmallHostSmoke,
+        ));
+    }
+    None
+}
+
+fn cache_candidate_limit_rejection(
+    input: &LargeRamCacheAdmissionInput,
+) -> Option<CacheAdmissionReason> {
+    if input.candidate.dirty_ratio > input.config.max_dirty_ratio {
+        return Some(CacheAdmissionReason::CandidateDirtyPressureTooHigh);
+    }
+    if input.candidate.writeback_queue_depth > input.config.max_writeback_queue_depth {
+        return Some(CacheAdmissionReason::CandidateWritebackQueueTooDeep);
+    }
+    if input.candidate.eviction_pressure() > input.config.max_eviction_pressure {
+        return Some(CacheAdmissionReason::CandidateEvictionPressureTooHigh);
+    }
+    if input.candidate.memory_overhead_ratio(input.config) > input.config.max_memory_overhead_ratio
+    {
+        return Some(CacheAdmissionReason::CandidateMemoryOverheadTooHigh);
+    }
+    let p99_latency_regression_ratio = p99_regression_ratio(
+        input.current_arc.p99_latency_micros,
+        input.candidate.p99_latency_micros,
+    );
+    if p99_latency_regression_ratio > input.config.max_p99_latency_regression_ratio {
+        return Some(CacheAdmissionReason::CandidateP99LatencyRegressed);
+    }
+    let hit_rate_gain = input.candidate.hit_rate() - input.current_arc.hit_rate();
+    if hit_rate_gain < input.config.min_hit_rate_gain {
+        return Some(CacheAdmissionReason::CandidateHitRateGainTooSmall);
+    }
+    None
+}
+
+fn cache_admission_report(
+    input: &LargeRamCacheAdmissionInput,
+    mode: CacheAdmissionMode,
+    reason: CacheAdmissionReason,
+    selected_policy: CacheAdmissionPolicy,
+    claim_state: CacheAdmissionClaimState,
+) -> CacheAdmissionDecisionReport {
+    CacheAdmissionDecisionReport {
+        mode,
+        reason,
+        selected_policy,
+        fallback_policy: CacheAdmissionPolicy::CurrentArc,
+        claim_state,
+        hit_rate_gain: input.candidate.hit_rate() - input.current_arc.hit_rate(),
+        p99_latency_regression_ratio: p99_regression_ratio(
+            input.current_arc.p99_latency_micros,
+            input.candidate.p99_latency_micros,
+        ),
+        candidate_memory_overhead_ratio: input.candidate.memory_overhead_ratio(input.config),
+        candidate_eviction_pressure: input.candidate.eviction_pressure(),
+        candidate_dirty_ratio: input.candidate.dirty_ratio,
+        current_expected_loss: input.current_arc.expected_loss(input.config),
+        candidate_expected_loss: input.candidate.expected_loss(input.config),
+    }
+}
+
+fn p99_regression_ratio(current_p99_micros: u64, candidate_p99_micros: u64) -> f64 {
+    if candidate_p99_micros <= current_p99_micros {
+        return 0.0;
+    }
+    if current_p99_micros == 0 {
+        return f64::INFINITY;
+    }
+    candidate_p99_micros.saturating_sub(current_p99_micros) as f64 / current_p99_micros as f64
+}
+
 /// Memory pressure levels used to adapt cache target size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryPressure {
@@ -6357,6 +6766,199 @@ mod tests {
         assert_eq!(json["cache_dirty_count"], 0);
         assert_eq!(json["writeback_queue_depth"], 0);
         assert!((json["hit_rate"].as_f64().expect("hit rate") - 0.5).abs() < 1e-12);
+    }
+
+    fn current_arc_cache_admission_sample() -> CacheAdmissionPolicySample {
+        CacheAdmissionPolicySample {
+            policy: CacheAdmissionPolicy::CurrentArc,
+            cache_hits: 8_500,
+            cache_misses: 1_500,
+            cache_evictions: 700,
+            p99_latency_micros: 900,
+            memory_overhead_bytes: 256 * 1024 * 1024,
+            dirty_ratio: 0.22,
+            writeback_queue_depth: 1_000,
+        }
+    }
+
+    fn segmented_s3fifo_cache_admission_sample() -> CacheAdmissionPolicySample {
+        CacheAdmissionPolicySample {
+            policy: CacheAdmissionPolicy::SegmentedS3Fifo,
+            cache_hits: 9_300,
+            cache_misses: 700,
+            cache_evictions: 300,
+            p99_latency_micros: 650,
+            memory_overhead_bytes: 512 * 1024 * 1024,
+            dirty_ratio: 0.18,
+            writeback_queue_depth: 500,
+        }
+    }
+
+    fn large_ram_cache_admission_input() -> LargeRamCacheAdmissionInput {
+        LargeRamCacheAdmissionInput {
+            config: LargeRamCacheBudgetConfig::default(),
+            host_memory: CacheHostMemoryObservation {
+                total_ram_bytes: Some(384 * 1024 * 1024 * 1024),
+                available_ram_bytes: Some(320 * 1024 * 1024 * 1024),
+                numa_nodes: Some(4),
+            },
+            artifact_evidence: CacheAdmissionArtifactEvidence::complete(),
+            current_arc: current_arc_cache_admission_sample(),
+            candidate: segmented_s3fifo_cache_admission_sample(),
+        }
+    }
+
+    #[test]
+    fn large_ram_cache_contract_downgrades_missing_and_small_hosts() {
+        let missing = LargeRamCacheAdmissionInput {
+            host_memory: CacheHostMemoryObservation {
+                total_ram_bytes: None,
+                available_ram_bytes: Some(16 * 1024 * 1024 * 1024),
+                numa_nodes: None,
+            },
+            ..large_ram_cache_admission_input()
+        };
+        let missing_report = evaluate_large_ram_cache_admission(&missing);
+        assert_eq!(missing_report.mode, CacheAdmissionMode::CapabilitySkip);
+        assert_eq!(
+            missing_report.reason,
+            CacheAdmissionReason::MissingHostMemory
+        );
+        assert_eq!(
+            missing_report.claim_state,
+            CacheAdmissionClaimState::MissingReference
+        );
+
+        let small_host = LargeRamCacheAdmissionInput {
+            host_memory: CacheHostMemoryObservation {
+                total_ram_bytes: Some(64 * 1024 * 1024 * 1024),
+                available_ram_bytes: Some(48 * 1024 * 1024 * 1024),
+                numa_nodes: Some(1),
+            },
+            ..large_ram_cache_admission_input()
+        };
+        let small_report = evaluate_large_ram_cache_admission(&small_host);
+        assert_eq!(small_report.mode, CacheAdmissionMode::CapabilitySkip);
+        assert_eq!(
+            small_report.reason,
+            CacheAdmissionReason::HostBelowLargeRamFloor
+        );
+        assert_eq!(
+            small_report.claim_state,
+            CacheAdmissionClaimState::SmallHostSmoke
+        );
+    }
+
+    #[test]
+    fn large_ram_cache_contract_requires_artifact_gates() {
+        let input = LargeRamCacheAdmissionInput {
+            artifact_evidence: CacheAdmissionArtifactEvidence::complete()
+                .without(CacheAdmissionEvidenceGate::RawLogs),
+            ..large_ram_cache_admission_input()
+        };
+        let report = evaluate_large_ram_cache_admission(&input);
+        assert_eq!(report.mode, CacheAdmissionMode::KeepCurrentArc);
+        assert_eq!(
+            report.reason,
+            CacheAdmissionReason::MissingArtifactGate(CacheAdmissionEvidenceGate::RawLogs)
+        );
+        assert_eq!(report.selected_policy, CacheAdmissionPolicy::CurrentArc);
+        assert_eq!(
+            report.claim_state,
+            CacheAdmissionClaimState::MissingReference
+        );
+    }
+
+    #[test]
+    fn large_ram_cache_contract_rejects_dirty_queue_and_memory_pressure() {
+        let dirty = LargeRamCacheAdmissionInput {
+            candidate: CacheAdmissionPolicySample {
+                dirty_ratio: 0.60,
+                ..segmented_s3fifo_cache_admission_sample()
+            },
+            ..large_ram_cache_admission_input()
+        };
+        let dirty_report = evaluate_large_ram_cache_admission(&dirty);
+        assert_eq!(
+            dirty_report.reason,
+            CacheAdmissionReason::CandidateDirtyPressureTooHigh
+        );
+
+        let deep_queue = LargeRamCacheAdmissionInput {
+            candidate: CacheAdmissionPolicySample {
+                writeback_queue_depth: 2_000_000,
+                ..segmented_s3fifo_cache_admission_sample()
+            },
+            ..large_ram_cache_admission_input()
+        };
+        let queue_report = evaluate_large_ram_cache_admission(&deep_queue);
+        assert_eq!(
+            queue_report.reason,
+            CacheAdmissionReason::CandidateWritebackQueueTooDeep
+        );
+
+        let memory = LargeRamCacheAdmissionInput {
+            candidate: CacheAdmissionPolicySample {
+                memory_overhead_bytes: 3 * 1024 * 1024 * 1024,
+                ..segmented_s3fifo_cache_admission_sample()
+            },
+            ..large_ram_cache_admission_input()
+        };
+        let memory_report = evaluate_large_ram_cache_admission(&memory);
+        assert_eq!(
+            memory_report.reason,
+            CacheAdmissionReason::CandidateMemoryOverheadTooHigh
+        );
+    }
+
+    #[test]
+    fn large_ram_cache_contract_selects_candidate_design_only_with_fallback() {
+        let input = large_ram_cache_admission_input();
+        let report = evaluate_large_ram_cache_admission(&input);
+
+        assert_eq!(report.mode, CacheAdmissionMode::CandidateDesignOnly);
+        assert_eq!(
+            report.reason,
+            CacheAdmissionReason::CandidateLowerExpectedLoss
+        );
+        assert_eq!(
+            report.selected_policy,
+            CacheAdmissionPolicy::SegmentedS3Fifo
+        );
+        assert_eq!(report.fallback_policy, CacheAdmissionPolicy::CurrentArc);
+        assert_eq!(report.claim_state, CacheAdmissionClaimState::Experimental);
+        assert!(report.hit_rate_gain >= input.config.min_hit_rate_gain);
+        assert!(report.candidate_expected_loss < report.current_expected_loss);
+    }
+
+    #[test]
+    fn large_ram_cache_contract_json_fixture_records_flush_backpressure_and_claim() {
+        let input = large_ram_cache_admission_input();
+        let input_json = serde_json::to_value(&input).expect("serialize input");
+        let gates = input_json["artifact_evidence"]["gates"]
+            .as_array()
+            .expect("artifact gates");
+        assert!(
+            gates
+                .iter()
+                .any(|gate| gate.as_str() == Some("BackpressurePolicy"))
+        );
+        assert!(
+            gates
+                .iter()
+                .any(|gate| gate.as_str() == Some("FlushPolicy"))
+        );
+        assert!(
+            gates
+                .iter()
+                .any(|gate| gate.as_str() == Some("ReleaseClaimState"))
+        );
+
+        let report = evaluate_large_ram_cache_admission(&input);
+        let report_json = serde_json::to_value(report).expect("serialize report");
+        assert_eq!(report_json["mode"], "CandidateDesignOnly");
+        assert_eq!(report_json["fallback_policy"], "CurrentArc");
+        assert_eq!(report_json["claim_state"], "Experimental");
     }
 
     #[test]
