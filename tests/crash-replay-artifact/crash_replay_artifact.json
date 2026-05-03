@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "artifact_id": "crash_replay_pre_commit_baseline_001",
+  "bead_id": "bd-nk49l",
+  "schedule_id": "labruntime_pre_commit_seed_42",
+  "seed": 42,
+  "lane_type": "core_labruntime",
+  "crash_taxonomy": "pre_commit_crash",
+  "pre_crash_image_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "post_replay_image_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "expected_survivors": {
+    "present_paths": [
+      {
+        "path": "/file_under_test",
+        "byte_size": 4096,
+        "xattr_keys": [],
+        "mode": "0644"
+      }
+    ],
+    "absent_paths": ["/scratch/tmpfile"]
+  },
+  "observed_survivors": {
+    "present_paths": [
+      {
+        "path": "/file_under_test",
+        "byte_size": 4096,
+        "xattr_keys": [],
+        "mode": "0644"
+      }
+    ],
+    "absent_paths": ["/scratch/tmpfile"]
+  },
+  "operation_trace": [
+    {
+      "step": 1,
+      "op": "create",
+      "args": ["path=/file_under_test"],
+      "crash_point_after": false
+    },
+    {
+      "step": 2,
+      "op": "write",
+      "args": ["offset=0", "len=4096"],
+      "crash_point_after": false
+    },
+    {
+      "step": 3,
+      "op": "begin_commit",
+      "args": [],
+      "crash_point_after": true
+    }
+  ],
+  "repair_actions": ["replay_journal", "verify_invariants"],
+  "oracle_verdict": "exact_match",
+  "minimization_status": "minimized",
+  "raw_log_path": "artifacts/crash-replay/labruntime_pre_commit_seed_42.log",
+  "reproduction_command": "rch exec -- cargo test -p ffs-harness --test crash_replay -- pre_commit_seed_42",
+  "follow_up_bead": "",
+  "follow_up_skip_reason": ""
+}
