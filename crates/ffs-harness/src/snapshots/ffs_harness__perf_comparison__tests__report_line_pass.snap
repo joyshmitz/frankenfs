@@ -1,0 +1,5 @@
+---
+source: crates/ffs-harness/src/perf_comparison.rs
+expression: line
+---
+[PASS] op_pass: +0.0% (d=0.00 negligible, p=N/A) — pass

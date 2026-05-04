@@ -1217,6 +1217,44 @@ mod tests {
         assert!(report.contains("1 pass"));
     }
 
+    /// bd-by4bc — golden-output snapshot for `format_full_report` on the
+    /// most stable case (single all-PASS result with delta=0%, zero variance,
+    /// p_value branch = "p=N/A"). Pins the title, the 72-char "=" separator,
+    /// the summary clause structure, and the per-result line shape so any
+    /// silent drift in the human-readable perf report is caught immediately.
+    /// Substring assertions in `full_report_has_summary` and
+    /// `report_line_format` cannot detect such drift.
+    #[test]
+    fn full_report_pass_only_snapshot() {
+        let comparator = RegressionComparator::new(ComparatorConfig::default());
+        let result = comparator.compare(
+            "op_pass",
+            &[100.0, 100.0, 100.0, 100.0, 100.0],
+            &[100.0, 100.0, 100.0, 100.0, 100.0],
+            &test_envelope(),
+        );
+        let report = format_full_report(&[result]);
+        insta::assert_snapshot!("full_report_pass_only", report);
+    }
+
+    /// bd-by4bc — golden-output snapshot for a single `format_report_line`
+    /// invocation. Independent of the full-report wrapper so future drift
+    /// in the line shape (verdict tag dictionary, percent precision, effect
+    /// label, p-value branch, " — " explanation suffix) is pinned even when
+    /// `format_full_report` itself is unchanged.
+    #[test]
+    fn report_line_pass_snapshot() {
+        let comparator = RegressionComparator::new(ComparatorConfig::default());
+        let result = comparator.compare(
+            "op_pass",
+            &[100.0, 100.0, 100.0, 100.0, 100.0],
+            &[100.0, 100.0, 100.0, 100.0, 100.0],
+            &test_envelope(),
+        );
+        let line = format_report_line(&result);
+        insta::assert_snapshot!("report_line_pass", line);
+    }
+
     // ── Negative / invariant tests ───────────────────────────────────
 
     #[test]

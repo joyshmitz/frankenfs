@@ -1,0 +1,9 @@
+---
+source: crates/ffs-harness/src/perf_comparison.rs
+expression: report
+---
+Performance Regression Report (comparator v1)
+========================================================================
+Summary: 1 pass, 0 warn, 0 fail, 0 inconclusive
+
+[PASS] op_pass: +0.0% (d=0.00 negligible, p=N/A) — pass
