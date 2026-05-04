@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "lab_id": "frankenfs_chaos_replay_lab_v1",
+  "bead_id": "bd-rchk0.5.5",
+  "schedules": [
+    {
+      "schedule_id": "chaos_pre_commit_seed_42",
+      "seed": 42,
+      "lane": "core_labruntime",
+      "crash_taxonomy": "pre_commit_crash",
+      "operation_trace": [
+        {"step": 1, "op": "create", "args": ["path=/staged"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": false},
+        {"step": 2, "op": "write", "args": ["offset=0", "len=4096"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": false},
+        {"step": 3, "op": "begin_commit", "args": [], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": true}
+      ],
+      "crash_point_after_step": 3,
+      "expected_survivor_kind": "exact_match_pre_crash",
+      "expected_survivor_paths": [],
+      "expected_absent_paths": ["/staged"],
+      "repair_policy": "no_repair",
+      "minimization_status": "minimized",
+      "raw_log_path": "artifacts/chaos-replay/pre_commit_seed_42.log",
+      "replay_command": "rch exec -- cargo test -p ffs-harness chaos_replay -- pre_commit_seed_42",
+      "host_skip_reason": "",
+      "follow_up_bead": ""
+    },
+    {
+      "schedule_id": "chaos_post_commit_pre_flush_seed_43",
+      "seed": 43,
+      "lane": "core_labruntime",
+      "crash_taxonomy": "post_commit_pre_flush_crash",
+      "operation_trace": [
+        {"step": 1, "op": "create", "args": ["path=/durable"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": false},
+        {"step": 2, "op": "write", "args": ["offset=0", "len=4096"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": false},
+        {"step": 3, "op": "begin_commit", "args": [], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": true},
+        {"step": 4, "op": "end_commit", "args": [], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": true}
+      ],
+      "crash_point_after_step": 4,
+      "expected_survivor_kind": "exact_match_post_commit",
+      "expected_survivor_paths": ["/durable"],
+      "expected_absent_paths": [],
+      "repair_policy": "no_repair",
+      "minimization_status": "minimized",
+      "raw_log_path": "artifacts/chaos-replay/post_commit_seed_43.log",
+      "replay_command": "rch exec -- cargo test -p ffs-harness chaos_replay -- post_commit_seed_43",
+      "host_skip_reason": "",
+      "follow_up_bead": ""
+    },
+    {
+      "schedule_id": "chaos_replay_interruption_seed_44",
+      "seed": 44,
+      "lane": "core_labruntime",
+      "crash_taxonomy": "replay_interruption",
+      "operation_trace": [
+        {"step": 1, "op": "create", "args": ["path=/replay_target"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": false},
+        {"step": 2, "op": "write", "args": ["offset=0", "len=8192"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": false},
+        {"step": 3, "op": "begin_commit", "args": [], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": true},
+        {"step": 4, "op": "end_commit", "args": [], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": true},
+        {"step": 5, "op": "checkpoint_marker", "args": ["replay_resume_point"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": false}
+      ],
+      "crash_point_after_step": 5,
+      "expected_survivor_kind": "exact_match_post_commit",
+      "expected_survivor_paths": ["/replay_target"],
+      "expected_absent_paths": [],
+      "repair_policy": "scrub_detect_only",
+      "minimization_status": "minimization_in_progress",
+      "raw_log_path": "artifacts/chaos-replay/replay_interruption_seed_44.log",
+      "replay_command": "rch exec -- cargo test -p ffs-harness chaos_replay -- replay_interruption_seed_44",
+      "host_skip_reason": "",
+      "follow_up_bead": ""
+    },
+    {
+      "schedule_id": "chaos_repair_interruption_seed_45",
+      "seed": 45,
+      "lane": "core_labruntime",
+      "crash_taxonomy": "repair_interruption",
+      "operation_trace": [
+        {"step": 1, "op": "create", "args": ["path=/repair_target"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": false},
+        {"step": 2, "op": "write", "args": ["offset=0", "len=8192"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": false},
+        {"step": 3, "op": "fsync", "args": [], "fsync_boundary": true, "fsyncdir_boundary": false, "commit_boundary": false},
+        {"step": 4, "op": "checkpoint_marker", "args": ["repair_planned"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": false}
+      ],
+      "crash_point_after_step": 4,
+      "expected_survivor_kind": "allowed_repaired_divergence",
+      "expected_survivor_paths": ["/repair_target"],
+      "expected_absent_paths": [],
+      "repair_policy": "interrupted_repair",
+      "minimization_status": "minimization_in_progress",
+      "raw_log_path": "artifacts/chaos-replay/repair_interruption_seed_45.log",
+      "replay_command": "rch exec -- cargo test -p ffs-harness chaos_replay -- repair_interruption_seed_45",
+      "host_skip_reason": "",
+      "follow_up_bead": "bd-rchk0.5.3"
+    },
+    {
+      "schedule_id": "chaos_metadata_data_ordering_seed_46",
+      "seed": 46,
+      "lane": "core_labruntime",
+      "crash_taxonomy": "metadata_data_ordering_boundary",
+      "operation_trace": [
+        {"step": 1, "op": "create", "args": ["path=/meta_data"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": false},
+        {"step": 2, "op": "write", "args": ["offset=0", "len=4096"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": false},
+        {"step": 3, "op": "begin_commit", "args": ["meta_only"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": true},
+        {"step": 4, "op": "fsyncdir", "args": ["dir=/"], "fsync_boundary": false, "fsyncdir_boundary": true, "commit_boundary": false}
+      ],
+      "crash_point_after_step": 4,
+      "expected_survivor_kind": "exact_match_post_commit",
+      "expected_survivor_paths": ["/meta_data"],
+      "expected_absent_paths": [],
+      "repair_policy": "no_repair",
+      "minimization_status": "minimized",
+      "raw_log_path": "artifacts/chaos-replay/metadata_data_ordering_seed_46.log",
+      "replay_command": "rch exec -- cargo test -p ffs-harness chaos_replay -- metadata_data_ordering_seed_46",
+      "host_skip_reason": "",
+      "follow_up_bead": ""
+    },
+    {
+      "schedule_id": "chaos_mounted_host_skip_seed_47",
+      "seed": 47,
+      "lane": "host_skip",
+      "crash_taxonomy": "mount_teardown_race",
+      "operation_trace": [],
+      "crash_point_after_step": 0,
+      "expected_survivor_kind": "host_skip",
+      "expected_survivor_paths": [],
+      "expected_absent_paths": [],
+      "repair_policy": "no_repair",
+      "minimization_status": "not_minimized",
+      "raw_log_path": "artifacts/chaos-replay/mount_teardown_seed_47.skip.log",
+      "replay_command": "rch exec -- cargo test -p ffs-harness chaos_replay -- mount_teardown_seed_47",
+      "host_skip_reason": "low-privilege host has no /dev/fuse; mount_teardown_race lane is intentionally skipped",
+      "follow_up_bead": ""
+    },
+    {
+      "schedule_id": "chaos_concurrent_writer_conflict_seed_48",
+      "seed": 48,
+      "lane": "core_labruntime",
+      "crash_taxonomy": "concurrent_writer_conflict",
+      "operation_trace": [
+        {"step": 1, "op": "create", "args": ["path=/concurrent"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": false},
+        {"step": 2, "op": "write", "args": ["offset=0", "len=4096", "writer=A"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": false},
+        {"step": 3, "op": "write", "args": ["offset=0", "len=4096", "writer=B"], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": false},
+        {"step": 4, "op": "begin_commit", "args": [], "fsync_boundary": false, "fsyncdir_boundary": false, "commit_boundary": true}
+      ],
+      "crash_point_after_step": 4,
+      "expected_survivor_kind": "allowed_repaired_divergence",
+      "expected_survivor_paths": ["/concurrent"],
+      "expected_absent_paths": [],
+      "repair_policy": "ledger_repair",
+      "minimization_status": "not_minimized",
+      "raw_log_path": "artifacts/chaos-replay/concurrent_writer_seed_48.log",
+      "replay_command": "rch exec -- cargo test -p ffs-harness chaos_replay -- concurrent_writer_seed_48",
+      "host_skip_reason": "",
+      "follow_up_bead": "bd-rchk0.5.3"
+    }
+  ]
+}
