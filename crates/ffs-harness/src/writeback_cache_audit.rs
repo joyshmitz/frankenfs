@@ -15,6 +15,8 @@ use std::{fmt::Write as _, fs, path::Path};
 
 pub const WRITEBACK_CACHE_AUDIT_SCHEMA_VERSION: u32 = 1;
 pub const WRITEBACK_CACHE_AUDIT_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const WRITEBACK_CACHE_ORDERING_SCHEMA_VERSION: u32 = 1;
+pub const WRITEBACK_CACHE_ORDERING_REPORT_SCHEMA_VERSION: u32 = 1;
 
 /// Required invariant identifiers for the writeback-cache gate.
 ///
@@ -53,6 +55,20 @@ pub const REQUIRED_ARTIFACT_FIELDS: [&str; 15] = [
     "filesystem_flavor",
     "operation_class",
     "explicit_opt_in",
+];
+
+pub const ALLOWED_ORDERING_REJECTION_REASONS: [&str; 11] = [
+    "default_off_or_not_opted_in",
+    "raw_fuser_option_missing",
+    "missing_invariant_evidence",
+    "flush_misclassified_as_durable",
+    "missing_fsync_boundary",
+    "missing_fsyncdir_boundary",
+    "metadata_after_data_violation",
+    "cancellation_not_classified",
+    "stale_epoch_state",
+    "repair_refresh_missing",
+    "ordering_mismatch",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,11 +148,104 @@ pub struct WritebackCacheAuditReport {
     pub reproduction_command: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritebackOrderingOracle {
+    pub schema_version: u32,
+    pub gate_version: String,
+    pub bead_id: String,
+    pub mount_options: WritebackMountOptions,
+    pub raw_fuser_options: Vec<String>,
+    pub dirty_page_state: String,
+    pub metadata_state: String,
+    pub flush_observed_non_durable: bool,
+    pub fsync_observed_durable: bool,
+    pub fsyncdir_observed_durable: bool,
+    pub cancellation_state: String,
+    pub unmount_state: String,
+    pub crash_reopen_state: String,
+    pub epoch_id: String,
+    pub epoch_state: String,
+    pub repair_symbol_generation: u64,
+    pub repair_symbol_refresh: String,
+    pub invariant_evidence: Vec<WritebackOrderingInvariantEvidence>,
+    pub expected_ordering: Vec<String>,
+    pub observed_ordering: Vec<String>,
+    pub artifact_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritebackOrderingInvariantEvidence {
+    pub id: String,
+    pub supported: bool,
+    pub test_id: String,
+    pub artifact_field: String,
+    pub release_gate_consumer: String,
+    pub unsupported_rationale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum WritebackOrderingDecision {
+    Accept,
+    Reject {
+        reason: String,
+        invariants_failing: Vec<String>,
+        remediation: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritebackOrderingSyncEvidence {
+    pub flush_observed_non_durable: bool,
+    pub fsync_observed_durable: bool,
+    pub fsyncdir_observed_durable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritebackOrderingReport {
+    pub schema_version: u32,
+    pub gate_version: String,
+    pub bead_id: String,
+    pub scenario_id: String,
+    pub valid: bool,
+    pub decision: WritebackOrderingDecision,
+    pub invariant_map: Vec<WritebackInvariant>,
+    pub invariant_evidence: Vec<WritebackOrderingInvariantEvidence>,
+    pub failure_modes: Vec<String>,
+    pub mount_options: WritebackMountOptions,
+    pub raw_fuser_options: Vec<String>,
+    pub dirty_page_state: String,
+    pub metadata_state: String,
+    #[serde(flatten)]
+    pub sync_evidence: WritebackOrderingSyncEvidence,
+    pub cancellation_state: String,
+    pub unmount_state: String,
+    pub crash_reopen_state: String,
+    pub epoch_id: String,
+    pub epoch_state: String,
+    pub repair_symbol_generation: u64,
+    pub repair_symbol_refresh: String,
+    pub expected_ordering: Vec<String>,
+    pub observed_ordering: Vec<String>,
+    pub artifact_paths: Vec<String>,
+    pub reproduction_command: String,
+}
+
 pub fn load_writeback_cache_audit_gate(path: &Path) -> Result<WritebackCacheAuditGate> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     serde_json::from_slice(&bytes).with_context(|| {
         format!(
             "failed to parse writeback-cache audit gate {}",
+            path.display()
+        )
+    })
+}
+
+pub fn load_writeback_ordering_oracle(path: &Path) -> Result<WritebackOrderingOracle> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "failed to parse writeback-cache ordering oracle {}",
             path.display()
         )
     })
@@ -175,12 +284,65 @@ pub fn build_writeback_cache_audit_report(
     })
 }
 
+pub fn build_writeback_ordering_report(
+    oracle: &WritebackOrderingOracle,
+    scenario_id: &str,
+    reproduction_command: &str,
+) -> Result<WritebackOrderingReport> {
+    validate_writeback_ordering_oracle(oracle)?;
+    let decision = evaluate_writeback_ordering_oracle(oracle);
+    Ok(WritebackOrderingReport {
+        schema_version: WRITEBACK_CACHE_ORDERING_REPORT_SCHEMA_VERSION,
+        gate_version: oracle.gate_version.clone(),
+        bead_id: oracle.bead_id.clone(),
+        scenario_id: scenario_id.to_owned(),
+        valid: true,
+        decision,
+        invariant_map: writeback_invariant_map(),
+        invariant_evidence: oracle.invariant_evidence.clone(),
+        failure_modes: ALLOWED_ORDERING_REJECTION_REASONS
+            .iter()
+            .map(|reason| (*reason).to_owned())
+            .collect(),
+        mount_options: oracle.mount_options.clone(),
+        raw_fuser_options: oracle.raw_fuser_options.clone(),
+        dirty_page_state: oracle.dirty_page_state.clone(),
+        metadata_state: oracle.metadata_state.clone(),
+        sync_evidence: WritebackOrderingSyncEvidence {
+            flush_observed_non_durable: oracle.flush_observed_non_durable,
+            fsync_observed_durable: oracle.fsync_observed_durable,
+            fsyncdir_observed_durable: oracle.fsyncdir_observed_durable,
+        },
+        cancellation_state: oracle.cancellation_state.clone(),
+        unmount_state: oracle.unmount_state.clone(),
+        crash_reopen_state: oracle.crash_reopen_state.clone(),
+        epoch_id: oracle.epoch_id.clone(),
+        epoch_state: oracle.epoch_state.clone(),
+        repair_symbol_generation: oracle.repair_symbol_generation,
+        repair_symbol_refresh: oracle.repair_symbol_refresh.clone(),
+        expected_ordering: oracle.expected_ordering.clone(),
+        observed_ordering: oracle.observed_ordering.clone(),
+        artifact_paths: oracle.artifact_paths.clone(),
+        reproduction_command: reproduction_command.to_owned(),
+    })
+}
+
 pub fn fail_on_writeback_cache_audit_errors(report: &WritebackCacheAuditReport) -> Result<()> {
     if !report.valid {
         bail!("writeback-cache audit report is invalid");
     }
     if let WritebackCacheAuditDecision::Reject { reason, .. } = &report.decision {
         bail!("writeback-cache audit rejected mount option: {reason}");
+    }
+    Ok(())
+}
+
+pub fn fail_on_writeback_ordering_errors(report: &WritebackOrderingReport) -> Result<()> {
+    if !report.valid {
+        bail!("writeback-cache ordering report is invalid");
+    }
+    if let WritebackOrderingDecision::Reject { reason, .. } = &report.decision {
+        bail!("writeback-cache ordering oracle rejected opt-in: {reason}");
     }
     Ok(())
 }
@@ -220,6 +382,54 @@ pub fn render_writeback_cache_audit_markdown(report: &WritebackCacheAuditReport)
     text.push_str("\n## Artifact Fields\n\n");
     for field in &report.required_artifact_fields {
         let _ = writeln!(text, "- {field}");
+    }
+    text
+}
+
+#[must_use]
+pub fn render_writeback_ordering_markdown(report: &WritebackOrderingReport) -> String {
+    let decision = match &report.decision {
+        WritebackOrderingDecision::Accept => "accept".to_owned(),
+        WritebackOrderingDecision::Reject { reason, .. } => {
+            format!("reject ({reason})")
+        }
+    };
+    let mut text = String::new();
+    text.push_str("# Writeback-Cache Ordering Oracle\n\n");
+    let _ = writeln!(text, "- schema_version: {}", report.schema_version);
+    let _ = writeln!(text, "- gate_version: {}", report.gate_version);
+    let _ = writeln!(text, "- bead_id: {}", report.bead_id);
+    let _ = writeln!(text, "- scenario_id: {}", report.scenario_id);
+    let _ = writeln!(text, "- decision: {decision}");
+    let _ = writeln!(text, "- dirty_page_state: {}", report.dirty_page_state);
+    let _ = writeln!(text, "- metadata_state: {}", report.metadata_state);
+    let _ = writeln!(text, "- epoch_id: {}", report.epoch_id);
+    let _ = writeln!(
+        text,
+        "- repair_symbol_generation: {}",
+        report.repair_symbol_generation
+    );
+    let _ = writeln!(
+        text,
+        "- reproduction_command: `{}`\n",
+        report.reproduction_command
+    );
+    text.push_str("## Invariant Evidence\n\n");
+    for evidence in &report.invariant_evidence {
+        let _ = writeln!(
+            text,
+            "- {} supported={} test_id={} artifact_field={} release_gate_consumer={} unsupported_rationale={}",
+            evidence.id,
+            evidence.supported,
+            evidence.test_id,
+            evidence.artifact_field,
+            evidence.release_gate_consumer,
+            evidence.unsupported_rationale
+        );
+    }
+    text.push_str("\n## Failure Modes\n\n");
+    for mode in &report.failure_modes {
+        let _ = writeln!(text, "- {mode}");
     }
     text
 }
@@ -459,6 +669,140 @@ fn check_conflicting_flags(gate: &WritebackCacheAuditGate) -> Option<WritebackCa
     None
 }
 
+#[must_use]
+pub fn evaluate_writeback_ordering_oracle(
+    oracle: &WritebackOrderingOracle,
+) -> WritebackOrderingDecision {
+    if oracle.mount_options.mode != "rw"
+        || !oracle.mount_options.raw_options.iter().any(|v| v == "rw")
+    {
+        return reject_ordering(
+            "default_off_or_not_opted_in",
+            ["I5"],
+            "positive writeback-cache ordering proof requires an explicit rw opt-in scenario",
+        );
+    }
+    if !oracle
+        .raw_fuser_options
+        .iter()
+        .any(|v| v == "writeback_cache")
+    {
+        return reject_ordering(
+            "raw_fuser_option_missing",
+            ["I5"],
+            "positive ordering proof must record the raw FUSE writeback_cache option under test",
+        );
+    }
+    if let Some(decision) = check_ordering_invariant_evidence(oracle) {
+        return decision;
+    }
+    if !oracle.flush_observed_non_durable {
+        return reject_ordering(
+            "flush_misclassified_as_durable",
+            ["I5"],
+            "flush must remain a lifecycle hook and must not advance durability",
+        );
+    }
+    if oracle.dirty_page_state != "fsynced_durable" || !oracle.fsync_observed_durable {
+        return reject_ordering(
+            "missing_fsync_boundary",
+            ["I4"],
+            "dirty data must become durable only after an observed fsync boundary",
+        );
+    }
+    if !oracle.fsyncdir_observed_durable {
+        return reject_ordering(
+            "missing_fsyncdir_boundary",
+            ["I3", "I4"],
+            "metadata durability requires an observed fsyncdir boundary",
+        );
+    }
+    if oracle.metadata_state != "metadata_after_data" {
+        return reject_ordering(
+            "metadata_after_data_violation",
+            ["I3"],
+            "metadata visibility must not overtake dependent dirty data",
+        );
+    }
+    if !["cancelled_before_writeback_classified", "none"]
+        .contains(&oracle.cancellation_state.as_str())
+    {
+        return reject_ordering(
+            "cancellation_not_classified",
+            ["I2"],
+            "cancellation before writeback must be classified before opt-in can accept",
+        );
+    }
+    if oracle.epoch_id.trim().is_empty() || oracle.epoch_state != "fresh" {
+        return reject_ordering(
+            "stale_epoch_state",
+            ["I1", "I6"],
+            "ordering proof must name a fresh epoch before accepting writeback_cache",
+        );
+    }
+    if oracle.crash_reopen_state != "survivor_set_verified"
+        || oracle.unmount_state != "dirty_pages_flushed_or_rejected"
+    {
+        return reject_ordering(
+            "ordering_mismatch",
+            ["I4", "I6"],
+            "crash/reopen and unmount evidence must verify the expected survivor set",
+        );
+    }
+    if oracle.repair_symbol_refresh != "refreshed_after_writeback" {
+        return reject_ordering(
+            "repair_refresh_missing",
+            ["I6"],
+            "repair symbols must refresh after accepted writeback before release gates can accept",
+        );
+    }
+    if oracle.expected_ordering != oracle.observed_ordering {
+        return reject_ordering(
+            "ordering_mismatch",
+            ["I2", "I3"],
+            "observed dirty-page/fsync ordering must match the oracle expectation",
+        );
+    }
+    WritebackOrderingDecision::Accept
+}
+
+fn check_ordering_invariant_evidence(
+    oracle: &WritebackOrderingOracle,
+) -> Option<WritebackOrderingDecision> {
+    let mut missing = Vec::new();
+    for invariant_id in REQUIRED_INVARIANT_IDS {
+        let Some(evidence) = oracle
+            .invariant_evidence
+            .iter()
+            .find(|entry| entry.id == invariant_id)
+        else {
+            missing.push(invariant_id.to_owned());
+            continue;
+        };
+        if evidence.supported {
+            if evidence.test_id.trim().is_empty()
+                || evidence.artifact_field.trim().is_empty()
+                || evidence.release_gate_consumer.trim().is_empty()
+            {
+                missing.push(evidence.id.clone());
+            }
+        } else {
+            missing.push(evidence.id.clone());
+        }
+    }
+    if missing.is_empty() {
+        None
+    } else {
+        Some(WritebackOrderingDecision::Reject {
+            reason: "missing_invariant_evidence".to_owned(),
+            invariants_failing: missing,
+            remediation:
+                "every invariant I1-I6 must have executable test/artifact/release-gate evidence before opt-in accepts"
+                    .to_owned(),
+        })
+    }
+}
+
 fn reject(
     reason: &str,
     invariants_failing: impl IntoIterator<Item = &'static str>,
@@ -469,6 +813,22 @@ fn reject(
         .map(|id| (*id).to_owned())
         .collect();
     WritebackCacheAuditDecision::Reject {
+        reason: reason.to_owned(),
+        invariants_failing: invariants,
+        remediation: remediation.to_owned(),
+    }
+}
+
+fn reject_ordering(
+    reason: &str,
+    invariants_failing: impl IntoIterator<Item = &'static str>,
+    remediation: &str,
+) -> WritebackOrderingDecision {
+    let invariants: Vec<String> = invariants_failing
+        .into_iter()
+        .map(|id| (*id).to_owned())
+        .collect();
+    WritebackOrderingDecision::Reject {
         reason: reason.to_owned(),
         invariants_failing: invariants,
         remediation: remediation.to_owned(),
@@ -521,6 +881,53 @@ pub fn validate_writeback_cache_audit_gate(gate: &WritebackCacheAuditGate) -> Re
     Ok(())
 }
 
+pub fn validate_writeback_ordering_oracle(oracle: &WritebackOrderingOracle) -> Result<()> {
+    if oracle.schema_version != WRITEBACK_CACHE_ORDERING_SCHEMA_VERSION {
+        bail!(
+            "writeback cache ordering schema_version must be {WRITEBACK_CACHE_ORDERING_SCHEMA_VERSION}, got {}",
+            oracle.schema_version
+        );
+    }
+    if !oracle.bead_id.starts_with("bd-") {
+        bail!(
+            "writeback cache ordering bead_id must look like bd-..., got `{}`",
+            oracle.bead_id
+        );
+    }
+    if oracle.gate_version.trim().is_empty() {
+        bail!("writeback cache ordering gate_version must not be empty");
+    }
+    validate_writeback_mount_options(&oracle.mount_options)?;
+    if oracle.raw_fuser_options.is_empty() {
+        bail!("writeback cache ordering raw_fuser_options must not be empty");
+    }
+    if oracle.artifact_paths.is_empty() {
+        bail!("writeback cache ordering artifact_paths must not be empty");
+    }
+    if oracle.expected_ordering.is_empty() || oracle.observed_ordering.is_empty() {
+        bail!("writeback cache ordering expected and observed ordering must not be empty");
+    }
+    for path in &oracle.artifact_paths {
+        if path.trim().is_empty() {
+            bail!("writeback cache ordering artifact path must not be empty");
+        }
+    }
+    Ok(())
+}
+
+fn validate_writeback_mount_options(options: &WritebackMountOptions) -> Result<()> {
+    if options.raw_options.is_empty() {
+        bail!("writeback cache audit raw_options must include the declared mount option set");
+    }
+    if options.fs_name.trim().is_empty() {
+        bail!("writeback cache audit fs_name must not be empty");
+    }
+    if options.mode.trim().is_empty() {
+        bail!("writeback cache audit mount mode must not be empty");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,8 +971,87 @@ mod tests {
         }
     }
 
+    fn supported_invariant(id: &str) -> WritebackOrderingInvariantEvidence {
+        WritebackOrderingInvariantEvidence {
+            id: id.to_owned(),
+            supported: true,
+            test_id: format!("writeback_ordering_{id}_test"),
+            artifact_field: format!("ordering.{id}.artifact"),
+            release_gate_consumer: "writeback_cache.release_gate".to_owned(),
+            unsupported_rationale: String::new(),
+        }
+    }
+
+    fn happy_ordering_oracle() -> WritebackOrderingOracle {
+        WritebackOrderingOracle {
+            schema_version: WRITEBACK_CACHE_ORDERING_SCHEMA_VERSION,
+            gate_version: "bd-8pz7h-ordering-v1".to_owned(),
+            bead_id: "bd-8pz7h".to_owned(),
+            mount_options: WritebackMountOptions {
+                raw_options: vec![
+                    "rw".to_owned(),
+                    "fsname=frankenfs".to_owned(),
+                    "writeback_cache".to_owned(),
+                ],
+                fs_name: "frankenfs".to_owned(),
+                allow_other: false,
+                auto_unmount: true,
+                default_permissions: true,
+                mode: "rw".to_owned(),
+            },
+            raw_fuser_options: vec![
+                "fsname=frankenfs".to_owned(),
+                "subtype=ffs".to_owned(),
+                "rw".to_owned(),
+                "writeback_cache".to_owned(),
+            ],
+            dirty_page_state: "fsynced_durable".to_owned(),
+            metadata_state: "metadata_after_data".to_owned(),
+            flush_observed_non_durable: true,
+            fsync_observed_durable: true,
+            fsyncdir_observed_durable: true,
+            cancellation_state: "cancelled_before_writeback_classified".to_owned(),
+            unmount_state: "dirty_pages_flushed_or_rejected".to_owned(),
+            crash_reopen_state: "survivor_set_verified".to_owned(),
+            epoch_id: "epoch-0007".to_owned(),
+            epoch_state: "fresh".to_owned(),
+            repair_symbol_generation: 8,
+            repair_symbol_refresh: "refreshed_after_writeback".to_owned(),
+            invariant_evidence: REQUIRED_INVARIANT_IDS
+                .into_iter()
+                .map(supported_invariant)
+                .collect(),
+            expected_ordering: vec![
+                "dirty_data".to_owned(),
+                "fsync".to_owned(),
+                "metadata".to_owned(),
+                "fsyncdir".to_owned(),
+                "repair_symbol_refresh".to_owned(),
+            ],
+            observed_ordering: vec![
+                "dirty_data".to_owned(),
+                "fsync".to_owned(),
+                "metadata".to_owned(),
+                "fsyncdir".to_owned(),
+                "repair_symbol_refresh".to_owned(),
+            ],
+            artifact_paths: vec![
+                "artifacts/writeback-cache/ordering.json".to_owned(),
+                "artifacts/writeback-cache/crash_reopen.json".to_owned(),
+            ],
+        }
+    }
+
     fn rejection_reason(decision: &WritebackCacheAuditDecision) -> Option<&str> {
         if let WritebackCacheAuditDecision::Reject { reason, .. } = decision {
+            Some(reason.as_str())
+        } else {
+            None
+        }
+    }
+
+    fn ordering_rejection_reason(decision: &WritebackOrderingDecision) -> Option<&str> {
+        if let WritebackOrderingDecision::Reject { reason, .. } = decision {
             Some(reason.as_str())
         } else {
             None
@@ -921,6 +1407,251 @@ mod tests {
         .expect("schema-valid rejection should still build report");
 
         let result = fail_on_writeback_cache_audit_errors(&report);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn ordering_oracle_accepts_complete_proof() {
+        let decision = evaluate_writeback_ordering_oracle(&happy_ordering_oracle());
+        assert!(matches!(decision, WritebackOrderingDecision::Accept));
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_default_off_mount() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.mount_options.mode = "ro".to_owned();
+        oracle.mount_options.raw_options = vec!["ro".to_owned(), "fsname=frankenfs".to_owned()];
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert_eq!(
+            ordering_rejection_reason(&decision),
+            Some("default_off_or_not_opted_in")
+        );
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_missing_raw_fuser_writeback_option() {
+        let mut oracle = happy_ordering_oracle();
+        oracle
+            .raw_fuser_options
+            .retain(|option| option != "writeback_cache");
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert_eq!(
+            ordering_rejection_reason(&decision),
+            Some("raw_fuser_option_missing")
+        );
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_missing_invariant_test_id() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.invariant_evidence[0].test_id.clear();
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert!(matches!(
+            decision,
+            WritebackOrderingDecision::Reject {
+                reason,
+                invariants_failing,
+                ..
+            } if reason == "missing_invariant_evidence"
+                && invariants_failing.contains(&"I1".to_owned())
+        ));
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_missing_invariant_artifact_field() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.invariant_evidence[1].artifact_field.clear();
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert!(matches!(
+            decision,
+            WritebackOrderingDecision::Reject {
+                reason,
+                invariants_failing,
+                ..
+            } if reason == "missing_invariant_evidence"
+                && invariants_failing.contains(&"I2".to_owned())
+        ));
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_missing_invariant_release_gate_consumer() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.invariant_evidence[2].release_gate_consumer.clear();
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert!(matches!(
+            decision,
+            WritebackOrderingDecision::Reject {
+                reason,
+                invariants_failing,
+                ..
+            } if reason == "missing_invariant_evidence"
+                && invariants_failing.contains(&"I3".to_owned())
+        ));
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_unsupported_invariant_even_with_rationale() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.invariant_evidence[3].supported = false;
+        oracle.invariant_evidence[3].unsupported_rationale =
+            "permissioned mounted lane unavailable on this host".to_owned();
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert_eq!(
+            ordering_rejection_reason(&decision),
+            Some("missing_invariant_evidence")
+        );
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_unsupported_invariant_without_rationale() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.invariant_evidence[3].supported = false;
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert_eq!(
+            ordering_rejection_reason(&decision),
+            Some("missing_invariant_evidence")
+        );
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_dirty_pages_without_fsync_boundary() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.dirty_page_state = "dirty_unflushed".to_owned();
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert_eq!(
+            ordering_rejection_reason(&decision),
+            Some("missing_fsync_boundary")
+        );
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_flush_as_durable() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.flush_observed_non_durable = false;
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert_eq!(
+            ordering_rejection_reason(&decision),
+            Some("flush_misclassified_as_durable")
+        );
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_missing_fsyncdir_boundary() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.fsyncdir_observed_durable = false;
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert_eq!(
+            ordering_rejection_reason(&decision),
+            Some("missing_fsyncdir_boundary")
+        );
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_metadata_overtaking_data() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.metadata_state = "metadata_before_data".to_owned();
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert_eq!(
+            ordering_rejection_reason(&decision),
+            Some("metadata_after_data_violation")
+        );
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_unclassified_cancellation() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.cancellation_state = "unknown".to_owned();
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert_eq!(
+            ordering_rejection_reason(&decision),
+            Some("cancellation_not_classified")
+        );
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_stale_epoch_state() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.epoch_state = "stale".to_owned();
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert_eq!(
+            ordering_rejection_reason(&decision),
+            Some("stale_epoch_state")
+        );
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_unmount_with_dirty_pages() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.unmount_state = "dirty_pages_pending".to_owned();
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert_eq!(
+            ordering_rejection_reason(&decision),
+            Some("ordering_mismatch")
+        );
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_missing_repair_refresh() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.repair_symbol_refresh = "pending".to_owned();
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert_eq!(
+            ordering_rejection_reason(&decision),
+            Some("repair_refresh_missing")
+        );
+    }
+
+    #[test]
+    fn ordering_oracle_rejects_observed_ordering_mismatch() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.observed_ordering.swap(0, 1);
+        let decision = evaluate_writeback_ordering_oracle(&oracle);
+        assert_eq!(
+            ordering_rejection_reason(&decision),
+            Some("ordering_mismatch")
+        );
+    }
+
+    #[test]
+    fn ordering_report_includes_oracle_fields_and_repro() {
+        let report = build_writeback_ordering_report(
+            &happy_ordering_oracle(),
+            "writeback_cache_ordering_accepts_complete_oracle",
+            "ffs-harness validate-writeback-cache-ordering --oracle oracle.json",
+        )
+        .expect("happy ordering oracle should build report");
+
+        assert!(matches!(report.decision, WritebackOrderingDecision::Accept));
+        assert_eq!(
+            report.schema_version,
+            WRITEBACK_CACHE_ORDERING_REPORT_SCHEMA_VERSION
+        );
+        assert_eq!(report.invariant_evidence.len(), 6);
+        assert!(
+            report
+                .raw_fuser_options
+                .contains(&"writeback_cache".to_owned())
+        );
+        assert_eq!(report.artifact_paths.len(), 2);
+        assert!(
+            report
+                .reproduction_command
+                .contains("validate-writeback-cache-ordering")
+        );
+    }
+
+    #[test]
+    fn ordering_require_accept_fails_closed_on_rejection() {
+        let mut oracle = happy_ordering_oracle();
+        oracle.fsync_observed_durable = false;
+        let report = build_writeback_ordering_report(
+            &oracle,
+            "writeback_cache_ordering_rejects_missing_fsync",
+            "ffs-harness validate-writeback-cache-ordering --oracle oracle.json --require-accept",
+        )
+        .expect("schema-valid rejection should still build report");
+
+        let result = fail_on_writeback_ordering_errors(&report);
         assert!(result.is_err());
     }
 }

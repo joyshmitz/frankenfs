@@ -246,16 +246,55 @@ The dry-run e2e suite
 - `writeback_cache_audit_cli_wired`
 - `writeback_cache_audit_accepts_complete_gate`
 - `writeback_cache_audit_rejects_default_mount`
+- `writeback_cache_audit_fuse_unavailable_rejected`
+- `writeback_cache_audit_unsupported_mode_rejected`
+- `writeback_cache_audit_repeated_mount_attempts`
+- `writeback_cache_audit_fuser_options_default_off`
 - `writeback_cache_audit_bad_schema_fails`
 - `writeback_cache_audit_report_fields`
 - `writeback_cache_audit_unit_tests`
+- `writeback_cache_audit_help_docs_consistent`
 - `writeback_cache_audit_catalog_valid`
+- `writeback_cache_ordering_cli_wired`
+- `writeback_cache_ordering_accepts_complete_oracle`
+- `writeback_cache_ordering_rejects_default_off`
+- `writeback_cache_ordering_rejects_missing_fsync`
+- `writeback_cache_ordering_rejects_missing_fsyncdir`
+- `writeback_cache_ordering_cancellation_classified`
+- `writeback_cache_ordering_crash_reopen_artifact`
+- `writeback_cache_ordering_report_fields`
+- `writeback_cache_ordering_unit_tests`
 
 These tests prove default-off behavior, explicit opt-in acceptance, rejection
 classes, schema failure, report artifact fields, and unit policy coverage. A
 future implementation bead must add the production mount-option plumbing only
 after this gate accepts the relevant mount class and the report artifact names
 the generated evidence paths.
+
+## Positive Ordering Oracle
+
+The negative mount-option audit only proves that unsafe or unaudited paths do
+not forward `writeback_cache`. A separate positive oracle is required before a
+release gate may classify kernel writeback-cache support as stronger than
+experimental:
+
+```bash
+ffs-harness validate-writeback-cache-ordering --oracle FILE --scenario-id ID --require-accept
+```
+
+The ordering oracle report records the exact raw FUSE option list, gate
+version, invariant evidence for I1-I6, dirty-page state, flush/fsync/fsyncdir
+observations, epoch identity, unmount and crash/reopen survivor-set state,
+repair-symbol generation and refresh state, expected ordering, observed
+ordering, artifact paths, cleanup status through the e2e log, and a
+reproduction command.
+
+Every invariant must have an executable test id, artifact field, and named
+release-gate consumer. Unsupported rationales are documented, but they still
+fail closed for positive opt-in. Release gates therefore cannot mark
+writeback-cache stronger than experimental unless both the negative-option
+audit and this positive ordering oracle pass with fresh authoritative
+evidence.
 
 ## Follow-On Work
 

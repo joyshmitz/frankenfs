@@ -14,8 +14,10 @@ export REPO_ROOT
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_writeback_cache_audit}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 
-LOG_DIR="${FFS_E2E_LOG_DIR:-$REPO_ROOT/artifacts/e2e/$(date +%Y%m%d_%H%M%S)_ffs_writeback_cache_audit}"
-mkdir -p "$LOG_DIR"
+RUN_ID="$(date +%Y%m%d_%H%M%S)_ffs_writeback_cache_audit"
+LOG_DIR="${FFS_E2E_LOG_DIR:-$REPO_ROOT/artifacts/e2e/$RUN_ID}"
+INPUT_DIR="${FFS_E2E_INPUT_DIR:-$REPO_ROOT/artifacts/e2e_inputs/$RUN_ID}"
+mkdir -p "$LOG_DIR" "$INPUT_DIR"
 LOG_FILE="$LOG_DIR/run.log"
 
 PASS_COUNT=0
@@ -35,6 +37,15 @@ TOTAL=0
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_unit_tests|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_help_docs_consistent|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_catalog_valid|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_ordering_cli_wired|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_ordering_accepts_complete_oracle|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_ordering_rejects_default_off|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_ordering_rejects_missing_fsync|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_ordering_rejects_missing_fsyncdir|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_ordering_cancellation_classified|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_ordering_crash_reopen_artifact|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_ordering_report_fields|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_ordering_unit_tests|outcome=PASS
 
 log() {
     echo "$*" | tee -a "$LOG_FILE"
@@ -64,14 +75,56 @@ run_rch_capture() {
     shift
     local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-420}"
     local status=0
-    if command -v timeout >/dev/null 2>&1; then
-        RCH_VISIBILITY=none timeout "${timeout_secs}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    local pid
+    local use_process_group=0
+    : >"$log_path"
+
+    if command -v setsid >/dev/null 2>&1; then
+        RCH_VISIBILITY=none setsid "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
+        use_process_group=1
     else
-        RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+        RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
     fi
-    if [[ "$status" -eq 0 ]]; then
-        return 0
+    pid=$!
+
+    local deadline=$((SECONDS + timeout_secs))
+    while kill -0 "$pid" 2>/dev/null; do
+        if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+            if [[ "$use_process_group" -eq 1 ]]; then
+                kill -TERM -- "-$pid" 2>/dev/null || true
+            else
+                kill -TERM "$pid" 2>/dev/null || true
+            fi
+            wait "$pid" 2>/dev/null || true
+            return 0
+        fi
+        if grep -Eq "Remote command finished: exit=([1-9]|[1-9][0-9]+)" "$log_path"; then
+            if [[ "$use_process_group" -eq 1 ]]; then
+                kill -TERM -- "-$pid" 2>/dev/null || true
+            else
+                kill -TERM "$pid" 2>/dev/null || true
+            fi
+            wait "$pid" 2>/dev/null || true
+            return 1
+        fi
+        if [[ "$SECONDS" -ge "$deadline" ]]; then
+            break
+        fi
+        sleep 1
+    done
+
+    if kill -0 "$pid" 2>/dev/null; then
+        if [[ "$use_process_group" -eq 1 ]]; then
+            kill -TERM -- "-$pid" 2>/dev/null || true
+        else
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+        wait "$pid" 2>/dev/null || true
+        status=124
+    else
+        wait "$pid" 2>/dev/null || status=$?
     fi
+
     if grep -Fq "Remote command finished: exit=0" "$log_path"; then
         return 0
     fi
@@ -137,6 +190,83 @@ PY
     log "$observation"
 }
 
+expect_ordering_report_rejection() {
+    local report_path="$1"
+    local expected_reason="$2"
+    local expected_invariant="$3"
+    python3 - "$report_path" "$expected_reason" "$expected_invariant" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected_reason = sys.argv[2]
+expected_invariant = sys.argv[3]
+decision = report["decision"]
+if decision["decision"] != "reject":
+    raise SystemExit("expected reject decision")
+if decision["reason"] != expected_reason:
+    raise SystemExit(f"wrong reason: {decision['reason']}")
+if expected_invariant not in decision["invariants_failing"]:
+    raise SystemExit(f"{expected_invariant} failure not reported")
+PY
+}
+
+record_ordering_observation() {
+    local report_path="$1"
+    local expected_error_class="$2"
+    local cleanup_status="$3"
+    local observation
+    observation="$(python3 - "$report_path" "$expected_error_class" "$cleanup_status" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = sys.argv[2]
+cleanup = sys.argv[3]
+decision = report["decision"]
+observed = "accept" if decision["decision"] == "accept" else decision["reason"]
+invariants = ",".join(row["id"] for row in report["invariant_map"])
+raw_options = ",".join(report["mount_options"]["raw_options"])
+raw_fuser = ",".join(report["raw_fuser_options"])
+artifact_paths = ",".join(report["artifact_paths"])
+expected_ordering = ",".join(report["expected_ordering"])
+observed_ordering = ",".join(report["observed_ordering"])
+repro = report["reproduction_command"].replace("|", "/")
+print(
+    "WRITEBACK_CACHE_ORDERING_OBSERVATION"
+    f"|scenario_id={report['scenario_id']}"
+    f"|gate_version={report['gate_version']}"
+    f"|mount_options={raw_options}"
+    f"|raw_fuser_options={raw_fuser}"
+    f"|invariant_ids={invariants}"
+    f"|decision={decision['decision']}"
+    f"|expected_error_class={expected}"
+    f"|observed_error_class={observed}"
+    f"|dirty_page_state={report['dirty_page_state']}"
+    f"|metadata_state={report['metadata_state']}"
+    f"|flush_observed_non_durable={report['flush_observed_non_durable']}"
+    f"|fsync_observed_durable={report['fsync_observed_durable']}"
+    f"|fsyncdir_observed_durable={report['fsyncdir_observed_durable']}"
+    f"|cancellation_state={report['cancellation_state']}"
+    f"|unmount_state={report['unmount_state']}"
+    f"|crash_reopen_state={report['crash_reopen_state']}"
+    f"|epoch_id={report['epoch_id']}"
+    f"|epoch_state={report['epoch_state']}"
+    f"|repair_symbol_generation={report['repair_symbol_generation']}"
+    f"|repair_symbol_refresh={report['repair_symbol_refresh']}"
+    f"|expected_ordering={expected_ordering}"
+    f"|observed_ordering={observed_ordering}"
+    f"|artifact_paths={artifact_paths}"
+    f"|cleanup_status={cleanup}"
+    f"|reproduction_command={repro}"
+)
+PY
+)"
+    log "$observation"
+}
+
 extract_json_object() {
     local raw_path="$1"
     local out_path="$2"
@@ -165,14 +295,21 @@ log "=============================================="
 log "E2E Test: ffs_writeback_cache_audit"
 log "Started: $(date -Iseconds)"
 log "Log directory: $LOG_DIR"
+log "Input directory: $INPUT_DIR"
 log "CARGO_TARGET_DIR: $CARGO_TARGET_DIR"
 log "=============================================="
 
-ACCEPT_GATE="$LOG_DIR/writeback_cache_accept_gate.json"
-DEFAULT_REJECT_GATE="$LOG_DIR/writeback_cache_default_reject_gate.json"
-FUSE_UNAVAILABLE_GATE="$LOG_DIR/writeback_cache_fuse_unavailable_gate.json"
-UNSUPPORTED_MODE_GATE="$LOG_DIR/writeback_cache_unsupported_mode_gate.json"
-BAD_SCHEMA_GATE="$LOG_DIR/writeback_cache_bad_schema_gate.json"
+ACCEPT_GATE="$INPUT_DIR/writeback_cache_accept_gate.json"
+DEFAULT_REJECT_GATE="$INPUT_DIR/writeback_cache_default_reject_gate.json"
+FUSE_UNAVAILABLE_GATE="$INPUT_DIR/writeback_cache_fuse_unavailable_gate.json"
+UNSUPPORTED_MODE_GATE="$INPUT_DIR/writeback_cache_unsupported_mode_gate.json"
+BAD_SCHEMA_GATE="$INPUT_DIR/writeback_cache_bad_schema_gate.json"
+ORDERING_ACCEPT_ORACLE="$INPUT_DIR/writeback_cache_ordering_accept_oracle.json"
+ORDERING_DEFAULT_OFF_ORACLE="$INPUT_DIR/writeback_cache_ordering_default_off_oracle.json"
+ORDERING_MISSING_FSYNC_ORACLE="$INPUT_DIR/writeback_cache_ordering_missing_fsync_oracle.json"
+ORDERING_MISSING_FSYNCDIR_ORACLE="$INPUT_DIR/writeback_cache_ordering_missing_fsyncdir_oracle.json"
+ORDERING_CANCELLATION_ORACLE="$INPUT_DIR/writeback_cache_ordering_cancellation_oracle.json"
+ORDERING_CRASH_REOPEN_ORACLE="$INPUT_DIR/writeback_cache_ordering_crash_reopen_oracle.json"
 ACCEPT_RAW="$LOG_DIR/writeback_cache_accept.raw"
 REJECT_RAW="$LOG_DIR/writeback_cache_reject.raw"
 FUSE_UNAVAILABLE_RAW="$LOG_DIR/writeback_cache_fuse_unavailable.raw"
@@ -183,12 +320,25 @@ FUSER_OPTIONS_RAW="$LOG_DIR/writeback_cache_fuser_options.raw"
 BAD_SCHEMA_RAW="$LOG_DIR/writeback_cache_bad_schema.raw"
 UNIT_RAW="$LOG_DIR/writeback_cache_unit_tests.raw"
 HELP_RAW="$LOG_DIR/writeback_cache_help.raw"
+ORDERING_ACCEPT_RAW="$LOG_DIR/writeback_cache_ordering_accept.raw"
+ORDERING_DEFAULT_OFF_RAW="$LOG_DIR/writeback_cache_ordering_default_off.raw"
+ORDERING_MISSING_FSYNC_RAW="$LOG_DIR/writeback_cache_ordering_missing_fsync.raw"
+ORDERING_MISSING_FSYNCDIR_RAW="$LOG_DIR/writeback_cache_ordering_missing_fsyncdir.raw"
+ORDERING_CANCELLATION_RAW="$LOG_DIR/writeback_cache_ordering_cancellation.raw"
+ORDERING_CRASH_REOPEN_RAW="$LOG_DIR/writeback_cache_ordering_crash_reopen.raw"
+ORDERING_UNIT_RAW="$LOG_DIR/writeback_cache_ordering_unit_tests.raw"
 ACCEPT_REPORT="$LOG_DIR/writeback_cache_accept_report.json"
 REJECT_REPORT="$LOG_DIR/writeback_cache_reject_report.json"
 FUSE_UNAVAILABLE_REPORT="$LOG_DIR/writeback_cache_fuse_unavailable_report.json"
 UNSUPPORTED_MODE_REPORT="$LOG_DIR/writeback_cache_unsupported_mode_report.json"
 REPEATED_REPORT_A="$LOG_DIR/writeback_cache_repeated_a_report.json"
 REPEATED_REPORT_B="$LOG_DIR/writeback_cache_repeated_b_report.json"
+ORDERING_ACCEPT_REPORT="$LOG_DIR/writeback_cache_ordering_accept_report.json"
+ORDERING_DEFAULT_OFF_REPORT="$LOG_DIR/writeback_cache_ordering_default_off_report.json"
+ORDERING_MISSING_FSYNC_REPORT="$LOG_DIR/writeback_cache_ordering_missing_fsync_report.json"
+ORDERING_MISSING_FSYNCDIR_REPORT="$LOG_DIR/writeback_cache_ordering_missing_fsyncdir_report.json"
+ORDERING_CANCELLATION_REPORT="$LOG_DIR/writeback_cache_ordering_cancellation_report.json"
+ORDERING_CRASH_REOPEN_REPORT="$LOG_DIR/writeback_cache_ordering_crash_reopen_report.json"
 
 cat >"$ACCEPT_GATE" <<'JSON'
 {
@@ -367,6 +517,171 @@ unsupported_mode["mount_options"]["raw_options"] = [
 ]
 pathlib.Path(sys.argv[3]).write_text(
     json.dumps(unsupported_mode, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+
+cat >"$ORDERING_ACCEPT_ORACLE" <<'JSON'
+{
+  "schema_version": 1,
+  "gate_version": "bd-8pz7h-ordering-v1",
+  "bead_id": "bd-8pz7h",
+  "mount_options": {
+    "raw_options": [
+      "rw",
+      "fsname=frankenfs",
+      "writeback_cache"
+    ],
+    "fs_name": "frankenfs",
+    "allow_other": false,
+    "auto_unmount": true,
+    "default_permissions": true,
+    "mode": "rw"
+  },
+  "raw_fuser_options": [
+    "fsname=frankenfs",
+    "subtype=ffs",
+    "rw",
+    "writeback_cache"
+  ],
+  "dirty_page_state": "fsynced_durable",
+  "metadata_state": "metadata_after_data",
+  "flush_observed_non_durable": true,
+  "fsync_observed_durable": true,
+  "fsyncdir_observed_durable": true,
+  "cancellation_state": "cancelled_before_writeback_classified",
+  "unmount_state": "dirty_pages_flushed_or_rejected",
+  "crash_reopen_state": "survivor_set_verified",
+  "epoch_id": "epoch-0007",
+  "epoch_state": "fresh",
+  "repair_symbol_generation": 8,
+  "repair_symbol_refresh": "refreshed_after_writeback",
+  "invariant_evidence": [
+    {
+      "id": "I1",
+      "supported": true,
+      "test_id": "writeback_ordering_i1_snapshot_visibility",
+      "artifact_field": "ordering.I1.epoch_id",
+      "release_gate_consumer": "writeback_cache.release_gate",
+      "unsupported_rationale": ""
+    },
+    {
+      "id": "I2",
+      "supported": true,
+      "test_id": "writeback_ordering_i2_alias_order",
+      "artifact_field": "ordering.I2.observed_ordering",
+      "release_gate_consumer": "writeback_cache.release_gate",
+      "unsupported_rationale": ""
+    },
+    {
+      "id": "I3",
+      "supported": true,
+      "test_id": "writeback_ordering_i3_metadata_after_data",
+      "artifact_field": "ordering.I3.metadata_state",
+      "release_gate_consumer": "writeback_cache.release_gate",
+      "unsupported_rationale": ""
+    },
+    {
+      "id": "I4",
+      "supported": true,
+      "test_id": "writeback_ordering_i4_sync_boundaries",
+      "artifact_field": "ordering.I4.fsync_fsyncdir",
+      "release_gate_consumer": "writeback_cache.release_gate",
+      "unsupported_rationale": ""
+    },
+    {
+      "id": "I5",
+      "supported": true,
+      "test_id": "writeback_ordering_i5_flush_non_durability",
+      "artifact_field": "ordering.I5.flush_observed_non_durable",
+      "release_gate_consumer": "writeback_cache.release_gate",
+      "unsupported_rationale": ""
+    },
+    {
+      "id": "I6",
+      "supported": true,
+      "test_id": "writeback_ordering_i6_cross_epoch_order",
+      "artifact_field": "ordering.I6.repair_symbol_generation",
+      "release_gate_consumer": "writeback_cache.release_gate",
+      "unsupported_rationale": ""
+    }
+  ],
+  "expected_ordering": [
+    "dirty_data",
+    "fsync",
+    "metadata",
+    "fsyncdir",
+    "repair_symbol_refresh"
+  ],
+  "observed_ordering": [
+    "dirty_data",
+    "fsync",
+    "metadata",
+    "fsyncdir",
+    "repair_symbol_refresh"
+  ],
+  "artifact_paths": [
+    "artifacts/writeback-cache/ordering.json",
+    "artifacts/writeback-cache/crash_reopen.json",
+    "artifacts/writeback-cache/cancellation.json"
+  ]
+}
+JSON
+
+python3 - "$ORDERING_ACCEPT_ORACLE" \
+    "$ORDERING_DEFAULT_OFF_ORACLE" \
+    "$ORDERING_MISSING_FSYNC_ORACLE" \
+    "$ORDERING_MISSING_FSYNCDIR_ORACLE" \
+    "$ORDERING_CANCELLATION_ORACLE" \
+    "$ORDERING_CRASH_REOPEN_ORACLE" <<'PY'
+import copy
+import json
+import pathlib
+import sys
+
+base = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+
+default_off = copy.deepcopy(base)
+default_off["mount_options"]["mode"] = "ro"
+default_off["mount_options"]["raw_options"] = ["ro", "fsname=frankenfs"]
+default_off["raw_fuser_options"] = ["fsname=frankenfs", "subtype=ffs", "ro"]
+pathlib.Path(sys.argv[2]).write_text(
+    json.dumps(default_off, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+
+missing_fsync = copy.deepcopy(base)
+missing_fsync["dirty_page_state"] = "dirty_unflushed"
+missing_fsync["fsync_observed_durable"] = False
+pathlib.Path(sys.argv[3]).write_text(
+    json.dumps(missing_fsync, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+
+missing_fsyncdir = copy.deepcopy(base)
+missing_fsyncdir["fsyncdir_observed_durable"] = False
+pathlib.Path(sys.argv[4]).write_text(
+    json.dumps(missing_fsyncdir, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+
+cancellation = copy.deepcopy(base)
+cancellation["artifact_paths"] = [
+    "artifacts/writeback-cache/ordering.json",
+    "artifacts/writeback-cache/cancellation_before_writeback.json",
+]
+pathlib.Path(sys.argv[5]).write_text(
+    json.dumps(cancellation, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+
+crash_reopen = copy.deepcopy(base)
+crash_reopen["artifact_paths"] = [
+    "artifacts/writeback-cache/ordering.json",
+    "artifacts/writeback-cache/crash_reopen_survivor_set.json",
+]
+pathlib.Path(sys.argv[6]).write_text(
+    json.dumps(crash_reopen, indent=2, sort_keys=True) + "\n",
     encoding="utf-8",
 )
 PY
@@ -586,7 +901,158 @@ else
     scenario_result "writeback_cache_audit_help_docs_consistent" "FAIL" "ffs-cli mount help failed; see $HELP_RAW"
 fi
 
-step "Scenario 12: scenario catalog names this suite and static evidence markers"
+step "Scenario 12: ordering oracle module and CLI are wired"
+if grep -Fq "build_writeback_ordering_report" crates/ffs-harness/src/main.rs \
+    && grep -Fq "validate-writeback-cache-ordering" crates/ffs-harness/src/main.rs \
+    && grep -Fq "WritebackOrderingOracle" crates/ffs-harness/src/writeback_cache_audit.rs; then
+    scenario_result "writeback_cache_ordering_cli_wired" "PASS" "ordering oracle CLI command exported"
+else
+    scenario_result "writeback_cache_ordering_cli_wired" "FAIL" "missing ordering oracle CLI or report builder"
+fi
+
+step "Scenario 13: positive ordering oracle accepts complete evidence"
+if run_rch_capture "$ORDERING_ACCEPT_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-ordering \
+    --oracle "$ORDERING_ACCEPT_ORACLE" \
+    --scenario-id writeback_cache_ordering_accepts_complete_oracle \
+    --require-accept; then
+    if extract_json_object "$ORDERING_ACCEPT_RAW" "$ORDERING_ACCEPT_REPORT" '"schema_version"'; then
+        record_ordering_observation "$ORDERING_ACCEPT_REPORT" "accept" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_ordering_accepts_complete_oracle" "PASS" "complete dirty-page ordering oracle accepted"
+    else
+        scenario_result "writeback_cache_ordering_accepts_complete_oracle" "FAIL" "accepted ordering run did not emit report JSON"
+    fi
+else
+    scenario_result "writeback_cache_ordering_accepts_complete_oracle" "FAIL" "complete ordering oracle rejected; see $ORDERING_ACCEPT_RAW"
+fi
+
+step "Scenario 14: ordering oracle rejects default-off mount evidence"
+if run_rch_capture "$ORDERING_DEFAULT_OFF_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-ordering \
+    --oracle "$ORDERING_DEFAULT_OFF_ORACLE" \
+    --scenario-id writeback_cache_ordering_rejects_default_off; then
+    if extract_json_object "$ORDERING_DEFAULT_OFF_RAW" "$ORDERING_DEFAULT_OFF_REPORT" '"schema_version"' \
+        && expect_ordering_report_rejection "$ORDERING_DEFAULT_OFF_REPORT" "default_off_or_not_opted_in" "I5"
+    then
+        record_ordering_observation "$ORDERING_DEFAULT_OFF_REPORT" "default_off_or_not_opted_in" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_ordering_rejects_default_off" "PASS" "default-off ordering proof rejected with stable reason"
+    else
+        scenario_result "writeback_cache_ordering_rejects_default_off" "FAIL" "default-off ordering report missing stable reason"
+    fi
+else
+    scenario_result "writeback_cache_ordering_rejects_default_off" "FAIL" "schema-valid default-off ordering oracle should emit report"
+fi
+
+step "Scenario 15: ordering oracle rejects missing fsync boundary"
+if run_rch_capture "$ORDERING_MISSING_FSYNC_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-ordering \
+    --oracle "$ORDERING_MISSING_FSYNC_ORACLE" \
+    --scenario-id writeback_cache_ordering_rejects_missing_fsync; then
+    if extract_json_object "$ORDERING_MISSING_FSYNC_RAW" "$ORDERING_MISSING_FSYNC_REPORT" '"schema_version"' \
+        && expect_ordering_report_rejection "$ORDERING_MISSING_FSYNC_REPORT" "missing_fsync_boundary" "I4"
+    then
+        record_ordering_observation "$ORDERING_MISSING_FSYNC_REPORT" "missing_fsync_boundary" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_ordering_rejects_missing_fsync" "PASS" "dirty pages without fsync durability rejected"
+    else
+        scenario_result "writeback_cache_ordering_rejects_missing_fsync" "FAIL" "missing-fsync report missing stable reason"
+    fi
+else
+    scenario_result "writeback_cache_ordering_rejects_missing_fsync" "FAIL" "schema-valid missing-fsync oracle should emit report"
+fi
+
+step "Scenario 16: ordering oracle rejects missing fsyncdir boundary"
+if run_rch_capture "$ORDERING_MISSING_FSYNCDIR_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-ordering \
+    --oracle "$ORDERING_MISSING_FSYNCDIR_ORACLE" \
+    --scenario-id writeback_cache_ordering_rejects_missing_fsyncdir; then
+    if extract_json_object "$ORDERING_MISSING_FSYNCDIR_RAW" "$ORDERING_MISSING_FSYNCDIR_REPORT" '"schema_version"' \
+        && expect_ordering_report_rejection "$ORDERING_MISSING_FSYNCDIR_REPORT" "missing_fsyncdir_boundary" "I3"
+    then
+        record_ordering_observation "$ORDERING_MISSING_FSYNCDIR_REPORT" "missing_fsyncdir_boundary" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_ordering_rejects_missing_fsyncdir" "PASS" "metadata without fsyncdir durability rejected"
+    else
+        scenario_result "writeback_cache_ordering_rejects_missing_fsyncdir" "FAIL" "missing-fsyncdir report missing stable reason"
+    fi
+else
+    scenario_result "writeback_cache_ordering_rejects_missing_fsyncdir" "FAIL" "schema-valid missing-fsyncdir oracle should emit report"
+fi
+
+step "Scenario 17: cancellation before writeback is explicitly classified"
+if run_rch_capture "$ORDERING_CANCELLATION_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-ordering \
+    --oracle "$ORDERING_CANCELLATION_ORACLE" \
+    --scenario-id writeback_cache_ordering_cancellation_classified \
+    --require-accept; then
+    if extract_json_object "$ORDERING_CANCELLATION_RAW" "$ORDERING_CANCELLATION_REPORT" '"schema_version"'; then
+        record_ordering_observation "$ORDERING_CANCELLATION_REPORT" "accept" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_ordering_cancellation_classified" "PASS" "cancellation state emitted as classified"
+    else
+        scenario_result "writeback_cache_ordering_cancellation_classified" "FAIL" "cancellation report missing JSON"
+    fi
+else
+    scenario_result "writeback_cache_ordering_cancellation_classified" "FAIL" "classified cancellation oracle rejected; see $ORDERING_CANCELLATION_RAW"
+fi
+
+step "Scenario 18: crash/reopen survivor-set artifact is part of ordering evidence"
+if run_rch_capture "$ORDERING_CRASH_REOPEN_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-ordering \
+    --oracle "$ORDERING_CRASH_REOPEN_ORACLE" \
+    --scenario-id writeback_cache_ordering_crash_reopen_artifact \
+    --require-accept; then
+    if extract_json_object "$ORDERING_CRASH_REOPEN_RAW" "$ORDERING_CRASH_REOPEN_REPORT" '"schema_version"'; then
+        record_ordering_observation "$ORDERING_CRASH_REOPEN_REPORT" "accept" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_ordering_crash_reopen_artifact" "PASS" "crash/reopen survivor-set artifact emitted"
+    else
+        scenario_result "writeback_cache_ordering_crash_reopen_artifact" "FAIL" "crash/reopen report missing JSON"
+    fi
+else
+    scenario_result "writeback_cache_ordering_crash_reopen_artifact" "FAIL" "crash/reopen ordering oracle rejected; see $ORDERING_CRASH_REOPEN_RAW"
+fi
+
+step "Scenario 19: ordering report carries dirty-page, sync, epoch, repair, and repro fields"
+if python3 - "$ORDERING_ACCEPT_REPORT" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+if report["decision"]["decision"] != "accept":
+    raise SystemExit("complete ordering oracle did not accept")
+if "writeback_cache" not in report["raw_fuser_options"]:
+    raise SystemExit("raw FUSER writeback_cache option missing")
+if report["dirty_page_state"] != "fsynced_durable":
+    raise SystemExit("dirty-page state missing")
+if report["flush_observed_non_durable"] is not True:
+    raise SystemExit("flush non-durability evidence missing")
+if report["fsync_observed_durable"] is not True:
+    raise SystemExit("fsync durability evidence missing")
+if report["fsyncdir_observed_durable"] is not True:
+    raise SystemExit("fsyncdir durability evidence missing")
+if not report["epoch_id"] or report["epoch_state"] != "fresh":
+    raise SystemExit("fresh epoch evidence missing")
+if report["repair_symbol_generation"] < 1 or report["repair_symbol_refresh"] != "refreshed_after_writeback":
+    raise SystemExit("repair symbol refresh evidence missing")
+if report["expected_ordering"] != report["observed_ordering"]:
+    raise SystemExit("ordering mismatch in accept report")
+if "validate-writeback-cache-ordering" not in report["reproduction_command"]:
+    raise SystemExit("missing ordering reproduction command")
+if len(report["invariant_evidence"]) != 6:
+    raise SystemExit("expected invariant evidence for I1-I6")
+PY
+then
+    scenario_result "writeback_cache_ordering_report_fields" "PASS" "ordering report contains oracle artifact contract"
+else
+    scenario_result "writeback_cache_ordering_report_fields" "FAIL" "ordering report contract incomplete"
+fi
+
+step "Scenario 20: unit tests cover ordering oracle policy"
+if run_rch_capture "$ORDERING_UNIT_RAW" cargo test -p ffs-harness ordering_oracle -- --nocapture; then
+    scenario_result "writeback_cache_ordering_unit_tests" "PASS" "ordering oracle unit tests passed through rch"
+else
+    scenario_result "writeback_cache_ordering_unit_tests" "FAIL" "ordering oracle unit tests failed; see $ORDERING_UNIT_RAW"
+fi
+
+step "Scenario 21: scenario catalog names this suite and static evidence markers"
 if jq -e '.suites[] | select(.suite_id == "ffs_writeback_cache_audit")' scripts/e2e/scenario_catalog.json >/dev/null \
     && grep -Fq "SCENARIO_RESULT|scenario_id=writeback_cache_audit_catalog_valid|outcome=PASS" "$0" \
     && python3 - scripts/e2e/scenario_catalog.json <<'PY'
@@ -610,6 +1076,15 @@ required = {
     "writeback_cache_audit_unit_tests",
     "writeback_cache_audit_help_docs_consistent",
     "writeback_cache_audit_catalog_valid",
+    "writeback_cache_ordering_cli_wired",
+    "writeback_cache_ordering_accepts_complete_oracle",
+    "writeback_cache_ordering_rejects_default_off",
+    "writeback_cache_ordering_rejects_missing_fsync",
+    "writeback_cache_ordering_rejects_missing_fsyncdir",
+    "writeback_cache_ordering_cancellation_classified",
+    "writeback_cache_ordering_crash_reopen_artifact",
+    "writeback_cache_ordering_report_fields",
+    "writeback_cache_ordering_unit_tests",
 }
 missing = required - ids
 if missing:

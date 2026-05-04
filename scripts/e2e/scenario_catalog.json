@@ -525,6 +525,60 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_catalog_valid|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_ordering_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_ordering_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_ordering_accepts_complete_oracle",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_ordering_accepts_complete_oracle|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_ordering_rejects_default_off",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_ordering_rejects_default_off|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_ordering_rejects_missing_fsync",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_ordering_rejects_missing_fsync|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_ordering_rejects_missing_fsyncdir",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_ordering_rejects_missing_fsyncdir|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_ordering_cancellation_classified",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_ordering_cancellation_classified|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_ordering_crash_reopen_artifact",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_ordering_crash_reopen_artifact|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_ordering_report_fields",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_ordering_report_fields|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_ordering_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_ordering_unit_tests|outcome=PASS"
         }
       ]
     },
