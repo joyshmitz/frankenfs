@@ -12152,5 +12152,251 @@ mod tests {
             prop_assert_eq!(parsed.blocks_count & u64::from(u32::MAX), u64::from(blocks_lo));
         }
 
+        // ── Ext4GroupDesc encode/decode metamorphic relations (bd-ov7zr) ────
+        // The fixed-input `group_desc_write_to_bytes_roundtrip_32`/`_64` tests
+        // pin one example each; these proptests exercise the full field-value
+        // space and pin the lo/hi split contract so a future refactor of the
+        // 32-vs-64 branching can't silently corrupt 64-bit-mode bitmap pointers.
+
+        /// MR1 — full bijection at desc_size=64: parse(write(gd, 64), 64) == gd.
+        #[test]
+        fn ext4_proptest_group_desc_full_roundtrip_64(
+            block_bitmap in any::<u64>(),
+            inode_bitmap in any::<u64>(),
+            inode_table in any::<u64>(),
+            free_blocks_count in any::<u32>(),
+            free_inodes_count in any::<u32>(),
+            used_dirs_count in any::<u32>(),
+            itable_unused in any::<u32>(),
+            flags in any::<u16>(),
+            checksum in any::<u16>(),
+            block_bitmap_csum in any::<u32>(),
+            inode_bitmap_csum in any::<u32>(),
+        ) {
+            let gd = Ext4GroupDesc {
+                block_bitmap,
+                inode_bitmap,
+                inode_table,
+                free_blocks_count,
+                free_inodes_count,
+                used_dirs_count,
+                itable_unused,
+                flags,
+                checksum,
+                block_bitmap_csum,
+                inode_bitmap_csum,
+            };
+            let mut buf = [0_u8; 64];
+            gd.write_to_bytes(&mut buf, 64).expect("write 64");
+            let parsed = Ext4GroupDesc::parse_from_bytes(&buf, 64).expect("parse 64");
+            prop_assert_eq!(parsed, gd, "64-byte desc must round-trip exactly");
+        }
+
+        /// MR2 — truncating bijection at desc_size=32: high halves drop.
+        #[test]
+        fn ext4_proptest_group_desc_truncating_roundtrip_32(
+            block_bitmap in any::<u64>(),
+            inode_bitmap in any::<u64>(),
+            inode_table in any::<u64>(),
+            free_blocks_count in any::<u32>(),
+            free_inodes_count in any::<u32>(),
+            used_dirs_count in any::<u32>(),
+            itable_unused in any::<u32>(),
+            flags in any::<u16>(),
+            checksum in any::<u16>(),
+            block_bitmap_csum in any::<u32>(),
+            inode_bitmap_csum in any::<u32>(),
+        ) {
+            let gd = Ext4GroupDesc {
+                block_bitmap,
+                inode_bitmap,
+                inode_table,
+                free_blocks_count,
+                free_inodes_count,
+                used_dirs_count,
+                itable_unused,
+                flags,
+                checksum,
+                block_bitmap_csum,
+                inode_bitmap_csum,
+            };
+            #[expect(clippy::cast_possible_truncation)]
+            let truncated = Ext4GroupDesc {
+                block_bitmap: u64::from(block_bitmap as u32),
+                inode_bitmap: u64::from(inode_bitmap as u32),
+                inode_table: u64::from(inode_table as u32),
+                free_blocks_count: u32::from(free_blocks_count as u16),
+                free_inodes_count: u32::from(free_inodes_count as u16),
+                used_dirs_count: u32::from(used_dirs_count as u16),
+                itable_unused: u32::from(itable_unused as u16),
+                flags,
+                checksum,
+                block_bitmap_csum: u32::from(block_bitmap_csum as u16),
+                inode_bitmap_csum: u32::from(inode_bitmap_csum as u16),
+            };
+            let mut buf = [0_u8; 32];
+            gd.write_to_bytes(&mut buf, 32).expect("write 32");
+            let parsed = Ext4GroupDesc::parse_from_bytes(&buf, 32).expect("parse 32");
+            prop_assert_eq!(parsed, truncated, "32-byte desc must round-trip the lo halves only");
+        }
+
+        /// MR3 — encoded output parses identically regardless of how the
+        /// destination buffer was initialised. Padding bytes (bg_reserved /
+        /// hi-csum tail, e.g. 0x14..0x18, 0x34..0x38, 0x3C..0x40 at
+        /// desc_size=64) are intentionally left untouched per the writer's
+        /// doc comment, so we compare PARSED structs rather than raw bytes —
+        /// any drift in which offsets the writer touches is caught here.
+        #[test]
+        fn ext4_proptest_group_desc_write_init_invariance(
+            block_bitmap in any::<u64>(),
+            inode_bitmap in any::<u64>(),
+            inode_table in any::<u64>(),
+            free_blocks_count in any::<u32>(),
+            free_inodes_count in any::<u32>(),
+            used_dirs_count in any::<u32>(),
+            itable_unused in any::<u32>(),
+            flags in any::<u16>(),
+            checksum in any::<u16>(),
+            block_bitmap_csum in any::<u32>(),
+            inode_bitmap_csum in any::<u32>(),
+            ds in prop_oneof![Just(32_u16), Just(64_u16)],
+            fill in any::<u8>(),
+        ) {
+            let gd = Ext4GroupDesc {
+                block_bitmap,
+                inode_bitmap,
+                inode_table,
+                free_blocks_count,
+                free_inodes_count,
+                used_dirs_count,
+                itable_unused,
+                flags,
+                checksum,
+                block_bitmap_csum,
+                inode_bitmap_csum,
+            };
+            let ds_usize = usize::from(ds);
+            let mut buf_zero = vec![0x00_u8; ds_usize];
+            let mut buf_fill = vec![fill; ds_usize];
+            gd.write_to_bytes(&mut buf_zero, ds).expect("write zero-init");
+            gd.write_to_bytes(&mut buf_fill, ds).expect("write fill-init");
+            let parsed_zero =
+                Ext4GroupDesc::parse_from_bytes(&buf_zero, ds).expect("parse zero-init");
+            let parsed_fill =
+                Ext4GroupDesc::parse_from_bytes(&buf_fill, ds).expect("parse fill-init");
+            prop_assert_eq!(
+                parsed_zero, parsed_fill,
+                "encoded output must parse identically regardless of pre-write buffer state"
+            );
+        }
+
+        /// MR4 — encode is pure: writing the same gd twice into the same
+        /// buffer produces identical bytes both times. The padding bytes
+        /// hold their post-first-write values; if the writer ever read from
+        /// the buffer or accumulated state, the second pass would diverge.
+        #[test]
+        fn ext4_proptest_group_desc_encode_is_pure(
+            block_bitmap in any::<u64>(),
+            inode_bitmap in any::<u64>(),
+            inode_table in any::<u64>(),
+            free_blocks_count in any::<u32>(),
+            free_inodes_count in any::<u32>(),
+            used_dirs_count in any::<u32>(),
+            itable_unused in any::<u32>(),
+            flags in any::<u16>(),
+            checksum in any::<u16>(),
+            block_bitmap_csum in any::<u32>(),
+            inode_bitmap_csum in any::<u32>(),
+            ds in prop_oneof![Just(32_u16), Just(64_u16)],
+        ) {
+            let gd = Ext4GroupDesc {
+                block_bitmap,
+                inode_bitmap,
+                inode_table,
+                free_blocks_count,
+                free_inodes_count,
+                used_dirs_count,
+                itable_unused,
+                flags,
+                checksum,
+                block_bitmap_csum,
+                inode_bitmap_csum,
+            };
+            let ds_usize = usize::from(ds);
+            let mut buf = vec![0_u8; ds_usize];
+            gd.write_to_bytes(&mut buf, ds).expect("first encode");
+            let snapshot = buf.clone();
+            gd.write_to_bytes(&mut buf, ds).expect("second encode");
+            prop_assert_eq!(snapshot, buf, "encode must be a pure function of `gd`");
+        }
+
+        /// MR5a — write to undersized buffer must error.
+        #[test]
+        fn ext4_proptest_group_desc_write_too_small_errors(
+            short_len in 0_usize..=63,
+            ds in prop_oneof![Just(32_u16), Just(64_u16)],
+        ) {
+            let ds_usize = usize::from(ds);
+            prop_assume!(short_len < ds_usize);
+            let gd = Ext4GroupDesc {
+                block_bitmap: 1,
+                inode_bitmap: 1,
+                inode_table: 1,
+                free_blocks_count: 0,
+                free_inodes_count: 0,
+                used_dirs_count: 0,
+                itable_unused: 0,
+                flags: 0,
+                checksum: 0,
+                block_bitmap_csum: 0,
+                inode_bitmap_csum: 0,
+            };
+            let mut buf = vec![0_u8; short_len];
+            prop_assert!(
+                gd.write_to_bytes(&mut buf, ds).is_err(),
+                "write must reject buffer shorter than desc_size"
+            );
+        }
+
+        /// MR5b — parse from undersized input must error.
+        #[test]
+        fn ext4_proptest_group_desc_parse_too_small_errors(
+            short_len in 0_usize..=63,
+            ds in prop_oneof![Just(32_u16), Just(64_u16)],
+        ) {
+            let ds_usize = usize::from(ds);
+            prop_assume!(short_len < ds_usize);
+            let bytes = vec![0xAB_u8; short_len];
+            prop_assert!(
+                Ext4GroupDesc::parse_from_bytes(&bytes, ds).is_err(),
+                "parse must reject input shorter than desc_size"
+            );
+        }
+
+        /// MR6 — 32-byte parser ignores bytes at offset >= 0x20.
+        #[test]
+        fn ext4_proptest_group_desc_parse_32_ignores_tail(
+            block_bitmap in any::<u32>(),
+            inode_bitmap in any::<u32>(),
+            inode_table in any::<u32>(),
+            tail in proptest::collection::vec(any::<u8>(), 0..=96),
+        ) {
+            let mut canonical = [0_u8; 32];
+            canonical[0x00..0x04].copy_from_slice(&block_bitmap.to_le_bytes());
+            canonical[0x04..0x08].copy_from_slice(&inode_bitmap.to_le_bytes());
+            canonical[0x08..0x0C].copy_from_slice(&inode_table.to_le_bytes());
+            let baseline = Ext4GroupDesc::parse_from_bytes(&canonical, 32)
+                .expect("baseline 32-byte parse");
+
+            let mut extended = canonical.to_vec();
+            extended.extend_from_slice(&tail);
+            let with_tail = Ext4GroupDesc::parse_from_bytes(&extended, 32)
+                .expect("extended-input 32-byte parse");
+            prop_assert_eq!(
+                with_tail, baseline,
+                "32-byte parse must ignore bytes >= 0x20"
+            );
+        }
+
     }
 }
