@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-pub const MATRIX_SCHEMA_VERSION: u32 = 3;
+pub const MATRIX_SCHEMA_VERSION: u32 = 4;
 pub const DEFAULT_MATRIX_PATH: &str = "tests/workload-matrix/mounted_write_workload_matrix.json";
 const DEFAULT_MATRIX_JSON: &str =
     include_str!("../../../tests/workload-matrix/mounted_write_workload_matrix.json");
@@ -45,6 +45,28 @@ const REQUIRED_MULTI_HANDLE_KINDS: [&str; 6] = [
     "truncate_while_open",
     "metadata_attr_while_open",
     "xattr_visibility",
+];
+
+const REQUIRED_NAMESPACE_OPERATION_KINDS: [&str; 9] = [
+    "rename_overwrite",
+    "rename_no_overwrite",
+    "cross_directory_rename",
+    "hardlink_lifecycle",
+    "symlink_persistence",
+    "unlink_open_handle",
+    "rmdir_non_empty_reject",
+    "xattr_namespace_update",
+    "unsupported_fallocate_noop",
+];
+
+const REQUIRED_NAMESPACE_FSYNC_BOUNDARIES: [&str; 7] = [
+    "data_fsync",
+    "parent_fsyncdir",
+    "file_close",
+    "clean_unmount",
+    "forced_reopen",
+    "unsupported_rejection",
+    "host_capability_skip",
 ];
 
 const ALLOWED_MULTI_HANDLE_KINDS: [&str; 9] = [
@@ -96,6 +118,24 @@ const REQUIRED_MULTI_HANDLE_RESULT_FIELDS: [&str; 6] = [
 
 const REQUIRED_MULTI_HANDLE_RESULT_ARTIFACTS: [&str; 1] = ["mounted_multihandle_results.json"];
 
+const REQUIRED_NAMESPACE_RESULT_FIELDS: [&str; 12] = [
+    "parent_directory_id",
+    "child_path_id",
+    "namespace_operation_kind",
+    "fsync_boundary",
+    "pre_directory_entries",
+    "post_directory_entries",
+    "expected_survivor_set",
+    "expected_link_count",
+    "xattr_keys",
+    "image_fixture_hash",
+    "reopen_state",
+    "no_partial_mutation_check",
+];
+
+const REQUIRED_NAMESPACE_RESULT_ARTIFACTS: [&str; 1] =
+    ["mounted_namespace_durability_results.json"];
+
 const REQUIRED_SCENARIO_PROOF_CLASSES: [&str; 5] = [
     "positive",
     "refusal",
@@ -131,6 +171,21 @@ const REQUIRED_SCENARIO_PROOF_ARTIFACTS: [&str; 7] = [
     "cleanup_status",
 ];
 
+const REQUIRED_NAMESPACE_ARTIFACTS: [&str; 12] = [
+    "scenario_id",
+    "parent_directory_id",
+    "child_path_id",
+    "namespace_operation_kind",
+    "fsync_boundary",
+    "expected_survivor_set",
+    "expected_link_count",
+    "reopen_state",
+    "no_partial_mutation_check",
+    "operation_trace_path",
+    "cleanup_status",
+    "image_fixture_hash",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MountedWriteMatrix {
     pub schema_version: u32,
@@ -140,6 +195,8 @@ pub struct MountedWriteMatrix {
     pub scenarios: Vec<MountedWriteScenario>,
     #[serde(default)]
     pub multi_handle_scenarios: Vec<MultiHandleScenario>,
+    #[serde(default)]
+    pub namespace_scenarios: Vec<NamespaceScenario>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,6 +280,30 @@ pub struct MountedWriteScenario {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceScenario {
+    pub scenario_id: String,
+    pub filesystem: String,
+    pub image_setup: String,
+    pub mount_flags: Vec<String>,
+    pub fs_specific_options: Vec<String>,
+    pub parent_directory_id: String,
+    pub child_path_id: String,
+    pub namespace_operation_kind: String,
+    pub fsync_boundary: String,
+    pub operation_sequence: Vec<String>,
+    pub pre_directory_entries: Vec<String>,
+    pub post_directory_entries: Vec<String>,
+    pub expected_survivor_set: SurvivorSet,
+    pub expected_link_count: Option<u32>,
+    pub xattr_keys: Vec<String>,
+    pub image_fixture_hash: String,
+    pub reopen: ReopenExpectation,
+    pub no_partial_mutation_check: bool,
+    pub artifact_requirements: Vec<String>,
+    pub expected_outcome: ExpectedOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScenarioProof {
     pub scenario_class: String,
     pub image_fixture_hash: String,
@@ -271,6 +352,11 @@ pub struct MountedWriteMatrixReport {
     pub multi_handle_filesystems: Vec<String>,
     pub multi_handle_max_handles: u32,
     pub multi_handle_unsupported_count: usize,
+    pub namespace_scenario_count: usize,
+    pub namespace_filesystems: Vec<String>,
+    pub namespace_operation_kinds: Vec<String>,
+    pub namespace_fsync_boundaries: Vec<String>,
+    pub namespace_no_partial_mutation_count: usize,
     pub valid: bool,
     pub errors: Vec<String>,
 }
@@ -360,6 +446,9 @@ pub fn validate_mounted_write_matrix(matrix: &MountedWriteMatrix) -> MountedWrit
         &mut errors,
     );
 
+    let namespace_coverage =
+        validate_namespace_scenarios(&matrix.namespace_scenarios, &mut scenario_ids, &mut errors);
+
     MountedWriteMatrixReport {
         schema_version: matrix.schema_version,
         bead_id: matrix.bead_id.clone(),
@@ -378,9 +467,53 @@ pub fn validate_mounted_write_matrix(matrix: &MountedWriteMatrix) -> MountedWrit
         multi_handle_filesystems: multi_handle_filesystems.into_iter().collect(),
         multi_handle_max_handles,
         multi_handle_unsupported_count,
+        namespace_scenario_count: matrix.namespace_scenarios.len(),
+        namespace_filesystems: namespace_coverage.filesystems.into_iter().collect(),
+        namespace_operation_kinds: namespace_coverage.operation_kinds.into_iter().collect(),
+        namespace_fsync_boundaries: namespace_coverage.fsync_boundaries.into_iter().collect(),
+        namespace_no_partial_mutation_count: namespace_coverage.no_partial_mutation_count,
         valid: errors.is_empty(),
         errors,
     }
+}
+
+#[derive(Default)]
+struct NamespaceCoverage {
+    filesystems: BTreeSet<String>,
+    operation_kinds: BTreeSet<String>,
+    fsync_boundaries: BTreeSet<String>,
+    no_partial_mutation_count: usize,
+}
+
+fn validate_namespace_scenarios(
+    scenarios: &[NamespaceScenario],
+    scenario_ids: &mut BTreeSet<String>,
+    errors: &mut Vec<String>,
+) -> NamespaceCoverage {
+    let mut coverage = NamespaceCoverage::default();
+
+    for scenario in scenarios {
+        validate_namespace_scenario(
+            scenario,
+            scenario_ids,
+            &mut coverage.filesystems,
+            &mut coverage.operation_kinds,
+            &mut coverage.fsync_boundaries,
+            &mut coverage.no_partial_mutation_count,
+            errors,
+        );
+    }
+
+    validate_namespace_coverage(
+        scenarios,
+        &coverage.filesystems,
+        &coverage.operation_kinds,
+        &coverage.fsync_boundaries,
+        coverage.no_partial_mutation_count,
+        errors,
+    );
+
+    coverage
 }
 
 fn validate_top_level(matrix: &MountedWriteMatrix, errors: &mut Vec<String>) {
@@ -456,6 +589,24 @@ fn validate_result_contract(contract: &ResultsContract, errors: &mut Vec<String>
         if !contract.artifact_paths.iter().any(|path| path == required) {
             errors.push(format!(
                 "results_contract missing multi-handle artifact path {required}"
+            ));
+        }
+    }
+    for required in REQUIRED_NAMESPACE_RESULT_FIELDS {
+        if !contract
+            .required_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            errors.push(format!(
+                "results_contract missing namespace required field {required}"
+            ));
+        }
+    }
+    for required in REQUIRED_NAMESPACE_RESULT_ARTIFACTS {
+        if !contract.artifact_paths.iter().any(|path| path == required) {
+            errors.push(format!(
+                "results_contract missing namespace artifact path {required}"
             ));
         }
     }
@@ -1092,6 +1243,243 @@ fn validate_multi_handle_coverage(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn validate_namespace_scenario(
+    scenario: &NamespaceScenario,
+    scenario_ids: &mut BTreeSet<String>,
+    namespace_filesystems: &mut BTreeSet<String>,
+    namespace_operation_kinds: &mut BTreeSet<String>,
+    namespace_fsync_boundaries: &mut BTreeSet<String>,
+    namespace_no_partial_mutation_count: &mut usize,
+    errors: &mut Vec<String>,
+) {
+    if !scenario_ids.insert(scenario.scenario_id.clone()) {
+        errors.push(format!("duplicate scenario_id {}", scenario.scenario_id));
+    }
+    if !scenario.scenario_id.starts_with("mounted_write_namespace_") {
+        errors.push(format!(
+            "namespace scenario_id {} must start with mounted_write_namespace_",
+            scenario.scenario_id
+        ));
+    }
+    if !REQUIRED_FILESYSTEMS.contains(&scenario.filesystem.as_str()) {
+        errors.push(format!(
+            "namespace scenario {} has unsupported filesystem {}",
+            scenario.scenario_id, scenario.filesystem
+        ));
+    }
+    namespace_filesystems.insert(scenario.filesystem.clone());
+    if scenario.image_setup.trim().is_empty() {
+        errors.push(format!(
+            "namespace scenario {} missing image_setup",
+            scenario.scenario_id
+        ));
+    }
+    if scenario.mount_flags.is_empty() {
+        errors.push(format!(
+            "namespace scenario {} missing mount_flags",
+            scenario.scenario_id
+        ));
+    }
+    if scenario.fs_specific_options.is_empty() {
+        errors.push(format!(
+            "namespace scenario {} missing fs_specific_options",
+            scenario.scenario_id
+        ));
+    }
+    validate_namespace_identity(scenario, errors);
+    validate_namespace_operation(
+        scenario,
+        namespace_operation_kinds,
+        namespace_fsync_boundaries,
+        namespace_no_partial_mutation_count,
+        errors,
+    );
+    validate_namespace_expectations(scenario, errors);
+}
+
+fn validate_namespace_identity(scenario: &NamespaceScenario, errors: &mut Vec<String>) {
+    if scenario.parent_directory_id.trim().is_empty() {
+        errors.push(format!(
+            "namespace scenario {} missing parent_directory_id",
+            scenario.scenario_id
+        ));
+    }
+    if scenario.child_path_id.trim().is_empty() {
+        errors.push(format!(
+            "namespace scenario {} missing child_path_id",
+            scenario.scenario_id
+        ));
+    }
+}
+
+fn validate_namespace_operation(
+    scenario: &NamespaceScenario,
+    namespace_operation_kinds: &mut BTreeSet<String>,
+    namespace_fsync_boundaries: &mut BTreeSet<String>,
+    namespace_no_partial_mutation_count: &mut usize,
+    errors: &mut Vec<String>,
+) {
+    if !REQUIRED_NAMESPACE_OPERATION_KINDS.contains(&scenario.namespace_operation_kind.as_str()) {
+        errors.push(format!(
+            "namespace scenario {} has unsupported namespace_operation_kind {}",
+            scenario.scenario_id, scenario.namespace_operation_kind
+        ));
+    }
+    namespace_operation_kinds.insert(scenario.namespace_operation_kind.clone());
+    if !REQUIRED_NAMESPACE_FSYNC_BOUNDARIES.contains(&scenario.fsync_boundary.as_str()) {
+        errors.push(format!(
+            "namespace scenario {} has unsupported fsync_boundary {}",
+            scenario.scenario_id, scenario.fsync_boundary
+        ));
+    }
+    namespace_fsync_boundaries.insert(scenario.fsync_boundary.clone());
+    if scenario.operation_sequence.is_empty() {
+        errors.push(format!(
+            "namespace scenario {} missing operation_sequence",
+            scenario.scenario_id
+        ));
+    }
+    if scenario.pre_directory_entries.is_empty() {
+        errors.push(format!(
+            "namespace scenario {} missing pre_directory_entries",
+            scenario.scenario_id
+        ));
+    }
+    if scenario.post_directory_entries.is_empty() {
+        errors.push(format!(
+            "namespace scenario {} missing post_directory_entries",
+            scenario.scenario_id
+        ));
+    }
+    if scenario.namespace_operation_kind == "xattr_namespace_update"
+        && scenario.xattr_keys.is_empty()
+    {
+        errors.push(format!(
+            "namespace scenario {} xattr_namespace_update must declare xattr_keys",
+            scenario.scenario_id
+        ));
+    }
+    if scenario.expected_outcome.outcome_class == "unsupported_rejected" {
+        *namespace_no_partial_mutation_count += 1;
+        if !scenario.no_partial_mutation_check || !scenario.expected_outcome.no_partial_mutation {
+            errors.push(format!(
+                "namespace scenario {} unsupported_rejected must require no_partial_mutation_check",
+                scenario.scenario_id
+            ));
+        }
+        if !scenario.expected_outcome.follow_up_bead.starts_with("bd-") {
+            errors.push(format!(
+                "namespace scenario {} unsupported_rejected needs follow_up_bead starting with bd-",
+                scenario.scenario_id
+            ));
+        }
+    }
+}
+
+fn validate_namespace_expectations(scenario: &NamespaceScenario, errors: &mut Vec<String>) {
+    if scenario.expected_survivor_set.present_paths.is_empty()
+        && scenario.expected_survivor_set.absent_paths.is_empty()
+    {
+        errors.push(format!(
+            "namespace scenario {} expected_survivor_set must declare at least one present or absent path",
+            scenario.scenario_id
+        ));
+    }
+    if scenario.expected_link_count.is_none() {
+        errors.push(format!(
+            "namespace scenario {} missing expected_link_count",
+            scenario.scenario_id
+        ));
+    }
+    if !is_sha256_fixture_hash(&scenario.image_fixture_hash) {
+        errors.push(format!(
+            "namespace scenario {} image_fixture_hash must be sha256:<64 lowercase hex chars>",
+            scenario.scenario_id
+        ));
+    }
+    if !ALLOWED_REOPEN_KINDS.contains(&scenario.reopen.kind.as_str()) {
+        errors.push(format!(
+            "namespace scenario {} has unsupported reopen.kind {}",
+            scenario.scenario_id, scenario.reopen.kind
+        ));
+    }
+    if scenario.reopen.expected_state.trim().is_empty() {
+        errors.push(format!(
+            "namespace scenario {} missing reopen.expected_state",
+            scenario.scenario_id
+        ));
+    }
+    for required in REQUIRED_NAMESPACE_ARTIFACTS {
+        if !scenario
+            .artifact_requirements
+            .iter()
+            .any(|requirement| requirement == required)
+        {
+            errors.push(format!(
+                "namespace scenario {} artifact_requirements missing {}",
+                scenario.scenario_id, required
+            ));
+        }
+    }
+    if !["pass", "skip", "unsupported_rejected"]
+        .contains(&scenario.expected_outcome.outcome_class.as_str())
+    {
+        errors.push(format!(
+            "namespace scenario {} has invalid outcome_class {}",
+            scenario.scenario_id, scenario.expected_outcome.outcome_class
+        ));
+    }
+    if scenario.expected_outcome.detail.trim().is_empty() {
+        errors.push(format!(
+            "namespace scenario {} missing outcome detail",
+            scenario.scenario_id
+        ));
+    }
+}
+
+fn validate_namespace_coverage(
+    scenarios: &[NamespaceScenario],
+    filesystems: &BTreeSet<String>,
+    operation_kinds: &BTreeSet<String>,
+    fsync_boundaries: &BTreeSet<String>,
+    no_partial_mutation_count: usize,
+    errors: &mut Vec<String>,
+) {
+    if scenarios.is_empty() {
+        errors.push(
+            "matrix must declare namespace_scenarios for namespace atomicity and fsyncdir durability"
+                .to_owned(),
+        );
+        return;
+    }
+    for required in REQUIRED_FILESYSTEMS {
+        if !filesystems.contains(required) {
+            errors.push(format!("namespace_scenarios missing filesystem {required}"));
+        }
+    }
+    for required in REQUIRED_NAMESPACE_OPERATION_KINDS {
+        if !operation_kinds.contains(required) {
+            errors.push(format!(
+                "namespace_scenarios missing namespace_operation_kind {required}"
+            ));
+        }
+    }
+    for required in REQUIRED_NAMESPACE_FSYNC_BOUNDARIES {
+        if !fsync_boundaries.contains(required) {
+            errors.push(format!(
+                "namespace_scenarios missing fsync_boundary {required}"
+            ));
+        }
+    }
+    if no_partial_mutation_count == 0 {
+        errors.push(
+            "namespace_scenarios must include at least one unsupported rejection with no partial mutation"
+                .to_owned(),
+        );
+    }
+}
+
 pub fn fail_on_mounted_write_matrix_errors(report: &MountedWriteMatrixReport) -> Result<()> {
     if report.valid {
         Ok(())
@@ -1341,6 +1729,137 @@ mod tests {
         assert_eq!(report.multi_handle_filesystems, vec!["btrfs", "ext4"]);
         assert!(report.multi_handle_max_handles >= 2);
         assert!(report.multi_handle_unsupported_count >= 1);
+    }
+
+    #[test]
+    fn default_matrix_carries_namespace_atomicity_coverage() {
+        let report = validate_default_mounted_write_matrix().expect("default matrix validates");
+        assert!(
+            report.namespace_scenario_count >= REQUIRED_NAMESPACE_OPERATION_KINDS.len(),
+            "need at least one namespace scenario per required operation kind, got {}",
+            report.namespace_scenario_count
+        );
+        for operation_kind in REQUIRED_NAMESPACE_OPERATION_KINDS {
+            assert!(
+                report
+                    .namespace_operation_kinds
+                    .iter()
+                    .any(|kind| kind == operation_kind),
+                "missing namespace operation kind {operation_kind}"
+            );
+        }
+        for fsync_boundary in REQUIRED_NAMESPACE_FSYNC_BOUNDARIES {
+            assert!(
+                report
+                    .namespace_fsync_boundaries
+                    .iter()
+                    .any(|boundary| boundary == fsync_boundary),
+                "missing namespace fsync boundary {fsync_boundary}"
+            );
+        }
+        assert_eq!(report.namespace_filesystems, vec!["btrfs", "ext4"]);
+        assert!(report.namespace_no_partial_mutation_count >= 1);
+    }
+
+    fn first_namespace_scenario(matrix: &mut MountedWriteMatrix) -> &mut NamespaceScenario {
+        matrix
+            .namespace_scenarios
+            .first_mut()
+            .expect("at least one namespace scenario in fixture")
+    }
+
+    #[test]
+    fn namespace_scenario_requires_parent_directory_id() {
+        let mut matrix = valid_matrix();
+        let scenario = first_namespace_scenario(&mut matrix);
+        scenario.parent_directory_id.clear();
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("parent_directory_id"))
+        );
+    }
+
+    #[test]
+    fn namespace_scenario_requires_child_path_id() {
+        let mut matrix = valid_matrix();
+        let scenario = first_namespace_scenario(&mut matrix);
+        scenario.child_path_id.clear();
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("child_path_id"))
+        );
+    }
+
+    #[test]
+    fn namespace_scenario_requires_expected_link_count() {
+        let mut matrix = valid_matrix();
+        let scenario = first_namespace_scenario(&mut matrix);
+        scenario.expected_link_count = None;
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("expected_link_count"))
+        );
+    }
+
+    #[test]
+    fn namespace_xattr_scenario_requires_xattr_keys() {
+        let mut matrix = valid_matrix();
+        let scenario = matrix
+            .namespace_scenarios
+            .iter_mut()
+            .find(|scenario| scenario.namespace_operation_kind == "xattr_namespace_update")
+            .expect("xattr namespace scenario in fixture");
+        scenario.xattr_keys.clear();
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("xattr_keys"))
+        );
+    }
+
+    #[test]
+    fn namespace_unsupported_requires_no_partial_mutation() {
+        let mut matrix = valid_matrix();
+        let scenario = matrix
+            .namespace_scenarios
+            .iter_mut()
+            .find(|scenario| scenario.expected_outcome.outcome_class == "unsupported_rejected")
+            .expect("unsupported namespace scenario in fixture");
+        scenario.no_partial_mutation_check = false;
+        scenario.expected_outcome.no_partial_mutation = false;
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("no_partial_mutation_check"))
+        );
+    }
+
+    #[test]
+    fn namespace_required_operation_kinds_are_enforced() {
+        let mut matrix = valid_matrix();
+        matrix
+            .namespace_scenarios
+            .retain(|scenario| scenario.namespace_operation_kind != "rename_overwrite");
+        let report = validate_mounted_write_matrix(&matrix);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("rename_overwrite"))
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@ VALIDATION_JSON="$E2E_LOG_DIR/mounted_write_workload_matrix_validation.json"
 RESULT_JSON="$E2E_LOG_DIR/mounted_write_workload_results.json"
 RESULT_CSV="$E2E_LOG_DIR/mounted_write_workload_results.csv"
 MULTIHANDLE_RESULT_JSON="$E2E_LOG_DIR/mounted_multihandle_results.json"
+NAMESPACE_RESULT_JSON="$E2E_LOG_DIR/mounted_namespace_durability_results.json"
 STDOUT_DIR="$E2E_LOG_DIR/stdout"
 STDERR_DIR="$E2E_LOG_DIR/stderr"
 
@@ -39,6 +40,7 @@ FFS_MOUNTED_WRITE_MATRIX_PATH="$MATRIX_PATH" \
 FFS_MOUNTED_WRITE_RESULT_JSON="$RESULT_JSON" \
 FFS_MOUNTED_WRITE_RESULT_CSV="$RESULT_CSV" \
 FFS_MOUNTED_WRITE_MULTIHANDLE_RESULT_JSON="$MULTIHANDLE_RESULT_JSON" \
+FFS_MOUNTED_WRITE_NAMESPACE_RESULT_JSON="$NAMESPACE_RESULT_JSON" \
 FFS_MOUNTED_WRITE_STDOUT_DIR="$STDOUT_DIR" \
 FFS_MOUNTED_WRITE_STDERR_DIR="$STDERR_DIR" \
 python3 - <<'PY'
@@ -60,6 +62,7 @@ result_csv = pathlib.Path(os.environ["FFS_MOUNTED_WRITE_RESULT_CSV"])
 multi_handle_result_json = pathlib.Path(
     os.environ["FFS_MOUNTED_WRITE_MULTIHANDLE_RESULT_JSON"]
 )
+namespace_result_json = pathlib.Path(os.environ["FFS_MOUNTED_WRITE_NAMESPACE_RESULT_JSON"])
 stdout_dir = pathlib.Path(os.environ["FFS_MOUNTED_WRITE_STDOUT_DIR"])
 stderr_dir = pathlib.Path(os.environ["FFS_MOUNTED_WRITE_STDERR_DIR"])
 execute = os.environ.get("FFS_MOUNTED_WRITE_EXECUTE") == "1"
@@ -421,6 +424,114 @@ multi_handle_result_json.write_text(
     encoding="utf-8",
 )
 
+
+def run_namespace_scenario(scenario: dict[str, object]) -> dict[str, object]:
+    scenario_id = str(scenario["scenario_id"])
+    filesystem = str(scenario["filesystem"])
+    expected = dict(scenario["expected_outcome"])
+    survivor_set = dict(scenario["expected_survivor_set"])
+    reopen = dict(scenario["reopen"])
+    stdout_path = stdout_dir / f"{scenario_id}.out"
+    stderr_path = stderr_dir / f"{scenario_id}.err"
+    operation_trace_path = stdout_dir / f"{scenario_id}.trace.json"
+    operation_trace_path.write_text(
+        json.dumps(
+            {
+                "scenario_id": scenario_id,
+                "parent_directory_id": scenario["parent_directory_id"],
+                "child_path_id": scenario["child_path_id"],
+                "namespace_operation_kind": scenario["namespace_operation_kind"],
+                "fsync_boundary": scenario["fsync_boundary"],
+                "operation_sequence": scenario["operation_sequence"],
+                "pre_directory_entries": scenario["pre_directory_entries"],
+                "post_directory_entries": scenario["post_directory_entries"],
+                "expected_link_count": scenario["expected_link_count"],
+                "xattr_keys": scenario["xattr_keys"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    base = {
+        "scenario_id": scenario_id,
+        "filesystem": filesystem,
+        "mount_flags": list(scenario["mount_flags"]),
+        "parent_directory_id": str(scenario["parent_directory_id"]),
+        "child_path_id": str(scenario["child_path_id"]),
+        "namespace_operation_kind": str(scenario["namespace_operation_kind"]),
+        "fsync_boundary": str(scenario["fsync_boundary"]),
+        "operation_sequence": list(scenario["operation_sequence"]),
+        "pre_directory_entries": list(scenario["pre_directory_entries"]),
+        "post_directory_entries": list(scenario["post_directory_entries"]),
+        "expected_survivor_set": survivor_set,
+        "expected_link_count": scenario["expected_link_count"],
+        "xattr_keys": list(scenario["xattr_keys"]),
+        "image_fixture_hash": str(scenario["image_fixture_hash"]),
+        "reopen_state": reopen,
+        "no_partial_mutation_check": bool(scenario["no_partial_mutation_check"]),
+        "expected_outcome": str(expected["outcome_class"]),
+        "actual_outcome": "skip",
+        "artifact_paths": [
+            str(operation_trace_path),
+            str(stdout_path),
+            str(stderr_path),
+        ],
+        "operation_trace_path": str(operation_trace_path),
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "cleanup_status": "not_run",
+        "skip_reason": "",
+        "duration_ms": 0,
+    }
+
+    if scenario["fsync_boundary"] == "host_capability_skip":
+        base["skip_reason"] = "HOST_CAPABILITY_SKIP: namespace durability lane requires host FUSE capability"
+    elif not execute:
+        base["skip_reason"] = "FFS_MOUNTED_WRITE_EXECUTE not set to 1"
+    elif not mountpoints.get(filesystem, ""):
+        base["skip_reason"] = f"FFS_MOUNTED_WRITE_{filesystem.upper()}_MOUNTPOINT not set"
+    else:
+        base["skip_reason"] = "namespace durability mounted executor is not enabled in this dry-run gate"
+
+    base["cleanup_status"] = "preserved_artifacts"
+    append_log(
+        stdout_path,
+        "namespace_durability_classification "
+        f"kind={base['namespace_operation_kind']} "
+        f"fsync_boundary={base['fsync_boundary']} "
+        f"detail={base['skip_reason']}",
+    )
+    return base
+
+
+namespace_results: list[dict[str, object]] = []
+for scenario in matrix.get("namespace_scenarios", []):
+    namespace_result = run_namespace_scenario(dict(scenario))
+    namespace_results.append(namespace_result)
+    print(
+        "NAMESPACE_RESULT|scenario_id={scenario_id}|kind={namespace_operation_kind}|outcome={actual_outcome}|detail={skip_reason}".format(
+            **namespace_result
+        )
+    )
+
+namespace_payload = {
+    "schema_version": 1,
+    "bead_id": matrix["bead_id"],
+    "matrix_schema_version": matrix["schema_version"],
+    "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "matrix_path": str(matrix_path),
+    "execute": execute,
+    "results": namespace_results,
+    "reproduction_command": "scripts/e2e/ffs_mounted_write_workload_matrix.sh",
+}
+namespace_result_json.write_text(
+    json.dumps(namespace_payload, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+
 payload = {
     "schema_version": 1,
     "bead_id": matrix["bead_id"],
@@ -475,3 +586,4 @@ PY
 e2e_log "Mounted write workload results JSON: $RESULT_JSON"
 e2e_log "Mounted write workload results CSV: $RESULT_CSV"
 e2e_log "Mounted multi-handle results JSON: $MULTIHANDLE_RESULT_JSON"
+e2e_log "Mounted namespace durability results JSON: $NAMESPACE_RESULT_JSON"

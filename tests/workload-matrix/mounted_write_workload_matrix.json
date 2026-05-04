@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "bead_id": "bd-rchk0.3.2",
   "runner": "scripts/e2e/ffs_mounted_write_workload_matrix.sh",
   "results_contract": {
@@ -25,6 +25,16 @@
       "reopen_state",
       "artifact_paths",
       "remediation_id",
+      "parent_directory_id",
+      "child_path_id",
+      "namespace_operation_kind",
+      "fsync_boundary",
+      "pre_directory_entries",
+      "post_directory_entries",
+      "expected_link_count",
+      "xattr_keys",
+      "image_fixture_hash",
+      "no_partial_mutation_check",
       "handle_ids",
       "operation_trace",
       "expected_visibility",
@@ -34,6 +44,7 @@
     "artifact_paths": [
       "mounted_write_workload_results.json",
       "mounted_write_workload_results.csv",
+      "mounted_namespace_durability_results.json",
       "mounted_multihandle_results.json",
       "run.log"
     ]
@@ -633,6 +644,478 @@
       "expected_outcome": {
         "outcome_class": "skip",
         "detail": "missing host mount capability is classified as HOST_CAPABILITY_SKIP with preserved diagnostics",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    }
+  ],
+  "namespace_scenarios": [
+    {
+      "scenario_id": "mounted_write_namespace_ext4_rename_overwrite_fsyncdir",
+      "filesystem": "ext4",
+      "image_setup": "ext4 image with /parent/src and /parent/dst regular files",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["dir_index", "extent"],
+      "parent_directory_id": "dir:/parent",
+      "child_path_id": "path:/parent/dst",
+      "namespace_operation_kind": "rename_overwrite",
+      "fsync_boundary": "parent_fsyncdir",
+      "operation_sequence": ["rename /parent/src /parent/dst", "fsyncdir /parent", "image_reopen"],
+      "pre_directory_entries": ["/parent/src", "/parent/dst"],
+      "post_directory_entries": ["/parent/dst"],
+      "expected_survivor_set": {
+        "present_paths": ["/parent/dst"],
+        "absent_paths": ["/parent/src"],
+        "xattr_state": []
+      },
+      "expected_link_count": 1,
+      "xattr_keys": [],
+      "image_fixture_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "reopen": {
+        "kind": "image_reopen",
+        "expected_state": "parent fsyncdir makes overwrite rename durable with only destination surviving"
+      },
+      "no_partial_mutation_check": false,
+      "artifact_requirements": [
+        "scenario_id",
+        "parent_directory_id",
+        "child_path_id",
+        "namespace_operation_kind",
+        "fsync_boundary",
+        "expected_survivor_set",
+        "expected_link_count",
+        "reopen_state",
+        "no_partial_mutation_check",
+        "operation_trace_path",
+        "cleanup_status",
+        "image_fixture_hash"
+      ],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "detail": "overwrite rename survives parent fsyncdir and reopen with no split-brain src/dst state",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_namespace_ext4_rename_no_overwrite_data_fsync",
+      "filesystem": "ext4",
+      "image_setup": "ext4 image with /parent/src and absent /parent/new",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["dir_index", "extent"],
+      "parent_directory_id": "dir:/parent",
+      "child_path_id": "path:/parent/new",
+      "namespace_operation_kind": "rename_no_overwrite",
+      "fsync_boundary": "data_fsync",
+      "operation_sequence": ["write /parent/src", "fsync /parent/src", "rename /parent/src /parent/new", "fsyncdir /parent"],
+      "pre_directory_entries": ["/parent/src"],
+      "post_directory_entries": ["/parent/new"],
+      "expected_survivor_set": {
+        "present_paths": ["/parent/new"],
+        "absent_paths": ["/parent/src"],
+        "xattr_state": []
+      },
+      "expected_link_count": 1,
+      "xattr_keys": [],
+      "image_fixture_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "reopen": {
+        "kind": "image_reopen",
+        "expected_state": "data fsync plus parent fsyncdir preserves renamed file data at the new path"
+      },
+      "no_partial_mutation_check": false,
+      "artifact_requirements": [
+        "scenario_id",
+        "parent_directory_id",
+        "child_path_id",
+        "namespace_operation_kind",
+        "fsync_boundary",
+        "expected_survivor_set",
+        "expected_link_count",
+        "reopen_state",
+        "no_partial_mutation_check",
+        "operation_trace_path",
+        "cleanup_status",
+        "image_fixture_hash"
+      ],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "detail": "non-overwrite rename survives data fsync and parent fsyncdir at the renamed path",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_namespace_btrfs_cross_directory_rename_unmount",
+      "filesystem": "btrfs",
+      "image_setup": "btrfs image with /a/file and empty /b",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["single_device", "subvolume_root"],
+      "parent_directory_id": "dir:/b",
+      "child_path_id": "path:/b/file",
+      "namespace_operation_kind": "cross_directory_rename",
+      "fsync_boundary": "clean_unmount",
+      "operation_sequence": ["rename /a/file /b/file", "fsyncdir /a", "fsyncdir /b", "clean_unmount", "image_reopen"],
+      "pre_directory_entries": ["/a/file", "/b"],
+      "post_directory_entries": ["/a", "/b/file"],
+      "expected_survivor_set": {
+        "present_paths": ["/b/file"],
+        "absent_paths": ["/a/file"],
+        "xattr_state": []
+      },
+      "expected_link_count": 1,
+      "xattr_keys": [],
+      "image_fixture_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "reopen": {
+        "kind": "image_reopen",
+        "expected_state": "clean unmount preserves cross-directory rename and parent directory states"
+      },
+      "no_partial_mutation_check": false,
+      "artifact_requirements": [
+        "scenario_id",
+        "parent_directory_id",
+        "child_path_id",
+        "namespace_operation_kind",
+        "fsync_boundary",
+        "expected_survivor_set",
+        "expected_link_count",
+        "reopen_state",
+        "no_partial_mutation_check",
+        "operation_trace_path",
+        "cleanup_status",
+        "image_fixture_hash"
+      ],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "detail": "cross-directory rename keeps exactly one visible child after clean unmount and reopen",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_namespace_ext4_hardlink_file_close",
+      "filesystem": "ext4",
+      "image_setup": "ext4 image with /links/original and no alias",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["dir_index", "extent"],
+      "parent_directory_id": "dir:/links",
+      "child_path_id": "path:/links/alias",
+      "namespace_operation_kind": "hardlink_lifecycle",
+      "fsync_boundary": "file_close",
+      "operation_sequence": ["link /links/original /links/alias", "close /links/original", "stat /links/alias"],
+      "pre_directory_entries": ["/links/original"],
+      "post_directory_entries": ["/links/original", "/links/alias"],
+      "expected_survivor_set": {
+        "present_paths": ["/links/original", "/links/alias"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "expected_link_count": 2,
+      "xattr_keys": [],
+      "image_fixture_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "reopen": {
+        "kind": "close_open",
+        "expected_state": "fresh stat observes both hardlink names and shared link count two"
+      },
+      "no_partial_mutation_check": false,
+      "artifact_requirements": [
+        "scenario_id",
+        "parent_directory_id",
+        "child_path_id",
+        "namespace_operation_kind",
+        "fsync_boundary",
+        "expected_survivor_set",
+        "expected_link_count",
+        "reopen_state",
+        "no_partial_mutation_check",
+        "operation_trace_path",
+        "cleanup_status",
+        "image_fixture_hash"
+      ],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "detail": "hardlink lifecycle records shared link count and both path survivors after close/open",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_namespace_btrfs_symlink_forced_reopen",
+      "filesystem": "btrfs",
+      "image_setup": "btrfs image with /target/data and new symlink /sym",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["single_device", "subvolume_root"],
+      "parent_directory_id": "dir:/",
+      "child_path_id": "path:/sym",
+      "namespace_operation_kind": "symlink_persistence",
+      "fsync_boundary": "forced_reopen",
+      "operation_sequence": ["symlink target/data /sym", "fsyncdir /", "forced_reopen"],
+      "pre_directory_entries": ["/target/data"],
+      "post_directory_entries": ["/target/data", "/sym"],
+      "expected_survivor_set": {
+        "present_paths": ["/sym", "/target/data"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "expected_link_count": 1,
+      "xattr_keys": [],
+      "image_fixture_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "reopen": {
+        "kind": "image_reopen",
+        "expected_state": "forced reopen preserves symlink entry and target path bytes"
+      },
+      "no_partial_mutation_check": false,
+      "artifact_requirements": [
+        "scenario_id",
+        "parent_directory_id",
+        "child_path_id",
+        "namespace_operation_kind",
+        "fsync_boundary",
+        "expected_survivor_set",
+        "expected_link_count",
+        "reopen_state",
+        "no_partial_mutation_check",
+        "operation_trace_path",
+        "cleanup_status",
+        "image_fixture_hash"
+      ],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "detail": "symlink persists through forced reopen with target unchanged",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_namespace_ext4_unlink_open_handle_fsyncdir",
+      "filesystem": "ext4",
+      "image_setup": "ext4 image with /open/live held open across unlink",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["dir_index", "extent"],
+      "parent_directory_id": "dir:/open",
+      "child_path_id": "path:/open/live",
+      "namespace_operation_kind": "unlink_open_handle",
+      "fsync_boundary": "parent_fsyncdir",
+      "operation_sequence": ["open /open/live", "unlink /open/live", "fsyncdir /open", "read open handle", "close handle"],
+      "pre_directory_entries": ["/open/live"],
+      "post_directory_entries": ["/open"],
+      "expected_survivor_set": {
+        "present_paths": ["/open"],
+        "absent_paths": ["/open/live"],
+        "xattr_state": []
+      },
+      "expected_link_count": 0,
+      "xattr_keys": [],
+      "image_fixture_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "reopen": {
+        "kind": "close_open",
+        "expected_state": "open handle remains readable until close, then reopened namespace keeps path absent"
+      },
+      "no_partial_mutation_check": false,
+      "artifact_requirements": [
+        "scenario_id",
+        "parent_directory_id",
+        "child_path_id",
+        "namespace_operation_kind",
+        "fsync_boundary",
+        "expected_survivor_set",
+        "expected_link_count",
+        "reopen_state",
+        "no_partial_mutation_check",
+        "operation_trace_path",
+        "cleanup_status",
+        "image_fixture_hash"
+      ],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "detail": "unlink while open records nlink zero and no path resurrection after close/open",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_namespace_btrfs_rmdir_non_empty_reject",
+      "filesystem": "btrfs",
+      "image_setup": "btrfs image with /busy/child present",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["single_device", "subvolume_root"],
+      "parent_directory_id": "dir:/busy",
+      "child_path_id": "path:/busy/child",
+      "namespace_operation_kind": "rmdir_non_empty_reject",
+      "fsync_boundary": "unsupported_rejection",
+      "operation_sequence": ["rmdir /busy", "stat /busy/child", "image_reopen"],
+      "pre_directory_entries": ["/busy", "/busy/child"],
+      "post_directory_entries": ["/busy", "/busy/child"],
+      "expected_survivor_set": {
+        "present_paths": ["/busy", "/busy/child"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "expected_link_count": 2,
+      "xattr_keys": [],
+      "image_fixture_hash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "reopen": {
+        "kind": "image_reopen",
+        "expected_state": "rmdir rejection preserves both parent directory and child after reopen"
+      },
+      "no_partial_mutation_check": true,
+      "artifact_requirements": [
+        "scenario_id",
+        "parent_directory_id",
+        "child_path_id",
+        "namespace_operation_kind",
+        "fsync_boundary",
+        "expected_survivor_set",
+        "expected_link_count",
+        "reopen_state",
+        "no_partial_mutation_check",
+        "operation_trace_path",
+        "cleanup_status",
+        "image_fixture_hash"
+      ],
+      "expected_outcome": {
+        "outcome_class": "unsupported_rejected",
+        "detail": "non-empty rmdir rejection preserves child namespace and link counts",
+        "no_partial_mutation": true,
+        "follow_up_bead": "bd-rchk0.3.4"
+      }
+    },
+    {
+      "scenario_id": "mounted_write_namespace_ext4_xattr_update_fsyncdir",
+      "filesystem": "ext4",
+      "image_setup": "ext4 image with user_xattr enabled on /meta/file",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["user_xattr", "extent"],
+      "parent_directory_id": "dir:/meta",
+      "child_path_id": "path:/meta/file",
+      "namespace_operation_kind": "xattr_namespace_update",
+      "fsync_boundary": "parent_fsyncdir",
+      "operation_sequence": ["setxattr user.ffs_namespace /meta/file", "fsync /meta/file", "fsyncdir /meta", "image_reopen"],
+      "pre_directory_entries": ["/meta/file"],
+      "post_directory_entries": ["/meta/file"],
+      "expected_survivor_set": {
+        "present_paths": ["/meta/file"],
+        "absent_paths": [],
+        "xattr_state": ["user.ffs_namespace=v1"]
+      },
+      "expected_link_count": 1,
+      "xattr_keys": ["user.ffs_namespace"],
+      "image_fixture_hash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "reopen": {
+        "kind": "image_reopen",
+        "expected_state": "xattr update and parent directory fsyncdir keep file path and user xattr visible"
+      },
+      "no_partial_mutation_check": false,
+      "artifact_requirements": [
+        "scenario_id",
+        "parent_directory_id",
+        "child_path_id",
+        "namespace_operation_kind",
+        "fsync_boundary",
+        "expected_survivor_set",
+        "expected_link_count",
+        "reopen_state",
+        "no_partial_mutation_check",
+        "operation_trace_path",
+        "cleanup_status",
+        "image_fixture_hash"
+      ],
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "detail": "xattr namespace update preserves path, link count, and xattr evidence after reopen",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_namespace_btrfs_unsupported_fallocate_noop",
+      "filesystem": "btrfs",
+      "image_setup": "btrfs image with /alloc/file and unsupported fallocate mode requested",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["single_device", "unsupported_fallocate_guard"],
+      "parent_directory_id": "dir:/alloc",
+      "child_path_id": "path:/alloc/file",
+      "namespace_operation_kind": "unsupported_fallocate_noop",
+      "fsync_boundary": "unsupported_rejection",
+      "operation_sequence": ["fallocate unsupported-mode /alloc/file", "stat /alloc/file", "image_reopen"],
+      "pre_directory_entries": ["/alloc/file"],
+      "post_directory_entries": ["/alloc/file"],
+      "expected_survivor_set": {
+        "present_paths": ["/alloc/file"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "expected_link_count": 1,
+      "xattr_keys": [],
+      "image_fixture_hash": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      "reopen": {
+        "kind": "image_reopen",
+        "expected_state": "unsupported fallocate refusal leaves file size, link count, and directory entry unchanged"
+      },
+      "no_partial_mutation_check": true,
+      "artifact_requirements": [
+        "scenario_id",
+        "parent_directory_id",
+        "child_path_id",
+        "namespace_operation_kind",
+        "fsync_boundary",
+        "expected_survivor_set",
+        "expected_link_count",
+        "reopen_state",
+        "no_partial_mutation_check",
+        "operation_trace_path",
+        "cleanup_status",
+        "image_fixture_hash"
+      ],
+      "expected_outcome": {
+        "outcome_class": "unsupported_rejected",
+        "detail": "unsupported fallocate mode is a no-op refusal with unchanged namespace state",
+        "no_partial_mutation": true,
+        "follow_up_bead": "bd-rchk0.3.4"
+      }
+    },
+    {
+      "scenario_id": "mounted_write_namespace_ext4_host_capability_skip",
+      "filesystem": "ext4",
+      "image_setup": "host capability probe lane for namespace durability mounted smoke",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["requires_fuse_device", "requires_user_mount_permission"],
+      "parent_directory_id": "dir:/",
+      "child_path_id": "path:/capability-probe",
+      "namespace_operation_kind": "rename_no_overwrite",
+      "fsync_boundary": "host_capability_skip",
+      "operation_sequence": ["host capability probe", "emit structured skip"],
+      "pre_directory_entries": ["/"],
+      "post_directory_entries": ["/"],
+      "expected_survivor_set": {
+        "present_paths": ["/"],
+        "absent_paths": ["/capability-probe"],
+        "xattr_state": []
+      },
+      "expected_link_count": 2,
+      "xattr_keys": [],
+      "image_fixture_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "reopen": {
+        "kind": "none",
+        "expected_state": "host capability skip records missing FUSE prerequisites without product pass/fail"
+      },
+      "no_partial_mutation_check": false,
+      "artifact_requirements": [
+        "scenario_id",
+        "parent_directory_id",
+        "child_path_id",
+        "namespace_operation_kind",
+        "fsync_boundary",
+        "expected_survivor_set",
+        "expected_link_count",
+        "reopen_state",
+        "no_partial_mutation_check",
+        "operation_trace_path",
+        "cleanup_status",
+        "image_fixture_hash"
+      ],
+      "expected_outcome": {
+        "outcome_class": "skip",
+        "detail": "missing host mount capability emits structured namespace durability skip artifacts",
         "no_partial_mutation": false,
         "follow_up_bead": ""
       }
