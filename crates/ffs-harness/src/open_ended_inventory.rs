@@ -373,6 +373,70 @@ const ALLOWED_SOURCE_STATUSES: [&str; 4] = ["active", "deferred", "sunset", "non
 
 const ALLOWED_FRESHNESS_STATES: [&str; 3] = ["fresh", "stale", "exempt"];
 const NOTE_MATCH_TOKENS: [&str; 5] = ["TODO", "FIXME", "NOTE", "non-goal", "bd-"];
+pub const OPEN_ENDED_NOTE_SCANNER_VERSION: &str = "bd-l7ov7-open-ended-note-scanner-v1";
+
+const OPEN_ENDED_NOTE_PATTERNS: [&str; 7] = [
+    "add more cases",
+    "expand corpus",
+    "TODO fuzz",
+    "future edge cases",
+    "adversarial inputs",
+    "more goldens",
+    "known gaps",
+];
+
+const REQUIRED_NOTE_LOG_FIELDS: [&str; 8] = [
+    "scanner_version",
+    "search_patterns",
+    "source_path",
+    "row_id",
+    "matched_text_snippet_hash",
+    "decision",
+    "linked_bead_or_artifact",
+    "reproduction_command",
+];
+
+const REQUIRED_NOTE_ARTIFACT_FIELDS: [&str; 3] =
+    ["report_json", "run_log", "scanner_fixture_path"];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenEndedNoteSource {
+    pub source_path: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenEndedNoteScanReport {
+    pub schema_version: u32,
+    pub scanner_version: String,
+    pub source_count: usize,
+    pub search_patterns: Vec<String>,
+    pub match_count: usize,
+    pub real_open_note_count: usize,
+    pub false_positive_count: usize,
+    pub unresolved_note_count: usize,
+    pub rows: Vec<OpenEndedNoteMatch>,
+    pub output_path: String,
+    pub reproduction_command: String,
+    pub valid: bool,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenEndedNoteMatch {
+    pub source_path: String,
+    pub line_number: usize,
+    pub section_id: String,
+    pub matched_phrase: String,
+    pub matched_text_snippet_hash: String,
+    pub decision: String,
+    pub false_positive_reason: String,
+    pub linked_bead_or_artifact: String,
+    pub risk_surface: String,
+    pub required_log_fields: Vec<String>,
+    pub required_artifacts: Vec<String>,
+    pub reproduction_command: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceScopeManifest {
@@ -1074,14 +1138,332 @@ fn count_linked_beads_or_artifacts(text: &str) -> usize {
     text.matches("bd-").count() + text.matches("artifact").count()
 }
 
+#[must_use]
+pub fn scan_open_ended_notes(
+    sources: &[OpenEndedNoteSource],
+    output_path: &str,
+    reproduction_command: &str,
+) -> OpenEndedNoteScanReport {
+    let mut errors = Vec::new();
+    if output_path.trim().is_empty() {
+        errors.push("open-ended note scan output_path must be nonempty".to_owned());
+    }
+    if !reproduction_command.contains("open_ended_note_scanner") {
+        errors.push(
+            "open-ended note scan reproduction_command must name open_ended_note_scanner"
+                .to_owned(),
+        );
+    }
+
+    let rows = sources
+        .iter()
+        .flat_map(|source| {
+            scan_open_ended_note_source(source, reproduction_command, &mut errors)
+        })
+        .collect::<Vec<_>>();
+
+    let real_open_note_count = rows
+        .iter()
+        .filter(|row| row.decision == "requires_inventory_row")
+        .count();
+    let false_positive_count = rows
+        .iter()
+        .filter(|row| row.decision == "false_positive")
+        .count();
+    let unresolved_note_count = rows
+        .iter()
+        .filter(|row| {
+            row.decision == "requires_inventory_row" && row.linked_bead_or_artifact == "missing"
+        })
+        .count();
+
+    for row in &rows {
+        validate_open_ended_note_match(row, &mut errors);
+        if row.decision == "requires_inventory_row" && row.linked_bead_or_artifact == "missing" {
+            errors.push(format!(
+                "{}:{} matched `{}` but lacks linked bead/artifact or inventory row",
+                row.source_path, row.line_number, row.matched_phrase
+            ));
+        }
+    }
+
+    OpenEndedNoteScanReport {
+        schema_version: SOURCE_SCOPE_MANIFEST_SCHEMA_VERSION,
+        scanner_version: OPEN_ENDED_NOTE_SCANNER_VERSION.to_owned(),
+        source_count: sources.len(),
+        search_patterns: OPEN_ENDED_NOTE_PATTERNS
+            .iter()
+            .map(|pattern| (*pattern).to_owned())
+            .collect(),
+        match_count: rows.len(),
+        real_open_note_count,
+        false_positive_count,
+        unresolved_note_count,
+        rows,
+        output_path: output_path.to_owned(),
+        reproduction_command: reproduction_command.to_owned(),
+        valid: errors.is_empty(),
+        errors,
+    }
+}
+
+fn scan_open_ended_note_source(
+    source: &OpenEndedNoteSource,
+    reproduction_command: &str,
+    errors: &mut Vec<String>,
+) -> Vec<OpenEndedNoteMatch> {
+    if source.source_path.trim().is_empty() {
+        errors.push("open-ended note scan source_path must be nonempty".to_owned());
+    }
+    let mut rows = Vec::new();
+    let mut section_id = "root".to_owned();
+    let mut in_fenced_code = false;
+
+    for (index, line) in source.text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_fenced_code = !in_fenced_code;
+        }
+        if !in_fenced_code && trimmed.starts_with('#') {
+            section_id = slugify_heading(trimmed);
+        }
+        for pattern in matched_open_ended_patterns(line) {
+            rows.push(build_note_match(
+                source,
+                index + 1,
+                &section_id,
+                line,
+                pattern,
+                in_fenced_code,
+                reproduction_command,
+            ));
+        }
+    }
+
+    rows
+}
+
+fn matched_open_ended_patterns(line: &str) -> Vec<&'static str> {
+    let lower = line.to_ascii_lowercase();
+    OPEN_ENDED_NOTE_PATTERNS
+        .iter()
+        .copied()
+        .filter(|pattern| lower.contains(&pattern.to_ascii_lowercase()))
+        .collect()
+}
+
+fn build_note_match(
+    source: &OpenEndedNoteSource,
+    line_number: usize,
+    section_id: &str,
+    line: &str,
+    matched_phrase: &str,
+    in_fenced_code: bool,
+    reproduction_command: &str,
+) -> OpenEndedNoteMatch {
+    let (decision, false_positive_reason, linked_bead_or_artifact) =
+        classify_open_ended_note(line, in_fenced_code);
+
+    OpenEndedNoteMatch {
+        source_path: source.source_path.clone(),
+        line_number,
+        section_id: section_id.to_owned(),
+        matched_phrase: matched_phrase.to_owned(),
+        matched_text_snippet_hash: snippet_hash(line),
+        decision: decision.to_owned(),
+        false_positive_reason: false_positive_reason.to_owned(),
+        linked_bead_or_artifact,
+        risk_surface: infer_note_risk_surface(line, matched_phrase).to_owned(),
+        required_log_fields: REQUIRED_NOTE_LOG_FIELDS
+            .iter()
+            .map(|field| (*field).to_owned())
+            .collect(),
+        required_artifacts: REQUIRED_NOTE_ARTIFACT_FIELDS
+            .iter()
+            .map(|field| (*field).to_owned())
+            .collect(),
+        reproduction_command: reproduction_command.to_owned(),
+    }
+}
+
+fn classify_open_ended_note(line: &str, in_fenced_code: bool) -> (&'static str, &'static str, String) {
+    let trimmed = line.trim_start();
+    if in_fenced_code || trimmed.starts_with('>') {
+        return (
+            "false_positive",
+            "quoted_or_example",
+            "not_applicable".to_owned(),
+        );
+    }
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("historical")
+        || lower.contains("closed bead")
+        || lower.contains("status: closed")
+        || lower.contains("already closed")
+    {
+        return (
+            "false_positive",
+            "historical_closed_context",
+            first_linked_bead_or_artifact(line)
+                .unwrap_or_else(|| "historical-context".to_owned()),
+        );
+    }
+    if let Some(link) = first_linked_bead_or_artifact(line) {
+        return ("already_linked", "n/a", link);
+    }
+    ("requires_inventory_row", "n/a", "missing".to_owned())
+}
+
+fn first_linked_bead_or_artifact(line: &str) -> Option<String> {
+    line.split_whitespace().find_map(|raw| {
+        let token = raw.trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '`' | '\'' | '"' | ',' | ';' | ':' | ')' | '(' | '[' | ']' | '.'
+            )
+        });
+        if token.starts_with("bd-") {
+            return Some(token.to_owned());
+        }
+        if token.contains('/') && (token.ends_with(".md") || token.ends_with(".json")) {
+            return Some(token.to_owned());
+        }
+        if token.contains("artifact") {
+            return Some(token.to_owned());
+        }
+        None
+    })
+}
+
+fn infer_note_risk_surface(line: &str, matched_phrase: &str) -> &'static str {
+    let lower = format!(
+        "{} {}",
+        line.to_ascii_lowercase(),
+        matched_phrase.to_ascii_lowercase()
+    );
+    if lower.contains("fuzz") || lower.contains("adversarial") {
+        "fuzz"
+    } else if lower.contains("golden") {
+        "golden-fixture"
+    } else if lower.contains("corpus") {
+        "corpus"
+    } else if lower.contains("parser") {
+        "parser"
+    } else {
+        "conformance"
+    }
+}
+
+fn slugify_heading(line: &str) -> String {
+    let slug = line
+        .trim_start_matches('#')
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        "root".to_owned()
+    } else {
+        slug
+    }
+}
+
+fn snippet_hash(line: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(line.as_bytes())))
+}
+
+fn validate_open_ended_note_match(row: &OpenEndedNoteMatch, errors: &mut Vec<String>) {
+    if row.source_path.trim().is_empty() {
+        errors.push("open-ended note row missing source_path".to_owned());
+    }
+    if row.line_number == 0 {
+        errors.push(format!(
+            "open-ended note row {} missing line_number",
+            row.source_path
+        ));
+    }
+    if row.section_id.trim().is_empty() {
+        errors.push(format!(
+            "open-ended note row {}:{} missing section_id",
+            row.source_path, row.line_number
+        ));
+    }
+    if !row.matched_text_snippet_hash.starts_with("sha256:") {
+        errors.push(format!(
+            "open-ended note row {}:{} missing snippet hash",
+            row.source_path, row.line_number
+        ));
+    }
+    if !matches!(
+        row.decision.as_str(),
+        "requires_inventory_row" | "already_linked" | "false_positive"
+    ) {
+        errors.push(format!(
+            "open-ended note row {}:{} has invalid decision {}",
+            row.source_path, row.line_number, row.decision
+        ));
+    }
+    if row.decision == "false_positive" && row.false_positive_reason == "n/a" {
+        errors.push(format!(
+            "open-ended note row {}:{} false_positive needs reason",
+            row.source_path, row.line_number
+        ));
+    }
+    if row.decision != "requires_inventory_row" && row.linked_bead_or_artifact == "missing" {
+        errors.push(format!(
+            "open-ended note row {}:{} non-open note missing linkage marker",
+            row.source_path, row.line_number
+        ));
+    }
+    for field in REQUIRED_NOTE_LOG_FIELDS {
+        if !row.required_log_fields.iter().any(|value| value == field) {
+            errors.push(format!(
+                "open-ended note row {}:{} missing log field {field}",
+                row.source_path, row.line_number
+            ));
+        }
+    }
+    for field in REQUIRED_NOTE_ARTIFACT_FIELDS {
+        if !row.required_artifacts.iter().any(|value| value == field) {
+            errors.push(format!(
+                "open-ended note row {}:{} missing artifact field {field}",
+                row.source_path, row.line_number
+            ));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DECISIONS, INVENTORY_MARKDOWN, PROOF_TYPES, analyze_inventory, validate_current_inventory,
+        DECISIONS, INVENTORY_MARKDOWN, OPEN_ENDED_NOTE_PATTERNS, OpenEndedNoteSource,
+        PROOF_TYPES, analyze_inventory, scan_open_ended_notes, validate_current_inventory,
     };
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
+
+    const POSITIVE_SCANNER_FIXTURE: &str =
+        include_str!("../../../tests/open-ended-inventory/scanner_fixture_positive.md");
+    const NEGATIVE_SCANNER_FIXTURE: &str =
+        include_str!("../../../tests/open-ended-inventory/scanner_fixture_negative.md");
+
+    fn note_source(path: &str, text: &str) -> OpenEndedNoteSource {
+        OpenEndedNoteSource {
+            source_path: path.to_owned(),
+            text: text.to_owned(),
+        }
+    }
 
     #[test]
     fn current_inventory_has_valid_rows_and_vocabularies() {
@@ -1166,6 +1548,147 @@ mod tests {
     #[test]
     fn inventory_document_names_the_acceptance_bead() {
         assert!(INVENTORY_MARKDOWN.contains("bd-rchk7.1"));
+    }
+
+    #[test]
+    fn open_ended_note_scanner_fixture_docs_emit_expected_rows() {
+        let reproduction_command =
+            "cargo test -p ffs-harness open_ended_note_scanner -- --nocapture";
+        let positive = scan_open_ended_notes(
+            &[note_source(
+                "tests/open-ended-inventory/scanner_fixture_positive.md",
+                POSITIVE_SCANNER_FIXTURE,
+            )],
+            "artifacts/open-ended-inventory/positive_report.json",
+            reproduction_command,
+        );
+        println!(
+            "OPEN_ENDED_NOTE_SCAN|fixture=positive|valid={}|matches={}|false_positives={}|unresolved={}|scanner_version={}",
+            positive.valid,
+            positive.match_count,
+            positive.false_positive_count,
+            positive.unresolved_note_count,
+            positive.scanner_version
+        );
+        assert!(positive.valid, "{:?}", positive.errors);
+        assert!(positive.match_count >= 4, "positive fixture should scan real rows");
+        assert!(
+            positive.false_positive_count >= 2,
+            "positive fixture should include false-positive controls"
+        );
+        assert_eq!(positive.unresolved_note_count, 0);
+
+        let negative = scan_open_ended_notes(
+            &[note_source(
+                "tests/open-ended-inventory/scanner_fixture_negative.md",
+                NEGATIVE_SCANNER_FIXTURE,
+            )],
+            "artifacts/open-ended-inventory/negative_report.json",
+            reproduction_command,
+        );
+        println!(
+            "OPEN_ENDED_NOTE_SCAN|fixture=negative|valid={}|matches={}|false_positives={}|unresolved={}|scanner_version={}",
+            negative.valid,
+            negative.match_count,
+            negative.false_positive_count,
+            negative.unresolved_note_count,
+            negative.scanner_version
+        );
+        assert!(!negative.valid);
+        assert_eq!(negative.unresolved_note_count, 1);
+        assert!(
+            negative
+                .errors
+                .iter()
+                .any(|error| error.contains("lacks linked bead/artifact"))
+        );
+    }
+
+    #[test]
+    fn open_ended_note_scanner_covers_pattern_vocabulary() {
+        let text = OPEN_ENDED_NOTE_PATTERNS
+            .iter()
+            .enumerate()
+            .map(|(index, pattern)| {
+                format!(
+                    "- {pattern} is tracked by bd-l7ov7 with artifact tests/open-ended-inventory/pattern-{index}.json"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let report = scan_open_ended_notes(
+            &[note_source("docs/patterns.md", &text)],
+            "artifacts/open-ended-inventory/patterns.json",
+            "cargo test -p ffs-harness open_ended_note_scanner -- --nocapture",
+        );
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.match_count, OPEN_ENDED_NOTE_PATTERNS.len());
+        for pattern in OPEN_ENDED_NOTE_PATTERNS {
+            assert!(
+                report.rows.iter().any(|row| row.matched_phrase == pattern),
+                "missing pattern {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_ended_note_scanner_separates_false_positive_classes() {
+        let text = r#"
+## Scanner Examples
+
+Historical context: closed bead bd-rchk7.1 asked to expand corpus before the inventory existed.
+
+> Add more cases for the parser is shown here as a quoted example only.
+
+```
+TODO fuzz: future edge cases in a code block are examples, not source notes.
+```
+
+The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.json.
+"#;
+        let report = scan_open_ended_notes(
+            &[note_source("docs/scanner-examples.md", text)],
+            "artifacts/open-ended-inventory/examples.json",
+            "cargo test -p ffs-harness open_ended_note_scanner -- --nocapture",
+        );
+        assert!(report.valid, "{:?}", report.errors);
+        assert!(report.rows.iter().any(|row| {
+            row.decision == "false_positive"
+                && row.false_positive_reason == "historical_closed_context"
+        }));
+        assert!(report.rows.iter().any(|row| {
+            row.decision == "false_positive"
+                && row.false_positive_reason == "quoted_or_example"
+        }));
+        assert!(report.rows.iter().any(|row| {
+            row.decision == "already_linked" && row.linked_bead_or_artifact == "bd-l7ov7"
+        }));
+    }
+
+    #[test]
+    fn open_ended_note_scanner_real_inventory_sample_has_no_unresolved_notes() {
+        let report = scan_open_ended_notes(
+            &[note_source(
+                "docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md",
+                INVENTORY_MARKDOWN,
+            )],
+            "artifacts/open-ended-inventory/current_inventory_scan.json",
+            "cargo test -p ffs-harness open_ended_note_scanner -- --nocapture",
+        );
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.unresolved_note_count, 0);
+        for row in report.rows {
+            assert!(!row.source_path.is_empty());
+            assert!(row.line_number > 0);
+            assert!(!row.section_id.is_empty());
+            assert!(row.matched_text_snippet_hash.starts_with("sha256:"));
+            assert!(row.required_log_fields.iter().any(|field| field == "row_id"));
+            assert!(
+                row.required_artifacts
+                    .iter()
+                    .any(|field| field == "report_json")
+            );
+        }
     }
 
     use super::{
