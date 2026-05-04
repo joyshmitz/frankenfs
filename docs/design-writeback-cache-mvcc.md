@@ -196,6 +196,67 @@ The barrier design costs complexity, but the unbarriered path has unacceptable e
 
 That checker is not the production barrier implementation; it is the executable statement of the invariants above.
 
+## Mount-Option Acceptance Gate
+
+`writeback_cache` remains default-off. No mount implementation may forward the
+kernel FUSE `writeback_cache` option until the harness audit gate accepts a
+schema-valid gate artifact for the exact mount scenario. The current gate is
+`bd-rchk0.2.1-gate-v1`, exposed through:
+
+```bash
+ffs-harness validate-writeback-cache-audit --gate FILE --scenario-id ID --require-accept
+```
+
+The audit report records:
+
+| Field family | Required content |
+|--------------|------------------|
+| Mount options | raw options, mode, `fs_name`, `allow_other`, `auto_unmount`, `default_permissions` |
+| Gate identity | schema version, gate version, bead id, scenario id, reproduction command |
+| FUSE capability | probe status, kernel writeback-cache support, helper binary presence |
+| Evidence artifacts | epoch-barrier proof, crash matrix, fsync/fsyncdir evidence |
+| Decision data | decision, invariant IDs, stable rejection reason, remediation |
+
+The acceptance mapping is:
+
+| Invariant | Gate requirement |
+|-----------|------------------|
+| I1 Snapshot Visibility Boundary | `epoch_barrier_artifact` is present, fresh, and passing |
+| I2 Alias Order Preservation | `operation_class` is in the audited mounted-write envelope |
+| I3 Metadata-After-Data Dependency | rw repair-write serialization is accepted and conflicting flags are absent |
+| I4 Sync Boundary Completeness | `fsync_evidence_artifact` is present, fresh, and passing |
+| I5 Flush Non-Durability | mount is `rw` with explicit opt-in; flush-only evidence is not sufficient |
+| I6 Cross-Epoch Order | `crash_matrix_artifact` is present, fresh, and passing |
+
+Stable rejection reasons are part of the contract and are intentionally machine
+readable:
+
+- `missing_epoch_barrier_artifact`
+- `stale_epoch_barrier_artifact`
+- `rw_repair_serialization_unsupported`
+- `default_or_read_only_mount`
+- `unsupported_filesystem_or_operation`
+- `fuse_capability_unavailable`
+- `stale_crash_matrix_or_missing_fsync_evidence`
+- `conflicting_cli_flags`
+
+The dry-run e2e suite
+`scripts/e2e/ffs_writeback_cache_audit_e2e.sh` covers:
+
+- `writeback_cache_audit_cli_wired`
+- `writeback_cache_audit_accepts_complete_gate`
+- `writeback_cache_audit_rejects_default_mount`
+- `writeback_cache_audit_bad_schema_fails`
+- `writeback_cache_audit_report_fields`
+- `writeback_cache_audit_unit_tests`
+- `writeback_cache_audit_catalog_valid`
+
+These tests prove default-off behavior, explicit opt-in acceptance, rejection
+classes, schema failure, report artifact fields, and unit policy coverage. A
+future implementation bead must add the production mount-option plumbing only
+after this gate accepts the relevant mount class and the report artifact names
+the generated evidence paths.
+
 ## Follow-On Work
 
 1. Add a daemon-side staged writeback epoch structure instead of immediate live writes.

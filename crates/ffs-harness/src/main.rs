@@ -142,6 +142,10 @@ use ffs_harness::{
         render_workload_corpus_markdown, validate_selected_workload_scenario,
         validate_workload_corpus,
     },
+    writeback_cache_audit::{
+        build_writeback_cache_audit_report, fail_on_writeback_cache_audit_errors,
+        load_writeback_cache_audit_gate, render_writeback_cache_audit_markdown,
+    },
     xfstests::{
         XfstestsStatus, apply_allowlist, compare_against_baseline, load_allowlist, load_baseline,
         load_selected_tests, parse_check_output, summarize_uniform, write_junit_xml,
@@ -247,6 +251,7 @@ fn run() -> Result<()> {
         Some("validate-repair-writeback-serialization") => {
             validate_repair_writeback_serialization_cmd(&args[1..])
         }
+        Some("validate-writeback-cache-audit") => validate_writeback_cache_audit_cmd(&args[1..]),
         Some("validate-workload-corpus") => validate_workload_corpus_cmd(&args[1..]),
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
         Some("validate-mounted-write-matrix") => validate_mounted_write_matrix_cmd(&args[1..]),
@@ -330,6 +335,16 @@ struct RepairWritebackSerializationCmdArgs {
     artifact_out_path: Option<String>,
     summary_out_path: Option<String>,
     proof_summary_out_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct WritebackCacheAuditCmdArgs {
+    gate_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    scenario_id: String,
+    reproduction_command: Option<String>,
+    require_accept: bool,
 }
 
 #[derive(Debug)]
@@ -2248,6 +2263,111 @@ fn parse_repair_writeback_serialization_cmd_args(
     }))
 }
 
+fn validate_writeback_cache_audit_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_writeback_cache_audit_cmd_args(args)? else {
+        return Ok(());
+    };
+    let gate = load_writeback_cache_audit_gate(Path::new(&cmd_args.gate_path))?;
+    let reproduction_command = cmd_args.reproduction_command.clone().unwrap_or_else(|| {
+        format!(
+            "ffs-harness validate-writeback-cache-audit --gate {} --scenario-id {}",
+            cmd_args.gate_path, cmd_args.scenario_id
+        )
+    });
+    let report =
+        build_writeback_cache_audit_report(&gate, &cmd_args.scenario_id, &reproduction_command)?;
+    let output = serde_json::to_string_pretty(&report)?;
+
+    if let Some(path) = &cmd_args.out_path {
+        write_text_file(Path::new(path), &format!("{output}\n"))?;
+        println!(
+            "writeback-cache audit report written: {} scenario={} require_accept={}",
+            path, report.scenario_id, cmd_args.require_accept
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = &cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(path),
+            &render_writeback_cache_audit_markdown(&report),
+        )?;
+        println!("writeback-cache audit summary written: {path}");
+    }
+
+    if cmd_args.require_accept {
+        fail_on_writeback_cache_audit_errors(&report)?;
+    }
+    Ok(())
+}
+
+fn parse_writeback_cache_audit_cmd_args(
+    args: &[String],
+) -> Result<Option<WritebackCacheAuditCmdArgs>> {
+    let mut gate_path: Option<String> = None;
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut scenario_id = "writeback_cache_audit_cli".to_owned();
+    let mut reproduction_command: Option<String> = None;
+    let mut require_accept = false;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--gate" => {
+                i += 1;
+                gate_path = Some(args.get(i).context("--gate requires a path")?.to_owned());
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--scenario-id" => {
+                i += 1;
+                scenario_id = args
+                    .get(i)
+                    .context("--scenario-id requires a scenario id")?
+                    .to_owned();
+            }
+            "--reproduction-command" => {
+                i += 1;
+                reproduction_command = Some(
+                    args.get(i)
+                        .context("--reproduction-command requires a command string")?
+                        .to_owned(),
+                );
+            }
+            "--require-accept" => {
+                require_accept = true;
+            }
+            "--help" | "-h" => {
+                print_writeback_cache_audit_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-writeback-cache-audit argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(WritebackCacheAuditCmdArgs {
+        gate_path: gate_path.context("--gate is required for writeback-cache audit validation")?,
+        out_path,
+        summary_out_path,
+        scenario_id,
+        reproduction_command,
+        require_accept,
+    }))
+}
+
 fn validate_proof_overhead_budget_cmd(args: &[String]) -> Result<()> {
     let mut budget_path: Option<String> = None;
     let mut metrics_path: Option<String> = None;
@@ -3384,6 +3504,7 @@ fn print_usage() {
     print_repair_confidence_lab_usage_summary();
     print_operator_recovery_drill_usage_summary();
     print_repair_writeback_serialization_usage_summary();
+    print_writeback_cache_audit_usage_summary();
     print_workload_corpus_usage_summary();
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
     println!("  ffs-harness validate-mounted-recovery-matrix [--matrix FILE] [--out FILE]");
@@ -3474,6 +3595,7 @@ fn print_usage_examples() {
     print_repair_confidence_lab_example();
     print_operator_recovery_drill_example();
     print_repair_writeback_serialization_example();
+    print_writeback_cache_audit_example();
     print_workload_corpus_example();
     println!(
         "  ffs-harness validate-mounted-write-matrix --out artifacts/e2e/mounted_write_matrix.json"
@@ -3646,6 +3768,18 @@ fn print_repair_writeback_serialization_usage_summary() {
 fn print_repair_writeback_serialization_example() {
     println!(
         "  ffs-harness validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --out artifacts/repair-writeback/contract_report.json --artifact-out artifacts/repair-writeback/sample_artifact_manifest.json --summary-out artifacts/repair-writeback/contract_summary.md"
+    );
+}
+
+fn print_writeback_cache_audit_usage_summary() {
+    println!(
+        "  ffs-harness validate-writeback-cache-audit --gate FILE [--scenario-id ID] [--require-accept] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_writeback_cache_audit_example() {
+    println!(
+        "  ffs-harness validate-writeback-cache-audit --gate artifacts/writeback-cache/gate.json --scenario-id writeback_cache_audit_accepts_complete_gate --require-accept --out artifacts/writeback-cache/report.json --summary-out artifacts/writeback-cache/summary.md"
     );
 }
 
@@ -3935,6 +4069,20 @@ fn print_repair_writeback_serialization_usage() {
     println!("  --artifact-out FILE                Write sample shared QA artifact manifest JSON");
     println!("  --summary-out FILE                 Write Markdown contract summary");
     println!("  --proof-summary-out FILE           Write downstream proof summary JSON");
+}
+
+fn print_writeback_cache_audit_usage() {
+    println!("Usage: ffs-harness validate-writeback-cache-audit [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --gate FILE                        Read writeback-cache audit gate JSON");
+    println!("  --scenario-id ID                   Scenario identifier for the emitted report");
+    println!(
+        "  --reproduction-command CMD         Command captured in the report reproduction field"
+    );
+    println!("  --require-accept                   Exit nonzero unless the gate accepts");
+    println!("  --out FILE                         Write validation report JSON");
+    println!("  --summary-out FILE                 Write Markdown gate summary");
 }
 
 fn print_workload_corpus_usage() {

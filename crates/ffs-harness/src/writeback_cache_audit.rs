@@ -9,20 +9,21 @@
 //! present. Each rejection class carries a stable reason code so release gates
 //! and the remediation catalog can fail closed without parsing prose.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write as _, fs, path::Path};
 
 pub const WRITEBACK_CACHE_AUDIT_SCHEMA_VERSION: u32 = 1;
+pub const WRITEBACK_CACHE_AUDIT_REPORT_SCHEMA_VERSION: u32 = 1;
 
 /// Required invariant identifiers for the writeback-cache gate.
 ///
-/// I1 = epoch barrier proof artifact present and not stale.
-/// I2 = repair-write serialization gate has accepted rw lane.
-/// I3 = mount mode is rw with explicit opt-in flag.
-/// I4 = filesystem flavor and operation class are supported.
-/// I5 = FUSE capability probe reports current host supports writeback_cache.
-/// I6 = crash matrix / fsync evidence is fresh and passes.
+/// I1 = Snapshot Visibility Boundary.
+/// I2 = Alias Order Preservation.
+/// I3 = Metadata-After-Data Dependency.
+/// I4 = Sync Boundary Completeness.
+/// I5 = Flush Non-Durability.
+/// I6 = Cross-Epoch Order.
 pub const REQUIRED_INVARIANT_IDS: [&str; 6] = ["I1", "I2", "I3", "I4", "I5", "I6"];
 
 pub const ALLOWED_REJECTION_REASONS: [&str; 8] = [
@@ -34,6 +35,24 @@ pub const ALLOWED_REJECTION_REASONS: [&str; 8] = [
     "fuse_capability_unavailable",
     "stale_crash_matrix_or_missing_fsync_evidence",
     "conflicting_cli_flags",
+];
+
+pub const REQUIRED_ARTIFACT_FIELDS: [&str; 15] = [
+    "schema_version",
+    "gate_version",
+    "bead_id",
+    "mount_options.raw_options",
+    "mount_options.mode",
+    "repair_serialization_state",
+    "fuse_capability.probe_status",
+    "fuse_capability.kernel_supports_writeback_cache",
+    "fuse_capability.helper_binary_present",
+    "epoch_barrier_artifact.artifact_path",
+    "crash_matrix_artifact.artifact_path",
+    "fsync_evidence_artifact.artifact_path",
+    "filesystem_flavor",
+    "operation_class",
+    "explicit_opt_in",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +107,164 @@ pub enum WritebackCacheAuditDecision {
         invariants_failing: Vec<String>,
         remediation: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritebackInvariant {
+    pub id: String,
+    pub name: String,
+    pub gate_requirement: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritebackCacheAuditReport {
+    pub schema_version: u32,
+    pub gate_version: String,
+    pub bead_id: String,
+    pub scenario_id: String,
+    pub valid: bool,
+    pub decision: WritebackCacheAuditDecision,
+    pub invariant_map: Vec<WritebackInvariant>,
+    pub failure_modes: Vec<String>,
+    pub required_artifact_fields: Vec<String>,
+    pub mount_options: WritebackMountOptions,
+    pub artifact_paths: Vec<String>,
+    pub reproduction_command: String,
+}
+
+pub fn load_writeback_cache_audit_gate(path: &Path) -> Result<WritebackCacheAuditGate> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "failed to parse writeback-cache audit gate {}",
+            path.display()
+        )
+    })
+}
+
+pub fn build_writeback_cache_audit_report(
+    gate: &WritebackCacheAuditGate,
+    scenario_id: &str,
+    reproduction_command: &str,
+) -> Result<WritebackCacheAuditReport> {
+    validate_writeback_cache_audit_gate(gate)?;
+    let decision = evaluate_writeback_cache_audit(gate);
+    Ok(WritebackCacheAuditReport {
+        schema_version: WRITEBACK_CACHE_AUDIT_REPORT_SCHEMA_VERSION,
+        gate_version: gate.gate_version.clone(),
+        bead_id: gate.bead_id.clone(),
+        scenario_id: scenario_id.to_owned(),
+        valid: true,
+        decision,
+        invariant_map: writeback_invariant_map(),
+        failure_modes: ALLOWED_REJECTION_REASONS
+            .iter()
+            .map(|reason| (*reason).to_owned())
+            .collect(),
+        required_artifact_fields: REQUIRED_ARTIFACT_FIELDS
+            .iter()
+            .map(|field| (*field).to_owned())
+            .collect(),
+        mount_options: gate.mount_options.clone(),
+        artifact_paths: vec![
+            gate.epoch_barrier_artifact.artifact_path.clone(),
+            gate.crash_matrix_artifact.artifact_path.clone(),
+            gate.fsync_evidence_artifact.artifact_path.clone(),
+        ],
+        reproduction_command: reproduction_command.to_owned(),
+    })
+}
+
+pub fn fail_on_writeback_cache_audit_errors(report: &WritebackCacheAuditReport) -> Result<()> {
+    if !report.valid {
+        bail!("writeback-cache audit report is invalid");
+    }
+    if let WritebackCacheAuditDecision::Reject { reason, .. } = &report.decision {
+        bail!("writeback-cache audit rejected mount option: {reason}");
+    }
+    Ok(())
+}
+
+#[must_use]
+pub fn render_writeback_cache_audit_markdown(report: &WritebackCacheAuditReport) -> String {
+    let decision = match &report.decision {
+        WritebackCacheAuditDecision::Accept => "accept".to_owned(),
+        WritebackCacheAuditDecision::Reject { reason, .. } => {
+            format!("reject ({reason})")
+        }
+    };
+    let mut text = String::new();
+    text.push_str("# Writeback-Cache Audit Gate\n\n");
+    let _ = writeln!(text, "- schema_version: {}", report.schema_version);
+    let _ = writeln!(text, "- gate_version: {}", report.gate_version);
+    let _ = writeln!(text, "- bead_id: {}", report.bead_id);
+    let _ = writeln!(text, "- scenario_id: {}", report.scenario_id);
+    let _ = writeln!(text, "- decision: {decision}");
+    let _ = writeln!(
+        text,
+        "- reproduction_command: `{}`\n",
+        report.reproduction_command
+    );
+    text.push_str("## Invariants\n\n");
+    for invariant in &report.invariant_map {
+        let _ = writeln!(
+            text,
+            "- {} {}: {}",
+            invariant.id, invariant.name, invariant.gate_requirement
+        );
+    }
+    text.push_str("\n## Failure Modes\n\n");
+    for mode in &report.failure_modes {
+        let _ = writeln!(text, "- {mode}");
+    }
+    text.push_str("\n## Artifact Fields\n\n");
+    for field in &report.required_artifact_fields {
+        let _ = writeln!(text, "- {field}");
+    }
+    text
+}
+
+#[must_use]
+pub fn writeback_invariant_map() -> Vec<WritebackInvariant> {
+    [
+        (
+            "I1",
+            "Snapshot Visibility Boundary",
+            "epoch_barrier_artifact must be present, fresh, and passing before rw opt-in",
+        ),
+        (
+            "I2",
+            "Alias Order Preservation",
+            "operation_class must be in the audited mounted-write envelope",
+        ),
+        (
+            "I3",
+            "Metadata-After-Data Dependency",
+            "rw repair-write serialization must be accepted and conflicting flags absent",
+        ),
+        (
+            "I4",
+            "Sync Boundary Completeness",
+            "fsync evidence must be present, fresh, and passing",
+        ),
+        (
+            "I5",
+            "Flush Non-Durability",
+            "mount mode must be rw with explicit opt-in; flush-only evidence is not sufficient",
+        ),
+        (
+            "I6",
+            "Cross-Epoch Order",
+            "crash matrix evidence must be present, fresh, and passing",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, name, gate_requirement)| WritebackInvariant {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        gate_requirement: gate_requirement.to_owned(),
+    })
+    .collect()
 }
 
 #[must_use]
@@ -311,12 +488,39 @@ pub fn validate_writeback_cache_audit_gate(gate: &WritebackCacheAuditGate) -> Re
             gate.bead_id
         );
     }
+    if gate.gate_version.trim().is_empty() {
+        bail!("writeback cache audit gate_version must not be empty");
+    }
+    if gate.mount_options.raw_options.is_empty() {
+        bail!("writeback cache audit raw_options must include the declared mount option set");
+    }
+    if gate.mount_options.fs_name.trim().is_empty() {
+        bail!("writeback cache audit fs_name must not be empty");
+    }
     let unsupported_modes: BTreeSet<&str> = ["", "swap"].into_iter().collect();
     if unsupported_modes.contains(gate.mount_options.mode.as_str()) {
         bail!(
             "writeback cache audit mount mode `{}` is not supported",
             gate.mount_options.mode
         );
+    }
+    if gate.fuse_capability.probe_status.trim().is_empty() {
+        bail!("writeback cache audit fuse probe_status must not be empty");
+    }
+    for artifact in [
+        &gate.epoch_barrier_artifact,
+        &gate.crash_matrix_artifact,
+        &gate.fsync_evidence_artifact,
+    ] {
+        if artifact.artifact_id.trim().is_empty() {
+            bail!("writeback cache audit artifact_id must not be empty");
+        }
+        if artifact.artifact_path.trim().is_empty() {
+            bail!(
+                "writeback cache audit artifact_path must not be empty for {}",
+                artifact.artifact_id
+            );
+        }
     }
     Ok(())
 }
@@ -546,14 +750,13 @@ mod tests {
         let mut gate = happy_gate();
         gate.fuse_capability.probe_status = "unavailable".to_owned();
         let decision = evaluate_writeback_cache_audit(&gate);
-        if let WritebackCacheAuditDecision::Reject {
-            invariants_failing, ..
-        } = decision
-        {
-            assert!(invariants_failing.contains(&"I5".to_owned()));
-        } else {
-            panic!("expected reject decision");
-        }
+        assert!(matches!(
+            &decision,
+            WritebackCacheAuditDecision::Reject {
+                invariants_failing,
+                ..
+            } if invariants_failing.contains(&"I5".to_owned())
+        ));
     }
 
     #[test]
@@ -561,11 +764,11 @@ mod tests {
         let mut gate = happy_gate();
         gate.repair_serialization_state = "unknown".to_owned();
         let decision = evaluate_writeback_cache_audit(&gate);
-        if let WritebackCacheAuditDecision::Reject { reason, .. } = decision {
-            assert!(ALLOWED_REJECTION_REASONS.contains(&reason.as_str()));
-        } else {
-            panic!("expected reject decision");
-        }
+        assert!(matches!(
+            &decision,
+            WritebackCacheAuditDecision::Reject { reason, .. }
+                if ALLOWED_REJECTION_REASONS.contains(&reason.as_str())
+        ));
     }
 
     #[test]
@@ -593,6 +796,14 @@ mod tests {
     }
 
     #[test]
+    fn validate_gate_top_level_rejects_empty_artifact_path() {
+        let mut gate = happy_gate();
+        gate.fsync_evidence_artifact.artifact_path.clear();
+        let result = validate_writeback_cache_audit_gate(&gate);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn validate_gate_top_level_accepts_happy_path() {
         let result = validate_writeback_cache_audit_gate(&happy_gate());
         assert!(result.is_ok());
@@ -604,5 +815,65 @@ mod tests {
         for id in &REQUIRED_INVARIANT_IDS {
             assert!(id.starts_with('I'));
         }
+    }
+
+    #[test]
+    fn invariant_map_uses_design_invariant_names() {
+        let map = writeback_invariant_map();
+        let names: Vec<&str> = map
+            .iter()
+            .map(|invariant| invariant.name.as_str())
+            .collect();
+        assert!(names.contains(&"Snapshot Visibility Boundary"));
+        assert!(names.contains(&"Alias Order Preservation"));
+        assert!(names.contains(&"Metadata-After-Data Dependency"));
+        assert!(names.contains(&"Sync Boundary Completeness"));
+        assert!(names.contains(&"Flush Non-Durability"));
+        assert!(names.contains(&"Cross-Epoch Order"));
+    }
+
+    #[test]
+    fn report_includes_failure_modes_artifact_fields_and_repro() {
+        let report = build_writeback_cache_audit_report(
+            &happy_gate(),
+            "writeback_cache_audit_accepts_complete_gate",
+            "ffs-harness validate-writeback-cache-audit --gate gate.json",
+        )
+        .expect("happy gate should build report");
+
+        assert_eq!(
+            report.scenario_id,
+            "writeback_cache_audit_accepts_complete_gate"
+        );
+        assert!(
+            report
+                .failure_modes
+                .contains(&"default_or_read_only_mount".to_owned())
+        );
+        assert!(
+            report
+                .required_artifact_fields
+                .contains(&"mount_options.raw_options".to_owned())
+        );
+        assert_eq!(report.artifact_paths.len(), 3);
+        assert!(matches!(
+            report.decision,
+            WritebackCacheAuditDecision::Accept
+        ));
+    }
+
+    #[test]
+    fn require_accept_fails_closed_on_rejection() {
+        let mut gate = happy_gate();
+        gate.explicit_opt_in = false;
+        let report = build_writeback_cache_audit_report(
+            &gate,
+            "writeback_cache_audit_rejects_default_mount",
+            "ffs-harness validate-writeback-cache-audit --gate gate.json --require-accept",
+        )
+        .expect("schema-valid rejection should still build report");
+
+        let result = fail_on_writeback_cache_audit_errors(&report);
+        assert!(result.is_err());
     }
 }

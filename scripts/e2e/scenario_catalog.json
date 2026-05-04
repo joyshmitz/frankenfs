@@ -445,6 +445,60 @@
       ]
     },
     {
+      "suite_id": "ffs_writeback_cache_audit",
+      "script": "scripts/e2e/ffs_writeback_cache_audit_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "writeback_cache_audit_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_audit_accepts_complete_gate",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_accepts_complete_gate|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_audit_rejects_default_mount",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_rejects_default_mount|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_audit_bad_schema_fails",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_bad_schema_fails|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_audit_report_fields",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_report_fields|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_audit_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_audit_catalog_valid",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_catalog_valid|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_expansion",
       "script": "scripts/e2e/ffs_benchmark_expansion_e2e.sh",
       "required_categories": [
