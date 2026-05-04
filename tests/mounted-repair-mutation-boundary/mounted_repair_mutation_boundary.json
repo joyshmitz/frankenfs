@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "matrix_id": "frankenfs_mounted_repair_mutation_boundary_v1",
+  "bead_id": "bd-wjsuj",
+  "scenarios": [
+    {
+      "scenario_id": "repair_boundary_default_ro_detection_only",
+      "kind": "default_ro_detection_only",
+      "mount_mode": "read_only",
+      "background_repair": false,
+      "background_scrub_ledger": true,
+      "ledger_state": "absent_default",
+      "pre_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "expected_post_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "expected_mutation_scope": "no_mutation",
+      "expected_outcome": "detection_only",
+      "pre_ledger_row_count": 0,
+      "expected_post_ledger_row_count": 0,
+      "expected_visible_namespace": {
+        "present_paths": ["/sample.txt"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "host_paths_touched": ["artifacts/repair-boundary/detection_only/run.log"],
+      "cleanup_status": "teardown_image",
+      "artifact_paths": ["artifacts/repair-boundary/detection_only/result.json"],
+      "reproduction_command": "scripts/e2e/ffs_mounted_repair_policy_e2e.sh detection_only",
+      "host_skip_reason": "",
+      "follow_up_bead": ""
+    },
+    {
+      "scenario_id": "repair_boundary_ro_repair_with_ledger_allowed",
+      "kind": "ro_repair_with_ledger_allowed",
+      "mount_mode": "read_only",
+      "background_repair": true,
+      "background_scrub_ledger": true,
+      "ledger_state": "present",
+      "pre_image_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "expected_post_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "expected_mutation_scope": "image_repair_path_and_ledger",
+      "expected_outcome": "ledger_repair_applied",
+      "pre_ledger_row_count": 4,
+      "expected_post_ledger_row_count": 9,
+      "expected_visible_namespace": {
+        "present_paths": ["/repaired.txt"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "host_paths_touched": [
+        "artifacts/repair-boundary/ro_repair/repair-ledger.jsonl",
+        "artifacts/repair-boundary/ro_repair/run.log"
+      ],
+      "cleanup_status": "preserve_artifacts_on_failure",
+      "artifact_paths": [
+        "artifacts/repair-boundary/ro_repair/result.json",
+        "artifacts/repair-boundary/ro_repair/repair-ledger.jsonl"
+      ],
+      "reproduction_command": "scripts/e2e/ffs_mounted_repair_policy_e2e.sh ro_repair_with_ledger",
+      "host_skip_reason": "",
+      "follow_up_bead": ""
+    },
+    {
+      "scenario_id": "repair_boundary_rw_repair_refused",
+      "kind": "rw_repair_refused",
+      "mount_mode": "read_write",
+      "background_repair": true,
+      "background_scrub_ledger": true,
+      "ledger_state": "present",
+      "pre_image_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "expected_post_image_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "expected_mutation_scope": "refused_no_partial_mutation",
+      "expected_outcome": "rw_refused",
+      "pre_ledger_row_count": 6,
+      "expected_post_ledger_row_count": 6,
+      "expected_visible_namespace": {
+        "present_paths": ["/client.txt"],
+        "absent_paths": ["/repair-marker"],
+        "xattr_state": []
+      },
+      "host_paths_touched": ["artifacts/repair-boundary/rw_refused/run.log"],
+      "cleanup_status": "preserve_artifacts_on_failure",
+      "artifact_paths": [
+        "artifacts/repair-boundary/rw_refused/result.json",
+        "artifacts/repair-boundary/rw_refused/refusal.log"
+      ],
+      "reproduction_command": "scripts/e2e/ffs_mounted_repair_policy_e2e.sh rw_repair_refused",
+      "host_skip_reason": "",
+      "follow_up_bead": "bd-rchk0.1"
+    },
+    {
+      "scenario_id": "repair_boundary_missing_ledger_refused",
+      "kind": "missing_ledger_refused",
+      "mount_mode": "read_only",
+      "background_repair": true,
+      "background_scrub_ledger": false,
+      "ledger_state": "missing",
+      "pre_image_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "expected_post_image_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "expected_mutation_scope": "refused_no_partial_mutation",
+      "expected_outcome": "ledger_refused",
+      "pre_ledger_row_count": 0,
+      "expected_post_ledger_row_count": 0,
+      "expected_visible_namespace": {
+        "present_paths": ["/client.txt"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "host_paths_touched": ["artifacts/repair-boundary/missing_ledger/run.log"],
+      "cleanup_status": "preserve_artifacts_on_failure",
+      "artifact_paths": ["artifacts/repair-boundary/missing_ledger/result.json"],
+      "reproduction_command": "scripts/e2e/ffs_mounted_repair_policy_e2e.sh missing_ledger",
+      "host_skip_reason": "",
+      "follow_up_bead": "bd-rchk0.1"
+    },
+    {
+      "scenario_id": "repair_boundary_stale_ledger_refused",
+      "kind": "stale_ledger_refused",
+      "mount_mode": "read_only",
+      "background_repair": true,
+      "background_scrub_ledger": true,
+      "ledger_state": "stale",
+      "pre_image_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "expected_post_image_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "expected_mutation_scope": "refused_no_partial_mutation",
+      "expected_outcome": "ledger_refused",
+      "pre_ledger_row_count": 12,
+      "expected_post_ledger_row_count": 12,
+      "expected_visible_namespace": {
+        "present_paths": ["/client.txt"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "host_paths_touched": ["artifacts/repair-boundary/stale_ledger/run.log"],
+      "cleanup_status": "preserve_artifacts_on_failure",
+      "artifact_paths": ["artifacts/repair-boundary/stale_ledger/result.json"],
+      "reproduction_command": "scripts/e2e/ffs_mounted_repair_policy_e2e.sh stale_ledger",
+      "host_skip_reason": "",
+      "follow_up_bead": "bd-rchk0.1"
+    },
+    {
+      "scenario_id": "repair_boundary_host_capability_skip",
+      "kind": "host_capability_skip",
+      "mount_mode": "read_only",
+      "background_repair": false,
+      "background_scrub_ledger": true,
+      "ledger_state": "absent_default",
+      "pre_image_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "expected_post_image_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "expected_mutation_scope": "no_mutation",
+      "expected_outcome": "host_skipped",
+      "pre_ledger_row_count": 0,
+      "expected_post_ledger_row_count": 0,
+      "expected_visible_namespace": {
+        "present_paths": [],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "host_paths_touched": ["artifacts/repair-boundary/host_skip/skip.json"],
+      "cleanup_status": "preserve_artifacts_always",
+      "artifact_paths": ["artifacts/repair-boundary/host_skip/skip.json"],
+      "reproduction_command": "FFS_MOUNTED_REPAIR_EXECUTE=1 scripts/e2e/ffs_mounted_repair_policy_e2e.sh host_skip",
+      "host_skip_reason": "low-privilege host has no /dev/fuse; this lane is intentionally skipped",
+      "follow_up_bead": ""
+    }
+  ]
+}
