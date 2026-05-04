@@ -4159,7 +4159,14 @@ impl OpenFs {
     ) -> ffs_error::Result<()> {
         let expected_len = usize::try_from(self.block_size())
             .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
+        let mut seen_blocks = BTreeSet::new();
         for recovered in recovered_blocks {
+            if !seen_blocks.insert(recovered.block) {
+                return Err(FfsError::RepairFailed(format!(
+                    "duplicate repair writeback block {} rejected: mounted mutation authority requires one recovered payload per block",
+                    recovered.block.0
+                )));
+            }
             if recovered.expected_current.len() != expected_len {
                 return Err(FfsError::Format(format!(
                     "repair writeback block {} expected-current size mismatch: got {} expected {expected_len}",
@@ -34790,6 +34797,57 @@ mod tests {
             "expected format error, got: {err:?}"
         );
         assert_eq!(dev_view.snapshot_bytes(), image);
+        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+    }
+
+    #[test]
+    fn repair_writeback_rejects_duplicate_block_without_mutation_or_refresh() {
+        let image = build_ext4_image_with_state(EXT4_VALID_FS);
+        let dev = TestDevice::from_vec(image.clone());
+        let dev_view = dev.clone();
+        let cx = Cx::for_testing();
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let lifecycle = Arc::new(RecordingRepairLifecycle::default());
+        fs.attach_repair_flush_lifecycle(lifecycle.clone());
+
+        let block = REPAIR_RACE_BLOCK;
+        let expected_current = durable_block_bytes(&fs, &cx, block);
+        let first_data = filled_repair_block(&fs, 0xA5);
+        let second_data = filled_repair_block(&fs, 0x5A);
+        let entries = [
+            RepairWritebackBlock {
+                block,
+                expected_current: expected_current.as_slice(),
+                data: first_data.as_slice(),
+            },
+            RepairWritebackBlock {
+                block,
+                expected_current: expected_current.as_slice(),
+                data: second_data.as_slice(),
+            },
+        ];
+
+        let err = fs
+            .repair_writeback_blocks_via_mounted_mutation_path(&cx, &entries)
+            .expect_err("duplicate repair target must fail closed before mutation");
+
+        assert!(
+            matches!(
+                err,
+                FfsError::RepairFailed(ref message)
+                    if message.contains("duplicate repair writeback block")
+            ),
+            "expected duplicate repair target failure, got: {err:?}"
+        );
+        assert_eq!(dev_view.snapshot_bytes(), image);
+        assert!(
+            lifecycle
+                .blocks
+                .lock()
+                .expect("repair lifecycle lock")
+                .is_empty(),
+            "duplicate repair target must not refresh repair symbols"
+        );
         assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
     }
 

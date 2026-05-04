@@ -6,7 +6,8 @@
 # stages, commits, flushes, verifies recovered physical blocks, and rejects
 # deterministic stale repair/client-write interleavings. Also proves the CLI
 # enables read-write background repair only with ledger-backed evidence while
-# kernel writeback-cache mode remains disabled.
+# kernel writeback-cache mode remains disabled. bd-n99t2 extends the smoke with
+# malformed-plan rejection before any mutation or symbol-refresh notification.
 
 set -euo pipefail
 
@@ -81,6 +82,10 @@ require_core_test \
     "repair_writeback_cancellation_before_stage_leaves_device_unchanged" \
     "cancelled repair writeback stops before device mutation"
 require_core_test \
+    "repair_race_duplicate_block_no_mutation" \
+    "repair_writeback_rejects_duplicate_block_without_mutation_or_refresh" \
+    "duplicate repair writeback targets reject before mutation or symbol refresh"
+require_core_test \
     "repair_race_stale_refresh_suppressed" \
     "repair_writeback_stale_rejection_does_not_notify_refresh_lifecycle" \
     "stale repair rejection suppresses repair-symbol refresh lifecycle"
@@ -134,6 +139,7 @@ fuse_text = fuse_log.read_text(encoding="utf-8")
 required_core = [
     "repair_writeback_uses_mounted_request_scope_and_flushes_to_device",
     "repair_writeback_rejects_short_block_without_mutating_device",
+    "repair_writeback_rejects_duplicate_block_without_mutation_or_refresh",
     "repair_writeback_repair_before_client_write_preserves_later_client_commit",
     "repair_writeback_write_before_repair_rejects_stale_snapshot",
     "repair_writeback_disjoint_client_write_and_repair_both_persist",
@@ -175,7 +181,7 @@ if missing:
 
 record = {
     "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    "bead_ids": ["bd-rchk0.1.2", "bd-rchk0.1.3", "bd-rchk0.1.4"],
+    "bead_ids": ["bd-rchk0.1.2", "bd-rchk0.1.3", "bd-rchk0.1.4", "bd-n99t2"],
     "operation_id": "op-repair-writeback-route-smoke-001",
     "scenario_id": "repair_writeback_route_smoke",
     "interleaving_schedule_ids": [
@@ -183,6 +189,7 @@ record = {
         "client-write-before-repair-stale-rejected",
         "disjoint-client-write-and-repair",
         "cancel-before-repair-stage",
+        "duplicate-repair-target-rejected",
         "stale-refresh-suppressed",
         "repair-flush-reopen-boundary",
     ],
@@ -192,6 +199,7 @@ record = {
         "commit_through_mvcc_request_scope",
         "flush_mvcc_to_device",
         "verify_durable_block_bytes",
+        "reject_duplicate_repair_targets_before_stage",
         "reject_if_mounted_bytes_changed_since_repair_planning",
     ],
     "writeback_authority": "mounted_mvcc_request_scope",
@@ -202,8 +210,8 @@ record = {
         "serialization_gate": "mounted_mvcc_request_scope_required",
         "writeback_cache_state": "kernel_writeback_cache_disabled"
     },
-    "expected_state": "repair_writeback_committed_or_stale_repair_rejected",
-    "observed_state": "repair_writeback_interleavings_verified",
+    "expected_state": "repair_writeback_committed_or_malformed_or_stale_repair_rejected",
+    "observed_state": "repair_writeback_interleavings_and_duplicate_target_rejection_verified",
     "error_class": None,
     "ledger_rows": [
         "RepairAttempted",
@@ -236,12 +244,13 @@ record = {
 artifact.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 summary.write_text(
     "# Repair Writeback Route And Race Smoke\n\n"
-    "- beads: bd-rchk0.1.2, bd-rchk0.1.3, bd-rchk0.1.4\n"
+    "- beads: bd-rchk0.1.2, bd-rchk0.1.3, bd-rchk0.1.4, bd-n99t2\n"
     "- mounted authority: mounted_mvcc_request_scope\n"
     "- direct authority scope: offline_or_client_read_only\n"
+    "- malformed repair plans: duplicate recovered-block targets reject before mutation\n"
     "- rw background repair: ledger required, mounted serializer required\n"
     "- kernel writeback-cache: disabled\n"
-    "- result: repair_writeback_interleavings_verified\n",
+    "- result: repair_writeback_interleavings_and_duplicate_target_rejection_verified\n",
     encoding="utf-8",
 )
 PY
