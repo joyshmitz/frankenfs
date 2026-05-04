@@ -32,7 +32,10 @@
 > experimental, detection-only, dry-run-only, parse-only, single-device-only,
 > basic-coverage, disabled, opt-in-mutating, unsupported, deferred, and
 > host-blocked states before public docs or release gates can strengthen a
-> claim.
+> claim. The checked-in release-gate policy
+> (`tests/release-gates/release_gate_policy_v1.json`) is the machine-readable
+> map from those public claim classes to proof-bundle lanes, thresholds, kill
+> switches, remediation beads, or explicit non-goals.
 
 ## 2. Tracked Capability Matrix
 

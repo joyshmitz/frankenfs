@@ -1,0 +1,629 @@
+{
+  "features": [
+    {
+      "docs_wording_id": "readme.mount.rw.ext4",
+      "feature_id": "mount.rw.ext4",
+      "kill_switches": [
+        {
+          "downgrade_to": "disabled",
+          "reason": "stale evidence cannot upgrade read-write mount status",
+          "remediation_id": "bd-rchk0.5.6",
+          "switch_id": "stale-evidence",
+          "trigger": "stale_evidence"
+        },
+        {
+          "downgrade_to": "hidden",
+          "reason": "missing required lane hides public read-write mount claim",
+          "remediation_id": "bd-rchk0.5.6",
+          "switch_id": "missing-evidence",
+          "trigger": "any_required_lane_missing"
+        }
+      ],
+      "previous_state": "experimental",
+      "remediation_id": "bd-rchk0.5.6",
+      "required_lanes": [
+        {
+          "allow_capability_skip": false,
+          "expected_outcome": "pass",
+          "failed_state": "hidden",
+          "lane_id": "fuse",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk4",
+          "risk_class": "host_capability_skip"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "conformance",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk1",
+          "risk_class": "security_refused",
+          "skipped_state": "experimental"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "release_gates",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.5.6",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        }
+      ],
+      "target_state": "validated",
+      "thresholds": [
+        {
+          "comparator": "at_least",
+          "downgrade_to": "experimental",
+          "metric": "pass_lanes",
+          "remediation_id": "bd-rchk0.5.6",
+          "value": 9
+        },
+        {
+          "comparator": "at_most",
+          "downgrade_to": "disabled",
+          "metric": "error_lanes",
+          "remediation_id": "bd-rchk0.5.6",
+          "value": 0
+        }
+      ]
+    },
+    {
+      "docs_wording_id": "readme.mount.rw.btrfs",
+      "feature_id": "mount.rw.btrfs",
+      "kill_switches": [
+        {
+          "downgrade_to": "disabled",
+          "reason": "stale evidence cannot upgrade read-write mount status",
+          "remediation_id": "bd-rchk0.5.6",
+          "switch_id": "stale-evidence",
+          "trigger": "stale_evidence"
+        },
+        {
+          "downgrade_to": "hidden",
+          "reason": "missing required lane hides public read-write mount claim",
+          "remediation_id": "bd-rchk0.5.6",
+          "switch_id": "missing-evidence",
+          "trigger": "any_required_lane_missing"
+        }
+      ],
+      "previous_state": "experimental",
+      "remediation_id": "bd-rchk0.5.6",
+      "required_lanes": [
+        {
+          "allow_capability_skip": false,
+          "expected_outcome": "pass",
+          "failed_state": "hidden",
+          "lane_id": "fuse",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk4",
+          "risk_class": "host_capability_skip"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "conformance",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk1",
+          "risk_class": "security_refused",
+          "skipped_state": "experimental"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "release_gates",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.5.6",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        }
+      ],
+      "target_state": "validated",
+      "thresholds": [
+        {
+          "comparator": "at_least",
+          "downgrade_to": "experimental",
+          "metric": "pass_lanes",
+          "remediation_id": "bd-rchk0.5.6",
+          "value": 9
+        },
+        {
+          "comparator": "at_most",
+          "downgrade_to": "disabled",
+          "metric": "error_lanes",
+          "remediation_id": "bd-rchk0.5.6",
+          "value": 0
+        }
+      ]
+    },
+    {
+      "docs_wording_id": "readme.repair.rw.writeback",
+      "feature_id": "repair.rw.writeback",
+      "kill_switches": [
+        {
+          "downgrade_to": "disabled",
+          "reason": "stale evidence cannot enable mutating repair",
+          "remediation_id": "bd-rchk0.5.6",
+          "switch_id": "stale-evidence",
+          "trigger": "stale_evidence"
+        },
+        {
+          "downgrade_to": "hidden",
+          "reason": "missing required lane hides mutating repair claim",
+          "remediation_id": "bd-rchk0.5.6",
+          "switch_id": "missing-evidence",
+          "trigger": "any_required_lane_missing"
+        },
+        {
+          "downgrade_to": "detection_only",
+          "reason": "repair lane failure keeps repair detection-only",
+          "remediation_id": "bd-rchk0.1",
+          "switch_id": "repair-failed",
+          "trigger": "any_required_lane_failed"
+        }
+      ],
+      "previous_state": "detection_only",
+      "remediation_id": "bd-rchk0.1",
+      "required_lanes": [
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "detection_only",
+          "lane_id": "repair_lab",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.5.3",
+          "risk_class": "unsafe_repair_refused",
+          "skipped_state": "detection_only"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "crash_replay",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.5.5",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "release_gates",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.5.6",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        }
+      ],
+      "target_state": "opt_in_mutating",
+      "thresholds": [
+        {
+          "comparator": "at_least",
+          "downgrade_to": "detection_only",
+          "metric": "pass_lanes",
+          "remediation_id": "bd-rchk0.5.6",
+          "value": 9
+        },
+        {
+          "comparator": "at_most",
+          "downgrade_to": "disabled",
+          "metric": "error_lanes",
+          "remediation_id": "bd-rchk0.5.6",
+          "value": 0
+        }
+      ]
+    },
+    {
+      "docs_wording_id": "readme.writeback_cache",
+      "feature_id": "writeback_cache",
+      "kill_switches": [
+        {
+          "downgrade_to": "disabled",
+          "reason": "stale evidence cannot enable writeback-cache",
+          "remediation_id": "bd-rchk0.5.6",
+          "switch_id": "stale-evidence",
+          "trigger": "stale_evidence"
+        },
+        {
+          "downgrade_to": "hidden",
+          "reason": "missing required lane hides writeback-cache claim",
+          "remediation_id": "bd-rchk0.5.6",
+          "switch_id": "missing-evidence",
+          "trigger": "any_required_lane_missing"
+        }
+      ],
+      "previous_state": "disabled",
+      "remediation_id": "bd-rchk0.2.1",
+      "required_lanes": [
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "writeback_cache",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.2.1",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "experimental",
+          "lane_id": "performance",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk5",
+          "risk_class": "noisy_performance",
+          "skipped_state": "experimental"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "crash_replay",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.5.5",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "release_gates",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.5.6",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        }
+      ],
+      "target_state": "opt_in_mutating",
+      "thresholds": [
+        {
+          "comparator": "at_least",
+          "downgrade_to": "experimental",
+          "metric": "pass_lanes",
+          "remediation_id": "bd-rchk0.5.6",
+          "value": 9
+        },
+        {
+          "comparator": "at_most",
+          "downgrade_to": "disabled",
+          "metric": "error_lanes",
+          "remediation_id": "bd-rchk0.5.6",
+          "value": 0
+        }
+      ]
+    },
+    {
+      "docs_wording_id": "readme.background_scrub_mutation",
+      "explicit_deferral": {
+        "deferral_id": "background-scrub-detection-only",
+        "non_goal_rationale": "background scrub remains detection-only unless a repair ledger and mutation policy explicitly authorize repair",
+        "reason": "default background scrub must not mutate user images",
+        "owner_bead": "bd-rchk6"
+      },
+      "feature_id": "background_scrub_mutation",
+      "kill_switches": [
+        {
+          "downgrade_to": "detection_only",
+          "reason": "stale evidence preserves detection-only scrub",
+          "remediation_id": "bd-rchk6",
+          "switch_id": "stale-evidence",
+          "trigger": "stale_evidence"
+        },
+        {
+          "downgrade_to": "hidden",
+          "reason": "missing required lane hides scrub mutation claim",
+          "remediation_id": "bd-rchk6",
+          "switch_id": "missing-evidence",
+          "trigger": "any_required_lane_missing"
+        }
+      ],
+      "previous_state": "detection_only",
+      "remediation_id": "bd-rchk6",
+      "required_lanes": [
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "detection_only",
+          "lane_id": "scrub_repair_status",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk6",
+          "risk_class": "unsafe_repair_refused",
+          "skipped_state": "detection_only"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "detection_only",
+          "lane_id": "repair_lab",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.5.3",
+          "risk_class": "unsafe_repair_refused",
+          "skipped_state": "detection_only"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "release_gates",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.5.6",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        }
+      ],
+      "target_state": "detection_only",
+      "thresholds": [
+        {
+          "comparator": "at_most",
+          "downgrade_to": "detection_only",
+          "metric": "error_lanes",
+          "remediation_id": "bd-rchk0.5.6",
+          "value": 0
+        }
+      ]
+    },
+    {
+      "docs_wording_id": "feature_parity.conformance",
+      "feature_id": "conformance.claims",
+      "kill_switches": [
+        {
+          "downgrade_to": "disabled",
+          "reason": "stale evidence blocks conformance claim upgrades",
+          "remediation_id": "bd-rchk0.5.6",
+          "switch_id": "stale-evidence",
+          "trigger": "stale_evidence"
+        }
+      ],
+      "previous_state": "experimental",
+      "remediation_id": "bd-rchk1",
+      "required_lanes": [
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "conformance",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk1",
+          "risk_class": "security_refused",
+          "skipped_state": "experimental"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "release_gates",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.5.6",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        }
+      ],
+      "target_state": "validated",
+      "thresholds": [
+        {
+          "comparator": "at_most",
+          "downgrade_to": "disabled",
+          "metric": "error_lanes",
+          "remediation_id": "bd-rchk0.5.6",
+          "value": 0
+        }
+      ]
+    },
+    {
+      "docs_wording_id": "feature_parity.xfstests",
+      "feature_id": "xfstests.baseline",
+      "kill_switches": [
+        {
+          "downgrade_to": "disabled",
+          "reason": "stale evidence blocks xfstests baseline claims",
+          "remediation_id": "bd-rchk3",
+          "switch_id": "stale-evidence",
+          "trigger": "stale_evidence"
+        },
+        {
+          "downgrade_to": "hidden",
+          "reason": "missing xfstests evidence hides baseline claims",
+          "remediation_id": "bd-rchk3",
+          "switch_id": "missing-evidence",
+          "trigger": "any_required_lane_missing"
+        }
+      ],
+      "previous_state": "disabled",
+      "remediation_id": "bd-rchk3",
+      "required_lanes": [
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "xfstests",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk3",
+          "risk_class": "host_capability_skip",
+          "skipped_state": "disabled"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "release_gates",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.5.6",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        }
+      ],
+      "target_state": "experimental",
+      "thresholds": [
+        {
+          "comparator": "at_most",
+          "downgrade_to": "disabled",
+          "metric": "error_lanes",
+          "remediation_id": "bd-rchk0.5.6",
+          "value": 0
+        }
+      ]
+    },
+    {
+      "docs_wording_id": "feature_parity.performance",
+      "feature_id": "performance.baseline",
+      "kill_switches": [
+        {
+          "downgrade_to": "disabled",
+          "reason": "stale evidence blocks performance claim upgrades",
+          "remediation_id": "bd-rchk5",
+          "switch_id": "stale-evidence",
+          "trigger": "stale_evidence"
+        }
+      ],
+      "previous_state": "disabled",
+      "remediation_id": "bd-rchk5",
+      "required_lanes": [
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "experimental",
+          "lane_id": "performance",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk5",
+          "risk_class": "noisy_performance",
+          "skipped_state": "experimental"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "release_gates",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.5.6",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        }
+      ],
+      "target_state": "experimental",
+      "thresholds": [
+        {
+          "comparator": "at_most",
+          "downgrade_to": "disabled",
+          "metric": "error_lanes",
+          "remediation_id": "bd-rchk0.5.6",
+          "value": 0
+        }
+      ]
+    },
+    {
+      "docs_wording_id": "feature_parity.fuzz_conformance",
+      "feature_id": "fuzz.conformance",
+      "kill_switches": [
+        {
+          "downgrade_to": "disabled",
+          "reason": "stale evidence blocks fuzz and conformance claim upgrades",
+          "remediation_id": "bd-rchk7",
+          "switch_id": "stale-evidence",
+          "trigger": "stale_evidence"
+        }
+      ],
+      "previous_state": "experimental",
+      "remediation_id": "bd-rchk7",
+      "required_lanes": [
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "conformance",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk7",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "known_deferrals",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk7",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "release_gates",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.5.6",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        }
+      ],
+      "target_state": "validated",
+      "thresholds": [
+        {
+          "comparator": "at_most",
+          "downgrade_to": "disabled",
+          "metric": "error_lanes",
+          "remediation_id": "bd-rchk0.5.6",
+          "value": 0
+        }
+      ]
+    },
+    {
+      "docs_wording_id": "feature_parity.crash_replay",
+      "feature_id": "crash_replay.evidence",
+      "kill_switches": [
+        {
+          "downgrade_to": "disabled",
+          "reason": "stale evidence blocks crash/replay claim upgrades",
+          "remediation_id": "bd-rchk0.5.5",
+          "switch_id": "stale-evidence",
+          "trigger": "stale_evidence"
+        }
+      ],
+      "previous_state": "experimental",
+      "remediation_id": "bd-rchk0.5.5",
+      "required_lanes": [
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "crash_replay",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.5.5",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        },
+        {
+          "allow_capability_skip": true,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "release_gates",
+          "missing_state": "hidden",
+          "remediation_id": "bd-rchk0.5.6",
+          "risk_class": "generic",
+          "skipped_state": "experimental"
+        }
+      ],
+      "target_state": "validated",
+      "thresholds": [
+        {
+          "comparator": "at_most",
+          "downgrade_to": "disabled",
+          "metric": "error_lanes",
+          "remediation_id": "bd-rchk0.5.6",
+          "value": 0
+        }
+      ]
+    }
+  ],
+  "policy_id": "frankenfs_release_gate_policy_v1",
+  "reproduction_command": "cargo run -p ffs-harness -- evaluate-release-gates --bundle artifacts/proof/bundle/manifest.json --policy tests/release-gates/release_gate_policy_v1.json --current-git-sha $(git rev-parse HEAD) --max-age-days 14",
+  "required_log_fields": [],
+  "schema_version": 1
+}

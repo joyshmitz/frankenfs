@@ -1420,7 +1420,7 @@ validate the offline inspection path, run:
 To inspect a real bundle without depending on ambient build state, run:
 
 ```bash
-cargo run -p ffs-harness -- validate-proof-bundle \
+rch exec -- cargo run -p ffs-harness -- validate-proof-bundle \
   --bundle artifacts/proof/bundle/manifest.json \
   --current-git-sha "$(git rev-parse HEAD)" \
   --max-age-days 14 \
@@ -1437,6 +1437,12 @@ production failure. Required lanes are `conformance`, `xfstests`, `fuse`,
 `differential_oracle`, `repair_lab`, `crash_replay`, `performance`,
 `writeback_cache`, `scrub_repair_status`, `known_deferrals`, and
 `release_gates`.
+
+The canonical release-gate policy lives at
+`tests/release-gates/release_gate_policy_v1.json`. It maps mount/write,
+automatic repair, writeback-cache, scrub/repair, conformance, xfstests,
+performance, fuzz/conformance, and crash/replay claims to required proof-bundle
+lanes, thresholds, kill switches, remediation beads, or explicit non-goals.
 
 ### Readiness Gates
 

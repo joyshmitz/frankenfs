@@ -1481,6 +1481,90 @@ mod tests {
     }
 
     #[test]
+    fn canonical_release_gate_policy_covers_required_domains() {
+        let policy = load_release_gate_policy(&canonical_policy_path()).expect("canonical policy");
+        let report = evaluate_release_gates(&policy, &passing_proof());
+        assert!(report.valid, "{:?}", report.errors);
+        assert!(report.release_ready);
+        assert_eq!(report.policy_id, "frankenfs_release_gate_policy_v1");
+
+        let feature_ids = policy
+            .features
+            .iter()
+            .map(|feature| feature.feature_id.as_str())
+            .collect::<BTreeSet<_>>();
+        for required in [
+            "mount.rw.ext4",
+            "mount.rw.btrfs",
+            "repair.rw.writeback",
+            "writeback_cache",
+            "background_scrub_mutation",
+            "conformance.claims",
+            "xfstests.baseline",
+            "performance.baseline",
+            "fuzz.conformance",
+            "crash_replay.evidence",
+        ] {
+            assert!(feature_ids.contains(required), "missing feature {required}");
+        }
+
+        let lane_ids = policy
+            .features
+            .iter()
+            .flat_map(|feature| feature.required_lanes.iter())
+            .map(|lane| lane.lane_id.as_str())
+            .collect::<BTreeSet<_>>();
+        for required in [
+            "conformance",
+            "xfstests",
+            "fuse",
+            "repair_lab",
+            "crash_replay",
+            "performance",
+            "writeback_cache",
+            "scrub_repair_status",
+            "known_deferrals",
+            "release_gates",
+        ] {
+            assert!(lane_ids.contains(required), "missing lane {required}");
+        }
+
+        assert!(
+            policy.features.iter().all(|feature| {
+                feature.remediation_id.is_some()
+                    || feature.explicit_deferral.as_ref().is_some_and(|deferral| {
+                        deferral.owner_bead.is_some() || deferral.non_goal_rationale.is_some()
+                    })
+            }),
+            "all release-gate caveats need a remediation bead or explicit non-goal"
+        );
+    }
+
+    #[test]
+    fn canonical_release_gate_policy_fails_closed_on_missing_xfstests() {
+        let policy = load_release_gate_policy(&canonical_policy_path()).expect("canonical policy");
+        let mut proof = passing_proof();
+        proof.lanes.retain(|lane| lane.lane_id != "xfstests");
+        proof.totals.lanes = proof.lanes.len();
+        proof.totals.pass = proof.lanes.len();
+
+        let report = evaluate_release_gates(&policy, &proof);
+
+        assert!(!report.valid);
+        let xfstests_report = report
+            .feature_reports
+            .iter()
+            .find(|feature| feature.feature_id == "xfstests.baseline")
+            .expect("xfstests feature report");
+        assert_eq!(xfstests_report.final_state, FeatureState::Hidden);
+        assert!(report.findings.iter().any(|finding| {
+            finding.feature_id == "xfstests.baseline"
+                && finding.finding_id.contains("missing_required_lane")
+                && finding.remediation_id.as_deref() == Some("bd-rchk3")
+        }));
+    }
+
+    #[test]
     fn markdown_renders_feature_states_and_findings() {
         let mut proof = passing_proof();
         proof.totals.pass = 8;
@@ -1489,5 +1573,10 @@ mod tests {
         assert!(markdown.contains("FrankenFS Release Gate"));
         assert!(markdown.contains("writeback_cache"));
         assert!(markdown.contains("threshold"));
+    }
+
+    fn canonical_policy_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/release-gates/release_gate_policy_v1.json")
     }
 }

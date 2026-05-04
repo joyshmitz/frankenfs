@@ -752,13 +752,17 @@ Release gates are executable policy files that consume a validated proof bundle
 and emit feature states plus generated public wording. The evaluator is
 fail-closed: stale proof bundles, missing required lanes, lane failures, broken
 artifacts, and threshold failures downgrade or block user-facing claims.
+The canonical checked-in policy is
+`tests/release-gates/release_gate_policy_v1.json`; generated or CI policies must
+stay compatible with that fixture before they can strengthen README or
+FEATURE_PARITY wording.
 
 Evaluate a bundle with:
 
 ```bash
 rch exec -- cargo run -p ffs-harness -- evaluate-release-gates \
   --bundle artifacts/proof/bundle/manifest.json \
-  --policy artifacts/proof/release_gate_policy.json \
+  --policy tests/release-gates/release_gate_policy_v1.json \
   --current-git-sha "$(git rev-parse HEAD)" \
   --max-age-days 14 \
   --out artifacts/proof/release_gate.json \
