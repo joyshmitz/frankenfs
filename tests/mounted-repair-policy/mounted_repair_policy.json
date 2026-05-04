@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "policy_id": "frankenfs_mounted_repair_policy_v1",
+  "bead_id": "bd-rchk7.3",
+  "scenarios": [
+    {
+      "scenario_id": "mounted_repair_default_ro_scrub_detect_only",
+      "kind": "default_ro_scrub_detect_only",
+      "mount_mode": "read_only",
+      "cli_flags": [
+        "--background-scrub-ledger",
+        "artifacts/repair/scrub-ledger.jsonl"
+      ],
+      "ledger_present": false,
+      "ledger_id": "",
+      "pre_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "expected_outcome": "detect_only",
+      "rejection_reason": "",
+      "expected_ledger_transitions": ["detect_recorded"],
+      "expected_post_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "expected_symbol_generation_increment": 0,
+      "artifact_requirements": [
+        "scenario_id",
+        "cli_flags",
+        "ledger_id",
+        "pre_image_hash",
+        "expected_outcome",
+        "expected_ledger_transitions"
+      ],
+      "cleanup_policy": "teardown_image"
+    },
+    {
+      "scenario_id": "mounted_repair_ro_background_repair_with_ledger",
+      "kind": "ro_background_repair_with_ledger",
+      "mount_mode": "read_only",
+      "cli_flags": [
+        "--background-repair",
+        "--background-scrub-ledger",
+        "artifacts/repair/recovered-ledger.jsonl"
+      ],
+      "ledger_present": true,
+      "ledger_id": "ledger_recover_001",
+      "pre_image_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "expected_outcome": "repaired_with_symbol_refresh",
+      "rejection_reason": "",
+      "expected_ledger_transitions": [
+        "detect_recorded",
+        "repair_planned",
+        "repair_applied",
+        "symbols_refreshed",
+        "scrub_clean_after_repair"
+      ],
+      "expected_post_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "expected_symbol_generation_increment": 1,
+      "artifact_requirements": [
+        "scenario_id",
+        "cli_flags",
+        "ledger_id",
+        "pre_image_hash",
+        "expected_outcome",
+        "expected_ledger_transitions"
+      ],
+      "cleanup_policy": "preserve_artifacts_on_failure"
+    },
+    {
+      "scenario_id": "mounted_repair_rw_background_repair_rejected",
+      "kind": "rw_background_repair_rejected",
+      "mount_mode": "read_write",
+      "cli_flags": [
+        "--rw",
+        "--background-repair",
+        "--background-scrub-ledger",
+        "artifacts/repair/rw-attempt.jsonl"
+      ],
+      "ledger_present": true,
+      "ledger_id": "ledger_rw_attempt_001",
+      "pre_image_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "expected_outcome": "refused_rw_background_repair",
+      "rejection_reason": "rw_serialization_unsupported",
+      "expected_ledger_transitions": [],
+      "expected_post_image_hash": "",
+      "expected_symbol_generation_increment": 0,
+      "artifact_requirements": [
+        "scenario_id",
+        "cli_flags",
+        "ledger_id",
+        "pre_image_hash",
+        "expected_outcome",
+        "expected_ledger_transitions"
+      ],
+      "cleanup_policy": "preserve_artifacts_on_failure"
+    },
+    {
+      "scenario_id": "mounted_repair_ledger_evidence_lifecycle",
+      "kind": "ledger_evidence_lifecycle",
+      "mount_mode": "read_only",
+      "cli_flags": [
+        "--background-repair",
+        "--background-scrub-ledger",
+        "artifacts/repair/lifecycle-ledger.jsonl"
+      ],
+      "ledger_present": true,
+      "ledger_id": "ledger_lifecycle_001",
+      "pre_image_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "expected_outcome": "ledger_lifecycle_observed",
+      "rejection_reason": "",
+      "expected_ledger_transitions": [
+        "detect_recorded",
+        "repair_planned",
+        "repair_applied",
+        "symbols_refreshed",
+        "scrub_clean_after_repair"
+      ],
+      "expected_post_image_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "expected_symbol_generation_increment": 1,
+      "artifact_requirements": [
+        "scenario_id",
+        "cli_flags",
+        "ledger_id",
+        "pre_image_hash",
+        "expected_outcome",
+        "expected_ledger_transitions"
+      ],
+      "cleanup_policy": "preserve_artifacts_always"
+    }
+  ]
+}

@@ -22,6 +22,7 @@ pub mod log_contract;
 pub mod metrics;
 pub mod mounted_differential_oracle;
 pub mod mounted_recovery_matrix;
+pub mod mounted_repair_policy;
 pub mod mounted_write_matrix;
 pub mod open_ended_inventory;
 pub mod operational_readiness_report;
