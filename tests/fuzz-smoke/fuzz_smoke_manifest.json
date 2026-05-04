@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "corpus_id": "frankenfs_deterministic_fuzz_smoke_v1",
+  "bead_id": "bd-rchk7.4",
+  "corpus_version": "2026-05-03.fixed-seed-v1",
+  "default_timeout_ms": 250,
+  "artifact_contract": [
+    "command_line",
+    "seed_ids",
+    "corpus_checksum",
+    "duration_ms",
+    "stdout_path",
+    "stderr_path",
+    "cleanup_status",
+    "report_json",
+    "target_summary"
+  ],
+  "seeds": [
+    {
+      "seed_id": "fs_ext4_superblock_magic_truncated",
+      "path": "tests/fuzz_corpus/corpus_50_ext4_magic_truncated.bin",
+      "target": "ext4_superblock",
+      "expected_class": "InsufficientData",
+      "expected_error_contains": "need 1024"
+    },
+    {
+      "seed_id": "fs_ext4_group_desc_short",
+      "path": "tests/fuzz_corpus/corpus_53_extent_hdr_max.bin",
+      "target": "ext4_group_desc_32",
+      "expected_class": "InsufficientData",
+      "expected_error_contains": "need 32"
+    },
+    {
+      "seed_id": "fs_ext4_inode_short",
+      "path": "tests/fuzz_corpus/corpus_53_extent_hdr_max.bin",
+      "target": "ext4_inode",
+      "expected_class": "InsufficientData"
+    },
+    {
+      "seed_id": "fs_ext4_extent_header_max_entries",
+      "path": "tests/fuzz_corpus/corpus_53_extent_hdr_max.bin",
+      "target": "ext4_extent_tree",
+      "expected_class": "InsufficientData"
+    },
+    {
+      "seed_id": "fs_ext4_directory_tail_short",
+      "path": "tests/fuzz_corpus/corpus_52_dir_tail_short.bin",
+      "target": "ext4_dir_block",
+      "expected_class": "accepted"
+    },
+    {
+      "seed_id": "fs_btrfs_superblock_sparse_magic",
+      "path": "tests/fuzz_corpus/corpus_51_btrfs_magic_sparse.bin",
+      "target": "btrfs_superblock",
+      "expected_class": "InsufficientData",
+      "expected_error_contains": "need 4096"
+    },
+    {
+      "seed_id": "fs_btrfs_sys_chunk_truncated",
+      "path": "tests/fuzz_corpus/corpus_54_chunk_truncated.bin",
+      "target": "btrfs_sys_chunk_array",
+      "expected_class": "InsufficientData"
+    },
+    {
+      "seed_id": "fs_btrfs_leaf_items_sparse_magic",
+      "path": "tests/fuzz_corpus/corpus_51_btrfs_magic_sparse.bin",
+      "target": "btrfs_leaf_items",
+      "expected_class": "InsufficientData"
+    },
+    {
+      "seed_id": "fs_repair_corpus_manifest",
+      "path": "tests/repair-corpus/repair_corpus.json",
+      "target": "repair_corpus_manifest",
+      "expected_class": "accepted"
+    }
+  ]
+}

@@ -27,6 +27,10 @@ use ffs_harness::{
     },
     e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
     extract_btrfs_superblock, extract_ext4_superblock, extract_region,
+    fuzz_smoke::{
+        DEFAULT_FUZZ_SMOKE_MANIFEST_PATH, fail_on_fuzz_smoke_errors, load_fuzz_smoke_manifest,
+        run_fuzz_smoke_manifest,
+    },
     invariant_oracle::{
         fail_on_invariant_oracle_errors, load_invariant_oracle_report, load_invariant_trace,
         render_invariant_oracle_markdown, validate_invariant_oracle_report,
@@ -210,6 +214,7 @@ fn run() -> Result<()> {
             validate_support_state_accounting_cmd(&args[1..])
         }
         Some("validate-docs-status-drift") => validate_docs_status_drift_cmd(&args[1..]),
+        Some("validate-fuzz-smoke") => validate_fuzz_smoke_cmd(&args[1..]),
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
         Some("validate-proof-bundle") => validate_proof_bundle_cmd(&args[1..]),
         Some("evaluate-release-gates") => evaluate_release_gates_cmd(&args[1..]),
@@ -2930,6 +2935,54 @@ fn validate_docs_status_drift_cmd(args: &[String]) -> Result<()> {
     fail_on_docs_status_drift_errors(&report)
 }
 
+fn validate_fuzz_smoke_cmd(args: &[String]) -> Result<()> {
+    let mut manifest_path = DEFAULT_FUZZ_SMOKE_MANIFEST_PATH.to_owned();
+    let mut workspace_root = ".".to_owned();
+    let mut out_path: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                args.get(i)
+                    .context("--manifest requires a path")?
+                    .clone_into(&mut manifest_path);
+            }
+            "--workspace-root" => {
+                i += 1;
+                args.get(i)
+                    .context("--workspace-root requires a path")?
+                    .clone_into(&mut workspace_root);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--help" | "-h" => {
+                print_fuzz_smoke_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-fuzz-smoke argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let manifest = load_fuzz_smoke_manifest(Path::new(&manifest_path))?;
+    let report = run_fuzz_smoke_manifest(&manifest, Path::new(&workspace_root));
+    let json = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{json}\n"))?;
+        println!(
+            "fuzz-smoke report written: {} seeds={} checksum={}",
+            path, report.seed_count, report.corpus_checksum
+        );
+    } else {
+        println!("{json}");
+    }
+    fail_on_fuzz_smoke_errors(&report)
+}
+
 fn validate_mounted_write_matrix_cmd(args: &[String]) -> Result<()> {
     let mut matrix_path = DEFAULT_MATRIX_PATH.to_owned();
     let mut out_path: Option<String> = None;
@@ -3287,6 +3340,9 @@ fn print_usage() {
         "  ffs-harness validate-docs-status-drift [--issues FILE] [--feature-parity FILE] [--snippets FILE] [--out FILE] [--summary-out FILE]"
     );
     println!(
+        "  ffs-harness validate-fuzz-smoke [--manifest FILE] [--workspace-root DIR] [--out FILE]"
+    );
+    println!(
         "  ffs-harness validate-proof-overhead-budget --budget FILE --metrics FILE [--out FILE]"
     );
     println!(
@@ -3375,6 +3431,7 @@ fn print_usage_examples() {
     println!(
         "  ffs-harness validate-docs-status-drift --out artifacts/docs-status/docs_status_drift.json --summary-out artifacts/docs-status/docs_status_drift.md"
     );
+    println!("  ffs-harness validate-fuzz-smoke --out artifacts/fuzz-smoke/fuzz_smoke_report.json");
     println!(
         "  ffs-harness validate-proof-overhead-budget --budget artifacts/proof/budget.json --metrics artifacts/proof/metrics.json --out artifacts/proof/budget_report.json"
     );
@@ -3412,6 +3469,16 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness validate-mounted-recovery-matrix --out artifacts/e2e/mounted_recovery_matrix.json"
+    );
+}
+
+fn print_fuzz_smoke_usage() {
+    println!(
+        "ffs-harness validate-fuzz-smoke [--manifest FILE] [--workspace-root DIR] [--out FILE]"
+    );
+    println!();
+    println!(
+        "Validates fixed fuzz-smoke seeds against parser error classes, panic classification, timeout budgets, and artifact contract fields."
     );
 }
 
