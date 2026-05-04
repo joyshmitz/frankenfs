@@ -7,6 +7,7 @@ pub mod benchmark_taxonomy;
 pub mod btrfs_capability_drift;
 pub mod btrfs_multidevice_corpus;
 pub mod btrfs_send_receive_corpus;
+pub mod casefold_corpus;
 pub mod crash_promotion;
 pub mod crash_replay_artifact;
 pub mod cross_oracle_arbitration;

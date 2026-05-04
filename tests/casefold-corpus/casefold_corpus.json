@@ -1,0 +1,207 @@
+{
+  "schema_version": 1,
+  "corpus_id": "frankenfs_ext4_casefold_corpus_v1",
+  "bead_id": "bd-9er6s",
+  "cases": [
+    {
+      "case_id": "casefold_lookup_hit_ascii",
+      "source_name_bytes_hex": "48656c6c6f2e747874",
+      "normalized_form_bytes_hex": "68656c6c6f2e747874",
+      "normalized_class": "ascii_lower",
+      "operation_kind": "lookup",
+      "feature_flags": ["EXT4_FEATURE_INCOMPAT_CASEFOLD", "ext4_encoding_utf8_12_1"],
+      "expected_outcome": "lookup_hit",
+      "kernel_comparison_status": "kernel_exact_match",
+      "unsupported_rationale": "",
+      "cleanup_policy": "teardown_image",
+      "artifact_requirements": [
+        "case_id",
+        "source_name_bytes_hex",
+        "normalized_form_bytes_hex",
+        "expected_outcome",
+        "kernel_comparison_status"
+      ],
+      "htree_interaction": false
+    },
+    {
+      "case_id": "casefold_lookup_miss_ascii",
+      "source_name_bytes_hex": "6e6f6e2d6578697374656e74",
+      "normalized_form_bytes_hex": "6e6f6e2d6578697374656e74",
+      "normalized_class": "ascii_lower",
+      "operation_kind": "lookup",
+      "feature_flags": ["EXT4_FEATURE_INCOMPAT_CASEFOLD", "ext4_encoding_utf8_12_1"],
+      "expected_outcome": "lookup_miss",
+      "kernel_comparison_status": "kernel_exact_match",
+      "unsupported_rationale": "",
+      "cleanup_policy": "teardown_image",
+      "artifact_requirements": [
+        "case_id",
+        "source_name_bytes_hex",
+        "normalized_form_bytes_hex",
+        "expected_outcome",
+        "kernel_comparison_status"
+      ],
+      "htree_interaction": false
+    },
+    {
+      "case_id": "casefold_create_success_nfc",
+      "source_name_bytes_hex": "6dc3a96d6f2e747874",
+      "normalized_form_bytes_hex": "6dc3a96d6f2e747874",
+      "normalized_class": "nfc_canonical",
+      "operation_kind": "create",
+      "feature_flags": ["EXT4_FEATURE_INCOMPAT_CASEFOLD", "ext4_encoding_utf8_12_1"],
+      "expected_outcome": "create_success",
+      "kernel_comparison_status": "kernel_exact_match",
+      "unsupported_rationale": "",
+      "cleanup_policy": "teardown_image",
+      "artifact_requirements": [
+        "case_id",
+        "source_name_bytes_hex",
+        "normalized_form_bytes_hex",
+        "expected_outcome",
+        "kernel_comparison_status"
+      ],
+      "htree_interaction": true
+    },
+    {
+      "case_id": "casefold_create_collision_refused",
+      "source_name_bytes_hex": "48656c6c6f",
+      "normalized_form_bytes_hex": "68656c6c6f",
+      "normalized_class": "casefold_only",
+      "operation_kind": "create",
+      "feature_flags": ["EXT4_FEATURE_INCOMPAT_CASEFOLD", "ext4_encoding_utf8_12_1"],
+      "expected_outcome": "create_collision_refused",
+      "kernel_comparison_status": "kernel_exact_match",
+      "unsupported_rationale": "",
+      "cleanup_policy": "preserve_artifacts_on_failure",
+      "artifact_requirements": [
+        "case_id",
+        "source_name_bytes_hex",
+        "normalized_form_bytes_hex",
+        "expected_outcome",
+        "kernel_comparison_status"
+      ],
+      "htree_interaction": true
+    },
+    {
+      "case_id": "casefold_rename_success_intra_dir",
+      "source_name_bytes_hex": "6f6c642e747874",
+      "normalized_form_bytes_hex": "6f6c642e747874",
+      "normalized_class": "ascii_lower",
+      "operation_kind": "rename",
+      "feature_flags": ["EXT4_FEATURE_INCOMPAT_CASEFOLD", "ext4_encoding_utf8_12_1"],
+      "expected_outcome": "rename_success",
+      "kernel_comparison_status": "kernel_exact_match",
+      "unsupported_rationale": "",
+      "cleanup_policy": "teardown_image",
+      "artifact_requirements": [
+        "case_id",
+        "source_name_bytes_hex",
+        "normalized_form_bytes_hex",
+        "expected_outcome",
+        "kernel_comparison_status"
+      ],
+      "htree_interaction": false
+    },
+    {
+      "case_id": "casefold_cross_directory_rename_collision",
+      "source_name_bytes_hex": "446174612e747874",
+      "normalized_form_bytes_hex": "646174612e747874",
+      "normalized_class": "casefold_only",
+      "operation_kind": "cross_directory_rename",
+      "feature_flags": ["EXT4_FEATURE_INCOMPAT_CASEFOLD", "ext4_encoding_utf8_12_1"],
+      "expected_outcome": "rename_collision_refused",
+      "kernel_comparison_status": "kernel_exact_match",
+      "unsupported_rationale": "",
+      "cleanup_policy": "preserve_artifacts_on_failure",
+      "artifact_requirements": [
+        "case_id",
+        "source_name_bytes_hex",
+        "normalized_form_bytes_hex",
+        "expected_outcome",
+        "kernel_comparison_status"
+      ],
+      "htree_interaction": false
+    },
+    {
+      "case_id": "casefold_invalid_utf8_refused",
+      "source_name_bytes_hex": "ffc0c1",
+      "normalized_form_bytes_hex": "",
+      "normalized_class": "invalid_utf8",
+      "operation_kind": "lookup",
+      "feature_flags": ["EXT4_FEATURE_INCOMPAT_CASEFOLD", "ext4_encoding_utf8_12_1"],
+      "expected_outcome": "invalid_encoding_refused",
+      "kernel_comparison_status": "kernel_exact_match",
+      "unsupported_rationale": "",
+      "cleanup_policy": "preserve_artifacts_on_failure",
+      "artifact_requirements": [
+        "case_id",
+        "source_name_bytes_hex",
+        "normalized_form_bytes_hex",
+        "expected_outcome",
+        "kernel_comparison_status"
+      ],
+      "htree_interaction": false
+    },
+    {
+      "case_id": "casefold_overlong_normalized_refused",
+      "source_name_bytes_hex": "6c6f6e676e616d65",
+      "normalized_form_bytes_hex": "61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "normalized_class": "overlong_normalized_name",
+      "operation_kind": "create",
+      "feature_flags": ["EXT4_FEATURE_INCOMPAT_CASEFOLD", "ext4_encoding_utf8_12_1"],
+      "expected_outcome": "invalid_encoding_refused",
+      "kernel_comparison_status": "kernel_exact_match",
+      "unsupported_rationale": "",
+      "cleanup_policy": "preserve_artifacts_on_failure",
+      "artifact_requirements": [
+        "case_id",
+        "source_name_bytes_hex",
+        "normalized_form_bytes_hex",
+        "expected_outcome",
+        "kernel_comparison_status"
+      ],
+      "htree_interaction": false
+    },
+    {
+      "case_id": "casefold_mount_feature_accepted",
+      "source_name_bytes_hex": "726f6f74",
+      "normalized_form_bytes_hex": "726f6f74",
+      "normalized_class": "ascii_lower",
+      "operation_kind": "mount_feature_check",
+      "feature_flags": ["EXT4_FEATURE_INCOMPAT_CASEFOLD", "ext4_encoding_utf8_12_1"],
+      "expected_outcome": "mount_feature_accepted",
+      "kernel_comparison_status": "kernel_exact_match",
+      "unsupported_rationale": "",
+      "cleanup_policy": "teardown_image",
+      "artifact_requirements": [
+        "case_id",
+        "source_name_bytes_hex",
+        "normalized_form_bytes_hex",
+        "expected_outcome",
+        "kernel_comparison_status"
+      ],
+      "htree_interaction": false
+    },
+    {
+      "case_id": "casefold_unsupported_submode_documented",
+      "source_name_bytes_hex": "fc",
+      "normalized_form_bytes_hex": "c3bc",
+      "normalized_class": "casefold_only",
+      "operation_kind": "lookup",
+      "feature_flags": ["EXT4_FEATURE_INCOMPAT_CASEFOLD", "ext4_encoding_utf8_12_1"],
+      "expected_outcome": "lookup_miss",
+      "kernel_comparison_status": "kernel_unsupported_submode",
+      "unsupported_rationale": "FrankenFS does not yet apply Unicode 14.0 casefold case-pair updates beyond the 12.1 table baseline; flagged as a follow-up via bd-9er6s",
+      "cleanup_policy": "teardown_image",
+      "artifact_requirements": [
+        "case_id",
+        "source_name_bytes_hex",
+        "normalized_form_bytes_hex",
+        "expected_outcome",
+        "kernel_comparison_status"
+      ],
+      "htree_interaction": false
+    }
+  ]
+}
