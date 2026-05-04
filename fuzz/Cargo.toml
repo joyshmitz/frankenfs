@@ -288,3 +288,8 @@ doc = false
 name = "fuzz_mvcc_compression_resolve"
 path = "fuzz_targets/fuzz_mvcc_compression_resolve.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_ext4_group_desc_roundtrip"
+path = "fuzz_targets/fuzz_ext4_group_desc_roundtrip.rs"
+doc = false
