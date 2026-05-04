@@ -1,0 +1,5 @@
+# Curated btrfs subset for FrankenFS E2E tracking (bd-rchk3.2).
+# These rows make btrfs-specific scope explicit without running destructive host operations by default.
+
+btrfs/001
+btrfs/008

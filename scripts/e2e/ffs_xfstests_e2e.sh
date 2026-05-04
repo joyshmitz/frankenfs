@@ -23,10 +23,11 @@ e2e_print_env
 XFSTESTS_MODE="${XFSTESTS_MODE:-auto}"        # auto | plan | run
 XFSTESTS_STRICT="${XFSTESTS_STRICT:-0}"       # 0 | 1
 XFSTESTS_DRY_RUN="${XFSTESTS_DRY_RUN:-1}"     # 0 | 1 (run mode only)
-XFSTESTS_FILTER="${XFSTESTS_FILTER:-all}"     # all | generic | ext4
+XFSTESTS_FILTER="${XFSTESTS_FILTER:-all}"     # all | generic | ext4 | btrfs
 XFSTESTS_DIR="${XFSTESTS_DIR:-}"
 XFSTESTS_GENERIC_LIST="${XFSTESTS_GENERIC_LIST:-$REPO_ROOT/scripts/e2e/xfstests_generic.list}"
 XFSTESTS_EXT4_LIST="${XFSTESTS_EXT4_LIST:-$REPO_ROOT/scripts/e2e/xfstests_ext4.list}"
+XFSTESTS_BTRFS_LIST="${XFSTESTS_BTRFS_LIST:-$REPO_ROOT/scripts/e2e/xfstests_btrfs.list}"
 XFSTESTS_REGRESSION_GUARD_JSON="${XFSTESTS_REGRESSION_GUARD_JSON:-$REPO_ROOT/scripts/e2e/xfstests_regression_guard.json}"
 XFSTESTS_ALLOWLIST_JSON="${XFSTESTS_ALLOWLIST_JSON:-$REPO_ROOT/scripts/e2e/xfstests_allowlist.json}"
 XFSTESTS_BASELINE_JSON="${XFSTESTS_BASELINE_JSON:-}"
@@ -47,6 +48,7 @@ mkdir -p "$ARTIFACT_DIR"
 
 declare -a GENERIC_TESTS=()
 declare -a EXT4_TESTS=()
+declare -a BTRFS_TESTS=()
 declare -a SELECTED_TESTS=()
 EFFECTIVE_MODE="$XFSTESTS_MODE"
 LAST_CHECK_RC="null"
@@ -133,6 +135,7 @@ write_summary() {
   },
   "generic_count": ${#GENERIC_TESTS[@]},
   "ext4_count": ${#EXT4_TESTS[@]},
+  "btrfs_count": ${#BTRFS_TESTS[@]},
   "selected_count": ${#SELECTED_TESTS[@]},
   "reason": "$safe_reason"
 }
@@ -344,6 +347,7 @@ status_counts = Counter()
 classification_counts = Counter()
 outcome_counts = Counter()
 operation_counts = Counter()
+flavor_counts = Counter()
 lane_counts = Counter()
 plan_outcome_counts = Counter()
 command_plans = []
@@ -365,10 +369,12 @@ for test_id in selected:
     classification = entry.get("classification")
     expected_outcome = entry.get("expected_outcome")
     operation_class = entry.get("expected_operation_class")
+    filesystem_flavor = entry.get("filesystem_flavor", test_id.split("/", 1)[0])
     status_counts[status] += 1
     classification_counts[classification or "missing"] += 1
     outcome_counts[expected_outcome or "missing"] += 1
     operation_counts[operation_class or "missing"] += 1
+    flavor_counts[filesystem_flavor or "missing"] += 1
     lane_counts[command_plan.get("execution_lane", "missing")] += 1
     plan_outcome_counts[command_plan.get("expected_plan_outcome", "missing")] += 1
     command_plans.append(command_plan)
@@ -379,7 +385,7 @@ for test_id in selected:
     tests.append({
         "policy_row_id": entry.get("policy_row_id"),
         "test_id": test_id,
-        "filesystem_flavor": entry.get("filesystem_flavor", test_id.split("/", 1)[0]),
+        "filesystem_flavor": filesystem_flavor,
         "v1_scope_mapping": entry.get("v1_scope_mapping"),
         "expected_operation_class": operation_class,
         "operation_class_tags": entry.get("operation_class_tags", []),
@@ -405,7 +411,7 @@ for test_id in selected:
             "source_xfstests_id": test_id,
             "command_plan_id": command_plan.get("plan_id"),
             "policy_row_id": entry.get("policy_row_id"),
-            "filesystem_flavor": entry.get("filesystem_flavor", test_id.split("/", 1)[0]),
+            "filesystem_flavor": filesystem_flavor,
             "risk_category": entry.get("user_risk_category"),
             "selected_or_skipped": entry.get("selection_decision"),
             "capability_requirement": required,
@@ -453,6 +459,7 @@ payload = {
     "classification_counts": dict(sorted(classification_counts.items())),
     "expected_outcome_counts": dict(sorted(outcome_counts.items())),
     "operation_class_counts": dict(sorted(operation_counts.items())),
+    "filesystem_flavor_counts": dict(sorted(flavor_counts.items())),
     "command_plan_lane_counts": dict(sorted(lane_counts.items())),
     "command_plan_outcome_counts": dict(sorted(plan_outcome_counts.items())),
     "command_plan_proof": {
@@ -487,6 +494,7 @@ for label, counter in [
     ("Status", status_counts),
     ("Classification", classification_counts),
     ("Expected outcome", outcome_counts),
+    ("Filesystem flavor", flavor_counts),
     ("Operation class", operation_counts),
     ("Command plan lane", lane_counts),
     ("Command plan outcome", plan_outcome_counts),
@@ -854,7 +862,7 @@ build_selection() {
     local -a raw_selection=()
     case "$XFSTESTS_FILTER" in
         all)
-            raw_selection=("${GENERIC_TESTS[@]}" "${EXT4_TESTS[@]}")
+            raw_selection=("${GENERIC_TESTS[@]}" "${EXT4_TESTS[@]}" "${BTRFS_TESTS[@]}")
             ;;
         generic)
             raw_selection=("${GENERIC_TESTS[@]}")
@@ -862,8 +870,11 @@ build_selection() {
         ext4)
             raw_selection=("${EXT4_TESTS[@]}")
             ;;
+        btrfs)
+            raw_selection=("${BTRFS_TESTS[@]}")
+            ;;
         *)
-            e2e_fail "Invalid XFSTESTS_FILTER='$XFSTESTS_FILTER' (expected all|generic|ext4)"
+            e2e_fail "Invalid XFSTESTS_FILTER='$XFSTESTS_FILTER' (expected all|generic|ext4|btrfs)"
             ;;
     esac
 
@@ -1104,6 +1115,7 @@ run_xfstests_subset() {
 e2e_step "Load curated xfstests subsets"
 load_test_list "$XFSTESTS_GENERIC_LIST" "generic" GENERIC_TESTS
 load_test_list "$XFSTESTS_EXT4_LIST" "ext4" EXT4_TESTS
+load_test_list "$XFSTESTS_BTRFS_LIST" "btrfs" BTRFS_TESTS
 build_selection
 
 printf '%s\n' "${SELECTED_TESTS[@]}" >"$SELECTED_FILE"

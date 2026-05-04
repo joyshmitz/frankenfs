@@ -12,6 +12,12 @@ FUSE mount. Established 2026-03-18.
 > blocked by an existing `apt-get upgrade -y` process holding the dpkg frontend
 > lock. Treat the table below as the last executable taxonomy plus the dated
 > 2026-05-01 environment-blocked baseline attempt.
+>
+> **Policy refresh (2026-05-04):** The dry-run subset policy now also includes
+> explicit btrfs planning rows (`btrfs/001`, `btrfs/008`) so the xfstests
+> artifacts distinguish generic, ext4, and btrfs scope. These rows are not new
+> pass/fail runtime evidence; they are classified before execution until the
+> permissioned xfstests lane is available.
 
 ## Fresh Baseline Attempt - 2026-05-01
 
@@ -24,7 +30,7 @@ FUSE mount. Established 2026-03-18.
 | xfstests checkout | `third_party/xfstests-dev/check` present |
 | Wrapper command | `XFSTESTS_MODE=auto XFSTESTS_DRY_RUN=1 XFSTESTS_STRICT=0 ./scripts/e2e/ffs_xfstests_e2e.sh` |
 | Wrapper artifacts | `artifacts/e2e/20260501_000535_ffs_xfstests_e2e/xfstests/{selected_tests.txt,summary.json,results.json,junit.xml,check.log}` |
-| Selected subset | 11 tests: 7 generic, 4 ext4 |
+| Selected subset | 11 tests at execution time: 7 generic, 4 ext4 |
 | Wrapper outcome | `status=skipped`, `mode=run`, `dry_run=1`, `check_rc=1` |
 | Current counts | passed 0, failed 0, skipped 0, not_run 11 |
 | Immediate blocker | `check.log`: `fsstress not found or executable` |
@@ -59,9 +65,15 @@ wrapper with `XFSTESTS_DRY_RUN=0`.
 | ext4/003 | skip | known_fail | bigalloc scratch mkfs |
 | ext4/005 | skip | known_fail | EXT4 ioctl kernel/VFS boundary: `ENOTTY` before `ffs-fuse::ioctl` |
 | ext4/013 | skip | wont_fix | debugfs raw inode corruption |
+| btrfs/001 | skip | likely_pass | subvolume/snapshot scratch lane requires btrfs-progs, built xfstests, and permissioned FUSE execution |
+| btrfs/008 | skip | wont_fix | full btrfs send/receive apply parity remains explicit follow-up work (`bd-naww5`) |
 
 **Passable: 3/11** — generic/001, generic/013, generic/035
 **Likely passable: 1/11** — generic/112 (pending runtime validation)
+
+**Current policy rows: 17** — 11 generic, 4 ext4, 2 btrfs. Runtime passability
+counts above remain tied to the 2026-05-01 execution attempt until a fresh
+permissioned run updates the baseline.
 
 ## Root Cause Analysis
 

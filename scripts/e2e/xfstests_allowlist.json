@@ -918,5 +918,137 @@
       "expected_plan_outcome": "unsupported_by_scope",
       "command_summary": "scope-skip ext4/013 module-level command before host mutation"
     }
+  },
+  {
+    "test_id": "btrfs/001",
+    "failure_reason": "Exercises btrfs subvolume and snapshot mutation through btrfs-progs on a scratch mount. FrankenFS supports btrfs selected-root interpretation, but this xfstests row requires a permissioned btrfs scratch device, btrfs utility mutation ioctls, and real mount execution before it can be classified as pass/fail.",
+    "status": "likely_pass",
+    "policy_row_id": "xfstests-policy-btrfs-001",
+    "filesystem_flavor": "btrfs",
+    "v1_scope_mapping": "README.md#v1-filesystem-scope",
+    "expected_operation_class": "directory_mutation",
+    "operation_class_tags": [
+      "read_only_mount",
+      "rw_file_lifecycle"
+    ],
+    "user_risk_category": "namespace_integrity",
+    "expected_outcome": "environment_blocked",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
+    "required_capabilities": [
+      "fuse_mount",
+      "btrfs_progs",
+      "btrfs_subvolume_snapshot",
+      "built_xfstests"
+    ],
+    "classification": "environment_blocked",
+    "scope_reference": "README.md#v1-filesystem-scope",
+    "tracker_id": "bd-rchk3.2",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=btrfs ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-btrfs-001",
+      "execution_lane": "host_skip",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/btrfs-001.img",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/btrfs-001",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/btrfs-001",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/btrfs-001.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/btrfs-001.scratch.img",
+      "image_hash": "sha256:plan-fixture-btrfs-001",
+      "helper_binaries": [
+        "xfstests/check",
+        "btrfs",
+        "ffs-cli",
+        "fusermount3"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount",
+        "host_tooling"
+      ],
+      "mutation_surface": "dry-run command selection for btrfs subvolume and snapshot coverage under temp-root FUSE placeholders",
+      "cleanup_action": "skip real btrfs utility mutation until permissioned lane; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "btrfs/001"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "host_skip",
+      "command_summary": "host-skip btrfs/001 subvolume/snapshot command until btrfs scratch prerequisites exist"
+    }
+  },
+  {
+    "test_id": "btrfs/008",
+    "failure_reason": "Exercises full btrfs send and receive mutation through btrfs-progs. FrankenFS currently keeps send/receive export and apply parity as explicit follow-up work, so this row is selected only to preserve the unsupported-by-V1 boundary in the xfstests policy.",
+    "status": "wont_fix",
+    "policy_row_id": "xfstests-policy-btrfs-008",
+    "filesystem_flavor": "btrfs",
+    "v1_scope_mapping": "README.md#allowed-deferrals-and-non-goals",
+    "expected_operation_class": "host_capability_skip",
+    "operation_class_tags": [
+      "directory_mutation",
+      "xattr_semantics"
+    ],
+    "user_risk_category": "unsupported_feature",
+    "expected_outcome": "unsupported_by_v1",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
+    "required_capabilities": [
+      "fuse_mount",
+      "btrfs_progs",
+      "btrfs_send_receive",
+      "built_xfstests"
+    ],
+    "classification": "unsupported_by_v1",
+    "scope_reference": "README.md#allowed-deferrals-and-non-goals",
+    "tracker_id": "bd-naww5",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=btrfs ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-btrfs-008",
+      "execution_lane": "unsupported_by_scope",
+      "image_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/images/btrfs-008.img",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/btrfs-008",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/btrfs-008",
+      "test_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/btrfs-008.test.img",
+      "scratch_device": "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/btrfs-008.scratch.img",
+      "image_hash": "sha256:plan-fixture-btrfs-008",
+      "helper_binaries": [
+        "xfstests/check",
+        "btrfs",
+        "ffs-cli",
+        "fusermount3"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount",
+        "host_tooling"
+      ],
+      "mutation_surface": "no product mutation; btrfs send/receive apply parity is classified before execution",
+      "cleanup_action": "skip unsupported send/receive apply lane; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "btrfs/008"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "unsupported_by_scope",
+      "command_summary": "scope-skip btrfs/008 send/receive command before host mutation"
+    }
   }
 ]

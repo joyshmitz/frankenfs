@@ -179,6 +179,8 @@ const REQUIRED_XFSTESTS_OPERATION_CLASSES: &[&str] = &[
     "host_capability_skip",
 ];
 
+const REQUIRED_XFSTESTS_FILESYSTEM_FLAVORS: &[&str] = &["generic", "ext4", "btrfs"];
+
 const KNOWN_XFSTESTS_RISK_CATEGORIES: &[&str] = &[
     "data_visibility",
     "data_integrity",
@@ -311,8 +313,12 @@ pub fn validate_xfstests_policy(
 pub fn validate_xfstests_policy_coverage(allowlist: &[XfstestsAllowlistEntry]) -> Vec<String> {
     let mut errors = Vec::new();
     let mut covered = BTreeSet::new();
+    let mut flavors = BTreeSet::new();
 
     for entry in allowlist {
+        if let Some(filesystem_flavor) = entry.filesystem_flavor.as_deref() {
+            flavors.insert(filesystem_flavor.to_owned());
+        }
         if let Some(operation_class) = entry.expected_operation_class.as_deref() {
             covered.insert(operation_class.to_owned());
         }
@@ -325,6 +331,14 @@ pub fn validate_xfstests_policy_coverage(allowlist: &[XfstestsAllowlistEntry]) -
         if !covered.contains(*required) {
             errors.push(format!(
                 "xfstests policy is missing representative operation class: {required}"
+            ));
+        }
+    }
+
+    for required in REQUIRED_XFSTESTS_FILESYSTEM_FLAVORS {
+        if !flavors.contains(*required) {
+            errors.push(format!(
+                "xfstests policy is missing representative filesystem flavor: {required}"
             ));
         }
     }
@@ -348,7 +362,7 @@ fn validate_policy_entry(entry: &XfstestsAllowlistEntry, selected: bool, errors:
 
 fn validate_policy_identity(entry: &XfstestsAllowlistEntry, errors: &mut Vec<String>) {
     let test_prefix = entry.test_id.split('/').next().unwrap_or_default();
-    if !matches!(test_prefix, "generic" | "ext4") {
+    if !matches!(test_prefix, "generic" | "ext4" | "btrfs") {
         errors.push(format!(
             "xfstests policy has unsupported test id format: {}",
             entry.test_id
@@ -376,8 +390,9 @@ fn validate_policy_identity(entry: &XfstestsAllowlistEntry, errors: &mut Vec<Str
     }
 
     match entry.filesystem_flavor.as_deref() {
-        Some("generic" | "ext4") if entry.filesystem_flavor.as_deref() == Some(test_prefix) => {}
-        Some("generic" | "ext4") => errors.push(format!(
+        Some("generic" | "ext4" | "btrfs")
+            if entry.filesystem_flavor.as_deref() == Some(test_prefix) => {}
+        Some("generic" | "ext4" | "btrfs") => errors.push(format!(
             "xfstests policy {} has filesystem_flavor that does not match id prefix",
             entry.test_id
         )),
@@ -1408,6 +1423,9 @@ generic/001  2s ... pass\n";
         selected.extend(load_selected_tests(&repo_xfstests_list_path(
             "xfstests_ext4.list",
         ))?);
+        selected.extend(load_selected_tests(&repo_xfstests_list_path(
+            "xfstests_btrfs.list",
+        ))?);
         let allowlist = load_allowlist(&repo_xfstests_allowlist_path())?;
 
         let mut errors = validate_xfstests_policy(&selected, &allowlist);
@@ -1613,6 +1631,23 @@ generic/001  2s ... pass\n";
                 .iter()
                 .any(|error| error.contains("host_capability_skip")),
             "expected missing representative operation class error, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn xfstests_policy_coverage_requires_representative_filesystem_flavors() {
+        let allowlist = vec![
+            valid_policy_entry("generic/001"),
+            valid_policy_entry("ext4/001"),
+        ];
+
+        let errors = validate_xfstests_policy_coverage(&allowlist);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("filesystem flavor: btrfs")),
+            "expected missing btrfs flavor error, got {errors:#?}"
         );
     }
 
