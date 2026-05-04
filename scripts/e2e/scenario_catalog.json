@@ -473,6 +473,30 @@
           "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_rejects_default_mount|outcome=PASS"
         },
         {
+          "id": "writeback_cache_audit_fuse_unavailable_rejected",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_fuse_unavailable_rejected|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_audit_unsupported_mode_rejected",
+          "category": "unsupported_op",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_unsupported_mode_rejected|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_audit_repeated_mount_attempts",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_repeated_mount_attempts|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_audit_fuser_options_default_off",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_fuser_options_default_off|outcome=PASS"
+        },
+        {
           "id": "writeback_cache_audit_bad_schema_fails",
           "category": "error",
           "status": "active",
@@ -489,6 +513,12 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_audit_help_docs_consistent",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_help_docs_consistent|outcome=PASS"
         },
         {
           "id": "writeback_cache_audit_catalog_valid",

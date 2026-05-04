@@ -12018,6 +12018,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_mount_options_excludes_writeback_cache_across_variants() {
+        let cases = vec![
+            ("default_ro", MountOptions::default()),
+            (
+                "read_write",
+                MountOptions {
+                    read_only: false,
+                    ..MountOptions::default()
+                },
+            ),
+            (
+                "rw_allow_other",
+                MountOptions {
+                    read_only: false,
+                    allow_other: true,
+                    ..MountOptions::default()
+                },
+            ),
+            (
+                "rw_no_auto_unmount",
+                MountOptions {
+                    read_only: false,
+                    auto_unmount: false,
+                    ..MountOptions::default()
+                },
+            ),
+            (
+                "rw_allow_other_threads",
+                MountOptions {
+                    read_only: false,
+                    allow_other: true,
+                    auto_unmount: false,
+                    ioctl_trace_path: None,
+                    worker_threads: 8,
+                },
+            ),
+        ];
+
+        for (case, opts) in cases {
+            let labels = mount_option_labels_for_fuzzing(&opts);
+            let mount_opts = build_mount_options(&opts);
+            let debug_dump = mount_option_debug_lines(&mount_opts);
+            println!(
+                "WRITEBACK_CACHE_FUSER_OPTIONS|case={case}|labels={}|debug={}",
+                labels.join(";"),
+                debug_dump.replace('\n', "|")
+            );
+
+            assert!(
+                labels.iter().all(|label| {
+                    let label = label.to_ascii_lowercase();
+                    !label.contains("writeback_cache") && !label.contains("writebackcache")
+                }),
+                "writeback_cache surfaced in canonical mount labels for {case}: {labels:?}"
+            );
+            assert!(
+                !mount_opts
+                    .iter()
+                    .any(|option| matches!(option, MountOption::CUSTOM(value)
+                        if value.to_ascii_lowercase().contains("writeback_cache"))),
+                "writeback_cache surfaced as a custom FUSE option for {case}: {mount_opts:?}"
+            );
+            assert!(
+                !debug_dump.to_ascii_lowercase().contains("writebackcache"),
+                "WritebackCache-like enum appeared for {case}: {debug_dump}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_mount_options_rejects_kernel_writeback_cache_tokens() {
+        let cases = [
+            ("writeback_cache", "writeback_cache"),
+            ("rw,writeback_cache", "writeback_cache"),
+            ("writeback_cache=true", "writeback_cache"),
+            ("nowriteback_cache", "nowriteback_cache"),
+        ];
+
+        for (raw, expected_option) in cases {
+            assert!(
+                matches!(
+                    parse_mount_options_for_fuzzing(raw.as_bytes()),
+                    Err(MountOptionParseError::UnknownOption { option })
+                        if option == expected_option
+                ),
+                "kernel writeback_cache token should be rejected: {raw}"
+            );
+        }
+    }
+
     // ── should_shed backpressure tests ───────────────────────────────────
 
     #[test]

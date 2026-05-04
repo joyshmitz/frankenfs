@@ -11,7 +11,7 @@
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, fmt::Write as _, fs, path::Path};
+use std::{fmt::Write as _, fs, path::Path};
 
 pub const WRITEBACK_CACHE_AUDIT_SCHEMA_VERSION: u32 = 1;
 pub const WRITEBACK_CACHE_AUDIT_REPORT_SCHEMA_VERSION: u32 = 1;
@@ -324,7 +324,7 @@ fn check_mount_mode_and_opt_in(
         return Some(reject(
             "default_or_read_only_mount",
             ["I3"],
-            "writeback_cache requires an rw mount; default and ro mounts must keep it disabled",
+            "writeback_cache requires an rw mount; default, ro, and unsupported modes must keep it disabled",
         ));
     }
     if !gate.explicit_opt_in {
@@ -497,12 +497,8 @@ pub fn validate_writeback_cache_audit_gate(gate: &WritebackCacheAuditGate) -> Re
     if gate.mount_options.fs_name.trim().is_empty() {
         bail!("writeback cache audit fs_name must not be empty");
     }
-    let unsupported_modes: BTreeSet<&str> = ["", "swap"].into_iter().collect();
-    if unsupported_modes.contains(gate.mount_options.mode.as_str()) {
-        bail!(
-            "writeback cache audit mount mode `{}` is not supported",
-            gate.mount_options.mode
-        );
+    if gate.mount_options.mode.trim().is_empty() {
+        bail!("writeback cache audit mount mode must not be empty");
     }
     if gate.fuse_capability.probe_status.trim().is_empty() {
         bail!("writeback cache audit fuse probe_status must not be empty");
@@ -663,6 +659,17 @@ mod tests {
     }
 
     #[test]
+    fn kernel_writeback_capability_false_is_rejected() {
+        let mut gate = happy_gate();
+        gate.fuse_capability.kernel_supports_writeback_cache = false;
+        let decision = evaluate_writeback_cache_audit(&gate);
+        assert_eq!(
+            rejection_reason(&decision),
+            Some("fuse_capability_unavailable")
+        );
+    }
+
+    #[test]
     fn rw_repair_serialization_pending_is_rejected() {
         let mut gate = happy_gate();
         gate.repair_serialization_state = "pending_review".to_owned();
@@ -710,6 +717,28 @@ mod tests {
     fn missing_crash_matrix_is_rejected() {
         let mut gate = happy_gate();
         gate.crash_matrix_artifact.present = false;
+        let decision = evaluate_writeback_cache_audit(&gate);
+        assert_eq!(
+            rejection_reason(&decision),
+            Some("stale_crash_matrix_or_missing_fsync_evidence")
+        );
+    }
+
+    #[test]
+    fn stale_crash_matrix_is_rejected() {
+        let mut gate = happy_gate();
+        gate.crash_matrix_artifact.fresh = false;
+        let decision = evaluate_writeback_cache_audit(&gate);
+        assert_eq!(
+            rejection_reason(&decision),
+            Some("stale_crash_matrix_or_missing_fsync_evidence")
+        );
+    }
+
+    #[test]
+    fn missing_fsync_evidence_is_rejected() {
+        let mut gate = happy_gate();
+        gate.fsync_evidence_artifact.present = false;
         let decision = evaluate_writeback_cache_audit(&gate);
         assert_eq!(
             rejection_reason(&decision),
@@ -780,9 +809,27 @@ mod tests {
     }
 
     #[test]
-    fn validate_gate_top_level_rejects_unsupported_mode() {
+    fn unsupported_mode_builds_policy_rejection_report() {
         let mut gate = happy_gate();
         gate.mount_options.mode = "swap".to_owned();
+        let report = build_writeback_cache_audit_report(
+            &gate,
+            "writeback_cache_audit_rejects_unsupported_mode",
+            "ffs-harness validate-writeback-cache-audit --gate gate.json",
+        )
+        .expect("unsupported mode should still produce a policy report");
+
+        assert!(matches!(
+            report.decision,
+            WritebackCacheAuditDecision::Reject { ref reason, .. }
+                if reason == "default_or_read_only_mount"
+        ));
+    }
+
+    #[test]
+    fn validate_gate_top_level_rejects_empty_mode() {
+        let mut gate = happy_gate();
+        gate.mount_options.mode.clear();
         let result = validate_writeback_cache_audit_gate(&gate);
         assert!(result.is_err());
     }

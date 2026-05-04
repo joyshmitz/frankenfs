@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ffs_writeback_cache_audit_e2e.sh - dry-run gate for bd-rchk0.2.1.
+# ffs_writeback_cache_audit_e2e.sh - dry-run gate for bd-rchk0.2.1.1.
 #
 # Proves that the FUSE writeback_cache mount option remains gated by an
 # explicit audit report and fails closed for default, unsupported, and stale
@@ -26,9 +26,14 @@ TOTAL=0
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_cli_wired|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_accepts_complete_gate|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_rejects_default_mount|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_audit_fuse_unavailable_rejected|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_audit_unsupported_mode_rejected|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_audit_repeated_mount_attempts|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_audit_fuser_options_default_off|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_bad_schema_fails|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_report_fields|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_unit_tests|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_audit_help_docs_consistent|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_catalog_valid|outcome=PASS
 
 log() {
@@ -73,6 +78,65 @@ run_rch_capture() {
     return "$status"
 }
 
+expect_report_rejection() {
+    local report_path="$1"
+    local expected_reason="$2"
+    local expected_invariant="$3"
+    python3 - "$report_path" "$expected_reason" "$expected_invariant" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected_reason = sys.argv[2]
+expected_invariant = sys.argv[3]
+decision = report["decision"]
+if decision["decision"] != "reject":
+    raise SystemExit("expected reject decision")
+if decision["reason"] != expected_reason:
+    raise SystemExit(f"wrong reason: {decision['reason']}")
+if expected_invariant not in decision["invariants_failing"]:
+    raise SystemExit(f"{expected_invariant} failure not reported")
+PY
+}
+
+record_report_observation() {
+    local report_path="$1"
+    local expected_error_class="$2"
+    local cleanup_status="$3"
+    local observation
+    observation="$(python3 - "$report_path" "$expected_error_class" "$cleanup_status" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = sys.argv[2]
+cleanup = sys.argv[3]
+decision = report["decision"]
+observed = "accept" if decision["decision"] == "accept" else decision["reason"]
+invariants = ",".join(row["id"] for row in report["invariant_map"])
+raw_options = ",".join(report["mount_options"]["raw_options"])
+artifact_paths = ",".join(report["artifact_paths"])
+repro = report["reproduction_command"].replace("|", "/")
+print(
+    "WRITEBACK_CACHE_AUDIT_OBSERVATION"
+    f"|scenario_id={report['scenario_id']}"
+    f"|gate_version={report['gate_version']}"
+    f"|mount_options={raw_options}"
+    f"|invariant_ids={invariants}"
+    f"|decision={decision['decision']}"
+    f"|expected_error_class={expected}"
+    f"|observed_error_class={observed}"
+    f"|artifact_paths={artifact_paths}"
+    f"|cleanup_status={cleanup}"
+    f"|reproduction_command={repro}"
+)
+PY
+)"
+    log "$observation"
+}
+
 extract_json_object() {
     local raw_path="$1"
     local out_path="$2"
@@ -106,19 +170,31 @@ log "=============================================="
 
 ACCEPT_GATE="$LOG_DIR/writeback_cache_accept_gate.json"
 DEFAULT_REJECT_GATE="$LOG_DIR/writeback_cache_default_reject_gate.json"
+FUSE_UNAVAILABLE_GATE="$LOG_DIR/writeback_cache_fuse_unavailable_gate.json"
+UNSUPPORTED_MODE_GATE="$LOG_DIR/writeback_cache_unsupported_mode_gate.json"
 BAD_SCHEMA_GATE="$LOG_DIR/writeback_cache_bad_schema_gate.json"
 ACCEPT_RAW="$LOG_DIR/writeback_cache_accept.raw"
 REJECT_RAW="$LOG_DIR/writeback_cache_reject.raw"
+FUSE_UNAVAILABLE_RAW="$LOG_DIR/writeback_cache_fuse_unavailable.raw"
+UNSUPPORTED_MODE_RAW="$LOG_DIR/writeback_cache_unsupported_mode.raw"
+REPEATED_RAW_A="$LOG_DIR/writeback_cache_repeated_a.raw"
+REPEATED_RAW_B="$LOG_DIR/writeback_cache_repeated_b.raw"
+FUSER_OPTIONS_RAW="$LOG_DIR/writeback_cache_fuser_options.raw"
 BAD_SCHEMA_RAW="$LOG_DIR/writeback_cache_bad_schema.raw"
 UNIT_RAW="$LOG_DIR/writeback_cache_unit_tests.raw"
+HELP_RAW="$LOG_DIR/writeback_cache_help.raw"
 ACCEPT_REPORT="$LOG_DIR/writeback_cache_accept_report.json"
 REJECT_REPORT="$LOG_DIR/writeback_cache_reject_report.json"
+FUSE_UNAVAILABLE_REPORT="$LOG_DIR/writeback_cache_fuse_unavailable_report.json"
+UNSUPPORTED_MODE_REPORT="$LOG_DIR/writeback_cache_unsupported_mode_report.json"
+REPEATED_REPORT_A="$LOG_DIR/writeback_cache_repeated_a_report.json"
+REPEATED_REPORT_B="$LOG_DIR/writeback_cache_repeated_b_report.json"
 
 cat >"$ACCEPT_GATE" <<'JSON'
 {
   "schema_version": 1,
-  "gate_version": "bd-rchk0.2.1-gate-v1",
-  "bead_id": "bd-rchk0.2.1",
+  "gate_version": "bd-rchk0.2.1.1-gate-v1",
+  "bead_id": "bd-rchk0.2.1.1",
   "mount_options": {
     "raw_options": [
       "rw",
@@ -168,8 +244,8 @@ JSON
 cat >"$DEFAULT_REJECT_GATE" <<'JSON'
 {
   "schema_version": 1,
-  "gate_version": "bd-rchk0.2.1-gate-v1",
-  "bead_id": "bd-rchk0.2.1",
+  "gate_version": "bd-rchk0.2.1.1-gate-v1",
+  "bead_id": "bd-rchk0.2.1.1",
   "mount_options": {
     "raw_options": [
       "ro",
@@ -219,8 +295,8 @@ JSON
 cat >"$BAD_SCHEMA_GATE" <<'JSON'
 {
   "schema_version": 99,
-  "gate_version": "bd-rchk0.2.1-gate-v1",
-  "bead_id": "bd-rchk0.2.1",
+  "gate_version": "bd-rchk0.2.1.1-gate-v1",
+  "bead_id": "bd-rchk0.2.1.1",
   "mount_options": {
     "raw_options": [
       "rw"
@@ -265,6 +341,36 @@ cat >"$BAD_SCHEMA_GATE" <<'JSON'
 }
 JSON
 
+python3 - "$ACCEPT_GATE" "$FUSE_UNAVAILABLE_GATE" "$UNSUPPORTED_MODE_GATE" <<'PY'
+import copy
+import json
+import pathlib
+import sys
+
+base = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+
+fuse_unavailable = copy.deepcopy(base)
+fuse_unavailable["fuse_capability"]["probe_status"] = "unavailable"
+fuse_unavailable["fuse_capability"]["kernel_supports_writeback_cache"] = False
+fuse_unavailable["fuse_capability"]["helper_binary_present"] = False
+pathlib.Path(sys.argv[2]).write_text(
+    json.dumps(fuse_unavailable, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+
+unsupported_mode = copy.deepcopy(base)
+unsupported_mode["mount_options"]["mode"] = "swap"
+unsupported_mode["mount_options"]["raw_options"] = [
+    "swap",
+    "fsname=frankenfs",
+    "default_permissions",
+]
+pathlib.Path(sys.argv[3]).write_text(
+    json.dumps(unsupported_mode, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+
 step "Scenario 1: writeback-cache audit module and CLI are wired"
 if grep -Fq "pub mod writeback_cache_audit" crates/ffs-harness/src/lib.rs \
     && grep -Fq "validate-writeback-cache-audit" crates/ffs-harness/src/main.rs; then
@@ -280,6 +386,7 @@ if run_rch_capture "$ACCEPT_RAW" cargo run --quiet -p ffs-harness -- \
     --scenario-id writeback_cache_audit_accepts_complete_gate \
     --require-accept; then
     if extract_json_object "$ACCEPT_RAW" "$ACCEPT_REPORT" '"schema_version"'; then
+        record_report_observation "$ACCEPT_REPORT" "accept" "retained:${LOG_DIR}"
         scenario_result "writeback_cache_audit_accepts_complete_gate" "PASS" "complete opt-in gate accepted"
     else
         scenario_result "writeback_cache_audit_accepts_complete_gate" "FAIL" "accepted run did not emit report JSON"
@@ -294,21 +401,9 @@ if run_rch_capture "$REJECT_RAW" cargo run --quiet -p ffs-harness -- \
     --gate "$DEFAULT_REJECT_GATE" \
     --scenario-id writeback_cache_audit_rejects_default_mount; then
     if extract_json_object "$REJECT_RAW" "$REJECT_REPORT" '"schema_version"' \
-        && python3 - "$REJECT_REPORT" <<'PY'
-import json
-import pathlib
-import sys
-
-report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-decision = report["decision"]
-if decision["decision"] != "reject":
-    raise SystemExit("expected reject decision")
-if decision["reason"] != "default_or_read_only_mount":
-    raise SystemExit(f"wrong reason: {decision['reason']}")
-if "I3" not in decision["invariants_failing"]:
-    raise SystemExit("I3 failure not reported")
-PY
+        && expect_report_rejection "$REJECT_REPORT" "default_or_read_only_mount" "I3"
     then
+        record_report_observation "$REJECT_REPORT" "default_or_read_only_mount" "retained:${LOG_DIR}"
         scenario_result "writeback_cache_audit_rejects_default_mount" "PASS" "default/off gate rejected with stable reason"
     else
         scenario_result "writeback_cache_audit_rejects_default_mount" "FAIL" "reject report missing stable reason"
@@ -317,19 +412,108 @@ else
     scenario_result "writeback_cache_audit_rejects_default_mount" "FAIL" "schema-valid rejection should emit report"
 fi
 
-step "Scenario 4: bad schema fails closed"
+step "Scenario 4: unavailable FUSE capability rejects with a stable class"
+if run_rch_capture "$FUSE_UNAVAILABLE_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-audit \
+    --gate "$FUSE_UNAVAILABLE_GATE" \
+    --scenario-id writeback_cache_audit_fuse_unavailable_rejected; then
+    if extract_json_object "$FUSE_UNAVAILABLE_RAW" "$FUSE_UNAVAILABLE_REPORT" '"schema_version"' \
+        && expect_report_rejection "$FUSE_UNAVAILABLE_REPORT" "fuse_capability_unavailable" "I5"
+    then
+        record_report_observation "$FUSE_UNAVAILABLE_REPORT" "fuse_capability_unavailable" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_audit_fuse_unavailable_rejected" "PASS" "unavailable kernel/helper capability rejected"
+    else
+        scenario_result "writeback_cache_audit_fuse_unavailable_rejected" "FAIL" "FUSE-unavailable report missing stable reason"
+    fi
+else
+    scenario_result "writeback_cache_audit_fuse_unavailable_rejected" "FAIL" "schema-valid FUSE-unavailable gate should emit report"
+fi
+
+step "Scenario 5: unsupported mount mode rejects as a policy report"
+if run_rch_capture "$UNSUPPORTED_MODE_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-audit \
+    --gate "$UNSUPPORTED_MODE_GATE" \
+    --scenario-id writeback_cache_audit_unsupported_mode_rejected; then
+    if extract_json_object "$UNSUPPORTED_MODE_RAW" "$UNSUPPORTED_MODE_REPORT" '"schema_version"' \
+        && expect_report_rejection "$UNSUPPORTED_MODE_REPORT" "default_or_read_only_mount" "I3"
+    then
+        record_report_observation "$UNSUPPORTED_MODE_REPORT" "default_or_read_only_mount" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_audit_unsupported_mode_rejected" "PASS" "unsupported mode rejected with report artifact"
+    else
+        scenario_result "writeback_cache_audit_unsupported_mode_rejected" "FAIL" "unsupported-mode report missing stable reason"
+    fi
+else
+    scenario_result "writeback_cache_audit_unsupported_mode_rejected" "FAIL" "schema-valid unsupported-mode gate should emit report"
+fi
+
+step "Scenario 6: repeated dry-run mount attempts keep the same decision"
+if run_rch_capture "$REPEATED_RAW_A" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-audit \
+    --gate "$DEFAULT_REJECT_GATE" \
+    --scenario-id writeback_cache_audit_repeated_mount_attempts_a \
+    && run_rch_capture "$REPEATED_RAW_B" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-audit \
+    --gate "$DEFAULT_REJECT_GATE" \
+    --scenario-id writeback_cache_audit_repeated_mount_attempts_b \
+    && extract_json_object "$REPEATED_RAW_A" "$REPEATED_REPORT_A" '"schema_version"' \
+    && extract_json_object "$REPEATED_RAW_B" "$REPEATED_REPORT_B" '"schema_version"' \
+    && python3 - "$REPEATED_REPORT_A" "$REPEATED_REPORT_B" <<'PY'
+import json
+import pathlib
+import sys
+
+a = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+b = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+for key in ("decision", "failure_modes", "required_artifact_fields", "mount_options", "artifact_paths"):
+    if a[key] != b[key]:
+        raise SystemExit(f"repeated report field changed: {key}")
+PY
+then
+    record_report_observation "$REPEATED_REPORT_A" "default_or_read_only_mount" "retained:${LOG_DIR}"
+    scenario_result "writeback_cache_audit_repeated_mount_attempts" "PASS" "repeated dry-run attempts kept decision and artifacts stable"
+else
+    scenario_result "writeback_cache_audit_repeated_mount_attempts" "FAIL" "repeated dry-run attempts drifted; see $REPEATED_RAW_A and $REPEATED_RAW_B"
+fi
+
+step "Scenario 7: FUSE mount option construction keeps writeback_cache absent"
+if run_rch_capture "$FUSER_OPTIONS_RAW" cargo test -p ffs-fuse writeback_cache -- --nocapture; then
+    if python3 - "$FUSER_OPTIONS_RAW" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+lines = [line for line in text.splitlines() if "WRITEBACK_CACHE_FUSER_OPTIONS|" in line]
+if not lines:
+    raise SystemExit("missing FUSE mount option observations")
+for line in lines:
+    payload = line.split("|labels=", 1)[1].lower()
+    if "writeback_cache" in payload or "writebackcache" in payload:
+        raise SystemExit(f"writeback cache option leaked: {line}")
+PY
+    then
+        log "WRITEBACK_CACHE_FUSER_OPTIONS_ARTIFACT|raw_log=${FUSER_OPTIONS_RAW}|cleanup_status=retained:${LOG_DIR}"
+        scenario_result "writeback_cache_audit_fuser_options_default_off" "PASS" "FUSE option matrix emitted no writeback_cache token"
+    else
+        scenario_result "writeback_cache_audit_fuser_options_default_off" "FAIL" "FUSE option matrix leaked or omitted observations"
+    fi
+else
+    scenario_result "writeback_cache_audit_fuser_options_default_off" "FAIL" "ffs-fuse writeback_cache tests failed; see $FUSER_OPTIONS_RAW"
+fi
+
+step "Scenario 8: bad schema fails closed"
 if run_rch_capture "$BAD_SCHEMA_RAW" cargo run --quiet -p ffs-harness -- \
     validate-writeback-cache-audit \
     --gate "$BAD_SCHEMA_GATE" \
     --scenario-id writeback_cache_audit_bad_schema_fails; then
     scenario_result "writeback_cache_audit_bad_schema_fails" "FAIL" "bad schema unexpectedly accepted"
 elif grep -Fq "schema_version" "$BAD_SCHEMA_RAW"; then
+    log "WRITEBACK_CACHE_AUDIT_OBSERVATION|scenario_id=writeback_cache_audit_bad_schema_fails|gate_version=invalid|mount_options=rw|invariant_ids=I1,I2,I3,I4,I5,I6|decision=reject|expected_error_class=schema_version|observed_error_class=schema_version|artifact_paths=${BAD_SCHEMA_GATE}|cleanup_status=retained:${LOG_DIR}|reproduction_command=ffs-harness validate-writeback-cache-audit --gate ${BAD_SCHEMA_GATE}"
     scenario_result "writeback_cache_audit_bad_schema_fails" "PASS" "bad schema rejected with schema_version diagnostic"
 else
     scenario_result "writeback_cache_audit_bad_schema_fails" "FAIL" "bad schema rejected without useful diagnostic"
 fi
 
-step "Scenario 5: report carries invariants, failure modes, artifacts, and repro command"
+step "Scenario 9: report carries invariants, failure modes, artifacts, and repro command"
 if python3 - "$ACCEPT_REPORT" <<'PY'
 import json
 import pathlib
@@ -378,16 +562,60 @@ else
     scenario_result "writeback_cache_audit_report_fields" "FAIL" "report contract incomplete"
 fi
 
-step "Scenario 6: unit tests cover gate policy and report contract"
+step "Scenario 10: unit tests cover gate policy and report contract"
 if run_rch_capture "$UNIT_RAW" cargo test -p ffs-harness writeback_cache_audit -- --nocapture; then
     scenario_result "writeback_cache_audit_unit_tests" "PASS" "module unit tests passed through rch"
 else
     scenario_result "writeback_cache_audit_unit_tests" "FAIL" "module unit tests failed; see $UNIT_RAW"
 fi
 
-step "Scenario 7: scenario catalog names this suite and static evidence markers"
+step "Scenario 11: CLI help, README, and FEATURE_PARITY keep unsupported wording"
+if run_rch_capture "$HELP_RAW" cargo run --quiet -p ffs-cli -- mount --help; then
+    if grep -Fq "writeback_cache" "$HELP_RAW" \
+        && grep -Fq "intentionally unsupported" "$HELP_RAW" \
+        && grep -Fq "bd-rchk0.2.1.1" README.md \
+        && grep -Fq "bd-rchk0.2.1.1" FEATURE_PARITY.md \
+        && grep -Fq "must not enable it" README.md \
+        && grep -Fq "remains unsupported" FEATURE_PARITY.md; then
+        log "WRITEBACK_CACHE_HELP_DOCS_OBSERVATION|scenario_id=writeback_cache_audit_help_docs_consistent|expected_error_class=unsupported|observed_error_class=unsupported|help_log=${HELP_RAW}|cleanup_status=retained:${LOG_DIR}|reproduction_command=cargo run -p ffs-cli -- mount --help"
+        scenario_result "writeback_cache_audit_help_docs_consistent" "PASS" "help/docs/parity keep unsupported wording"
+    else
+        scenario_result "writeback_cache_audit_help_docs_consistent" "FAIL" "help/docs/parity wording drifted"
+    fi
+else
+    scenario_result "writeback_cache_audit_help_docs_consistent" "FAIL" "ffs-cli mount help failed; see $HELP_RAW"
+fi
+
+step "Scenario 12: scenario catalog names this suite and static evidence markers"
 if jq -e '.suites[] | select(.suite_id == "ffs_writeback_cache_audit")' scripts/e2e/scenario_catalog.json >/dev/null \
-    && grep -Fq "SCENARIO_RESULT|scenario_id=writeback_cache_audit_catalog_valid|outcome=PASS" "$0"; then
+    && grep -Fq "SCENARIO_RESULT|scenario_id=writeback_cache_audit_catalog_valid|outcome=PASS" "$0" \
+    && python3 - scripts/e2e/scenario_catalog.json <<'PY'
+import json
+import pathlib
+import sys
+
+catalog = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+suite = next(row for row in catalog["suites"] if row["suite_id"] == "ffs_writeback_cache_audit")
+ids = {row["id"] for row in suite["scenarios"]}
+required = {
+    "writeback_cache_audit_cli_wired",
+    "writeback_cache_audit_accepts_complete_gate",
+    "writeback_cache_audit_rejects_default_mount",
+    "writeback_cache_audit_fuse_unavailable_rejected",
+    "writeback_cache_audit_unsupported_mode_rejected",
+    "writeback_cache_audit_repeated_mount_attempts",
+    "writeback_cache_audit_fuser_options_default_off",
+    "writeback_cache_audit_bad_schema_fails",
+    "writeback_cache_audit_report_fields",
+    "writeback_cache_audit_unit_tests",
+    "writeback_cache_audit_help_docs_consistent",
+    "writeback_cache_audit_catalog_valid",
+}
+missing = required - ids
+if missing:
+    raise SystemExit(f"missing catalog scenarios: {sorted(missing)}")
+PY
+then
     scenario_result "writeback_cache_audit_catalog_valid" "PASS" "catalog suite and markers present"
 else
     scenario_result "writeback_cache_audit_catalog_valid" "FAIL" "catalog suite or evidence markers missing"
