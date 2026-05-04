@@ -118,6 +118,11 @@ use ffs_harness::{
     },
     validate_btrfs_fixture, validate_ext4_fixture,
     verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
+    wal_group_commit_gate::{
+        DEFAULT_WAL_GROUP_COMMIT_GATE_MANIFEST, fail_on_wal_group_commit_gate_errors,
+        load_wal_group_commit_gate_manifest, render_wal_group_commit_gate_markdown,
+        validate_wal_group_commit_gate_manifest,
+    },
     workload_corpus::{
         DEFAULT_WORKLOAD_CORPUS_PATH, fail_on_workload_corpus_errors, load_workload_corpus,
         render_workload_corpus_markdown, validate_workload_corpus,
@@ -204,6 +209,7 @@ fn run() -> Result<()> {
         Some("performance-delta-closeout") => performance_delta_closeout_cmd(&args[1..]),
         Some("validate-swarm-cache-controller") => validate_swarm_cache_controller_cmd(&args[1..]),
         Some("validate-swarm-workload-harness") => validate_swarm_workload_harness_cmd(&args[1..]),
+        Some("validate-wal-group-commit-gate") => validate_wal_group_commit_gate_cmd(&args[1..]),
         Some("validate-scrub-repair-scheduler") => validate_scrub_repair_scheduler_cmd(&args[1..]),
         Some("validate-adversarial-threat-model") => {
             validate_adversarial_threat_model_cmd(&args[1..])
@@ -342,6 +348,14 @@ struct SwarmCacheControllerCmdArgs {
 
 #[derive(Debug)]
 struct SwarmWorkloadHarnessCmdArgs {
+    manifest_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
+struct WalGroupCommitGateCmdArgs {
     manifest_path: String,
     out_path: Option<String>,
     summary_out_path: Option<String>,
@@ -1320,6 +1334,89 @@ fn parse_swarm_workload_harness_cmd_args(
     }
 
     Ok(Some(SwarmWorkloadHarnessCmdArgs {
+        manifest_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
+fn validate_wal_group_commit_gate_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_wal_group_commit_gate_cmd_args(args)? else {
+        return Ok(());
+    };
+    let manifest = load_wal_group_commit_gate_manifest(Path::new(&cmd_args.manifest_path))?;
+    let report = validate_wal_group_commit_gate_manifest(&manifest);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_wal_group_commit_gate_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "WAL group-commit gate report written: {} valid={} scenarios={} measurements={}",
+            path, report.valid, report.scenario_count, report.measurement_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_wal_group_commit_gate_markdown(&report)),
+        )?;
+        println!("WAL group-commit gate summary written: {path}");
+    }
+
+    fail_on_wal_group_commit_gate_errors(&report)
+}
+
+fn parse_wal_group_commit_gate_cmd_args(
+    args: &[String],
+) -> Result<Option<WalGroupCommitGateCmdArgs>> {
+    let mut manifest_path = DEFAULT_WAL_GROUP_COMMIT_GATE_MANIFEST.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                args.get(i)
+                    .context("--manifest requires a path")?
+                    .clone_into(&mut manifest_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_wal_group_commit_gate_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-wal-group-commit-gate argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(WalGroupCommitGateCmdArgs {
         manifest_path,
         out_path,
         summary_out_path,
@@ -3019,6 +3116,7 @@ fn print_usage() {
     print_performance_delta_closeout_usage_summary();
     print_swarm_cache_controller_usage_summary();
     print_swarm_workload_harness_usage_summary();
+    print_wal_group_commit_gate_usage_summary();
     print_scrub_repair_scheduler_usage_summary();
     print_adversarial_threat_model_usage_summary();
     print_soak_canary_campaign_usage_summary();
@@ -3105,6 +3203,7 @@ fn print_usage_examples() {
     print_performance_delta_closeout_example();
     print_swarm_cache_controller_example();
     print_swarm_workload_harness_example();
+    print_wal_group_commit_gate_example();
     print_scrub_repair_scheduler_example();
     print_adversarial_threat_model_example();
     print_soak_canary_campaign_example();
@@ -3165,6 +3264,18 @@ fn print_swarm_workload_harness_usage_summary() {
 fn print_swarm_workload_harness_example() {
     println!(
         "  ffs-harness validate-swarm-workload-harness --manifest benchmarks/swarm_workload_harness_manifest.json --out artifacts/performance/swarm_workload_harness.json --summary-out artifacts/performance/swarm_workload_harness.md"
+    );
+}
+
+fn print_wal_group_commit_gate_usage_summary() {
+    println!(
+        "  ffs-harness validate-wal-group-commit-gate [--manifest FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_wal_group_commit_gate_example() {
+    println!(
+        "  ffs-harness validate-wal-group-commit-gate --manifest benchmarks/wal_group_commit_gate_manifest.json --out artifacts/performance/wal_group_commit_gate.json --summary-out artifacts/performance/wal_group_commit_gate.md"
     );
 }
 
@@ -3421,6 +3532,16 @@ fn print_swarm_workload_harness_usage() {
     println!();
     println!("Options:");
     println!("  --manifest FILE                    Read swarm workload harness manifest JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write selected-format validation report");
+    println!("  --summary-out FILE                 Write Markdown inspection summary");
+}
+
+fn print_wal_group_commit_gate_usage() {
+    println!("Usage: ffs-harness validate-wal-group-commit-gate [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --manifest FILE                    Read WAL group-commit gate manifest JSON");
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write selected-format validation report");
     println!("  --summary-out FILE                 Write Markdown inspection summary");

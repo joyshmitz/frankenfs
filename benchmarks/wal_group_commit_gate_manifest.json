@@ -1,0 +1,388 @@
+{
+  "schema_version": 1,
+  "gate_id": "bd-p2j3e.4-wal-group-commit-gate-v1",
+  "generated_at": "2026-05-03T23:30:00Z",
+  "target_host": {
+    "min_cpu_cores_logical": 64,
+    "min_ram_total_gb": 256,
+    "min_ram_available_gb": 192
+  },
+  "reference_policy": {
+    "require_reference_lane": true,
+    "min_cpu_cores_logical": 64,
+    "min_ram_total_gb": 256,
+    "min_ram_available_gb": 192,
+    "require_same_storage_class": true
+  },
+  "invariants": [
+    {
+      "invariant_id": "record_order",
+      "description": "Every WAL replay must observe the same logical record order published by the group-commit epoch.",
+      "enforcement": "Replay proof compares expected and observed sequence numbers before any public claim can improve.",
+      "evidence_path": "artifacts/wal/record_order/evidence.json"
+    },
+    {
+      "invariant_id": "idempotent_replay",
+      "description": "Replaying an already-applied segment must be a no-op for metadata state and publish cursors.",
+      "enforcement": "Replay proof includes repeated replay of the same raw WAL log and validates stable record counts.",
+      "evidence_path": "artifacts/wal/idempotent_replay/evidence.json"
+    },
+    {
+      "invariant_id": "fsync_fdatasync_boundary_semantics",
+      "description": "fsync and fdatasync boundaries must not publish records past the durable epoch promised to callers.",
+      "enforcement": "Boundary assertions in the replay row must pass before measured-local or authoritative claims are legal.",
+      "evidence_path": "artifacts/wal/fsync_fdatasync_boundary/evidence.json"
+    },
+    {
+      "invariant_id": "checksum_validation",
+      "description": "CRC/checksum mismatches must be rejected during replay and must not advance durable publish order.",
+      "enforcement": "Replay rows track checksum outcomes and fsync-tail rows count checksum failures.",
+      "evidence_path": "artifacts/wal/checksum_validation/evidence.json"
+    },
+    {
+      "invariant_id": "cancellation",
+      "description": "Cancellation between reserve, write, and publish must not lose committed records or leak partial commits.",
+      "enforcement": "Replay proof records cancellation verification and measurement rows count cancelled commit losses.",
+      "evidence_path": "artifacts/wal/cancellation/evidence.json"
+    },
+    {
+      "invariant_id": "partial_segment_writes",
+      "description": "Partially written WAL segments must replay only validated prefixes and leave tail records unpublished.",
+      "enforcement": "Replay proof verifies partial segment writes and measurement rows count partial-segment replay failures.",
+      "evidence_path": "artifacts/wal/partial_segment_writes/evidence.json"
+    },
+    {
+      "invariant_id": "durable_publish_order",
+      "description": "A record can become visible only after every required log buffer through its epoch has reached durable storage.",
+      "enforcement": "Public claims require durable publish order proof plus passing fsync-tail evidence on a comparable lane.",
+      "evidence_path": "artifacts/wal/durable_publish_order/evidence.json"
+    }
+  ],
+  "replay_proofs": [
+    {
+      "proof_id": "proof_large_pass",
+      "scenario_id": "wal_append_256gb_authoritative",
+      "raw_log_path": "artifacts/wal/large-host/raw.log",
+      "replay_artifact_path": "artifacts/wal/large-host/replay.json",
+      "reproduction_command": "ffs-harness validate-wal-group-commit-gate --manifest benchmarks/wal_group_commit_gate_manifest.json",
+      "validation_command": "ffs-harness validate-wal-group-commit-gate --format markdown",
+      "expected_record_count": 128000,
+      "observed_record_count": 128000,
+      "checksum_outcome": "validated",
+      "record_order_verified": true,
+      "idempotent_replay_verified": true,
+      "fsync_fdatasync_boundary_verified": true,
+      "cancellation_verified": true,
+      "partial_segment_write_verified": true,
+      "durable_publish_order_verified": true,
+      "status": "pass"
+    },
+    {
+      "proof_id": "proof_small_smoke",
+      "scenario_id": "wal_smoke_missing_reference",
+      "raw_log_path": "artifacts/wal/smoke/raw.log",
+      "replay_artifact_path": "artifacts/wal/smoke/replay.json",
+      "reproduction_command": "ffs-harness validate-wal-group-commit-gate --manifest benchmarks/wal_group_commit_gate_manifest.json",
+      "validation_command": "ffs-harness validate-wal-group-commit-gate --format markdown",
+      "expected_record_count": 16000,
+      "observed_record_count": 16000,
+      "checksum_outcome": "validated",
+      "record_order_verified": true,
+      "idempotent_replay_verified": true,
+      "fsync_fdatasync_boundary_verified": true,
+      "cancellation_verified": true,
+      "partial_segment_write_verified": true,
+      "durable_publish_order_verified": true,
+      "status": "pass"
+    }
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "wal_append_256gb_authoritative",
+      "workload_class": "append_fsync",
+      "host": {
+        "host_fingerprint": "large-host-run",
+        "cpu_cores_logical": 96,
+        "numa_nodes": 2,
+        "ram_total_gb": 512.0,
+        "ram_available_gb": 420.0,
+        "storage_class": "nvme",
+        "lane": "permissioned_large_host"
+      },
+      "reference": {
+        "lane_id": "large-host-reference",
+        "host": {
+          "host_fingerprint": "large-host-reference",
+          "cpu_cores_logical": 96,
+          "numa_nodes": 2,
+          "ram_total_gb": 512.0,
+          "ram_available_gb": 420.0,
+          "storage_class": "nvme",
+          "lane": "permissioned_large_host"
+        },
+        "raw_logs": [
+          "artifacts/wal/reference/raw.log"
+        ],
+        "artifact_paths": [
+          "artifacts/wal/reference/report.json"
+        ]
+      },
+      "replay_proof_id": "proof_large_pass",
+      "fsync_tail_slo": {
+        "p99_pass_us": 2000.0,
+        "p99_warn_us": 5000.0,
+        "min_throughput_ops_per_sec": 30000.0,
+        "max_replay_risk_ppm": 1000.0,
+        "max_memory_footprint_mb": 1024.0,
+        "max_durable_publish_lag_us": 400.0,
+        "max_p99_latency_cv": 0.20,
+        "max_order_violations": 0,
+        "max_checksum_failures": 0,
+        "max_boundary_violations": 0,
+        "max_cancelled_commit_losses": 0,
+        "max_partial_segment_replay_failures": 0
+      },
+      "measurements": [
+        {
+          "candidate_id": "current_serial_wal",
+          "batching_depth": 1,
+          "group_commit_width": 1,
+          "p50_fsync_latency_us": 2450.0,
+          "p99_fsync_latency_us": 4900.0,
+          "p99_latency_cv": 0.03,
+          "throughput_ops_per_sec": 18000.0,
+          "replay_risk_ppm": 15.0,
+          "memory_footprint_mb": 64.0,
+          "durable_publish_lag_us": 80.0,
+          "checksum_failures": 0,
+          "observed_order_violations": 0,
+          "fdatasync_boundary_violations": 0,
+          "cancelled_commit_losses": 0,
+          "partial_segment_replay_failures": 0,
+          "claim_state": "blocked",
+          "expected_classification": "fail"
+        },
+        {
+          "candidate_id": "parallel_epoch_group_commit",
+          "batching_depth": 32,
+          "group_commit_width": 16,
+          "p50_fsync_latency_us": 925.0,
+          "p99_fsync_latency_us": 1850.0,
+          "p99_latency_cv": 0.04,
+          "throughput_ops_per_sec": 34000.0,
+          "replay_risk_ppm": 15.0,
+          "memory_footprint_mb": 512.0,
+          "durable_publish_lag_us": 210.0,
+          "checksum_failures": 0,
+          "observed_order_violations": 0,
+          "fdatasync_boundary_violations": 0,
+          "cancelled_commit_losses": 0,
+          "partial_segment_replay_failures": 0,
+          "claim_state": "measured_authoritative",
+          "expected_classification": "pass"
+        },
+        {
+          "candidate_id": "wide_batch_warn",
+          "batching_depth": 96,
+          "group_commit_width": 32,
+          "p50_fsync_latency_us": 1325.0,
+          "p99_fsync_latency_us": 2650.0,
+          "p99_latency_cv": 0.04,
+          "throughput_ops_per_sec": 37000.0,
+          "replay_risk_ppm": 15.0,
+          "memory_footprint_mb": 550.0,
+          "durable_publish_lag_us": 430.0,
+          "checksum_failures": 0,
+          "observed_order_violations": 0,
+          "fdatasync_boundary_violations": 0,
+          "cancelled_commit_losses": 0,
+          "partial_segment_replay_failures": 0,
+          "claim_state": "fixture_smoke_only",
+          "expected_classification": "warn"
+        },
+        {
+          "candidate_id": "deep_batch_fail",
+          "batching_depth": 256,
+          "group_commit_width": 64,
+          "p50_fsync_latency_us": 3250.0,
+          "p99_fsync_latency_us": 6500.0,
+          "p99_latency_cv": 0.05,
+          "throughput_ops_per_sec": 41000.0,
+          "replay_risk_ppm": 15.0,
+          "memory_footprint_mb": 1500.0,
+          "durable_publish_lag_us": 1900.0,
+          "checksum_failures": 1,
+          "observed_order_violations": 0,
+          "fdatasync_boundary_violations": 0,
+          "cancelled_commit_losses": 0,
+          "partial_segment_replay_failures": 1,
+          "claim_state": "blocked",
+          "expected_classification": "fail"
+        },
+        {
+          "candidate_id": "wide_batch_noisy",
+          "batching_depth": 64,
+          "group_commit_width": 32,
+          "p50_fsync_latency_us": 1050.0,
+          "p99_fsync_latency_us": 2100.0,
+          "p99_latency_cv": 0.42,
+          "throughput_ops_per_sec": 35500.0,
+          "replay_risk_ppm": 15.0,
+          "memory_footprint_mb": 540.0,
+          "durable_publish_lag_us": 260.0,
+          "checksum_failures": 0,
+          "observed_order_violations": 0,
+          "fdatasync_boundary_violations": 0,
+          "cancelled_commit_losses": 0,
+          "partial_segment_replay_failures": 0,
+          "claim_state": "fixture_smoke_only",
+          "expected_classification": "noisy"
+        }
+      ],
+      "claim_state": "measured_authoritative",
+      "reproduction_command": "ffs-harness validate-wal-group-commit-gate --manifest benchmarks/wal_group_commit_gate_manifest.json",
+      "raw_logs": [
+        "artifacts/wal/large-host/raw.log"
+      ],
+      "artifact_paths": [
+        "artifacts/wal/large-host/report.json"
+      ]
+    },
+    {
+      "scenario_id": "wal_smoke_missing_reference",
+      "workload_class": "fixture_smoke",
+      "host": {
+        "host_fingerprint": "developer-smoke",
+        "cpu_cores_logical": 16,
+        "numa_nodes": 1,
+        "ram_total_gb": 64.0,
+        "ram_available_gb": 40.0,
+        "storage_class": "nvme",
+        "lane": "developer_smoke"
+      },
+      "replay_proof_id": "proof_small_smoke",
+      "fsync_tail_slo": {
+        "p99_pass_us": 2000.0,
+        "p99_warn_us": 5000.0,
+        "min_throughput_ops_per_sec": 30000.0,
+        "max_replay_risk_ppm": 1000.0,
+        "max_memory_footprint_mb": 1024.0,
+        "max_durable_publish_lag_us": 400.0,
+        "max_p99_latency_cv": 0.20,
+        "max_order_violations": 0,
+        "max_checksum_failures": 0,
+        "max_boundary_violations": 0,
+        "max_cancelled_commit_losses": 0,
+        "max_partial_segment_replay_failures": 0
+      },
+      "measurements": [
+        {
+          "candidate_id": "parallel_epoch_group_commit",
+          "batching_depth": 16,
+          "group_commit_width": 8,
+          "p50_fsync_latency_us": 1450.0,
+          "p99_fsync_latency_us": 2900.0,
+          "p99_latency_cv": 0.08,
+          "throughput_ops_per_sec": 12000.0,
+          "replay_risk_ppm": 15.0,
+          "memory_footprint_mb": 256.0,
+          "durable_publish_lag_us": 180.0,
+          "checksum_failures": 0,
+          "observed_order_violations": 0,
+          "fdatasync_boundary_violations": 0,
+          "cancelled_commit_losses": 0,
+          "partial_segment_replay_failures": 0,
+          "claim_state": "missing_reference",
+          "expected_classification": "missing_reference"
+        }
+      ],
+      "claim_state": "missing_reference",
+      "reproduction_command": "ffs-harness validate-wal-group-commit-gate --manifest benchmarks/wal_group_commit_gate_manifest.json",
+      "raw_logs": [
+        "artifacts/wal/smoke/raw.log"
+      ],
+      "artifact_paths": [
+        "artifacts/wal/smoke/report.json"
+      ]
+    }
+  ],
+  "expected_loss": {
+    "controller_id": "wal_expected_loss_v1",
+    "selected_candidate_id": "parallel_epoch_group_commit",
+    "target_throughput_ops_per_sec": 30000.0,
+    "weights": {
+      "p99_latency": 45.0,
+      "throughput_shortfall": 20.0,
+      "replay_risk": 30.0,
+      "memory_footprint": 0.001,
+      "durable_publish_lag": 5.0
+    },
+    "candidates": [
+      {
+        "candidate_id": "current_serial_wal",
+        "scenario_id": "wal_append_256gb_authoritative",
+        "batching_depth": 1,
+        "p99_fsync_latency_us": 4900.0,
+        "throughput_ops_per_sec": 18000.0,
+        "replay_risk_ppm": 5.0,
+        "memory_footprint_mb": 64.0,
+        "durable_publish_lag_us": 80.0
+      },
+      {
+        "candidate_id": "parallel_epoch_group_commit",
+        "scenario_id": "wal_append_256gb_authoritative",
+        "batching_depth": 32,
+        "p99_fsync_latency_us": 1850.0,
+        "throughput_ops_per_sec": 34000.0,
+        "replay_risk_ppm": 15.0,
+        "memory_footprint_mb": 512.0,
+        "durable_publish_lag_us": 210.0
+      },
+      {
+        "candidate_id": "deep_batch_fail",
+        "scenario_id": "wal_append_256gb_authoritative",
+        "batching_depth": 256,
+        "p99_fsync_latency_us": 6500.0,
+        "throughput_ops_per_sec": 41000.0,
+        "replay_risk_ppm": 1500.0,
+        "memory_footprint_mb": 1500.0,
+        "durable_publish_lag_us": 1900.0
+      }
+    ]
+  },
+  "public_claims": [
+    {
+      "claim_id": "parallel_wal_authoritative_claim",
+      "candidate_id": "parallel_epoch_group_commit",
+      "scenario_id": "wal_append_256gb_authoritative",
+      "replay_proof_id": "proof_large_pass",
+      "claim_state": "measured_authoritative",
+      "wording": "Parallel WAL group commit is measured only for the referenced large-host lane."
+    }
+  ],
+  "required_log_fields": [
+    "scenario_id",
+    "host_fingerprint",
+    "lane",
+    "reference_lane_id",
+    "replay_proof_id",
+    "candidate_id",
+    "batching_depth",
+    "group_commit_width",
+    "p99_fsync_latency_us",
+    "throughput_ops_per_sec",
+    "replay_risk_ppm",
+    "memory_footprint_mb",
+    "durable_publish_lag_us",
+    "checksum_outcome",
+    "classification",
+    "reproduction_command",
+    "raw_log_path"
+  ],
+  "release_gate_consumers": [
+    "bd-p2j3e",
+    "bd-rchk5",
+    "proof-bundle",
+    "release-gates"
+  ]
+}

@@ -45,6 +45,7 @@ pub mod swarm_cache_controller;
 pub mod swarm_workload_harness;
 pub mod tabletop_drill;
 pub mod verification_runner;
+pub mod wal_group_commit_gate;
 pub mod workload_corpus;
 pub mod writeback_cache_audit;
 pub mod xfstests;
