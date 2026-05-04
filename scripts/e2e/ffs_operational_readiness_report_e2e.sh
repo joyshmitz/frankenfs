@@ -86,6 +86,12 @@ for rel in [
     "perf/baseline.json",
     "perf_baseline_run/stdout.log",
     "perf_baseline_run/stderr.log",
+    "proof/bundle.json",
+    "proof_bundle_stale/stdout.log",
+    "proof_bundle_stale/stderr.log",
+    "release/unsupported.json",
+    "release_gate_unsupported/stdout.log",
+    "release_gate_unsupported/stderr.log",
     "legacy/run.log",
 ]:
     touch(rel)
@@ -98,6 +104,8 @@ cases = [
     ("writeback_crash_matrix", "writeback/crash.json", "FAIL", "fail", "product_failure", None, "open writeback crash bead"),
     ("fuzz_repair_smoke", "fuzz/repair.json", "FAIL", "error", "worker_dependency_missing", None, "run on fuzz-capable worker"),
     ("perf_baseline_run", "perf/baseline.json", "SKIP", "error", "host_environment_failure", "worker_dependency_missing", "run on performance worker"),
+    ("proof_bundle_stale", "proof/bundle.json", "FAIL", "fail", "stale_tracker_tooling_failure", None, "refresh proof bundle before release"),
+    ("release_gate_unsupported", "release/unsupported.json", "SKIP", "skip", "unsupported_v1_scope", "unsupported_v1_scope", "document explicit V1 non-goal"),
 ]
 
 manifest = {
@@ -202,7 +210,7 @@ else
 fi
 
 e2e_step "Scenario 3: JSON report aggregates outcomes and diagnostics"
-if cargo run --quiet -p ffs-harness -- operational-readiness-report \
+if "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- operational-readiness-report \
     --artifacts "$FIXTURE_DIR" \
     --current-git-sha fixture-head \
     --out "$REPORT_JSON"; then
@@ -219,6 +227,8 @@ required_workstreams = {
     "writeback_cache",
     "fuzz_smoke",
     "performance",
+    "proof_bundle",
+    "release_gate",
 }
 missing = sorted(required_workstreams - set(data["workstreams"]))
 if missing:
@@ -233,6 +243,22 @@ if len(data["stale_git_shas"]) != 1:
     raise SystemExit("expected one stale git sha")
 if data["missing_log_paths"]:
     raise SystemExit(f"unexpected missing logs: {data['missing_log_paths']}")
+if data["required_workstreams_missing"]:
+    raise SystemExit(f"missing required workstreams: {data['required_workstreams_missing']}")
+if not data["contract_failed"]:
+    raise SystemExit("stale legacy artifact should fail the readiness contract")
+taxonomy = {row["scenario_id"]: row["taxonomy_class"] for row in data["scenarios"]}
+expected_taxonomy = {
+    "repair_policy_refusal": "product_failure",
+    "fuse_capability_probe": "host_capability_skip",
+    "proof_bundle_stale": "stale_artifact",
+    "release_gate_unsupported": "unsupported_by_scope",
+}
+for scenario_id, expected in expected_taxonomy.items():
+    if taxonomy.get(scenario_id) != expected:
+        raise SystemExit(f"{scenario_id} taxonomy {taxonomy.get(scenario_id)} != {expected}")
+if not all(row.get("reproduction_command") for row in data["scenarios"]):
+    raise SystemExit("every row must preserve a reproduction command")
 PY
     then
         scenario_result "readiness_report_json" "PASS" "JSON report aggregates workstreams"
@@ -244,13 +270,14 @@ else
 fi
 
 e2e_step "Scenario 4: Markdown report preserves raw artifact links"
-if cargo run --quiet -p ffs-harness -- operational-readiness-report \
+if "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- operational-readiness-report \
     --artifacts "$FIXTURE_DIR" \
     --current-git-sha fixture-head \
     --format markdown \
     --out "$REPORT_MD" \
     && grep -q "artifact \`mounted/ext4_rw.json\`" "$REPORT_MD" \
-    && grep -q "Diagnostics: duplicate_scenarios=1 stale_git_shas=1 missing_logs=0" "$REPORT_MD"; then
+    && grep -q "Diagnostics: duplicate_scenarios=1 stale_git_shas=1 missing_logs=0" "$REPORT_MD" \
+    && grep -q "Contract: failed=true missing_workstreams=0 violations=0" "$REPORT_MD"; then
     scenario_result "readiness_report_markdown" "PASS" "Markdown preserves links and diagnostics"
 else
     scenario_result "readiness_report_markdown" "FAIL" "Markdown report validation failed"

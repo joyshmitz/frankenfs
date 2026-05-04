@@ -350,7 +350,14 @@ an artifact directory for versioned `ArtifactManifest` files and legacy
 groups scenarios by workstream, counts pass/fail/skip/error outcomes, preserves
 links to raw logs and artifacts, flags duplicate scenario IDs, detects stale git
 SHAs when `--current-git-sha` is provided, and separates product failures from
-environment-only blockers.
+environment-only blockers. Each scenario row also carries a stable
+`taxonomy_class`, controlling artifact, reproduction command, cleanup status,
+manifest schema version, and host fingerprint so report consumers can distinguish
+`product_failure`, `host_capability_skip`, `authoritative_lane_unavailable`,
+`harness_failure`, `unsupported_by_scope`, `stale_artifact`,
+`missing_artifact`, `noisy_measurement`, `security_refusal`,
+`unsafe_repair_refusal`, and `pass_with_experimental_caveat` without parsing
+free-form logs.
 
 ```bash
 cargo run -p ffs-harness -- operational-readiness-report \
@@ -363,6 +370,10 @@ cargo run -p ffs-harness -- operational-readiness-report \
 Attach the JSON or Markdown report path to the bead close reason when a bead
 claims operational readiness evidence. The report is an aggregator; it does not
 replace the raw per-suite logs, manifests, or reproduction commands.
+Required readiness workstreams are fail-closed in the JSON contract through
+`required_workstreams_missing` and `contract_failed`; stale git SHAs and missing
+logs also set `contract_failed` so docs and parity claims cannot upgrade from an
+incomplete aggregate.
 
 ### Soak/Canary Campaigns
 

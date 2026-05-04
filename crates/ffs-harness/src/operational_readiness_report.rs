@@ -9,8 +9,8 @@
 //! from host or worker blockers.
 
 use crate::artifact_manifest::{
-    ArtifactManifest, GateVerdict, OperationalErrorClass, OperationalOutcomeClass, ScenarioResult,
-    SkipReason,
+    ArtifactManifest, GateVerdict, OperationalErrorClass, OperationalOutcomeClass, ScenarioOutcome,
+    ScenarioResult, SkipReason,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const READINESS_REPORT_SCHEMA_VERSION: u32 = 1;
+const REQUIRED_WORKSTREAMS: [&str; 9] = [
+    "xfstests",
+    "fuse_lane",
+    "mounted_scenario_matrix",
+    "repair_policy",
+    "writeback_cache",
+    "fuzz_smoke",
+    "performance",
+    "proof_bundle",
+    "release_gate",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationalReadinessReportConfig {
@@ -40,6 +51,7 @@ impl OperationalReadinessReportConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationalReadinessReport {
     pub schema_version: u32,
+    pub report_id: String,
     pub source_root: String,
     pub source_manifest_count: usize,
     pub source_legacy_summary_count: usize,
@@ -47,6 +59,9 @@ pub struct OperationalReadinessReport {
     pub scenario_count: usize,
     pub totals: ReadinessCounts,
     pub workstreams: BTreeMap<String, ReadinessCounts>,
+    pub required_workstreams_missing: Vec<String>,
+    pub contract_failed: bool,
+    pub contract_violations: Vec<ReadinessContractViolation>,
     pub duplicate_scenario_ids: Vec<String>,
     pub stale_git_shas: Vec<StaleGitSha>,
     pub missing_log_paths: Vec<MissingLogPath>,
@@ -80,6 +95,14 @@ pub struct MissingLogPath {
     pub path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessContractViolation {
+    pub source_path: String,
+    pub scenario_id: Option<String>,
+    pub violation: String,
+    pub remediation_id: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadinessOutcome {
@@ -87,6 +110,23 @@ pub enum ReadinessOutcome {
     Fail,
     Skip,
     Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessTaxonomyClass {
+    Pass,
+    ProductFailure,
+    HostCapabilitySkip,
+    AuthoritativeLaneUnavailable,
+    HarnessFailure,
+    UnsupportedByScope,
+    StaleArtifact,
+    MissingArtifact,
+    NoisyMeasurement,
+    SecurityRefusal,
+    UnsafeRepairRefusal,
+    PassWithExperimentalCaveat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,15 +138,21 @@ pub struct ReadinessScenarioRow {
     pub workstream: String,
     pub scenario_id: String,
     pub outcome: ReadinessOutcome,
+    pub taxonomy_class: ReadinessTaxonomyClass,
     pub failure_kind: Option<String>,
     pub skip_reason: Option<String>,
     pub environment_only_blocker: bool,
     pub product_failure: bool,
     pub git_commit: String,
     pub stale_git_sha: bool,
+    pub manifest_schema_version: Option<u32>,
+    pub host_fingerprint: Option<String>,
     pub stdout_path: Option<String>,
     pub stderr_path: Option<String>,
     pub artifact_refs: Vec<String>,
+    pub controlling_artifact: Option<String>,
+    pub reproduction_command: Option<String>,
+    pub cleanup_status: Option<String>,
     pub remediation_hint: Option<String>,
     pub owner_bead: Option<String>,
     pub detail: Option<String>,
@@ -155,6 +201,7 @@ struct ReportBuilder {
     seen_scenarios: BTreeMap<String, usize>,
     stale_git_shas: Vec<StaleGitSha>,
     missing_log_paths: Vec<MissingLogPath>,
+    contract_violations: Vec<ReadinessContractViolation>,
     scenarios: Vec<ReadinessScenarioRow>,
 }
 
@@ -163,6 +210,17 @@ struct LogSource<'a> {
     source_path: &'a Path,
     source_path_text: &'a str,
     scenario_id: Option<&'a str>,
+}
+
+struct TaxonomyInput<'a> {
+    outcome: ReadinessOutcome,
+    error_class: Option<OperationalErrorClass>,
+    skip_reason: Option<SkipReason>,
+    workstream: &'a str,
+    stale_git_sha: bool,
+    artifact_refs: &'a [String],
+    detail: Option<&'a str>,
+    remediation_hint: Option<&'a str>,
 }
 
 pub fn build_operational_readiness_report(
@@ -218,6 +276,14 @@ pub fn render_operational_readiness_markdown(report: &OperationalReadinessReport
         report.missing_log_paths.len()
     )
     .ok();
+    writeln!(
+        &mut out,
+        "- Contract: failed={} missing_workstreams={} violations={}",
+        report.contract_failed,
+        report.required_workstreams_missing.len(),
+        report.contract_violations.len()
+    )
+    .ok();
     writeln!(&mut out).ok();
     writeln!(&mut out, "## Workstreams").ok();
     for (workstream, counts) in &report.workstreams {
@@ -243,11 +309,18 @@ pub fn render_operational_readiness_markdown(report: &OperationalReadinessReport
     writeln!(&mut out, "|---|---|---:|---|---|---|").ok();
     for row in &report.scenarios {
         let failure_kind = row.failure_kind.as_deref().unwrap_or("");
+        let taxonomy_class = serialized_enum_name(row.taxonomy_class);
         let logs = render_log_links(row);
         writeln!(
             &mut out,
-            "| `{}` | `{}` | `{:?}` | {} | `{}` | {} |",
-            row.workstream, row.scenario_id, row.outcome, failure_kind, row.source_path, logs
+            "| `{}` | `{}` | `{:?}` | {} / {} | `{}` | {} |",
+            row.workstream,
+            row.scenario_id,
+            row.outcome,
+            taxonomy_class,
+            failure_kind,
+            row.source_path,
+            logs
         )
         .ok();
     }
@@ -274,22 +347,6 @@ impl ReportBuilder {
 
         for (scenario_id, scenario) in &manifest.scenarios {
             let operational = manifest.operational_scenarios.get(scenario_id);
-            let artifact_refs = operational
-                .map(|record| record.artifact_refs.clone())
-                .unwrap_or_default();
-            let workstream = classify_workstream(&manifest.gate_id, scenario_id, &artifact_refs);
-            let outcome = operational.map_or_else(
-                || outcome_from_scenario_result(scenario.outcome),
-                |record| outcome_from_operational(record.classification, record.actual_outcome),
-            );
-            let error_class = operational.and_then(|record| record.error_class);
-            let skip_reason = operational.and_then(|record| record.skip_reason);
-            let detail = scenario.detail.clone();
-            let environment_only_blocker =
-                is_environment_only_blocker(error_class, skip_reason, detail.as_deref());
-            let product_failure =
-                is_product_failure(outcome, error_class, environment_only_blocker);
-
             if let Some(record) = operational {
                 self.record_scenario_log_paths(
                     config,
@@ -303,29 +360,14 @@ impl ReportBuilder {
                     &record.stderr_path,
                 );
             }
-
-            let row = ReadinessScenarioRow {
-                source_path: source_path_text.clone(),
-                source_kind: SourceKind::ArtifactManifest,
-                gate_id: manifest.gate_id.clone(),
-                run_id: manifest.run_id.clone(),
-                workstream,
-                scenario_id: scenario_id.clone(),
-                outcome,
-                failure_kind: error_class.map(serialized_enum_name),
-                skip_reason: skip_reason.map(serialized_enum_name),
-                environment_only_blocker,
-                product_failure,
-                git_commit: manifest.git_context.commit.clone(),
+            self.push_row(build_manifest_row(
+                &source_path_text,
+                manifest,
+                scenario_id,
+                scenario,
+                operational,
                 stale_git_sha,
-                stdout_path: operational.map(|record| record.stdout_path.clone()),
-                stderr_path: operational.map(|record| record.stderr_path.clone()),
-                artifact_refs,
-                remediation_hint: operational.and_then(|record| record.remediation_hint.clone()),
-                owner_bead: manifest.bead_id.clone(),
-                detail,
-            };
-            self.push_row(row);
+            ));
         }
 
         if manifest.verdict == GateVerdict::Skip && manifest.scenarios.is_empty() {
@@ -337,15 +379,24 @@ impl ReportBuilder {
                 workstream: classify_workstream(&manifest.gate_id, "gate_skipped", &[]),
                 scenario_id: "gate_skipped".to_owned(),
                 outcome: ReadinessOutcome::Skip,
+                taxonomy_class: ReadinessTaxonomyClass::AuthoritativeLaneUnavailable,
                 failure_kind: None,
                 skip_reason: Some("gate_verdict_skip".to_owned()),
                 environment_only_blocker: true,
                 product_failure: false,
                 git_commit: manifest.git_context.commit.clone(),
                 stale_git_sha,
+                manifest_schema_version: Some(manifest.schema_version),
+                host_fingerprint: Some(manifest_host_fingerprint(manifest)),
                 stdout_path: None,
                 stderr_path: None,
                 artifact_refs: Vec::new(),
+                controlling_artifact: None,
+                reproduction_command: manifest
+                    .operational_context
+                    .as_ref()
+                    .map(|context| context.command_line.join(" ")),
+                cleanup_status: None,
                 remediation_hint: Some(
                     "inspect gate-level skip reason in source manifest".to_owned(),
                 ),
@@ -389,18 +440,27 @@ impl ReportBuilder {
             let environment_only_blocker =
                 is_environment_only_blocker(None, None, scenario.detail.as_deref());
             let product_failure = is_product_failure(outcome, None, environment_only_blocker);
+            let workstream =
+                classify_workstream(&summary.gate_id, &scenario.scenario_id, &artifact_refs);
+            let taxonomy_class = classify_taxonomy(&TaxonomyInput {
+                outcome,
+                error_class: None,
+                skip_reason: None,
+                workstream: &workstream,
+                stale_git_sha,
+                artifact_refs: &artifact_refs,
+                detail: scenario.detail.as_deref(),
+                remediation_hint: scenario.detail.as_deref(),
+            });
             let row = ReadinessScenarioRow {
                 source_path: source_path_text.clone(),
                 source_kind: SourceKind::LegacyE2eSummary,
                 gate_id: summary.gate_id.clone(),
                 run_id: summary.run_id.clone(),
-                workstream: classify_workstream(
-                    &summary.gate_id,
-                    &scenario.scenario_id,
-                    &artifact_refs,
-                ),
+                workstream,
                 scenario_id: scenario.scenario_id.clone(),
                 outcome,
+                taxonomy_class,
                 failure_kind: if product_failure {
                     Some("product_failure".to_owned())
                 } else if environment_only_blocker {
@@ -413,9 +473,17 @@ impl ReportBuilder {
                 product_failure,
                 git_commit: summary.git_context.commit.clone(),
                 stale_git_sha,
+                manifest_schema_version: None,
+                host_fingerprint: Some(format!(
+                    "legacy:{}:{}",
+                    summary.git_context.branch, summary.git_context.clean
+                )),
                 stdout_path: Some(summary.log_file.clone()),
                 stderr_path: None,
                 artifact_refs,
+                controlling_artifact: Some(summary.log_file.clone()),
+                reproduction_command: Some(format!("inspect legacy e2e log {}", summary.log_file)),
+                cleanup_status: None,
                 remediation_hint: scenario.detail.clone(),
                 owner_bead: None,
                 detail: scenario.detail.clone(),
@@ -431,6 +499,11 @@ impl ReportBuilder {
             .filter(|(_, count)| **count > 1)
             .map(|(scenario_id, _)| scenario_id.clone())
             .collect();
+        let required_workstreams_missing = REQUIRED_WORKSTREAMS
+            .iter()
+            .filter(|workstream| !self.workstreams.contains_key(**workstream))
+            .map(|workstream| (*workstream).to_owned())
+            .collect::<Vec<_>>();
 
         self.scenarios.sort_by(|left, right| {
             left.workstream
@@ -441,6 +514,11 @@ impl ReportBuilder {
 
         OperationalReadinessReport {
             schema_version: READINESS_REPORT_SCHEMA_VERSION,
+            report_id: format!(
+                "operational-readiness:{}:{}",
+                display_path(&config.artifacts_dir),
+                config.current_git_sha.as_deref().unwrap_or("unknown")
+            ),
             source_root: display_path(&config.artifacts_dir),
             source_manifest_count: self.source_manifest_count,
             source_legacy_summary_count: self.source_legacy_summary_count,
@@ -448,6 +526,12 @@ impl ReportBuilder {
             scenario_count: self.scenarios.len(),
             totals: self.totals,
             workstreams: self.workstreams,
+            contract_failed: !required_workstreams_missing.is_empty()
+                || !self.contract_violations.is_empty()
+                || !self.missing_log_paths.is_empty()
+                || !self.stale_git_shas.is_empty(),
+            required_workstreams_missing,
+            contract_violations: self.contract_violations,
             duplicate_scenario_ids,
             stale_git_shas: self.stale_git_shas,
             missing_log_paths: self.missing_log_paths,
@@ -561,6 +645,12 @@ impl ReportBuilder {
             field: field.to_owned(),
             path: path.to_owned(),
         });
+        self.contract_violations.push(ReadinessContractViolation {
+            source_path: source.source_path_text.to_owned(),
+            scenario_id: source.scenario_id.map(str::to_owned),
+            violation: format!("missing required log path `{field}`: {path}"),
+            remediation_id: "bd-un9xt:missing-log-path".to_owned(),
+        });
     }
 }
 
@@ -611,6 +701,84 @@ fn artifact_path_set(manifest: &ArtifactManifest) -> BTreeSet<String> {
         .iter()
         .map(|artifact| artifact.path.clone())
         .collect()
+}
+
+fn build_manifest_row(
+    source_path_text: &str,
+    manifest: &ArtifactManifest,
+    scenario_id: &str,
+    scenario: &ScenarioOutcome,
+    operational: Option<&crate::artifact_manifest::OperationalScenarioRecord>,
+    stale_git_sha: bool,
+) -> ReadinessScenarioRow {
+    let artifact_refs = operational
+        .map(|record| record.artifact_refs.clone())
+        .unwrap_or_default();
+    let workstream = classify_workstream(&manifest.gate_id, scenario_id, &artifact_refs);
+    let outcome = operational.map_or_else(
+        || outcome_from_scenario_result(scenario.outcome),
+        |record| outcome_from_operational(record.classification, record.actual_outcome),
+    );
+    let error_class = operational.and_then(|record| record.error_class);
+    let skip_reason = operational.and_then(|record| record.skip_reason);
+    let detail = scenario.detail.clone();
+    let environment_only_blocker =
+        is_environment_only_blocker(error_class, skip_reason, detail.as_deref());
+    let product_failure = is_product_failure(outcome, error_class, environment_only_blocker);
+    let taxonomy_class = classify_taxonomy(&TaxonomyInput {
+        outcome,
+        error_class,
+        skip_reason,
+        workstream: &workstream,
+        stale_git_sha,
+        artifact_refs: &artifact_refs,
+        detail: detail.as_deref(),
+        remediation_hint: operational.and_then(|record| record.remediation_hint.as_deref()),
+    });
+    let reproduction_command = manifest
+        .operational_context
+        .as_ref()
+        .map(|context| context.command_line.join(" "));
+    let controlling_artifact = artifact_refs.first().cloned();
+
+    ReadinessScenarioRow {
+        source_path: source_path_text.to_owned(),
+        source_kind: SourceKind::ArtifactManifest,
+        gate_id: manifest.gate_id.clone(),
+        run_id: manifest.run_id.clone(),
+        workstream,
+        scenario_id: scenario_id.to_owned(),
+        outcome,
+        taxonomy_class,
+        failure_kind: error_class.map(serialized_enum_name),
+        skip_reason: skip_reason.map(serialized_enum_name),
+        environment_only_blocker,
+        product_failure,
+        git_commit: manifest.git_context.commit.clone(),
+        stale_git_sha,
+        manifest_schema_version: Some(manifest.schema_version),
+        host_fingerprint: Some(manifest_host_fingerprint(manifest)),
+        stdout_path: operational.map(|record| record.stdout_path.clone()),
+        stderr_path: operational.map(|record| record.stderr_path.clone()),
+        artifact_refs,
+        controlling_artifact,
+        reproduction_command,
+        cleanup_status: operational.map(|record| serialized_enum_name(record.cleanup_status)),
+        remediation_hint: operational.and_then(|record| record.remediation_hint.clone()),
+        owner_bead: manifest.bead_id.clone(),
+        detail,
+    }
+}
+
+fn manifest_host_fingerprint(manifest: &ArtifactManifest) -> String {
+    format!(
+        "{}|{}|{}cpu|{}GiB|{}",
+        manifest.environment.hostname,
+        manifest.environment.cpu_model,
+        manifest.environment.cpu_count,
+        manifest.environment.memory_gib,
+        manifest.environment.kernel
+    )
 }
 
 fn log_path_is_resolved(
@@ -697,7 +865,11 @@ fn classify_workstream(gate_id: &str, scenario_id: &str, artifact_refs: &[String
         haystack.push_str(&artifact.to_ascii_lowercase());
     }
 
-    if haystack.contains("xfstest") {
+    if haystack.contains("release") && haystack.contains("gate") {
+        "release_gate".to_owned()
+    } else if haystack.contains("proof") || haystack.contains("bundle") {
+        "proof_bundle".to_owned()
+    } else if haystack.contains("xfstest") {
         "xfstests".to_owned()
     } else if haystack.contains("writeback") {
         "writeback_cache".to_owned()
@@ -713,6 +885,90 @@ fn classify_workstream(gate_id: &str, scenario_id: &str, artifact_refs: &[String
         "performance".to_owned()
     } else {
         "other".to_owned()
+    }
+}
+
+fn classify_taxonomy(input: &TaxonomyInput<'_>) -> ReadinessTaxonomyClass {
+    let detail = input.detail.unwrap_or("").to_ascii_lowercase();
+    let remediation_hint = input.remediation_hint.unwrap_or("").to_ascii_lowercase();
+    let text = format!("{detail} {remediation_hint}");
+
+    if input.stale_git_sha
+        || matches!(
+            input.error_class,
+            Some(OperationalErrorClass::StaleTrackerToolingFailure)
+        )
+    {
+        return ReadinessTaxonomyClass::StaleArtifact;
+    }
+    if input.artifact_refs.is_empty() {
+        return ReadinessTaxonomyClass::MissingArtifact;
+    }
+    if text.contains("security") || text.contains("refusal") && text.contains("hostile") {
+        return ReadinessTaxonomyClass::SecurityRefusal;
+    }
+    if text.contains("unsafe repair") || text.contains("unsafe_repair") {
+        return ReadinessTaxonomyClass::UnsafeRepairRefusal;
+    }
+    if matches!(
+        input.error_class,
+        Some(
+            OperationalErrorClass::WorkerDependencyMissing
+                | OperationalErrorClass::FusePermissionSkip
+                | OperationalErrorClass::RootOwnedBtrfsTestdirEacces
+                | OperationalErrorClass::HostEnvironmentFailure
+        )
+    ) || matches!(
+        input.skip_reason,
+        Some(
+            SkipReason::FuseUnavailable
+                | SkipReason::FusePermissionDenied
+                | SkipReason::WorkerDependencyMissing
+                | SkipReason::RootOwnedBtrfsTestdirEacces
+        )
+    ) {
+        return if text.contains("authoritative") || text.contains("required lane") {
+            ReadinessTaxonomyClass::AuthoritativeLaneUnavailable
+        } else {
+            ReadinessTaxonomyClass::HostCapabilitySkip
+        };
+    }
+    if matches!(
+        input.error_class,
+        Some(OperationalErrorClass::UnsupportedV1Scope)
+    ) || matches!(input.skip_reason, Some(SkipReason::UnsupportedV1Scope))
+    {
+        return ReadinessTaxonomyClass::UnsupportedByScope;
+    }
+    if matches!(
+        input.error_class,
+        Some(OperationalErrorClass::HarnessBug | OperationalErrorClass::UnsafeCleanupFailure)
+    ) {
+        return ReadinessTaxonomyClass::HarnessFailure;
+    }
+    if matches!(
+        input.error_class,
+        Some(OperationalErrorClass::ResourceLimit)
+    ) && input.workstream == "performance"
+    {
+        return ReadinessTaxonomyClass::NoisyMeasurement;
+    }
+    if matches!(
+        input.error_class,
+        Some(OperationalErrorClass::ProductFailure)
+    ) {
+        return ReadinessTaxonomyClass::ProductFailure;
+    }
+    if matches!(input.outcome, ReadinessOutcome::Pass)
+        && (text.contains("experimental") || text.contains("caveat"))
+    {
+        return ReadinessTaxonomyClass::PassWithExperimentalCaveat;
+    }
+    match input.outcome {
+        ReadinessOutcome::Pass => ReadinessTaxonomyClass::Pass,
+        ReadinessOutcome::Fail => ReadinessTaxonomyClass::ProductFailure,
+        ReadinessOutcome::Skip => ReadinessTaxonomyClass::HostCapabilitySkip,
+        ReadinessOutcome::Error => ReadinessTaxonomyClass::HarnessFailure,
     }
 }
 
@@ -762,8 +1018,13 @@ fn is_product_failure(
     error_class: Option<OperationalErrorClass>,
     environment_only_blocker: bool,
 ) -> bool {
-    matches!(error_class, Some(OperationalErrorClass::ProductFailure))
-        || (matches!(outcome, ReadinessOutcome::Fail) && !environment_only_blocker)
+    if matches!(error_class, Some(OperationalErrorClass::ProductFailure)) {
+        return true;
+    }
+    if error_class.is_some() {
+        return false;
+    }
+    matches!(outcome, ReadinessOutcome::Fail) && !environment_only_blocker
 }
 
 fn serialized_enum_name<T>(value: T) -> String
@@ -823,13 +1084,15 @@ mod tests {
         let report = fixture.report(Some("abc123"));
 
         assert_eq!(report.source_manifest_count, 1);
-        assert_eq!(report.scenario_count, 7);
+        assert_eq!(report.scenario_count, 9);
         assert_eq!(report.totals.pass, 2);
-        assert_eq!(report.totals.fail, 2);
-        assert_eq!(report.totals.skip, 1);
+        assert_eq!(report.totals.fail, 3);
+        assert_eq!(report.totals.skip, 2);
         assert_eq!(report.totals.error, 2);
         assert_eq!(report.totals.product_failures, 2);
         assert_eq!(report.totals.environment_blockers, 3);
+        assert!(!report.contract_failed);
+        assert!(report.required_workstreams_missing.is_empty());
         assert!(report.workstreams.contains_key("xfstests"));
         assert!(report.workstreams.contains_key("fuse_lane"));
         assert!(report.workstreams.contains_key("mounted_scenario_matrix"));
@@ -837,6 +1100,16 @@ mod tests {
         assert!(report.workstreams.contains_key("writeback_cache"));
         assert!(report.workstreams.contains_key("fuzz_smoke"));
         assert!(report.workstreams.contains_key("performance"));
+        assert!(report.workstreams.contains_key("proof_bundle"));
+        assert!(report.workstreams.contains_key("release_gate"));
+        assert!(report.scenarios.iter().any(|row| {
+            row.scenario_id == "proof_bundle_stale"
+                && row.taxonomy_class == ReadinessTaxonomyClass::StaleArtifact
+        }));
+        assert!(report.scenarios.iter().any(|row| {
+            row.scenario_id == "release_gate_unsupported"
+                && row.taxonomy_class == ReadinessTaxonomyClass::UnsupportedByScope
+        }));
     }
 
     #[test]
@@ -872,6 +1145,11 @@ mod tests {
             missing.scenario_id.as_deref() == Some("mounted_ext4_rw")
                 && missing.field == "stdout_path"
         }));
+        assert!(report.contract_failed);
+        assert!(report.contract_violations.iter().any(|violation| {
+            violation.scenario_id.as_deref() == Some("mounted_ext4_rw")
+                && violation.violation.contains("missing required log path")
+        }));
     }
 
     #[test]
@@ -883,9 +1161,168 @@ mod tests {
         let report = fixture.report(Some("abc123"));
         let markdown = render_operational_readiness_markdown(&report);
 
-        assert!(markdown.contains("Totals: pass=2 fail=2 skip=1 error=2"));
+        assert!(markdown.contains("Totals: pass=2 fail=3 skip=2 error=2"));
         assert!(markdown.contains("`mounted_ext4_rw`"));
         assert!(markdown.contains("artifact `mounted/ext4_rw.json`"));
+        assert!(markdown.contains("Contract: failed=false missing_workstreams=0 violations=0"));
+    }
+
+    #[test]
+    fn taxonomy_covers_actionable_failure_contract_values() {
+        let cases = [
+            (
+                ReadinessTaxonomyClass::ProductFailure,
+                ReadinessOutcome::Fail,
+                Some(OperationalErrorClass::ProductFailure),
+                None,
+                "repair_policy",
+                false,
+                &["repair/policy.json"][..],
+                "",
+                "open repair policy bead",
+            ),
+            (
+                ReadinessTaxonomyClass::HostCapabilitySkip,
+                ReadinessOutcome::Skip,
+                Some(OperationalErrorClass::FusePermissionSkip),
+                Some(SkipReason::FusePermissionDenied),
+                "fuse_lane",
+                false,
+                &["fuse/capability.json"][..],
+                "",
+                "rerun with /dev/fuse access",
+            ),
+            (
+                ReadinessTaxonomyClass::AuthoritativeLaneUnavailable,
+                ReadinessOutcome::Skip,
+                Some(OperationalErrorClass::HostEnvironmentFailure),
+                Some(SkipReason::WorkerDependencyMissing),
+                "mounted_scenario_matrix",
+                false,
+                &["mounted/capability.json"][..],
+                "authoritative required lane unavailable",
+                "rerun on permissioned worker",
+            ),
+            (
+                ReadinessTaxonomyClass::HarnessFailure,
+                ReadinessOutcome::Error,
+                Some(OperationalErrorClass::HarnessBug),
+                None,
+                "xfstests",
+                false,
+                &["xfstests/raw.log"][..],
+                "",
+                "fix harness parser",
+            ),
+            (
+                ReadinessTaxonomyClass::UnsupportedByScope,
+                ReadinessOutcome::Skip,
+                Some(OperationalErrorClass::UnsupportedV1Scope),
+                Some(SkipReason::UnsupportedV1Scope),
+                "release_gate",
+                false,
+                &["release/unsupported.json"][..],
+                "",
+                "explicit V1 non-goal",
+            ),
+            (
+                ReadinessTaxonomyClass::StaleArtifact,
+                ReadinessOutcome::Fail,
+                Some(OperationalErrorClass::StaleTrackerToolingFailure),
+                None,
+                "proof_bundle",
+                false,
+                &["proof/stale.json"][..],
+                "",
+                "refresh proof bundle",
+            ),
+            (
+                ReadinessTaxonomyClass::MissingArtifact,
+                ReadinessOutcome::Error,
+                None,
+                None,
+                "proof_bundle",
+                false,
+                &[][..],
+                "",
+                "attach missing report",
+            ),
+            (
+                ReadinessTaxonomyClass::NoisyMeasurement,
+                ReadinessOutcome::Error,
+                Some(OperationalErrorClass::ResourceLimit),
+                None,
+                "performance",
+                false,
+                &["perf/baseline.json"][..],
+                "",
+                "rerun with isolated worker",
+            ),
+            (
+                ReadinessTaxonomyClass::SecurityRefusal,
+                ReadinessOutcome::Fail,
+                Some(OperationalErrorClass::ProductFailure),
+                None,
+                "release_gate",
+                false,
+                &["security/refusal.json"][..],
+                "security refusal for hostile proof path",
+                "keep release blocked",
+            ),
+            (
+                ReadinessTaxonomyClass::UnsafeRepairRefusal,
+                ReadinessOutcome::Fail,
+                Some(OperationalErrorClass::ProductFailure),
+                None,
+                "repair_policy",
+                false,
+                &["repair/refusal.json"][..],
+                "unsafe repair refused before mutation",
+                "use dry-run first",
+            ),
+            (
+                ReadinessTaxonomyClass::PassWithExperimentalCaveat,
+                ReadinessOutcome::Pass,
+                None,
+                None,
+                "performance",
+                false,
+                &["perf/smoke.json"][..],
+                "pass with experimental caveat",
+                "",
+            ),
+        ];
+
+        for (
+            expected,
+            outcome,
+            error_class,
+            skip_reason,
+            workstream,
+            stale_git_sha,
+            artifact_refs,
+            detail,
+            remediation_hint,
+        ) in cases
+        {
+            let artifact_refs = artifact_refs
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                classify_taxonomy(&TaxonomyInput {
+                    outcome,
+                    error_class,
+                    skip_reason,
+                    workstream,
+                    stale_git_sha,
+                    artifact_refs: &artifact_refs,
+                    detail: Some(detail),
+                    remediation_hint: Some(remediation_hint),
+                }),
+                expected
+            );
+        }
     }
 
     struct ReadinessFixture {
@@ -985,7 +1422,7 @@ mod tests {
         remediation_hint: Option<&'static str>,
     }
 
-    fn sample_cases() -> [Case; 7] {
+    fn sample_cases() -> [Case; 9] {
         [
             Case {
                 scenario_id: "xfstests_generic_subset",
@@ -1049,6 +1486,24 @@ mod tests {
                 error_class: Some(OperationalErrorClass::HostEnvironmentFailure),
                 skip_reason: Some(SkipReason::WorkerDependencyMissing),
                 remediation_hint: Some("run on performance worker"),
+            },
+            Case {
+                scenario_id: "proof_bundle_stale",
+                gate_hint: "proof/bundle.json",
+                result: ScenarioResult::Fail,
+                classification: OperationalOutcomeClass::Fail,
+                error_class: Some(OperationalErrorClass::StaleTrackerToolingFailure),
+                skip_reason: None,
+                remediation_hint: Some("refresh proof bundle before release"),
+            },
+            Case {
+                scenario_id: "release_gate_unsupported",
+                gate_hint: "release/unsupported.json",
+                result: ScenarioResult::Skip,
+                classification: OperationalOutcomeClass::Skip,
+                error_class: Some(OperationalErrorClass::UnsupportedV1Scope),
+                skip_reason: Some(SkipReason::UnsupportedV1Scope),
+                remediation_hint: Some("document explicit V1 non-goal"),
             },
         ]
     }
