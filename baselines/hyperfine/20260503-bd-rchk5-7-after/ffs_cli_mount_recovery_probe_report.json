@@ -1,0 +1,46 @@
+{
+  "attempts": [
+    {
+      "cleanup_status": "unmounted",
+      "exit_code": 1,
+      "label": "recovery",
+      "mountpoint": "baselines/hyperfine/20260503-bd-rchk5-7-after/mount_probe_mounts/recovery",
+      "ready": false,
+      "stderr_path": "baselines/hyperfine/20260503-bd-rchk5-7-after/mount_probe_mounts/recovery.stderr",
+      "stdout_path": "baselines/hyperfine/20260503-bd-rchk5-7-after/mount_probe_mounts/recovery.stdout",
+      "timed_out": false
+    }
+  ],
+  "classification": "host_capability_skip",
+  "command": {
+    "ffs_bin": "/data/tmp/cargo-target/release-perf/ffs-cli",
+    "image": "baselines/hyperfine/20260503/mount_recovery_probe.ext4",
+    "mount_root": "baselines/hyperfine/20260503-bd-rchk5-7-after/mount_probe_mounts"
+  },
+  "exit_code": 1,
+  "generated_at": "2026-05-03T22:16:45.264657Z",
+  "kernel_fuse_mode": "permissioned_required",
+  "mode": "recovery",
+  "mount_options": {
+    "background_repair": "not_enabled_by_probe",
+    "background_scrub": "disabled_by_probe",
+    "writeback_cache": "disabled"
+  },
+  "outcome": "fail",
+  "probe_id": "mount_benchmark_probe",
+  "readiness_poll": {
+    "interval_secs": 0.005,
+    "max_polls": 2000,
+    "max_wait_secs": 10.0,
+    "mountpoint_check": {
+      "method": "proc_self_mountinfo",
+      "mountinfo_path": "/proc/self/mountinfo"
+    }
+  },
+  "reason": "Mounting ext4 image (block_size=4096, blocks=8192, ro, runtime=standard) at baselines/hyperfine/20260503-bd-rchk5-7-after/mount_probe_mounts/recovery error: FUSE mount failed at baselines/hyperfine/20260503-bd-rchk5-7-after/mount_probe_mounts/recovery: invalid mountpoint: mountpoint does not exist: baselines/hyperfine/20260503-bd-rchk5-7-after/mount_probe_mounts/recovery",
+  "required_capabilities": [
+    "benchmark_host",
+    "fuse"
+  ],
+  "schema_version": 1
+}
