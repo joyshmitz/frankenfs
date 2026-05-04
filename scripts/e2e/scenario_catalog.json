@@ -521,6 +521,48 @@
           "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_help_docs_consistent|outcome=PASS"
         },
         {
+          "id": "writeback_cache_opt_in_cli_help_boundaries",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_cli_help_boundaries|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_opt_in_cli_rejects_missing_gate",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_cli_rejects_missing_gate|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_opt_in_cli_rejects_read_only",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_cli_rejects_read_only|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_opt_in_cli_accepts_gate_before_image_open",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_cli_accepts_gate_before_image_open|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_opt_in_cli_repeated_rejections",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_cli_repeated_rejections|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_opt_in_fuser_options_enabled",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_fuser_options_enabled|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_opt_in_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_unit_tests|outcome=PASS"
+        },
+        {
           "id": "writeback_cache_audit_catalog_valid",
           "category": "happy",
           "status": "active",

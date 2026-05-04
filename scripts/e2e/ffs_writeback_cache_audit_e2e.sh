@@ -37,6 +37,13 @@ TOTAL=0
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_unit_tests|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_help_docs_consistent|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_catalog_valid|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_cli_help_boundaries|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_cli_rejects_missing_gate|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_cli_rejects_read_only|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_cli_accepts_gate_before_image_open|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_cli_repeated_rejections|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_fuser_options_enabled|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_unit_tests|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_ordering_cli_wired|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_ordering_accepts_complete_oracle|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_ordering_rejects_default_off|outcome=PASS
@@ -320,6 +327,14 @@ FUSER_OPTIONS_RAW="$LOG_DIR/writeback_cache_fuser_options.raw"
 BAD_SCHEMA_RAW="$LOG_DIR/writeback_cache_bad_schema.raw"
 UNIT_RAW="$LOG_DIR/writeback_cache_unit_tests.raw"
 HELP_RAW="$LOG_DIR/writeback_cache_help.raw"
+CLI_OPT_IN_HELP_RAW="$LOG_DIR/writeback_cache_opt_in_help.raw"
+CLI_MISSING_GATE_RAW="$LOG_DIR/writeback_cache_opt_in_missing_gate.raw"
+CLI_RO_REJECT_RAW="$LOG_DIR/writeback_cache_opt_in_read_only.raw"
+CLI_ACCEPT_IMAGE_OPEN_RAW="$LOG_DIR/writeback_cache_opt_in_accept_image_open.raw"
+CLI_REPEATED_RAW_A="$LOG_DIR/writeback_cache_opt_in_repeated_a.raw"
+CLI_REPEATED_RAW_B="$LOG_DIR/writeback_cache_opt_in_repeated_b.raw"
+FUSER_OPT_IN_RAW="$LOG_DIR/writeback_cache_opt_in_fuser_options.raw"
+CLI_OPT_IN_UNIT_RAW="$LOG_DIR/writeback_cache_opt_in_unit_tests.raw"
 ORDERING_ACCEPT_RAW="$LOG_DIR/writeback_cache_ordering_accept.raw"
 ORDERING_DEFAULT_OFF_RAW="$LOG_DIR/writeback_cache_ordering_default_off.raw"
 ORDERING_MISSING_FSYNC_RAW="$LOG_DIR/writeback_cache_ordering_missing_fsync.raw"
@@ -884,16 +899,19 @@ else
     scenario_result "writeback_cache_audit_unit_tests" "FAIL" "module unit tests failed; see $UNIT_RAW"
 fi
 
-step "Scenario 11: CLI help, README, and FEATURE_PARITY keep unsupported wording"
+step "Scenario 11: CLI help, README, and FEATURE_PARITY keep gated opt-in wording"
 if run_rch_capture "$HELP_RAW" cargo run --quiet -p ffs-cli -- mount --help; then
     if grep -Fq "writeback_cache" "$HELP_RAW" \
-        && grep -Fq "intentionally unsupported" "$HELP_RAW" \
-        && grep -Fq "bd-rchk0.2.1.1" README.md \
+        && grep -Fq "fsync" "$HELP_RAW" \
+        && grep -Fq "fsyncdir" "$HELP_RAW" \
+        && grep -Fq "flush remains non-durable" "$HELP_RAW" \
+        && grep -Fq "bd-rchk0.2.2" README.md \
         && grep -Fq "bd-rchk0.2.1.1" FEATURE_PARITY.md \
-        && grep -Fq "must not enable it" README.md \
-        && grep -Fq "remains unsupported" FEATURE_PARITY.md; then
-        log "WRITEBACK_CACHE_HELP_DOCS_OBSERVATION|scenario_id=writeback_cache_audit_help_docs_consistent|expected_error_class=unsupported|observed_error_class=unsupported|help_log=${HELP_RAW}|cleanup_status=retained:${LOG_DIR}|reproduction_command=cargo run -p ffs-cli -- mount --help"
-        scenario_result "writeback_cache_audit_help_docs_consistent" "PASS" "help/docs/parity keep unsupported wording"
+        && grep -Fq "bd-rchk0.2.2" FEATURE_PARITY.md \
+        && grep -Fq "requires --rw, an audit gate, and an ordering oracle" README.md \
+        && grep -Fq "release-readiness claim remains blocked" FEATURE_PARITY.md; then
+        log "WRITEBACK_CACHE_HELP_DOCS_OBSERVATION|scenario_id=writeback_cache_audit_help_docs_consistent|expected_error_class=gated_opt_in|observed_error_class=gated_opt_in|help_log=${HELP_RAW}|cleanup_status=retained:${LOG_DIR}|reproduction_command=cargo run -p ffs-cli -- mount --help"
+        scenario_result "writeback_cache_audit_help_docs_consistent" "PASS" "help/docs/parity keep gated opt-in wording"
     else
         scenario_result "writeback_cache_audit_help_docs_consistent" "FAIL" "help/docs/parity wording drifted"
     fi
@@ -901,7 +919,100 @@ else
     scenario_result "writeback_cache_audit_help_docs_consistent" "FAIL" "ffs-cli mount help failed; see $HELP_RAW"
 fi
 
-step "Scenario 12: ordering oracle module and CLI are wired"
+step "Scenario 12: opt-in CLI help exposes gate and durability boundaries"
+if run_rch_capture "$CLI_OPT_IN_HELP_RAW" cargo run --quiet -p ffs-cli -- mount --help; then
+    if grep -Fq -- "--writeback-cache" "$CLI_OPT_IN_HELP_RAW" \
+        && grep -Fq -- "--writeback-cache-gate" "$CLI_OPT_IN_HELP_RAW" \
+        && grep -Fq -- "--writeback-cache-ordering-oracle" "$CLI_OPT_IN_HELP_RAW" \
+        && grep -Fq "flush remains non-durable" "$CLI_OPT_IN_HELP_RAW" \
+        && grep -Fq "fsync" "$CLI_OPT_IN_HELP_RAW" \
+        && grep -Fq "fsyncdir" "$CLI_OPT_IN_HELP_RAW"; then
+        log "WRITEBACK_CACHE_OPT_IN_OBSERVATION|scenario_id=writeback_cache_opt_in_cli_help_boundaries|mount_options=rw,writeback_cache|stdout_stderr=${CLI_OPT_IN_HELP_RAW}|cleanup_status=not_mounted|reproduction_command=cargo run -p ffs-cli -- mount --help"
+        scenario_result "writeback_cache_opt_in_cli_help_boundaries" "PASS" "CLI help names gate paths and sync boundaries"
+    else
+        scenario_result "writeback_cache_opt_in_cli_help_boundaries" "FAIL" "CLI help omitted opt-in gate wording"
+    fi
+else
+    scenario_result "writeback_cache_opt_in_cli_help_boundaries" "FAIL" "ffs-cli mount help failed; see $CLI_OPT_IN_HELP_RAW"
+fi
+
+step "Scenario 13: opt-in rejects before mount when audit gate is missing"
+if run_rch_capture "$CLI_MISSING_GATE_RAW" cargo run --quiet -p ffs-cli -- \
+    mount --rw --writeback-cache /definitely/missing.img /definitely/missing-mnt; then
+    scenario_result "writeback_cache_opt_in_cli_rejects_missing_gate" "FAIL" "missing gate unexpectedly reached mount"
+elif grep -Fq -- "--writeback-cache requires --writeback-cache-gate" "$CLI_MISSING_GATE_RAW"; then
+    log "WRITEBACK_CACHE_OPT_IN_OBSERVATION|scenario_id=writeback_cache_opt_in_cli_rejects_missing_gate|mount_options=rw,writeback_cache|expected_error_class=missing_audit_gate|observed_error_class=missing_audit_gate|stdout_stderr=${CLI_MISSING_GATE_RAW}|cleanup_status=not_mounted|reproduction_command=ffs mount --rw --writeback-cache /definitely/missing.img /definitely/missing-mnt"
+    scenario_result "writeback_cache_opt_in_cli_rejects_missing_gate" "PASS" "missing gate rejected before image open"
+else
+    scenario_result "writeback_cache_opt_in_cli_rejects_missing_gate" "FAIL" "missing gate rejected without stable diagnostic"
+fi
+
+step "Scenario 14: opt-in rejects read-only conflicting flags before gate I/O"
+if run_rch_capture "$CLI_RO_REJECT_RAW" cargo run --quiet -p ffs-cli -- \
+    mount --writeback-cache \
+    --writeback-cache-gate "$ACCEPT_GATE" \
+    --writeback-cache-ordering-oracle "$ORDERING_ACCEPT_ORACLE" \
+    /definitely/missing.img /definitely/missing-mnt; then
+    scenario_result "writeback_cache_opt_in_cli_rejects_read_only" "FAIL" "read-only writeback_cache unexpectedly reached mount"
+elif grep -Fq -- "--writeback-cache requires --rw" "$CLI_RO_REJECT_RAW"; then
+    log "WRITEBACK_CACHE_OPT_IN_OBSERVATION|scenario_id=writeback_cache_opt_in_cli_rejects_read_only|mount_options=ro,writeback_cache|expected_error_class=read_only_writeback_cache|observed_error_class=read_only_writeback_cache|fuse_capability_artifact=${ACCEPT_GATE}|stdout_stderr=${CLI_RO_REJECT_RAW}|cleanup_status=not_mounted|reproduction_command=ffs mount --writeback-cache --writeback-cache-gate ${ACCEPT_GATE} --writeback-cache-ordering-oracle ${ORDERING_ACCEPT_ORACLE} /definitely/missing.img /definitely/missing-mnt"
+    scenario_result "writeback_cache_opt_in_cli_rejects_read_only" "PASS" "read-only opt-in rejected before gate reads or mount"
+else
+    scenario_result "writeback_cache_opt_in_cli_rejects_read_only" "FAIL" "read-only rejection missing stable diagnostic"
+fi
+
+step "Scenario 15: complete opt-in gate passes guard before image-open failure"
+if run_rch_capture "$CLI_ACCEPT_IMAGE_OPEN_RAW" cargo run --quiet -p ffs-cli -- \
+    mount --rw --writeback-cache \
+    --writeback-cache-gate "$ACCEPT_GATE" \
+    --writeback-cache-ordering-oracle "$ORDERING_ACCEPT_ORACLE" \
+    /definitely/missing.img /definitely/missing-mnt; then
+    scenario_result "writeback_cache_opt_in_cli_accepts_gate_before_image_open" "FAIL" "missing image unexpectedly mounted"
+elif grep -Fq "failed to open filesystem image" "$CLI_ACCEPT_IMAGE_OPEN_RAW" \
+    && ! grep -Fq "writeback-cache audit gate rejected" "$CLI_ACCEPT_IMAGE_OPEN_RAW" \
+    && ! grep -Fq "writeback-cache ordering oracle rejected" "$CLI_ACCEPT_IMAGE_OPEN_RAW"; then
+    log "WRITEBACK_CACHE_OPT_IN_OBSERVATION|scenario_id=writeback_cache_opt_in_cli_accepts_gate_before_image_open|mount_options=rw,writeback_cache|expected_error_class=filesystem_open_failed|observed_error_class=filesystem_open_failed|fuse_capability_artifact=${ACCEPT_GATE}|stdout_stderr=${CLI_ACCEPT_IMAGE_OPEN_RAW}|cleanup_status=not_mounted|reproduction_command=ffs mount --rw --writeback-cache --writeback-cache-gate ${ACCEPT_GATE} --writeback-cache-ordering-oracle ${ORDERING_ACCEPT_ORACLE} /definitely/missing.img /definitely/missing-mnt"
+    scenario_result "writeback_cache_opt_in_cli_accepts_gate_before_image_open" "PASS" "accepted gate reached the image-open stage before failing"
+else
+    scenario_result "writeback_cache_opt_in_cli_accepts_gate_before_image_open" "FAIL" "accepted gate did not reach image-open diagnostic"
+fi
+
+step "Scenario 16: repeated CLI rejections keep the same guard class"
+if run_rch_capture "$CLI_REPEATED_RAW_A" cargo run --quiet -p ffs-cli -- \
+    mount --rw --writeback-cache /definitely/missing.img /definitely/missing-mnt; then
+    scenario_result "writeback_cache_opt_in_cli_repeated_rejections" "FAIL" "first repeated rejection unexpectedly succeeded"
+elif run_rch_capture "$CLI_REPEATED_RAW_B" cargo run --quiet -p ffs-cli -- \
+    mount --rw --writeback-cache /definitely/missing.img /definitely/missing-mnt; then
+    scenario_result "writeback_cache_opt_in_cli_repeated_rejections" "FAIL" "second repeated rejection unexpectedly succeeded"
+elif grep -Fq -- "--writeback-cache requires --writeback-cache-gate" "$CLI_REPEATED_RAW_A" \
+    && grep -Fq -- "--writeback-cache requires --writeback-cache-gate" "$CLI_REPEATED_RAW_B"; then
+    log "WRITEBACK_CACHE_OPT_IN_OBSERVATION|scenario_id=writeback_cache_opt_in_cli_repeated_rejections|mount_options=rw,writeback_cache|expected_error_class=missing_audit_gate|observed_error_class=missing_audit_gate|stdout_stderr=${CLI_REPEATED_RAW_A},${CLI_REPEATED_RAW_B}|cleanup_status=not_mounted|reproduction_command=ffs mount --rw --writeback-cache /definitely/missing.img /definitely/missing-mnt"
+    scenario_result "writeback_cache_opt_in_cli_repeated_rejections" "PASS" "repeated guard rejections stayed stable"
+else
+    scenario_result "writeback_cache_opt_in_cli_repeated_rejections" "FAIL" "repeated guard rejection class drifted"
+fi
+
+step "Scenario 17: FUSE option builder includes writeback_cache only on opt-in"
+if run_rch_capture "$FUSER_OPT_IN_RAW" cargo test -p ffs-fuse build_mount_options_includes_writeback_cache_only_when_opted_in -- --nocapture; then
+    if grep -Fq "WRITEBACK_CACHE_OPT_IN_FUSER_OPTIONS|case=explicit_rw_opt_in" "$FUSER_OPT_IN_RAW" \
+        && grep -Fq "writeback_cache" "$FUSER_OPT_IN_RAW"; then
+        log "WRITEBACK_CACHE_OPT_IN_OBSERVATION|scenario_id=writeback_cache_opt_in_fuser_options_enabled|mount_options=rw,writeback_cache|stdout_stderr=${FUSER_OPT_IN_RAW}|cleanup_status=not_mounted|reproduction_command=cargo test -p ffs-fuse build_mount_options_includes_writeback_cache_only_when_opted_in -- --nocapture"
+        scenario_result "writeback_cache_opt_in_fuser_options_enabled" "PASS" "FUSE builder emitted writeback_cache for explicit rw opt-in"
+    else
+        scenario_result "writeback_cache_opt_in_fuser_options_enabled" "FAIL" "FUSE opt-in test omitted raw option observation"
+    fi
+else
+    scenario_result "writeback_cache_opt_in_fuser_options_enabled" "FAIL" "FUSE opt-in unit test failed; see $FUSER_OPT_IN_RAW"
+fi
+
+step "Scenario 18: CLI/FUSE opt-in unit tests cover guard acceptance and rejection"
+if run_rch_capture "$CLI_OPT_IN_UNIT_RAW" cargo test -p ffs-cli mount_writeback_cache -- --nocapture; then
+    scenario_result "writeback_cache_opt_in_unit_tests" "PASS" "CLI opt-in unit tests passed through rch"
+else
+    scenario_result "writeback_cache_opt_in_unit_tests" "FAIL" "CLI opt-in unit tests failed; see $CLI_OPT_IN_UNIT_RAW"
+fi
+
+step "Scenario 19: ordering oracle module and CLI are wired"
 if grep -Fq "build_writeback_ordering_report" crates/ffs-harness/src/main.rs \
     && grep -Fq "validate-writeback-cache-ordering" crates/ffs-harness/src/main.rs \
     && grep -Fq "WritebackOrderingOracle" crates/ffs-harness/src/writeback_cache_audit.rs; then
@@ -910,7 +1021,7 @@ else
     scenario_result "writeback_cache_ordering_cli_wired" "FAIL" "missing ordering oracle CLI or report builder"
 fi
 
-step "Scenario 13: positive ordering oracle accepts complete evidence"
+step "Scenario 20: positive ordering oracle accepts complete evidence"
 if run_rch_capture "$ORDERING_ACCEPT_RAW" cargo run --quiet -p ffs-harness -- \
     validate-writeback-cache-ordering \
     --oracle "$ORDERING_ACCEPT_ORACLE" \
@@ -926,7 +1037,7 @@ else
     scenario_result "writeback_cache_ordering_accepts_complete_oracle" "FAIL" "complete ordering oracle rejected; see $ORDERING_ACCEPT_RAW"
 fi
 
-step "Scenario 14: ordering oracle rejects default-off mount evidence"
+step "Scenario 21: ordering oracle rejects default-off mount evidence"
 if run_rch_capture "$ORDERING_DEFAULT_OFF_RAW" cargo run --quiet -p ffs-harness -- \
     validate-writeback-cache-ordering \
     --oracle "$ORDERING_DEFAULT_OFF_ORACLE" \
@@ -943,7 +1054,7 @@ else
     scenario_result "writeback_cache_ordering_rejects_default_off" "FAIL" "schema-valid default-off ordering oracle should emit report"
 fi
 
-step "Scenario 15: ordering oracle rejects missing fsync boundary"
+step "Scenario 22: ordering oracle rejects missing fsync boundary"
 if run_rch_capture "$ORDERING_MISSING_FSYNC_RAW" cargo run --quiet -p ffs-harness -- \
     validate-writeback-cache-ordering \
     --oracle "$ORDERING_MISSING_FSYNC_ORACLE" \
@@ -960,7 +1071,7 @@ else
     scenario_result "writeback_cache_ordering_rejects_missing_fsync" "FAIL" "schema-valid missing-fsync oracle should emit report"
 fi
 
-step "Scenario 16: ordering oracle rejects missing fsyncdir boundary"
+step "Scenario 23: ordering oracle rejects missing fsyncdir boundary"
 if run_rch_capture "$ORDERING_MISSING_FSYNCDIR_RAW" cargo run --quiet -p ffs-harness -- \
     validate-writeback-cache-ordering \
     --oracle "$ORDERING_MISSING_FSYNCDIR_ORACLE" \
@@ -977,7 +1088,7 @@ else
     scenario_result "writeback_cache_ordering_rejects_missing_fsyncdir" "FAIL" "schema-valid missing-fsyncdir oracle should emit report"
 fi
 
-step "Scenario 17: cancellation before writeback is explicitly classified"
+step "Scenario 24: cancellation before writeback is explicitly classified"
 if run_rch_capture "$ORDERING_CANCELLATION_RAW" cargo run --quiet -p ffs-harness -- \
     validate-writeback-cache-ordering \
     --oracle "$ORDERING_CANCELLATION_ORACLE" \
@@ -993,7 +1104,7 @@ else
     scenario_result "writeback_cache_ordering_cancellation_classified" "FAIL" "classified cancellation oracle rejected; see $ORDERING_CANCELLATION_RAW"
 fi
 
-step "Scenario 18: crash/reopen survivor-set artifact is part of ordering evidence"
+step "Scenario 25: crash/reopen survivor-set artifact is part of ordering evidence"
 if run_rch_capture "$ORDERING_CRASH_REOPEN_RAW" cargo run --quiet -p ffs-harness -- \
     validate-writeback-cache-ordering \
     --oracle "$ORDERING_CRASH_REOPEN_ORACLE" \
@@ -1009,7 +1120,7 @@ else
     scenario_result "writeback_cache_ordering_crash_reopen_artifact" "FAIL" "crash/reopen ordering oracle rejected; see $ORDERING_CRASH_REOPEN_RAW"
 fi
 
-step "Scenario 19: ordering report carries dirty-page, sync, epoch, repair, and repro fields"
+step "Scenario 26: ordering report carries dirty-page, sync, epoch, repair, and repro fields"
 if python3 - "$ORDERING_ACCEPT_REPORT" <<'PY'
 import json
 import pathlib
@@ -1045,14 +1156,14 @@ else
     scenario_result "writeback_cache_ordering_report_fields" "FAIL" "ordering report contract incomplete"
 fi
 
-step "Scenario 20: unit tests cover ordering oracle policy"
+step "Scenario 27: unit tests cover ordering oracle policy"
 if run_rch_capture "$ORDERING_UNIT_RAW" cargo test -p ffs-harness ordering_oracle -- --nocapture; then
     scenario_result "writeback_cache_ordering_unit_tests" "PASS" "ordering oracle unit tests passed through rch"
 else
     scenario_result "writeback_cache_ordering_unit_tests" "FAIL" "ordering oracle unit tests failed; see $ORDERING_UNIT_RAW"
 fi
 
-step "Scenario 21: scenario catalog names this suite and static evidence markers"
+step "Scenario 28: scenario catalog names this suite and static evidence markers"
 if jq -e '.suites[] | select(.suite_id == "ffs_writeback_cache_audit")' scripts/e2e/scenario_catalog.json >/dev/null \
     && grep -Fq "SCENARIO_RESULT|scenario_id=writeback_cache_audit_catalog_valid|outcome=PASS" "$0" \
     && python3 - scripts/e2e/scenario_catalog.json <<'PY'
@@ -1076,6 +1187,13 @@ required = {
     "writeback_cache_audit_unit_tests",
     "writeback_cache_audit_help_docs_consistent",
     "writeback_cache_audit_catalog_valid",
+    "writeback_cache_opt_in_cli_help_boundaries",
+    "writeback_cache_opt_in_cli_rejects_missing_gate",
+    "writeback_cache_opt_in_cli_rejects_read_only",
+    "writeback_cache_opt_in_cli_accepts_gate_before_image_open",
+    "writeback_cache_opt_in_cli_repeated_rejections",
+    "writeback_cache_opt_in_fuser_options_enabled",
+    "writeback_cache_opt_in_unit_tests",
     "writeback_cache_ordering_cli_wired",
     "writeback_cache_ordering_accepts_complete_oracle",
     "writeback_cache_ordering_rejects_default_off",

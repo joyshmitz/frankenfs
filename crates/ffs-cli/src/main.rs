@@ -27,8 +27,15 @@ use ffs_core::{
     BtrfsMountSelection, CrashRecoveryOutcome, Ext4DataErrPolicy, Ext4JournalReplayMode, FsFlavor,
     FsOps, OpenFs, OpenOptions, RepairWritebackBlock, detect_filesystem_at_path,
 };
-use ffs_fuse::{MountConfig, MountOptions, mount_managed};
-use ffs_harness::ParityReport;
+use ffs_fuse::{MountConfig, MountOptions, WritebackCacheMode, mount_managed};
+use ffs_harness::{
+    ParityReport,
+    writeback_cache_audit::{
+        build_writeback_cache_audit_report, build_writeback_ordering_report,
+        fail_on_writeback_cache_audit_errors, fail_on_writeback_ordering_errors,
+        load_writeback_cache_audit_gate, load_writeback_ordering_oracle,
+    },
+};
 use ffs_ondisk::{
     BtrfsSuperblock, Ext4DirEntry, Ext4Extent, Ext4ExtentHeader, Ext4ExtentIndex, Ext4GroupDesc,
     Ext4ImageReader, Ext4Inode, Ext4Superblock, ExtentTree, ext4::Ext4QuotaInodes, parse_dx_root,
@@ -287,6 +294,36 @@ impl MountBackgroundScrubConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct MountWritebackCacheConfig {
+    enabled: bool,
+    audit_gate_path: Option<PathBuf>,
+    ordering_oracle_path: Option<PathBuf>,
+}
+
+impl MountWritebackCacheConfig {
+    #[cfg(test)]
+    const fn disabled() -> Self {
+        Self {
+            enabled: false,
+            audit_gate_path: None,
+            ordering_oracle_path: None,
+        }
+    }
+
+    fn from_cli(
+        enabled: bool,
+        audit_gate_path: Option<PathBuf>,
+        ordering_oracle_path: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            enabled,
+            audit_gate_path,
+            ordering_oracle_path,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct MountCmdOptions {
     allow_other: bool,
     read_write: bool,
@@ -296,6 +333,7 @@ struct MountCmdOptions {
     ext4_verify_journal_checksums: bool,
     runtime: MountRuntimeConfig,
     background_scrub: MountBackgroundScrubConfig,
+    writeback_cache: MountWritebackCacheConfig,
 }
 
 fn default_env_filter() -> EnvFilter {
@@ -474,8 +512,9 @@ enum Command {
         ///   shutdown, and final metrics logging.
         /// - `per-core`: managed mount with thread-per-core dispatch. Sets worker
         ///   threads to match detected cores and logs per-core metrics on shutdown.
-        /// - Kernel FUSE `writeback_cache` mode is intentionally unsupported in
-        ///   V1.x; durability boundaries are explicit `fsync` / `fsyncdir`.
+        /// - Kernel FUSE `writeback_cache` mode is default-off in V1.x and only
+        ///   enabled by `--writeback-cache` after the audit gate and ordering
+        ///   oracle accept.
         #[arg(long = "runtime-mode", value_enum, default_value_t = MountRuntimeMode::Standard)]
         runtime_mode: MountRuntimeMode,
         /// Graceful unmount timeout for managed/per-core modes (seconds).
@@ -489,6 +528,19 @@ enum Command {
         /// Mount read-write (default is read-only).
         #[arg(long)]
         rw: bool,
+        /// Opt into kernel FUSE writeback_cache after the safety gate accepts.
+        ///
+        /// Requires `--rw`, `--writeback-cache-gate`, and
+        /// `--writeback-cache-ordering-oracle`. flush remains non-durable;
+        /// fsync and fsyncdir are the durability boundaries.
+        #[arg(long = "writeback-cache")]
+        writeback_cache: bool,
+        /// Audit gate JSON required by `--writeback-cache`.
+        #[arg(long = "writeback-cache-gate")]
+        writeback_cache_gate: Option<PathBuf>,
+        /// Dirty-page ordering oracle JSON required by `--writeback-cache`.
+        #[arg(long = "writeback-cache-ordering-oracle")]
+        writeback_cache_ordering_oracle: Option<PathBuf>,
         /// Force background scrub even when mounting read-write.
         ///
         /// Without this flag, read-only mounts start a detection-only scrub
@@ -1509,6 +1561,9 @@ fn run() -> Result<()> {
             managed_unmount_timeout_secs,
             allow_other,
             rw,
+            writeback_cache,
+            writeback_cache_gate,
+            writeback_cache_ordering_oracle,
             background_scrub,
             no_background_scrub,
             background_scrub_interval_secs,
@@ -1553,6 +1608,11 @@ fn run() -> Result<()> {
                         managed_unmount_timeout_secs,
                     },
                     background_scrub,
+                    writeback_cache: MountWritebackCacheConfig::from_cli(
+                        writeback_cache,
+                        writeback_cache_gate,
+                        writeback_cache_ordering_oracle,
+                    ),
                 },
             )
         }
@@ -4052,6 +4112,42 @@ fn log_mount_runtime_rejected(
     );
 }
 
+fn log_mount_writeback_cache_rejected(
+    operation_id: &str,
+    scenario_id: &str,
+    error_class: &'static str,
+    reason: &str,
+) {
+    error!(
+        target: "ffs::cli::mount",
+        operation_id,
+        scenario_id,
+        outcome = "writeback_cache_rejected",
+        error_class,
+        reason,
+        "mount_writeback_cache_rejected"
+    );
+}
+
+fn log_mount_writeback_cache_accepted(
+    operation_id: &str,
+    scenario_id: &str,
+    audit_gate_path: &Path,
+    ordering_oracle_path: &Path,
+) {
+    info!(
+        target: "ffs::cli::mount",
+        operation_id,
+        scenario_id,
+        outcome = "writeback_cache_accepted",
+        audit_gate = %audit_gate_path.display(),
+        ordering_oracle = %ordering_oracle_path.display(),
+        durability_flush = "non_durable",
+        durability_boundaries = "fsync,fsyncdir",
+        "mount_writeback_cache_accepted"
+    );
+}
+
 fn emit_mount_banner(
     open_fs: &OpenFs,
     mountpoint: &Path,
@@ -4107,17 +4203,221 @@ fn emit_optional_recovery_banner(open_fs: &OpenFs) {
     }
 }
 
+struct MountWritebackCacheEvidence<'a> {
+    audit_gate_path: &'a Path,
+    ordering_oracle_path: &'a Path,
+    reproduction_command: String,
+}
+
+fn prepare_mount_writeback_cache_evidence<'a>(
+    image_path: &Path,
+    mountpoint: &Path,
+    options: &'a MountCmdOptions,
+    operation_id: &str,
+    scenario_id: &str,
+) -> Result<Option<MountWritebackCacheEvidence<'a>>> {
+    let request = &options.writeback_cache;
+    if !request.enabled {
+        if request.audit_gate_path.is_some() || request.ordering_oracle_path.is_some() {
+            let reason = "--writeback-cache-gate and --writeback-cache-ordering-oracle require --writeback-cache";
+            log_mount_writeback_cache_rejected(
+                operation_id,
+                scenario_id,
+                "gate_without_opt_in",
+                reason,
+            );
+            bail!("{reason}");
+        }
+        return Ok(None);
+    }
+
+    if !options.read_write {
+        let reason = "--writeback-cache requires --rw; flush is non-durable and fsync/fsyncdir are the durability boundaries";
+        log_mount_writeback_cache_rejected(
+            operation_id,
+            scenario_id,
+            "read_only_writeback_cache",
+            reason,
+        );
+        bail!("{reason}");
+    }
+
+    let Some(audit_gate_path) = request.audit_gate_path.as_deref() else {
+        let reason = "--writeback-cache requires --writeback-cache-gate";
+        log_mount_writeback_cache_rejected(operation_id, scenario_id, "missing_audit_gate", reason);
+        bail!("{reason}");
+    };
+    let Some(ordering_oracle_path) = request.ordering_oracle_path.as_deref() else {
+        let reason = "--writeback-cache requires --writeback-cache-ordering-oracle";
+        log_mount_writeback_cache_rejected(
+            operation_id,
+            scenario_id,
+            "missing_ordering_oracle",
+            reason,
+        );
+        bail!("{reason}");
+    };
+
+    let reproduction_command = format!(
+        "ffs mount --rw --writeback-cache --writeback-cache-gate {} --writeback-cache-ordering-oracle {} {} {}",
+        audit_gate_path.display(),
+        ordering_oracle_path.display(),
+        image_path.display(),
+        mountpoint.display()
+    );
+    Ok(Some(MountWritebackCacheEvidence {
+        audit_gate_path,
+        ordering_oracle_path,
+        reproduction_command,
+    }))
+}
+
+fn validate_mount_writeback_cache_audit_gate(
+    path: &Path,
+    scenario_id: &str,
+    reproduction_command: &str,
+    operation_id: &str,
+) -> Result<()> {
+    let audit_gate = match load_writeback_cache_audit_gate(path) {
+        Ok(gate) => gate,
+        Err(error) => {
+            let reason = format!("{error:#}");
+            log_mount_writeback_cache_rejected(
+                operation_id,
+                scenario_id,
+                "audit_gate_invalid",
+                &reason,
+            );
+            return Err(error.context("failed to load writeback-cache audit gate"));
+        }
+    };
+    let audit_report =
+        match build_writeback_cache_audit_report(&audit_gate, scenario_id, reproduction_command) {
+            Ok(report) => report,
+            Err(error) => {
+                let reason = format!("{error:#}");
+                log_mount_writeback_cache_rejected(
+                    operation_id,
+                    scenario_id,
+                    "audit_gate_invalid",
+                    &reason,
+                );
+                return Err(error.context("failed to validate writeback-cache audit gate"));
+            }
+        };
+    if let Err(error) = fail_on_writeback_cache_audit_errors(&audit_report) {
+        let reason = format!("{error:#}");
+        log_mount_writeback_cache_rejected(
+            operation_id,
+            scenario_id,
+            "audit_gate_rejected",
+            &reason,
+        );
+        return Err(error.context("writeback-cache audit gate rejected CLI opt-in"));
+    }
+    Ok(())
+}
+
+fn validate_mount_writeback_cache_ordering_oracle(
+    path: &Path,
+    scenario_id: &str,
+    reproduction_command: &str,
+    operation_id: &str,
+) -> Result<()> {
+    let ordering_oracle = match load_writeback_ordering_oracle(path) {
+        Ok(oracle) => oracle,
+        Err(error) => {
+            let reason = format!("{error:#}");
+            log_mount_writeback_cache_rejected(
+                operation_id,
+                scenario_id,
+                "ordering_oracle_invalid",
+                &reason,
+            );
+            return Err(error.context("failed to load writeback-cache ordering oracle"));
+        }
+    };
+    let ordering_report = match build_writeback_ordering_report(
+        &ordering_oracle,
+        scenario_id,
+        reproduction_command,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            let reason = format!("{error:#}");
+            log_mount_writeback_cache_rejected(
+                operation_id,
+                scenario_id,
+                "ordering_oracle_invalid",
+                &reason,
+            );
+            return Err(error.context("failed to validate writeback-cache ordering oracle"));
+        }
+    };
+    if let Err(error) = fail_on_writeback_ordering_errors(&ordering_report) {
+        let reason = format!("{error:#}");
+        log_mount_writeback_cache_rejected(
+            operation_id,
+            scenario_id,
+            "ordering_oracle_rejected",
+            &reason,
+        );
+        return Err(error.context("writeback-cache ordering oracle rejected CLI opt-in"));
+    }
+    Ok(())
+}
+
+fn validate_mount_writeback_cache_request(
+    image_path: &Path,
+    mountpoint: &Path,
+    options: &MountCmdOptions,
+    operation_id: &str,
+    scenario_id: &str,
+) -> Result<()> {
+    let Some(evidence) = prepare_mount_writeback_cache_evidence(
+        image_path,
+        mountpoint,
+        options,
+        operation_id,
+        scenario_id,
+    )?
+    else {
+        return Ok(());
+    };
+    validate_mount_writeback_cache_audit_gate(
+        evidence.audit_gate_path,
+        scenario_id,
+        &evidence.reproduction_command,
+        operation_id,
+    )?;
+    validate_mount_writeback_cache_ordering_oracle(
+        evidence.ordering_oracle_path,
+        scenario_id,
+        &evidence.reproduction_command,
+        operation_id,
+    )?;
+    log_mount_writeback_cache_accepted(
+        operation_id,
+        scenario_id,
+        evidence.audit_gate_path,
+        evidence.ordering_oracle_path,
+    );
+    Ok(())
+}
+
 fn mount_with_fuse(
     open_fs: Arc<OpenFs>,
     mountpoint: &Path,
     read_write: bool,
     allow_other: bool,
     auto_unmount: bool,
+    writeback_cache: WritebackCacheMode,
 ) -> Result<()> {
     let opts = MountOptions {
         read_only: !read_write,
         allow_other,
         auto_unmount,
+        writeback_cache,
         ioctl_trace_path: None,
         worker_threads: 0,
     };
@@ -4133,6 +4433,7 @@ struct ManagedMountParams<'a> {
     read_write: bool,
     allow_other: bool,
     auto_unmount: bool,
+    writeback_cache: WritebackCacheMode,
     unmount_timeout_secs: u64,
     operation_id: &'a str,
     scenario_id: &'a str,
@@ -4144,6 +4445,7 @@ fn mount_with_managed_fuse(open_fs: Arc<OpenFs>, params: &ManagedMountParams<'_>
             read_only: !params.read_write,
             allow_other: params.allow_other,
             auto_unmount: params.auto_unmount,
+            writeback_cache: params.writeback_cache,
             ioctl_trace_path: None,
             worker_threads: 0,
         },
@@ -4207,6 +4509,7 @@ fn mount_with_per_core_fuse(open_fs: Arc<OpenFs>, params: &ManagedMountParams<'_
             read_only: !params.read_write,
             allow_other: params.allow_other,
             auto_unmount: params.auto_unmount,
+            writeback_cache: params.writeback_cache,
             ioctl_trace_path: None,
             worker_threads: dispatcher.num_cores() as usize,
         },
@@ -4679,6 +4982,7 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
         allow_other = options.allow_other,
         auto_unmount,
         read_write = options.read_write,
+        writeback_cache = options.writeback_cache.enabled,
         background_repair = options.background_scrub.repair_writes_enabled
     );
     let _command_guard = command_span.enter();
@@ -4714,6 +5018,14 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
         auto_unmount,
         options.read_write,
     );
+
+    validate_mount_writeback_cache_request(
+        image_path,
+        mountpoint,
+        options,
+        &operation_id,
+        scenario_id,
+    )?;
 
     let mut open_fs = match open_filesystem_for_mount(image_path, options) {
         Ok(open_fs) => open_fs,
@@ -4774,6 +5086,7 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
                 options.read_write,
                 options.allow_other,
                 auto_unmount,
+                WritebackCacheMode::from_enabled(options.writeback_cache.enabled),
             )?;
         }
         MountRuntimeMode::Managed | MountRuntimeMode::PerCore => {
@@ -4782,6 +5095,7 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
                 read_write: options.read_write,
                 allow_other: options.allow_other,
                 auto_unmount,
+                writeback_cache: WritebackCacheMode::from_enabled(options.writeback_cache.enabled),
                 unmount_timeout_secs: runtime.managed_unmount_timeout_secs(),
                 operation_id: &operation_id,
                 scenario_id,
@@ -6051,14 +6365,15 @@ mod tests {
         FsckCommandOptions, FsckFlags, InfoCommandOptions, InfoSections, LogFormat,
         MAX_EXT4_INFO_GROUPS, MountAccessMode, MountBackgroundRepairMode,
         MountBackgroundScrubConfig, MountBackgroundScrubMode, MountBackgroundScrubRequest,
-        MountCmdOptions, MountMode, MountRuntimeConfig, MountRuntimeMode, RepairCommandOptions,
-        RepairFlags, btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output,
-        build_info_output, build_mount_open_options, choose_btrfs_scrub_block_size,
-        ext4_appears_clean_state, ext4_mount_replay_mode, format_ratio_thousandths,
-        log_mount_runtime_rejected, log_mount_runtime_selected, mount_cmd, mount_operation_id,
-        open_filesystem_for_mount, parse_btrfs_mount_selection, read_ext4_group_desc_from_path,
-        read_ext4_inode_from_path, read_file_region, start_mount_background_scrub,
-        summarize_repair_staleness, unavailable_repair_info,
+        MountCmdOptions, MountMode, MountRuntimeConfig, MountRuntimeMode,
+        MountWritebackCacheConfig, RepairCommandOptions, RepairFlags, btrfs_chunk_type_flag_names,
+        build_ext4_group_info, build_fsck_output, build_info_output, build_mount_open_options,
+        choose_btrfs_scrub_block_size, ext4_appears_clean_state, ext4_mount_replay_mode,
+        format_ratio_thousandths, log_mount_runtime_rejected, log_mount_runtime_selected,
+        mount_cmd, mount_operation_id, open_filesystem_for_mount, parse_btrfs_mount_selection,
+        read_ext4_group_desc_from_path, read_ext4_inode_from_path, read_file_region,
+        start_mount_background_scrub, summarize_repair_staleness, unavailable_repair_info,
+        validate_mount_writeback_cache_request,
     };
     use crate::cmd_evidence::{
         EvidenceHistogramBucket, EvidenceHistogramSnapshot, EvidenceMvccRuntimeMetricsSnapshot,
@@ -6079,7 +6394,7 @@ mod tests {
     use serde_json::Value;
     use std::io::{self, Seek, SeekFrom, Write};
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tracing::{info, info_span};
@@ -6093,6 +6408,123 @@ mod tests {
             interval_secs: super::DEFAULT_MOUNT_BACKGROUND_SCRUB_INTERVAL_SECS,
             ledger_path: None,
         }
+    }
+
+    fn test_mount_cmd_options(
+        read_write: bool,
+        writeback_cache: MountWritebackCacheConfig,
+    ) -> MountCmdOptions {
+        MountCmdOptions {
+            allow_other: false,
+            read_write,
+            mount_mode: MountMode::Compat,
+            btrfs_mount_selection: BtrfsMountSelection::DefaultRoot,
+            ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
+            ext4_verify_journal_checksums: true,
+            runtime: MountRuntimeConfig {
+                mode: MountRuntimeMode::Standard,
+                managed_unmount_timeout_secs: None,
+            },
+            background_scrub: test_mount_background_scrub_disabled(),
+            writeback_cache,
+        }
+    }
+
+    fn write_happy_writeback_artifacts(dir: &Path) -> (PathBuf, PathBuf) {
+        let gate_path = dir.join("writeback_gate.json");
+        let oracle_path = dir.join("writeback_ordering_oracle.json");
+        let artifact = |id: &str| {
+            serde_json::json!({
+                "artifact_id": id,
+                "present": true,
+                "fresh": true,
+                "passed": true,
+                "artifact_path": format!("artifacts/writeback-cache/{id}.json")
+            })
+        };
+        let gate = serde_json::json!({
+            "schema_version": 1,
+            "gate_version": "bd-rchk0.2.2-cli-gate-v1",
+            "bead_id": "bd-rchk0.2.2",
+            "mount_options": {
+                "raw_options": ["rw", "fsname=frankenfs", "writeback_cache"],
+                "fs_name": "frankenfs",
+                "allow_other": false,
+                "auto_unmount": true,
+                "default_permissions": true,
+                "mode": "rw"
+            },
+            "repair_serialization_state": "rw_lane_accepted",
+            "fuse_capability": {
+                "probe_status": "available",
+                "kernel_supports_writeback_cache": true,
+                "helper_binary_present": true
+            },
+            "epoch_barrier_artifact": artifact("epoch_barrier_proof"),
+            "crash_matrix_artifact": artifact("writeback_crash_matrix"),
+            "fsync_evidence_artifact": artifact("fsync_fsyncdir_boundary"),
+            "filesystem_flavor": "ext4",
+            "operation_class": "mounted_write",
+            "explicit_opt_in": true,
+            "conflicting_flags": []
+        });
+        let invariant_evidence: Vec<_> = ["I1", "I2", "I3", "I4", "I5", "I6"]
+            .into_iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "supported": true,
+                    "test_id": format!("writeback_ordering_{id}_test"),
+                    "artifact_field": format!("ordering.{id}.artifact"),
+                    "release_gate_consumer": "writeback_cache.release_gate",
+                    "unsupported_rationale": ""
+                })
+            })
+            .collect();
+        let oracle = serde_json::json!({
+            "schema_version": 1,
+            "gate_version": "bd-rchk0.2.2-ordering-v1",
+            "bead_id": "bd-rchk0.2.2",
+            "mount_options": {
+                "raw_options": ["rw", "fsname=frankenfs", "writeback_cache"],
+                "fs_name": "frankenfs",
+                "allow_other": false,
+                "auto_unmount": true,
+                "default_permissions": true,
+                "mode": "rw"
+            },
+            "raw_fuser_options": ["fsname=frankenfs", "subtype=ffs", "writeback_cache"],
+            "dirty_page_state": "fsynced_durable",
+            "metadata_state": "metadata_after_data",
+            "flush_observed_non_durable": true,
+            "fsync_observed_durable": true,
+            "fsyncdir_observed_durable": true,
+            "cancellation_state": "cancelled_before_writeback_classified",
+            "unmount_state": "dirty_pages_flushed_or_rejected",
+            "crash_reopen_state": "survivor_set_verified",
+            "epoch_id": "epoch-0007",
+            "epoch_state": "fresh",
+            "repair_symbol_generation": 8,
+            "repair_symbol_refresh": "refreshed_after_writeback",
+            "invariant_evidence": invariant_evidence,
+            "expected_ordering": ["dirty_data", "fsync", "metadata", "fsyncdir", "repair_symbol_refresh"],
+            "observed_ordering": ["dirty_data", "fsync", "metadata", "fsyncdir", "repair_symbol_refresh"],
+            "artifact_paths": [
+                "artifacts/writeback-cache/ordering.json",
+                "artifacts/writeback-cache/crash_reopen.json"
+            ]
+        });
+        std::fs::write(
+            &gate_path,
+            serde_json::to_vec_pretty(&gate).expect("serialize gate"),
+        )
+        .expect("write gate");
+        std::fs::write(
+            &oracle_path,
+            serde_json::to_vec_pretty(&oracle).expect("serialize oracle"),
+        )
+        .expect("write oracle");
+        (gate_path, oracle_path)
     }
 
     #[derive(Clone, Default)]
@@ -8587,6 +9019,7 @@ mod tests {
                             managed_unmount_timeout_secs: None,
                         },
                         background_scrub: test_mount_background_scrub_disabled(),
+                        writeback_cache: MountWritebackCacheConfig::disabled(),
                     },
                 )
                 .expect_err("non-clean MMP state should reject mount before FUSE starts");
@@ -8657,6 +9090,7 @@ mod tests {
                     managed_unmount_timeout_secs: Some(30),
                 },
                 background_scrub: test_mount_background_scrub_disabled(),
+                writeback_cache: MountWritebackCacheConfig::disabled(),
             },
         )
         .expect_err("managed mode with missing image should fail at open");
@@ -8687,6 +9121,7 @@ mod tests {
                     managed_unmount_timeout_secs: None,
                 },
                 background_scrub: test_mount_background_scrub_disabled(),
+                writeback_cache: MountWritebackCacheConfig::disabled(),
             },
         )
         .expect_err("per-core mode with missing image should fail at open");
@@ -8746,6 +9181,7 @@ mod tests {
                 managed_unmount_timeout_secs: None,
             },
             background_scrub: test_mount_background_scrub_disabled(),
+            writeback_cache: MountWritebackCacheConfig::disabled(),
         });
         assert_eq!(
             open_options.btrfs_mount_selection,
@@ -8767,6 +9203,7 @@ mod tests {
                 managed_unmount_timeout_secs: None,
             },
             background_scrub: test_mount_background_scrub_disabled(),
+            writeback_cache: MountWritebackCacheConfig::disabled(),
         });
         assert_eq!(
             open_options.btrfs_mount_selection,
@@ -8792,6 +9229,7 @@ mod tests {
                 managed_unmount_timeout_secs: None,
             },
             background_scrub: test_mount_background_scrub_disabled(),
+            writeback_cache: MountWritebackCacheConfig::disabled(),
         });
         assert_eq!(
             open_options.btrfs_mount_selection,
@@ -8821,6 +9259,7 @@ mod tests {
                         managed_unmount_timeout_secs: None,
                     },
                     background_scrub: test_mount_background_scrub_disabled(),
+                    writeback_cache: MountWritebackCacheConfig::disabled(),
                 },
             )
             .expect_err("missing btrfs subvolume should fail before FUSE mount");
@@ -8861,6 +9300,7 @@ mod tests {
                         managed_unmount_timeout_secs: None,
                     },
                     background_scrub: test_mount_background_scrub_disabled(),
+                    writeback_cache: MountWritebackCacheConfig::disabled(),
                 },
             )
             .expect_err("missing btrfs snapshot should fail before FUSE mount");
@@ -8898,6 +9338,7 @@ mod tests {
                         managed_unmount_timeout_secs: None,
                     },
                     background_scrub: test_mount_background_scrub_disabled(),
+                    writeback_cache: MountWritebackCacheConfig::disabled(),
                 },
             )
             .expect("named btrfs subvolume should open through mount operator path");
@@ -8954,6 +9395,7 @@ mod tests {
                         managed_unmount_timeout_secs: None,
                     },
                     background_scrub: test_mount_background_scrub_disabled(),
+                    writeback_cache: MountWritebackCacheConfig::disabled(),
                 },
             )
             .expect("named btrfs snapshot should open through mount operator path");
@@ -9072,6 +9514,164 @@ mod tests {
                 "expected mount command"
             ),
         }
+    }
+
+    #[test]
+    fn mount_writeback_cache_flag_defaults_to_false() {
+        let cli = Cli::try_parse_from(["ffs", "mount", "/img", "/mnt"])
+            .expect("mount should parse with defaults");
+        match cli.command {
+            Command::Mount {
+                writeback_cache,
+                writeback_cache_gate,
+                writeback_cache_ordering_oracle,
+                ..
+            } => {
+                assert!(!writeback_cache);
+                assert_eq!(writeback_cache_gate, None);
+                assert_eq!(writeback_cache_ordering_oracle, None);
+            }
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
+        }
+    }
+
+    #[test]
+    fn mount_writeback_cache_flag_opt_in_parses_gate_paths() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "mount",
+            "--rw",
+            "--writeback-cache",
+            "--writeback-cache-gate",
+            "/tmp/gate.json",
+            "--writeback-cache-ordering-oracle",
+            "/tmp/oracle.json",
+            "/img",
+            "/mnt",
+        ])
+        .expect("mount with explicit writeback-cache gate should parse");
+        match cli.command {
+            Command::Mount {
+                rw,
+                writeback_cache,
+                writeback_cache_gate,
+                writeback_cache_ordering_oracle,
+                ..
+            } => {
+                assert!(rw);
+                assert!(writeback_cache);
+                assert_eq!(writeback_cache_gate, Some(PathBuf::from("/tmp/gate.json")));
+                assert_eq!(
+                    writeback_cache_ordering_oracle,
+                    Some(PathBuf::from("/tmp/oracle.json"))
+                );
+            }
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
+        }
+    }
+
+    #[test]
+    fn mount_writeback_cache_rejects_read_only_before_gate_io() {
+        let options = test_mount_cmd_options(
+            false,
+            MountWritebackCacheConfig::from_cli(
+                true,
+                Some(PathBuf::from("/missing/gate.json")),
+                Some(PathBuf::from("/missing/oracle.json")),
+            ),
+        );
+        let err = validate_mount_writeback_cache_request(
+            Path::new("/img"),
+            Path::new("/mnt"),
+            &options,
+            "mount-op",
+            "cli_mount_runtime_standard_ro",
+        )
+        .expect_err("read-only writeback_cache should reject before reading gate files");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("--writeback-cache requires --rw"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn mount_writeback_cache_rejects_missing_gate_with_stable_diagnostic() {
+        let options = test_mount_cmd_options(
+            true,
+            MountWritebackCacheConfig::from_cli(true, None, Some(PathBuf::from("/tmp/oracle"))),
+        );
+        let first = validate_mount_writeback_cache_request(
+            Path::new("/img"),
+            Path::new("/mnt"),
+            &options,
+            "mount-op-a",
+            "cli_mount_runtime_standard_rw",
+        )
+        .expect_err("missing gate should reject");
+        let second = validate_mount_writeback_cache_request(
+            Path::new("/img"),
+            Path::new("/mnt"),
+            &options,
+            "mount-op-b",
+            "cli_mount_runtime_standard_rw",
+        )
+        .expect_err("repeated missing gate should reject the same way");
+        assert_eq!(first.to_string(), second.to_string());
+        assert!(
+            first
+                .to_string()
+                .contains("--writeback-cache requires --writeback-cache-gate")
+        );
+    }
+
+    #[test]
+    fn mount_writeback_cache_rejects_gate_paths_without_opt_in() {
+        let options = test_mount_cmd_options(
+            true,
+            MountWritebackCacheConfig::from_cli(
+                false,
+                Some(PathBuf::from("/tmp/gate")),
+                Some(PathBuf::from("/tmp/oracle")),
+            ),
+        );
+        let err = validate_mount_writeback_cache_request(
+            Path::new("/img"),
+            Path::new("/mnt"),
+            &options,
+            "mount-op",
+            "cli_mount_runtime_standard_rw",
+        )
+        .expect_err("gate paths without opt-in should reject");
+        let message = err.to_string();
+        assert!(
+            message.contains("require --writeback-cache"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn mount_writeback_cache_accepts_complete_gate_and_ordering_oracle() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (gate_path, oracle_path) = write_happy_writeback_artifacts(temp.path());
+        let options = test_mount_cmd_options(
+            true,
+            MountWritebackCacheConfig::from_cli(true, Some(gate_path), Some(oracle_path)),
+        );
+        validate_mount_writeback_cache_request(
+            Path::new("/img"),
+            Path::new("/mnt"),
+            &options,
+            "mount-op",
+            "cli_mount_runtime_standard_rw",
+        )
+        .expect("complete gate and ordering oracle should accept before image open");
     }
 
     #[test]

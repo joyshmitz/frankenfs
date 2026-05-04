@@ -1,6 +1,6 @@
 # Writeback-Cache MVCC Boundary Design
 
-**Status:** Accepted for V1.x policy, design-ready for future enablement
+**Status:** Accepted for V1.x policy, explicit opt-in wiring gated by evidence
 **Date:** 2026-03-14
 **Bead:** bd-m5wf.2.1
 **Scope:** FUSE kernel `writeback_cache` ordering vs. FrankenFS MVCC visibility and durability
@@ -9,13 +9,19 @@
 
 The live code establishes a strict V1.x contract:
 
-- `ffs-fuse` does **not** mount with kernel `writeback_cache`; `build_mount_options_excludes_kernel_writeback_cache_mode` enforces that.
+- `ffs-fuse` defaults `writeback_cache` off and only forwards the kernel option
+  when `MountOptions::writeback_cache` is explicitly set on a read-write mount.
+  Read-only opt-in rejects before the FUSE session is created.
+- `ffs-cli mount --writeback-cache` requires `--rw`, an accepted
+  writeback-cache audit gate, and an accepted dirty-page ordering oracle before
+  it passes the option to `ffs-fuse`.
 - `flush` is a non-durable lifecycle hook. `ffs-core::OpenFs::flush()` logs `durability_boundary = "none"` and does not call device sync.
 - `fsync` / `fsyncdir` are the only explicit durability boundaries in the FUSE layer. `ffs-core::OpenFs::{ext4,btrfs}_sync_with_logging()` call `self.dev.sync(cx)`.
-- Request scopes currently register and release an MVCC snapshot around each FUSE callback, but they do **not** attach a transaction or hidden write epoch. `begin_request_scope()` captures `current_snapshot()` and `end_request_scope()` releases it.
-- The ext4 and btrfs write paths mutate live filesystem state directly during `write()`, `rename()`, `create()`, etc. There is no daemon-side staging layer for “kernel accepted the write, but the daemon has not committed it yet.”
+- `ffs-core::WritebackEpochBarrier` models `staged_epoch >= visible_epoch >= durable_epoch` and the proof harness now has both the negative-option gate (`bd-rchk0.2.1.1`) and dirty-page ordering oracle (`bd-8pz7h`).
 
-That combination is coherent only while kernel-side write reordering is disabled.
+That combination keeps ordinary mounts conservative while allowing a narrow,
+evidence-gated experimental opt-in. The user-facing release-readiness claim is
+still blocked until fresh crash/replay integration evidence is present.
 
 ## Problem Statement
 
@@ -97,17 +103,25 @@ If writeback reordering is allowed at all, it may occur only within a single bar
 
 This prevents a newer epoch from becoming visible or durable ahead of an earlier epoch that the application logically issued first.
 
-## Why V1.x Must Keep `writeback_cache` Disabled
+## Why V1.x Must Keep `writeback_cache` Default-Off and Evidence-Gated
 
-The current implementation violates the prerequisites for `writeback_cache` in three ways:
+The default path must not enable `writeback_cache` opportunistically:
 
-1. **No staging epoch:** arriving `write()` requests mutate live ext4/btrfs state immediately.
-2. **No commit fence:** `begin_request_scope()` captures a snapshot, but it does not establish a per-request or per-handle writeback epoch.
-3. **No sync wait-set:** `fsync` / `fsyncdir` sync the underlying device, but they do not first wait for all earlier kernel-dirty pages to be delivered into daemon-visible state.
+1. The kernel can still reorder, batch, or delay dirty pages in ways that are
+   invisible to a default mount request.
+2. Operators need a concrete audit artifact proving the epoch barrier, FUSE
+   capability, repair-serialization, crash matrix, and fsync/fsyncdir evidence
+   are fresh for the mount they are attempting.
+3. The dirty-page ordering oracle must show that raw FUSE options under test
+   include `writeback_cache`, that `flush` remains non-durable, and that
+   fsync/fsyncdir advance the durable survivor set before release gates can
+   promote the claim.
 
 Therefore the correct V1.x decision is:
 
-- **Operational policy:** keep kernel `writeback_cache` disabled.
+- **Operational policy:** keep kernel `writeback_cache` disabled by default.
+- **Opt-in policy:** only `--writeback-cache --rw` with accepted gate/oracle
+  artifacts forwards the kernel option.
 - **Contract:** `flush` is non-durable; `fsync` / `fsyncdir` are the only durability boundaries.
 
 ## Future Enablement Design: Writeback Epoch Fence

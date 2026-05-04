@@ -219,6 +219,8 @@ const MOVE_EXT_SUCCESS_ERROR_CLASS: &str = "none";
 pub enum FuseError {
     #[error("invalid mountpoint: {0}")]
     InvalidMountpoint(String),
+    #[error(transparent)]
+    UnsupportedFeature(#[from] FfsError),
     #[error("mount I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -302,11 +304,39 @@ fn to_file_attr(attr: &InodeAttr) -> FileAttr {
 
 // ── Mount options ───────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WritebackCacheMode {
+    #[default]
+    Disabled,
+    Enabled,
+}
+
+impl WritebackCacheMode {
+    #[must_use]
+    pub const fn from_enabled(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+
+    #[must_use]
+    pub const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MountOptions {
     pub read_only: bool,
     pub allow_other: bool,
     pub auto_unmount: bool,
+    /// Explicit opt-in to the kernel FUSE `writeback_cache` mount option.
+    ///
+    /// Defaults off. Callers must only enable this after the writeback-cache
+    /// audit gate and dirty-page ordering oracle have accepted the mount.
+    pub writeback_cache: WritebackCacheMode,
     /// Optional append-only trace file for recording every FUSE ioctl callback.
     ///
     /// Used by end-to-end harness tests to distinguish kernel/VFS rejections
@@ -326,6 +356,7 @@ impl Default for MountOptions {
             read_only: true,
             allow_other: false,
             auto_unmount: true,
+            writeback_cache: WritebackCacheMode::Disabled,
             ioctl_trace_path: None,
             worker_threads: 0,
         }
@@ -416,6 +447,14 @@ fn apply_mount_option(
         "noauto_unmount" => {
             reject_mount_option_value(key, value)?;
             options.auto_unmount = false;
+        }
+        "writeback_cache" => {
+            options.writeback_cache =
+                WritebackCacheMode::from_enabled(parse_mount_bool_or_flag(key, value, true)?);
+        }
+        "nowriteback_cache" => {
+            reject_mount_option_value(key, value)?;
+            options.writeback_cache = WritebackCacheMode::Disabled;
         }
         "worker_threads" | "threads" => {
             options.worker_threads = parse_mount_usize(key, value)?;
@@ -4855,6 +4894,9 @@ fn build_mount_options(options: &MountOptions) -> Vec<MountOption> {
     if options.auto_unmount {
         opts.push(MountOption::AutoUnmount);
     }
+    if options.writeback_cache.is_enabled() {
+        opts.push(MountOption::CUSTOM("writeback_cache".to_owned()));
+    }
     if options.worker_threads > 0 {
         let max_background = options.resolved_thread_count();
         let congestion_threshold = max_background.saturating_mul(3).saturating_div(4).max(1);
@@ -4867,6 +4909,17 @@ fn build_mount_options(options: &MountOptions) -> Vec<MountOption> {
     }
 
     opts
+}
+
+fn validate_mount_options(options: &MountOptions) -> Result<(), FuseError> {
+    if options.writeback_cache.is_enabled() && options.read_only {
+        return Err(FfsError::UnsupportedFeature(
+            "kernel FUSE writeback_cache requires an explicit read-write mount; flush is non-durable and fsync/fsyncdir are the durability boundaries"
+                .to_owned(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn mount_option_label(option: &MountOption) -> String {
@@ -4933,6 +4986,7 @@ pub fn mount(
     mountpoint: impl AsRef<Path>,
     options: &MountOptions,
 ) -> Result<(), FuseError> {
+    validate_mount_options(options)?;
     let mountpoint = mountpoint.as_ref();
     validate_mountpoint(mountpoint)?;
     let fuse_opts = build_mount_options(options);
@@ -4951,6 +5005,7 @@ pub fn mount_background(
     mountpoint: impl AsRef<Path>,
     options: &MountOptions,
 ) -> Result<fuser::BackgroundSession, FuseError> {
+    validate_mount_options(options)?;
     let mountpoint = mountpoint.as_ref();
     validate_mountpoint(mountpoint)?;
     let fuse_opts = build_mount_options(options);
@@ -5135,6 +5190,7 @@ pub fn mount_managed(
     mountpoint: impl AsRef<Path>,
     config: &MountConfig,
 ) -> Result<MountHandle, FuseError> {
+    validate_mount_options(&config.options)?;
     let mountpoint = mountpoint.as_ref();
     validate_mountpoint(mountpoint)?;
 
@@ -5286,6 +5342,7 @@ mod tests {
         assert!(opts.read_only);
         assert!(!opts.allow_other);
         assert!(opts.auto_unmount);
+        assert!(!opts.writeback_cache.is_enabled());
         assert!(opts.ioctl_trace_path.is_none());
     }
 
@@ -11905,6 +11962,7 @@ mod tests {
             read_only: false,
             allow_other: false,
             auto_unmount: true,
+            writeback_cache: WritebackCacheMode::Disabled,
             ioctl_trace_path: None,
             worker_threads: 0,
         };
@@ -11920,6 +11978,7 @@ mod tests {
             read_only: true,
             allow_other: true,
             auto_unmount: false,
+            writeback_cache: WritebackCacheMode::Disabled,
             ioctl_trace_path: None,
             worker_threads: 0,
         };
@@ -11936,6 +11995,7 @@ mod tests {
             read_only: true,
             allow_other: false,
             auto_unmount: true,
+            writeback_cache: WritebackCacheMode::Disabled,
             ioctl_trace_path: None,
             worker_threads: 8,
         };
@@ -11962,6 +12022,7 @@ mod tests {
         assert!(!opts.read_only);
         assert!(opts.allow_other);
         assert!(!opts.auto_unmount);
+        assert!(!opts.writeback_cache.is_enabled());
         assert_eq!(opts.worker_threads, 4);
     }
 
@@ -11987,6 +12048,7 @@ mod tests {
             read_only: true,
             allow_other: false,
             auto_unmount: true,
+            writeback_cache: WritebackCacheMode::Disabled,
             ioctl_trace_path: None,
             worker_threads: 0,
         };
@@ -12051,6 +12113,7 @@ mod tests {
                     read_only: false,
                     allow_other: true,
                     auto_unmount: false,
+                    writeback_cache: WritebackCacheMode::Disabled,
                     ioctl_trace_path: None,
                     worker_threads: 8,
                 },
@@ -12089,24 +12152,45 @@ mod tests {
     }
 
     #[test]
-    fn parse_mount_options_rejects_kernel_writeback_cache_tokens() {
-        let cases = [
-            ("writeback_cache", "writeback_cache"),
-            ("rw,writeback_cache", "writeback_cache"),
-            ("writeback_cache=true", "writeback_cache"),
-            ("nowriteback_cache", "nowriteback_cache"),
-        ];
+    fn parse_mount_options_accepts_explicit_writeback_cache_token() {
+        let opts = parse_mount_options_for_fuzzing(b"rw,writeback_cache")
+            .expect("explicit rw writeback_cache option should parse");
+        assert!(!opts.read_only);
+        assert!(opts.writeback_cache.is_enabled());
+    }
 
-        for (raw, expected_option) in cases {
-            assert!(
-                matches!(
-                    parse_mount_options_for_fuzzing(raw.as_bytes()),
-                    Err(MountOptionParseError::UnknownOption { option })
-                        if option == expected_option
-                ),
-                "kernel writeback_cache token should be rejected: {raw}"
-            );
-        }
+    #[test]
+    fn build_mount_options_includes_writeback_cache_only_when_opted_in() {
+        let opts = MountOptions {
+            read_only: false,
+            writeback_cache: WritebackCacheMode::Enabled,
+            ..MountOptions::default()
+        };
+        let labels = mount_option_labels_for_fuzzing(&opts);
+        println!(
+            "WRITEBACK_CACHE_OPT_IN_FUSER_OPTIONS|case=explicit_rw_opt_in|labels={}",
+            labels.join(";")
+        );
+        assert!(
+            labels.iter().any(|label| label == "writeback_cache"),
+            "explicit writeback_cache opt-in should reach canonical mount labels: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn validate_mount_options_rejects_read_only_writeback_cache() {
+        let opts = MountOptions {
+            read_only: true,
+            writeback_cache: WritebackCacheMode::Enabled,
+            ..MountOptions::default()
+        };
+        let err = validate_mount_options(&opts)
+            .expect_err("read-only writeback_cache request must fail before mounting");
+        let message = err.to_string();
+        assert!(
+            message.contains("writeback_cache requires an explicit read-write mount"),
+            "unexpected error: {message}"
+        );
     }
 
     // ── should_shed backpressure tests ───────────────────────────────────
@@ -12485,6 +12569,7 @@ CUSTOM("congestion_threshold=3")"#;
             read_only: false,
             allow_other: true,
             auto_unmount: false,
+            writeback_cache: WritebackCacheMode::Disabled,
             ioctl_trace_path: None,
             worker_threads: 4,
         };
