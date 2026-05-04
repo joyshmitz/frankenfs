@@ -111,6 +111,11 @@ use ffs_harness::{
         load_swarm_cache_controller_contract, render_swarm_cache_controller_markdown,
         validate_swarm_cache_controller_contract,
     },
+    swarm_tail_latency::{
+        DEFAULT_SWARM_TAIL_LATENCY_LEDGER, fail_on_swarm_tail_latency_errors,
+        load_swarm_tail_latency_ledger, render_swarm_tail_latency_markdown,
+        validate_swarm_tail_latency_ledger,
+    },
     swarm_workload_harness::{
         DEFAULT_SWARM_WORKLOAD_HARNESS_MANIFEST, fail_on_swarm_workload_harness_errors,
         load_swarm_workload_harness_manifest, render_swarm_workload_harness_markdown,
@@ -208,6 +213,7 @@ fn run() -> Result<()> {
         }
         Some("performance-delta-closeout") => performance_delta_closeout_cmd(&args[1..]),
         Some("validate-swarm-cache-controller") => validate_swarm_cache_controller_cmd(&args[1..]),
+        Some("validate-swarm-tail-latency") => validate_swarm_tail_latency_cmd(&args[1..]),
         Some("validate-swarm-workload-harness") => validate_swarm_workload_harness_cmd(&args[1..]),
         Some("validate-wal-group-commit-gate") => validate_wal_group_commit_gate_cmd(&args[1..]),
         Some("validate-scrub-repair-scheduler") => validate_scrub_repair_scheduler_cmd(&args[1..]),
@@ -341,6 +347,14 @@ struct WorkloadCorpusCmdArgs {
 #[derive(Debug)]
 struct SwarmCacheControllerCmdArgs {
     contract_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
+struct SwarmTailLatencyCmdArgs {
+    ledger_path: String,
     out_path: Option<String>,
     summary_out_path: Option<String>,
     format: ProofBundleFormat,
@@ -1252,6 +1266,87 @@ fn parse_swarm_cache_controller_cmd_args(
 
     Ok(Some(SwarmCacheControllerCmdArgs {
         contract_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
+fn validate_swarm_tail_latency_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_swarm_tail_latency_cmd_args(args)? else {
+        return Ok(());
+    };
+    let ledger = load_swarm_tail_latency_ledger(Path::new(&cmd_args.ledger_path))?;
+    let report = validate_swarm_tail_latency_ledger(&ledger);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_swarm_tail_latency_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "swarm tail-latency report written: {} valid={} rows={} alerts={}",
+            path, report.valid, report.row_count, report.component_dominance_alert_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_swarm_tail_latency_markdown(&report)),
+        )?;
+        println!("swarm tail-latency summary written: {path}");
+    }
+
+    fail_on_swarm_tail_latency_errors(&report)
+}
+
+fn parse_swarm_tail_latency_cmd_args(args: &[String]) -> Result<Option<SwarmTailLatencyCmdArgs>> {
+    let mut ledger_path = DEFAULT_SWARM_TAIL_LATENCY_LEDGER.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--ledger" => {
+                i += 1;
+                args.get(i)
+                    .context("--ledger requires a path")?
+                    .clone_into(&mut ledger_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_swarm_tail_latency_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-swarm-tail-latency argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(SwarmTailLatencyCmdArgs {
+        ledger_path,
         out_path,
         summary_out_path,
         format,
@@ -3115,6 +3210,7 @@ fn print_usage() {
     print_performance_baseline_manifest_usage_summary();
     print_performance_delta_closeout_usage_summary();
     print_swarm_cache_controller_usage_summary();
+    print_swarm_tail_latency_usage_summary();
     print_swarm_workload_harness_usage_summary();
     print_wal_group_commit_gate_usage_summary();
     print_scrub_repair_scheduler_usage_summary();
@@ -3202,6 +3298,7 @@ fn print_usage_examples() {
     print_performance_baseline_manifest_example();
     print_performance_delta_closeout_example();
     print_swarm_cache_controller_example();
+    print_swarm_tail_latency_example();
     print_swarm_workload_harness_example();
     print_wal_group_commit_gate_example();
     print_scrub_repair_scheduler_example();
@@ -3252,6 +3349,18 @@ fn print_swarm_cache_controller_usage_summary() {
 fn print_swarm_cache_controller_example() {
     println!(
         "  ffs-harness validate-swarm-cache-controller --contract benchmarks/swarm_cache_controller_contract.json --out artifacts/performance/swarm_cache_controller.json --summary-out artifacts/performance/swarm_cache_controller.md"
+    );
+}
+
+fn print_swarm_tail_latency_usage_summary() {
+    println!(
+        "  ffs-harness validate-swarm-tail-latency [--ledger FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_swarm_tail_latency_example() {
+    println!(
+        "  ffs-harness validate-swarm-tail-latency --ledger benchmarks/swarm_tail_latency_ledger.json --out artifacts/performance/swarm_tail_latency.json --summary-out artifacts/performance/swarm_tail_latency.md"
     );
 }
 
@@ -3522,6 +3631,16 @@ fn print_swarm_cache_controller_usage() {
     println!();
     println!("Options:");
     println!("  --contract FILE                    Read swarm cache controller contract JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write selected-format validation report");
+    println!("  --summary-out FILE                 Write Markdown inspection summary");
+}
+
+fn print_swarm_tail_latency_usage() {
+    println!("Usage: ffs-harness validate-swarm-tail-latency [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --ledger FILE                      Read swarm tail-latency ledger JSON");
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write selected-format validation report");
     println!("  --summary-out FILE                 Write Markdown inspection summary");

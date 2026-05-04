@@ -59,6 +59,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 # Run P1 workload corpus schema and proof-consumer coverage smoke
 ./scripts/e2e/ffs_workload_corpus_e2e.sh
 
+# Run swarm tail-latency decomposition ledger validation
+./scripts/e2e/ffs_swarm_tail_latency_e2e.sh
+
 # Run NUMA-aware swarm workload harness dry-run validation
 ./scripts/e2e/ffs_swarm_workload_harness_e2e.sh
 
@@ -171,6 +174,23 @@ cargo run -p ffs-harness -- validate-swarm-workload-harness \
 ```
 
 The manifest is a dry-run proof contract, not a real workload execution grant. It must include a host fingerprint, CPU/RAM/NUMA visibility, storage class, FUSE capability, kernel, RCH/local lane, worker isolation notes, exact command plan, resource caps, queue/backpressure counters, cleanup policy, expected artifacts, raw logs, and release-claim state. Local hosts or lanes without enough CPU, RAM, or NUMA visibility must use `capability_skip` or `small_host_smoke`; they cannot produce a 64-core/256GB pass claim.
+
+## Swarm Tail-Latency Ledger Contract
+
+The 64-core/256GB swarm tail-latency decomposition ledger lives in:
+
+- `benchmarks/swarm_tail_latency_ledger.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-swarm-tail-latency \
+  --ledger benchmarks/swarm_tail_latency_ledger.json \
+  --out artifacts/performance/swarm_tail_latency.json \
+  --summary-out artifacts/performance/swarm_tail_latency.md
+```
+
+The ledger decomposes p99 latency into queueing, service, I/O, retries, synchronization, allocator, repair backlog, cache pressure, WAL fsync, and FUSE wrapper components. Rows must carry host fingerprint, core/RAM profile, queue depth, backpressure state, reference state, release-claim state, reproduction command, raw logs, and artifact paths. Missing references, incomplete host fingerprints, or missing component attribution force experimental or missing-reference wording; they cannot produce measured large-host claims.
 
 ## Repair Confidence Lab Contract
 
