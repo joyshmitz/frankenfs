@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ffs_invariant_oracle_e2e.sh - smoke gate for bd-rchk0.5.1.1.
+# ffs_invariant_oracle_e2e.sh - smoke gate for bd-rchk0.5.1.
 #
 # Scenarios:
 #   1. Harness module and CLI are wired.

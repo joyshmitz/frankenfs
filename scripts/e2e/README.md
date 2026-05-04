@@ -908,12 +908,12 @@ The release gate suite exercises:
 The invariant oracle suite exercises:
 
 1. `validate-invariant-oracle` CLI wiring and module export
-2. Replayable trace schema validation for a create/write/fsync operation sequence
+2. Replayable trace schema validation for create/write/fsync plus the executable model surfaces for nested rename/unlink, extent ownership, snapshot visibility, journal replay idempotence, and mounted repair writeback authority
 3. Deterministic replay ids, artifact references, and reproduction commands in the JSON report
 4. Consumer validation for model-version compatibility and malformed oracle artifacts
 5. Expected invariant failure reporting with failure class, violated invariant, operation index, state hashes, expected/observed invariant result, and minimized trace prefix
 6. Fail-closed validation for unexpected production/model mismatches
-7. Unit coverage for schema parsing, deterministic replay, false-positive guards, expected failures, minimization, classification, consumer validation, and Markdown rendering
+7. Unit coverage for schema parsing, deterministic replay, false-positive guards, expected failures, minimization, classification, consumer validation, rename/unlink edges, extent overlap rejection, snapshot/journal stability, repair serialization, and Markdown rendering
 
 The cross-oracle arbitration suite exercises:
 

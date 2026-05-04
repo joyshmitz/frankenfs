@@ -356,6 +356,7 @@ project can honestly claim operational readiness beyond the current V1 contract.
 | `bd-rchk5` | Performance baselines | Open: re-measure throughput/latency claims against current code |
 | `bd-rchk6` | Mounted self-healing lifecycle | Complete: automatic mounted repair is implemented for explicit `--background-repair --background-scrub-ledger <jsonl>` mounts; read-write repair routes recovered source blocks through the mounted MVCC repair-writeback serializer and rejects stale scrub snapshots before mutation |
 | `bd-rchk7` | Fuzz/conformance expansion | Open: close or bead remaining open-ended corpus expansion notes |
+| `bd-rchk0.5.1` | Executable invariant oracle | Complete: `ffs-harness` validates replayable invariant traces for create/write/fsync, nested rename/unlink, extent ownership and overlap rejection, snapshot visibility, journal replay idempotence, and mounted repair writeback authority; the CLI/E2E path emits deterministic replay ids, artifact references, reproduction commands, expected/unexpected failure classes, state hashes, and minimized trace prefixes. |
 
 ## 5. Update Rule
 

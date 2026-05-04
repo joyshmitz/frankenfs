@@ -1,10 +1,11 @@
 #![allow(clippy::module_name_repetitions)]
 
-//! Replayable invariant-oracle trace validation for `bd-rchk0.5.1.1`.
+//! Replayable invariant-oracle trace validation for `bd-rchk0.5.1`.
 //!
 //! This module intentionally models externally meaningful filesystem state:
-//! paths, file sizes, durable paths, operation ordering, and structured failure
-//! evidence. It is not a parallel implementation of FrankenFS internals.
+//! paths, file sizes, durable paths, extent ownership, snapshots, journal
+//! replay, repair writeback authority, operation ordering, and structured
+//! failure evidence. It is not a parallel implementation of FrankenFS internals.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -39,7 +40,17 @@ pub struct InvariantTraceOperation {
     pub action: InvariantAction,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes_written: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extent_start: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extent_len: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_authority: Option<String>,
     pub precondition: String,
     pub expected_model_delta: String,
     pub observed_subsystem_event: String,
@@ -60,6 +71,12 @@ pub enum InvariantAction {
     WriteFile,
     FsyncFile,
     Mkdir,
+    RenamePath,
+    UnlinkPath,
+    AllocateExtent,
+    SnapshotRead,
+    JournalReplay,
+    RepairWriteback,
     UnsupportedOperation,
     ModelInvariantProbe,
 }
@@ -93,6 +110,14 @@ pub struct InvariantModelState {
     pub files: Vec<InvariantFileState>,
     #[serde(default)]
     pub durable_paths: Vec<String>,
+    #[serde(default)]
+    pub extents: Vec<InvariantExtentState>,
+    #[serde(default)]
+    pub snapshots: Vec<InvariantSnapshotState>,
+    #[serde(default)]
+    pub journal_replay_count: u64,
+    #[serde(default)]
+    pub repair_writeback_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +125,19 @@ pub struct InvariantFileState {
     pub path: String,
     pub size: u64,
     pub content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct InvariantExtentState {
+    pub path: String,
+    pub start: u64,
+    pub len: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct InvariantSnapshotState {
+    pub snapshot_id: String,
+    pub visible_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +196,10 @@ struct ReplayState {
     directories: BTreeSet<String>,
     files: BTreeMap<String, ReplayFile>,
     durable_paths: BTreeSet<String>,
+    extents: Vec<InvariantExtentState>,
+    snapshots: BTreeMap<String, Vec<String>>,
+    journal_replay_count: u64,
+    repair_writeback_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -555,6 +597,9 @@ fn validate_operation_shape(
         errors,
     );
     validate_path("operation.path", &operation.path, errors);
+    if let Some(target_path) = &operation.target_path {
+        validate_path("operation.target_path", target_path, errors);
+    }
     if !operation_ids.insert(operation.operation_id.clone()) {
         errors.push(format!("duplicate operation_id {}", operation.operation_id));
     }
@@ -573,6 +618,33 @@ fn validate_operation_shape(
     if operation.action == InvariantAction::WriteFile && operation.bytes_written.is_none() {
         errors.push(format!(
             "operation {} write_file requires bytes_written",
+            operation.operation_id
+        ));
+    }
+    if operation.action == InvariantAction::RenamePath && operation.target_path.is_none() {
+        errors.push(format!(
+            "operation {} rename_path requires target_path",
+            operation.operation_id
+        ));
+    }
+    if operation.action == InvariantAction::AllocateExtent
+        && (operation.extent_start.is_none() || operation.extent_len.is_none())
+    {
+        errors.push(format!(
+            "operation {} allocate_extent requires extent_start and extent_len",
+            operation.operation_id
+        ));
+    }
+    if operation.action == InvariantAction::SnapshotRead && operation.snapshot_id.is_none() {
+        errors.push(format!(
+            "operation {} snapshot_read requires snapshot_id",
+            operation.operation_id
+        ));
+    }
+    if operation.action == InvariantAction::RepairWriteback && operation.repair_authority.is_none()
+    {
+        errors.push(format!(
+            "operation {} repair_writeback requires repair_authority",
             operation.operation_id
         ));
     }
@@ -622,6 +694,25 @@ fn validate_state_paths(prefix: &str, state: &InvariantModelState, errors: &mut 
             ));
         }
     }
+    for extent in &state.extents {
+        validate_path(&format!("{prefix}.extents.path"), &extent.path, errors);
+        if extent.len == 0 {
+            errors.push(format!(
+                "{prefix}.extents {} length must be nonzero",
+                extent.path
+            ));
+        }
+    }
+    for snapshot in &state.snapshots {
+        validate_nonempty(
+            &format!("{prefix}.snapshots.snapshot_id"),
+            &snapshot.snapshot_id,
+            errors,
+        );
+        for path in &snapshot.visible_paths {
+            validate_path(&format!("{prefix}.snapshots.visible_paths"), path, errors);
+        }
+    }
 }
 
 fn validate_path(field: &str, path: &str, errors: &mut Vec<String>) {
@@ -639,47 +730,176 @@ impl ReplayState {
             directories: BTreeSet::from([ROOT_PATH.to_owned()]),
             files: BTreeMap::new(),
             durable_paths: BTreeSet::new(),
+            extents: Vec::new(),
+            snapshots: BTreeMap::new(),
+            journal_replay_count: 0,
+            repair_writeback_count: 0,
         }
     }
 
     fn apply(&mut self, operation: &InvariantTraceOperation) -> Vec<&'static str> {
-        let mut violations = Vec::new();
         match operation.action {
-            InvariantAction::CreateFile => {
-                if !self.parent_dir_exists(&operation.path) {
-                    violations.push("parent_directory_exists");
+            InvariantAction::CreateFile => self.apply_create_file(operation),
+            InvariantAction::WriteFile => self.apply_write_file(operation),
+            InvariantAction::FsyncFile => self.apply_fsync_file(operation),
+            InvariantAction::Mkdir => self.apply_mkdir(operation),
+            InvariantAction::RenamePath => self.apply_rename_path(operation),
+            InvariantAction::UnlinkPath => self.apply_unlink_path(operation),
+            InvariantAction::AllocateExtent => self.apply_allocate_extent(operation),
+            InvariantAction::SnapshotRead => self.apply_snapshot_read(operation),
+            InvariantAction::JournalReplay => {
+                if self.journal_replay_count == 0 {
+                    self.journal_replay_count = 1;
                 }
-                self.files.insert(
-                    operation.path.clone(),
-                    ReplayFile {
-                        size: 0,
-                        content_hash: EMPTY_SHA256.to_owned(),
-                    },
-                );
+                Vec::new()
             }
-            InvariantAction::WriteFile => {
-                let Some(file) = self.files.get_mut(&operation.path) else {
-                    violations.push("file_exists_before_write");
-                    return violations;
-                };
-                let bytes_written = operation.bytes_written.unwrap_or(0);
-                file.size = file.size.saturating_add(bytes_written);
-                file.content_hash = synthetic_content_hash(&operation.path, file.size);
+            InvariantAction::RepairWriteback => self.apply_repair_writeback(operation),
+            InvariantAction::UnsupportedOperation | InvariantAction::ModelInvariantProbe => {
+                Vec::new()
             }
-            InvariantAction::FsyncFile => {
-                if self.files.contains_key(&operation.path) {
-                    self.durable_paths.insert(operation.path.clone());
-                } else {
-                    violations.push("fsync_target_exists");
-                }
-            }
-            InvariantAction::Mkdir => {
-                if !self.parent_dir_exists(&operation.path) {
-                    violations.push("parent_directory_exists");
-                }
-                self.directories.insert(operation.path.clone());
-            }
-            InvariantAction::UnsupportedOperation | InvariantAction::ModelInvariantProbe => {}
+        }
+    }
+
+    fn apply_create_file(&mut self, operation: &InvariantTraceOperation) -> Vec<&'static str> {
+        let mut violations = Vec::new();
+        if !self.parent_dir_exists(&operation.path) {
+            violations.push("parent_directory_exists");
+        }
+        self.files.insert(
+            operation.path.clone(),
+            ReplayFile {
+                size: 0,
+                content_hash: EMPTY_SHA256.to_owned(),
+            },
+        );
+        violations
+    }
+
+    fn apply_write_file(&mut self, operation: &InvariantTraceOperation) -> Vec<&'static str> {
+        let mut violations = Vec::new();
+        let Some(file) = self.files.get_mut(&operation.path) else {
+            violations.push("file_exists_before_write");
+            return violations;
+        };
+        let bytes_written = operation.bytes_written.unwrap_or(0);
+        file.size = file.size.saturating_add(bytes_written);
+        file.content_hash = synthetic_content_hash(&operation.path, file.size);
+        violations
+    }
+
+    fn apply_fsync_file(&mut self, operation: &InvariantTraceOperation) -> Vec<&'static str> {
+        let mut violations = Vec::new();
+        if self.files.contains_key(&operation.path) {
+            self.durable_paths.insert(operation.path.clone());
+        } else {
+            violations.push("fsync_target_exists");
+        }
+        violations
+    }
+
+    fn apply_mkdir(&mut self, operation: &InvariantTraceOperation) -> Vec<&'static str> {
+        let mut violations = Vec::new();
+        if !self.parent_dir_exists(&operation.path) {
+            violations.push("parent_directory_exists");
+        }
+        self.directories.insert(operation.path.clone());
+        violations
+    }
+
+    fn apply_rename_path(&mut self, operation: &InvariantTraceOperation) -> Vec<&'static str> {
+        let mut violations = Vec::new();
+        let Some(target_path) = operation.target_path.as_deref() else {
+            violations.push("rename_target_path_present");
+            return violations;
+        };
+        if operation.path == ROOT_PATH {
+            violations.push("rename_source_not_root");
+        }
+        if !self.files.contains_key(&operation.path)
+            && !self.directories.contains(&operation.path)
+        {
+            violations.push("rename_source_exists");
+        }
+        if !self.parent_dir_exists(target_path) {
+            violations.push("rename_target_parent_exists");
+        }
+        if self.files.contains_key(target_path) || self.directories.contains(target_path) {
+            violations.push("rename_target_absent");
+        }
+        if violations.is_empty() {
+            self.rebase_path_tree(&operation.path, target_path);
+        }
+        violations
+    }
+
+    fn apply_unlink_path(&mut self, operation: &InvariantTraceOperation) -> Vec<&'static str> {
+        let mut violations = Vec::new();
+        if self.files.remove(&operation.path).is_none() {
+            violations.push("unlink_target_exists");
+        }
+        self.durable_paths.remove(&operation.path);
+        self.extents.retain(|extent| extent.path != operation.path);
+        violations
+    }
+
+    fn apply_allocate_extent(&mut self, operation: &InvariantTraceOperation) -> Vec<&'static str> {
+        let mut violations = Vec::new();
+        let Some(start) = operation.extent_start else {
+            violations.push("extent_fields_present");
+            return violations;
+        };
+        let Some(len) = operation.extent_len else {
+            violations.push("extent_fields_present");
+            return violations;
+        };
+        if !self.files.contains_key(&operation.path) {
+            violations.push("extent_owner_file_exists");
+        }
+        if len == 0 || start.checked_add(len).is_none() {
+            violations.push("extent_range_valid");
+        } else if self.extent_overlaps(start, len) {
+            violations.push("extent_range_does_not_overlap");
+        }
+        if violations.is_empty() {
+            self.extents.push(InvariantExtentState {
+                path: operation.path.clone(),
+                start,
+                len,
+            });
+            self.extents.sort();
+        }
+        violations
+    }
+
+    fn apply_snapshot_read(&mut self, operation: &InvariantTraceOperation) -> Vec<&'static str> {
+        let mut violations = Vec::new();
+        let Some(snapshot_id) = operation.snapshot_id.as_deref() else {
+            violations.push("snapshot_id_present");
+            return violations;
+        };
+        if snapshot_id.trim().is_empty() {
+            violations.push("snapshot_id_present");
+        }
+        if violations.is_empty() {
+            self.snapshots
+                .insert(snapshot_id.to_owned(), self.files.keys().cloned().collect());
+        }
+        violations
+    }
+
+    fn apply_repair_writeback(
+        &mut self,
+        operation: &InvariantTraceOperation,
+    ) -> Vec<&'static str> {
+        let mut violations = Vec::new();
+        if !self.files.contains_key(&operation.path) {
+            violations.push("repair_target_exists");
+        }
+        if operation.repair_authority.as_deref() != Some("mounted_mutation_authority") {
+            violations.push("repair_writeback_uses_mutation_authority");
+        }
+        if violations.is_empty() {
+            self.repair_writeback_count = self.repair_writeback_count.saturating_add(1);
         }
         violations
     }
@@ -695,6 +915,33 @@ impl ReplayState {
         self.directories.contains(parent)
     }
 
+    fn extent_overlaps(&self, start: u64, len: u64) -> bool {
+        self.extents
+            .iter()
+            .any(|extent| ranges_overlap(start, len, extent.start, extent.len))
+    }
+
+    fn rebase_path_tree(&mut self, source: &str, target: &str) {
+        self.directories = self
+            .directories
+            .iter()
+            .map(|path| rebase_path(path, source, target))
+            .collect();
+        self.files = std::mem::take(&mut self.files)
+            .into_iter()
+            .map(|(path, file)| (rebase_path(&path, source, target), file))
+            .collect();
+        self.durable_paths = self
+            .durable_paths
+            .iter()
+            .map(|path| rebase_path(path, source, target))
+            .collect();
+        for extent in &mut self.extents {
+            extent.path = rebase_path(&extent.path, source, target);
+        }
+        self.extents.sort();
+    }
+
     fn to_model_state(&self) -> InvariantModelState {
         InvariantModelState {
             directories: self.directories.iter().cloned().collect(),
@@ -708,6 +955,17 @@ impl ReplayState {
                 })
                 .collect(),
             durable_paths: self.durable_paths.iter().cloned().collect(),
+            extents: self.extents.clone(),
+            snapshots: self
+                .snapshots
+                .iter()
+                .map(|(snapshot_id, visible_paths)| InvariantSnapshotState {
+                    snapshot_id: snapshot_id.clone(),
+                    visible_paths: visible_paths.clone(),
+                })
+                .collect(),
+            journal_replay_count: self.journal_replay_count,
+            repair_writeback_count: self.repair_writeback_count,
         }
     }
 }
@@ -724,6 +982,10 @@ fn compare_states(
         observed.durable_paths.iter().map(String::as_str).collect();
     let expected_files = file_map(expected);
     let observed_files = file_map(observed);
+    let expected_extents: BTreeSet<&InvariantExtentState> = expected.extents.iter().collect();
+    let observed_extents: BTreeSet<&InvariantExtentState> = observed.extents.iter().collect();
+    let expected_snapshots: BTreeSet<&InvariantSnapshotState> = expected.snapshots.iter().collect();
+    let observed_snapshots: BTreeSet<&InvariantSnapshotState> = observed.snapshots.iter().collect();
 
     let mut invariants = Vec::new();
     if !observed_dirs.contains(ROOT_PATH) {
@@ -734,6 +996,21 @@ fn compare_states(
     }
     if expected_durable != observed_durable {
         invariants.push("durability_set_matches_model");
+    }
+    if expected_extents != observed_extents {
+        invariants.push("extent_set_matches_model");
+    }
+    if state_has_overlapping_extents(observed) {
+        invariants.push("extent_range_does_not_overlap");
+    }
+    if expected_snapshots != observed_snapshots {
+        invariants.push("snapshot_set_matches_model");
+    }
+    if expected.journal_replay_count != observed.journal_replay_count {
+        invariants.push("journal_replay_idempotent");
+    }
+    if expected.repair_writeback_count != observed.repair_writeback_count {
+        invariants.push("repair_writeback_count_matches_model");
     }
     for (path, expected_file) in &expected_files {
         let Some(observed_file) = observed_files.get(path) else {
@@ -839,7 +1116,27 @@ fn deterministic_replay_id(trace: &InvariantTrace) -> String {
         hash_part(&mut hasher, &operation.path);
         hash_part(
             &mut hasher,
+            operation.target_path.as_deref().unwrap_or_default(),
+        );
+        hash_part(
+            &mut hasher,
             &operation.bytes_written.unwrap_or_default().to_string(),
+        );
+        hash_part(
+            &mut hasher,
+            &operation.extent_start.unwrap_or_default().to_string(),
+        );
+        hash_part(
+            &mut hasher,
+            &operation.extent_len.unwrap_or_default().to_string(),
+        );
+        hash_part(
+            &mut hasher,
+            operation.snapshot_id.as_deref().unwrap_or_default(),
+        );
+        hash_part(
+            &mut hasher,
+            operation.repair_authority.as_deref().unwrap_or_default(),
         );
         state.apply(operation);
         hash_model_state(&mut hasher, &state.to_model_state());
@@ -853,6 +1150,12 @@ fn action_label(action: InvariantAction) -> &'static str {
         InvariantAction::WriteFile => "write_file",
         InvariantAction::FsyncFile => "fsync_file",
         InvariantAction::Mkdir => "mkdir",
+        InvariantAction::RenamePath => "rename_path",
+        InvariantAction::UnlinkPath => "unlink_path",
+        InvariantAction::AllocateExtent => "allocate_extent",
+        InvariantAction::SnapshotRead => "snapshot_read",
+        InvariantAction::JournalReplay => "journal_replay",
+        InvariantAction::RepairWriteback => "repair_writeback",
         InvariantAction::UnsupportedOperation => "unsupported_operation",
         InvariantAction::ModelInvariantProbe => "model_invariant_probe",
     }
@@ -876,6 +1179,26 @@ fn hash_model_state(hasher: &mut Sha256, state: &InvariantModelState) {
     for durable_path in &state.durable_paths {
         hash_part(hasher, durable_path);
     }
+    hash_part(hasher, "extents");
+    hash_part(hasher, &state.extents.len().to_string());
+    for extent in &state.extents {
+        hash_part(hasher, &extent.path);
+        hash_part(hasher, &extent.start.to_string());
+        hash_part(hasher, &extent.len.to_string());
+    }
+    hash_part(hasher, "snapshots");
+    hash_part(hasher, &state.snapshots.len().to_string());
+    for snapshot in &state.snapshots {
+        hash_part(hasher, &snapshot.snapshot_id);
+        hash_part(hasher, &snapshot.visible_paths.len().to_string());
+        for path in &snapshot.visible_paths {
+            hash_part(hasher, path);
+        }
+    }
+    hash_part(hasher, "journal_replay_count");
+    hash_part(hasher, &state.journal_replay_count.to_string());
+    hash_part(hasher, "repair_writeback_count");
+    hash_part(hasher, &state.repair_writeback_count.to_string());
 }
 
 fn model_state_hash(state: &InvariantModelState) -> String {
@@ -920,6 +1243,43 @@ fn collect_required_artifacts(trace: &InvariantTrace) -> Vec<String> {
     artifacts.into_iter().collect()
 }
 
+fn ranges_overlap(a_start: u64, a_len: u64, b_start: u64, b_len: u64) -> bool {
+    let Some(a_end) = a_start.checked_add(a_len) else {
+        return true;
+    };
+    let Some(b_end) = b_start.checked_add(b_len) else {
+        return true;
+    };
+    a_start < b_end && b_start < a_end
+}
+
+fn state_has_overlapping_extents(state: &InvariantModelState) -> bool {
+    for (index, left) in state.extents.iter().enumerate() {
+        for right in state.extents.iter().skip(index + 1) {
+            if ranges_overlap(left.start, left.len, right.start, right.len) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn rebase_path(path: &str, source: &str, target: &str) -> String {
+    if path == source {
+        return target.to_owned();
+    }
+    if source == ROOT_PATH {
+        return path.to_owned();
+    }
+    let Some(suffix) = path.strip_prefix(source) else {
+        return path.to_owned();
+    };
+    if !suffix.starts_with('/') {
+        return path.to_owned();
+    }
+    format!("{target}{suffix}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -940,7 +1300,79 @@ mod tests {
                 })
                 .collect(),
             durable_paths: durable.iter().map(|path| (*path).to_owned()).collect(),
+            ..InvariantModelState::default()
         }
+    }
+
+    fn state_with_dirs(
+        directories: &[&str],
+        files: &[(&str, u64)],
+        durable: &[&str],
+    ) -> InvariantModelState {
+        InvariantModelState {
+            directories: directories
+                .iter()
+                .map(|directory| (*directory).to_owned())
+                .collect(),
+            files: files
+                .iter()
+                .map(|(path, size)| InvariantFileState {
+                    path: (*path).to_owned(),
+                    size: *size,
+                    content_hash: if *size == 0 {
+                        EMPTY_SHA256.to_owned()
+                    } else {
+                        synthetic_content_hash(path, *size)
+                    },
+                })
+                .collect(),
+            durable_paths: durable.iter().map(|path| (*path).to_owned()).collect(),
+            ..InvariantModelState::default()
+        }
+    }
+
+    fn with_extents(
+        mut state: InvariantModelState,
+        extents: &[(&str, u64, u64)],
+    ) -> InvariantModelState {
+        state.extents = extents
+            .iter()
+            .map(|(path, start, len)| InvariantExtentState {
+                path: (*path).to_owned(),
+                start: *start,
+                len: *len,
+            })
+            .collect();
+        state.extents.sort();
+        state
+    }
+
+    fn with_snapshots(
+        mut state: InvariantModelState,
+        snapshots: &[(&str, &[&str])],
+    ) -> InvariantModelState {
+        state.snapshots = snapshots
+            .iter()
+            .map(|(snapshot_id, visible_paths)| InvariantSnapshotState {
+                snapshot_id: (*snapshot_id).to_owned(),
+                visible_paths: visible_paths
+                    .iter()
+                    .map(|path| (*path).to_owned())
+                    .collect(),
+            })
+            .collect();
+        state.snapshots.sort();
+        state
+    }
+
+    fn with_counts(
+        mut state: InvariantModelState,
+        journal_replay_count: u64,
+        repair_writeback_count: u64,
+    ) -> InvariantModelState {
+        state.journal_replay_count = journal_replay_count;
+        state.repair_writeback_count = repair_writeback_count;
+        state
     }
 
     fn op(
@@ -956,7 +1388,12 @@ mod tests {
             operation_index,
             action,
             path: path.to_owned(),
+            target_path: None,
             bytes_written,
+            extent_start: None,
+            extent_len: None,
+            snapshot_id: None,
+            repair_authority: None,
             precondition: "model precondition recorded".to_owned(),
             expected_model_delta: "model delta recorded".to_owned(),
             observed_subsystem_event: "OpenFs operation event".to_owned(),
@@ -1210,6 +1647,191 @@ mod tests {
         let report = validate_invariant_trace(&trace);
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.failure_class_counts["unsupported_operation"], 1);
+    }
+
+    #[test]
+    fn nested_directory_rename_and_unlink_edges_replay() {
+        let mut trace = InvariantTrace {
+            schema_version: INVARIANT_ORACLE_SCHEMA_VERSION,
+            model_version: INVARIANT_ORACLE_MODEL_VERSION.to_owned(),
+            trace_id: "trace-rename-unlink".to_owned(),
+            seed: 77,
+            reproduction_command:
+                "ffs-harness validate-invariant-oracle --trace artifacts/invariant/rename.json"
+                    .to_owned(),
+            operations: Vec::new(),
+        };
+        trace.operations.push(op(
+            0,
+            InvariantAction::Mkdir,
+            "/projects",
+            None,
+            state_with_dirs(&["/", "/projects"], &[], &[]),
+            state_with_dirs(&["/", "/projects"], &[], &[]),
+        ));
+        trace.operations.push(op(
+            1,
+            InvariantAction::CreateFile,
+            "/projects/alpha",
+            None,
+            state_with_dirs(&["/", "/projects"], &[("/projects/alpha", 0)], &[]),
+            state_with_dirs(&["/", "/projects"], &[("/projects/alpha", 0)], &[]),
+        ));
+        let mut rename = op(
+            2,
+            InvariantAction::RenamePath,
+            "/projects/alpha",
+            None,
+            state_with_dirs(&["/", "/projects"], &[("/projects/beta", 0)], &[]),
+            state_with_dirs(&["/", "/projects"], &[("/projects/beta", 0)], &[]),
+        );
+        rename.target_path = Some("/projects/beta".to_owned());
+        trace.operations.push(rename);
+        trace.operations.push(op(
+            3,
+            InvariantAction::UnlinkPath,
+            "/projects/beta",
+            None,
+            state_with_dirs(&["/", "/projects"], &[], &[]),
+            state_with_dirs(&["/", "/projects"], &[], &[]),
+        ));
+
+        let report = validate_invariant_trace(&trace);
+        assert!(report.valid, "{report:?}");
+        assert!(report.violations.is_empty());
+    }
+
+    #[test]
+    fn extent_ownership_rejects_overlapping_live_ranges() {
+        let mut trace = valid_trace();
+        let mut first_extent = op(
+            3,
+            InvariantAction::AllocateExtent,
+            "/alpha",
+            None,
+            with_extents(state(&[("/alpha", 5)], &["/alpha"]), &[("/alpha", 0, 4)]),
+            with_extents(state(&[("/alpha", 5)], &["/alpha"]), &[("/alpha", 0, 4)]),
+        );
+        first_extent.extent_start = Some(0);
+        first_extent.extent_len = Some(4);
+        trace.operations.push(first_extent);
+        let mut second_extent = op(
+            4,
+            InvariantAction::AllocateExtent,
+            "/alpha",
+            None,
+            with_extents(
+                state(&[("/alpha", 5)], &["/alpha"]),
+                &[("/alpha", 0, 4), ("/alpha", 4, 4)],
+            ),
+            with_extents(
+                state(&[("/alpha", 5)], &["/alpha"]),
+                &[("/alpha", 0, 4), ("/alpha", 4, 4)],
+            ),
+        );
+        second_extent.extent_start = Some(4);
+        second_extent.extent_len = Some(4);
+        trace.operations.push(second_extent);
+        let mut overlap = op(
+            5,
+            InvariantAction::AllocateExtent,
+            "/alpha",
+            None,
+            with_extents(
+                state(&[("/alpha", 5)], &["/alpha"]),
+                &[("/alpha", 0, 4), ("/alpha", 4, 4)],
+            ),
+            with_extents(
+                state(&[("/alpha", 5)], &["/alpha"]),
+                &[("/alpha", 0, 4), ("/alpha", 4, 4)],
+            ),
+        );
+        overlap.extent_start = Some(2);
+        overlap.extent_len = Some(2);
+        overlap.expected_violation = Some("extent_range_does_not_overlap".to_owned());
+        overlap.failure_class = Some(InvariantFailureClass::ModelBug);
+        trace.operations.push(overlap);
+
+        let report = validate_invariant_trace(&trace);
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.expected_failure_count, 1);
+        assert_eq!(
+            report.violations[0].violated_invariant,
+            "extent_range_does_not_overlap"
+        );
+    }
+
+    #[test]
+    fn snapshots_and_journal_replay_are_stable_under_repeat_replay() {
+        let mut trace = valid_trace();
+        let base = state(&[("/alpha", 5)], &["/alpha"]);
+        let snap_state = with_snapshots(base, &[("snap-1", &["/alpha"])]);
+        let mut snapshot = op(
+            3,
+            InvariantAction::SnapshotRead,
+            "/",
+            None,
+            snap_state.clone(),
+            snap_state.clone(),
+        );
+        snapshot.snapshot_id = Some("snap-1".to_owned());
+        trace.operations.push(snapshot);
+        trace.operations.push(op(
+            4,
+            InvariantAction::JournalReplay,
+            "/",
+            None,
+            with_counts(snap_state.clone(), 1, 0),
+            with_counts(snap_state.clone(), 1, 0),
+        ));
+        trace.operations.push(op(
+            5,
+            InvariantAction::JournalReplay,
+            "/",
+            None,
+            with_counts(snap_state.clone(), 1, 0),
+            with_counts(snap_state, 1, 0),
+        ));
+
+        let report = validate_invariant_trace(&trace);
+        assert!(report.valid, "{report:?}");
+        assert!(report.violations.is_empty());
+    }
+
+    #[test]
+    fn repair_writeback_requires_mounted_mutation_authority() {
+        let mut trace = valid_trace();
+        let accepted = with_counts(state(&[("/alpha", 5)], &["/alpha"]), 0, 1);
+        let mut repair = op(
+            3,
+            InvariantAction::RepairWriteback,
+            "/alpha",
+            None,
+            accepted.clone(),
+            accepted,
+        );
+        repair.repair_authority = Some("mounted_mutation_authority".to_owned());
+        trace.operations.push(repair);
+        let mut bypass = op(
+            4,
+            InvariantAction::RepairWriteback,
+            "/alpha",
+            None,
+            with_counts(state(&[("/alpha", 5)], &["/alpha"]), 0, 1),
+            with_counts(state(&[("/alpha", 5)], &["/alpha"]), 0, 1),
+        );
+        bypass.repair_authority = Some("direct_block_writer".to_owned());
+        bypass.expected_violation = Some("repair_writeback_uses_mutation_authority".to_owned());
+        bypass.failure_class = Some(InvariantFailureClass::ModelBug);
+        trace.operations.push(bypass);
+
+        let report = validate_invariant_trace(&trace);
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.expected_failure_count, 1);
+        assert_eq!(
+            report.violations[0].violated_invariant,
+            "repair_writeback_uses_mutation_authority"
+        );
     }
 
     #[test]
