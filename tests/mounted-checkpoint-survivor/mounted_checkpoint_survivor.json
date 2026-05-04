@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "matrix_id": "frankenfs_mounted_checkpoint_survivor_v1",
+  "bead_id": "bd-zm0wr",
+  "scenarios": [
+    {
+      "scenario_id": "mounted_checkpoint_clean_unmount_baseline",
+      "checkpoint_id": "ckpt_clean_001",
+      "kind": "clean_unmount",
+      "mount_options": ["rw", "default_permissions"],
+      "pre_operation_image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "post_operation_image_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "operation_trace": [
+        {"step": 1, "op": "create", "args": ["path=/file"], "fsync_boundary": false, "fsyncdir_boundary": false},
+        {"step": 2, "op": "write", "args": ["offset=0", "len=4096"], "fsync_boundary": false, "fsyncdir_boundary": false},
+        {"step": 3, "op": "fsync", "args": [], "fsync_boundary": true, "fsyncdir_boundary": false}
+      ],
+      "crash_or_unmount_point_step": 0,
+      "expected_survivor_set": {
+        "present_paths": ["/file"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "recovery_command": "ffs-harness reopen-and-verify --image artifacts/checkpoint/clean_001.img",
+      "recovery_classification": "expected_survivor_set",
+      "partial_artifact_policy": "preserve_on_failure",
+      "process_control": "clean_signal",
+      "artifact_paths": ["artifacts/mounted-checkpoint/clean_unmount.json"],
+      "cleanup_policy": "teardown_image"
+    },
+    {
+      "scenario_id": "mounted_checkpoint_process_termination_pre_fsync",
+      "checkpoint_id": "ckpt_pre_fsync_001",
+      "kind": "process_termination_pre_fsync",
+      "mount_options": ["rw", "default_permissions"],
+      "pre_operation_image_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "post_operation_image_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "operation_trace": [
+        {"step": 1, "op": "create", "args": ["path=/staged"], "fsync_boundary": false, "fsyncdir_boundary": false},
+        {"step": 2, "op": "write", "args": ["offset=0", "len=8192"], "fsync_boundary": false, "fsyncdir_boundary": false},
+        {"step": 3, "op": "checkpoint_marker", "args": ["pre_fsync"], "fsync_boundary": false, "fsyncdir_boundary": false}
+      ],
+      "crash_or_unmount_point_step": 3,
+      "expected_survivor_set": {
+        "present_paths": [],
+        "absent_paths": ["/staged"],
+        "xattr_state": []
+      },
+      "recovery_command": "ffs-harness replay-pre-fsync --checkpoint ckpt_pre_fsync_001",
+      "recovery_classification": "expected_survivor_set",
+      "partial_artifact_policy": "preserve_always",
+      "process_control": "sigterm_then_sigkill",
+      "artifact_paths": [
+        "artifacts/mounted-checkpoint/pre_fsync.json",
+        "artifacts/mounted-checkpoint/pre_fsync.partial.log"
+      ],
+      "cleanup_policy": "preserve_artifacts_on_failure"
+    },
+    {
+      "scenario_id": "mounted_checkpoint_process_termination_post_fsync",
+      "checkpoint_id": "ckpt_post_fsync_001",
+      "kind": "process_termination_post_fsync",
+      "mount_options": ["rw", "default_permissions"],
+      "pre_operation_image_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "post_operation_image_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "operation_trace": [
+        {"step": 1, "op": "create", "args": ["path=/durable"], "fsync_boundary": false, "fsyncdir_boundary": false},
+        {"step": 2, "op": "write", "args": ["offset=0", "len=4096"], "fsync_boundary": false, "fsyncdir_boundary": false},
+        {"step": 3, "op": "fsync", "args": [], "fsync_boundary": true, "fsyncdir_boundary": false},
+        {"step": 4, "op": "checkpoint_marker", "args": ["post_fsync"], "fsync_boundary": false, "fsyncdir_boundary": false}
+      ],
+      "crash_or_unmount_point_step": 4,
+      "expected_survivor_set": {
+        "present_paths": ["/durable"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "recovery_command": "ffs-harness replay-post-fsync --checkpoint ckpt_post_fsync_001",
+      "recovery_classification": "expected_survivor_set",
+      "partial_artifact_policy": "preserve_always",
+      "process_control": "sigterm_then_sigkill",
+      "artifact_paths": [
+        "artifacts/mounted-checkpoint/post_fsync.json",
+        "artifacts/mounted-checkpoint/post_fsync.partial.log"
+      ],
+      "cleanup_policy": "preserve_artifacts_on_failure"
+    },
+    {
+      "scenario_id": "mounted_checkpoint_reopen_after_write",
+      "checkpoint_id": "ckpt_reopen_001",
+      "kind": "reopen_after_write",
+      "mount_options": ["rw", "default_permissions"],
+      "pre_operation_image_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "post_operation_image_hash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "operation_trace": [
+        {"step": 1, "op": "create", "args": ["path=/persistent"], "fsync_boundary": false, "fsyncdir_boundary": false},
+        {"step": 2, "op": "write", "args": ["offset=0", "len=16384"], "fsync_boundary": false, "fsyncdir_boundary": false},
+        {"step": 3, "op": "fsync", "args": [], "fsync_boundary": true, "fsyncdir_boundary": false}
+      ],
+      "crash_or_unmount_point_step": 3,
+      "expected_survivor_set": {
+        "present_paths": ["/persistent"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "recovery_command": "ffs-harness reopen-image --image artifacts/checkpoint/reopen_001.img",
+      "recovery_classification": "expected_survivor_set",
+      "partial_artifact_policy": "preserve_on_failure",
+      "process_control": "clean_signal",
+      "artifact_paths": ["artifacts/mounted-checkpoint/reopen.json"],
+      "cleanup_policy": "teardown_image"
+    },
+    {
+      "scenario_id": "mounted_checkpoint_fsyncdir_boundary",
+      "checkpoint_id": "ckpt_fsyncdir_001",
+      "kind": "fsyncdir_boundary",
+      "mount_options": ["rw", "default_permissions"],
+      "pre_operation_image_hash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "post_operation_image_hash": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      "operation_trace": [
+        {"step": 1, "op": "create", "args": ["path=/dir/a"], "fsync_boundary": false, "fsyncdir_boundary": false},
+        {"step": 2, "op": "fsyncdir", "args": ["dir=/dir"], "fsync_boundary": false, "fsyncdir_boundary": true},
+        {"step": 3, "op": "checkpoint_marker", "args": ["fsyncdir_complete"], "fsync_boundary": false, "fsyncdir_boundary": false}
+      ],
+      "crash_or_unmount_point_step": 3,
+      "expected_survivor_set": {
+        "present_paths": ["/dir/a"],
+        "absent_paths": [],
+        "xattr_state": []
+      },
+      "recovery_command": "ffs-harness verify-fsyncdir --checkpoint ckpt_fsyncdir_001",
+      "recovery_classification": "expected_survivor_set",
+      "partial_artifact_policy": "preserve_on_failure",
+      "process_control": "clean_signal",
+      "artifact_paths": ["artifacts/mounted-checkpoint/fsyncdir.json"],
+      "cleanup_policy": "teardown_image"
+    },
+    {
+      "scenario_id": "mounted_checkpoint_kill9_refusal",
+      "checkpoint_id": "ckpt_kill9_refusal_001",
+      "kind": "forced_unmount",
+      "mount_options": ["rw", "default_permissions"],
+      "pre_operation_image_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "post_operation_image_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "operation_trace": [
+        {"step": 1, "op": "create", "args": ["path=/probe"], "fsync_boundary": false, "fsyncdir_boundary": false},
+        {"step": 2, "op": "checkpoint_marker", "args": ["pre_refusal"], "fsync_boundary": false, "fsyncdir_boundary": false}
+      ],
+      "crash_or_unmount_point_step": 2,
+      "expected_survivor_set": {
+        "present_paths": [],
+        "absent_paths": ["/probe"],
+        "xattr_state": []
+      },
+      "recovery_command": "ffs-harness no-op (kill -9 refused; harness preserves the probe state)",
+      "recovery_classification": "harness_bug",
+      "partial_artifact_policy": "preserve_always",
+      "process_control": "kill_minus_nine_refused",
+      "artifact_paths": [
+        "artifacts/mounted-checkpoint/kill9_refusal.json",
+        "artifacts/mounted-checkpoint/kill9_refusal.refusal.log"
+      ],
+      "cleanup_policy": "preserve_artifacts_always"
+    }
+  ]
+}

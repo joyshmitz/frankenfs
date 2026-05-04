@@ -22,6 +22,7 @@ pub mod inventory_closeout_gate;
 pub mod invariant_oracle;
 pub mod log_contract;
 pub mod metrics;
+pub mod mounted_checkpoint_survivor;
 pub mod mounted_differential_oracle;
 pub mod mounted_lane_gate;
 pub mod mounted_recovery_matrix;
