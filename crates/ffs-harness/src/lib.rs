@@ -46,6 +46,7 @@ pub mod proof_bundle;
 pub mod proof_overhead_budget;
 pub mod release_gate;
 pub mod remediation_catalog;
+pub mod remediation_severity_gate;
 pub mod repair_confidence_lab;
 pub mod repair_corpus;
 pub mod repair_writeback_serialization;
