@@ -174,6 +174,7 @@ pub fn validate_fuzz_smoke_manifest(manifest: &FuzzSmokeManifest) -> Vec<String>
     errors
 }
 
+#[must_use]
 pub fn run_fuzz_smoke_manifest(
     manifest: &FuzzSmokeManifest,
     workspace_root: &Path,
@@ -329,20 +330,19 @@ fn run_seed(
         ),
     };
 
-    let mut execution = if let Some(error) = read_error {
-        TargetExecution {
+    let mut execution = read_error.map_or_else(
+        || execute_target(&seed.target, &bytes),
+        |error| TargetExecution {
             actual_class: "SeedReadError".to_owned(),
             error_detail: error,
-        }
-    } else {
-        execute_target(&seed.target, &bytes)
-    };
+        },
+    );
 
     let duration = started.elapsed();
     let timeout_ms = seed.timeout_ms.unwrap_or(default_timeout_ms);
     let timed_out = timed_out(duration, timeout_ms);
     if timed_out {
-        execution.actual_class = "timeout".to_owned();
+        "timeout".clone_into(&mut execution.actual_class);
         execution.error_detail = format!(
             "seed runtime {}ms exceeded timeout {timeout_ms}ms",
             duration_ms(duration)
@@ -505,13 +505,15 @@ fn timed_out(duration: Duration, timeout_ms: u64) -> bool {
 }
 
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(message) = payload.downcast_ref::<&'static str>() {
-        (*message).to_owned()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "non-string panic payload".to_owned()
-    }
+    payload.downcast_ref::<&'static str>().map_or_else(
+        || {
+            payload.downcast_ref::<String>().map_or_else(
+                || "non-string panic payload".to_owned(),
+                std::clone::Clone::clone,
+            )
+        },
+        |message| (*message).to_owned(),
+    )
 }
 
 #[cfg(test)]
