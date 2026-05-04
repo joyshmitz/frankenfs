@@ -1,0 +1,205 @@
+{
+  "schema_version": 1,
+  "corpus_id": "frankenfs_btrfs_send_recv_v1",
+  "bead_id": "bd-naww5",
+  "cases": [
+    {
+      "case_id": "btrfs_send_recv_parse_only_baseline",
+      "supported_subset": "parse_only",
+      "source_snapshot": {
+        "snapshot_id": "snap_parse_001",
+        "uuid": "11111111-2222-3333-4444-555555555555",
+        "parent_uuid": "00000000-0000-0000-0000-000000000000",
+        "generation": 5,
+        "image_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "parent_snapshot": null,
+      "expected_stream_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_receive_target_hash": "",
+      "record_count": 32,
+      "expected_outcome": "parse_success",
+      "unsupported_record": "",
+      "capability_required": "deterministic_only",
+      "cleanup_policy": "teardown_image_set",
+      "artifact_requirements": [
+        "case_id",
+        "expected_stream_hash",
+        "expected_receive_target_hash",
+        "expected_outcome"
+      ],
+      "chain_of_custody": {
+        "artifact_path": "artifacts/btrfs-send-recv/parse_only_001.json",
+        "artifact_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111122",
+        "recorded_by": "frankenfs_send_recv_lab",
+        "recorded_at_unix": 1714752000,
+        "linked_bead": "bd-naww5"
+      }
+    },
+    {
+      "case_id": "btrfs_send_recv_export_only_full",
+      "supported_subset": "export_only",
+      "source_snapshot": {
+        "snapshot_id": "snap_export_001",
+        "uuid": "22222222-2222-3333-4444-555555555555",
+        "parent_uuid": "00000000-0000-0000-0000-000000000000",
+        "generation": 7,
+        "image_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "parent_snapshot": null,
+      "expected_stream_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "expected_receive_target_hash": "",
+      "record_count": 64,
+      "expected_outcome": "export_success",
+      "unsupported_record": "",
+      "capability_required": "deterministic_only",
+      "cleanup_policy": "teardown_image_set",
+      "artifact_requirements": [
+        "case_id",
+        "expected_stream_hash",
+        "expected_receive_target_hash",
+        "expected_outcome"
+      ],
+      "chain_of_custody": {
+        "artifact_path": "artifacts/btrfs-send-recv/export_only_001.json",
+        "artifact_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222233",
+        "recorded_by": "frankenfs_send_recv_lab",
+        "recorded_at_unix": 1714752100,
+        "linked_bead": "bd-naww5"
+      }
+    },
+    {
+      "case_id": "btrfs_send_recv_receive_only_full",
+      "supported_subset": "receive_only",
+      "source_snapshot": {
+        "snapshot_id": "snap_receive_source_001",
+        "uuid": "33333333-2222-3333-4444-555555555555",
+        "parent_uuid": "00000000-0000-0000-0000-000000000000",
+        "generation": 3,
+        "image_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      "parent_snapshot": null,
+      "expected_stream_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "expected_receive_target_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "record_count": 48,
+      "expected_outcome": "receive_success",
+      "unsupported_record": "",
+      "capability_required": "deterministic_only",
+      "cleanup_policy": "teardown_image_set",
+      "artifact_requirements": [
+        "case_id",
+        "expected_stream_hash",
+        "expected_receive_target_hash",
+        "expected_outcome"
+      ],
+      "chain_of_custody": {
+        "artifact_path": "artifacts/btrfs-send-recv/receive_only_001.json",
+        "artifact_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333344",
+        "recorded_by": "frankenfs_send_recv_lab",
+        "recorded_at_unix": 1714752200,
+        "linked_bead": "bd-naww5"
+      }
+    },
+    {
+      "case_id": "btrfs_send_recv_roundtrip_full",
+      "supported_subset": "roundtrip_supported",
+      "source_snapshot": {
+        "snapshot_id": "snap_roundtrip_source_001",
+        "uuid": "44444444-2222-3333-4444-555555555555",
+        "parent_uuid": "00000000-0000-0000-0000-000000000000",
+        "generation": 9,
+        "image_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "parent_snapshot": null,
+      "expected_stream_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "expected_receive_target_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "record_count": 96,
+      "expected_outcome": "roundtrip_success",
+      "unsupported_record": "",
+      "capability_required": "permissioned_btrfs_progs",
+      "cleanup_policy": "teardown_image_set",
+      "artifact_requirements": [
+        "case_id",
+        "expected_stream_hash",
+        "expected_receive_target_hash",
+        "expected_outcome"
+      ],
+      "chain_of_custody": {
+        "artifact_path": "artifacts/btrfs-send-recv/roundtrip_001.json",
+        "artifact_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444455",
+        "recorded_by": "frankenfs_send_recv_lab",
+        "recorded_at_unix": 1714752300,
+        "linked_bead": "bd-naww5"
+      }
+    },
+    {
+      "case_id": "btrfs_send_recv_unsupported_record_refusal",
+      "supported_subset": "unsupported",
+      "source_snapshot": {
+        "snapshot_id": "snap_unsupported_001",
+        "uuid": "55555555-2222-3333-4444-555555555555",
+        "parent_uuid": "00000000-0000-0000-0000-000000000000",
+        "generation": 4,
+        "image_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      "parent_snapshot": null,
+      "expected_stream_hash": "",
+      "expected_receive_target_hash": "",
+      "record_count": 12,
+      "expected_outcome": "refused_unsupported_record",
+      "unsupported_record": "encoded_write",
+      "capability_required": "deterministic_only",
+      "cleanup_policy": "preserve_artifacts_on_failure",
+      "artifact_requirements": [
+        "case_id",
+        "expected_stream_hash",
+        "expected_receive_target_hash",
+        "expected_outcome"
+      ],
+      "chain_of_custody": {
+        "artifact_path": "artifacts/btrfs-send-recv/refusal_unsupported_001.json",
+        "artifact_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555566",
+        "recorded_by": "frankenfs_send_recv_lab",
+        "recorded_at_unix": 1714752400,
+        "linked_bead": "bd-naww5"
+      }
+    },
+    {
+      "case_id": "btrfs_send_recv_incremental_parent_mismatch_refusal",
+      "supported_subset": "unsupported",
+      "source_snapshot": {
+        "snapshot_id": "snap_incr_source_001",
+        "uuid": "66666666-2222-3333-4444-555555555555",
+        "parent_uuid": "77777777-2222-3333-4444-555555555555",
+        "generation": 11,
+        "image_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+      },
+      "parent_snapshot": {
+        "snapshot_id": "snap_incr_parent_wrong_001",
+        "uuid": "88888888-2222-3333-4444-555555555555",
+        "parent_uuid": "00000000-0000-0000-0000-000000000000",
+        "generation": 5,
+        "image_hash": "sha256:8888888888888888888888888888888888888888888888888888888888888888"
+      },
+      "expected_stream_hash": "",
+      "expected_receive_target_hash": "",
+      "record_count": 24,
+      "expected_outcome": "refused_incremental_parent_mismatch",
+      "unsupported_record": "",
+      "capability_required": "deterministic_only",
+      "cleanup_policy": "preserve_artifacts_on_failure",
+      "artifact_requirements": [
+        "case_id",
+        "expected_stream_hash",
+        "expected_receive_target_hash",
+        "expected_outcome"
+      ],
+      "chain_of_custody": {
+        "artifact_path": "artifacts/btrfs-send-recv/refusal_incremental_001.json",
+        "artifact_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666677",
+        "recorded_by": "frankenfs_send_recv_lab",
+        "recorded_at_unix": 1714752500,
+        "linked_bead": "bd-naww5"
+      }
+    }
+  ]
+}
