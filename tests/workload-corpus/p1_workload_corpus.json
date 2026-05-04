@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "corpus_id": "frankenfs_p1_user_risk_workloads",
-  "corpus_version": "2026-05-03.1",
-  "bead_id": "bd-rchk0.5.7.1",
+  "corpus_version": "2026-05-04.1",
+  "bead_id": "bd-rchk0.5.7",
   "scenario_id_regex": "^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$",
   "user_risks": [
     "data_loss",

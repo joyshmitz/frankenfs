@@ -1,6 +1,6 @@
 #![allow(clippy::too_many_lines)]
 
-//! Versioned P1 workload corpus validation for `bd-rchk0.5.7.1`.
+//! Versioned real-world workload corpus validation for `bd-rchk0.5.7`.
 //!
 //! The corpus is the shared proof substrate for user-risk scenarios consumed by
 //! invariant, mounted differential, repair, crash/replay, proof-bundle, and
@@ -180,6 +180,28 @@ pub fn load_workload_corpus(path: &Path) -> Result<WorkloadCorpus> {
         .with_context(|| format!("failed to read workload corpus {}", path.display()))?;
     serde_json::from_str(&text)
         .with_context(|| format!("invalid workload corpus JSON {}", path.display()))
+}
+
+#[must_use]
+pub fn find_workload_scenario<'a>(
+    corpus: &'a WorkloadCorpus,
+    scenario_id: &str,
+) -> Option<&'a WorkloadScenario> {
+    corpus
+        .scenarios
+        .iter()
+        .find(|scenario| scenario.scenario_id == scenario_id)
+}
+
+pub fn validate_selected_workload_scenario(
+    corpus: &WorkloadCorpus,
+    scenario_id: &str,
+) -> Result<()> {
+    if find_workload_scenario(corpus, scenario_id).is_some() {
+        Ok(())
+    } else {
+        bail!("workload corpus does not contain selected scenario {scenario_id}")
+    }
 }
 
 #[must_use]
@@ -821,6 +843,7 @@ mod tests {
         let corpus = fixture_corpus();
         let report = validate_workload_corpus(&corpus);
         assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.bead_id, "bd-rchk0.5.7");
         assert!(report.scenario_count >= 11);
         for status in ["positive", "negative", "unsupported", "host_skip"] {
             assert!(report.status_counts.contains_key(status));
@@ -830,6 +853,33 @@ mod tests {
         assert!(report.proof_bundle_coverage.ready);
         assert_eq!(report.coverage_matrix.len(), report.scenario_count);
         assert!(report.missing_high_risk_user_risks.is_empty());
+    }
+
+    #[test]
+    fn validates_selected_reproduction_scenario() {
+        let corpus = fixture_corpus();
+        validate_selected_workload_scenario(&corpus, "workload_editor_save_atomic_ext4")
+            .expect("selected scenario exists");
+        let scenario = find_workload_scenario(&corpus, "workload_editor_save_atomic_ext4")
+            .expect("selected scenario should be returned");
+        assert_eq!(scenario.operation_class, "editor_save");
+        assert!(
+            scenario
+                .linked_proof_consumers
+                .iter()
+                .any(|consumer| consumer == "crash_replay_lab")
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_selected_reproduction_scenario() {
+        let corpus = fixture_corpus();
+        let err =
+            validate_selected_workload_scenario(&corpus, "workload_missing_scenario").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("workload corpus does not contain selected scenario")
+        );
     }
 
     #[test]

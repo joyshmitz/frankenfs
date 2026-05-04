@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ffs_workload_corpus_e2e.sh - P1 workload corpus dry-run gate for bd-rchk0.5.7.1.
+# ffs_workload_corpus_e2e.sh - real-world workload corpus dry-run gate for bd-rchk0.5.7.
 #
 # Validates the shared workload corpus that feeds proof consumers and release
 # readiness evidence without running heavyweight mounted or benchmark lanes.
@@ -85,6 +85,18 @@ if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harnes
 else
     cat "$VALIDATE_RAW"
     scenario_result "workload_corpus_validates" "FAIL" "checked-in workload corpus rejected"
+fi
+
+SELECT_RAW="$E2E_LOG_DIR/workload_corpus_select.raw"
+e2e_step "Scenario 2b: selected reproduction scenarios are checked"
+if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- \
+    validate-workload-corpus \
+    --corpus "$CORPUS_JSON" \
+    --select workload_editor_save_atomic_ext4 >"$SELECT_RAW" 2>&1; then
+    scenario_result "workload_corpus_selected_scenarios_checked" "PASS" "known scenario accepted through the reproduction selector"
+else
+    cat "$SELECT_RAW"
+    scenario_result "workload_corpus_selected_scenarios_checked" "FAIL" "known selected scenario was rejected"
 fi
 
 e2e_step "Scenario 3: proof coverage spans user risks, filesystems, and consumers"

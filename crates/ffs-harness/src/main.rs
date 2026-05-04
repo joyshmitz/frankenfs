@@ -139,7 +139,8 @@ use ffs_harness::{
     },
     workload_corpus::{
         DEFAULT_WORKLOAD_CORPUS_PATH, fail_on_workload_corpus_errors, load_workload_corpus,
-        render_workload_corpus_markdown, validate_workload_corpus,
+        render_workload_corpus_markdown, validate_selected_workload_scenario,
+        validate_workload_corpus,
     },
     xfstests::{
         XfstestsStatus, apply_allowlist, compare_against_baseline, load_allowlist, load_baseline,
@@ -352,6 +353,7 @@ struct WorkloadCorpusCmdArgs {
     corpus_path: String,
     out_path: Option<String>,
     summary_out_path: Option<String>,
+    selected_scenario_id: Option<String>,
     format: ProofBundleFormat,
 }
 
@@ -408,6 +410,9 @@ fn validate_workload_corpus_cmd(args: &[String]) -> Result<()> {
         return Ok(());
     };
     let corpus = load_workload_corpus(Path::new(&cmd_args.corpus_path))?;
+    if let Some(scenario_id) = cmd_args.selected_scenario_id.as_deref() {
+        validate_selected_workload_scenario(&corpus, scenario_id)?;
+    }
     let report = validate_workload_corpus(&corpus);
     let output = match cmd_args.format {
         ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
@@ -439,6 +444,7 @@ fn parse_workload_corpus_cmd_args(args: &[String]) -> Result<Option<WorkloadCorp
     let mut corpus_path = DEFAULT_WORKLOAD_CORPUS_PATH.to_owned();
     let mut out_path: Option<String> = None;
     let mut summary_out_path: Option<String> = None;
+    let mut selected_scenario_id: Option<String> = None;
     let mut format = ProofBundleFormat::Json;
     let mut i = 0;
 
@@ -469,7 +475,11 @@ fn parse_workload_corpus_cmd_args(args: &[String]) -> Result<Option<WorkloadCorp
             }
             "--select" => {
                 i += 1;
-                let _ = args.get(i).context("--select requires a scenario id")?;
+                selected_scenario_id = Some(
+                    args.get(i)
+                        .context("--select requires a scenario id")?
+                        .to_owned(),
+                );
             }
             "--help" | "-h" => {
                 print_workload_corpus_usage();
@@ -484,6 +494,7 @@ fn parse_workload_corpus_cmd_args(args: &[String]) -> Result<Option<WorkloadCorp
         corpus_path,
         out_path,
         summary_out_path,
+        selected_scenario_id,
         format,
     }))
 }
