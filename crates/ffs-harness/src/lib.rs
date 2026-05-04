@@ -18,6 +18,7 @@ pub mod error_taxonomy;
 pub mod fuzz_dashboard;
 pub mod fuzz_smoke;
 pub mod health_consistency;
+pub mod inventory_closeout_gate;
 pub mod invariant_oracle;
 pub mod log_contract;
 pub mod metrics;

@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "gate_id": "frankenfs_inventory_closeout_v1",
+  "bead_id": "bd-rpjp9",
+  "now_unix": 1714752000,
+  "rows": [
+    {
+      "row_id": "inv_parser_001",
+      "source_path": "docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md",
+      "matched_snippet_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "risk_surface": "parser",
+      "state": "completed_artifact",
+      "linked_bead_or_artifact": "tests/fixtures/parser/closed_001.json",
+      "duplicate_of": "",
+      "stale_expiry_unix": 0,
+      "owner": "harness",
+      "user_risk_rationale": ""
+    },
+    {
+      "row_id": "inv_mounted_path_001",
+      "source_path": "docs/mounted/runtime-modes.md",
+      "matched_snippet_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "risk_surface": "mounted_path",
+      "state": "linked_bead",
+      "linked_bead_or_artifact": "bd-rchk0.3.4",
+      "duplicate_of": "",
+      "stale_expiry_unix": 0,
+      "owner": "fuse",
+      "user_risk_rationale": ""
+    },
+    {
+      "row_id": "inv_repair_001",
+      "source_path": "docs/repair/runbook.md",
+      "matched_snippet_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "risk_surface": "repair",
+      "state": "long_campaign",
+      "linked_bead_or_artifact": "bd-rchk5",
+      "duplicate_of": "",
+      "stale_expiry_unix": 0,
+      "owner": "repair",
+      "user_risk_rationale": "long-running repair fuzz campaign tracked separately to keep CI bounded"
+    },
+    {
+      "row_id": "inv_fuzz_001",
+      "source_path": "tests/fuzz_corpus/parser_seeds.md",
+      "matched_snippet_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "risk_surface": "fuzz",
+      "state": "stale_allowed_until",
+      "linked_bead_or_artifact": "bd-rchk7",
+      "duplicate_of": "",
+      "stale_expiry_unix": 1730000000,
+      "owner": "harness",
+      "user_risk_rationale": "fuzz corpus expansion is throttled to one cycle per release; budgeted as stale until the next release window"
+    },
+    {
+      "row_id": "inv_golden_001",
+      "source_path": "docs/conformance/goldens.md",
+      "matched_snippet_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "risk_surface": "golden",
+      "state": "duplicate_of",
+      "linked_bead_or_artifact": "",
+      "duplicate_of": "inv_parser_001",
+      "stale_expiry_unix": 0,
+      "owner": "",
+      "user_risk_rationale": ""
+    },
+    {
+      "row_id": "inv_xfstests_001",
+      "source_path": "scripts/e2e/xfstests_baseline.json",
+      "matched_snippet_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "risk_surface": "xfstests",
+      "state": "host_blocked",
+      "linked_bead_or_artifact": "bd-rchk3.1",
+      "duplicate_of": "",
+      "stale_expiry_unix": 0,
+      "owner": "harness",
+      "user_risk_rationale": "xfstests subset depends on permissioned host that current swarm runners do not provide"
+    },
+    {
+      "row_id": "inv_performance_001",
+      "source_path": "docs/performance/baseline.md",
+      "matched_snippet_hash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "risk_surface": "performance",
+      "state": "explicit_non_goal",
+      "linked_bead_or_artifact": "docs/performance/non-goals.md",
+      "duplicate_of": "",
+      "stale_expiry_unix": 0,
+      "owner": "performance",
+      "user_risk_rationale": "absolute latency targets vary by hardware; we declare a relative-regression non-goal here"
+    },
+    {
+      "row_id": "inv_readme_feature_parity_001",
+      "source_path": "FEATURE_PARITY.md",
+      "matched_snippet_hash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "risk_surface": "readme_feature_parity",
+      "state": "false_positive",
+      "linked_bead_or_artifact": "",
+      "duplicate_of": "",
+      "stale_expiry_unix": 0,
+      "owner": "release",
+      "user_risk_rationale": "the phrase appears inside a quoted historical excerpt, not as a present-tense open note"
+    }
+  ]
+}
