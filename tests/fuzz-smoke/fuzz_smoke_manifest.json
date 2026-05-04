@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "corpus_id": "frankenfs_deterministic_fuzz_smoke_v1",
-  "bead_id": "bd-rchk7.4",
-  "corpus_version": "2026-05-03.fixed-seed-v1",
+  "bead_id": "bd-u8hx5",
+  "corpus_version": "2026-05-04.provenance-v1",
   "default_timeout_ms": 250,
   "artifact_contract": [
     "command_line",
@@ -13,65 +13,216 @@
     "stderr_path",
     "cleanup_status",
     "report_json",
-    "target_summary"
+    "target_summary",
+    "corpus_version",
+    "seed_hashes",
+    "provenance",
+    "resource_counters",
+    "minimization_status",
+    "quarantine_status",
+    "reproduction_command"
   ],
   "seeds": [
     {
       "seed_id": "fs_ext4_superblock_magic_truncated",
       "path": "tests/fuzz_corpus/corpus_50_ext4_magic_truncated.bin",
+      "source": "tests/fuzz_corpus/README.md",
+      "provenance": "synthetic ext4 magic-truncation adversarial seed from the fixed parser corpus",
       "target": "ext4_superblock",
       "expected_class": "InsufficientData",
-      "expected_error_contains": "need 1024"
+      "expected_error_contains": "need 1024",
+      "corpus_checksum": "sha256:c0c73b4f3cf135a5d7d70b8a4c3cdc3a0bc61d16f560affa57b5901eb4bf719e",
+      "timeout_ms": 250,
+      "resource_budget": {
+        "max_input_bytes": 1024,
+        "max_duration_ms": 250,
+        "max_artifact_bytes": 65536
+      },
+      "minimization": {
+        "status": "minimized",
+        "replay_command": "cargo run --quiet -p ffs-harness -- validate-fuzz-smoke --manifest tests/fuzz-smoke/fuzz_smoke_manifest.json --workspace-root . --out artifacts/fuzz-smoke/fuzz_smoke_report.json"
+      },
+      "quarantine": {
+        "status": "none"
+      }
     },
     {
       "seed_id": "fs_ext4_group_desc_short",
       "path": "tests/fuzz_corpus/corpus_53_extent_hdr_max.bin",
+      "source": "tests/fuzz_corpus/README.md",
+      "provenance": "synthetic ext4 extent-header seed reused as a short group-descriptor parser probe",
       "target": "ext4_group_desc_32",
       "expected_class": "InsufficientData",
-      "expected_error_contains": "need 32"
+      "expected_error_contains": "need 32",
+      "corpus_checksum": "sha256:27910d8f977c7d7782af5b343e5512616d1a34a485dc61b3e142373ef7ff5e66",
+      "timeout_ms": 250,
+      "resource_budget": {
+        "max_input_bytes": 1024,
+        "max_duration_ms": 250,
+        "max_artifact_bytes": 65536
+      },
+      "minimization": {
+        "status": "minimized",
+        "replay_command": "cargo run --quiet -p ffs-harness -- validate-fuzz-smoke --manifest tests/fuzz-smoke/fuzz_smoke_manifest.json --workspace-root . --out artifacts/fuzz-smoke/fuzz_smoke_report.json"
+      },
+      "quarantine": {
+        "status": "none"
+      }
     },
     {
       "seed_id": "fs_ext4_inode_short",
       "path": "tests/fuzz_corpus/corpus_53_extent_hdr_max.bin",
+      "source": "tests/fuzz_corpus/README.md",
+      "provenance": "synthetic ext4 extent-header seed reused as a short inode parser probe",
       "target": "ext4_inode",
-      "expected_class": "InsufficientData"
+      "expected_class": "InsufficientData",
+      "corpus_checksum": "sha256:27910d8f977c7d7782af5b343e5512616d1a34a485dc61b3e142373ef7ff5e66",
+      "timeout_ms": 250,
+      "resource_budget": {
+        "max_input_bytes": 1024,
+        "max_duration_ms": 250,
+        "max_artifact_bytes": 65536
+      },
+      "minimization": {
+        "status": "minimized",
+        "replay_command": "cargo run --quiet -p ffs-harness -- validate-fuzz-smoke --manifest tests/fuzz-smoke/fuzz_smoke_manifest.json --workspace-root . --out artifacts/fuzz-smoke/fuzz_smoke_report.json"
+      },
+      "quarantine": {
+        "status": "none"
+      }
     },
     {
       "seed_id": "fs_ext4_extent_header_max_entries",
       "path": "tests/fuzz_corpus/corpus_53_extent_hdr_max.bin",
+      "source": "tests/fuzz_corpus/README.md",
+      "provenance": "synthetic ext4 extent-header seed with maximum entry count pressure",
       "target": "ext4_extent_tree",
-      "expected_class": "InsufficientData"
+      "expected_class": "InsufficientData",
+      "corpus_checksum": "sha256:27910d8f977c7d7782af5b343e5512616d1a34a485dc61b3e142373ef7ff5e66",
+      "timeout_ms": 250,
+      "resource_budget": {
+        "max_input_bytes": 1024,
+        "max_duration_ms": 250,
+        "max_artifact_bytes": 65536
+      },
+      "minimization": {
+        "status": "minimized",
+        "replay_command": "cargo run --quiet -p ffs-harness -- validate-fuzz-smoke --manifest tests/fuzz-smoke/fuzz_smoke_manifest.json --workspace-root . --out artifacts/fuzz-smoke/fuzz_smoke_report.json"
+      },
+      "quarantine": {
+        "status": "none"
+      }
     },
     {
       "seed_id": "fs_ext4_directory_tail_short",
       "path": "tests/fuzz_corpus/corpus_52_dir_tail_short.bin",
+      "source": "tests/fuzz_corpus/README.md",
+      "provenance": "synthetic ext4 directory-tail truncation seed for fixed parser smoke coverage",
       "target": "ext4_dir_block",
-      "expected_class": "accepted"
+      "expected_class": "accepted",
+      "corpus_checksum": "sha256:205f570fab9a60138f350fc54226115957bd90b7cf9c459465fc7ab1ca492776",
+      "timeout_ms": 250,
+      "resource_budget": {
+        "max_input_bytes": 1024,
+        "max_duration_ms": 250,
+        "max_artifact_bytes": 65536
+      },
+      "minimization": {
+        "status": "minimized",
+        "replay_command": "cargo run --quiet -p ffs-harness -- validate-fuzz-smoke --manifest tests/fuzz-smoke/fuzz_smoke_manifest.json --workspace-root . --out artifacts/fuzz-smoke/fuzz_smoke_report.json"
+      },
+      "quarantine": {
+        "status": "none"
+      }
     },
     {
       "seed_id": "fs_btrfs_superblock_sparse_magic",
       "path": "tests/fuzz_corpus/corpus_51_btrfs_magic_sparse.bin",
+      "source": "tests/fuzz_corpus/README.md",
+      "provenance": "synthetic btrfs sparse-magic seed for superblock and leaf parser probes",
       "target": "btrfs_superblock",
       "expected_class": "InsufficientData",
-      "expected_error_contains": "need 4096"
+      "expected_error_contains": "need 4096",
+      "corpus_checksum": "sha256:42d1e73752d3669929b95b25a3cfcac732bbc8fe1cb341d27a514dce45059dba",
+      "timeout_ms": 250,
+      "resource_budget": {
+        "max_input_bytes": 1024,
+        "max_duration_ms": 250,
+        "max_artifact_bytes": 65536
+      },
+      "minimization": {
+        "status": "minimized",
+        "replay_command": "cargo run --quiet -p ffs-harness -- validate-fuzz-smoke --manifest tests/fuzz-smoke/fuzz_smoke_manifest.json --workspace-root . --out artifacts/fuzz-smoke/fuzz_smoke_report.json"
+      },
+      "quarantine": {
+        "status": "none"
+      }
     },
     {
       "seed_id": "fs_btrfs_sys_chunk_truncated",
       "path": "tests/fuzz_corpus/corpus_54_chunk_truncated.bin",
+      "source": "tests/fuzz_corpus/README.md",
+      "provenance": "synthetic btrfs sys-chunk truncation seed from the fixed parser corpus",
       "target": "btrfs_sys_chunk_array",
-      "expected_class": "InsufficientData"
+      "expected_class": "InsufficientData",
+      "corpus_checksum": "sha256:bfca4110aab07fc5b41475d39b6d45027acb5ddb5c838b81f645021fdc508c23",
+      "timeout_ms": 250,
+      "resource_budget": {
+        "max_input_bytes": 1024,
+        "max_duration_ms": 250,
+        "max_artifact_bytes": 65536
+      },
+      "minimization": {
+        "status": "minimized",
+        "replay_command": "cargo run --quiet -p ffs-harness -- validate-fuzz-smoke --manifest tests/fuzz-smoke/fuzz_smoke_manifest.json --workspace-root . --out artifacts/fuzz-smoke/fuzz_smoke_report.json"
+      },
+      "quarantine": {
+        "status": "none"
+      }
     },
     {
       "seed_id": "fs_btrfs_leaf_items_sparse_magic",
       "path": "tests/fuzz_corpus/corpus_51_btrfs_magic_sparse.bin",
+      "source": "tests/fuzz_corpus/README.md",
+      "provenance": "synthetic btrfs sparse-magic seed reused as a leaf-items parser probe",
       "target": "btrfs_leaf_items",
-      "expected_class": "InsufficientData"
+      "expected_class": "InsufficientData",
+      "corpus_checksum": "sha256:42d1e73752d3669929b95b25a3cfcac732bbc8fe1cb341d27a514dce45059dba",
+      "timeout_ms": 250,
+      "resource_budget": {
+        "max_input_bytes": 1024,
+        "max_duration_ms": 250,
+        "max_artifact_bytes": 65536
+      },
+      "minimization": {
+        "status": "minimized",
+        "replay_command": "cargo run --quiet -p ffs-harness -- validate-fuzz-smoke --manifest tests/fuzz-smoke/fuzz_smoke_manifest.json --workspace-root . --out artifacts/fuzz-smoke/fuzz_smoke_report.json"
+      },
+      "quarantine": {
+        "status": "none"
+      }
     },
     {
       "seed_id": "fs_repair_corpus_manifest",
       "path": "tests/repair-corpus/repair_corpus.json",
+      "source": "tests/repair-corpus/repair_corpus.json",
+      "provenance": "repair and ledger corpus manifest produced by bd-rchk7.2 and decoded by the fixed fuzz-smoke gate",
       "target": "repair_corpus_manifest",
-      "expected_class": "accepted"
+      "expected_class": "accepted",
+      "corpus_checksum": "sha256:1dfc4ad8d6ebe80baf01589a7a5aacaecd352fe8a5110e660e7ff39c5db7da6a",
+      "timeout_ms": 250,
+      "resource_budget": {
+        "max_input_bytes": 32768,
+        "max_duration_ms": 250,
+        "max_artifact_bytes": 131072
+      },
+      "minimization": {
+        "status": "minimized",
+        "replay_command": "cargo run --quiet -p ffs-harness -- validate-fuzz-smoke --manifest tests/fuzz-smoke/fuzz_smoke_manifest.json --workspace-root . --out artifacts/fuzz-smoke/fuzz_smoke_report.json"
+      },
+      "quarantine": {
+        "status": "none"
+      }
     }
   ]
 }

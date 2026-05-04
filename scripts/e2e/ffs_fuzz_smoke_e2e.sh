@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ffs_fuzz_smoke_e2e.sh - deterministic fixed-seed parser smoke gate for bd-rchk7.4.
+# ffs_fuzz_smoke_e2e.sh - deterministic fixed-seed parser smoke gate for bd-u8hx5.
 
 set -euo pipefail
 
@@ -35,8 +35,6 @@ COMMAND=(
     "$MANIFEST_PATH"
     --workspace-root
     "$REPO_ROOT"
-    --out
-    "$REPORT_JSON"
 )
 printf -v COMMAND_LINE '%q ' "${COMMAND[@]}"
 COMMAND_LINE="${COMMAND_LINE% }"
@@ -64,6 +62,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -75,33 +74,141 @@ command_line = sys.argv[5]
 command_status = sys.argv[6]
 duration_ms = int(sys.argv[7])
 
-if not report_path.exists():
-    report = {
-        "valid": False,
-        "seed_ids": [],
-        "corpus_checksum": "",
-        "target_summary": {},
-        "errors": [f"missing report_json: {report_path}"],
-    }
-else:
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def extract_report_json(text: str) -> dict:
+    cleaned = ANSI_ESCAPE.sub("", text)
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(cleaned):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(cleaned[index:])
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(value, dict)
+            and value.get("corpus_id") == "frankenfs_deterministic_fuzz_smoke_v1"
+            and "seed_results" in value
+        ):
+            return value
+    raise ValueError("no fuzz-smoke report object found")
+
+
+if report_path.exists():
     report = json.loads(report_path.read_text(encoding="utf-8"))
+else:
+    report = None
+    decode_errors = []
+    for capture_path in (stdout_path, stderr_path):
+        try:
+            report = extract_report_json(capture_path.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            decode_errors.append(f"{capture_path}: {exc}")
+        else:
+            break
+    if report is None:
+        report = {
+            "valid": False,
+            "seed_ids": [],
+            "corpus_checksum": "",
+            "target_summary": {},
+            "errors": [
+                f"missing report_json: {report_path}",
+                "capture streams did not contain report JSON: " + "; ".join(decode_errors),
+            ],
+        }
+    else:
+        report_path.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+seed_results = report.get("seed_results", [])
+seed_hashes = {
+    row.get("seed_id", ""): row.get("sha256", "")
+    for row in seed_results
+}
+provenance = {
+    row.get("seed_id", ""): {
+        "source": row.get("source", ""),
+        "provenance": row.get("provenance", ""),
+    }
+    for row in seed_results
+}
+resource_counters = {
+    row.get("seed_id", ""): {
+        "byte_len": row.get("byte_len", 0),
+        "duration_ms": row.get("duration_ms", 0),
+        "budget": row.get("resource_budget", {}),
+    }
+    for row in seed_results
+}
+minimization_status = {
+    row.get("seed_id", ""): {
+        "status": row.get("minimization_status", ""),
+        "replay_command": row.get("replay_command", ""),
+        "follow_up_bead": row.get("follow_up_bead"),
+    }
+    for row in seed_results
+}
+quarantine_status = {
+    row.get("seed_id", ""): {
+        "status": row.get("quarantine_status", ""),
+        "quarantine_id": row.get("quarantine_id"),
+        "owner": row.get("quarantine_owner"),
+        "expires_at": row.get("quarantine_expires_at"),
+        "owning_bead": row.get("quarantine_owning_bead"),
+    }
+    for row in seed_results
+}
+
+unowned_failures = []
+for row in seed_results:
+    failed = (
+        not row.get("class_matched", False)
+        or not row.get("error_detail_matched", False)
+        or not row.get("corpus_checksum_matched", False)
+        or row.get("timed_out", False)
+        or row.get("actual_class") in {"panic", "resource_cap"}
+    )
+    owned = (
+        bool(row.get("replay_command"))
+        or bool(row.get("follow_up_bead"))
+        or bool(row.get("quarantine_owning_bead"))
+    )
+    if failed and not owned:
+        unowned_failures.append(row.get("seed_id", "<unknown>"))
+
+errors = list(report.get("errors", []))
+if unowned_failures:
+    errors.append("unowned fuzz-smoke failures: " + ", ".join(unowned_failures))
 
 artifact = {
     "schema_version": 1,
-    "bead_id": "bd-rchk7.4",
+    "bead_id": report.get("bead_id", "bd-u8hx5"),
     "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     "command_line": command_line,
     "command_status": command_status,
+    "corpus_version": report.get("corpus_version", ""),
     "seed_ids": report.get("seed_ids", []),
+    "seed_hashes": seed_hashes,
     "corpus_checksum": report.get("corpus_checksum", ""),
     "duration_ms": duration_ms,
+    "provenance": provenance,
+    "resource_counters": resource_counters,
+    "minimization_status": minimization_status,
+    "quarantine_status": quarantine_status,
     "stdout_path": str(stdout_path),
     "stderr_path": str(stderr_path),
     "report_json": str(report_path),
     "coverage_summary": report.get("target_summary", {}),
+    "outcome_summary": report.get("outcome_summary", {}),
     "cleanup_status": "registered_with_e2e_cleanup_trap",
-    "valid": command_status == "pass" and bool(report.get("valid")),
-    "errors": report.get("errors", []),
+    "seed_results": seed_results,
+    "valid": command_status == "pass" and bool(report.get("valid")) and not unowned_failures,
+    "errors": errors,
 }
 
 artifact_path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8")
