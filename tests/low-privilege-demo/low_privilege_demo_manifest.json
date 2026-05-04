@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "manifest_id": "frankenfs_low_privilege_demo_v1",
+  "bead_id": "bd-rchk0.5.13",
+  "git_sha": "0000000000000000000000000000000000000000",
+  "toolchain": "rust-nightly-2024-edition",
+  "kernel": "linux-6.x",
+  "command_line": "rch exec -- cargo run -p ffs-harness -- run-low-privilege-demo --out artifacts/low-privilege-demo/sample-bundle.json",
+  "working_directory_policy": "ephemeral_tempdir_torndown_on_exit",
+  "lanes": [
+    {
+      "lane_id": "lpd_parser_unit_ext4",
+      "execution_kind": "parser_unit",
+      "capability_requirement": "none",
+      "fixture_source": "tests/fixtures/ext4/superblock_minimal.bin",
+      "fixture_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "capability_check_command": "true",
+      "expected_outcome": "executed",
+      "expected_artifact_path": "artifacts/low-privilege-demo/parser_unit_ext4.json",
+      "host_skip_reason": "",
+      "reproduction_command": "rch exec -- cargo test -p ffs-ext4 superblock_minimal_parses",
+      "cleanup_status": "teardown_tempdir"
+    },
+    {
+      "lane_id": "lpd_invariant_oracle_core",
+      "execution_kind": "invariant_oracle",
+      "capability_requirement": "none",
+      "fixture_source": "tests/fixtures/invariant-oracle/baseline.json",
+      "fixture_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "capability_check_command": "true",
+      "expected_outcome": "executed",
+      "expected_artifact_path": "artifacts/low-privilege-demo/invariant_oracle.json",
+      "host_skip_reason": "",
+      "reproduction_command": "rch exec -- cargo test -p ffs-harness invariant_oracle::tests",
+      "cleanup_status": "teardown_tempdir"
+    },
+    {
+      "lane_id": "lpd_repair_dry_run_detection_only",
+      "execution_kind": "repair_dry_run",
+      "capability_requirement": "none",
+      "fixture_source": "tests/fixtures/repair/detection_only_baseline.json",
+      "fixture_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "capability_check_command": "true",
+      "expected_outcome": "executed",
+      "expected_artifact_path": "artifacts/low-privilege-demo/repair_dry_run.json",
+      "host_skip_reason": "",
+      "reproduction_command": "rch exec -- cargo run -p ffs-harness -- run-repair-dry-run --image tests/fixtures/repair/sample.img",
+      "cleanup_status": "teardown_tempdir"
+    },
+    {
+      "lane_id": "lpd_release_gate_eval",
+      "execution_kind": "release_gate_eval",
+      "capability_requirement": "none",
+      "fixture_source": "tests/fixtures/release-gate/sample-evidence.json",
+      "fixture_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "capability_check_command": "true",
+      "expected_outcome": "executed",
+      "expected_artifact_path": "artifacts/low-privilege-demo/release_gate_eval.json",
+      "host_skip_reason": "",
+      "reproduction_command": "rch exec -- cargo run -p ffs-harness -- evaluate-release-gate --evidence tests/fixtures/release-gate/sample-evidence.json",
+      "cleanup_status": "teardown_tempdir"
+    },
+    {
+      "lane_id": "lpd_mounted_smoke_host_skipped",
+      "execution_kind": "mounted_smoke",
+      "capability_requirement": "fuse",
+      "fixture_source": "scripts/e2e/ffs_mounted_write_workload_matrix.sh",
+      "fixture_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "capability_check_command": "test -e /dev/fuse",
+      "expected_outcome": "host_skipped",
+      "expected_artifact_path": "artifacts/low-privilege-demo/mounted_smoke.skip.json",
+      "host_skip_reason": "low-privilege host has no /dev/fuse; rerun with FFS_MOUNTED_WRITE_EXECUTE=1 on a permissioned worker to extend this lane",
+      "reproduction_command": "FFS_MOUNTED_WRITE_EXECUTE=1 scripts/e2e/ffs_mounted_write_workload_matrix.sh",
+      "cleanup_status": "preserve_host_skip_artifact"
+    }
+  ]
+}

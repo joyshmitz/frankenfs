@@ -21,6 +21,7 @@ pub mod health_consistency;
 pub mod inventory_closeout_gate;
 pub mod invariant_oracle;
 pub mod log_contract;
+pub mod low_privilege_demo;
 pub mod metrics;
 pub mod mounted_checkpoint_survivor;
 pub mod mounted_differential_oracle;
