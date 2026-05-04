@@ -230,6 +230,26 @@ def is_broad_shell_token(value):
         token in value for token in ["&&", ";", "*"]
     )
 
+def command_plan_test_fragment(test_id):
+    return test_id.replace("/", "-")
+
+def has_unsafe_cleanup_action(value):
+    if not isinstance(value, str):
+        return True
+    lower = value.lower()
+    return any(
+        token in lower
+        for token in ["rm ", "rm-", "rm\t", "rm -", "delete /", "remove /", "/*", "$(", "`", "&&", "||"]
+    )
+
+def validate_temp_path(test_id, field, value):
+    if not is_temp_path(value):
+        return f"policy {test_id} command plan has non-temporary {field}"
+    test_fragment = command_plan_test_fragment(test_id)
+    if test_fragment not in value:
+        return f"policy {test_id} command plan {field} lacks test id fragment {test_fragment}"
+    return None
+
 def validate_command_plan(test_id, plan):
     plan_errors = []
     if not isinstance(plan, dict):
@@ -260,16 +280,10 @@ def validate_command_plan(test_id, plan):
         plan_errors.append(f"policy {test_id} command plan has malformed plan_id")
     if plan.get("execution_lane") not in allowed_plan_lanes:
         plan_errors.append(f"policy {test_id} command plan has unknown execution_lane")
-    if not is_temp_path(plan.get("image_path")):
-        plan_errors.append(f"policy {test_id} command plan has non-temporary image_path")
-    if not is_temp_path(plan.get("scratch_path")):
-        plan_errors.append(f"policy {test_id} command plan has non-temporary scratch_path")
-    if not is_temp_path(plan.get("mountpoint")):
-        plan_errors.append(f"policy {test_id} command plan has non-temporary mountpoint")
-    if not is_temp_path(plan.get("test_device")):
-        plan_errors.append(f"policy {test_id} command plan has non-temporary test_device")
-    if not is_temp_path(plan.get("scratch_device")):
-        plan_errors.append(f"policy {test_id} command plan has non-temporary scratch_device")
+    for field in ["image_path", "scratch_path", "mountpoint", "test_device", "scratch_device"]:
+        path_error = validate_temp_path(test_id, field, plan.get(field))
+        if path_error:
+            plan_errors.append(path_error)
     if not str(plan.get("image_hash", "")).startswith("sha256:"):
         plan_errors.append(f"policy {test_id} command plan missing image_hash")
 
@@ -288,6 +302,9 @@ def validate_command_plan(test_id, plan):
     for privilege in privileges:
         if privilege not in allowed_plan_privileges:
             plan_errors.append(f"policy {test_id} command plan has unknown privilege {privilege}")
+
+    if has_unsafe_cleanup_action(plan.get("cleanup_action")):
+        plan_errors.append(f"policy {test_id} command plan has unsafe cleanup_action")
 
     argv = plan.get("argv", [])
     if not isinstance(argv, list) or not argv:
@@ -464,6 +481,9 @@ payload = {
     "command_plan_outcome_counts": dict(sorted(plan_outcome_counts.items())),
     "command_plan_proof": {
         "default_non_destructive": all(not plan.get("destructive") for plan in command_plans),
+        "default_developer_validation_mutates_host": requested_mode == "run"
+        and dry_run != "1"
+        and any(plan.get("execution_lane") == "permissioned_real" for plan in command_plans),
         "temp_root": "${TMPDIR:-/tmp}/frankenfs-xfstests",
         "paths_verified_temp_scoped": all(
             is_temp_path(plan.get("image_path"))
@@ -473,8 +493,22 @@ payload = {
             and is_temp_path(plan.get("scratch_device"))
             for plan in command_plans
         ),
+        "paths_verified_per_test": all(
+            command_plan_test_fragment(test.get("test_id", "")) in (test.get("command_plan", {}).get("image_path") or "")
+            and command_plan_test_fragment(test.get("test_id", "")) in (test.get("command_plan", {}).get("scratch_path") or "")
+            and command_plan_test_fragment(test.get("test_id", "")) in (test.get("command_plan", {}).get("mountpoint") or "")
+            and command_plan_test_fragment(test.get("test_id", "")) in (test.get("command_plan", {}).get("test_device") or "")
+            and command_plan_test_fragment(test.get("test_id", "")) in (test.get("command_plan", {}).get("scratch_device") or "")
+            for test in tests
+        ),
+        "cleanup_actions_safe": all(
+            not has_unsafe_cleanup_action(plan.get("cleanup_action")) for plan in command_plans
+        ),
         "broad_shell_commands_rejected": True,
         "permissioned_destructive_lane_required": True,
+        "representative_ext4_and_btrfs_present": all(
+            flavor in flavor_counts for flavor in ["ext4", "btrfs"]
+        ),
         "plans": command_plans,
     },
     "tests": tests,

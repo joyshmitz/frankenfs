@@ -565,12 +565,20 @@ fn validate_command_plan_paths(
     plan: &XfstestsCommandPlan,
     errors: &mut Vec<String>,
 ) {
+    let test_fragment = command_plan_test_fragment(&entry.test_id);
     if !is_temp_scoped_path(&plan.image_path) {
         errors.push(format!(
             "xfstests policy {} command plan uses non-temporary image path: {}",
             entry.test_id, plan.image_path
         ));
     }
+    validate_command_plan_path_fragment(
+        entry,
+        "image path",
+        &plan.image_path,
+        &test_fragment,
+        errors,
+    );
 
     if !is_temp_scoped_path(&plan.scratch_path) {
         errors.push(format!(
@@ -578,6 +586,13 @@ fn validate_command_plan_paths(
             entry.test_id, plan.scratch_path
         ));
     }
+    validate_command_plan_path_fragment(
+        entry,
+        "scratch path",
+        &plan.scratch_path,
+        &test_fragment,
+        errors,
+    );
 
     if !is_temp_scoped_path(&plan.mountpoint) {
         errors.push(format!(
@@ -585,6 +600,13 @@ fn validate_command_plan_paths(
             entry.test_id, plan.mountpoint
         ));
     }
+    validate_command_plan_path_fragment(
+        entry,
+        "mountpoint",
+        &plan.mountpoint,
+        &test_fragment,
+        errors,
+    );
 
     if !is_temp_scoped_path(&plan.test_device) {
         errors.push(format!(
@@ -592,6 +614,13 @@ fn validate_command_plan_paths(
             entry.test_id, plan.test_device
         ));
     }
+    validate_command_plan_path_fragment(
+        entry,
+        "test device placeholder",
+        &plan.test_device,
+        &test_fragment,
+        errors,
+    );
 
     if !is_temp_scoped_path(&plan.scratch_device) {
         errors.push(format!(
@@ -599,6 +628,13 @@ fn validate_command_plan_paths(
             entry.test_id, plan.scratch_device
         ));
     }
+    validate_command_plan_path_fragment(
+        entry,
+        "scratch device placeholder",
+        &plan.scratch_device,
+        &test_fragment,
+        errors,
+    );
 
     if !plan.image_hash.starts_with("sha256:") || plan.image_hash.len() <= "sha256:".len() {
         errors.push(format!(
@@ -648,6 +684,11 @@ fn validate_command_plan_helpers(
             "xfstests policy {} command plan is missing cleanup action",
             entry.test_id
         ));
+    } else if has_unsafe_cleanup_action(&plan.cleanup_action) {
+        errors.push(format!(
+            "xfstests policy {} command plan has unsafe cleanup action: {}",
+            entry.test_id, plan.cleanup_action
+        ));
     }
 
     if plan.mutation_surface.trim().is_empty() {
@@ -690,6 +731,21 @@ fn validate_command_plan_argv(
                 entry.test_id
             ));
         }
+    }
+}
+
+fn validate_command_plan_path_fragment(
+    entry: &XfstestsAllowlistEntry,
+    field: &str,
+    path: &str,
+    test_fragment: &str,
+    errors: &mut Vec<String>,
+) {
+    if !path.contains(test_fragment) {
+        errors.push(format!(
+            "xfstests policy {} command plan {field} does not include test id fragment {test_fragment}: {path}",
+            entry.test_id
+        ));
     }
 }
 
@@ -790,6 +846,25 @@ fn is_temp_scoped_path(path: &str) -> bool {
 
 fn is_broad_shell_token(token: &str) -> bool {
     matches!(token, "sh" | "bash" | "zsh" | "-c" | "shell")
+}
+
+fn has_unsafe_cleanup_action(action: &str) -> bool {
+    let lower = action.to_ascii_lowercase();
+    lower.contains("rm ")
+        || lower.contains("rm-")
+        || lower.contains("rm\t")
+        || lower.contains("rm -")
+        || lower.contains("delete /")
+        || lower.contains("remove /")
+        || lower.contains("/*")
+        || lower.contains("$(")
+        || lower.contains('`')
+        || lower.contains("&&")
+        || lower.contains("||")
+}
+
+fn command_plan_test_fragment(test_id: &str) -> String {
+    test_id.replace('/', "-")
 }
 
 fn expected_outcome_for_classification(entry: &XfstestsAllowlistEntry) -> &'static str {
@@ -1558,6 +1633,47 @@ generic/001  2s ... pass\n";
                 "expected {expected} error, got {errors:#?}"
             );
         }
+    }
+
+    #[test]
+    fn xfstests_policy_rejects_command_plan_paths_not_bound_to_test_id() {
+        let selected = vec!["generic/001".to_owned()];
+        let mut entry = valid_policy_entry("generic/001");
+        let plan = entry.command_plan.as_mut().expect("command plan");
+        plan.image_path = "${TMPDIR:-/tmp}/frankenfs-xfstests/images/shared.img".to_owned();
+        plan.scratch_path = "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/shared".to_owned();
+        plan.mountpoint = "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/shared".to_owned();
+        plan.test_device = "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/shared.test.img".to_owned();
+        plan.scratch_device =
+            "${TMPDIR:-/tmp}/frankenfs-xfstests/devices/shared.scratch.img".to_owned();
+
+        let errors = validate_xfstests_policy(&selected, &[entry]);
+
+        assert!(
+            errors
+                .iter()
+                .filter(|error| error.contains("does not include test id fragment generic-001"))
+                .count()
+                >= 5,
+            "expected per-test sandbox errors, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn xfstests_policy_rejects_unsafe_cleanup_action() {
+        let selected = vec!["generic/001".to_owned()];
+        let mut entry = valid_policy_entry("generic/001");
+        let plan = entry.command_plan.as_mut().expect("command plan");
+        plan.cleanup_action = "rm -rf /var/lib/frankenfs && sync".to_owned();
+
+        let errors = validate_xfstests_policy(&selected, &[entry]);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("unsafe cleanup action")),
+            "expected unsafe cleanup action error, got {errors:#?}"
+        );
     }
 
     #[test]
