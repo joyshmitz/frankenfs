@@ -42,6 +42,7 @@ pub mod scrub_repair_scheduler;
 pub mod soak_canary_campaign;
 pub mod support_state_accounting;
 pub mod swarm_cache_controller;
+pub mod swarm_operator_report;
 pub mod swarm_tail_latency;
 pub mod swarm_workload_harness;
 pub mod tabletop_drill;

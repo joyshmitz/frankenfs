@@ -1,0 +1,216 @@
+{
+  "schema_version": 1,
+  "report_id": "bd-p2j3e.7-swarm-operator-report-v1",
+  "generated_at": "2026-05-04T00:00:00Z",
+  "required_card_ids": [
+    "tail_latency_decomposition",
+    "numa_shard_harness",
+    "rcu_qsbr_metadata",
+    "parallel_wal_group_commit",
+    "cache_budget_controller",
+    "scrub_repair_scheduler"
+  ],
+  "proof_bundle_consumers": [
+    "proof-bundle",
+    "bd-rchk0.5.4.1"
+  ],
+  "release_gate_consumers": [
+    "release-gate",
+    "bd-rchk0.5.6.1"
+  ],
+  "cards": [
+    {
+      "idea_id": "tail_latency_decomposition",
+      "title": "Tail-latency decomposition ledger",
+      "source_lane": "bd-p2j3e.1/swarm_tail_latency",
+      "selected_algorithmic_pattern": "component_attribution_ledger",
+      "invariants": [
+        "p99_component_attribution_present",
+        "release_claim_state_recorded_per_row",
+        "reproduction_command_recorded",
+        "public_claims_remain_experimental_without_reference_lane"
+      ],
+      "evidence": [
+        {
+          "evidence_id": "bd-p2j3e.1-validator",
+          "summary": "Default ledger validates component dominance, noisy/missing-reference classifications, markdown rendering, and conservative claim wording.",
+          "artifact_paths": [
+            "benchmarks/swarm_tail_latency_ledger.json",
+            "scripts/e2e/ffs_swarm_tail_latency_e2e.sh"
+          ],
+          "validation_command": "ffs-harness validate-swarm-tail-latency --ledger benchmarks/swarm_tail_latency_ledger.json",
+          "linked_bead_id": "bd-p2j3e.1",
+          "release_claim_state": "experimental"
+        }
+      ],
+      "expected_loss_rule": "Escalate only when reduced p99 dominates added instrumentation cost and all raw reference lanes remain current.",
+      "fallback": "Keep public performance claims experimental and route operators to component-level diagnostics.",
+      "validation_command": "ffs-harness validate-swarm-tail-latency --ledger benchmarks/swarm_tail_latency_ledger.json --format markdown",
+      "release_claim_state": "experimental",
+      "linked_bead_ids": [
+        "bd-p2j3e.1"
+      ]
+    },
+    {
+      "idea_id": "numa_shard_harness",
+      "title": "NUMA and shard-aware swarm workload harness",
+      "source_lane": "bd-p2j3e.2/swarm_workload_harness",
+      "selected_algorithmic_pattern": "host_fingerprint_and_capability_downgrade",
+      "invariants": [
+        "host_fingerprint_fields_present",
+        "64_core_claim_requires_large_host_lane",
+        "missing_numa_visibility_downgrades",
+        "dry_run_command_plan_has_no_destructive_host_operations"
+      ],
+      "evidence": [
+        {
+          "evidence_id": "bd-p2j3e.2-validator",
+          "summary": "Default manifest validates five workload classes, command plans, host downgrade rows, and dry-run classifications.",
+          "artifact_paths": [
+            "benchmarks/swarm_workload_harness_manifest.json",
+            "scripts/e2e/ffs_swarm_workload_harness_e2e.sh"
+          ],
+          "validation_command": "ffs-harness validate-swarm-workload-harness --manifest benchmarks/swarm_workload_harness_manifest.json",
+          "linked_bead_id": "bd-p2j3e.2",
+          "release_claim_state": "small_host_smoke"
+        }
+      ],
+      "expected_loss_rule": "Prefer capability-skip or small-host smoke over any 64-core claim when NUMA, RAM, FUSE, or isolation evidence is incomplete.",
+      "fallback": "Run fixture smoke only and preserve exact command plans for a permissioned large-host lane.",
+      "validation_command": "ffs-harness validate-swarm-workload-harness --manifest benchmarks/swarm_workload_harness_manifest.json --format markdown",
+      "release_claim_state": "small_host_smoke",
+      "linked_bead_ids": [
+        "bd-p2j3e.2",
+        "bd-rchk0.5.7.1",
+        "bd-w13fr"
+      ]
+    },
+    {
+      "idea_id": "rcu_qsbr_metadata",
+      "title": "RCU/QSBR metadata read-path proof surface",
+      "source_lane": "bd-p2j3e.3/ffs-mvcc-rcu",
+      "selected_algorithmic_pattern": "zero_unsafe_epoch_snapshot_proof",
+      "invariants": [
+        "reader_snapshot_visibility",
+        "writer_publication_order",
+        "epoch_advancement_is_bounded",
+        "rollback_to_lock_path_remains_available"
+      ],
+      "evidence": [
+        {
+          "evidence_id": "bd-p2j3e.3-model-tests",
+          "summary": "Design-only RCU/QSBR surface has model tests, no unsafe code, and an expected-loss comparison against the lock path.",
+          "artifact_paths": [
+            "crates/ffs-mvcc/src/rcu.rs"
+          ],
+          "validation_command": "cargo test -p ffs-mvcc rcu -- --nocapture",
+          "linked_bead_id": "bd-p2j3e.3",
+          "release_claim_state": "design_only"
+        }
+      ],
+      "expected_loss_rule": "Do not enable until measured contention and tail-latency gain exceed memory, epoch-stall, and complexity risk.",
+      "fallback": "Keep the existing lock-based metadata path as the active implementation.",
+      "validation_command": "cargo test -p ffs-mvcc rcu -- --nocapture",
+      "release_claim_state": "design_only",
+      "linked_bead_ids": [
+        "bd-p2j3e.3"
+      ]
+    },
+    {
+      "idea_id": "parallel_wal_group_commit",
+      "title": "Parallel WAL and group-commit evidence gate",
+      "source_lane": "bd-p2j3e.4/wal_group_commit_gate",
+      "selected_algorithmic_pattern": "replay_proven_group_commit_gate",
+      "invariants": [
+        "record_order_preserved",
+        "idempotent_replay",
+        "fsync_boundary_semantics_explicit",
+        "partial_segment_writes_fail_closed"
+      ],
+      "evidence": [
+        {
+          "evidence_id": "bd-p2j3e.4-validator",
+          "summary": "WAL gate validates replay-proof rows, fsync-tail SLO classifications, expected-loss controller, and public-claim guard.",
+          "artifact_paths": [
+            "benchmarks/wal_group_commit_gate_manifest.json",
+            "scripts/e2e/ffs_wal_group_commit_gate_e2e.sh"
+          ],
+          "validation_command": "ffs-harness validate-wal-group-commit-gate --manifest benchmarks/wal_group_commit_gate_manifest.json",
+          "linked_bead_id": "bd-p2j3e.4",
+          "release_claim_state": "experimental"
+        }
+      ],
+      "expected_loss_rule": "Accept batching only when throughput gains exceed p99/fsync tail cost and replay proof remains valid for the same lane.",
+      "fallback": "Keep conservative WAL behavior and block claim upgrades when replay or fsync evidence is stale.",
+      "validation_command": "ffs-harness validate-wal-group-commit-gate --manifest benchmarks/wal_group_commit_gate_manifest.json --format markdown",
+      "release_claim_state": "experimental",
+      "linked_bead_ids": [
+        "bd-p2j3e.4"
+      ]
+    },
+    {
+      "idea_id": "cache_budget_controller",
+      "title": "256GB cache admission and memory-budget controller",
+      "source_lane": "bd-p2j3e.5/swarm_cache_controller",
+      "selected_algorithmic_pattern": "s3_fifo_arc_budget_fallback",
+      "invariants": [
+        "current_arc_fallback_present",
+        "dirty_pressure_visible",
+        "small_host_claims_downgrade",
+        "raw_logs_required_for_tuning"
+      ],
+      "evidence": [
+        {
+          "evidence_id": "bd-p2j3e.5-validator",
+          "summary": "Cache contract compares ARC and admission candidates while preserving dirty pressure, backpressure, and release claim state.",
+          "artifact_paths": [
+            "benchmarks/swarm_cache_controller_contract.json",
+            "scripts/e2e/ffs_swarm_cache_controller_e2e.sh"
+          ],
+          "validation_command": "ffs-harness validate-swarm-cache-controller --contract benchmarks/swarm_cache_controller_contract.json",
+          "linked_bead_id": "bd-p2j3e.5",
+          "release_claim_state": "experimental"
+        }
+      ],
+      "expected_loss_rule": "Admit a cache policy only when p99 and hit-rate gains dominate memory overhead and dirty-write risk.",
+      "fallback": "Fallback to current ARC when host memory, raw logs, or dirty pressure data are missing.",
+      "validation_command": "ffs-harness validate-swarm-cache-controller --contract benchmarks/swarm_cache_controller_contract.json --format markdown",
+      "release_claim_state": "experimental",
+      "linked_bead_ids": [
+        "bd-p2j3e.5"
+      ]
+    },
+    {
+      "idea_id": "scrub_repair_scheduler",
+      "title": "Morsel-driven scrub and repair scheduler",
+      "source_lane": "bd-p2j3e.6/scrub_repair_scheduler",
+      "selected_algorithmic_pattern": "foreground_first_morsel_scheduler",
+      "invariants": [
+        "no_repair_writeback_bypass",
+        "bounded_foreground_interference",
+        "ledger_complete",
+        "stale_symbols_refused"
+      ],
+      "evidence": [
+        {
+          "evidence_id": "bd-p2j3e.6-validator",
+          "summary": "Scheduler manifest validates fairness counters, foreground latency budgets, repair backlog age, stale-symbol refusal, and proof-bundle artifact paths.",
+          "artifact_paths": [
+            "benchmarks/scrub_repair_scheduler_manifest.json",
+            "scripts/e2e/ffs_scrub_repair_scheduler_e2e.sh"
+          ],
+          "validation_command": "ffs-harness validate-scrub-repair-scheduler --manifest benchmarks/scrub_repair_scheduler_manifest.json",
+          "linked_bead_id": "bd-p2j3e.6",
+          "release_claim_state": "experimental"
+        }
+      ],
+      "expected_loss_rule": "Run repair morsels only while repair freshness risk exceeds foreground p99 interference cost.",
+      "fallback": "Keep repair conservative and foreground-first until overlap evidence is current.",
+      "validation_command": "ffs-harness validate-scrub-repair-scheduler --manifest benchmarks/scrub_repair_scheduler_manifest.json --format markdown",
+      "release_claim_state": "experimental",
+      "linked_bead_ids": [
+        "bd-p2j3e.6"
+      ]
+    }
+  ]
+}

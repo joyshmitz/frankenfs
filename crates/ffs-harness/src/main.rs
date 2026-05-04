@@ -111,6 +111,11 @@ use ffs_harness::{
         load_swarm_cache_controller_contract, render_swarm_cache_controller_markdown,
         validate_swarm_cache_controller_contract,
     },
+    swarm_operator_report::{
+        DEFAULT_SWARM_OPERATOR_REPORT, fail_on_swarm_operator_report_errors,
+        load_swarm_operator_report, render_swarm_operator_report_markdown,
+        validate_swarm_operator_report,
+    },
     swarm_tail_latency::{
         DEFAULT_SWARM_TAIL_LATENCY_LEDGER, fail_on_swarm_tail_latency_errors,
         load_swarm_tail_latency_ledger, render_swarm_tail_latency_markdown,
@@ -213,6 +218,7 @@ fn run() -> Result<()> {
         }
         Some("performance-delta-closeout") => performance_delta_closeout_cmd(&args[1..]),
         Some("validate-swarm-cache-controller") => validate_swarm_cache_controller_cmd(&args[1..]),
+        Some("validate-swarm-operator-report") => validate_swarm_operator_report_cmd(&args[1..]),
         Some("validate-swarm-tail-latency") => validate_swarm_tail_latency_cmd(&args[1..]),
         Some("validate-swarm-workload-harness") => validate_swarm_workload_harness_cmd(&args[1..]),
         Some("validate-wal-group-commit-gate") => validate_wal_group_commit_gate_cmd(&args[1..]),
@@ -347,6 +353,14 @@ struct WorkloadCorpusCmdArgs {
 #[derive(Debug)]
 struct SwarmCacheControllerCmdArgs {
     contract_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
+struct SwarmOperatorReportCmdArgs {
+    report_path: String,
     out_path: Option<String>,
     summary_out_path: Option<String>,
     format: ProofBundleFormat,
@@ -1266,6 +1280,89 @@ fn parse_swarm_cache_controller_cmd_args(
 
     Ok(Some(SwarmCacheControllerCmdArgs {
         contract_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
+fn validate_swarm_operator_report_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_swarm_operator_report_cmd_args(args)? else {
+        return Ok(());
+    };
+    let report = load_swarm_operator_report(Path::new(&cmd_args.report_path))?;
+    let validation = validate_swarm_operator_report(&report);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&validation)?,
+        ProofBundleFormat::Markdown => render_swarm_operator_report_markdown(&validation),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "swarm operator report written: {} valid={} cards={}",
+            path, validation.valid, validation.card_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_swarm_operator_report_markdown(&validation)),
+        )?;
+        println!("swarm operator report summary written: {path}");
+    }
+
+    fail_on_swarm_operator_report_errors(&validation)
+}
+
+fn parse_swarm_operator_report_cmd_args(
+    args: &[String],
+) -> Result<Option<SwarmOperatorReportCmdArgs>> {
+    let mut report_path = DEFAULT_SWARM_OPERATOR_REPORT.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--report" => {
+                i += 1;
+                args.get(i)
+                    .context("--report requires a path")?
+                    .clone_into(&mut report_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_swarm_operator_report_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-swarm-operator-report argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(SwarmOperatorReportCmdArgs {
+        report_path,
         out_path,
         summary_out_path,
         format,
@@ -3210,6 +3307,7 @@ fn print_usage() {
     print_performance_baseline_manifest_usage_summary();
     print_performance_delta_closeout_usage_summary();
     print_swarm_cache_controller_usage_summary();
+    print_swarm_operator_report_usage_summary();
     print_swarm_tail_latency_usage_summary();
     print_swarm_workload_harness_usage_summary();
     print_wal_group_commit_gate_usage_summary();
@@ -3298,6 +3396,7 @@ fn print_usage_examples() {
     print_performance_baseline_manifest_example();
     print_performance_delta_closeout_example();
     print_swarm_cache_controller_example();
+    print_swarm_operator_report_example();
     print_swarm_tail_latency_example();
     print_swarm_workload_harness_example();
     print_wal_group_commit_gate_example();
@@ -3349,6 +3448,18 @@ fn print_swarm_cache_controller_usage_summary() {
 fn print_swarm_cache_controller_example() {
     println!(
         "  ffs-harness validate-swarm-cache-controller --contract benchmarks/swarm_cache_controller_contract.json --out artifacts/performance/swarm_cache_controller.json --summary-out artifacts/performance/swarm_cache_controller.md"
+    );
+}
+
+fn print_swarm_operator_report_usage_summary() {
+    println!(
+        "  ffs-harness validate-swarm-operator-report [--report FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_swarm_operator_report_example() {
+    println!(
+        "  ffs-harness validate-swarm-operator-report --report benchmarks/swarm_operator_report.json --out artifacts/performance/swarm_operator_report.json --summary-out artifacts/performance/swarm_operator_report.md"
     );
 }
 
@@ -3631,6 +3742,16 @@ fn print_swarm_cache_controller_usage() {
     println!();
     println!("Options:");
     println!("  --contract FILE                    Read swarm cache controller contract JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write selected-format validation report");
+    println!("  --summary-out FILE                 Write Markdown inspection summary");
+}
+
+fn print_swarm_operator_report_usage() {
+    println!("Usage: ffs-harness validate-swarm-operator-report [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --report FILE                      Read swarm operator decision report JSON");
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write selected-format validation report");
     println!("  --summary-out FILE                 Write Markdown inspection summary");
