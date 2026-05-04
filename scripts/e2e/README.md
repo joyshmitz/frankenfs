@@ -270,10 +270,11 @@ It defines the shared representation for verification outputs across E2E, benchm
 - `scenarios` keyed by `scenario_id`
 - `operational_context` for readiness-grade runs: exact command line, host/worker id, FUSE capability result, and primary stdout/stderr log paths
 - `operational_scenarios` keyed by `scenario_id` for expected/actual outcome, pass/fail/skip/error classification, filesystem flavor, image hash, mount options, exit status, stdout/stderr paths, evidence ledger paths, cleanup status, remediation hint, and artifact references
+- `readiness_events` for the versioned cross-lane event envelope: event id, report id, run id, lane id, scenario id or aggregate marker, controlling artifact id, parent correlation id, classification, severity, timestamp, git SHA, host/capability fingerprint, raw-log references, controlling evidence, remediation id, and reproduction command
 - `artifacts` with category, content type, size, checksum, redaction flag, and metadata
 - `verdict`, `duration_secs`, and optional retention metadata
 
-Generic historical manifests may use only the base schema. Operational readiness manifests must pass the stricter `validate_operational_manifest` check. That validator rejects missing run context, missing per-scenario metadata, invalid pass/fail/skip/error classification, ambiguous skip reasons, malformed artifact paths, artifact references that do not point at manifest entries, missing stdout/stderr paths, missing cleanup status, and unprobed FUSE capability.
+Generic historical manifests may use only the base schema. Operational readiness manifests must pass the stricter `validate_operational_manifest` check. That validator rejects missing run context, missing per-scenario metadata, invalid pass/fail/skip/error classification, ambiguous skip reasons, malformed artifact paths, artifact references that do not point at manifest entries, missing stdout/stderr paths, missing cleanup status, missing or malformed readiness event envelopes, and unprobed FUSE capability.
 
 Shared runner helpers live in `crates/ffs-harness/src/verification_runner.rs`.
 Domain-specific scripts should keep shell focused on orchestration and use the
@@ -352,7 +353,8 @@ links to raw logs and artifacts, flags duplicate scenario IDs, detects stale git
 SHAs when `--current-git-sha` is provided, and separates product failures from
 environment-only blockers. Each scenario row also carries a stable
 `taxonomy_class`, controlling artifact, reproduction command, cleanup status,
-manifest schema version, and host fingerprint so report consumers can distinguish
+manifest schema version, host fingerprint, readiness event ids, parent
+correlation ids, event artifact ids, and event severities so report consumers can distinguish
 `product_failure`, `host_capability_skip`, `authoritative_lane_unavailable`,
 `harness_failure`, `unsupported_by_scope`, `stale_artifact`,
 `missing_artifact`, `noisy_measurement`, `security_refusal`,

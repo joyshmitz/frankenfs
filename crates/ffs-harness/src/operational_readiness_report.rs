@@ -9,8 +9,8 @@
 //! from host or worker blockers.
 
 use crate::artifact_manifest::{
-    ArtifactManifest, GateVerdict, OperationalErrorClass, OperationalOutcomeClass, ScenarioOutcome,
-    ScenarioResult, SkipReason,
+    ArtifactManifest, GateVerdict, OperationalErrorClass, OperationalOutcomeClass,
+    ReadinessEventEnvelope, ScenarioOutcome, ScenarioResult, SkipReason,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,7 @@ pub struct OperationalReadinessReport {
     pub source_legacy_summary_count: usize,
     pub ignored_json_count: usize,
     pub scenario_count: usize,
+    pub readiness_event_count: usize,
     pub totals: ReadinessCounts,
     pub workstreams: BTreeMap<String, ReadinessCounts>,
     pub required_workstreams_missing: Vec<String>,
@@ -151,6 +152,10 @@ pub struct ReadinessScenarioRow {
     pub stderr_path: Option<String>,
     pub artifact_refs: Vec<String>,
     pub controlling_artifact: Option<String>,
+    pub readiness_event_ids: Vec<String>,
+    pub parent_correlation_ids: Vec<String>,
+    pub event_artifact_ids: Vec<String>,
+    pub event_severities: Vec<String>,
     pub reproduction_command: Option<String>,
     pub cleanup_status: Option<String>,
     pub remediation_hint: Option<String>,
@@ -196,6 +201,7 @@ struct ReportBuilder {
     source_manifest_count: usize,
     source_legacy_summary_count: usize,
     ignored_json_count: usize,
+    readiness_event_count: usize,
     totals: ReadinessCounts,
     workstreams: BTreeMap<String, ReadinessCounts>,
     seen_scenarios: BTreeMap<String, usize>,
@@ -259,6 +265,12 @@ pub fn render_operational_readiness_markdown(report: &OperationalReadinessReport
     .ok();
     writeln!(
         &mut out,
+        "- Readiness events: {}",
+        report.readiness_event_count
+    )
+    .ok();
+    writeln!(
+        &mut out,
         "- Totals: pass={} fail={} skip={} error={} product_failures={} environment_blockers={}",
         report.totals.pass,
         report.totals.fail,
@@ -303,22 +315,23 @@ pub fn render_operational_readiness_markdown(report: &OperationalReadinessReport
     writeln!(&mut out, "## Scenarios").ok();
     writeln!(
         &mut out,
-        "| Workstream | Scenario | Outcome | Failure kind | Source | Logs |"
+        "| Workstream | Scenario | Outcome | Failure kind | Events | Source | Logs |"
     )
     .ok();
-    writeln!(&mut out, "|---|---|---:|---|---|---|").ok();
+    writeln!(&mut out, "|---|---|---:|---|---|---|---|").ok();
     for row in &report.scenarios {
         let failure_kind = row.failure_kind.as_deref().unwrap_or("");
         let taxonomy_class = serialized_enum_name(row.taxonomy_class);
         let logs = render_log_links(row);
         writeln!(
             &mut out,
-            "| `{}` | `{}` | `{:?}` | {} / {} | `{}` | {} |",
+            "| `{}` | `{}` | `{:?}` | {} / {} | {} | `{}` | {} |",
             row.workstream,
             row.scenario_id,
             row.outcome,
             taxonomy_class,
             failure_kind,
+            render_event_links(row),
             row.source_path,
             logs
         )
@@ -344,9 +357,14 @@ impl ReportBuilder {
             &manifest.git_context.commit,
         );
         self.record_manifest_run_logs(config, source_path, &source_path_text, manifest);
+        self.readiness_event_count += manifest.readiness_events.len();
+        let readiness_events = readiness_events_by_scenario(manifest);
 
         for (scenario_id, scenario) in &manifest.scenarios {
             let operational = manifest.operational_scenarios.get(scenario_id);
+            let events = readiness_events
+                .get(scenario_id.as_str())
+                .map_or_else(Vec::new, Clone::clone);
             if let Some(record) = operational {
                 self.record_scenario_log_paths(
                     config,
@@ -359,6 +377,14 @@ impl ReportBuilder {
                     &record.stdout_path,
                     &record.stderr_path,
                 );
+                if events.is_empty() {
+                    self.record_contract_violation(
+                        &source_path_text,
+                        Some(scenario_id),
+                        format!("missing readiness event envelope for `{scenario_id}`"),
+                        "bd-slp26:missing-readiness-event",
+                    );
+                }
             }
             self.push_row(build_manifest_row(
                 &source_path_text,
@@ -366,6 +392,7 @@ impl ReportBuilder {
                 scenario_id,
                 scenario,
                 operational,
+                &events,
                 stale_git_sha,
             ));
         }
@@ -392,6 +419,10 @@ impl ReportBuilder {
                 stderr_path: None,
                 artifact_refs: Vec::new(),
                 controlling_artifact: None,
+                readiness_event_ids: Vec::new(),
+                parent_correlation_ids: Vec::new(),
+                event_artifact_ids: Vec::new(),
+                event_severities: Vec::new(),
                 reproduction_command: manifest
                     .operational_context
                     .as_ref()
@@ -482,6 +513,10 @@ impl ReportBuilder {
                 stderr_path: None,
                 artifact_refs,
                 controlling_artifact: Some(summary.log_file.clone()),
+                readiness_event_ids: Vec::new(),
+                parent_correlation_ids: Vec::new(),
+                event_artifact_ids: Vec::new(),
+                event_severities: Vec::new(),
                 reproduction_command: Some(format!("inspect legacy e2e log {}", summary.log_file)),
                 cleanup_status: None,
                 remediation_hint: scenario.detail.clone(),
@@ -524,6 +559,7 @@ impl ReportBuilder {
             source_legacy_summary_count: self.source_legacy_summary_count,
             ignored_json_count: self.ignored_json_count,
             scenario_count: self.scenarios.len(),
+            readiness_event_count: self.readiness_event_count,
             totals: self.totals,
             workstreams: self.workstreams,
             contract_failed: !required_workstreams_missing.is_empty()
@@ -652,6 +688,21 @@ impl ReportBuilder {
             remediation_id: "bd-un9xt:missing-log-path".to_owned(),
         });
     }
+
+    fn record_contract_violation(
+        &mut self,
+        source_path: &str,
+        scenario_id: Option<&str>,
+        violation: String,
+        remediation_id: &str,
+    ) {
+        self.contract_violations.push(ReadinessContractViolation {
+            source_path: source_path.to_owned(),
+            scenario_id: scenario_id.map(str::to_owned),
+            violation,
+            remediation_id: remediation_id.to_owned(),
+        });
+    }
 }
 
 impl ReadinessCounts {
@@ -703,12 +754,25 @@ fn artifact_path_set(manifest: &ArtifactManifest) -> BTreeSet<String> {
         .collect()
 }
 
+fn readiness_events_by_scenario(
+    manifest: &ArtifactManifest,
+) -> BTreeMap<&str, Vec<&ReadinessEventEnvelope>> {
+    let mut events = BTreeMap::<&str, Vec<&ReadinessEventEnvelope>>::new();
+    for event in &manifest.readiness_events {
+        if let Some(scenario_id) = event.scenario_id.as_deref() {
+            events.entry(scenario_id).or_default().push(event);
+        }
+    }
+    events
+}
+
 fn build_manifest_row(
     source_path_text: &str,
     manifest: &ArtifactManifest,
     scenario_id: &str,
     scenario: &ScenarioOutcome,
     operational: Option<&crate::artifact_manifest::OperationalScenarioRecord>,
+    readiness_events: &[&ReadinessEventEnvelope],
     stale_git_sha: bool,
 ) -> ReadinessScenarioRow {
     let artifact_refs = operational
@@ -740,6 +804,28 @@ fn build_manifest_row(
         .as_ref()
         .map(|context| context.command_line.join(" "));
     let controlling_artifact = artifact_refs.first().cloned();
+    let readiness_event_ids = readiness_events
+        .iter()
+        .map(|event| event.event_id.clone())
+        .collect::<Vec<_>>();
+    let parent_correlation_ids = readiness_events
+        .iter()
+        .filter_map(|event| event.parent_correlation_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let event_artifact_ids = readiness_events
+        .iter()
+        .map(|event| event.artifact_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let event_severities = readiness_events
+        .iter()
+        .map(|event| serialized_enum_name(event.severity))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
 
     ReadinessScenarioRow {
         source_path: source_path_text.to_owned(),
@@ -762,6 +848,10 @@ fn build_manifest_row(
         stderr_path: operational.map(|record| record.stderr_path.clone()),
         artifact_refs,
         controlling_artifact,
+        readiness_event_ids,
+        parent_correlation_ids,
+        event_artifact_ids,
+        event_severities,
         reproduction_command,
         cleanup_status: operational.map(|record| serialized_enum_name(record.cleanup_status)),
         remediation_hint: operational.and_then(|record| record.remediation_hint.clone()),
@@ -1065,13 +1155,27 @@ fn render_log_links(row: &ReadinessScenarioRow) -> String {
     links.join("<br>")
 }
 
+fn render_event_links(row: &ReadinessScenarioRow) -> String {
+    let mut links = Vec::new();
+    for event_id in &row.readiness_event_ids {
+        links.push(format!("event `{event_id}`"));
+    }
+    for parent_id in &row.parent_correlation_ids {
+        links.push(format!("parent `{parent_id}`"));
+    }
+    for artifact_id in &row.event_artifact_ids {
+        links.push(format!("artifact `{artifact_id}`"));
+    }
+    links.join("<br>")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::artifact_manifest::{
         ArtifactCategory, ArtifactEntry, CleanupStatus, EnvironmentFingerprint,
         FuseCapabilityResult, GitContext, OperationalRunContext, OperationalScenarioRecord,
-        WorkerContext,
+        ReadinessEventEnvelope, ReadinessEventSeverity, WorkerContext,
     };
     use tempfile::TempDir;
 
@@ -1085,6 +1189,7 @@ mod tests {
 
         assert_eq!(report.source_manifest_count, 1);
         assert_eq!(report.scenario_count, 9);
+        assert_eq!(report.readiness_event_count, 9);
         assert_eq!(report.totals.pass, 2);
         assert_eq!(report.totals.fail, 3);
         assert_eq!(report.totals.skip, 2);
@@ -1109,6 +1214,12 @@ mod tests {
         assert!(report.scenarios.iter().any(|row| {
             row.scenario_id == "release_gate_unsupported"
                 && row.taxonomy_class == ReadinessTaxonomyClass::UnsupportedByScope
+        }));
+        assert!(report.scenarios.iter().any(|row| {
+            row.scenario_id == "mounted_ext4_rw"
+                && row.readiness_event_ids == vec!["event_mounted_ext4_rw"]
+                && row.parent_correlation_ids == vec!["report_run-operational"]
+                && row.event_artifact_ids == vec!["mounted/ext4_rw.json"]
         }));
     }
 
@@ -1164,7 +1275,27 @@ mod tests {
         assert!(markdown.contains("Totals: pass=2 fail=3 skip=2 error=2"));
         assert!(markdown.contains("`mounted_ext4_rw`"));
         assert!(markdown.contains("artifact `mounted/ext4_rw.json`"));
+        assert!(markdown.contains("Readiness events: 9"));
+        assert!(markdown.contains("event `event_mounted_ext4_rw`"));
         assert!(markdown.contains("Contract: failed=false missing_workstreams=0 violations=0"));
+    }
+
+    #[test]
+    fn missing_readiness_event_fails_report_contract() {
+        let fixture = ReadinessFixture::new();
+        let mut manifest = sample_operational_manifest("abc123");
+        manifest
+            .readiness_events
+            .retain(|event| event.scenario_id.as_deref() != Some("mounted_ext4_rw"));
+        fixture.write_manifest("operational.json", &manifest);
+
+        let report = fixture.report(Some("abc123"));
+
+        assert!(report.contract_failed);
+        assert!(report.contract_violations.iter().any(|violation| {
+            violation.scenario_id.as_deref() == Some("mounted_ext4_rw")
+                && violation.remediation_id == "bd-slp26:missing-readiness-event"
+        }));
     }
 
     #[test]
@@ -1396,6 +1527,7 @@ mod tests {
                 stderr_path: "run/stderr.log".to_owned(),
             }),
             operational_scenarios: BTreeMap::new(),
+            readiness_events: Vec::new(),
             artifacts: vec![
                 artifact("run/stdout.log", ArtifactCategory::RawLog),
                 artifact("run/stderr.log", ArtifactCategory::RawLog),
@@ -1541,8 +1673,8 @@ mod tests {
                 actual_outcome: case.result,
                 classification: case.classification,
                 exit_status: i32::from(case.result != ScenarioResult::Pass),
-                stdout_path,
-                stderr_path,
+                stdout_path: stdout_path.clone(),
+                stderr_path: stderr_path.clone(),
                 ledger_paths: Vec::new(),
                 artifact_refs: vec![case.gate_hint.to_owned()],
                 cleanup_status: CleanupStatus::Clean,
@@ -1551,6 +1683,50 @@ mod tests {
                 skip_reason: case.skip_reason,
             },
         );
+        manifest
+            .readiness_events
+            .push(readiness_event_for_case(case, &stdout_path, &stderr_path));
+    }
+
+    fn readiness_event_for_case(
+        case: Case,
+        stdout_path: &str,
+        stderr_path: &str,
+    ) -> ReadinessEventEnvelope {
+        ReadinessEventEnvelope {
+            envelope_version: crate::artifact_manifest::READINESS_EVENT_ENVELOPE_VERSION,
+            event_id: format!("event_{}", case.scenario_id),
+            report_id: "report_run-operational".to_owned(),
+            run_id: "run-operational".to_owned(),
+            lane_id: classify_workstream(
+                "operational_readiness",
+                case.scenario_id,
+                &[case.gate_hint.to_owned()],
+            ),
+            scenario_id: Some(case.scenario_id.to_owned()),
+            aggregate_marker: None,
+            artifact_id: case.gate_hint.to_owned(),
+            parent_correlation_id: Some("report_run-operational".to_owned()),
+            classification: case.classification,
+            severity: match case.classification {
+                OperationalOutcomeClass::Pass => ReadinessEventSeverity::Info,
+                OperationalOutcomeClass::Skip => ReadinessEventSeverity::Warning,
+                OperationalOutcomeClass::Fail | OperationalOutcomeClass::Error => {
+                    ReadinessEventSeverity::Error
+                }
+            },
+            created_at: "2026-05-03T00:00:01Z".to_owned(),
+            git_commit: "abc123".to_owned(),
+            host_fingerprint: "host|Linux 6.17.0|64cpu".to_owned(),
+            capability_fingerprint: "fuse=permission_denied".to_owned(),
+            raw_log_refs: vec![stdout_path.to_owned(), stderr_path.to_owned()],
+            controlling_evidence: vec![case.gate_hint.to_owned()],
+            remediation_id: format!("bd-slp26:{}", case.scenario_id),
+            reproduction_command: format!(
+                "scripts/e2e/operational.sh --scenario {}",
+                case.scenario_id
+            ),
+        }
     }
 
     fn artifact(path: &str, category: ArtifactCategory) -> ArtifactEntry {

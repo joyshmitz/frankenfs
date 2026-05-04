@@ -8,7 +8,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
-REPO_ROOT="$(pwd)"
+REPO_ROOT="$(pwd -P)"
 export REPO_ROOT
 
 source "$REPO_ROOT/scripts/e2e/lib.sh"
@@ -34,11 +34,12 @@ scenario_result() {
 }
 
 e2e_init "ffs_operational_readiness_report"
+E2E_CLEANUP_ITEMS=()
 
 FIXTURE_DIR="$E2E_LOG_DIR/readiness_fixture"
 REPORT_JSON="$E2E_LOG_DIR/operational_readiness_report.json"
 REPORT_MD="$E2E_LOG_DIR/operational_readiness_report.md"
-UNIT_LOG="$(mktemp)"
+UNIT_LOG="$E2E_LOG_DIR/unit_tests.log"
 
 e2e_step "Scenario 1: module and CLI are wired"
 if grep -q "pub mod operational_readiness_report" crates/ffs-harness/src/lib.rs \
@@ -133,6 +134,7 @@ manifest = {
         "stderr_path": "run/stderr.log",
     },
     "operational_scenarios": {},
+    "readiness_events": [],
     "artifacts": [
         {"path": "run/stdout.log", "category": "raw_log", "content_type": "text/plain", "size_bytes": 12, "redacted": False, "metadata": {}},
         {"path": "run/stderr.log", "category": "raw_log", "content_type": "text/plain", "size_bytes": 12, "redacted": False, "metadata": {}},
@@ -174,6 +176,38 @@ for scenario_id, artifact, result, classification, error_class, skip_reason, rem
     if remediation:
         record["remediation_hint"] = remediation
     manifest["operational_scenarios"][scenario_id] = record
+    lane = (
+        "xfstests" if "xfstests" in scenario_id else
+        "fuse_lane" if "fuse" in scenario_id else
+        "mounted_scenario_matrix" if "mounted" in scenario_id else
+        "repair_policy" if "repair_policy" in scenario_id else
+        "writeback_cache" if "writeback" in scenario_id else
+        "fuzz_smoke" if "fuzz" in scenario_id else
+        "performance" if "perf" in scenario_id else
+        "proof_bundle" if "proof" in scenario_id else
+        "release_gate"
+    )
+    severity = "info" if classification == "pass" else "warning" if classification == "skip" else "error"
+    manifest["readiness_events"].append({
+        "envelope_version": 1,
+        "event_id": f"event_{scenario_id}",
+        "report_id": "report_fixture_operational",
+        "run_id": "fixture-operational",
+        "lane_id": lane,
+        "scenario_id": scenario_id,
+        "artifact_id": artifact,
+        "parent_correlation_id": "report_fixture_operational",
+        "classification": classification,
+        "severity": severity,
+        "created_at": "2026-05-03T00:00:01Z",
+        "git_commit": "fixture-head",
+        "host_fingerprint": "fixture-host|Linux 6.17.0|64cpu",
+        "capability_fingerprint": "fuse=permission_denied",
+        "raw_log_refs": [f"{scenario_id}/stdout.log", f"{scenario_id}/stderr.log"],
+        "controlling_evidence": [artifact],
+        "remediation_id": f"bd-slp26:{scenario_id}",
+        "reproduction_command": f"scripts/e2e/fixture.sh --scenario {scenario_id}",
+    })
 
 (root / "operational_manifest.json").write_text(
     json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -241,6 +275,8 @@ if "fuse_capability_probe" not in data["duplicate_scenario_ids"]:
     raise SystemExit("expected duplicate fuse scenario id")
 if len(data["stale_git_shas"]) != 1:
     raise SystemExit("expected one stale git sha")
+if data["readiness_event_count"] != 9:
+    raise SystemExit(f"expected nine readiness events, got {data['readiness_event_count']}")
 if data["missing_log_paths"]:
     raise SystemExit(f"unexpected missing logs: {data['missing_log_paths']}")
 if data["required_workstreams_missing"]:
@@ -259,6 +295,14 @@ for scenario_id, expected in expected_taxonomy.items():
         raise SystemExit(f"{scenario_id} taxonomy {taxonomy.get(scenario_id)} != {expected}")
 if not all(row.get("reproduction_command") for row in data["scenarios"]):
     raise SystemExit("every row must preserve a reproduction command")
+event_rows = [
+    row for row in data["scenarios"]
+    if row["scenario_id"] == "mounted_ext4_rw"
+]
+if not event_rows or event_rows[0]["readiness_event_ids"] != ["event_mounted_ext4_rw"]:
+    raise SystemExit("mounted row did not preserve readiness event id")
+if event_rows[0]["parent_correlation_ids"] != ["report_fixture_operational"]:
+    raise SystemExit("mounted row did not preserve parent correlation id")
 PY
     then
         scenario_result "readiness_report_json" "PASS" "JSON report aggregates workstreams"
@@ -276,6 +320,7 @@ if "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- operational-rea
     --format markdown \
     --out "$REPORT_MD" \
     && grep -q "artifact \`mounted/ext4_rw.json\`" "$REPORT_MD" \
+    && grep -q "event \`event_mounted_ext4_rw\`" "$REPORT_MD" \
     && grep -q "Diagnostics: duplicate_scenarios=1 stale_git_shas=1 missing_logs=0" "$REPORT_MD" \
     && grep -q "Contract: failed=true missing_workstreams=0 violations=0" "$REPORT_MD"; then
     scenario_result "readiness_report_markdown" "PASS" "Markdown preserves links and diagnostics"
@@ -295,8 +340,6 @@ if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness operational_readiness_rep
 else
     scenario_result "readiness_report_unit_tests" "FAIL" "unit tests failed"
 fi
-
-rm -f "$UNIT_LOG"
 
 e2e_step "Summary"
 e2e_log "SUMMARY|total=${TOTAL}|passed=${PASS_COUNT}|failed=${FAIL_COUNT}"

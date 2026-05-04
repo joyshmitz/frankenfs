@@ -32,6 +32,9 @@ pub const DEFAULT_MAX_COUNT: u32 = 50;
 /// Maximum total artifact size in bytes before pruning triggers (500 MB).
 pub const DEFAULT_MAX_TOTAL_BYTES: u64 = 500 * 1024 * 1024;
 
+/// Schema version for readiness event envelopes consumed by readiness reports.
+pub const READINESS_EVENT_ENVELOPE_VERSION: u32 = 1;
+
 // ── Manifest schema ──────────────────────────────────────────────────────
 
 /// Top-level verification artifact manifest.
@@ -63,6 +66,9 @@ pub struct ArtifactManifest {
     /// Per-scenario operational metadata keyed by scenario_id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub operational_scenarios: BTreeMap<String, OperationalScenarioRecord>,
+    /// Versioned readiness event envelopes keyed by their embedded event IDs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readiness_events: Vec<ReadinessEventEnvelope>,
     /// Artifact entries grouped by category.
     pub artifacts: Vec<ArtifactEntry>,
     /// Overall gate verdict.
@@ -280,6 +286,63 @@ pub struct OperationalScenarioRecord {
     /// Required when classification is skip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<SkipReason>,
+}
+
+/// Severity vocabulary for readiness event envelopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessEventSeverity {
+    Info,
+    Warning,
+    Error,
+    Critical,
+}
+
+/// Shared event envelope consumed by readiness reports, proof bundles, and
+/// release gates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessEventEnvelope {
+    /// Event envelope schema version.
+    pub envelope_version: u32,
+    /// Stable event identifier unique within a manifest.
+    pub event_id: String,
+    /// Report/campaign identifier produced by the lane.
+    pub report_id: String,
+    /// Run identifier, normally equal to the parent manifest run_id.
+    pub run_id: String,
+    /// Lane/workstream identifier such as xfstests or release_gate.
+    pub lane_id: String,
+    /// Scenario identifier, or an explicit aggregate marker for aggregate rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario_id: Option<String>,
+    /// Explicit marker for aggregate events that are not scenario-scoped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_marker: Option<String>,
+    /// Controlling artifact identifier/path for this event.
+    pub artifact_id: String,
+    /// Parent event or lane correlation id, when this event derives from another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_correlation_id: Option<String>,
+    /// Shared pass/fail/skip/error classification.
+    pub classification: OperationalOutcomeClass,
+    /// User-facing severity for sorting and escalation.
+    pub severity: ReadinessEventSeverity,
+    /// ISO 8601 event timestamp.
+    pub created_at: String,
+    /// Git SHA for the event producer.
+    pub git_commit: String,
+    /// Host fingerprint captured by the producer.
+    pub host_fingerprint: String,
+    /// Capability fingerprint or lane capability state.
+    pub capability_fingerprint: String,
+    /// Raw log paths needed to debug this event.
+    pub raw_log_refs: Vec<String>,
+    /// Evidence artifacts controlling this event's classification.
+    pub controlling_evidence: Vec<String>,
+    /// Stable remediation or non-goal identifier.
+    pub remediation_id: String,
+    /// Exact reproduction command.
+    pub reproduction_command: String,
 }
 
 /// A single artifact entry in the manifest.
@@ -803,6 +866,10 @@ pub enum ManifestValidationError {
     UnknownArtifactRef { scenario_id: String, path: String },
     /// Operational cleanup status was not recorded.
     MissingCleanupStatus(String),
+    /// A scenario is missing its required readiness event envelope.
+    MissingReadinessEvent(String),
+    /// A readiness event envelope is malformed.
+    InvalidReadinessEvent { event_id: String, reason: String },
 }
 
 impl std::fmt::Display for ManifestValidationError {
@@ -868,6 +935,12 @@ impl std::fmt::Display for ManifestValidationError {
             }
             Self::MissingCleanupStatus(id) => {
                 write!(f, "operational scenario {id} missing cleanup status")
+            }
+            Self::MissingReadinessEvent(id) => {
+                write!(f, "operational scenario {id} missing readiness event")
+            }
+            Self::InvalidReadinessEvent { event_id, reason } => {
+                write!(f, "readiness event {event_id} is invalid: {reason}")
             }
         }
     }
@@ -983,6 +1056,7 @@ pub fn validate_operational_manifest(manifest: &ArtifactManifest) -> Vec<Manifes
 
     validate_operational_context(&mut errors, context);
     validate_operational_scenarios(&mut errors, manifest);
+    validate_readiness_events(&mut errors, manifest);
 
     errors
 }
@@ -1102,6 +1176,177 @@ fn validate_operational_scenarios(
             ));
         }
     }
+}
+
+fn validate_readiness_events(
+    errors: &mut Vec<ManifestValidationError>,
+    manifest: &ArtifactManifest,
+) {
+    let artifact_paths: std::collections::BTreeSet<&str> = manifest
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.path.as_str())
+        .collect();
+    let mut seen_event_ids = std::collections::BTreeSet::new();
+    let mut scenario_event_counts = BTreeMap::<&str, usize>::new();
+
+    for event in &manifest.readiness_events {
+        validate_readiness_event(
+            errors,
+            manifest,
+            &artifact_paths,
+            &mut seen_event_ids,
+            &mut scenario_event_counts,
+            event,
+        );
+    }
+
+    for scenario_id in manifest.operational_scenarios.keys() {
+        if !scenario_event_counts.contains_key(scenario_id.as_str()) {
+            errors.push(ManifestValidationError::MissingReadinessEvent(
+                scenario_id.clone(),
+            ));
+        }
+    }
+}
+
+fn validate_readiness_event<'a>(
+    errors: &mut Vec<ManifestValidationError>,
+    manifest: &'a ArtifactManifest,
+    artifact_paths: &std::collections::BTreeSet<&str>,
+    seen_event_ids: &mut std::collections::BTreeSet<&'a str>,
+    scenario_event_counts: &mut BTreeMap<&'a str, usize>,
+    event: &'a ReadinessEventEnvelope,
+) {
+    let event_id = if event.event_id.trim().is_empty() {
+        "<empty>".to_owned()
+    } else {
+        event.event_id.clone()
+    };
+
+    if event.envelope_version != READINESS_EVENT_ENVELOPE_VERSION {
+        errors.push(ManifestValidationError::InvalidReadinessEvent {
+            event_id: event_id.clone(),
+            reason: format!(
+                "envelope_version {} expected {}",
+                event.envelope_version, READINESS_EVENT_ENVELOPE_VERSION
+            ),
+        });
+    }
+    if event.event_id.trim().is_empty() {
+        errors.push(ManifestValidationError::InvalidReadinessEvent {
+            event_id: event_id.clone(),
+            reason: "event_id is empty".to_owned(),
+        });
+    } else if !seen_event_ids.insert(event.event_id.as_str()) {
+        errors.push(ManifestValidationError::InvalidReadinessEvent {
+            event_id: event_id.clone(),
+            reason: "event_id is duplicated".to_owned(),
+        });
+    }
+    if event.report_id.trim().is_empty() {
+        push_readiness_event_missing(errors, &event_id, "report_id");
+    }
+    if event.run_id != manifest.run_id {
+        errors.push(ManifestValidationError::InvalidReadinessEvent {
+            event_id: event_id.clone(),
+            reason: "run_id must match manifest run_id".to_owned(),
+        });
+    }
+    if event.lane_id.trim().is_empty() {
+        push_readiness_event_missing(errors, &event_id, "lane_id");
+    }
+    match event.scenario_id.as_deref() {
+        Some(scenario_id) if !scenario_id.trim().is_empty() => {
+            if !is_valid_scenario_id(scenario_id) {
+                errors.push(ManifestValidationError::InvalidReadinessEvent {
+                    event_id: event_id.clone(),
+                    reason: format!("scenario_id {scenario_id} is invalid"),
+                });
+            } else if !manifest.scenarios.contains_key(scenario_id) {
+                errors.push(ManifestValidationError::InvalidReadinessEvent {
+                    event_id: event_id.clone(),
+                    reason: format!("scenario_id {scenario_id} is not in manifest scenarios"),
+                });
+            } else {
+                scenario_event_counts
+                    .entry(scenario_id)
+                    .and_modify(|count| *count += 1)
+                    .or_insert(1);
+            }
+        }
+        _ if event.aggregate_marker.as_deref().is_none_or(str::is_empty) => {
+            errors.push(ManifestValidationError::InvalidReadinessEvent {
+                event_id: event_id.clone(),
+                reason: "scenario_id or aggregate_marker is required".to_owned(),
+            });
+        }
+        _ => {}
+    }
+    validate_readiness_event_artifact_ref(errors, &event_id, artifact_paths, &event.artifact_id);
+    if parse_manifest_timestamp_epoch_days(&event.created_at).is_none() {
+        errors.push(ManifestValidationError::InvalidReadinessEvent {
+            event_id: event_id.clone(),
+            reason: format!("created_at {} is invalid", event.created_at),
+        });
+    }
+    if event.git_commit.trim().is_empty() {
+        push_readiness_event_missing(errors, &event_id, "git_commit");
+    }
+    if event.host_fingerprint.trim().is_empty() {
+        push_readiness_event_missing(errors, &event_id, "host_fingerprint");
+    }
+    if event.capability_fingerprint.trim().is_empty() {
+        push_readiness_event_missing(errors, &event_id, "capability_fingerprint");
+    }
+    if event.raw_log_refs.is_empty() {
+        push_readiness_event_missing(errors, &event_id, "raw_log_refs");
+    }
+    for path in &event.raw_log_refs {
+        validate_readiness_event_artifact_ref(errors, &event_id, artifact_paths, path);
+    }
+    if event.controlling_evidence.is_empty() {
+        push_readiness_event_missing(errors, &event_id, "controlling_evidence");
+    }
+    for path in &event.controlling_evidence {
+        validate_readiness_event_artifact_ref(errors, &event_id, artifact_paths, path);
+    }
+    if event.remediation_id.trim().is_empty() {
+        push_readiness_event_missing(errors, &event_id, "remediation_id");
+    }
+    if event.reproduction_command.trim().is_empty() {
+        push_readiness_event_missing(errors, &event_id, "reproduction_command");
+    }
+}
+
+fn validate_readiness_event_artifact_ref(
+    errors: &mut Vec<ManifestValidationError>,
+    event_id: &str,
+    artifact_paths: &std::collections::BTreeSet<&str>,
+    path: &str,
+) {
+    if !is_safe_relative_artifact_path(path) {
+        errors.push(ManifestValidationError::InvalidReadinessEvent {
+            event_id: event_id.to_owned(),
+            reason: format!("artifact path {path} is malformed"),
+        });
+    } else if !artifact_paths.contains(path) {
+        errors.push(ManifestValidationError::InvalidReadinessEvent {
+            event_id: event_id.to_owned(),
+            reason: format!("artifact path {path} is not listed in manifest artifacts"),
+        });
+    }
+}
+
+fn push_readiness_event_missing(
+    errors: &mut Vec<ManifestValidationError>,
+    event_id: &str,
+    field: &str,
+) {
+    errors.push(ManifestValidationError::InvalidReadinessEvent {
+        event_id: event_id.to_owned(),
+        reason: format!("{field} is empty"),
+    });
 }
 
 fn validate_required_run_log_path(
@@ -1269,6 +1514,7 @@ impl ManifestBuilder {
                 scenarios: BTreeMap::new(),
                 operational_context: None,
                 operational_scenarios: BTreeMap::new(),
+                readiness_events: Vec::new(),
                 artifacts: Vec::new(),
                 verdict: GateVerdict::Pass,
                 duration_secs: 0.0,
@@ -1336,6 +1582,13 @@ impl ManifestBuilder {
         self.manifest
             .operational_scenarios
             .insert(record.scenario_id.clone(), record);
+        self
+    }
+
+    /// Add a readiness event envelope.
+    #[must_use]
+    pub fn readiness_event(mut self, event: ReadinessEventEnvelope) -> Self {
+        self.manifest.readiness_events.push(event);
         self
     }
 
@@ -1442,11 +1695,9 @@ mod tests {
         let mut manifest = sample_manifest();
         manifest.run_id = String::new();
         let errors = validate_manifest(&manifest);
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ManifestValidationError::EmptyRunId))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ManifestValidationError::EmptyRunId)));
     }
 
     #[test]
@@ -1454,11 +1705,9 @@ mod tests {
         let mut manifest = sample_manifest();
         manifest.gate_id = String::new();
         let errors = validate_manifest(&manifest);
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ManifestValidationError::EmptyGateId))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ManifestValidationError::EmptyGateId)));
     }
 
     #[test]
@@ -1466,11 +1715,9 @@ mod tests {
         let mut manifest = sample_manifest();
         manifest.git_context.commit = String::new();
         let errors = validate_manifest(&manifest);
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ManifestValidationError::EmptyGitCommit))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ManifestValidationError::EmptyGitCommit)));
     }
 
     #[test]
@@ -1546,11 +1793,9 @@ mod tests {
         let mut manifest = sample_manifest();
         manifest.schema_version = 999;
         let errors = validate_manifest(&manifest);
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ManifestValidationError::UnsupportedVersion(999)))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ManifestValidationError::UnsupportedVersion(999))));
     }
 
     #[test]
@@ -1585,11 +1830,9 @@ mod tests {
         );
 
         let errors = validate_manifest(&manifest);
-        assert!(
-            errors.iter().any(
-                |e| matches!(e, ManifestValidationError::InvalidScenarioId(id) if id == "BAD")
-            )
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ManifestValidationError::InvalidScenarioId(id) if id == "BAD")));
         assert!(errors.iter().any(|e| matches!(
             e,
             ManifestValidationError::ScenarioIdMismatch { key, value }
@@ -1633,11 +1876,9 @@ mod tests {
         );
         manifest.verdict = GateVerdict::Pass; // Inconsistent!
         let errors = validate_manifest(&manifest);
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ManifestValidationError::InconsistentVerdict))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ManifestValidationError::InconsistentVerdict)));
     }
 
     #[test]
@@ -1653,11 +1894,9 @@ mod tests {
             metadata: BTreeMap::new(),
         });
         let errors = validate_manifest(&manifest);
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ManifestValidationError::EmptyArtifactPath))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ManifestValidationError::EmptyArtifactPath)));
     }
 
     // ── Scenario ID validation ───────────────────────────────────────
@@ -2010,11 +2249,9 @@ mod tests {
     fn operational_manifest_requires_context() {
         let manifest = sample_manifest();
         let errors = validate_operational_manifest(&manifest);
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ManifestValidationError::MissingOperationalContext))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ManifestValidationError::MissingOperationalContext)));
     }
 
     #[test]
@@ -2062,16 +2299,12 @@ mod tests {
         context.worker.host = "  ".to_owned();
 
         let errors = validate_operational_manifest(&manifest);
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ManifestValidationError::EmptyOperationalCommandLine))
-        );
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ManifestValidationError::EmptyOperationalHost))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ManifestValidationError::EmptyOperationalCommandLine)));
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ManifestValidationError::EmptyOperationalHost)));
     }
 
     #[test]
@@ -2213,6 +2446,75 @@ mod tests {
     }
 
     #[test]
+    fn operational_manifest_rejects_missing_readiness_event() {
+        let mut manifest = sample_operational_manifest();
+        manifest
+            .readiness_events
+            .retain(|event| event.scenario_id.as_deref() != Some("mounted_ext4_rw"));
+
+        let errors = validate_operational_manifest(&manifest);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ManifestValidationError::MissingReadinessEvent(id)
+                if id == "mounted_ext4_rw"
+        )));
+    }
+
+    #[test]
+    fn operational_manifest_rejects_malformed_readiness_event() {
+        let mut manifest = sample_operational_manifest();
+        let event = manifest
+            .readiness_events
+            .iter_mut()
+            .find(|event| event.scenario_id.as_deref() == Some("writeback_crash_matrix"))
+            .expect("event exists");
+        event.reproduction_command.clear();
+        event.raw_log_refs.push("../escape.log".to_owned());
+
+        let errors = validate_operational_manifest(&manifest);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ManifestValidationError::InvalidReadinessEvent { event_id, reason }
+                if event_id == "event_writeback_crash_matrix"
+                    && reason.contains("reproduction_command")
+        )));
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ManifestValidationError::InvalidReadinessEvent { event_id, reason }
+                if event_id == "event_writeback_crash_matrix"
+                    && reason.contains("malformed")
+        )));
+    }
+
+    #[test]
+    fn readiness_events_preserve_cross_lane_correlation_contract() {
+        let manifest = sample_operational_manifest();
+        let lanes = manifest
+            .readiness_events
+            .iter()
+            .map(|event| event.lane_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        for required in [
+            "xfstests",
+            "fuse_lane",
+            "mounted_scenario_matrix",
+            "fuzz_smoke",
+            "performance",
+            "writeback_cache",
+        ] {
+            assert!(lanes.contains(required), "missing lane {required}");
+        }
+        assert!(manifest.readiness_events.iter().all(|event| {
+            event.report_id == "report_run-operational"
+                && event.run_id == manifest.run_id
+                && event.parent_correlation_id.as_deref() == Some("report_run-operational")
+                && !event.raw_log_refs.is_empty()
+                && !event.controlling_evidence.is_empty()
+        }));
+    }
+
+    #[test]
     fn operational_outcome_class_rejects_unknown_json_values() {
         let json = r#"{
             "scenario_id": "mounted_ext4_rw",
@@ -2283,6 +2585,11 @@ mod tests {
                 path: "artifacts/e2e/missing.log".to_owned(),
             },
             ManifestValidationError::MissingCleanupStatus("test_scenario_id".to_owned()),
+            ManifestValidationError::MissingReadinessEvent("test_scenario_id".to_owned()),
+            ManifestValidationError::InvalidReadinessEvent {
+                event_id: "event_test_scenario_id".to_owned(),
+                reason: "missing field".to_owned(),
+            },
         ];
         for err in &errors {
             assert!(!err.to_string().is_empty(), "{err:?} has empty display");
@@ -2444,8 +2751,8 @@ mod tests {
                 actual_outcome: case.result,
                 classification: case.classification,
                 exit_status: i32::from(case.result != ScenarioResult::Pass),
-                stdout_path,
-                stderr_path,
+                stdout_path: stdout_path.clone(),
+                stderr_path: stderr_path.clone(),
                 ledger_paths: vec![ledger_path],
                 artifact_refs: vec![case.primary_artifact.to_owned()],
                 cleanup_status: CleanupStatus::Clean,
@@ -2453,6 +2760,66 @@ mod tests {
                 remediation_hint: case.remediation_hint.map(str::to_owned),
                 skip_reason: case.skip_reason,
             })
+            .readiness_event(sample_readiness_event(
+                case,
+                &stdout_path,
+                &stderr_path,
+                case.primary_artifact,
+            ))
+    }
+
+    fn sample_readiness_event(
+        case: &SampleOperationalCase,
+        stdout_path: &str,
+        stderr_path: &str,
+        primary_artifact: &str,
+    ) -> ReadinessEventEnvelope {
+        ReadinessEventEnvelope {
+            envelope_version: READINESS_EVENT_ENVELOPE_VERSION,
+            event_id: format!("event_{}", case.scenario_id),
+            report_id: "report_run-operational".to_owned(),
+            run_id: "run-operational".to_owned(),
+            lane_id: sample_lane_id(case.scenario_id).to_owned(),
+            scenario_id: Some(case.scenario_id.to_owned()),
+            aggregate_marker: None,
+            artifact_id: primary_artifact.to_owned(),
+            parent_correlation_id: Some("report_run-operational".to_owned()),
+            classification: case.classification,
+            severity: match case.classification {
+                OperationalOutcomeClass::Pass => ReadinessEventSeverity::Info,
+                OperationalOutcomeClass::Skip => ReadinessEventSeverity::Warning,
+                OperationalOutcomeClass::Fail | OperationalOutcomeClass::Error => {
+                    ReadinessEventSeverity::Error
+                }
+            },
+            created_at: "2026-03-04T12:00:01Z".to_owned(),
+            git_commit: "abc123".to_owned(),
+            host_fingerprint: "build-host-01|Linux 6.17.0|32cpu".to_owned(),
+            capability_fingerprint: "fuse=permission_denied".to_owned(),
+            raw_log_refs: vec![stdout_path.to_owned(), stderr_path.to_owned()],
+            controlling_evidence: vec![primary_artifact.to_owned()],
+            remediation_id: format!("bd-slp26:{}", case.scenario_id),
+            reproduction_command: format!(
+                "scripts/e2e/run_gate.sh --scenario {}",
+                case.scenario_id
+            ),
+        }
+    }
+
+    fn sample_lane_id(scenario_id: &str) -> &'static str {
+        if scenario_id.contains("xfstest") {
+            "xfstests"
+        } else if scenario_id.contains("fuse") {
+            "fuse_lane"
+        } else if scenario_id.contains("mounted") {
+            "mounted_scenario_matrix"
+        } else if scenario_id.contains("fuzz") {
+            "fuzz_smoke"
+        } else if scenario_id.contains("perf") {
+            "performance"
+        } else {
+            "writeback_cache"
+        }
     }
 
     fn test_artifact(path: &str, category: ArtifactCategory) -> ArtifactEntry {
