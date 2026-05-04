@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "manifest_id": "frankenfs_low_privilege_demo_sandbox_v1",
+  "bead_id": "bd-3crxf",
+  "allowed_workspace_root": "<tempdir>",
+  "forbidden_side_effects": [
+    "no_writes_outside_workspace_root",
+    "no_kernel_module_load",
+    "no_root_owned_writes",
+    "no_network_egress_outside_capability_probe",
+    "no_modification_of_committed_fixtures"
+  ],
+  "proof_bundle_schema_id": "frankenfs_proof_bundle_v1",
+  "readme_quickstart_wording_id": "readme_quickstart_low_privilege_demo_v1",
+  "cleanup_policy": "teardown_tempdir_on_exit_preserve_artifacts_on_failure",
+  "fixtures": [
+    {
+      "fixture_id": "fix_ext4_superblock_minimal",
+      "path": "tests/fixtures/ext4/superblock_minimal.bin",
+      "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "provenance": "committed_in_repo",
+      "mutable": false
+    },
+    {
+      "fixture_id": "fix_invariant_oracle_baseline",
+      "path": "tests/fixtures/invariant-oracle/baseline.json",
+      "sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "provenance": "committed_in_repo",
+      "mutable": false
+    },
+    {
+      "fixture_id": "fix_repair_dry_run_baseline",
+      "path": "tests/fixtures/repair/detection_only_baseline.json",
+      "sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "provenance": "committed_in_repo",
+      "mutable": false
+    },
+    {
+      "fixture_id": "fix_capability_probe_seed",
+      "path": "tests/fixtures/capability-probe/seed.json",
+      "sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "provenance": "generated_from_seed",
+      "mutable": false
+    }
+  ],
+  "lanes": [
+    {
+      "lane_id": "lpds_parser_unit",
+      "name": "parser_unit",
+      "expected_outcome": "executed",
+      "uses_fixture_id": "fix_ext4_superblock_minimal",
+      "output_path": "<tempdir>/parser_unit.json",
+      "host_skip_reason": "",
+      "claims_mounted_readiness": false
+    },
+    {
+      "lane_id": "lpds_invariant_oracle",
+      "name": "invariant_oracle",
+      "expected_outcome": "executed",
+      "uses_fixture_id": "fix_invariant_oracle_baseline",
+      "output_path": "<tempdir>/invariant_oracle.json",
+      "host_skip_reason": "",
+      "claims_mounted_readiness": false
+    },
+    {
+      "lane_id": "lpds_repair_dry_run",
+      "name": "repair_dry_run",
+      "expected_outcome": "executed",
+      "uses_fixture_id": "fix_repair_dry_run_baseline",
+      "output_path": "<tempdir>/repair_dry_run.json",
+      "host_skip_reason": "",
+      "claims_mounted_readiness": false
+    },
+    {
+      "lane_id": "lpds_mounted_smoke_skipped",
+      "name": "mounted_smoke_host_skipped",
+      "expected_outcome": "host_skipped",
+      "uses_fixture_id": "fix_capability_probe_seed",
+      "output_path": "<tempdir>/mounted_smoke.skip.json",
+      "host_skip_reason": "low-privilege host has no /dev/fuse; this lane is intentionally skipped and never claims mounted readiness",
+      "claims_mounted_readiness": false
+    }
+  ]
+}
