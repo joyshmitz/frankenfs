@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "catalog_id": "frankenfs_mounted_write_errno_budget_v1",
+  "bead_id": "bd-6t32i",
+  "max_broad_fallback_budget_per_cell": 3,
+  "cells": [
+    {
+      "cell_id": "ewb_ext4_permission_denied",
+      "filesystem": "ext4",
+      "operation_class": "permission_denied",
+      "normalized_errno": "EACCES",
+      "user_facing_class": "default_permissions_eacces",
+      "remediation_id": "rem_default_permissions_eacces_root_owned_dir",
+      "artifact_fields": [
+        "operation_id",
+        "scenario_id",
+        "raw_errno",
+        "normalized_errno",
+        "remediation_id"
+      ],
+      "redaction_policy": "redact_paths",
+      "broad_fallback_count": 0,
+      "broad_fallback_justification": "",
+      "follow_up_bead": ""
+    },
+    {
+      "cell_id": "ewb_btrfs_permission_denied",
+      "filesystem": "btrfs",
+      "operation_class": "permission_denied",
+      "normalized_errno": "EACCES",
+      "user_facing_class": "default_permissions_eacces",
+      "remediation_id": "rem_default_permissions_eacces_root_owned_dir",
+      "artifact_fields": [
+        "operation_id",
+        "scenario_id",
+        "raw_errno",
+        "normalized_errno",
+        "remediation_id"
+      ],
+      "redaction_policy": "redact_paths",
+      "broad_fallback_count": 0,
+      "broad_fallback_justification": "",
+      "follow_up_bead": ""
+    },
+    {
+      "cell_id": "ewb_ext4_unsupported_operation",
+      "filesystem": "ext4",
+      "operation_class": "unsupported_operation",
+      "normalized_errno": "EOPNOTSUPP",
+      "user_facing_class": "unsupported_operation",
+      "remediation_id": "rem_unsupported_mknod_block_device",
+      "artifact_fields": [
+        "operation_id",
+        "scenario_id",
+        "raw_errno",
+        "normalized_errno",
+        "remediation_id"
+      ],
+      "redaction_policy": "redact_paths",
+      "broad_fallback_count": 0,
+      "broad_fallback_justification": "",
+      "follow_up_bead": ""
+    },
+    {
+      "cell_id": "ewb_btrfs_unsupported_operation",
+      "filesystem": "btrfs",
+      "operation_class": "unsupported_operation",
+      "normalized_errno": "EOPNOTSUPP",
+      "user_facing_class": "unsupported_operation",
+      "remediation_id": "rem_unsupported_mknod_block_device",
+      "artifact_fields": [
+        "operation_id",
+        "scenario_id",
+        "raw_errno",
+        "normalized_errno",
+        "remediation_id"
+      ],
+      "redaction_policy": "redact_paths",
+      "broad_fallback_count": 0,
+      "broad_fallback_justification": "",
+      "follow_up_bead": ""
+    },
+    {
+      "cell_id": "ewb_ext4_stale_snapshot",
+      "filesystem": "ext4",
+      "operation_class": "stale_snapshot",
+      "normalized_errno": "ESTALE",
+      "user_facing_class": "stale_snapshot_refused",
+      "remediation_id": "rem_stale_snapshot_refused_after_reopen",
+      "artifact_fields": [
+        "operation_id",
+        "scenario_id",
+        "raw_errno",
+        "normalized_errno",
+        "remediation_id"
+      ],
+      "redaction_policy": "redact_paths",
+      "broad_fallback_count": 0,
+      "broad_fallback_justification": "",
+      "follow_up_bead": ""
+    },
+    {
+      "cell_id": "ewb_ext4_stale_repair_lease",
+      "filesystem": "ext4",
+      "operation_class": "stale_repair_lease",
+      "normalized_errno": "EBUSY",
+      "user_facing_class": "repair_serialization_blocked",
+      "remediation_id": "rem_repair_serialization_blocked_rw",
+      "artifact_fields": [
+        "operation_id",
+        "scenario_id",
+        "raw_errno",
+        "normalized_errno",
+        "remediation_id"
+      ],
+      "redaction_policy": "redact_paths",
+      "broad_fallback_count": 0,
+      "broad_fallback_justification": "",
+      "follow_up_bead": ""
+    },
+    {
+      "cell_id": "ewb_ext4_writeback_cache_gate_refusal",
+      "filesystem": "ext4",
+      "operation_class": "writeback_cache_gate_refusal",
+      "normalized_errno": "EBUSY",
+      "user_facing_class": "repair_serialization_blocked",
+      "remediation_id": "rem_repair_serialization_blocked_rw",
+      "artifact_fields": [
+        "operation_id",
+        "scenario_id",
+        "raw_errno",
+        "normalized_errno",
+        "remediation_id"
+      ],
+      "redaction_policy": "redact_paths",
+      "broad_fallback_count": 0,
+      "broad_fallback_justification": "",
+      "follow_up_bead": ""
+    },
+    {
+      "cell_id": "ewb_ext4_missing_ledger",
+      "filesystem": "ext4",
+      "operation_class": "missing_ledger",
+      "normalized_errno": "EROFS",
+      "user_facing_class": "repair_serialization_blocked",
+      "remediation_id": "rem_repair_serialization_blocked_rw",
+      "artifact_fields": [
+        "operation_id",
+        "scenario_id",
+        "raw_errno",
+        "normalized_errno",
+        "remediation_id"
+      ],
+      "redaction_policy": "redact_paths",
+      "broad_fallback_count": 0,
+      "broad_fallback_justification": "",
+      "follow_up_bead": ""
+    },
+    {
+      "cell_id": "ewb_ext4_unsafe_repair_refusal",
+      "filesystem": "ext4",
+      "operation_class": "unsafe_repair_refusal",
+      "normalized_errno": "EBUSY",
+      "user_facing_class": "repair_serialization_blocked",
+      "remediation_id": "rem_unsafe_repair_refused",
+      "artifact_fields": [
+        "operation_id",
+        "scenario_id",
+        "raw_errno",
+        "normalized_errno",
+        "remediation_id"
+      ],
+      "redaction_policy": "redact_paths",
+      "broad_fallback_count": 0,
+      "broad_fallback_justification": "",
+      "follow_up_bead": ""
+    },
+    {
+      "cell_id": "ewb_ext4_host_fuse_skip",
+      "filesystem": "ext4",
+      "operation_class": "host_fuse_skip",
+      "normalized_errno": "ENOTCONN",
+      "user_facing_class": "host_capability_skip",
+      "remediation_id": "rem_host_capability_skip_no_dev_fuse",
+      "artifact_fields": [
+        "operation_id",
+        "scenario_id",
+        "raw_errno",
+        "normalized_errno",
+        "remediation_id"
+      ],
+      "redaction_policy": "none",
+      "broad_fallback_count": 0,
+      "broad_fallback_justification": "",
+      "follow_up_bead": ""
+    },
+    {
+      "cell_id": "ewb_btrfs_unknown_eio_broad_fallback",
+      "filesystem": "btrfs",
+      "operation_class": "harness_failure",
+      "normalized_errno": "EIO",
+      "user_facing_class": "broad_fallback",
+      "remediation_id": "rem_broad_fallback_eio_unknown_branch",
+      "artifact_fields": [
+        "operation_id",
+        "scenario_id",
+        "raw_errno",
+        "normalized_errno",
+        "remediation_id"
+      ],
+      "redaction_policy": "redact_paths",
+      "broad_fallback_count": 2,
+      "broad_fallback_justification": "btrfs write path returns EIO from a deeply nested branch we have not yet mapped; tracked under the configured budget so operators see a known broad fallback and not silent corruption",
+      "follow_up_bead": "bd-6t32i"
+    }
+  ]
+}
