@@ -3,7 +3,8 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_harness::load_sparse_fixture;
 use ffs_ondisk::{
-    Ext4GroupDesc, Ext4Inode, parse_dir_block, parse_extent_tree, parse_sys_chunk_array,
+    Ext4GroupDesc, Ext4Inode, parse_dev_item, parse_dir_block, parse_dx_root, parse_extent_tree,
+    parse_sys_chunk_array, parse_xattr_block,
 };
 use std::hint::black_box;
 use std::path::Path;
@@ -117,6 +118,62 @@ fn bench_btrfs_sys_chunk_parse(c: &mut Criterion) {
     });
 }
 
+// bd-6eyj5 — bench coverage for four hot ext4/btrfs metadata parsers
+// that previously had no perf gate. Each is on the mounted-image
+// metadata read path; a regression here would silently slow throughput
+// without tripping the existing perf gate.
+
+fn bench_ext4_xattr_block_parse(c: &mut Criterion) {
+    let data = load_sparse_fixture(&fixture_path("ext4_xattr_block.json"))
+        .expect("load ext4_xattr_block fixture");
+
+    c.bench_function("ext4_xattr_block_parse", |b| {
+        b.iter(|| {
+            let xattrs = parse_xattr_block(black_box(&data)).expect("xattr block parse");
+            black_box(xattrs);
+        });
+    });
+}
+
+fn bench_ext4_dx_root_parse(c: &mut Criterion) {
+    let data = load_sparse_fixture(&fixture_path("ext4_htree_dx_root.json"))
+        .expect("load ext4_htree_dx_root fixture");
+
+    c.bench_function("ext4_dx_root_parse", |b| {
+        b.iter(|| {
+            let root = parse_dx_root(black_box(&data)).expect("dx root parse");
+            black_box(root);
+        });
+    });
+}
+
+fn bench_btrfs_dev_item_parse(c: &mut Criterion) {
+    let data = load_sparse_fixture(&fixture_path("btrfs_devitem.json"))
+        .expect("load btrfs_devitem fixture");
+
+    c.bench_function("btrfs_dev_item_parse", |b| {
+        b.iter(|| {
+            let item = parse_dev_item(black_box(&data)).expect("dev item parse");
+            black_box(item);
+        });
+    });
+}
+
+fn bench_ext4_extent_tree_index_parse(c: &mut Criterion) {
+    // The leaf path is exercised by `bench_ext4_extent_tree_parse` via the
+    // inode fixture's i_block region; this bench covers the internal-node
+    // (index) decoding path, which uses Ext4ExtentIndex layout instead of
+    // Ext4Extent layout.
+    let data = load_sparse_fixture(&fixture_path("ext4_extent_tree_index.json"))
+        .expect("load ext4_extent_tree_index fixture");
+
+    c.bench_function("ext4_extent_tree_index_parse", |b| {
+        b.iter(|| {
+            let _ = black_box(parse_extent_tree(black_box(&data)));
+        });
+    });
+}
+
 criterion_group!(
     ondisk,
     bench_ext4_inode_parse,
@@ -126,6 +183,10 @@ criterion_group!(
     bench_ext4_group_desc_write_64,
     bench_ext4_dir_block_parse,
     bench_ext4_extent_tree_parse,
+    bench_ext4_extent_tree_index_parse,
+    bench_ext4_xattr_block_parse,
+    bench_ext4_dx_root_parse,
     bench_btrfs_sys_chunk_parse,
+    bench_btrfs_dev_item_parse,
 );
 criterion_main!(ondisk);
