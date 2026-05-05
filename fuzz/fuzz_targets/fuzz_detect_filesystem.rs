@@ -1,15 +1,16 @@
 #![no_main]
 
-use ffs_core::{detect_filesystem, DetectionError, FrankenFsEngine, FsFlavor};
+use ffs_core::{DetectionError, FrankenFsEngine, FsFlavor, detect_filesystem};
 use ffs_ondisk::{EXT4_ORPHAN_FS, EXT4_VALID_FS};
 use ffs_types::{
-    crc32c, BTRFS_CSUM_TYPE_CRC32C, BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, EXT4_SUPERBLOCK_OFFSET,
-    EXT4_SUPER_MAGIC,
+    BTRFS_CSUM_TYPE_CRC32C, BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, EXT4_SUPER_MAGIC,
+    EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE, crc32c,
 };
 use libfuzzer_sys::fuzz_target;
 
 const MAX_INPUT_BYTES: usize = 512;
 const MAX_RAW_BYTES: usize = 4 * 1024;
+const EXT4_SUPERBLOCK_END: usize = EXT4_SUPERBLOCK_OFFSET + EXT4_SUPERBLOCK_SIZE;
 
 const EXT4_IMAGE_SIZE: usize = 128 * 1024;
 const EXT4_BLOCK_SIZE_LOG: u32 = 2;
@@ -42,7 +43,7 @@ const BTRFS_INTERESTING_OFFSETS: [usize; 10] = [
     BTRFS_ROOT_LOGICAL + 0x60,
 ];
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum SeedImage {
     Ext4Clean,
     Ext4Dirty,
@@ -62,6 +63,10 @@ impl SeedImage {
             4 => Self::Raw,
             _ => Self::Truncated,
         }
+    }
+
+    fn must_reject_as_short_image(self) -> bool {
+        matches!(self, Self::Zeroes | Self::Raw | Self::Truncated)
     }
 }
 
@@ -343,6 +348,31 @@ fuzz_target!(|data: &[u8]| {
         btrfs_first, btrfs_second,
         "FrankenFsEngine::parse_btrfs must be deterministic for identical inputs"
     );
+
+    if seed.must_reject_as_short_image() {
+        assert!(
+            image.len() < EXT4_SUPERBLOCK_END,
+            "{seed:?} seed must stay shorter than the ext4 superblock span"
+        );
+        assert_eq!(
+            first,
+            OutcomeClass::Unsupported,
+            "{seed:?} short image must not be classified as ext4 or btrfs"
+        );
+        assert!(
+            wrapped_result.is_err(),
+            "{seed:?} short image must be rejected by inspect_image"
+        );
+        assert!(
+            ext4_first.is_err(),
+            "{seed:?} short image must be rejected by parse_ext4"
+        );
+        assert!(
+            btrfs_first.is_err(),
+            "{seed:?} short image must be rejected by parse_btrfs"
+        );
+        return;
+    }
 
     match wrapped_result {
         Ok(FsFlavor::Ext4(superblock)) => {
