@@ -14562,6 +14562,14 @@ impl OpenFs {
             .collect())
     }
 
+    fn btrfs_validate_xattr_name(name: &str) -> ffs_error::Result<()> {
+        // Btrfs stores the full xattr name in the item payload, but the
+        // public API still uses Linux namespace syntax (`user.*`,
+        // `security.*`, etc.). Reuse the shared validator so direct btrfs
+        // callers cannot write payloads that the parser later rejects.
+        ffs_xattr::parse_xattr_name(name).map(|_| ())
+    }
+
     /// Get the value of a specific extended attribute on a btrfs inode.
     fn btrfs_getxattr(
         &self,
@@ -14569,6 +14577,7 @@ impl OpenFs {
         ino: InodeNumber,
         name: &str,
     ) -> ffs_error::Result<Option<Vec<u8>>> {
+        Self::btrfs_validate_xattr_name(name)?;
         let canonical = self.btrfs_canonical_inode(ino)?;
 
         // Fast path: look up the specific xattr by name hash (COW tree or
@@ -14740,6 +14749,7 @@ impl OpenFs {
         value: &[u8],
         mode: XattrSetMode,
     ) -> ffs_error::Result<()> {
+        Self::btrfs_validate_xattr_name(name)?;
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let canonical = self.btrfs_canonical_inode(ino)?;
         let existing = self.btrfs_getxattr(cx, ino, name)?;
@@ -14803,6 +14813,7 @@ impl OpenFs {
         ino: InodeNumber,
         name: &str,
     ) -> ffs_error::Result<bool> {
+        Self::btrfs_validate_xattr_name(name)?;
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let canonical = self.btrfs_canonical_inode(ino)?;
 
@@ -38599,6 +38610,95 @@ mod tests {
             .expect_err("replace on missing xattr should fail");
         assert_eq!(err.to_errno(), libc::ENOENT);
         assert_eq!(ops.getxattr(&cx, attr.ino, "user.missing").unwrap(), None);
+    }
+
+    #[test]
+    fn btrfs_write_xattr_rejects_invalid_names_without_poisoning_payload() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("xattr_invalid_name.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+
+        ops.setxattr(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            "user.good",
+            b"kept",
+            XattrSetMode::Set,
+        )
+        .unwrap();
+        let before_invalid = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .unwrap()
+            .ctime;
+        std::thread::sleep(Duration::from_millis(2));
+
+        for invalid_name in ["", "user.", "naked", "unknown.name"] {
+            let err = ops
+                .setxattr(
+                    &cx,
+                    &mut RequestScope::empty(),
+                    attr.ino,
+                    invalid_name,
+                    b"bad",
+                    XattrSetMode::Set,
+                )
+                .expect_err("invalid btrfs xattr name must be rejected before serialization");
+            assert_eq!(
+                err.to_errno(),
+                libc::EINVAL,
+                "invalid name {invalid_name:?}"
+            );
+
+            let err = ops
+                .getxattr(&cx, attr.ino, invalid_name)
+                .expect_err("invalid btrfs getxattr name must be rejected");
+            assert_eq!(
+                err.to_errno(),
+                libc::EINVAL,
+                "invalid name {invalid_name:?}"
+            );
+
+            let err = ops
+                .removexattr(&cx, &mut RequestScope::empty(), attr.ino, invalid_name)
+                .expect_err("invalid btrfs removexattr name must be rejected");
+            assert_eq!(
+                err.to_errno(),
+                libc::EINVAL,
+                "invalid name {invalid_name:?}"
+            );
+
+            assert_eq!(
+                ops.getxattr(&cx, attr.ino, "user.good").unwrap(),
+                Some(b"kept".to_vec()),
+                "invalid-name operation must not damage existing xattr payload"
+            );
+            assert_eq!(
+                ops.listxattr(&cx, attr.ino).unwrap(),
+                vec!["user.good"],
+                "invalid-name operation must leave btrfs xattr list parseable"
+            );
+        }
+
+        let after_invalid = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .unwrap()
+            .ctime;
+        assert_eq!(
+            after_invalid, before_invalid,
+            "invalid-name xattr operations must not mutate inode ctime"
+        );
     }
 
     #[test]
