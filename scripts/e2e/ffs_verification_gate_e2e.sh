@@ -65,7 +65,7 @@ if cargo test -p ffs-harness --lib -- artifact_manifest 2>"$TEST_LOG" | tee -a "
 else
     scenario_result "artifact_manifest_unit_tests" "FAIL" "artifact_manifest tests failed"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 2: log_contract unit tests pass
@@ -83,7 +83,7 @@ if cargo test -p ffs-harness --lib -- log_contract 2>"$TEST_LOG" | tee -a "$TEST
 else
     scenario_result "log_contract_unit_tests" "FAIL" "log_contract tests failed"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 3: verification_runner unit tests pass
@@ -101,7 +101,7 @@ if cargo test -p ffs-harness --lib -- verification_runner 2>"$TEST_LOG" | tee -a
 else
     scenario_result "verification_runner_unit_tests" "FAIL" "verification_runner tests failed"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 4: Scenario catalog validates
@@ -263,7 +263,7 @@ if cargo test -p ffs-harness --lib 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
 else
     scenario_result "full_harness_suite" "FAIL" "Harness test suite failed"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Summary
