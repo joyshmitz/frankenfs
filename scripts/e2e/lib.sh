@@ -50,7 +50,9 @@ e2e_init() {
     E2E_TEMP_DIR=$(mktemp -d -t "ffs_e2e_XXXXXX")
     E2E_CLEANUP_ITEMS+=("$E2E_TEMP_DIR")
 
-    # Set up cleanup trap (emits JSON summary before cleanup)
+    # Set up cleanup trap (emits JSON summary before cleanup).
+    # Set FFS_E2E_DISABLE_TEMP_CLEANUP=1 to preserve temp artifacts for
+    # operator inspection or no-delete agent sessions.
     trap e2e_cleanup EXIT
 
     # Start logging
@@ -378,7 +380,11 @@ e2e_run() {
     head -500 "$output_file" | while IFS= read -r line; do
         e2e_log "  $line"
     done
-    rm -f "$output_file"
+    if [[ "${FFS_E2E_DISABLE_TEMP_CLEANUP:-0}" == "1" ]]; then
+        e2e_log "Temp cleanup disabled; preserving command output temp file: $output_file"
+    else
+        rm -f "$output_file"
+    fi
 
     end_time=$(date +%s.%N)
     duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "N/A")
@@ -561,7 +567,11 @@ write $tmp_dir/readme.txt readme.txt
 write $tmp_dir/hello.txt testdir/hello.txt
 EOF
 
-    rm -rf "$tmp_dir"
+    if [[ "${FFS_E2E_DISABLE_TEMP_CLEANUP:-0}" == "1" ]]; then
+        e2e_log "Temp cleanup disabled; preserving image population temp directory: $tmp_dir"
+    else
+        rm -rf "$tmp_dir"
+    fi
 
     e2e_log "Image created successfully"
 }
@@ -790,6 +800,15 @@ e2e_cleanup() {
 
     # Unmount any active mount
     e2e_unmount "${E2E_MOUNT_POINT:-}" 2>/dev/null || true
+
+    if [[ "${FFS_E2E_DISABLE_TEMP_CLEANUP:-0}" == "1" ]]; then
+        for item in "${E2E_CLEANUP_ITEMS[@]:-}"; do
+            if [[ -d "$item" ]]; then
+                e2e_log "Temp cleanup disabled; preserving temp directory: $item"
+            fi
+        done
+        return "$exit_code"
+    fi
 
     # Remove temp directories
     for item in "${E2E_CLEANUP_ITEMS[@]:-}"; do

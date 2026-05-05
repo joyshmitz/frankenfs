@@ -91,6 +91,14 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 ./scripts/e2e/ffs_repair_writeback_route_e2e.sh
 ```
 
+## Preserving Temp Artifacts
+
+Scripts that source `scripts/e2e/lib.sh` remove their registered temp
+directories on exit during ordinary CI runs. Set
+`FFS_E2E_DISABLE_TEMP_CLEANUP=1` for operator inspection, no-delete agent
+sessions, or debugging runs that must preserve temp directories and direct
+`mktemp` logs.
+
 ## Scenario Catalog Contract
 
 Deterministic scenario IDs are centrally defined in:
