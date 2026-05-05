@@ -3014,38 +3014,68 @@ pub fn parse_inode_extent_tree(
 
 // ── Directory entry parsing ─────────────────────────────────────────────────
 
+// ── ext4 directory-entry file-type constants (bd-343v3) ──────────────────
+//
+// Mirrored verbatim from the Linux kernel `fs/ext4/ext4.h`. The
+// `Ext4FileType` enum below carries the same discriminants; these
+// pub consts give cross-crate callers a kernel-named handle they can
+// grep for (e.g., `EXT4_FT_DIR_CSUM` from ffs-core's dir-block
+// checksum pipeline). The `ext4_file_type_constants_match_kernel_header`
+// unit test pins each value.
+
+/// File-type sentinel: unknown / not specified (kernel: `EXT4_FT_UNKNOWN`).
+pub const EXT4_FT_UNKNOWN: u8 = 0;
+/// Regular file (kernel: `EXT4_FT_REG_FILE`).
+pub const EXT4_FT_REG_FILE: u8 = 1;
+/// Directory (kernel: `EXT4_FT_DIR`).
+pub const EXT4_FT_DIR: u8 = 2;
+/// Character device (kernel: `EXT4_FT_CHRDEV`).
+pub const EXT4_FT_CHRDEV: u8 = 3;
+/// Block device (kernel: `EXT4_FT_BLKDEV`).
+pub const EXT4_FT_BLKDEV: u8 = 4;
+/// FIFO / named pipe (kernel: `EXT4_FT_FIFO`).
+pub const EXT4_FT_FIFO: u8 = 5;
+/// Socket (kernel: `EXT4_FT_SOCK`).
+pub const EXT4_FT_SOCK: u8 = 6;
+/// Symbolic link (kernel: `EXT4_FT_SYMLINK`).
+pub const EXT4_FT_SYMLINK: u8 = 7;
+/// Boundary above which any non-sentinel value is invalid
+/// (kernel: `EXT4_FT_MAX`).
+pub const EXT4_FT_MAX: u8 = 8;
+/// Sentinel file_type value for the directory-block checksum tail
+/// (`ext4_dir_entry_tail.det_reserved_ft` per the kernel; the value
+/// 0xDE is reserved out-of-band from the EXT4_FT_* range).
+pub const EXT4_FT_DIR_CSUM: u8 = 0xDE;
+
 /// ext4 file type constants from directory entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Ext4FileType {
-    Unknown = 0,
-    RegFile = 1,
-    Dir = 2,
-    Chrdev = 3,
-    Blkdev = 4,
-    Fifo = 5,
-    Sock = 6,
-    Symlink = 7,
+    Unknown = EXT4_FT_UNKNOWN,
+    RegFile = EXT4_FT_REG_FILE,
+    Dir = EXT4_FT_DIR,
+    Chrdev = EXT4_FT_CHRDEV,
+    Blkdev = EXT4_FT_BLKDEV,
+    Fifo = EXT4_FT_FIFO,
+    Sock = EXT4_FT_SOCK,
+    Symlink = EXT4_FT_SYMLINK,
 }
 
 impl Ext4FileType {
     #[must_use]
     pub fn from_raw(val: u8) -> Self {
         match val {
-            1 => Self::RegFile,
-            2 => Self::Dir,
-            3 => Self::Chrdev,
-            4 => Self::Blkdev,
-            5 => Self::Fifo,
-            6 => Self::Sock,
-            7 => Self::Symlink,
+            EXT4_FT_REG_FILE => Self::RegFile,
+            EXT4_FT_DIR => Self::Dir,
+            EXT4_FT_CHRDEV => Self::Chrdev,
+            EXT4_FT_BLKDEV => Self::Blkdev,
+            EXT4_FT_FIFO => Self::Fifo,
+            EXT4_FT_SOCK => Self::Sock,
+            EXT4_FT_SYMLINK => Self::Symlink,
             _ => Self::Unknown,
         }
     }
 }
-
-/// Sentinel file_type value for directory entry checksum tails.
-const EXT4_FT_DIR_CSUM: u8 = 0xDE;
 
 /// A parsed ext4 directory entry (`ext4_dir_entry_2`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -10096,6 +10126,80 @@ mod tests {
     /// Trivial corollary of CR-B with B=empty, but worth pinning
     /// because a regression that accidentally negated empty input
     /// would silently corrupt every incremental checksum continuation.
+    /// bd-343v3 — Kernel-conformance pin for ext4 directory-entry
+    /// file-type constants. Each value is mirrored verbatim from the
+    /// Linux kernel `fs/ext4/ext4.h`. A regression that, e.g.,
+    /// swapped EXT4_FT_DIR (2) and EXT4_FT_REG_FILE (1) would make
+    /// readdir silently expose every directory as a regular file —
+    /// this test pins the kernel reference so such drift fails loudly.
+    #[test]
+    fn ext4_file_type_constants_match_kernel_header() {
+        // Values per fs/ext4/ext4.h `enum`/`#define EXT4_FT_*`.
+        assert_eq!(EXT4_FT_UNKNOWN, 0);
+        assert_eq!(EXT4_FT_REG_FILE, 1);
+        assert_eq!(EXT4_FT_DIR, 2);
+        assert_eq!(EXT4_FT_CHRDEV, 3);
+        assert_eq!(EXT4_FT_BLKDEV, 4);
+        assert_eq!(EXT4_FT_FIFO, 5);
+        assert_eq!(EXT4_FT_SOCK, 6);
+        assert_eq!(EXT4_FT_SYMLINK, 7);
+        assert_eq!(EXT4_FT_MAX, 8);
+        assert_eq!(EXT4_FT_DIR_CSUM, 0xDE);
+
+        // Enum discriminants must equal the kernel constants.
+        assert_eq!(Ext4FileType::Unknown as u8, EXT4_FT_UNKNOWN);
+        assert_eq!(Ext4FileType::RegFile as u8, EXT4_FT_REG_FILE);
+        assert_eq!(Ext4FileType::Dir as u8, EXT4_FT_DIR);
+        assert_eq!(Ext4FileType::Chrdev as u8, EXT4_FT_CHRDEV);
+        assert_eq!(Ext4FileType::Blkdev as u8, EXT4_FT_BLKDEV);
+        assert_eq!(Ext4FileType::Fifo as u8, EXT4_FT_FIFO);
+        assert_eq!(Ext4FileType::Sock as u8, EXT4_FT_SOCK);
+        assert_eq!(Ext4FileType::Symlink as u8, EXT4_FT_SYMLINK);
+
+        // `from_raw` round-trip: every value in [0, EXT4_FT_MAX) maps
+        // back to its corresponding enum variant whose discriminant
+        // equals the raw value.
+        for raw in 0..EXT4_FT_MAX {
+            let parsed = Ext4FileType::from_raw(raw);
+            assert_eq!(
+                parsed as u8, raw,
+                "Ext4FileType::from_raw({raw}) must round-trip to discriminant {raw}"
+            );
+        }
+
+        // Boundary: any value at or above EXT4_FT_MAX (except the
+        // out-of-band dir-checksum sentinel) decodes to Unknown. The
+        // sentinel itself is 0xDE and decodes to Unknown by the same
+        // rule — it is explicitly handled by the dir-tail recogniser
+        // outside the enum, not by `from_raw`.
+        assert_eq!(Ext4FileType::from_raw(EXT4_FT_MAX), Ext4FileType::Unknown);
+        assert_eq!(Ext4FileType::from_raw(50), Ext4FileType::Unknown);
+        assert_eq!(
+            Ext4FileType::from_raw(EXT4_FT_DIR_CSUM),
+            Ext4FileType::Unknown,
+            "EXT4_FT_DIR_CSUM is recognised by the dir-tail pipeline, NOT by Ext4FileType::from_raw"
+        );
+        assert_eq!(Ext4FileType::from_raw(u8::MAX), Ext4FileType::Unknown);
+
+        // Cross-check: file-type values are strict-monotonic ascending
+        // and the dir-csum sentinel sits well above EXT4_FT_MAX.
+        assert!(
+            EXT4_FT_UNKNOWN < EXT4_FT_REG_FILE
+                && EXT4_FT_REG_FILE < EXT4_FT_DIR
+                && EXT4_FT_DIR < EXT4_FT_CHRDEV
+                && EXT4_FT_CHRDEV < EXT4_FT_BLKDEV
+                && EXT4_FT_BLKDEV < EXT4_FT_FIFO
+                && EXT4_FT_FIFO < EXT4_FT_SOCK
+                && EXT4_FT_SOCK < EXT4_FT_SYMLINK
+                && EXT4_FT_SYMLINK < EXT4_FT_MAX,
+            "ext4 file-type values must be strict-monotonic ascending"
+        );
+        assert!(
+            EXT4_FT_DIR_CSUM > EXT4_FT_MAX,
+            "EXT4_FT_DIR_CSUM (0xDE) must sit above EXT4_FT_MAX so it never collides with a real file_type"
+        );
+    }
+
     /// bd-3ydm6 — Kernel-conformance pin for `is_reserved_inode`.
     /// Verifies the predicate matches the kernel `ext4_is_reserved_inode`
     /// contract on every reserved-inode constant from bd-k81lq plus
@@ -10117,16 +10221,16 @@ mod tests {
 
         // Every named reserved inode constant must satisfy the predicate.
         for &reserved in &[
-            EXT4_BAD_INO,            // 1
-            EXT4_ROOT_INO,           // 2
-            EXT4_USR_QUOTA_INO,      // 3
-            EXT4_GRP_QUOTA_INO,      // 4
-            EXT4_BOOT_LOADER_INO,    // 5
-            EXT4_UNDEL_DIR_INO,      // 6
-            EXT4_RESIZE_INO,         // 7
-            EXT4_JOURNAL_INO,        // 8
-            EXT4_EXCLUDE_INO,        // 9
-            EXT4_REPLICA_INO,        // 10
+            EXT4_BAD_INO,         // 1
+            EXT4_ROOT_INO,        // 2
+            EXT4_USR_QUOTA_INO,   // 3
+            EXT4_GRP_QUOTA_INO,   // 4
+            EXT4_BOOT_LOADER_INO, // 5
+            EXT4_UNDEL_DIR_INO,   // 6
+            EXT4_RESIZE_INO,      // 7
+            EXT4_JOURNAL_INO,     // 8
+            EXT4_EXCLUDE_INO,     // 9
+            EXT4_REPLICA_INO,     // 10
         ] {
             assert!(
                 is_reserved_inode(FIRST_INO, reserved),
