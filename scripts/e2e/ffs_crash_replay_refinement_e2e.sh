@@ -16,6 +16,7 @@ PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
 TOTAL=0
+PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK="permissioned-crash-replay-may-mount-kill-daemon-and-mutate-images"
 
 scenario_result() {
     local scenario_id="$1"
@@ -58,6 +59,82 @@ PY
     e2e_log "HOST_CAPABILITY_SKIP|scenario_id=${scenario_id}|lane_type=${lane_type}|classification=${classification}|artifact=${path}|reason=${reason}"
 }
 
+permissioned_missing_prerequisites() {
+    if [[ ! -e /dev/fuse ]]; then
+        printf '%s\n' "missing_/dev/fuse"
+    fi
+    if ! command -v fusermount3 >/dev/null 2>&1 && ! command -v fusermount >/dev/null 2>&1; then
+        printf '%s\n' "missing_fusermount3_or_fusermount"
+    fi
+    if [[ "${FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK:-}" != "$PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK" ]]; then
+        printf '%s\n' "missing_FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK"
+    fi
+}
+
+write_permissioned_blocker() {
+    local scenario_id="$1"
+    local lane_type="$2"
+    local classification="$3"
+    local reason="$4"
+    shift 4
+    local path="$E2E_LOG_DIR/${scenario_id}.json"
+    python3 - "$path" "$scenario_id" "$lane_type" "$classification" "$reason" "$PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK" "$@" <<'PY'
+import json
+import shutil
+import sys
+from pathlib import Path
+
+path, scenario_id, lane_type, classification, reason, ack_token, *missing = sys.argv[1:]
+payload = {
+    "scenario_id": scenario_id,
+    "outcome": "SKIP",
+    "lane_type": lane_type,
+    "classification": classification,
+    "blocker_kind": "permissioned_crash_replay_capability_blocker",
+    "reason": reason,
+    "missing_prerequisites": missing,
+    "permissioned_execution_attempted": False,
+    "hides_product_failure": False,
+    "host_probe": {
+        "dev_fuse_present": Path("/dev/fuse").exists(),
+        "fusermount3_path": shutil.which("fusermount3"),
+        "fusermount_path": shutil.which("fusermount"),
+        "mount_attempted": False,
+    },
+    "required_ack": {
+        "env": "FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK",
+        "expected": ack_token,
+    },
+    "rerun": (
+        "FFS_ENABLE_PERMISSIONED_CRASH_REPLAY=1 "
+        f"FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK={ack_token} "
+        "./scripts/e2e/ffs_crash_replay_refinement_e2e.sh"
+    ),
+}
+Path(path).write_text(json.dumps(payload, indent=2) + "\n")
+PY
+    e2e_log "PERMISSIONED_CRASH_REPLAY_BLOCKER|scenario_id=${scenario_id}|lane_type=${lane_type}|classification=${classification}|artifact=${path}|reason=${reason}|missing=$*"
+}
+
+permissioned_lane_or_blocker() {
+    local scenario_id="$1"
+    local lane_type="$2"
+    local classification="$3"
+    local ready_detail="$4"
+    mapfile -t missing < <(permissioned_missing_prerequisites)
+    if ((${#missing[@]} > 0)); then
+        write_permissioned_blocker \
+            "$scenario_id" \
+            "$lane_type" \
+            "$classification" \
+            "permissioned crash replay prerequisites are not satisfied on this host" \
+            "${missing[@]}"
+        scenario_result "$scenario_id" "SKIP" "structured permissioned capability blocker emitted"
+    else
+        scenario_result "$scenario_id" "FAIL" "$ready_detail"
+    fi
+}
+
 run_rch_capture() {
     local log_path="$1"
     shift
@@ -75,6 +152,27 @@ REPORT_JSON="$E2E_LOG_DIR/crash_replay_report.json"
 RUN_RAW="$E2E_LOG_DIR/crash_replay_run.raw"
 UNIT_LOG="$E2E_LOG_DIR/crash_replay_refinement_unit_tests.log"
 ARTIFACT_DIR="$E2E_LOG_DIR/crash_replay_artifacts"
+
+if [[ "${FFS_CRASH_REPLAY_PERMISSIONED_PROBE_ONLY:-0}" == "1" ]]; then
+    e2e_step "Permissioned crash replay blocker probe only"
+    permissioned_lane_or_blocker \
+        "crash_replay_mounted_write_reopen" \
+        "mounted_smoke" \
+        "mounted_write_reopen" \
+        "permissioned mounted crash replay prerequisites are present, but real mounted write/reopen execution remains parent bd-8bg7c work"
+    permissioned_lane_or_blocker \
+        "crash_replay_repair_interruption" \
+        "repair_interruption" \
+        "repair_interruption" \
+        "permissioned repair interruption prerequisites are present, but real repair-interruption execution remains parent bd-8bg7c work"
+    if ((FAIL_COUNT == 0)); then
+        e2e_log "Permissioned crash replay blocker probe passed: ${PASS_COUNT}/${TOTAL} (skipped=${SKIP_COUNT})"
+        e2e_pass
+        exit 0
+    else
+        e2e_fail "Permissioned crash replay blocker probe failed: ${FAIL_COUNT}/${TOTAL}"
+    fi
+fi
 
 e2e_step "Scenario 1: crash replay report emits minimization and survivor artifacts"
 if cargo run --quiet -p ffs-harness -- run-crash-replay \
@@ -154,7 +252,11 @@ if [[ "${FFS_ENABLE_PERMISSIONED_CRASH_REPLAY:-0}" != "1" ]]; then
         "permissioned mounted crash replay disabled by default"
     scenario_result "crash_replay_mounted_write_reopen" "SKIP" "structured host capability skip emitted"
 else
-    scenario_result "crash_replay_mounted_write_reopen" "FAIL" "permissioned mounted crash replay lane is not implemented in this smoke"
+    permissioned_lane_or_blocker \
+        "crash_replay_mounted_write_reopen" \
+        "mounted_smoke" \
+        "mounted_write_reopen" \
+        "permissioned mounted crash replay prerequisites are present, but real mounted write/reopen execution remains parent bd-8bg7c work"
 fi
 
 e2e_step "Scenario 4: repair-interruption lane is explicit or host-skipped"
@@ -166,7 +268,11 @@ if [[ "${FFS_ENABLE_PERMISSIONED_CRASH_REPLAY:-0}" != "1" ]]; then
         "permissioned repair interruption crash replay disabled by default"
     scenario_result "crash_replay_repair_interruption" "SKIP" "structured host capability skip emitted"
 else
-    scenario_result "crash_replay_repair_interruption" "FAIL" "permissioned repair interruption lane is not implemented in this smoke"
+    permissioned_lane_or_blocker \
+        "crash_replay_repair_interruption" \
+        "repair_interruption" \
+        "repair_interruption" \
+        "permissioned repair interruption prerequisites are present, but real repair-interruption execution remains parent bd-8bg7c work"
 fi
 
 e2e_step "Scenario 5: crash replay refinement unit tests pass"
