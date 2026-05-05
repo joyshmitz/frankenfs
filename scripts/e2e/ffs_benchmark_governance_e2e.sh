@@ -159,7 +159,7 @@ fi
 #######################################
 e2e_step "Scenario 8: All governance modules build"
 
-if cargo check -p ffs-harness 2>/dev/null; then
+if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo check -p ffs-harness 2>/dev/null; then
     scenario_result "governance_modules_build" "PASS" "ffs-harness builds cleanly"
 else
     scenario_result "governance_modules_build" "FAIL" "ffs-harness build failed"
@@ -176,7 +176,7 @@ COMBINED_FAIL=0
 
 # Run tests for all 3 governance modules
 for mod_filter in "benchmark_taxonomy" "perf_comparison" "perf_triage"; do
-    if cargo test -p ffs-harness --lib -- "$mod_filter" 2>>"$TEST_LOG" | tee -a "$TEST_LOG" > /dev/null 2>&1; then
+    if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib -- "$mod_filter" 2>>"$TEST_LOG" | tee -a "$TEST_LOG" > /dev/null 2>&1; then
         COMBINED_PASS=$((COMBINED_PASS + 1))
     else
         COMBINED_FAIL=$((COMBINED_FAIL + 1))
@@ -190,7 +190,7 @@ if [[ $COMBINED_FAIL -eq 0 && $TOTAL_TESTS -ge 50 ]]; then
 else
     scenario_result "governance_unit_tests_pass" "FAIL" "Failures: ${COMBINED_FAIL}/3 modules, ${TOTAL_TESTS} tests"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Summary
