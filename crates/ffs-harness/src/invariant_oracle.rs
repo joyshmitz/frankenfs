@@ -815,8 +815,7 @@ impl ReplayState {
         if operation.path == ROOT_PATH {
             violations.push("rename_source_not_root");
         }
-        if !self.files.contains_key(&operation.path)
-            && !self.directories.contains(&operation.path)
+        if !self.files.contains_key(&operation.path) && !self.directories.contains(&operation.path)
         {
             violations.push("rename_source_exists");
         }
@@ -887,10 +886,7 @@ impl ReplayState {
         violations
     }
 
-    fn apply_repair_writeback(
-        &mut self,
-        operation: &InvariantTraceOperation,
-    ) -> Vec<&'static str> {
+    fn apply_repair_writeback(&mut self, operation: &InvariantTraceOperation) -> Vec<&'static str> {
         let mut violations = Vec::new();
         if !self.files.contains_key(&operation.path) {
             violations.push("repair_target_exists");

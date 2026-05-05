@@ -16,23 +16,19 @@ use std::collections::BTreeSet;
 pub const LOW_PRIVILEGE_DEMO_SANDBOX_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_LOW_PRIVILEGE_DEMO_SANDBOX_PATH: &str =
     "tests/low-privilege-demo-sandbox/low_privilege_demo_sandbox.json";
-const DEFAULT_LOW_PRIVILEGE_DEMO_SANDBOX_JSON: &str = include_str!(
-    "../../../tests/low-privilege-demo-sandbox/low_privilege_demo_sandbox.json"
-);
+const DEFAULT_LOW_PRIVILEGE_DEMO_SANDBOX_JSON: &str =
+    include_str!("../../../tests/low-privilege-demo-sandbox/low_privilege_demo_sandbox.json");
 
 const ALLOWED_LANE_OUTCOMES: [&str; 3] = ["executed", "host_skipped", "capability_blocked"];
 
-const ALLOWED_FIXTURE_PROVENANCE: [&str; 4] =
-    ["committed_in_repo", "generated_from_seed", "downloaded_with_hash", "synthesized_in_test"];
-
-const FORBIDDEN_OUTPUT_ROOTS: [&str; 6] = [
-    "/etc",
-    "/root",
-    "/var",
-    "/usr",
-    "/home/ubuntu",
-    "/dev",
+const ALLOWED_FIXTURE_PROVENANCE: [&str; 4] = [
+    "committed_in_repo",
+    "generated_from_seed",
+    "downloaded_with_hash",
+    "synthesized_in_test",
 ];
+
+const FORBIDDEN_OUTPUT_ROOTS: [&str; 6] = ["/etc", "/root", "/var", "/usr", "/home/ubuntu", "/dev"];
 
 const REQUIRED_FORBIDDEN_SIDE_EFFECTS: [&str; 5] = [
     "no_writes_outside_workspace_root",
@@ -155,10 +151,7 @@ pub fn validate_low_privilege_demo_sandbox(
     }
 }
 
-fn validate_top_level(
-    manifest: &LowPrivilegeDemoSandbox,
-    errors: &mut Vec<String>,
-) {
+fn validate_top_level(manifest: &LowPrivilegeDemoSandbox, errors: &mut Vec<String>) {
     if manifest.schema_version != LOW_PRIVILEGE_DEMO_SANDBOX_SCHEMA_VERSION {
         errors.push(format!(
             "schema_version must be {LOW_PRIVILEGE_DEMO_SANDBOX_SCHEMA_VERSION}, got {}",
@@ -230,10 +223,7 @@ fn validate_fixture(
         ));
     }
     if fixture.path.trim().is_empty() {
-        errors.push(format!(
-            "fixture `{}` missing path",
-            fixture.fixture_id
-        ));
+        errors.push(format!("fixture `{}` missing path", fixture.fixture_id));
     }
     if !is_valid_sha256(&fixture.sha256) {
         errors.push(format!(
@@ -269,10 +259,7 @@ fn validate_lane(
         errors.push(format!("duplicate demo lane_id `{}`", lane.lane_id));
     }
     if !lane.lane_id.starts_with("lpds_") {
-        errors.push(format!(
-            "lane_id `{}` must start with lpds_",
-            lane.lane_id
-        ));
+        errors.push(format!("lane_id `{}` must start with lpds_", lane.lane_id));
     }
     if lane.name.trim().is_empty() {
         errors.push(format!("lane `{}` missing name", lane.lane_id));
@@ -289,10 +276,7 @@ fn validate_lane(
         *host_skipped += 1;
     }
     if lane.uses_fixture_id.trim().is_empty() {
-        errors.push(format!(
-            "lane `{}` missing uses_fixture_id",
-            lane.lane_id
-        ));
+        errors.push(format!("lane `{}` missing uses_fixture_id", lane.lane_id));
     } else if !fixture_ids.contains(&lane.uses_fixture_id) {
         errors.push(format!(
             "lane `{}` uses_fixture_id `{}` does not match any declared fixture",
@@ -340,9 +324,7 @@ fn validate_lane(
             lane.lane_id
         ));
     }
-    if lane.expected_outcome == "capability_blocked"
-        && lane.host_skip_reason.trim().is_empty()
-    {
+    if lane.expected_outcome == "capability_blocked" && lane.host_skip_reason.trim().is_empty() {
         errors.push(format!(
             "lane `{}` capability_blocked outcome must declare host_skip_reason",
             lane.lane_id
@@ -360,10 +342,7 @@ fn validate_required_lanes(seen: &BTreeSet<String>, errors: &mut Vec<String>) {
     }
 }
 
-fn validate_required_side_effects(
-    manifest: &LowPrivilegeDemoSandbox,
-    errors: &mut Vec<String>,
-) {
+fn validate_required_side_effects(manifest: &LowPrivilegeDemoSandbox, errors: &mut Vec<String>) {
     let seen: BTreeSet<&str> = manifest
         .forbidden_side_effects
         .iter()
@@ -371,9 +350,7 @@ fn validate_required_side_effects(
         .collect();
     for required in REQUIRED_FORBIDDEN_SIDE_EFFECTS {
         if !seen.contains(required) {
-            errors.push(format!(
-                "forbidden_side_effects must include `{required}`"
-            ));
+            errors.push(format!("forbidden_side_effects must include `{required}`"));
         }
     }
 }
@@ -405,7 +382,9 @@ mod tests {
     #[test]
     fn missing_required_lane_is_rejected() {
         let mut manifest = fixture_manifest();
-        manifest.lanes.retain(|l| l.name != "mounted_smoke_host_skipped");
+        manifest
+            .lanes
+            .retain(|l| l.name != "mounted_smoke_host_skipped");
         let report = validate_low_privilege_demo_sandbox(&manifest);
         assert!(report.errors.iter().any(|err| err
             .contains("missing required lane named `mounted_smoke_host_skipped`")));
@@ -418,8 +397,9 @@ mod tests {
             .forbidden_side_effects
             .retain(|effect| effect != "no_kernel_module_load");
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err
-            .contains("forbidden_side_effects must include `no_kernel_module_load`")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("forbidden_side_effects must include `no_kernel_module_load`")
+        }));
     }
 
     #[test]
@@ -428,7 +408,12 @@ mod tests {
         let dup = manifest.fixtures[0].fixture_id.clone();
         manifest.fixtures[1].fixture_id = dup;
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err.contains("duplicate demo fixture_id")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("duplicate demo fixture_id"))
+        );
     }
 
     #[test]
@@ -436,7 +421,12 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.fixtures[0].fixture_id = "demo_001".to_owned();
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err.contains("must start with fix_")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must start with fix_"))
+        );
     }
 
     #[test]
@@ -444,7 +434,12 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.fixtures[0].sha256 = "md5:not-supported".to_owned();
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err.contains("sha256 must be sha256")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("sha256 must be sha256"))
+        );
     }
 
     #[test]
@@ -452,7 +447,12 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.fixtures[0].provenance = "from_random_url".to_owned();
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err.contains("unsupported provenance")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported provenance"))
+        );
     }
 
     #[test]
@@ -465,8 +465,12 @@ mod tests {
             .expect("committed fixture exists");
         fixture.mutable = true;
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err
-            .contains("committed_in_repo provenance cannot be mutable")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("committed_in_repo provenance cannot be mutable"))
+        );
     }
 
     #[test]
@@ -475,7 +479,12 @@ mod tests {
         let dup = manifest.lanes[0].lane_id.clone();
         manifest.lanes[1].lane_id = dup;
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err.contains("duplicate demo lane_id")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("duplicate demo lane_id"))
+        );
     }
 
     #[test]
@@ -483,7 +492,12 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.lanes[0].lane_id = "lane_001".to_owned();
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err.contains("must start with lpds_")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must start with lpds_"))
+        );
     }
 
     #[test]
@@ -491,8 +505,12 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.lanes[0].uses_fixture_id = "fix_does_not_exist".to_owned();
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err
-            .contains("does not match any declared fixture")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("does not match any declared fixture"))
+        );
     }
 
     #[test]
@@ -500,8 +518,12 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.allowed_workspace_root = "/etc/frankenfs-demo".to_owned();
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err
-            .contains("must not begin under a forbidden host root")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must not begin under a forbidden host root"))
+        );
     }
 
     #[test]
@@ -509,8 +531,12 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.lanes[0].output_path = "/tmp/different-root/output.json".to_owned();
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err
-            .contains("must live under the allowed_workspace_root")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must live under the allowed_workspace_root"))
+        );
     }
 
     #[test]
@@ -518,8 +544,12 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.lanes[0].output_path = "/etc/frankenfs/output.json".to_owned();
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err
-            .contains("must not begin under a forbidden host root")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must not begin under a forbidden host root"))
+        );
     }
 
     #[test]
@@ -532,8 +562,12 @@ mod tests {
             .expect("host skipped lane exists");
         lane.host_skip_reason = String::new();
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err
-            .contains("host_skipped outcome must declare host_skip_reason")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("host_skipped outcome must declare host_skip_reason"))
+        );
     }
 
     #[test]
@@ -546,8 +580,12 @@ mod tests {
             .expect("host skipped lane exists");
         lane.claims_mounted_readiness = true;
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err
-            .contains("must not claim mounted readiness")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must not claim mounted readiness"))
+        );
     }
 
     #[test]
@@ -560,8 +598,13 @@ mod tests {
             .expect("executed lane exists");
         lane.host_skip_reason = "leftover".to_owned();
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err
-            .contains("non-host_skipped outcome must leave host_skip_reason empty")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err
+                    .contains("non-host_skipped outcome must leave host_skip_reason empty"))
+        );
     }
 
     #[test]
@@ -569,8 +612,12 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.proof_bundle_schema_id = String::new();
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err
-            .contains("proof_bundle_schema_id must not be empty")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("proof_bundle_schema_id must not be empty"))
+        );
     }
 
     #[test]
@@ -578,8 +625,12 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.readme_quickstart_wording_id = String::new();
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err
-            .contains("readme_quickstart_wording_id must not be empty")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("readme_quickstart_wording_id must not be empty"))
+        );
     }
 
     #[test]
@@ -587,7 +638,12 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.fixtures.clear();
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err.contains("at least one fixture")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("at least one fixture"))
+        );
     }
 
     #[test]
@@ -595,6 +651,11 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.lanes.clear();
         let report = validate_low_privilege_demo_sandbox(&manifest);
-        assert!(report.errors.iter().any(|err| err.contains("at least one lane")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("at least one lane"))
+        );
     }
 }

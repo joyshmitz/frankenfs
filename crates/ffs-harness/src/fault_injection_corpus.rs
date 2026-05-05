@@ -212,19 +212,16 @@ fn validate_case(
     errors: &mut Vec<String>,
 ) {
     if !ids.insert(case.case_id.clone()) {
-        errors.push(format!("duplicate fault injection case_id `{}`", case.case_id));
+        errors.push(format!(
+            "duplicate fault injection case_id `{}`",
+            case.case_id
+        ));
     }
     if !case.case_id.starts_with("fic_") {
-        errors.push(format!(
-            "case_id `{}` must start with fic_",
-            case.case_id
-        ));
+        errors.push(format!("case_id `{}` must start with fic_", case.case_id));
     }
     if case.seed == 0 {
-        errors.push(format!(
-            "case `{}` seed must be positive",
-            case.case_id
-        ));
+        errors.push(format!("case `{}` seed must be positive", case.case_id));
     }
     if !seeds.insert(case.seed) {
         errors.push(format!(
@@ -394,10 +391,7 @@ fn validate_case_required_text(case: &FaultInjectionCase, errors: &mut Vec<Strin
         ));
     }
     if case.replay_command.trim().is_empty() {
-        errors.push(format!(
-            "case `{}` missing replay_command",
-            case.case_id
-        ));
+        errors.push(format!("case `{}` missing replay_command", case.case_id));
     }
     if !case.follow_up_bead.is_empty() && !case.follow_up_bead.starts_with("bd-") {
         errors.push(format!(
@@ -407,10 +401,7 @@ fn validate_case_required_text(case: &FaultInjectionCase, errors: &mut Vec<Strin
     }
 }
 
-fn validate_case_class_invariants(
-    case: &FaultInjectionCase,
-    errors: &mut Vec<String>,
-) {
+fn validate_case_class_invariants(case: &FaultInjectionCase, errors: &mut Vec<String>) {
     if case.fault_kind == "adversarial_seed" && !case.adversarial {
         errors.push(format!(
             "case `{}` fault_kind=adversarial_seed must set adversarial=true",
@@ -428,9 +419,7 @@ fn validate_case_class_invariants(
             case.case_id
         ));
     }
-    if case.expected_repair_class == "unsafe_to_repair"
-        && !case.follow_up_bead.starts_with("bd-")
-    {
+    if case.expected_repair_class == "unsafe_to_repair" && !case.follow_up_bead.starts_with("bd-") {
         errors.push(format!(
             "case `{}` unsafe_to_repair must link a follow_up_bead so calibration is tracked",
             case.case_id
@@ -500,7 +489,12 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.cases.retain(|c| c.fault_kind != "bit_flip");
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err.contains("missing required fault_kind `bit_flip`")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required fault_kind `bit_flip`"))
+        );
     }
 
     #[test]
@@ -510,8 +504,11 @@ mod tests {
             .cases
             .retain(|c| c.expected_repair_class != "unsafe_to_repair");
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("missing required expected_repair_class `unsafe_to_repair`")));
+        assert!(
+            report.errors.iter().any(
+                |err| err.contains("missing required expected_repair_class `unsafe_to_repair`")
+            )
+        );
     }
 
     #[test]
@@ -520,7 +517,12 @@ mod tests {
         let dup = corpus.cases[0].case_id.clone();
         corpus.cases[1].case_id = dup;
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err.contains("duplicate fault injection case_id")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("duplicate fault injection case_id"))
+        );
     }
 
     #[test]
@@ -528,7 +530,12 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.cases[0].case_id = "case_001".to_owned();
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err.contains("must start with fic_")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must start with fic_"))
+        );
     }
 
     #[test]
@@ -536,7 +543,12 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.cases[0].seed = 0;
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err.contains("seed must be positive")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("seed must be positive"))
+        );
     }
 
     #[test]
@@ -545,7 +557,12 @@ mod tests {
         let seed = corpus.cases[0].seed;
         corpus.cases[1].seed = seed;
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err.contains("is not unique across the corpus")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("is not unique across the corpus"))
+        );
     }
 
     #[test]
@@ -553,7 +570,12 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.cases[0].fault_kind = "alien_radiation".to_owned();
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err.contains("unsupported fault_kind")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported fault_kind"))
+        );
     }
 
     #[test]
@@ -561,7 +583,12 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.cases[0].affected_logical_structure = "vibes_block".to_owned();
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err.contains("unsupported affected_logical_structure")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported affected_logical_structure"))
+        );
     }
 
     #[test]
@@ -569,7 +596,12 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.cases[0].affected_offsets.clear();
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err.contains("at least one affected_offset")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("at least one affected_offset"))
+        );
     }
 
     #[test]
@@ -577,8 +609,9 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.cases[0].affected_offsets = vec![100, 50];
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("affected_offsets must be strictly increasing for deterministic replay")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("affected_offsets must be strictly increasing for deterministic replay")
+        }));
     }
 
     #[test]
@@ -586,7 +619,12 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.cases[0].repair_symbol_budget = 0;
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err.contains("repair_symbol_budget must be positive")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("repair_symbol_budget must be positive"))
+        );
     }
 
     #[test]
@@ -594,7 +632,12 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.cases[0].symbols_supplied = corpus.cases[0].repair_symbol_budget + 5;
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err.contains("symbols_supplied exceeds repair_symbol_budget")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("symbols_supplied exceeds repair_symbol_budget"))
+        );
     }
 
     #[test]
@@ -607,8 +650,12 @@ mod tests {
             .expect("clean repair fixture exists");
         case.symbols_supplied = case.symbols_required_for_recovery - 1;
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("clean_repair must supply at least the required symbols")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("clean_repair must supply at least the required symbols"))
+        );
     }
 
     #[test]
@@ -621,8 +668,9 @@ mod tests {
             .expect("clean repair fixture exists");
         case.expected_confidence_lower_bound = 0.5;
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("clean_repair must declare expected_confidence_lower_bound >=")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("clean_repair must declare expected_confidence_lower_bound >=")
+        }));
     }
 
     #[test]
@@ -635,8 +683,9 @@ mod tests {
             .expect("detection only fixture exists");
         case.expected_confidence_lower_bound = 0.5;
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("detection_only must declare expected_confidence_lower_bound = 0.0")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("detection_only must declare expected_confidence_lower_bound = 0.0")
+        }));
     }
 
     #[test]
@@ -649,8 +698,9 @@ mod tests {
             .expect("false positive fixture exists");
         case.expected_confidence_lower_bound = 0.5;
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("false_positive must declare expected_confidence_lower_bound <= 0.05")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("false_positive must declare expected_confidence_lower_bound <= 0.05")
+        }));
     }
 
     #[test]
@@ -665,8 +715,9 @@ mod tests {
         case.expected_confidence_lower_bound = 0.99;
         case.symbols_supplied = case.symbols_required_for_recovery;
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("adversarial cases must classify as detection_only or unsafe_to_repair")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("adversarial cases must classify as detection_only or unsafe_to_repair")
+        }));
     }
 
     #[test]
@@ -679,8 +730,12 @@ mod tests {
             .expect("adversarial seed fixture exists");
         case.adversarial = false;
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("fault_kind=adversarial_seed must set adversarial=true")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("fault_kind=adversarial_seed must set adversarial=true"))
+        );
     }
 
     #[test]
@@ -693,8 +748,12 @@ mod tests {
             .expect("unsafe fixture exists");
         case.follow_up_bead = String::new();
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("unsafe_to_repair must link a follow_up_bead")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsafe_to_repair must link a follow_up_bead"))
+        );
     }
 
     #[test]
@@ -702,7 +761,12 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.cases[0].original_image_hash = "md5:not-supported".to_owned();
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err.contains("original_image_hash must be sha256")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("original_image_hash must be sha256"))
+        );
     }
 
     #[test]
@@ -710,7 +774,12 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.cases[0].corrupted_image_hash = corpus.cases[0].original_image_hash.clone();
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err.contains("must differ from original_image_hash")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must differ from original_image_hash"))
+        );
     }
 
     #[test]
@@ -718,7 +787,12 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.cases[0].replay_command = String::new();
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err.contains("missing replay_command")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing replay_command"))
+        );
     }
 
     #[test]
@@ -734,7 +808,12 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.min_confidence_lower_bound_for_clean_repair = 1.5;
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err.contains("must be in [0.0, 1.0]")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must be in [0.0, 1.0]"))
+        );
     }
 
     #[test]
@@ -742,6 +821,11 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.cases.clear();
         let report = validate_fault_injection_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err.contains("at least one case")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("at least one case"))
+        );
     }
 }

@@ -16,9 +16,8 @@ use std::collections::BTreeSet;
 pub const MOUNTED_CHECKPOINT_SURVIVOR_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_MOUNTED_CHECKPOINT_SURVIVOR_PATH: &str =
     "tests/mounted-checkpoint-survivor/mounted_checkpoint_survivor.json";
-const DEFAULT_MOUNTED_CHECKPOINT_SURVIVOR_JSON: &str = include_str!(
-    "../../../tests/mounted-checkpoint-survivor/mounted_checkpoint_survivor.json"
-);
+const DEFAULT_MOUNTED_CHECKPOINT_SURVIVOR_JSON: &str =
+    include_str!("../../../tests/mounted-checkpoint-survivor/mounted_checkpoint_survivor.json");
 
 const ALLOWED_LIFECYCLE_KINDS: [&str; 6] = [
     "clean_unmount",
@@ -40,8 +39,12 @@ const ALLOWED_RECOVERY_CLASSIFICATIONS: [&str; 5] = [
 const ALLOWED_PARTIAL_ARTIFACT_POLICIES: [&str; 3] =
     ["preserve_on_failure", "preserve_always", "discard_on_pass"];
 
-const ALLOWED_PROCESS_CONTROL: [&str; 4] =
-    ["clean_signal", "sigterm_then_sigkill", "kill_minus_nine_refused", "harness_internal_pause"];
+const ALLOWED_PROCESS_CONTROL: [&str; 4] = [
+    "clean_signal",
+    "sigterm_then_sigkill",
+    "kill_minus_nine_refused",
+    "harness_internal_pause",
+];
 
 const ALLOWED_TRACE_OPS: [&str; 7] = [
     "create",
@@ -114,16 +117,12 @@ pub struct MountedCheckpointSurvivorReport {
     pub errors: Vec<String>,
 }
 
-pub fn parse_mounted_checkpoint_survivor(
-    text: &str,
-) -> Result<MountedCheckpointSurvivorMatrix> {
-    serde_json::from_str(text).map_err(|err| {
-        anyhow::anyhow!("failed to parse mounted checkpoint survivor JSON: {err}")
-    })
+pub fn parse_mounted_checkpoint_survivor(text: &str) -> Result<MountedCheckpointSurvivorMatrix> {
+    serde_json::from_str(text)
+        .map_err(|err| anyhow::anyhow!("failed to parse mounted checkpoint survivor JSON: {err}"))
 }
 
-pub fn validate_default_mounted_checkpoint_survivor()
--> Result<MountedCheckpointSurvivorReport> {
+pub fn validate_default_mounted_checkpoint_survivor() -> Result<MountedCheckpointSurvivorReport> {
     let matrix = parse_mounted_checkpoint_survivor(DEFAULT_MOUNTED_CHECKPOINT_SURVIVOR_JSON)?;
     let report = validate_mounted_checkpoint_survivor(&matrix);
     if !report.valid {
@@ -147,7 +146,13 @@ pub fn validate_mounted_checkpoint_survivor(
 
     validate_top_level(matrix, &mut errors);
     for scenario in &matrix.scenarios {
-        validate_scenario(scenario, &mut ids, &mut checkpoints, &mut kinds, &mut errors);
+        validate_scenario(
+            scenario,
+            &mut ids,
+            &mut checkpoints,
+            &mut kinds,
+            &mut errors,
+        );
     }
     validate_required_kinds(&kinds, &mut errors);
 
@@ -162,10 +167,7 @@ pub fn validate_mounted_checkpoint_survivor(
     }
 }
 
-fn validate_top_level(
-    matrix: &MountedCheckpointSurvivorMatrix,
-    errors: &mut Vec<String>,
-) {
+fn validate_top_level(matrix: &MountedCheckpointSurvivorMatrix, errors: &mut Vec<String>) {
     if matrix.schema_version != MOUNTED_CHECKPOINT_SURVIVOR_SCHEMA_VERSION {
         errors.push(format!(
             "mounted checkpoint survivor schema_version must be {MOUNTED_CHECKPOINT_SURVIVOR_SCHEMA_VERSION}, got {}",
@@ -183,8 +185,7 @@ fn validate_top_level(
     }
     if matrix.scenarios.is_empty() {
         errors.push(
-            "mounted checkpoint survivor matrix must declare at least one scenario"
-                .to_owned(),
+            "mounted checkpoint survivor matrix must declare at least one scenario".to_owned(),
         );
     }
 }
@@ -237,10 +238,7 @@ fn validate_scenario(
     validate_kind_specific_invariants(scenario, errors);
 }
 
-fn validate_scenario_hashes(
-    scenario: &MountedCheckpointScenario,
-    errors: &mut Vec<String>,
-) {
+fn validate_scenario_hashes(scenario: &MountedCheckpointScenario, errors: &mut Vec<String>) {
     if !is_valid_sha256(&scenario.pre_operation_image_hash) {
         errors.push(format!(
             "scenario `{}` pre_operation_image_hash must be sha256:<64-hex>",
@@ -257,10 +255,7 @@ fn validate_scenario_hashes(
     }
 }
 
-fn validate_operation_trace(
-    scenario: &MountedCheckpointScenario,
-    errors: &mut Vec<String>,
-) {
+fn validate_operation_trace(scenario: &MountedCheckpointScenario, errors: &mut Vec<String>) {
     if scenario.operation_trace.is_empty() {
         errors.push(format!(
             "scenario `{}` operation_trace must not be empty",
@@ -327,10 +322,7 @@ fn validate_operation_trace(
     }
 }
 
-fn validate_survivor_set(
-    scenario: &MountedCheckpointScenario,
-    errors: &mut Vec<String>,
-) {
+fn validate_survivor_set(scenario: &MountedCheckpointScenario, errors: &mut Vec<String>) {
     if scenario.expected_survivor_set.present_paths.is_empty()
         && scenario.expected_survivor_set.absent_paths.is_empty()
     {
@@ -341,27 +333,20 @@ fn validate_survivor_set(
     }
 }
 
-fn validate_recovery_and_artifacts(
-    scenario: &MountedCheckpointScenario,
-    errors: &mut Vec<String>,
-) {
+fn validate_recovery_and_artifacts(scenario: &MountedCheckpointScenario, errors: &mut Vec<String>) {
     if scenario.recovery_command.trim().is_empty() {
         errors.push(format!(
             "scenario `{}` recovery_command must not be empty",
             scenario.scenario_id
         ));
     }
-    if !ALLOWED_RECOVERY_CLASSIFICATIONS
-        .contains(&scenario.recovery_classification.as_str())
-    {
+    if !ALLOWED_RECOVERY_CLASSIFICATIONS.contains(&scenario.recovery_classification.as_str()) {
         errors.push(format!(
             "scenario `{}` has unsupported recovery_classification `{}`",
             scenario.scenario_id, scenario.recovery_classification
         ));
     }
-    if !ALLOWED_PARTIAL_ARTIFACT_POLICIES
-        .contains(&scenario.partial_artifact_policy.as_str())
-    {
+    if !ALLOWED_PARTIAL_ARTIFACT_POLICIES.contains(&scenario.partial_artifact_policy.as_str()) {
         errors.push(format!(
             "scenario `{}` has unsupported partial_artifact_policy `{}`",
             scenario.scenario_id, scenario.partial_artifact_policy
@@ -484,8 +469,12 @@ mod tests {
             .scenarios
             .retain(|s| s.kind != "process_termination_post_fsync");
         let report = validate_mounted_checkpoint_survivor(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("missing required kind `process_termination_post_fsync`")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required kind `process_termination_post_fsync`"))
+        );
     }
 
     #[test]
@@ -508,10 +497,12 @@ mod tests {
         let dup = matrix.scenarios[0].checkpoint_id.clone();
         matrix.scenarios[1].checkpoint_id = dup;
         let report = validate_mounted_checkpoint_survivor(&matrix);
-        assert!(report
-            .errors
-            .iter()
-            .any(|err| err.contains("checkpoint_id") && err.contains("not unique")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("checkpoint_id") && err.contains("not unique"))
+        );
     }
 
     #[test]
@@ -545,8 +536,12 @@ mod tests {
         let mut matrix = fixture_matrix();
         matrix.scenarios[0].pre_operation_image_hash = "md5:not-supported".to_owned();
         let report = validate_mounted_checkpoint_survivor(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("pre_operation_image_hash must be sha256")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("pre_operation_image_hash must be sha256"))
+        );
     }
 
     #[test]
@@ -588,8 +583,12 @@ mod tests {
             .expect("post-fsync scenario exists");
         scenario.crash_or_unmount_point_step = 9999;
         let report = validate_mounted_checkpoint_survivor(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("does not match any operation_trace step")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("does not match any operation_trace step"))
+        );
     }
 
     #[test]
@@ -604,8 +603,12 @@ mod tests {
             step.fsyncdir_boundary = false;
         }
         let report = validate_mounted_checkpoint_survivor(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("fsyncdir_boundary kind must include an fsyncdir step")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("fsyncdir_boundary kind must include an fsyncdir step"))
+        );
     }
 
     #[test]
@@ -620,8 +623,11 @@ mod tests {
             step.fsync_boundary = false;
         }
         let report = validate_mounted_checkpoint_survivor(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("process_termination_post_fsync must include an fsync step")));
+        assert!(
+            report.errors.iter().any(
+                |err| err.contains("process_termination_post_fsync must include an fsync step")
+            )
+        );
     }
 
     #[test]
@@ -652,8 +658,12 @@ mod tests {
             .expect("clean unmount fixture exists");
         scenario.recovery_classification = "host_limitation".to_owned();
         let report = validate_mounted_checkpoint_survivor(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("clean_unmount must classify as expected_survivor_set")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("clean_unmount must classify as expected_survivor_set"))
+        );
     }
 
     #[test]
@@ -666,8 +676,9 @@ mod tests {
             .expect("kill -9 refused fixture exists");
         scenario.recovery_classification = "expected_survivor_set".to_owned();
         let report = validate_mounted_checkpoint_survivor(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("kill_minus_nine_refused cannot also claim expected_survivor_set")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("kill_minus_nine_refused cannot also claim expected_survivor_set")
+        }));
     }
 
     #[test]
@@ -680,8 +691,12 @@ mod tests {
             .expect("post-fsync fixture exists");
         scenario.partial_artifact_policy = "discard_on_pass".to_owned();
         let report = validate_mounted_checkpoint_survivor(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("crash lifecycle must preserve partial artifacts")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("crash lifecycle must preserve partial artifacts"))
+        );
     }
 
     #[test]
@@ -726,8 +741,14 @@ mod tests {
     #[test]
     fn empty_survivor_set_is_rejected() {
         let mut matrix = fixture_matrix();
-        matrix.scenarios[0].expected_survivor_set.present_paths.clear();
-        matrix.scenarios[0].expected_survivor_set.absent_paths.clear();
+        matrix.scenarios[0]
+            .expected_survivor_set
+            .present_paths
+            .clear();
+        matrix.scenarios[0]
+            .expected_survivor_set
+            .absent_paths
+            .clear();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
             report

@@ -116,8 +116,8 @@ fn ext4_group_desc_32byte_fixture_re_encodes_byte_identical() {
         "32-byte group desc fixture must materialise to exactly 32 bytes"
     );
 
-    let gd =
-        Ext4GroupDesc::parse_from_bytes(&original, 32).expect("parse 32-byte fixture for re-encode");
+    let gd = Ext4GroupDesc::parse_from_bytes(&original, 32)
+        .expect("parse 32-byte fixture for re-encode");
 
     let mut encoded = vec![0_u8; 32];
     gd.write_to_bytes(&mut encoded, 32)
@@ -145,8 +145,8 @@ fn ext4_group_desc_64byte_fixture_re_encodes_byte_identical() {
         "64-byte group desc fixture must materialise to exactly 64 bytes"
     );
 
-    let gd =
-        Ext4GroupDesc::parse_from_bytes(&original, 64).expect("parse 64-byte fixture for re-encode");
+    let gd = Ext4GroupDesc::parse_from_bytes(&original, 64)
+        .expect("parse 64-byte fixture for re-encode");
 
     let mut encoded = vec![0_u8; 64];
     gd.write_to_bytes(&mut encoded, 64)

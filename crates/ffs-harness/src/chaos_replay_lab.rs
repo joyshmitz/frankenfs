@@ -17,8 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const CHAOS_REPLAY_LAB_SCHEMA_VERSION: u32 = 1;
-pub const DEFAULT_CHAOS_REPLAY_LAB_PATH: &str =
-    "tests/chaos-replay-lab/chaos_replay_lab.json";
+pub const DEFAULT_CHAOS_REPLAY_LAB_PATH: &str = "tests/chaos-replay-lab/chaos_replay_lab.json";
 const DEFAULT_CHAOS_REPLAY_LAB_JSON: &str =
     include_str!("../../../tests/chaos-replay-lab/chaos_replay_lab.json");
 
@@ -336,10 +335,7 @@ fn validate_schedule_trace(schedule: &ChaosSchedule, errors: &mut Vec<String>) {
     }
 }
 
-fn validate_schedule_lane_consistency(
-    schedule: &ChaosSchedule,
-    errors: &mut Vec<String>,
-) {
+fn validate_schedule_lane_consistency(schedule: &ChaosSchedule, errors: &mut Vec<String>) {
     if schedule.lane == "host_skip" {
         if schedule.expected_survivor_kind != "host_skip" {
             errors.push(format!(
@@ -361,13 +357,9 @@ fn validate_schedule_lane_consistency(
     }
 }
 
-fn validate_schedule_required_text(
-    schedule: &ChaosSchedule,
-    errors: &mut Vec<String>,
-) {
+fn validate_schedule_required_text(schedule: &ChaosSchedule, errors: &mut Vec<String>) {
     if schedule.lane != "host_skip" {
-        if schedule.expected_survivor_paths.is_empty()
-            && schedule.expected_absent_paths.is_empty()
+        if schedule.expected_survivor_paths.is_empty() && schedule.expected_absent_paths.is_empty()
         {
             errors.push(format!(
                 "schedule `{}` must declare at least one expected_survivor_path or expected_absent_path",
@@ -395,10 +387,7 @@ fn validate_schedule_required_text(
     }
 }
 
-fn validate_schedule_repair_policy_consistency(
-    schedule: &ChaosSchedule,
-    errors: &mut Vec<String>,
-) {
+fn validate_schedule_repair_policy_consistency(schedule: &ChaosSchedule, errors: &mut Vec<String>) {
     if schedule.crash_taxonomy == "repair_interruption"
         && schedule.repair_policy != "interrupted_repair"
     {
@@ -417,10 +406,7 @@ fn validate_schedule_repair_policy_consistency(
     }
 }
 
-fn validate_required_taxonomy_coverage(
-    seen: &BTreeSet<String>,
-    errors: &mut Vec<String>,
-) {
+fn validate_required_taxonomy_coverage(seen: &BTreeSet<String>, errors: &mut Vec<String>) {
     for required in REQUIRED_CRASH_TAXONOMY_COVERAGE {
         if !seen.contains(required) {
             errors.push(format!(
@@ -499,7 +485,12 @@ mod tests {
         let mut lab = fixture_lab();
         lab.schedules[0].schedule_id = "schedule_001".to_owned();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err.contains("must start with chaos_")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must start with chaos_"))
+        );
     }
 
     #[test]
@@ -507,7 +498,12 @@ mod tests {
         let mut lab = fixture_lab();
         lab.schedules[0].seed = 0;
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err.contains("seed must be positive")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("seed must be positive"))
+        );
     }
 
     #[test]
@@ -516,7 +512,12 @@ mod tests {
         let seed = lab.schedules[0].seed;
         lab.schedules[1].seed = seed;
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err.contains("is not unique across the lab")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("is not unique across the lab"))
+        );
     }
 
     #[test]
@@ -524,7 +525,12 @@ mod tests {
         let mut lab = fixture_lab();
         lab.schedules[0].lane = "rust_belt".to_owned();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err.contains("unsupported lane")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported lane"))
+        );
     }
 
     #[test]
@@ -532,7 +538,12 @@ mod tests {
         let mut lab = fixture_lab();
         lab.schedules[0].crash_taxonomy = "vibes_taxonomy".to_owned();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err.contains("unsupported crash_taxonomy")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported crash_taxonomy"))
+        );
     }
 
     #[test]
@@ -540,7 +551,12 @@ mod tests {
         let mut lab = fixture_lab();
         lab.schedules[0].repair_policy = "duct_tape".to_owned();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err.contains("unsupported repair_policy")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported repair_policy"))
+        );
     }
 
     #[test]
@@ -548,7 +564,12 @@ mod tests {
         let mut lab = fixture_lab();
         lab.schedules[0].minimization_status = "guesswork".to_owned();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err.contains("unsupported minimization_status")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported minimization_status"))
+        );
     }
 
     #[test]
@@ -561,7 +582,12 @@ mod tests {
             .expect("non-skip schedule exists");
         schedule.operation_trace.clear();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err.contains("operation_trace must not be empty")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("operation_trace must not be empty"))
+        );
     }
 
     #[test]
@@ -572,8 +598,12 @@ mod tests {
             schedule.operation_trace[1].step = schedule.operation_trace[0].step;
         }
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err
-            .contains("strictly increasing") || err.contains("duplicate step")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("strictly increasing") || err.contains("duplicate step"))
+        );
     }
 
     #[test]
@@ -581,8 +611,12 @@ mod tests {
         let mut lab = fixture_lab();
         lab.schedules[0].crash_point_after_step = 9999;
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err
-            .contains("does not match any trace step")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("does not match any trace step"))
+        );
     }
 
     #[test]
@@ -597,8 +631,12 @@ mod tests {
             step.commit_boundary = false;
         }
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err
-            .contains("requires at least one commit boundary in the trace")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("requires at least one commit boundary in the trace"))
+        );
     }
 
     #[test]
@@ -611,8 +649,9 @@ mod tests {
             .expect("host_skip schedule exists");
         schedule.expected_survivor_kind = "exact_match_post_commit".to_owned();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err
-            .contains("host_skip lane must classify expected_survivor_kind=host_skip")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("host_skip lane must classify expected_survivor_kind=host_skip")
+        }));
     }
 
     #[test]
@@ -625,7 +664,12 @@ mod tests {
             .expect("host_skip schedule exists");
         schedule.host_skip_reason = String::new();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err.contains("must declare host_skip_reason")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must declare host_skip_reason"))
+        );
     }
 
     #[test]
@@ -638,8 +682,12 @@ mod tests {
             .expect("non-skip schedule exists");
         schedule.host_skip_reason = "leftover".to_owned();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err
-            .contains("non-host_skip lane must leave host_skip_reason empty")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("non-host_skip lane must leave host_skip_reason empty"))
+        );
     }
 
     #[test]
@@ -653,8 +701,9 @@ mod tests {
         schedule.expected_survivor_paths.clear();
         schedule.expected_absent_paths.clear();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err
-            .contains("must declare at least one expected_survivor_path or expected_absent_path")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("must declare at least one expected_survivor_path or expected_absent_path")
+        }));
     }
 
     #[test]
@@ -662,7 +711,12 @@ mod tests {
         let mut lab = fixture_lab();
         lab.schedules[0].raw_log_path = String::new();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err.contains("missing raw_log_path")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing raw_log_path"))
+        );
     }
 
     #[test]
@@ -670,7 +724,12 @@ mod tests {
         let mut lab = fixture_lab();
         lab.schedules[0].replay_command = String::new();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err.contains("missing replay_command")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing replay_command"))
+        );
     }
 
     #[test]
@@ -678,7 +737,12 @@ mod tests {
         let mut lab = fixture_lab();
         lab.schedules[0].follow_up_bead = "PROJ-99".to_owned();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err.contains("follow_up_bead must look like bd-")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("follow_up_bead must look like bd-"))
+        );
     }
 
     #[test]
@@ -691,8 +755,9 @@ mod tests {
             .expect("repair interruption schedule exists");
         schedule.repair_policy = "ledger_repair".to_owned();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err
-            .contains("repair_interruption crash_taxonomy requires repair_policy=interrupted_repair")));
+        assert!(report.errors.iter().any(|err| err.contains(
+            "repair_interruption crash_taxonomy requires repair_policy=interrupted_repair"
+        )));
     }
 
     #[test]
@@ -705,8 +770,9 @@ mod tests {
             .expect("repaired divergence schedule exists");
         schedule.repair_policy = "no_repair".to_owned();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err
-            .contains("allowed_repaired_divergence requires a repair_policy other than no_repair")));
+        assert!(report.errors.iter().any(|err| err.contains(
+            "allowed_repaired_divergence requires a repair_policy other than no_repair"
+        )));
     }
 
     #[test]
@@ -714,6 +780,11 @@ mod tests {
         let mut lab = fixture_lab();
         lab.schedules.clear();
         let report = validate_chaos_replay_lab(&lab);
-        assert!(report.errors.iter().any(|err| err.contains("at least one schedule")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("at least one schedule"))
+        );
     }
 }

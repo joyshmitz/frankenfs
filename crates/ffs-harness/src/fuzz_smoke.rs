@@ -3,17 +3,17 @@
 //! Deterministic fuzz-smoke manifest validation for high-risk parser surfaces.
 
 use crate::repair_corpus::{parse_repair_corpus, validate_repair_corpus};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use ffs_ondisk::{
-    parse_dir_block, parse_extent_tree, parse_leaf_items, parse_sys_chunk_array, BtrfsSuperblock,
-    Ext4GroupDesc, Ext4Inode, Ext4Superblock,
+    BtrfsSuperblock, Ext4GroupDesc, Ext4Inode, Ext4Superblock, parse_dir_block, parse_extent_tree,
+    parse_leaf_items, parse_sys_chunk_array,
 };
 use ffs_types::ParseError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::time::{Duration, Instant};
 

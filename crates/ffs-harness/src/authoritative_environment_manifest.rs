@@ -14,11 +14,14 @@ use serde::{Deserialize, Serialize};
 
 pub const AUTHORITATIVE_ENVIRONMENT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
-const ALLOWED_PRIVILEGE_MODELS: [&str; 4] =
-    ["unprivileged", "user_namespace", "sudo_capability", "rootful"];
+const ALLOWED_PRIVILEGE_MODELS: [&str; 4] = [
+    "unprivileged",
+    "user_namespace",
+    "sudo_capability",
+    "rootful",
+];
 
-const AUTHORITATIVE_PRIVILEGE_MODELS: [&str; 3] =
-    ["user_namespace", "sudo_capability", "rootful"];
+const AUTHORITATIVE_PRIVILEGE_MODELS: [&str; 3] = ["user_namespace", "sudo_capability", "rootful"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthoritativeEnvironmentManifest {
@@ -64,17 +67,9 @@ pub struct ResourceLimits {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum AuthoritativeEnvironmentDecision {
-    Authoritative {
-        manifest_id: String,
-    },
-    Skip {
-        reason: String,
-        remediation: String,
-    },
-    RejectMismatch {
-        reason: String,
-        remediation: String,
-    },
+    Authoritative { manifest_id: String },
+    Skip { reason: String, remediation: String },
+    RejectMismatch { reason: String, remediation: String },
 }
 
 #[must_use]
@@ -131,7 +126,10 @@ fn check_required_fields(
         ));
     }
     if manifest.host_id.trim().is_empty() {
-        return Some(reject("missing_host_id", "record host_id from the worker fingerprint"));
+        return Some(reject(
+            "missing_host_id",
+            "record host_id from the worker fingerprint",
+        ));
     }
     if manifest.worker_id.trim().is_empty() {
         return Some(reject(

@@ -100,9 +100,8 @@ pub struct MountedRepairPolicyReport {
 }
 
 pub fn parse_mounted_repair_policy(text: &str) -> Result<MountedRepairPolicy> {
-    serde_json::from_str(text).map_err(|err| {
-        anyhow::anyhow!("failed to parse mounted repair policy JSON: {err}")
-    })
+    serde_json::from_str(text)
+        .map_err(|err| anyhow::anyhow!("failed to parse mounted repair policy JSON: {err}"))
 }
 
 pub fn validate_default_mounted_repair_policy() -> Result<MountedRepairPolicyReport> {
@@ -119,9 +118,7 @@ pub fn validate_default_mounted_repair_policy() -> Result<MountedRepairPolicyRep
 }
 
 #[must_use]
-pub fn validate_mounted_repair_policy(
-    policy: &MountedRepairPolicy,
-) -> MountedRepairPolicyReport {
+pub fn validate_mounted_repair_policy(policy: &MountedRepairPolicy) -> MountedRepairPolicyReport {
     let mut errors = Vec::new();
     let mut ids = BTreeSet::new();
     let mut kinds = BTreeSet::new();
@@ -197,10 +194,7 @@ fn validate_scenario(
     validate_scenario_envelope(scenario, errors);
 }
 
-fn validate_scenario_mode_and_flags(
-    scenario: &MountedRepairScenario,
-    errors: &mut Vec<String>,
-) {
+fn validate_scenario_mode_and_flags(scenario: &MountedRepairScenario, errors: &mut Vec<String>) {
     if !["read_only", "read_write"].contains(&scenario.mount_mode.as_str()) {
         errors.push(format!(
             "scenario `{}` has unsupported mount_mode `{}`",
@@ -283,10 +277,7 @@ fn validate_scenario_mode_and_flags(
     }
 }
 
-fn validate_scenario_outcome(
-    scenario: &MountedRepairScenario,
-    errors: &mut Vec<String>,
-) {
+fn validate_scenario_outcome(scenario: &MountedRepairScenario, errors: &mut Vec<String>) {
     if !ALLOWED_OUTCOMES.contains(&scenario.expected_outcome.as_str()) {
         errors.push(format!(
             "scenario `{}` has unsupported expected_outcome `{}`",
@@ -324,12 +315,8 @@ fn validate_scenario_outcome(
     }
 }
 
-fn validate_scenario_ledger(
-    scenario: &MountedRepairScenario,
-    errors: &mut Vec<String>,
-) {
-    let needs_ledger_id =
-        scenario.ledger_present && !scenario.ledger_id.trim().is_empty();
+fn validate_scenario_ledger(scenario: &MountedRepairScenario, errors: &mut Vec<String>) {
+    let needs_ledger_id = scenario.ledger_present && !scenario.ledger_id.trim().is_empty();
     if scenario.ledger_present && scenario.ledger_id.trim().is_empty() {
         errors.push(format!(
             "scenario `{}` ledger_present=true requires ledger_id",
@@ -374,8 +361,7 @@ fn validate_scenario_ledger(
             ));
         }
     }
-    let needs_repair_transitions = scenario.expected_outcome
-        == "repaired_with_symbol_refresh"
+    let needs_repair_transitions = scenario.expected_outcome == "repaired_with_symbol_refresh"
         || scenario.expected_outcome == "ledger_lifecycle_observed";
     if needs_repair_transitions {
         for required in [
@@ -413,9 +399,7 @@ fn validate_scenario_ledger(
         if scenario
             .expected_ledger_transitions
             .iter()
-            .any(|transition| {
-                transition == "repair_applied" || transition == "symbols_refreshed"
-            })
+            .any(|transition| transition == "repair_applied" || transition == "symbols_refreshed")
         {
             errors.push(format!(
                 "scenario `{}` detect_only must not record repair_applied/symbols_refreshed",
@@ -431,10 +415,7 @@ fn validate_scenario_ledger(
     }
 }
 
-fn validate_scenario_envelope(
-    scenario: &MountedRepairScenario,
-    errors: &mut Vec<String>,
-) {
+fn validate_scenario_envelope(scenario: &MountedRepairScenario, errors: &mut Vec<String>) {
     if !ALLOWED_CLEANUP_POLICIES.contains(&scenario.cleanup_policy.as_str()) {
         errors.push(format!(
             "scenario `{}` has unsupported cleanup_policy `{}`",
@@ -605,8 +586,9 @@ mod tests {
         scenario.ledger_present = false;
         scenario.ledger_id = String::new();
         let report = validate_mounted_repair_policy(&policy);
-        assert!(report.errors.iter().any(|err| err
-            .contains("ro_background_repair_with_ledger requires ledger_present=true")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("ro_background_repair_with_ledger requires ledger_present=true")
+        }));
     }
 
     #[test]
@@ -637,8 +619,9 @@ mod tests {
             .expect("default scrub fixture exists");
         scenario.expected_outcome = "repaired_with_symbol_refresh".to_owned();
         let report = validate_mounted_repair_policy(&policy);
-        assert!(report.errors.iter().any(|err| err
-            .contains("default_ro_scrub_detect_only` requires expected_outcome=`detect_only`")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("default_ro_scrub_detect_only` requires expected_outcome=`detect_only`")
+        }));
     }
 
     #[test]
@@ -687,8 +670,12 @@ mod tests {
             .expect("detect-only fixture exists");
         scenario.rejection_reason = "rw_serialization_unsupported".to_owned();
         let report = validate_mounted_repair_policy(&policy);
-        assert!(report.errors.iter().any(|err| err
-            .contains("non-rejection outcome must leave rejection_reason empty")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("non-rejection outcome must leave rejection_reason empty"))
+        );
     }
 
     #[test]
@@ -752,8 +739,9 @@ mod tests {
             .expect("repair fixture exists");
         scenario.expected_symbol_generation_increment = 0;
         let report = validate_mounted_repair_policy(&policy);
-        assert!(report.errors.iter().any(|err| err
-            .contains("repair lifecycle requires expected_symbol_generation_increment > 0")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("repair lifecycle requires expected_symbol_generation_increment > 0")
+        }));
     }
 
     #[test]
@@ -768,8 +756,9 @@ mod tests {
             .expected_ledger_transitions
             .push("repair_applied".to_owned());
         let report = validate_mounted_repair_policy(&policy);
-        assert!(report.errors.iter().any(|err| err
-            .contains("detect_only must not record repair_applied/symbols_refreshed")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("detect_only must not record repair_applied/symbols_refreshed")
+        }));
     }
 
     #[test]
@@ -779,12 +768,9 @@ mod tests {
             .artifact_requirements
             .retain(|r| r != "expected_ledger_transitions");
         let report = validate_mounted_repair_policy(&policy);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("artifact_requirements missing `expected_ledger_transitions`"))
-        );
+        assert!(report.errors.iter().any(|err| {
+            err.contains("artifact_requirements missing `expected_ledger_transitions`")
+        }));
     }
 
     #[test]

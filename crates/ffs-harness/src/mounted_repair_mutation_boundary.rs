@@ -112,9 +112,7 @@ pub struct MountedRepairMutationBoundaryReport {
     pub errors: Vec<String>,
 }
 
-pub fn parse_mounted_repair_mutation_boundary(
-    text: &str,
-) -> Result<MountedRepairMutationBoundary> {
+pub fn parse_mounted_repair_mutation_boundary(text: &str) -> Result<MountedRepairMutationBoundary> {
     serde_json::from_str(text).map_err(|err| {
         anyhow::anyhow!("failed to parse mounted repair mutation boundary JSON: {err}")
     })
@@ -160,10 +158,7 @@ pub fn validate_mounted_repair_mutation_boundary(
     }
 }
 
-fn validate_top_level(
-    matrix: &MountedRepairMutationBoundary,
-    errors: &mut Vec<String>,
-) {
+fn validate_top_level(matrix: &MountedRepairMutationBoundary, errors: &mut Vec<String>) {
     if matrix.schema_version != MOUNTED_REPAIR_MUTATION_BOUNDARY_SCHEMA_VERSION {
         errors.push(format!(
             "schema_version must be {MOUNTED_REPAIR_MUTATION_BOUNDARY_SCHEMA_VERSION}, got {}",
@@ -180,9 +175,8 @@ fn validate_top_level(
         ));
     }
     if matrix.scenarios.is_empty() {
-        errors.push(
-            "mounted repair mutation boundary must declare at least one scenario".to_owned(),
-        );
+        errors
+            .push("mounted repair mutation boundary must declare at least one scenario".to_owned());
     }
 }
 
@@ -227,10 +221,7 @@ fn validate_scenario(
     validate_kind_specific_invariants(scenario, errors);
 }
 
-fn validate_scenario_hashes(
-    scenario: &MutationBoundaryScenario,
-    errors: &mut Vec<String>,
-) {
+fn validate_scenario_hashes(scenario: &MutationBoundaryScenario, errors: &mut Vec<String>) {
     if !is_valid_sha256(&scenario.pre_image_hash) {
         errors.push(format!(
             "scenario `{}` pre_image_hash must be sha256:<64-hex>",
@@ -259,10 +250,7 @@ fn validate_scenario_hashes(
     }
 }
 
-fn validate_scenario_mutation_scope(
-    scenario: &MutationBoundaryScenario,
-    errors: &mut Vec<String>,
-) {
+fn validate_scenario_mutation_scope(scenario: &MutationBoundaryScenario, errors: &mut Vec<String>) {
     if !ALLOWED_MUTATION_SCOPES.contains(&scenario.expected_mutation_scope.as_str()) {
         errors.push(format!(
             "scenario `{}` has unsupported expected_mutation_scope `{}`",
@@ -271,10 +259,7 @@ fn validate_scenario_mutation_scope(
     }
 }
 
-fn validate_scenario_outcome(
-    scenario: &MutationBoundaryScenario,
-    errors: &mut Vec<String>,
-) {
+fn validate_scenario_outcome(scenario: &MutationBoundaryScenario, errors: &mut Vec<String>) {
     if !ALLOWED_OUTCOMES.contains(&scenario.expected_outcome.as_str()) {
         errors.push(format!(
             "scenario `{}` has unsupported expected_outcome `{}`",
@@ -305,10 +290,7 @@ fn validate_scenario_outcome(
     }
 }
 
-fn validate_scenario_ledger(
-    scenario: &MutationBoundaryScenario,
-    errors: &mut Vec<String>,
-) {
+fn validate_scenario_ledger(scenario: &MutationBoundaryScenario, errors: &mut Vec<String>) {
     if !["present", "missing", "stale", "absent_default"].contains(&scenario.ledger_state.as_str())
     {
         errors.push(format!(
@@ -336,10 +318,7 @@ fn validate_scenario_ledger(
     }
 }
 
-fn validate_scenario_envelope(
-    scenario: &MutationBoundaryScenario,
-    errors: &mut Vec<String>,
-) {
+fn validate_scenario_envelope(scenario: &MutationBoundaryScenario, errors: &mut Vec<String>) {
     if !ALLOWED_CLEANUP_STATUSES.contains(&scenario.cleanup_status.as_str()) {
         errors.push(format!(
             "scenario `{}` has unsupported cleanup_status `{}`",
@@ -527,7 +506,9 @@ mod tests {
     #[test]
     fn missing_stale_ledger_kind_is_rejected() {
         let mut matrix = fixture_matrix();
-        matrix.scenarios.retain(|s| s.kind != "stale_ledger_refused");
+        matrix
+            .scenarios
+            .retain(|s| s.kind != "stale_ledger_refused");
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(
             report
@@ -593,8 +574,9 @@ mod tests {
             .expect("default detection fixture exists");
         scenario.background_repair = true;
         let report = validate_mounted_repair_mutation_boundary(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("default_ro_detection_only requires read_only + background_scrub_ledger")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("default_ro_detection_only requires read_only + background_scrub_ledger")
+        }));
     }
 
     #[test]
@@ -607,8 +589,12 @@ mod tests {
             .expect("ro repair fixture exists");
         scenario.expected_post_image_hash = scenario.pre_image_hash.clone();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("image-mutating outcome must change the image hash")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("image-mutating outcome must change the image hash"))
+        );
     }
 
     #[test]
@@ -621,8 +607,12 @@ mod tests {
             .expect("ro repair fixture exists");
         scenario.expected_post_ledger_row_count = scenario.pre_ledger_row_count;
         let report = validate_mounted_repair_mutation_boundary(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("mutating scope must grow the ledger row count")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("mutating scope must grow the ledger row count"))
+        );
     }
 
     #[test]
@@ -636,8 +626,9 @@ mod tests {
         scenario.expected_post_image_hash =
             "sha256:00000000000000000000000000000000000000000000000000000000000000ff".to_owned();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("non-image-mutating outcome must keep expected_post_image_hash equal to pre_image_hash")));
+        assert!(report.errors.iter().any(|err| err.contains(
+            "non-image-mutating outcome must keep expected_post_image_hash equal to pre_image_hash"
+        )));
     }
 
     #[test]
@@ -664,8 +655,12 @@ mod tests {
             .expect("rw refusal fixture exists");
         scenario.follow_up_bead = String::new();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("refusal outcome must link a follow_up_bead")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("refusal outcome must link a follow_up_bead"))
+        );
     }
 
     #[test]
@@ -678,8 +673,12 @@ mod tests {
             .expect("stale ledger fixture exists");
         scenario.expected_outcome = "rw_refused".to_owned();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("ledger refusal must classify as ledger_refused")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("ledger refusal must classify as ledger_refused"))
+        );
     }
 
     #[test]
@@ -692,8 +691,12 @@ mod tests {
             .expect("host skip fixture exists");
         scenario.host_skip_reason = String::new();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("host_skipped outcome must declare host_skip_reason")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("host_skipped outcome must declare host_skip_reason"))
+        );
     }
 
     #[test]
@@ -703,8 +706,12 @@ mod tests {
             .host_paths_touched
             .push("/etc/passwd".to_owned());
         let report = validate_mounted_repair_mutation_boundary(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("host_paths_touched") && err.contains("artifacts/")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("host_paths_touched") && err.contains("artifacts/"))
+        );
     }
 
     #[test]
@@ -712,8 +719,12 @@ mod tests {
         let mut matrix = fixture_matrix();
         matrix.scenarios[0].mount_mode = "rwx".to_owned();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("unsupported mount_mode")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported mount_mode"))
+        );
     }
 
     #[test]
@@ -721,8 +732,12 @@ mod tests {
         let mut matrix = fixture_matrix();
         matrix.scenarios[0].expected_mutation_scope = "anything_goes".to_owned();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("unsupported expected_mutation_scope")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported expected_mutation_scope"))
+        );
     }
 
     #[test]
@@ -730,8 +745,12 @@ mod tests {
         let mut matrix = fixture_matrix();
         matrix.scenarios[0].ledger_state = "schroedinger".to_owned();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("unsupported ledger_state")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported ledger_state"))
+        );
     }
 
     #[test]
@@ -739,8 +758,12 @@ mod tests {
         let mut matrix = fixture_matrix();
         matrix.scenarios[0].artifact_paths.clear();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
-        assert!(report.errors.iter().any(|err| err
-            .contains("must declare at least one artifact_path")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must declare at least one artifact_path"))
+        );
     }
 
     #[test]
@@ -748,7 +771,12 @@ mod tests {
         let mut matrix = fixture_matrix();
         matrix.scenarios[0].reproduction_command = String::new();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
-        assert!(report.errors.iter().any(|err| err.contains("missing reproduction_command")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing reproduction_command"))
+        );
     }
 
     #[test]
@@ -756,6 +784,11 @@ mod tests {
         let mut matrix = fixture_matrix();
         matrix.scenarios.clear();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
-        assert!(report.errors.iter().any(|err| err.contains("at least one scenario")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("at least one scenario"))
+        );
     }
 }

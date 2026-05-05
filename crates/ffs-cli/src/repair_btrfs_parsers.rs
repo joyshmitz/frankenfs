@@ -52,9 +52,18 @@ mod tests {
     fn parse_root_item_bytenr_rejects_empty_payload() {
         let err = parse_btrfs_root_item_bytenr(&[]).expect_err("empty payload must be rejected");
         let msg = err.to_string();
-        assert!(msg.contains("too short"), "error must mention length: {msg}");
-        assert!(msg.contains("184"), "error must mention required size: {msg}");
-        assert!(msg.ends_with("got 0"), "error must report actual length: {msg}");
+        assert!(
+            msg.contains("too short"),
+            "error must mention length: {msg}"
+        );
+        assert!(
+            msg.contains("184"),
+            "error must mention required size: {msg}"
+        );
+        assert!(
+            msg.ends_with("got 0"),
+            "error must report actual length: {msg}"
+        );
     }
 
     #[test]
@@ -62,8 +71,14 @@ mod tests {
         let err = parse_btrfs_root_item_bytenr(&[0xFF_u8; 183])
             .expect_err("183-byte payload must be rejected");
         let msg = err.to_string();
-        assert!(msg.contains("too short"), "error must mention length: {msg}");
-        assert!(msg.ends_with("got 183"), "error must report actual length: {msg}");
+        assert!(
+            msg.contains("too short"),
+            "error must mention length: {msg}"
+        );
+        assert!(
+            msg.ends_with("got 183"),
+            "error must report actual length: {msg}"
+        );
     }
 
     #[test]
@@ -87,8 +102,8 @@ mod tests {
     fn parse_root_item_bytenr_accepts_payload_longer_than_minimum() {
         let mut payload = root_item_payload(0xCAFE_BABE_F00D_BAAD);
         payload.extend(std::iter::repeat_n(0xFF_u8, 64));
-        let bytenr = parse_btrfs_root_item_bytenr(&payload)
-            .expect("oversized payload must still parse");
+        let bytenr =
+            parse_btrfs_root_item_bytenr(&payload).expect("oversized payload must still parse");
         assert_eq!(bytenr, 0xCAFE_BABE_F00D_BAAD);
     }
 
@@ -112,8 +127,8 @@ mod tests {
 
     #[test]
     fn parse_root_item_bytenr_accepts_u64_max() {
-        let bytenr =
-            parse_btrfs_root_item_bytenr(&root_item_payload(u64::MAX)).expect("u64::MAX is non-zero");
+        let bytenr = parse_btrfs_root_item_bytenr(&root_item_payload(u64::MAX))
+            .expect("u64::MAX is non-zero");
         assert_eq!(bytenr, u64::MAX);
     }
 
@@ -133,9 +148,18 @@ mod tests {
         let err = parse_btrfs_block_group_total_bytes(&[])
             .expect_err("empty block-group payload must be rejected");
         let msg = err.to_string();
-        assert!(msg.contains("too short"), "error must mention length: {msg}");
-        assert!(msg.contains("16"), "error must mention required size: {msg}");
-        assert!(msg.ends_with("got 0"), "error must report actual length: {msg}");
+        assert!(
+            msg.contains("too short"),
+            "error must mention length: {msg}"
+        );
+        assert!(
+            msg.contains("16"),
+            "error must mention required size: {msg}"
+        );
+        assert!(
+            msg.ends_with("got 0"),
+            "error must report actual length: {msg}"
+        );
     }
 
     #[test]
@@ -143,8 +167,14 @@ mod tests {
         let err = parse_btrfs_block_group_total_bytes(&[0xFF_u8; 15])
             .expect_err("15-byte payload must be rejected");
         let msg = err.to_string();
-        assert!(msg.contains("too short"), "error must mention length: {msg}");
-        assert!(msg.ends_with("got 15"), "error must report actual length: {msg}");
+        assert!(
+            msg.contains("too short"),
+            "error must mention length: {msg}"
+        );
+        assert!(
+            msg.ends_with("got 15"),
+            "error must report actual length: {msg}"
+        );
     }
 
     #[test]
@@ -156,9 +186,8 @@ mod tests {
 
     #[test]
     fn parse_block_group_total_bytes_accepts_minimum_length_with_valid_total() {
-        let total =
-            parse_btrfs_block_group_total_bytes(&block_group_payload(8 * 1024 * 1024))
-                .expect("valid total_bytes must parse");
+        let total = parse_btrfs_block_group_total_bytes(&block_group_payload(8 * 1024 * 1024))
+            .expect("valid total_bytes must parse");
         assert_eq!(total, 8 * 1024 * 1024);
     }
 

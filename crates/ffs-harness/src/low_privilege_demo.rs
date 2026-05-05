@@ -21,13 +21,8 @@ pub const DEFAULT_LOW_PRIVILEGE_DEMO_PATH: &str =
 const DEFAULT_LOW_PRIVILEGE_DEMO_JSON: &str =
     include_str!("../../../tests/low-privilege-demo/low_privilege_demo_manifest.json");
 
-const ALLOWED_CAPABILITY_REQUIREMENTS: [&str; 5] = [
-    "none",
-    "fuse",
-    "sudo",
-    "btrfs_progs",
-    "host_skip",
-];
+const ALLOWED_CAPABILITY_REQUIREMENTS: [&str; 5] =
+    ["none", "fuse", "sudo", "btrfs_progs", "host_skip"];
 
 const ALLOWED_EXECUTION_KINDS: [&str; 5] = [
     "parser_unit",
@@ -39,11 +34,8 @@ const ALLOWED_EXECUTION_KINDS: [&str; 5] = [
 
 const ALLOWED_OUTCOMES: [&str; 3] = ["executed", "host_skipped", "capability_blocked"];
 
-const REQUIRED_LOW_PRIVILEGE_KINDS: [&str; 3] = [
-    "parser_unit",
-    "invariant_oracle",
-    "repair_dry_run",
-];
+const REQUIRED_LOW_PRIVILEGE_KINDS: [&str; 3] =
+    ["parser_unit", "invariant_oracle", "repair_dry_run"];
 
 const REQUIRED_HOST_SKIPPED_LANES: [&str; 1] = ["mounted_smoke"];
 
@@ -140,10 +132,7 @@ pub fn validate_low_privilege_demo_manifest(
     }
 }
 
-fn validate_top_level(
-    manifest: &LowPrivilegeDemoManifest,
-    errors: &mut Vec<String>,
-) {
+fn validate_top_level(manifest: &LowPrivilegeDemoManifest, errors: &mut Vec<String>) {
     if manifest.schema_version != LOW_PRIVILEGE_DEMO_SCHEMA_VERSION {
         errors.push(format!(
             "low-privilege demo manifest schema_version must be {LOW_PRIVILEGE_DEMO_SCHEMA_VERSION}, got {}",
@@ -172,14 +161,10 @@ fn validate_top_level(
         errors.push("low-privilege demo manifest missing command_line".to_owned());
     }
     if manifest.working_directory_policy.trim().is_empty() {
-        errors.push(
-            "low-privilege demo manifest missing working_directory_policy".to_owned(),
-        );
+        errors.push("low-privilege demo manifest missing working_directory_policy".to_owned());
     }
     if manifest.lanes.is_empty() {
-        errors.push(
-            "low-privilege demo manifest must declare at least one lane".to_owned(),
-        );
+        errors.push("low-privilege demo manifest must declare at least one lane".to_owned());
     }
 }
 
@@ -197,10 +182,7 @@ fn validate_lane(
         ));
     }
     if !lane.lane_id.starts_with("lpd_") {
-        errors.push(format!(
-            "lane_id `{}` must start with lpd_",
-            lane.lane_id
-        ));
+        errors.push(format!("lane_id `{}` must start with lpd_", lane.lane_id));
     }
 
     if !ALLOWED_EXECUTION_KINDS.contains(&lane.execution_kind.as_str()) {
@@ -226,15 +208,9 @@ fn validate_lane(
     validate_lane_capability_consistency(lane, low_privilege_kinds, host_skipped_lanes, errors);
 }
 
-fn validate_lane_required_text(
-    lane: &LowPrivilegeDemoLane,
-    errors: &mut Vec<String>,
-) {
+fn validate_lane_required_text(lane: &LowPrivilegeDemoLane, errors: &mut Vec<String>) {
     if lane.fixture_source.trim().is_empty() {
-        errors.push(format!(
-            "lane `{}` missing fixture_source",
-            lane.lane_id
-        ));
+        errors.push(format!("lane `{}` missing fixture_source", lane.lane_id));
     }
     if !is_valid_sha256(&lane.fixture_hash) {
         errors.push(format!(
@@ -261,10 +237,7 @@ fn validate_lane_required_text(
         ));
     }
     if lane.cleanup_status.trim().is_empty() {
-        errors.push(format!(
-            "lane `{}` missing cleanup_status",
-            lane.lane_id
-        ));
+        errors.push(format!("lane `{}` missing cleanup_status", lane.lane_id));
     }
 }
 
@@ -274,10 +247,10 @@ fn validate_lane_capability_consistency(
     host_skipped_lanes: &mut BTreeSet<String>,
     errors: &mut Vec<String>,
 ) {
-    let needs_capability = lane.capability_requirement != "none"
-        && lane.capability_requirement != "host_skip";
-    let executes_low_privilege = lane.capability_requirement == "none"
-        && lane.expected_outcome == "executed";
+    let needs_capability =
+        lane.capability_requirement != "none" && lane.capability_requirement != "host_skip";
+    let executes_low_privilege =
+        lane.capability_requirement == "none" && lane.expected_outcome == "executed";
 
     if executes_low_privilege {
         low_privilege_kinds.insert(lane.execution_kind.clone());
@@ -310,9 +283,7 @@ fn validate_lane_capability_consistency(
             lane.lane_id
         ));
     }
-    if lane.execution_kind == "mounted_smoke"
-        && lane.capability_requirement == "none"
-    {
+    if lane.execution_kind == "mounted_smoke" && lane.capability_requirement == "none" {
         errors.push(format!(
             "lane `{}` mounted_smoke cannot claim capability=none",
             lane.lane_id
@@ -326,10 +297,7 @@ fn validate_lane_capability_consistency(
     }
 }
 
-fn validate_required_low_privilege_coverage(
-    seen: &BTreeSet<String>,
-    errors: &mut Vec<String>,
-) {
+fn validate_required_low_privilege_coverage(seen: &BTreeSet<String>, errors: &mut Vec<String>) {
     for required in REQUIRED_LOW_PRIVILEGE_KINDS {
         if !seen.contains(required) {
             errors.push(format!(
@@ -339,10 +307,7 @@ fn validate_required_low_privilege_coverage(
     }
 }
 
-fn validate_required_host_skipped_coverage(
-    seen: &BTreeSet<String>,
-    errors: &mut Vec<String>,
-) {
+fn validate_required_host_skipped_coverage(seen: &BTreeSet<String>, errors: &mut Vec<String>) {
     for required in REQUIRED_HOST_SKIPPED_LANES {
         if !seen.contains(required) {
             errors.push(format!(
@@ -390,9 +355,9 @@ mod tests {
     #[test]
     fn missing_low_privilege_kind_is_rejected() {
         let mut manifest = fixture_manifest();
-        manifest
-            .lanes
-            .retain(|lane| !(lane.execution_kind == "parser_unit" && lane.expected_outcome == "executed"));
+        manifest.lanes.retain(|lane| {
+            !(lane.execution_kind == "parser_unit" && lane.expected_outcome == "executed")
+        });
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
             report
@@ -405,9 +370,9 @@ mod tests {
     #[test]
     fn missing_repair_dry_run_kind_is_rejected() {
         let mut manifest = fixture_manifest();
-        manifest
-            .lanes
-            .retain(|lane| !(lane.execution_kind == "repair_dry_run" && lane.expected_outcome == "executed"));
+        manifest.lanes.retain(|lane| {
+            !(lane.execution_kind == "repair_dry_run" && lane.expected_outcome == "executed")
+        });
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
             report
@@ -420,9 +385,9 @@ mod tests {
     #[test]
     fn missing_host_skipped_mounted_lane_is_rejected() {
         let mut manifest = fixture_manifest();
-        manifest
-            .lanes
-            .retain(|lane| !(lane.execution_kind == "mounted_smoke" && lane.expected_outcome == "host_skipped"));
+        manifest.lanes.retain(|lane| {
+            !(lane.execution_kind == "mounted_smoke" && lane.expected_outcome == "host_skipped")
+        });
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
             report
@@ -509,8 +474,12 @@ mod tests {
         lane.expected_outcome = "host_skipped".to_owned();
         lane.host_skip_reason = "would never happen".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(report.errors.iter().any(|err| err
-            .contains("capability=none cannot expect host_skipped outcome")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("capability=none cannot expect host_skipped outcome"))
+        );
     }
 
     #[test]
@@ -537,8 +506,12 @@ mod tests {
             .expect("host-skipped lane exists");
         lane.host_skip_reason = String::new();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(report.errors.iter().any(|err| err
-            .contains("host_skipped outcome must declare host_skip_reason")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("host_skipped outcome must declare host_skip_reason"))
+        );
     }
 
     #[test]
@@ -551,8 +524,13 @@ mod tests {
             .expect("executed lane exists");
         lane.host_skip_reason = "leftover prose".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(report.errors.iter().any(|err| err
-            .contains("non-host_skipped outcome must leave host_skip_reason empty")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err
+                    .contains("non-host_skipped outcome must leave host_skip_reason empty"))
+        );
     }
 
     #[test]

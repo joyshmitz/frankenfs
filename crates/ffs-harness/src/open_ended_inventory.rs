@@ -396,8 +396,7 @@ const REQUIRED_NOTE_LOG_FIELDS: [&str; 8] = [
     "reproduction_command",
 ];
 
-const REQUIRED_NOTE_ARTIFACT_FIELDS: [&str; 3] =
-    ["report_json", "run_log", "scanner_fixture_path"];
+const REQUIRED_NOTE_ARTIFACT_FIELDS: [&str; 3] = ["report_json", "run_log", "scanner_fixture_path"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenEndedNoteSource {
@@ -1157,9 +1156,7 @@ pub fn scan_open_ended_notes(
 
     let rows = sources
         .iter()
-        .flat_map(|source| {
-            scan_open_ended_note_source(source, reproduction_command, &mut errors)
-        })
+        .flat_map(|source| scan_open_ended_note_source(source, reproduction_command, &mut errors))
         .collect::<Vec<_>>();
 
     let real_open_note_count = rows
@@ -1286,7 +1283,10 @@ fn build_note_match(
     }
 }
 
-fn classify_open_ended_note(line: &str, in_fenced_code: bool) -> (&'static str, &'static str, String) {
+fn classify_open_ended_note(
+    line: &str,
+    in_fenced_code: bool,
+) -> (&'static str, &'static str, String) {
     let trimmed = line.trim_start();
     if in_fenced_code || trimmed.starts_with('>') {
         return (
@@ -1304,8 +1304,7 @@ fn classify_open_ended_note(line: &str, in_fenced_code: bool) -> (&'static str, 
         return (
             "false_positive",
             "historical_closed_context",
-            first_linked_bead_or_artifact(line)
-                .unwrap_or_else(|| "historical-context".to_owned()),
+            first_linked_bead_or_artifact(line).unwrap_or_else(|| "historical-context".to_owned()),
         );
     }
     if let Some(link) = first_linked_bead_or_artifact(line) {
@@ -1446,8 +1445,8 @@ fn validate_open_ended_note_match(row: &OpenEndedNoteMatch, errors: &mut Vec<Str
 #[cfg(test)]
 mod tests {
     use super::{
-        DECISIONS, INVENTORY_MARKDOWN, OPEN_ENDED_NOTE_PATTERNS, OpenEndedNoteSource,
-        PROOF_TYPES, analyze_inventory, scan_open_ended_notes, validate_current_inventory,
+        DECISIONS, INVENTORY_MARKDOWN, OPEN_ENDED_NOTE_PATTERNS, OpenEndedNoteSource, PROOF_TYPES,
+        analyze_inventory, scan_open_ended_notes, validate_current_inventory,
     };
     use std::fs;
     use std::path::Path;
@@ -1571,7 +1570,10 @@ mod tests {
             positive.scanner_version
         );
         assert!(positive.valid, "{:?}", positive.errors);
-        assert!(positive.match_count >= 4, "positive fixture should scan real rows");
+        assert!(
+            positive.match_count >= 4,
+            "positive fixture should scan real rows"
+        );
         assert!(
             positive.false_positive_count >= 2,
             "positive fixture should include false-positive controls"
@@ -1657,8 +1659,7 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 && row.false_positive_reason == "historical_closed_context"
         }));
         assert!(report.rows.iter().any(|row| {
-            row.decision == "false_positive"
-                && row.false_positive_reason == "quoted_or_example"
+            row.decision == "false_positive" && row.false_positive_reason == "quoted_or_example"
         }));
         assert!(report.rows.iter().any(|row| {
             row.decision == "already_linked" && row.linked_bead_or_artifact == "bd-l7ov7"
@@ -1682,7 +1683,11 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
             assert!(row.line_number > 0);
             assert!(!row.section_id.is_empty());
             assert!(row.matched_text_snippet_hash.starts_with("sha256:"));
-            assert!(row.required_log_fields.iter().any(|field| field == "row_id"));
+            assert!(
+                row.required_log_fields
+                    .iter()
+                    .any(|field| field == "row_id")
+            );
             assert!(
                 row.required_artifacts
                     .iter()

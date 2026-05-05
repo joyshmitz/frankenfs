@@ -17,9 +17,8 @@ use std::collections::BTreeSet;
 pub const REMEDIATION_SEVERITY_GATE_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_REMEDIATION_SEVERITY_GATE_PATH: &str =
     "tests/remediation-severity-gate/remediation_severity_gate.json";
-const DEFAULT_REMEDIATION_SEVERITY_GATE_JSON: &str = include_str!(
-    "../../../tests/remediation-severity-gate/remediation_severity_gate.json"
-);
+const DEFAULT_REMEDIATION_SEVERITY_GATE_JSON: &str =
+    include_str!("../../../tests/remediation-severity-gate/remediation_severity_gate.json");
 
 const ALLOWED_OUTCOME_CLASSES: [&str; 11] = [
     "product_failure",
@@ -109,9 +108,8 @@ pub struct RemediationSeverityGateReport {
 }
 
 pub fn parse_remediation_severity_gate(text: &str) -> Result<RemediationSeverityGate> {
-    serde_json::from_str(text).map_err(|err| {
-        anyhow::anyhow!("failed to parse remediation severity gate JSON: {err}")
-    })
+    serde_json::from_str(text)
+        .map_err(|err| anyhow::anyhow!("failed to parse remediation severity gate JSON: {err}"))
 }
 
 pub fn validate_default_remediation_severity_gate() -> Result<RemediationSeverityGateReport> {
@@ -160,10 +158,7 @@ pub fn validate_remediation_severity_gate(
     }
 }
 
-fn validate_top_level(
-    gate: &RemediationSeverityGate,
-    errors: &mut Vec<String>,
-) {
+fn validate_top_level(gate: &RemediationSeverityGate, errors: &mut Vec<String>) {
     if gate.schema_version != REMEDIATION_SEVERITY_GATE_SCHEMA_VERSION {
         errors.push(format!(
             "remediation severity gate schema_version must be {REMEDIATION_SEVERITY_GATE_SCHEMA_VERSION}, got {}",
@@ -180,9 +175,7 @@ fn validate_top_level(
         ));
     }
     if gate.entries.is_empty() {
-        errors.push(
-            "remediation severity gate must declare at least one entry".to_owned(),
-        );
+        errors.push("remediation severity gate must declare at least one entry".to_owned());
     }
 }
 
@@ -245,10 +238,7 @@ fn validate_entry(
     validate_entry_safety_invariants(entry, errors);
 }
 
-fn validate_entry_required_text(
-    entry: &RemediationSeverityEntry,
-    errors: &mut Vec<String>,
-) {
+fn validate_entry_required_text(entry: &RemediationSeverityEntry, errors: &mut Vec<String>) {
     if !entry.owning_bead.starts_with("bd-") {
         errors.push(format!(
             "remediation `{}` owning_bead must look like bd-..., got `{}`",
@@ -275,10 +265,7 @@ fn validate_entry_required_text(
     }
 }
 
-fn validate_dead_end_prevention(
-    entry: &RemediationSeverityEntry,
-    errors: &mut Vec<String>,
-) {
+fn validate_dead_end_prevention(entry: &RemediationSeverityEntry, errors: &mut Vec<String>) {
     let has_action = !entry.immediate_action_command.trim().is_empty();
     let has_non_goal = !entry.explicit_non_goal_rationale.trim().is_empty();
     if !has_action && !has_non_goal {
@@ -301,12 +288,9 @@ fn validate_dead_end_prevention(
     }
 }
 
-fn validate_entry_safety_invariants(
-    entry: &RemediationSeverityEntry,
-    errors: &mut Vec<String>,
-) {
-    let is_refusal = entry.outcome_class == "security_refusal"
-        || entry.outcome_class == "unsafe_repair_refusal";
+fn validate_entry_safety_invariants(entry: &RemediationSeverityEntry, errors: &mut Vec<String>) {
+    let is_refusal =
+        entry.outcome_class == "security_refusal" || entry.outcome_class == "unsafe_repair_refusal";
     let claims_no_loss = entry.data_safety_severity == "no_user_data_at_risk"
         || entry.data_safety_severity == "data_loss_blocked_by_refusal";
     if is_refusal && !claims_no_loss {
@@ -324,9 +308,7 @@ fn validate_entry_safety_invariants(
             entry.remediation_id
         ));
     }
-    if entry.outcome_class == "low_confidence_repair"
-        && entry.mutation_status == "applied"
-    {
+    if entry.outcome_class == "low_confidence_repair" && entry.mutation_status == "applied" {
         errors.push(format!(
             "remediation `{}` low_confidence_repair must not record applied mutation; mutation requires high confidence",
             entry.remediation_id
@@ -348,8 +330,7 @@ fn validate_entry_safety_invariants(
             entry.remediation_id
         ));
     }
-    if entry.outcome_class == "host_capability_skip"
-        && entry.release_gate_effect == "block_release"
+    if entry.outcome_class == "host_capability_skip" && entry.release_gate_effect == "block_release"
     {
         errors.push(format!(
             "remediation `{}` host_capability_skip must not block_release; the host is at fault, not the product",
@@ -358,10 +339,7 @@ fn validate_entry_safety_invariants(
     }
 }
 
-fn validate_required_outcome_coverage(
-    seen: &BTreeSet<String>,
-    errors: &mut Vec<String>,
-) {
+fn validate_required_outcome_coverage(seen: &BTreeSet<String>, errors: &mut Vec<String>) {
     for required in REQUIRED_OUTCOME_COVERAGE {
         if !seen.contains(required) {
             errors.push(format!(
@@ -387,10 +365,7 @@ mod tests {
         assert_eq!(report.bead_id, "bd-t6zqr");
         for class in REQUIRED_OUTCOME_COVERAGE {
             assert!(
-                report
-                    .outcome_classes_covered
-                    .iter()
-                    .any(|c| c == class),
+                report.outcome_classes_covered.iter().any(|c| c == class),
                 "missing class {class}"
             );
         }
@@ -416,12 +391,9 @@ mod tests {
         gate.entries
             .retain(|entry| entry.outcome_class != "inconclusive_oracle_conflict");
         let report = validate_remediation_severity_gate(&gate);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("missing required outcome_class `inconclusive_oracle_conflict`"))
-        );
+        assert!(report.errors.iter().any(|err| {
+            err.contains("missing required outcome_class `inconclusive_oracle_conflict`")
+        }));
     }
 
     #[test]
@@ -443,7 +415,12 @@ mod tests {
         let mut gate = fixture_gate();
         gate.entries[0].remediation_id = "fix_001".to_owned();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err.contains("must start with rem_")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must start with rem_"))
+        );
     }
 
     #[test]
@@ -451,7 +428,12 @@ mod tests {
         let mut gate = fixture_gate();
         gate.entries[0].data_safety_severity = "kinda_safe".to_owned();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err.contains("unsupported data_safety_severity")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported data_safety_severity"))
+        );
     }
 
     #[test]
@@ -459,7 +441,12 @@ mod tests {
         let mut gate = fixture_gate();
         gate.entries[0].release_gate_effect = "pretend_release".to_owned();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err.contains("unsupported release_gate_effect")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported release_gate_effect"))
+        );
     }
 
     #[test]
@@ -467,7 +454,12 @@ mod tests {
         let mut gate = fixture_gate();
         gate.entries[0].safe_retry_policy = "yolo_retry".to_owned();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err.contains("unsupported safe_retry_policy")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported safe_retry_policy"))
+        );
     }
 
     #[test]
@@ -476,7 +468,12 @@ mod tests {
         gate.entries[0].immediate_action_command = String::new();
         gate.entries[0].explicit_non_goal_rationale = String::new();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err.contains("is a dead end")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("is a dead end"))
+        );
     }
 
     #[test]
@@ -489,8 +486,9 @@ mod tests {
             .expect("entry with action exists");
         entry.explicit_non_goal_rationale = "leftover".to_owned();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err
-            .contains("cannot have both immediate_action_command and explicit_non_goal_rationale")));
+        assert!(report.errors.iter().any(|err| err.contains(
+            "cannot have both immediate_action_command and explicit_non_goal_rationale"
+        )));
     }
 
     #[test]
@@ -504,8 +502,12 @@ mod tests {
         entry.data_safety_severity = "data_loss_unrecoverable".to_owned();
         entry.release_gate_effect = "block_release".to_owned();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err
-            .contains("refusal outcome must classify data_safety_severity")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("refusal outcome must classify data_safety_severity"))
+        );
     }
 
     #[test]
@@ -521,8 +523,9 @@ mod tests {
         entry.data_safety_severity = "data_loss_unrecoverable".to_owned();
         entry.release_gate_effect = "block_release".to_owned();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err
-            .contains("applied mutation with unrecoverable loss must classify as product_failure")));
+        assert!(report.errors.iter().any(|err| err.contains(
+            "applied mutation with unrecoverable loss must classify as product_failure"
+        )));
     }
 
     #[test]
@@ -535,8 +538,12 @@ mod tests {
             .expect("low confidence entry exists");
         entry.mutation_status = "applied".to_owned();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err
-            .contains("low_confidence_repair must not record applied mutation")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("low_confidence_repair must not record applied mutation"))
+        );
     }
 
     #[test]
@@ -550,8 +557,9 @@ mod tests {
         entry.data_safety_severity = "data_loss_unrecoverable".to_owned();
         entry.release_gate_effect = "annotate_caveat".to_owned();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err
-            .contains("data_loss_unrecoverable must use release_gate_effect=block_release")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("data_loss_unrecoverable must use release_gate_effect=block_release")
+        }));
     }
 
     #[test]
@@ -564,8 +572,12 @@ mod tests {
             .expect("caveat entry exists");
         entry.release_gate_effect = "block_release".to_owned();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err
-            .contains("pass_with_experimental_caveat must not block_release")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("pass_with_experimental_caveat must not block_release"))
+        );
     }
 
     #[test]
@@ -578,8 +590,12 @@ mod tests {
             .expect("host skip entry exists");
         entry.release_gate_effect = "block_release".to_owned();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err
-            .contains("host_capability_skip must not block_release")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("host_capability_skip must not block_release"))
+        );
     }
 
     #[test]
@@ -587,7 +603,12 @@ mod tests {
         let mut gate = fixture_gate();
         gate.entries[0].owning_bead = "PROJ-99".to_owned();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err.contains("owning_bead must look like bd-")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("owning_bead must look like bd-"))
+        );
     }
 
     #[test]
@@ -595,7 +616,12 @@ mod tests {
         let mut gate = fixture_gate();
         gate.entries[0].escalation_path = String::new();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err.contains("missing escalation_path")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing escalation_path"))
+        );
     }
 
     #[test]
@@ -603,7 +629,12 @@ mod tests {
         let mut gate = fixture_gate();
         gate.entries[0].docs_target = String::new();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err.contains("missing docs_target")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing docs_target"))
+        );
     }
 
     #[test]
@@ -611,8 +642,12 @@ mod tests {
         let mut gate = fixture_gate();
         gate.entries[0].artifact_requirements.clear();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err
-            .contains("at least one artifact_requirement")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("at least one artifact_requirement"))
+        );
     }
 
     #[test]
@@ -620,7 +655,12 @@ mod tests {
         let mut gate = fixture_gate();
         gate.entries.clear();
         let report = validate_remediation_severity_gate(&gate);
-        assert!(report.errors.iter().any(|err| err.contains("at least one entry")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("at least one entry"))
+        );
     }
 
     #[test]

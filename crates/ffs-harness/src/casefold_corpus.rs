@@ -19,8 +19,13 @@ pub const DEFAULT_CASEFOLD_CORPUS_PATH: &str = "tests/casefold-corpus/casefold_c
 const DEFAULT_CASEFOLD_CORPUS_JSON: &str =
     include_str!("../../../tests/casefold-corpus/casefold_corpus.json");
 
-const ALLOWED_OPERATION_KINDS: [&str; 5] =
-    ["lookup", "create", "rename", "cross_directory_rename", "mount_feature_check"];
+const ALLOWED_OPERATION_KINDS: [&str; 5] = [
+    "lookup",
+    "create",
+    "rename",
+    "cross_directory_rename",
+    "mount_feature_check",
+];
 
 const ALLOWED_OUTCOMES: [&str; 8] = [
     "lookup_hit",
@@ -48,7 +53,8 @@ const ALLOWED_KERNEL_COMPARISON: [&str; 4] = [
     "kernel_unsupported_submode",
 ];
 
-const REQUIRED_FEATURE_FLAGS: [&str; 2] = ["EXT4_FEATURE_INCOMPAT_CASEFOLD", "ext4_encoding_utf8_12_1"];
+const REQUIRED_FEATURE_FLAGS: [&str; 2] =
+    ["EXT4_FEATURE_INCOMPAT_CASEFOLD", "ext4_encoding_utf8_12_1"];
 
 const ALLOWED_CLEANUP_POLICIES: [&str; 3] = [
     "teardown_image",
@@ -56,8 +62,13 @@ const ALLOWED_CLEANUP_POLICIES: [&str; 3] = [
     "preserve_artifacts_always",
 ];
 
-const REQUIRED_OPERATION_COVERAGE: [&str; 5] =
-    ["lookup", "create", "rename", "cross_directory_rename", "mount_feature_check"];
+const REQUIRED_OPERATION_COVERAGE: [&str; 5] = [
+    "lookup",
+    "create",
+    "rename",
+    "cross_directory_rename",
+    "mount_feature_check",
+];
 
 const REQUIRED_OUTCOME_COVERAGE: [&str; 4] = [
     "create_collision_refused",
@@ -342,11 +353,7 @@ fn validate_case_feature_flags(case: &CasefoldCase, errors: &mut Vec<String>) {
         ));
     }
     for required in REQUIRED_FEATURE_FLAGS {
-        if !case
-            .feature_flags
-            .iter()
-            .any(|flag| flag == required)
-        {
+        if !case.feature_flags.iter().any(|flag| flag == required) {
             errors.push(format!(
                 "case `{}` feature_flags missing `{required}`",
                 case.case_id
@@ -446,8 +453,7 @@ mod tests {
     use super::*;
 
     fn fixture_corpus() -> CasefoldCorpus {
-        parse_casefold_corpus(DEFAULT_CASEFOLD_CORPUS_JSON)
-            .expect("default casefold corpus parses")
+        parse_casefold_corpus(DEFAULT_CASEFOLD_CORPUS_JSON).expect("default casefold corpus parses")
     }
 
     #[test]
@@ -577,8 +583,9 @@ mod tests {
         case.expected_outcome = "lookup_miss".to_owned();
         case.operation_kind = "lookup".to_owned();
         let report = validate_casefold_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("invalid_utf8 normalized_class must expect invalid_encoding_refused")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("invalid_utf8 normalized_class must expect invalid_encoding_refused")
+        }));
     }
 
     #[test]
@@ -591,8 +598,9 @@ mod tests {
             .expect("overlong fixture exists");
         case.normalized_form_bytes_hex = "1234".to_owned();
         let report = validate_casefold_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("overlong_normalized_name must declare a normalized form longer than 255 bytes")));
+        assert!(report.errors.iter().any(|err| err.contains(
+            "overlong_normalized_name must declare a normalized form longer than 255 bytes"
+        )));
     }
 
     #[test]
@@ -623,8 +631,11 @@ mod tests {
             .expect("unsupported submode fixture exists");
         case.unsupported_rationale = String::new();
         let report = validate_casefold_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("kernel_unsupported_submode requires unsupported_rationale")));
+        assert!(
+            report.errors.iter().any(
+                |err| err.contains("kernel_unsupported_submode requires unsupported_rationale")
+            )
+        );
     }
 
     #[test]
@@ -632,8 +643,9 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.cases[0].unsupported_rationale = "non-empty".to_owned();
         let report = validate_casefold_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("non-unsupported kernel status must leave unsupported_rationale empty")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("non-unsupported kernel status must leave unsupported_rationale empty")
+        }));
     }
 
     #[test]
@@ -676,8 +688,9 @@ mod tests {
             .expect("invalid_encoding fixture exists");
         case.htree_interaction = true;
         let report = validate_casefold_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("htree_interaction can only annotate lookup/create/rename outcomes")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("htree_interaction can only annotate lookup/create/rename outcomes")
+        }));
     }
 
     #[test]
@@ -690,8 +703,9 @@ mod tests {
             .expect("invalid_encoding fixture exists");
         case.normalized_class = "ascii_lower".to_owned();
         let report = validate_casefold_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("invalid_encoding_refused requires invalid_utf8 or overlong_normalized_name class")));
+        assert!(report.errors.iter().any(|err| err.contains(
+            "invalid_encoding_refused requires invalid_utf8 or overlong_normalized_name class"
+        )));
     }
 
     #[test]
@@ -704,8 +718,9 @@ mod tests {
             .expect("mount feature fixture exists");
         case.operation_kind = "lookup".to_owned();
         let report = validate_casefold_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("mount_feature_accepted requires mount_feature_check operation")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("mount_feature_accepted requires mount_feature_check operation")
+        }));
     }
 
     #[test]

@@ -17,9 +17,8 @@ use std::collections::BTreeSet;
 pub const INVENTORY_CLOSEOUT_GATE_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_INVENTORY_CLOSEOUT_GATE_PATH: &str =
     "tests/inventory-closeout-gate/inventory_closeout_gate.json";
-const DEFAULT_INVENTORY_CLOSEOUT_GATE_JSON: &str = include_str!(
-    "../../../tests/inventory-closeout-gate/inventory_closeout_gate.json"
-);
+const DEFAULT_INVENTORY_CLOSEOUT_GATE_JSON: &str =
+    include_str!("../../../tests/inventory-closeout-gate/inventory_closeout_gate.json");
 
 const ALLOWED_ROW_STATES: [&str; 8] = [
     "completed_artifact",
@@ -88,9 +87,8 @@ pub struct InventoryCloseoutReport {
 }
 
 pub fn parse_inventory_closeout_gate(text: &str) -> Result<InventoryCloseoutGate> {
-    serde_json::from_str(text).map_err(|err| {
-        anyhow::anyhow!("failed to parse inventory closeout gate JSON: {err}")
-    })
+    serde_json::from_str(text)
+        .map_err(|err| anyhow::anyhow!("failed to parse inventory closeout gate JSON: {err}"))
 }
 
 pub fn validate_default_inventory_closeout_gate() -> Result<InventoryCloseoutReport> {
@@ -107,9 +105,7 @@ pub fn validate_default_inventory_closeout_gate() -> Result<InventoryCloseoutRep
 }
 
 #[must_use]
-pub fn validate_inventory_closeout_gate(
-    gate: &InventoryCloseoutGate,
-) -> InventoryCloseoutReport {
+pub fn validate_inventory_closeout_gate(gate: &InventoryCloseoutGate) -> InventoryCloseoutReport {
     let mut errors = Vec::new();
     let mut ids = BTreeSet::new();
     let mut high_risk_surfaces = BTreeSet::new();
@@ -119,8 +115,7 @@ pub fn validate_inventory_closeout_gate(
 
     validate_top_level(gate, &mut errors);
 
-    let row_id_set: BTreeSet<&str> =
-        gate.rows.iter().map(|row| row.row_id.as_str()).collect();
+    let row_id_set: BTreeSet<&str> = gate.rows.iter().map(|row| row.row_id.as_str()).collect();
 
     for row in &gate.rows {
         validate_row(
@@ -201,10 +196,7 @@ fn validate_row(
         errors.push(format!("row `{}` missing source_path", row.row_id));
     }
     if row.matched_snippet_hash.trim().is_empty() {
-        errors.push(format!(
-            "row `{}` missing matched_snippet_hash",
-            row.row_id
-        ));
+        errors.push(format!("row `{}` missing matched_snippet_hash", row.row_id));
     }
     if !ALLOWED_RISK_SURFACES.contains(&row.risk_surface.as_str()) {
         errors.push(format!(
@@ -251,25 +243,18 @@ fn validate_row(
     }
 }
 
-fn validate_linked_bead_or_artifact_state(
-    row: &InventoryCloseoutRow,
-    errors: &mut Vec<String>,
-) {
+fn validate_linked_bead_or_artifact_state(row: &InventoryCloseoutRow, errors: &mut Vec<String>) {
     if row.linked_bead_or_artifact.trim().is_empty() {
         errors.push(format!(
             "row `{}` state requires linked_bead_or_artifact",
             row.row_id
         ));
-    } else if row.state == "linked_bead"
-        && !row.linked_bead_or_artifact.starts_with("bd-")
-    {
+    } else if row.state == "linked_bead" && !row.linked_bead_or_artifact.starts_with("bd-") {
         errors.push(format!(
             "row `{}` linked_bead state requires linked_bead_or_artifact starting with bd-",
             row.row_id
         ));
-    } else if row.state == "completed_artifact"
-        && !row.linked_bead_or_artifact.contains('/')
-    {
+    } else if row.state == "completed_artifact" && !row.linked_bead_or_artifact.contains('/') {
         errors.push(format!(
             "row `{}` completed_artifact state requires an artifact path",
             row.row_id
@@ -299,8 +284,7 @@ fn validate_host_blocked_state(row: &InventoryCloseoutRow, errors: &mut Vec<Stri
             row.row_id
         ));
     }
-    if !row.linked_bead_or_artifact.starts_with("bd-")
-        && !row.linked_bead_or_artifact.contains('/')
+    if !row.linked_bead_or_artifact.starts_with("bd-") && !row.linked_bead_or_artifact.contains('/')
     {
         errors.push(format!(
             "row `{}` host_blocked state requires linked bead or artifact path",
@@ -368,10 +352,7 @@ fn validate_duplicate_state(
     }
 }
 
-fn validate_false_positive_state(
-    row: &InventoryCloseoutRow,
-    errors: &mut Vec<String>,
-) {
+fn validate_false_positive_state(row: &InventoryCloseoutRow, errors: &mut Vec<String>) {
     if row.user_risk_rationale.trim().is_empty() {
         errors.push(format!(
             "row `{}` false_positive state requires user_risk_rationale",
@@ -386,10 +367,7 @@ fn validate_false_positive_state(
     }
 }
 
-fn validate_high_risk_coverage(
-    high_risk_surfaces: &BTreeSet<String>,
-    errors: &mut Vec<String>,
-) {
+fn validate_high_risk_coverage(high_risk_surfaces: &BTreeSet<String>, errors: &mut Vec<String>) {
     for required in HIGH_RISK_SURFACES {
         if !high_risk_surfaces.contains(required) {
             errors.push(format!(
@@ -415,10 +393,7 @@ mod tests {
         assert_eq!(report.bead_id, "bd-rpjp9");
         for surface in HIGH_RISK_SURFACES {
             assert!(
-                report
-                    .high_risk_surfaces_seen
-                    .iter()
-                    .any(|s| s == surface),
+                report.high_risk_surfaces_seen.iter().any(|s| s == surface),
                 "missing surface {surface}"
             );
         }
@@ -442,12 +417,7 @@ mod tests {
         let mut gate = fixture_gate();
         gate.rows.retain(|r| r.risk_surface != "xfstests");
         let report = validate_inventory_closeout_gate(&gate);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("`xfstests`"))
-        );
+        assert!(report.errors.iter().any(|err| err.contains("`xfstests`")));
     }
 
     #[test]
@@ -487,8 +457,9 @@ mod tests {
             .expect("linked_bead row exists");
         row.linked_bead_or_artifact = "PROJ-1".to_owned();
         let report = validate_inventory_closeout_gate(&gate);
-        assert!(report.errors.iter().any(|err| err
-            .contains("linked_bead state requires linked_bead_or_artifact starting with bd-")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("linked_bead state requires linked_bead_or_artifact starting with bd-")
+        }));
     }
 
     #[test]
@@ -501,8 +472,12 @@ mod tests {
             .expect("completed artifact row exists");
         row.linked_bead_or_artifact = "no-slash-no-path".to_owned();
         let report = validate_inventory_closeout_gate(&gate);
-        assert!(report.errors.iter().any(|err| err
-            .contains("completed_artifact state requires an artifact path")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("completed_artifact state requires an artifact path"))
+        );
     }
 
     #[test]
@@ -551,8 +526,12 @@ mod tests {
             .expect("stale_allowed row exists");
         row.user_risk_rationale = String::new();
         let report = validate_inventory_closeout_gate(&gate);
-        assert!(report.errors.iter().any(|err| err
-            .contains("stale_allowed_until requires user_risk_rationale")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("stale_allowed_until requires user_risk_rationale"))
+        );
     }
 
     #[test]
@@ -565,8 +544,9 @@ mod tests {
             .expect("stale_allowed row exists");
         row.linked_bead_or_artifact = String::new();
         let report = validate_inventory_closeout_gate(&gate);
-        assert!(report.errors.iter().any(|err| err
-            .contains("stale_allowed_until requires linked bead or non-goal artifact")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("stale_allowed_until requires linked bead or non-goal artifact")
+        }));
     }
 
     #[test]
@@ -615,10 +595,12 @@ mod tests {
             .expect("non-goal row exists");
         row.user_risk_rationale = String::new();
         let report = validate_inventory_closeout_gate(&gate);
-        assert!(report
-            .errors
-            .iter()
-            .any(|err| err.contains("requires user_risk_rationale")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("requires user_risk_rationale"))
+        );
     }
 
     #[test]

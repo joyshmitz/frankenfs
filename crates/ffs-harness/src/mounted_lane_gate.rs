@@ -114,8 +114,8 @@ pub fn evaluate_mounted_lane_gate(gate: &MountedLaneGate) -> MountedLaneDecision
         .capability_probe
         .now_unix
         .saturating_sub(gate.capability_probe.probe_at_unix);
-    let probe_stale = elapsed > gate.max_probe_age_seconds
-        || gate.capability_probe.probe_id.trim().is_empty();
+    let probe_stale =
+        elapsed > gate.max_probe_age_seconds || gate.capability_probe.probe_id.trim().is_empty();
     let probe_available = gate.capability_probe.status == "available"
         && gate.capability_probe.fuse_kernel_module_present
         && gate.capability_probe.helper_binary_present;
@@ -208,16 +208,16 @@ mod tests {
                 permissioned: true,
             },
             diagnostic_log_path: "artifacts/mounted-lane/diagnostic.log".to_owned(),
-            remediation_hint: "rerun fuse-capability-probe and retry the mounted matrix"
-                .to_owned(),
+            remediation_hint: "rerun fuse-capability-probe and retry the mounted matrix".to_owned(),
             max_probe_age_seconds: 600,
         }
     }
 
     fn reason(decision: &MountedLaneDecision) -> Option<&str> {
         match decision {
-            MountedLaneDecision::Fail { reason, .. }
-            | MountedLaneDecision::Skip { reason, .. } => Some(reason.as_str()),
+            MountedLaneDecision::Fail { reason, .. } | MountedLaneDecision::Skip { reason, .. } => {
+                Some(reason.as_str())
+            }
             MountedLaneDecision::Pass { .. } => None,
         }
     }
@@ -256,7 +256,10 @@ mod tests {
         gate.capability_probe.permissioned = false;
         let decision = evaluate_mounted_lane_gate(&gate);
         assert!(matches!(decision, MountedLaneDecision::Fail { .. }));
-        assert_eq!(reason(&decision), Some("authoritative_requires_permissioned_lane"));
+        assert_eq!(
+            reason(&decision),
+            Some("authoritative_requires_permissioned_lane")
+        );
     }
 
     #[test]

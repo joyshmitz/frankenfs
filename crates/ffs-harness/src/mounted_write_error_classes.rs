@@ -17,9 +17,8 @@ use std::collections::BTreeSet;
 pub const MOUNTED_WRITE_ERROR_CLASSES_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_MOUNTED_WRITE_ERROR_CLASSES_PATH: &str =
     "tests/mounted-write-error-classes/mounted_write_error_classes.json";
-const DEFAULT_MOUNTED_WRITE_ERROR_CLASSES_JSON: &str = include_str!(
-    "../../../tests/mounted-write-error-classes/mounted_write_error_classes.json"
-);
+const DEFAULT_MOUNTED_WRITE_ERROR_CLASSES_JSON: &str =
+    include_str!("../../../tests/mounted-write-error-classes/mounted_write_error_classes.json");
 
 const ALLOWED_ERROR_CLASSES: [&str; 9] = [
     "ok",
@@ -103,9 +102,8 @@ pub struct MountedWriteErrorReport {
 }
 
 pub fn parse_mounted_write_error_classes(text: &str) -> Result<MountedWriteErrorClasses> {
-    serde_json::from_str(text).map_err(|err| {
-        anyhow::anyhow!("failed to parse mounted write error classes JSON: {err}")
-    })
+    serde_json::from_str(text)
+        .map_err(|err| anyhow::anyhow!("failed to parse mounted write error classes JSON: {err}"))
 }
 
 pub fn validate_default_mounted_write_error_classes() -> Result<MountedWriteErrorReport> {
@@ -154,10 +152,7 @@ pub fn validate_mounted_write_error_classes(
     }
 }
 
-fn validate_top_level(
-    catalog: &MountedWriteErrorClasses,
-    errors: &mut Vec<String>,
-) {
+fn validate_top_level(catalog: &MountedWriteErrorClasses, errors: &mut Vec<String>) {
     if catalog.schema_version != MOUNTED_WRITE_ERROR_CLASSES_SCHEMA_VERSION {
         errors.push(format!(
             "mounted write error classes schema_version must be {MOUNTED_WRITE_ERROR_CLASSES_SCHEMA_VERSION}, got {}",
@@ -174,10 +169,7 @@ fn validate_top_level(
         ));
     }
     if catalog.entries.is_empty() {
-        errors.push(
-            "mounted write error classes must declare at least one entry"
-                .to_owned(),
-        );
+        errors.push("mounted write error classes must declare at least one entry".to_owned());
     }
 }
 
@@ -201,16 +193,10 @@ fn validate_entry(
         ));
     }
     if entry.scenario_id.trim().is_empty() {
-        errors.push(format!(
-            "entry `{}` missing scenario_id",
-            entry.entry_id
-        ));
+        errors.push(format!("entry `{}` missing scenario_id", entry.entry_id));
     }
     if entry.operation_id.trim().is_empty() {
-        errors.push(format!(
-            "entry `{}` missing operation_id",
-            entry.entry_id
-        ));
+        errors.push(format!("entry `{}` missing operation_id", entry.entry_id));
     }
     if ALLOWED_ERROR_CLASSES.contains(&entry.error_class.as_str()) {
         classes_seen.insert(entry.error_class.clone());
@@ -232,9 +218,7 @@ fn validate_entry(
             entry.entry_id, entry.redaction_policy
         ));
     }
-    if entry.remediation_hint.trim().is_empty()
-        && entry.error_class != "ok"
-    {
+    if entry.remediation_hint.trim().is_empty() && entry.error_class != "ok" {
         errors.push(format!(
             "entry `{}` non-ok error class must declare a remediation_hint",
             entry.entry_id
@@ -253,10 +237,7 @@ fn validate_entry(
     validate_ok_invariants(entry, errors);
 }
 
-fn validate_errno_class_consistency(
-    entry: &MountedWriteErrorEntry,
-    errors: &mut Vec<String>,
-) {
+fn validate_errno_class_consistency(entry: &MountedWriteErrorEntry, errors: &mut Vec<String>) {
     let expected_errnos: &[&str] = match entry.error_class.as_str() {
         "ok" => &["0"],
         "default_permissions_eacces" => &["EACCES", "EPERM"],
@@ -269,7 +250,9 @@ fn validate_errno_class_consistency(
         _ => &[],
     };
     if !expected_errnos.is_empty()
-        && !expected_errnos.iter().any(|expected| *expected == entry.raw_errno)
+        && !expected_errnos
+            .iter()
+            .any(|expected| *expected == entry.raw_errno)
     {
         errors.push(format!(
             "entry `{}` raw_errno `{}` does not match error_class `{}` expectations",
@@ -278,10 +261,7 @@ fn validate_errno_class_consistency(
     }
 }
 
-fn validate_redaction_policy_consistency(
-    entry: &MountedWriteErrorEntry,
-    errors: &mut Vec<String>,
-) {
+fn validate_redaction_policy_consistency(entry: &MountedWriteErrorEntry, errors: &mut Vec<String>) {
     if entry.error_class == "ok" && entry.redaction_policy != "none" {
         errors.push(format!(
             "entry `{}` ok class must use redaction_policy=none",
@@ -324,9 +304,7 @@ fn validate_broad_fallback(
                 entry.entry_id
             ));
         }
-        if !entry.follow_up_bead.is_empty()
-            && !entry.follow_up_bead.starts_with("bd-")
-        {
+        if !entry.follow_up_bead.is_empty() && !entry.follow_up_bead.starts_with("bd-") {
             errors.push(format!(
                 "entry `{}` follow_up_bead must look like bd-..., got `{}`",
                 entry.entry_id, entry.follow_up_bead
@@ -335,10 +313,7 @@ fn validate_broad_fallback(
     }
 }
 
-fn validate_ok_invariants(
-    entry: &MountedWriteErrorEntry,
-    errors: &mut Vec<String>,
-) {
+fn validate_ok_invariants(entry: &MountedWriteErrorEntry, errors: &mut Vec<String>) {
     if entry.error_class == "ok" {
         if entry.raw_errno != "0" {
             errors.push(format!(
@@ -395,10 +370,9 @@ mod tests {
             .retain(|e| e.error_class != "default_permissions_eacces");
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("missing required error_class `default_permissions_eacces`"))
+            report.errors.iter().any(
+                |err| err.contains("missing required error_class `default_permissions_eacces`")
+            )
         );
     }
 
@@ -409,12 +383,9 @@ mod tests {
             .entries
             .retain(|e| e.error_class != "repair_serialization_blocked");
         let report = validate_mounted_write_error_classes(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("missing required error_class `repair_serialization_blocked`"))
-        );
+        assert!(report.errors.iter().any(|err| {
+            err.contains("missing required error_class `repair_serialization_blocked`")
+        }));
     }
 
     #[test]
@@ -454,8 +425,12 @@ mod tests {
             .expect("default permissions fixture exists");
         entry.raw_errno = "EIO".to_owned();
         let report = validate_mounted_write_error_classes(&catalog);
-        assert!(report.errors.iter().any(|err| err
-            .contains("does not match error_class `default_permissions_eacces`")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("does not match error_class `default_permissions_eacces`"))
+        );
     }
 
     #[test]
@@ -468,8 +443,9 @@ mod tests {
             .expect("broad fallback fixture exists");
         entry.broad_fallback_justification = String::new();
         let report = validate_mounted_write_error_classes(&catalog);
-        assert!(report.errors.iter().any(|err| err
-            .contains("broad_fallback class must declare broad_fallback_justification")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("broad_fallback class must declare broad_fallback_justification")
+        }));
     }
 
     #[test]
@@ -500,8 +476,9 @@ mod tests {
             .expect("default permissions fixture exists");
         entry.broad_fallback_justification = "leftover prose".to_owned();
         let report = validate_mounted_write_error_classes(&catalog);
-        assert!(report.errors.iter().any(|err| err
-            .contains("non-broad_fallback class must leave broad_fallback_justification empty")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("non-broad_fallback class must leave broad_fallback_justification empty")
+        }));
     }
 
     #[test]
@@ -550,8 +527,12 @@ mod tests {
             .expect("xattr non-ok fixture exists");
         entry.redaction_policy = "none".to_owned();
         let report = validate_mounted_write_error_classes(&catalog);
-        assert!(report.errors.iter().any(|err| err
-            .contains("xattr operation must redact_paths_and_xattr_values")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("xattr operation must redact_paths_and_xattr_values"))
+        );
     }
 
     #[test]
@@ -564,8 +545,12 @@ mod tests {
             .expect("non-ok fixture exists");
         entry.remediation_hint = String::new();
         let report = validate_mounted_write_error_classes(&catalog);
-        assert!(report.errors.iter().any(|err| err
-            .contains("non-ok error class must declare a remediation_hint")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("non-ok error class must declare a remediation_hint"))
+        );
     }
 
     #[test]
@@ -627,8 +612,7 @@ mod tests {
 
     #[test]
     fn broad_fallback_count_is_reported() {
-        let report = validate_default_mounted_write_error_classes()
-            .expect("default validates");
+        let report = validate_default_mounted_write_error_classes().expect("default validates");
         assert!(report.broad_fallback_count >= 1);
     }
 }

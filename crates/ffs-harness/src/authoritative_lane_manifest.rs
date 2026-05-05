@@ -15,8 +15,7 @@ use std::collections::BTreeSet;
 
 pub const AUTHORITATIVE_LANE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
-const ALLOWED_ENVIRONMENT_KINDS: [&str; 4] =
-    ["local_developer", "ci", "rch_authoritative", "soak"];
+const ALLOWED_ENVIRONMENT_KINDS: [&str; 4] = ["local_developer", "ci", "rch_authoritative", "soak"];
 
 const AUTHORITATIVE_ENVIRONMENT_KINDS: [&str; 3] = ["ci", "rch_authoritative", "soak"];
 
@@ -498,8 +497,7 @@ mod tests {
     #[test]
     fn mismatched_mount_options_fails_closed_for_authoritative() {
         let mut manifest = happy_manifest();
-        manifest.observed_mount_options =
-            vec!["ro".to_owned(), "default_permissions".to_owned()];
+        manifest.observed_mount_options = vec!["ro".to_owned(), "default_permissions".to_owned()];
         let decision = evaluate_authoritative_lane(&manifest);
         assert_eq!(reason(&decision), Some("mismatched_mount_options"));
         assert!(matches!(
@@ -512,8 +510,7 @@ mod tests {
     fn mismatched_mount_options_skips_for_local() {
         let mut manifest = happy_manifest();
         manifest.environment_kind = "local_developer".to_owned();
-        manifest.observed_mount_options =
-            vec!["ro".to_owned(), "default_permissions".to_owned()];
+        manifest.observed_mount_options = vec!["ro".to_owned(), "default_permissions".to_owned()];
         let decision = evaluate_authoritative_lane(&manifest);
         assert_eq!(reason(&decision), Some("mismatched_mount_options"));
         assert!(matches!(decision, AuthoritativeLaneDecision::Skip { .. }));

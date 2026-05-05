@@ -16,9 +16,8 @@ use std::collections::BTreeSet;
 pub const MOUNTED_WRITE_ERRNO_BUDGET_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_MOUNTED_WRITE_ERRNO_BUDGET_PATH: &str =
     "tests/mounted-write-errno-budget/mounted_write_errno_budget.json";
-const DEFAULT_MOUNTED_WRITE_ERRNO_BUDGET_JSON: &str = include_str!(
-    "../../../tests/mounted-write-errno-budget/mounted_write_errno_budget.json"
-);
+const DEFAULT_MOUNTED_WRITE_ERRNO_BUDGET_JSON: &str =
+    include_str!("../../../tests/mounted-write-errno-budget/mounted_write_errno_budget.json");
 
 const ALLOWED_FILESYSTEMS: [&str; 2] = ["ext4", "btrfs"];
 
@@ -121,9 +120,8 @@ pub struct MountedWriteErrnoBudgetReport {
 }
 
 pub fn parse_mounted_write_errno_budget(text: &str) -> Result<MountedWriteErrnoBudget> {
-    serde_json::from_str(text).map_err(|err| {
-        anyhow::anyhow!("failed to parse mounted write errno budget JSON: {err}")
-    })
+    serde_json::from_str(text)
+        .map_err(|err| anyhow::anyhow!("failed to parse mounted write errno budget JSON: {err}"))
 }
 
 pub fn validate_default_mounted_write_errno_budget() -> Result<MountedWriteErrnoBudgetReport> {
@@ -224,10 +222,7 @@ fn validate_cell(
         ));
     }
     if !cell.cell_id.starts_with("ewb_") {
-        errors.push(format!(
-            "cell_id `{}` must start with ewb_",
-            cell.cell_id
-        ));
+        errors.push(format!("cell_id `{}` must start with ewb_", cell.cell_id));
     }
     if !ALLOWED_FILESYSTEMS.contains(&cell.filesystem.as_str()) {
         errors.push(format!(
@@ -305,10 +300,7 @@ fn validate_cell(
     );
 }
 
-fn validate_errno_class_consistency(
-    cell: &MountedWriteErrnoCell,
-    errors: &mut Vec<String>,
-) {
+fn validate_errno_class_consistency(cell: &MountedWriteErrnoCell, errors: &mut Vec<String>) {
     let expected_errnos: &[&str] = match cell.user_facing_class.as_str() {
         "default_permissions_eacces" => &["EACCES", "EPERM"],
         "unsupported_operation" => &["ENOSYS", "ENOTSUP", "EOPNOTSUPP", "ENAMETOOLONG"],
@@ -408,10 +400,7 @@ fn validate_operation_coverage(seen: &BTreeSet<String>, errors: &mut Vec<String>
     }
 }
 
-fn validate_filesystem_pair_coverage(
-    catalog: &MountedWriteErrnoBudget,
-    errors: &mut Vec<String>,
-) {
+fn validate_filesystem_pair_coverage(catalog: &MountedWriteErrnoBudget, errors: &mut Vec<String>) {
     let permission_filesystems: BTreeSet<&str> = catalog
         .cells
         .iter()
@@ -485,20 +474,17 @@ mod tests {
             .cells
             .retain(|cell| cell.operation_class != "writeback_cache_gate_refusal");
         let report = validate_mounted_write_errno_budget(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("missing required operation_class `writeback_cache_gate_refusal`"))
-        );
+        assert!(report.errors.iter().any(|err| {
+            err.contains("missing required operation_class `writeback_cache_gate_refusal`")
+        }));
     }
 
     #[test]
     fn permission_denied_must_cover_both_filesystems() {
         let mut catalog = fixture_catalog();
-        catalog
-            .cells
-            .retain(|cell| !(cell.operation_class == "permission_denied" && cell.filesystem == "btrfs"));
+        catalog.cells.retain(|cell| {
+            !(cell.operation_class == "permission_denied" && cell.filesystem == "btrfs")
+        });
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(
             report
@@ -511,9 +497,9 @@ mod tests {
     #[test]
     fn unsupported_operation_must_cover_both_filesystems() {
         let mut catalog = fixture_catalog();
-        catalog
-            .cells
-            .retain(|cell| !(cell.operation_class == "unsupported_operation" && cell.filesystem == "ext4"));
+        catalog.cells.retain(|cell| {
+            !(cell.operation_class == "unsupported_operation" && cell.filesystem == "ext4")
+        });
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(
             report
@@ -531,8 +517,12 @@ mod tests {
         clone.cell_id = format!("{}_dup", clone.cell_id);
         catalog.cells.push(clone);
         let report = validate_mounted_write_errno_budget(&catalog);
-        assert!(report.errors.iter().any(|err| err
-            .contains("duplicates the (filesystem, operation_class) pair")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("duplicates the (filesystem, operation_class) pair"))
+        );
     }
 
     #[test]
@@ -572,8 +562,9 @@ mod tests {
             .expect("default permissions cell exists");
         cell.normalized_errno = "EIO".to_owned();
         let report = validate_mounted_write_errno_budget(&catalog);
-        assert!(report.errors.iter().any(|err| err
-            .contains("does not match user_facing_class `default_permissions_eacces`")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("does not match user_facing_class `default_permissions_eacces`")
+        }));
     }
 
     #[test]
@@ -627,8 +618,9 @@ mod tests {
             .expect("broad fallback cell exists");
         cell.broad_fallback_justification = String::new();
         let report = validate_mounted_write_errno_budget(&catalog);
-        assert!(report.errors.iter().any(|err| err
-            .contains("broad_fallback class must declare broad_fallback_justification")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("broad_fallback class must declare broad_fallback_justification")
+        }));
     }
 
     #[test]
@@ -659,8 +651,9 @@ mod tests {
             .expect("broad fallback cell exists");
         cell.broad_fallback_count = 0;
         let report = validate_mounted_write_errno_budget(&catalog);
-        assert!(report.errors.iter().any(|err| err
-            .contains("broad_fallback class must record a positive broad_fallback_count")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("broad_fallback class must record a positive broad_fallback_count")
+        }));
     }
 
     #[test]
@@ -706,8 +699,12 @@ mod tests {
         let mut catalog = fixture_catalog();
         catalog.max_broad_fallback_budget_per_cell = 0;
         let report = validate_mounted_write_errno_budget(&catalog);
-        assert!(report.errors.iter().any(|err| err
-            .contains("max_broad_fallback_budget_per_cell must be positive")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("max_broad_fallback_budget_per_cell must be positive"))
+        );
     }
 
     #[test]
@@ -715,8 +712,12 @@ mod tests {
         let mut catalog = fixture_catalog();
         catalog.cells[0].artifact_fields.clear();
         let report = validate_mounted_write_errno_budget(&catalog);
-        assert!(report.errors.iter().any(|err| err
-            .contains("must declare at least one artifact_field")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must declare at least one artifact_field"))
+        );
     }
 
     #[test]

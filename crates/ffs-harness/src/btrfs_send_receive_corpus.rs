@@ -18,9 +18,8 @@ use std::collections::BTreeSet;
 pub const BTRFS_SEND_RECEIVE_CORPUS_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_BTRFS_SEND_RECEIVE_CORPUS_PATH: &str =
     "tests/btrfs-send-receive-corpus/btrfs_send_receive_corpus.json";
-const DEFAULT_BTRFS_SEND_RECEIVE_CORPUS_JSON: &str = include_str!(
-    "../../../tests/btrfs-send-receive-corpus/btrfs_send_receive_corpus.json"
-);
+const DEFAULT_BTRFS_SEND_RECEIVE_CORPUS_JSON: &str =
+    include_str!("../../../tests/btrfs-send-receive-corpus/btrfs_send_receive_corpus.json");
 
 const ALLOWED_SUPPORTED_SUBSETS: [&str; 5] = [
     "parse_only",
@@ -133,9 +132,8 @@ pub struct BtrfsSendReceiveCorpusReport {
 }
 
 pub fn parse_btrfs_send_receive_corpus(text: &str) -> Result<BtrfsSendReceiveCorpus> {
-    serde_json::from_str(text).map_err(|err| {
-        anyhow::anyhow!("failed to parse btrfs send/receive corpus JSON: {err}")
-    })
+    serde_json::from_str(text)
+        .map_err(|err| anyhow::anyhow!("failed to parse btrfs send/receive corpus JSON: {err}"))
 }
 
 pub fn validate_default_btrfs_send_receive_corpus() -> Result<BtrfsSendReceiveCorpusReport> {
@@ -162,7 +160,13 @@ pub fn validate_btrfs_send_receive_corpus(
 
     validate_corpus_top_level(corpus, &mut errors);
     for case in &corpus.cases {
-        validate_case(case, &mut ids, &mut subsets, &mut refusal_kinds, &mut errors);
+        validate_case(
+            case,
+            &mut ids,
+            &mut subsets,
+            &mut refusal_kinds,
+            &mut errors,
+        );
     }
     validate_required_subsets(&subsets, &mut errors);
     validate_required_refusals(&refusal_kinds, &mut errors);
@@ -179,10 +183,7 @@ pub fn validate_btrfs_send_receive_corpus(
     }
 }
 
-fn validate_corpus_top_level(
-    corpus: &BtrfsSendReceiveCorpus,
-    errors: &mut Vec<String>,
-) {
+fn validate_corpus_top_level(corpus: &BtrfsSendReceiveCorpus, errors: &mut Vec<String>) {
     if corpus.schema_version != BTRFS_SEND_RECEIVE_CORPUS_SCHEMA_VERSION {
         errors.push(format!(
             "btrfs send/receive corpus schema_version must be {BTRFS_SEND_RECEIVE_CORPUS_SCHEMA_VERSION}, got {}",
@@ -299,10 +300,7 @@ fn validate_snapshots(case: &BtrfsSendReceiveCase, errors: &mut Vec<String>) {
     }
 }
 
-fn validate_stream_and_target_hashes(
-    case: &BtrfsSendReceiveCase,
-    errors: &mut Vec<String>,
-) {
+fn validate_stream_and_target_hashes(case: &BtrfsSendReceiveCase, errors: &mut Vec<String>) {
     let stream_required = matches!(
         case.expected_outcome.as_str(),
         "parse_success" | "export_success" | "receive_success" | "roundtrip_success"
@@ -480,19 +478,14 @@ fn is_uuid(value: &str) -> bool {
         return false;
     }
     let bytes = value.as_bytes();
-    [8, 13, 18, 23]
-        .iter()
-        .all(|i| bytes[*i] == b'-')
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(i, b)| {
-                if [8, 13, 18, 23].contains(&i) {
-                    *b == b'-'
-                } else {
-                    b.is_ascii_hexdigit()
-                }
-            })
+    [8, 13, 18, 23].iter().all(|i| bytes[*i] == b'-')
+        && bytes.iter().enumerate().all(|(i, b)| {
+            if [8, 13, 18, 23].contains(&i) {
+                *b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
 }
 
 #[cfg(test)]
@@ -560,8 +553,9 @@ mod tests {
             .cases
             .retain(|case| case.expected_outcome != "refused_incremental_parent_mismatch");
         let report = validate_btrfs_send_receive_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("missing required refusal `refused_incremental_parent_mismatch`")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("missing required refusal `refused_incremental_parent_mismatch`")
+        }));
     }
 
     #[test]
@@ -601,8 +595,9 @@ mod tests {
             .expect("roundtrip fixture exists");
         case.supported_subset = "parse_only".to_owned();
         let report = validate_btrfs_send_receive_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("outcome `roundtrip_success` requires supported_subset=`roundtrip_supported`")));
+        assert!(report.errors.iter().any(|err| err.contains(
+            "outcome `roundtrip_success` requires supported_subset=`roundtrip_supported`"
+        )));
     }
 
     #[test]
@@ -644,8 +639,9 @@ mod tests {
             parent.generation = source_gen + 1;
         }
         let report = validate_btrfs_send_receive_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("parent_snapshot generation must be less than source generation")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("parent_snapshot generation must be less than source generation")
+        }));
     }
 
     #[test]
@@ -679,8 +675,13 @@ mod tests {
             .expect("refused_unsupported_record fixture exists");
         case.unsupported_record = String::new();
         let report = validate_btrfs_send_receive_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("refused_unsupported_record must declare unsupported_record")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err
+                    .contains("refused_unsupported_record must declare unsupported_record"))
+        );
     }
 
     #[test]
@@ -706,8 +707,9 @@ mod tests {
         let mut corpus = fixture_corpus();
         corpus.cases[0].unsupported_record = "encoded_write".to_owned();
         let report = validate_btrfs_send_receive_corpus(&corpus);
-        assert!(report.errors.iter().any(|err| err
-            .contains("non-unsupported-record outcome must leave unsupported_record empty")));
+        assert!(report.errors.iter().any(|err| {
+            err.contains("non-unsupported-record outcome must leave unsupported_record empty")
+        }));
     }
 
     #[test]
