@@ -3,7 +3,8 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_harness::load_sparse_fixture;
 use ffs_ondisk::{
-    Ext4GroupDesc, Ext4Inode, parse_dev_item, parse_dir_block, parse_dx_root, parse_extent_tree,
+    BtrfsHeader, BtrfsSuperblock, Ext4GroupDesc, Ext4Inode, parse_dev_item, parse_dir_block,
+    parse_dx_root, parse_extent_tree, parse_internal_items, parse_leaf_items,
     parse_sys_chunk_array, parse_xattr_block,
 };
 use std::hint::black_box;
@@ -159,6 +160,67 @@ fn bench_btrfs_dev_item_parse(c: &mut Criterion) {
     });
 }
 
+// bd-js1k5 — bench coverage for btrfs parsers on the mounted-image
+// hot path that bd-6eyj5 left un-benched. The existing
+// `bench_btrfs_sys_chunk_parse` pre-parses the superblock during
+// setup and benches only sys_chunk_array decoding; these benches
+// expose the parsers themselves to the perf gate.
+
+fn bench_btrfs_superblock_parse_region(c: &mut Criterion) {
+    let data = load_sparse_fixture(&fixture_path("btrfs_superblock_sparse.json"))
+        .expect("load btrfs_superblock_sparse fixture");
+
+    c.bench_function("btrfs_superblock_parse_region", |b| {
+        b.iter(|| {
+            let sb = BtrfsSuperblock::parse_superblock_region(black_box(&data))
+                .expect("btrfs superblock parse");
+            black_box(sb);
+        });
+    });
+}
+
+fn bench_btrfs_leaf_items_parse(c: &mut Criterion) {
+    let data = load_sparse_fixture(&fixture_path("btrfs_fstree_leaf.json"))
+        .expect("load btrfs_fstree_leaf fixture");
+
+    c.bench_function("btrfs_leaf_items_parse", |b| {
+        b.iter(|| {
+            let (header, items) = parse_leaf_items(black_box(&data)).expect("leaf items parse");
+            black_box((header, items));
+        });
+    });
+}
+
+fn bench_btrfs_internal_items_parse(c: &mut Criterion) {
+    // btrfs_leaf_node.json has level=3 in the header and therefore
+    // exercises `parse_internal_items` (internal-node decoding) rather
+    // than `parse_leaf_items` (leaf decoding) — distinct code paths.
+    let data = load_sparse_fixture(&fixture_path("btrfs_leaf_node.json"))
+        .expect("load btrfs_leaf_node fixture");
+
+    c.bench_function("btrfs_internal_items_parse", |b| {
+        b.iter(|| {
+            let (header, ptrs) =
+                parse_internal_items(black_box(&data)).expect("internal items parse");
+            black_box((header, ptrs));
+        });
+    });
+}
+
+fn bench_btrfs_header_parse_from_block(c: &mut Criterion) {
+    // Header-only access path; transitively covered by the leaf/internal
+    // parsers but also called standalone elsewhere in the codebase.
+    let data = load_sparse_fixture(&fixture_path("btrfs_fstree_leaf.json"))
+        .expect("load btrfs_fstree_leaf fixture for header bench");
+
+    c.bench_function("btrfs_header_parse_from_block", |b| {
+        b.iter(|| {
+            let header = BtrfsHeader::parse_from_block(black_box(&data)).expect("header parse");
+            black_box(header);
+        });
+    });
+}
+
 fn bench_ext4_extent_tree_index_parse(c: &mut Criterion) {
     // The leaf path is exercised by `bench_ext4_extent_tree_parse` via the
     // inode fixture's i_block region; this bench covers the internal-node
@@ -188,5 +250,9 @@ criterion_group!(
     bench_ext4_dx_root_parse,
     bench_btrfs_sys_chunk_parse,
     bench_btrfs_dev_item_parse,
+    bench_btrfs_superblock_parse_region,
+    bench_btrfs_leaf_items_parse,
+    bench_btrfs_internal_items_parse,
+    bench_btrfs_header_parse_from_block,
 );
 criterion_main!(ondisk);
