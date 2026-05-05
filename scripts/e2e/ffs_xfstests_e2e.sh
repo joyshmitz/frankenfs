@@ -919,7 +919,7 @@ counts = dict(sorted(Counter(case["status"] for case in cases).items()))
 manifest = {
     "schema_version": 1,
     "baseline_id": baseline_id,
-    "bead_id": "bd-kr3qu",
+    "bead_id": "bd-rchk3.3",
     "subset_version": subset_version,
     "environment": {
         "manifest_id": environment_manifest_id,

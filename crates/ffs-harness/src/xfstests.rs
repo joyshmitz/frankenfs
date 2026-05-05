@@ -204,6 +204,7 @@ pub const XFSTESTS_BASELINE_STATUS_VOCABULARY: &[XfstestsBaselineRowStatus] = &[
     XfstestsBaselineRowStatus::Interrupted,
     XfstestsBaselineRowStatus::Resumed,
 ];
+pub const XFSTESTS_BASELINE_BEAD_ID: &str = "bd-rchk3.3";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct XfstestsRawArtifact {
@@ -533,7 +534,7 @@ pub fn build_xfstests_baseline_manifest(
     Ok(XfstestsBaselineManifest {
         schema_version: 1,
         baseline_id: input.baseline_id.to_owned(),
-        bead_id: "bd-kr3qu".to_owned(),
+        bead_id: XFSTESTS_BASELINE_BEAD_ID.to_owned(),
         subset_version: input.subset_version.to_owned(),
         environment: XfstestsBaselineEnvironment {
             manifest_id: input.environment_manifest_id.to_owned(),
@@ -567,6 +568,11 @@ pub fn validate_xfstests_baseline_manifest(manifest: &XfstestsBaselineManifest) 
 
     if manifest.schema_version != 1 {
         errors.push("xfstests baseline manifest schema_version must be 1".to_owned());
+    }
+    if manifest.bead_id != XFSTESTS_BASELINE_BEAD_ID {
+        errors.push(format!(
+            "xfstests baseline manifest bead_id must be {XFSTESTS_BASELINE_BEAD_ID}"
+        ));
     }
     require_non_empty("baseline_id", &manifest.baseline_id, &mut errors);
     require_non_empty("subset_version", &manifest.subset_version, &mut errors);
@@ -2429,7 +2435,7 @@ mod tests {
         XfstestsBaselineManifest {
             schema_version: 1,
             baseline_id: "xfstests-baseline-test".to_owned(),
-            bead_id: "bd-kr3qu".to_owned(),
+            bead_id: XFSTESTS_BASELINE_BEAD_ID.to_owned(),
             subset_version: "xfstests-curated-v1".to_owned(),
             environment: XfstestsBaselineEnvironment {
                 manifest_id: "sha256:env".to_owned(),
@@ -3190,6 +3196,7 @@ generic/001  2s ... pass\n";
             manifest.raw_artifacts[0].sha256,
             sha256_hex(&fs::read(&raw)?)
         );
+        assert_eq!(manifest.bead_id, XFSTESTS_BASELINE_BEAD_ID);
         assert_eq!(manifest.cases[0].status, XfstestsBaselineRowStatus::Passed);
         assert_eq!(manifest.cases[1].status, XfstestsBaselineRowStatus::Failed);
         assert_eq!(manifest.cases[2].status, XfstestsBaselineRowStatus::Skipped);
