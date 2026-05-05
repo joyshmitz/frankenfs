@@ -20633,9 +20633,15 @@ mod tests {
             .statfs(&cx, &mut RequestScope::empty(), InodeNumber(1))
             .expect_err("StubFs should inherit the default statfs rejection");
 
-        let FfsError::UnsupportedFeature(message) = err else {
-            panic!("expected UnsupportedFeature for default statfs");
+        let message = if let FfsError::UnsupportedFeature(message) = err {
+            message
+        } else {
+            String::new()
         };
+        assert!(
+            !message.is_empty(),
+            "expected UnsupportedFeature for default statfs"
+        );
         assert_eq!(message, "statfs is not supported by this backend");
         assert!(
             !message.contains("not implemented"),
