@@ -1971,6 +1971,68 @@ mod tests {
             let result = trim_nul_padded(bytes);
             prop_assert_eq!(result, s.trim());
         }
+
+        // ── S_IS* predicate metamorphic relations (bd-0636l) ─────────
+
+        /// MR-A — Mask isolation: every S_IS* predicate ignores the
+        /// lower 12 bits (permissions / sticky / setuid / setgid).
+        /// `predicate(mode) == predicate(mode & S_IFMT)` for any u16.
+        /// Pins that the mask is correctly applied at every callsite.
+        #[test]
+        fn proptest_s_is_predicates_mask_isolation(mode in any::<u16>()) {
+            let mode_masked = mode & S_IFMT;
+            prop_assert_eq!(is_regular_file(mode), is_regular_file(mode_masked));
+            prop_assert_eq!(is_directory(mode), is_directory(mode_masked));
+            prop_assert_eq!(is_symlink(mode), is_symlink(mode_masked));
+            prop_assert_eq!(is_character_device(mode), is_character_device(mode_masked));
+            prop_assert_eq!(is_block_device(mode), is_block_device(mode_masked));
+            prop_assert_eq!(is_fifo(mode), is_fifo(mode_masked));
+            prop_assert_eq!(is_socket(mode), is_socket(mode_masked));
+        }
+
+        /// MR-B — Mutual exclusivity: for any u16, AT MOST ONE
+        /// predicate returns true. A regression that changed `==`
+        /// to `&` or `|` in any predicate would fail this MR.
+        #[test]
+        fn proptest_s_is_predicates_mutually_exclusive(mode in any::<u16>()) {
+            let count = u32::from(is_regular_file(mode))
+                + u32::from(is_directory(mode))
+                + u32::from(is_symlink(mode))
+                + u32::from(is_character_device(mode))
+                + u32::from(is_block_device(mode))
+                + u32::from(is_fifo(mode))
+                + u32::from(is_socket(mode));
+            prop_assert!(count <= 1, "at most one S_IS* predicate may return true");
+        }
+
+        /// MR-C — Total coverage on canonical S_IF* values: any mode
+        /// whose top 4 bits match a defined S_IF* constant satisfies
+        /// EXACTLY ONE predicate; any other mode satisfies NONE.
+        /// Sentinel test: the kernel reserves only the 7 listed type
+        /// fields (010..0140 in octal); other patterns in the upper
+        /// nibble (e.g. S_IFMT itself = 0o170_000) must NOT classify.
+        #[test]
+        fn proptest_s_is_predicates_total_coverage(mode in any::<u16>()) {
+            let masked = mode & S_IFMT;
+            let count = u32::from(is_regular_file(mode))
+                + u32::from(is_directory(mode))
+                + u32::from(is_symlink(mode))
+                + u32::from(is_character_device(mode))
+                + u32::from(is_block_device(mode))
+                + u32::from(is_fifo(mode))
+                + u32::from(is_socket(mode));
+            // Mode is in the canonical S_IF* set if and only if
+            // exactly one predicate returns true.
+            let in_canonical = matches!(
+                masked,
+                S_IFREG | S_IFDIR | S_IFLNK | S_IFCHR | S_IFBLK | S_IFIFO | S_IFSOCK
+            );
+            if in_canonical {
+                prop_assert_eq!(count, 1);
+            } else {
+                prop_assert_eq!(count, 0);
+            }
+        }
     }
 
     #[test]
