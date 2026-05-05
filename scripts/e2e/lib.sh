@@ -356,6 +356,44 @@ e2e_fuse_capability_available() {
 }
 
 #######################################
+# Remove or preserve a temporary file according to the E2E cleanup policy.
+# Arguments:
+#   $1 - Temp file path
+#######################################
+e2e_cleanup_tmp_file() {
+    local path="$1"
+
+    [[ -z "$path" ]] && return 0
+
+    if [[ "${FFS_E2E_DISABLE_TEMP_CLEANUP:-0}" == "1" ]]; then
+        if [[ -e "$path" ]]; then
+            e2e_log "Temp cleanup disabled; preserving temp file: $path"
+        fi
+    else
+        rm -f "$path"
+    fi
+}
+
+#######################################
+# Remove or preserve a temporary directory according to the E2E cleanup policy.
+# Arguments:
+#   $1 - Temp directory path
+#######################################
+e2e_cleanup_tmp_dir() {
+    local path="$1"
+
+    [[ -z "$path" ]] && return 0
+
+    if [[ "${FFS_E2E_DISABLE_TEMP_CLEANUP:-0}" == "1" ]]; then
+        if [[ -d "$path" ]]; then
+            e2e_log "Temp cleanup disabled; preserving temp directory: $path"
+        fi
+    else
+        rm -rf "$path" 2>/dev/null || true
+    fi
+}
+
+#######################################
 # Run a command and log output
 # Arguments:
 #   $* - Command to run
@@ -380,11 +418,7 @@ e2e_run() {
     head -500 "$output_file" | while IFS= read -r line; do
         e2e_log "  $line"
     done
-    if [[ "${FFS_E2E_DISABLE_TEMP_CLEANUP:-0}" == "1" ]]; then
-        e2e_log "Temp cleanup disabled; preserving command output temp file: $output_file"
-    else
-        rm -f "$output_file"
-    fi
+    e2e_cleanup_tmp_file "$output_file"
 
     end_time=$(date +%s.%N)
     duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "N/A")
@@ -567,11 +601,7 @@ write $tmp_dir/readme.txt readme.txt
 write $tmp_dir/hello.txt testdir/hello.txt
 EOF
 
-    if [[ "${FFS_E2E_DISABLE_TEMP_CLEANUP:-0}" == "1" ]]; then
-        e2e_log "Temp cleanup disabled; preserving image population temp directory: $tmp_dir"
-    else
-        rm -rf "$tmp_dir"
-    fi
+    e2e_cleanup_tmp_dir "$tmp_dir"
 
     e2e_log "Image created successfully"
 }
@@ -801,20 +831,8 @@ e2e_cleanup() {
     # Unmount any active mount
     e2e_unmount "${E2E_MOUNT_POINT:-}" 2>/dev/null || true
 
-    if [[ "${FFS_E2E_DISABLE_TEMP_CLEANUP:-0}" == "1" ]]; then
-        for item in "${E2E_CLEANUP_ITEMS[@]:-}"; do
-            if [[ -d "$item" ]]; then
-                e2e_log "Temp cleanup disabled; preserving temp directory: $item"
-            fi
-        done
-        return "$exit_code"
-    fi
-
-    # Remove temp directories
     for item in "${E2E_CLEANUP_ITEMS[@]:-}"; do
-        if [[ -d "$item" ]]; then
-            rm -rf "$item" 2>/dev/null || true
-        fi
+        e2e_cleanup_tmp_dir "$item"
     done
 
     return "$exit_code"

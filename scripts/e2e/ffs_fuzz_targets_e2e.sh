@@ -34,24 +34,6 @@ PASS_COUNT=0
 FAIL_COUNT=0
 TOTAL=0
 
-cleanup_tmp_file() {
-    local path="$1"
-    if [[ "${FFS_E2E_DISABLE_TEMP_CLEANUP:-0}" == "1" ]]; then
-        e2e_log "Temp cleanup disabled; preserving temp file: $path"
-    else
-        rm -f "$path"
-    fi
-}
-
-cleanup_tmp_dir() {
-    local path="$1"
-    if [[ "${FFS_E2E_DISABLE_TEMP_CLEANUP:-0}" == "1" ]]; then
-        e2e_log "Temp cleanup disabled; preserving temp directory: $path"
-    else
-        rm -rf "$path"
-    fi
-}
-
 scenario_result() {
     local scenario_id="$1"
     local status="$2"
@@ -102,7 +84,7 @@ else
     e2e_log "Build log tail:"
     tail -20 "$BUILD_LOG" | while IFS= read -r line; do e2e_log "  $line"; done
 fi
-cleanup_tmp_file "$BUILD_LOG"
+e2e_cleanup_tmp_file "$BUILD_LOG"
 
 #######################################
 # Scenario 3: Smoke run each target (100 iterations, no crash)
@@ -122,7 +104,7 @@ for target in "${EXPECTED_TARGETS[@]}"; do
             scenario_result "fuzz_smoke_${target}" "FAIL" "Smoke run failed with exit code ${EXIT_CODE}"
         fi
     fi
-    cleanup_tmp_file "$SMOKE_LOG"
+    e2e_cleanup_tmp_file "$SMOKE_LOG"
 done
 
 #######################################
@@ -178,7 +160,7 @@ if [[ -x "$SEED_SCRIPT" ]]; then
     else
         scenario_result "fuzz_seed_pipeline" "FAIL" "Seed generation failed"
     fi
-    cleanup_tmp_file "$GEN_LOG"
+    e2e_cleanup_tmp_file "$GEN_LOG"
 else
     scenario_result "fuzz_seed_pipeline" "FAIL" "Seed generation script missing or not executable"
 fi
@@ -199,7 +181,7 @@ if cargo fuzz run fuzz_ext4_metadata --fuzz-dir fuzz -- -runs=200 -max_total_tim
 else
     scenario_result "fuzz_dict_coverage" "FAIL" "Dictionary-enhanced fuzz run failed"
 fi
-cleanup_tmp_file "$DICT_LOG"
+e2e_cleanup_tmp_file "$DICT_LOG"
 
 #######################################
 # Scenario 8: Nightly campaign runner produces valid summary
@@ -234,8 +216,8 @@ print('ok' if all(k in d for k in required) else 'missing')
     else
         scenario_result "fuzz_nightly_campaign" "FAIL" "Nightly campaign script failed"
     fi
-    cleanup_tmp_file "$CAMPAIGN_LOG"
-    cleanup_tmp_dir "$FUZZ_ARTIFACTS_DIR"
+    e2e_cleanup_tmp_file "$CAMPAIGN_LOG"
+    e2e_cleanup_tmp_dir "$FUZZ_ARTIFACTS_DIR"
     unset FUZZ_ARTIFACTS_DIR
 else
     scenario_result "fuzz_nightly_campaign" "FAIL" "Nightly campaign script missing or not executable"

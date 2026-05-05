@@ -75,7 +75,7 @@ if cargo test -p ffs-mvcc -- wal::tests 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
 else
     scenario_result "vs_format_commit_roundtrip" "FAIL" "WAL encode/decode tests failed"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 3: Truncated tail handling tests
@@ -88,7 +88,7 @@ if cargo test -p ffs-mvcc -- truncat 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
 else
     scenario_result "vs_format_truncated_tail" "FAIL" "Truncated tail tests failed"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 4: CRC corruption detection tests
@@ -101,7 +101,7 @@ if cargo test -p ffs-mvcc -- crc corrupt 2>"$TEST_LOG" | tee -a "$TEST_LOG"; the
 else
     scenario_result "vs_format_corrupt_crc" "FAIL" "CRC corruption detection tests failed"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 5: Monotonicity enforcement tests
@@ -114,7 +114,7 @@ if cargo test -p ffs-mvcc -- duplicate_commit_sequence 2>"$TEST_LOG" | tee -a "$
 else
     scenario_result "vs_format_monotonic" "FAIL" "Monotonicity enforcement tests failed"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 6: Checkpoint + replay tests
@@ -127,7 +127,7 @@ if cargo test -p ffs-mvcc -- checkpoint 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
 else
     scenario_result "vs_format_checkpoint_replay" "FAIL" "Checkpoint + replay tests failed"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 7: OQ7 format stability tests
@@ -141,7 +141,7 @@ if cargo test -p ffs-mvcc -- oq7_ 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
 else
     scenario_result "vs_format_sentinels" "FAIL" "OQ7 format stability tests failed"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 8: Decision record exists
@@ -176,7 +176,7 @@ if cargo test -p ffs-mvcc -- sync_failure 2>"$TEST_LOG" | tee -a "$TEST_LOG"; th
 else
     scenario_result "vs_format_sync_required" "FAIL" "Sync failure handling tests failed"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Summary
