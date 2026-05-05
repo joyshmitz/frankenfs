@@ -12620,6 +12620,103 @@ mod tests {
             prop_assert_eq!(size % 4, 0);
         }
 
+        // ── Ext4DirEntry::actual_size kernel-formula MRs (bd-wwket) ──
+
+        /// MR-A (kernel-formula equivalence) — actual_size(name_len)
+        /// MUST equal the kernel macro `EXT4_DIR_REC_LEN(name_len)
+        /// = (name_len + 8 + 3) & ~3` byte-for-byte. Pins the exact
+        /// formula so a future refactor (e.g. `name_len + 11` vs
+        /// `8 + name_len + 3`) cannot drift the alignment math.
+        #[test]
+        fn ext4_proptest_dir_entry_actual_size_matches_kernel_macro(name_len in 0_u8..=255) {
+            let entry = Ext4DirEntry {
+                inode: 1, rec_len: 0, name_len,
+                file_type: Ext4FileType::RegFile,
+                name: vec![b'a'; usize::from(name_len)],
+            };
+            let kernel_formula = (usize::from(name_len) + 8 + 3) & !3;
+            prop_assert_eq!(entry.actual_size(), kernel_formula);
+        }
+
+        /// MR-B (monotonicity) — actual_size is non-decreasing in
+        /// name_len. Adding a byte to the name never shrinks the
+        /// on-disk record.
+        #[test]
+        fn ext4_proptest_dir_entry_actual_size_monotonic(name_len in 0_u8..=254) {
+            let mk = |nl: u8| -> usize {
+                let entry = Ext4DirEntry {
+                    inode: 1, rec_len: 0, name_len: nl,
+                    file_type: Ext4FileType::RegFile,
+                    name: vec![b'a'; usize::from(nl)],
+                };
+                entry.actual_size()
+            };
+            prop_assert!(mk(name_len) <= mk(name_len + 1));
+        }
+
+        /// MR-C (step-bounded) — between consecutive name_len values,
+        /// actual_size grows by either 0 or 4 (never 1, 2, 3, or > 4).
+        /// This is the sharpest formulation of the 4-byte alignment
+        /// contract.
+        #[test]
+        fn ext4_proptest_dir_entry_actual_size_step_is_zero_or_four(name_len in 0_u8..=254) {
+            let mk = |nl: u8| -> usize {
+                let entry = Ext4DirEntry {
+                    inode: 1, rec_len: 0, name_len: nl,
+                    file_type: Ext4FileType::RegFile,
+                    name: vec![b'a'; usize::from(nl)],
+                };
+                entry.actual_size()
+            };
+            let delta = mk(name_len + 1) - mk(name_len);
+            prop_assert!(
+                delta == 0 || delta == 4,
+                "actual_size step must be 0 or 4, got {delta} for name_len={name_len}"
+            );
+        }
+
+        /// MR-D (4-byte cycle) — across any window of 4 consecutive
+        /// name_len values, actual_size grows by exactly 4 in total.
+        /// Pins that the alignment rounds up ONCE per 4-byte boundary.
+        #[test]
+        fn ext4_proptest_dir_entry_actual_size_grows_four_per_window(name_len in 0_u8..=251) {
+            let mk = |nl: u8| -> usize {
+                let entry = Ext4DirEntry {
+                    inode: 1, rec_len: 0, name_len: nl,
+                    file_type: Ext4FileType::RegFile,
+                    name: vec![b'a'; usize::from(nl)],
+                };
+                entry.actual_size()
+            };
+            let total_delta = mk(name_len + 4) - mk(name_len);
+            prop_assert_eq!(
+                total_delta, 4,
+                "actual_size must grow by exactly 4 across 4 name_len increments"
+            );
+        }
+
+        // ── Ext4FileType::from_raw round-trip / boundary (bd-wwket) ──
+
+        /// MR-FG — from_raw is a total function that round-trips on
+        /// every defined variant and falls back to Unknown for every
+        /// other u8. Distinct from the bd-343v3 fixed-input pin: this
+        /// proptest covers every value in [0, 256) so any future drift
+        /// in the match arms (e.g. swapping two variants) trips here
+        /// regardless of which value the regression hit.
+        #[test]
+        fn ext4_proptest_file_type_from_raw_total_and_round_trips(raw in any::<u8>()) {
+            let parsed = Ext4FileType::from_raw(raw);
+            if raw < EXT4_FT_MAX {
+                // Defined range: round-trip via discriminant.
+                prop_assert_eq!(parsed as u8, raw);
+            } else {
+                // Out-of-range (including the 0xDE dir-csum sentinel,
+                // which is recognised by the dir-tail pipeline rather
+                // than by from_raw): MUST decode to Unknown.
+                prop_assert_eq!(parsed, Ext4FileType::Unknown);
+            }
+        }
+
         // ── rec_len_from_disk ────────────────────────────────────────
 
         /// 4-byte-aligned rec_len decodes to itself for standard blocks.
