@@ -25,8 +25,9 @@
 //! failure rather than a silent on-disk corruption.
 
 use ffs_ondisk::{
-    EXT4_FT_DIR_CSUM, stamp_dir_block_checksum, stamp_extent_block_checksum,
-    verify_dir_block_checksum, verify_extent_block_checksum,
+    EXT4_FT_DIR_CSUM, Ext4GroupDesc, stamp_block_bitmap_checksum, stamp_dir_block_checksum,
+    stamp_extent_block_checksum, stamp_inode_bitmap_checksum, verify_block_bitmap_checksum,
+    verify_dir_block_checksum, verify_extent_block_checksum, verify_inode_bitmap_checksum,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -143,4 +144,98 @@ fuzz_target!(|data: &[u8]| {
     stamp_extent_block_checksum(&mut extent_block, csum_seed, ino, generation);
     verify_extent_block_checksum(&extent_block, csum_seed, ino, generation)
         .expect("MR-2: stamped extent_block must verify successfully");
+
+    // ── MR-3 — block-bitmap stamp/verify round-trip ────────────────────
+    // (bd-7x87u — extends bd-nkfga's dir/extent coverage to bitmaps.)
+    // The bitmap checksum is computed over `clusters_per_group / 8`
+    // bytes of bitmap; the result is stored in
+    // `gd.block_bitmap_csum`, with the high half preserved only when
+    // desc_size >= 64. We exercise both 32-byte and 64-byte desc paths.
+    let mut cursor3 = ByteCursor::new(cursor2.remainder());
+
+    // Bound bitmap size (8..=1024 bytes) and clusters_per_group so that
+    // checksum_len = clusters_per_group/8 stays within bitmap.len().
+    let raw_bitmap_len = 8_usize + (usize::from(cursor3.next_u8() % 128)) * 8; // [8, 1032)
+    let bitmap_len = raw_bitmap_len.min(1024);
+    let mut block_bitmap = vec![0_u8; bitmap_len];
+    for byte in &mut block_bitmap {
+        *byte = cursor3.next_u8();
+    }
+    // clusters_per_group must be a multiple of 8 and <= bitmap_len * 8;
+    // pick a value that keeps `checksum_len = clusters_per_group/8`
+    // strictly within the bitmap.
+    let clusters_per_group = (u32::from(cursor3.next_u8()) % 32 + 1) * 8 // [8, 264) clusters
+        .min(u32::try_from(bitmap_len).unwrap_or(u32::MAX) * 8);
+    let desc_size: u16 = if cursor3.next_u8() & 1 == 0 { 32 } else { 64 };
+
+    let mut block_gd = Ext4GroupDesc {
+        block_bitmap: 0,
+        inode_bitmap: 0,
+        inode_table: 0,
+        free_blocks_count: 0,
+        free_inodes_count: 0,
+        used_dirs_count: 0,
+        itable_unused: 0,
+        flags: 0,
+        checksum: 0,
+        block_bitmap_csum: 0,
+        inode_bitmap_csum: 0,
+    };
+    stamp_block_bitmap_checksum(
+        &block_bitmap,
+        csum_seed,
+        clusters_per_group,
+        &mut block_gd,
+        desc_size,
+    );
+    verify_block_bitmap_checksum(
+        &block_bitmap,
+        csum_seed,
+        clusters_per_group,
+        &block_gd,
+        desc_size,
+    )
+    .expect("MR-3: stamped block_bitmap must verify against its own gd");
+
+    // ── MR-4 — inode-bitmap stamp/verify round-trip ───────────────────
+    // Same shape, distinct code path: writes to gd.inode_bitmap_csum,
+    // uses `inodes_per_group / 8` for the checksum coverage length.
+    let raw_inode_bitmap_len = 8_usize + (usize::from(cursor3.next_u8() % 128)) * 8;
+    let inode_bitmap_len = raw_inode_bitmap_len.min(1024);
+    let mut inode_bitmap = vec![0_u8; inode_bitmap_len];
+    for byte in &mut inode_bitmap {
+        *byte = cursor3.next_u8();
+    }
+    let inodes_per_group = (u32::from(cursor3.next_u8()) % 32 + 1) * 8
+        .min(u32::try_from(inode_bitmap_len).unwrap_or(u32::MAX) * 8);
+    let inode_desc_size: u16 = if cursor3.next_u8() & 1 == 0 { 32 } else { 64 };
+
+    let mut inode_gd = Ext4GroupDesc {
+        block_bitmap: 0,
+        inode_bitmap: 0,
+        inode_table: 0,
+        free_blocks_count: 0,
+        free_inodes_count: 0,
+        used_dirs_count: 0,
+        itable_unused: 0,
+        flags: 0,
+        checksum: 0,
+        block_bitmap_csum: 0,
+        inode_bitmap_csum: 0,
+    };
+    stamp_inode_bitmap_checksum(
+        &inode_bitmap,
+        csum_seed,
+        inodes_per_group,
+        &mut inode_gd,
+        inode_desc_size,
+    );
+    verify_inode_bitmap_checksum(
+        &inode_bitmap,
+        csum_seed,
+        inodes_per_group,
+        &inode_gd,
+        inode_desc_size,
+    )
+    .expect("MR-4: stamped inode_bitmap must verify against its own gd");
 });
