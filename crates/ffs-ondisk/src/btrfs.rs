@@ -4110,6 +4110,132 @@ mod tests {
                 ParseError::InvalidField { field: "sys_chunk_array_size", .. }
             ));
         }
+
+        // ── parse_dev_item metamorphic relations (bd-t2nrx) ───────────
+
+        /// MR-1 — `parse_dev_item` never panics on arbitrary bytes of
+        /// any length. Existing fixed-input tests cover a handful of
+        /// hand-crafted negative cases; this proptest exercises the
+        /// full input space [0, 256] bytes wide.
+        #[test]
+        fn btrfs_proptest_parse_dev_item_no_panic(
+            data in proptest::collection::vec(any::<u8>(), 0..=256),
+        ) {
+            let _ = parse_dev_item(&data);
+        }
+
+        /// MR-2 — Tail-invariance: `parse_dev_item` reads exactly the
+        /// first 98 bytes (BTRFS_DEV_ITEM_SIZE). For any valid input,
+        /// appending arbitrary suffix bytes MUST yield the same parse
+        /// result. A regression that hashed or dispatched on tail
+        /// bytes would slip past the fixed-input tests.
+        #[test]
+        fn btrfs_proptest_parse_dev_item_tail_invariance(
+            devid in 1_u64..=u64::MAX,
+            total_bytes in 1_u64..=u64::MAX,
+            bytes_used_pct in 0_u32..=100,
+            io_align in any::<u32>(),
+            io_width in any::<u32>(),
+            sector_size in any::<u32>(),
+            dev_type in any::<u64>(),
+            generation in any::<u64>(),
+            start_offset in any::<u64>(),
+            dev_group in any::<u32>(),
+            seek_speed in any::<u8>(),
+            bandwidth in any::<u8>(),
+            uuid in proptest::array::uniform16(any::<u8>()),
+            fsid in proptest::array::uniform16(any::<u8>()),
+            tail in proptest::collection::vec(any::<u8>(), 0..=128),
+        ) {
+            // bytes_used must be <= total_bytes per parse_dev_item's
+            // accounting check (l. 1098). Compute it as a percentage.
+            let bytes_used = total_bytes / 100 * u64::from(bytes_used_pct);
+
+            let mut buf = [0_u8; BTRFS_DEV_ITEM_SIZE];
+            buf[0..8].copy_from_slice(&devid.to_le_bytes());
+            buf[8..16].copy_from_slice(&total_bytes.to_le_bytes());
+            buf[16..24].copy_from_slice(&bytes_used.to_le_bytes());
+            buf[24..28].copy_from_slice(&io_align.to_le_bytes());
+            buf[28..32].copy_from_slice(&io_width.to_le_bytes());
+            buf[32..36].copy_from_slice(&sector_size.to_le_bytes());
+            buf[36..44].copy_from_slice(&dev_type.to_le_bytes());
+            buf[44..52].copy_from_slice(&generation.to_le_bytes());
+            buf[52..60].copy_from_slice(&start_offset.to_le_bytes());
+            buf[60..64].copy_from_slice(&dev_group.to_le_bytes());
+            buf[64] = seek_speed;
+            buf[65] = bandwidth;
+            buf[66..82].copy_from_slice(&uuid);
+            buf[82..98].copy_from_slice(&fsid);
+
+            let parsed_canonical =
+                parse_dev_item(&buf).expect("canonical 98-byte payload must parse");
+
+            let mut extended = buf.to_vec();
+            extended.extend_from_slice(&tail);
+            let parsed_extended = parse_dev_item(&extended)
+                .expect("extended payload must parse since the parser ignores bytes >= 98");
+
+            prop_assert_eq!(
+                parsed_canonical, parsed_extended,
+                "parse_dev_item must ignore bytes at offset >= 98"
+            );
+        }
+
+        /// MR-3 — Field round-trip / byte-offset contract: every
+        /// documented field offset is honored. Pins the 98-byte
+        /// layout so any future drift in the offset table surfaces
+        /// here rather than corrupting btrfs multi-device reads.
+        #[test]
+        fn btrfs_proptest_parse_dev_item_field_offsets(
+            devid in 1_u64..=u64::MAX,
+            total_bytes in 1_u64..=u64::MAX,
+            bytes_used_pct in 0_u32..=100,
+            io_align in any::<u32>(),
+            io_width in any::<u32>(),
+            sector_size in any::<u32>(),
+            dev_type in any::<u64>(),
+            generation in any::<u64>(),
+            start_offset in any::<u64>(),
+            dev_group in any::<u32>(),
+            seek_speed in any::<u8>(),
+            bandwidth in any::<u8>(),
+            uuid in proptest::array::uniform16(any::<u8>()),
+            fsid in proptest::array::uniform16(any::<u8>()),
+        ) {
+            let bytes_used = total_bytes / 100 * u64::from(bytes_used_pct);
+
+            let mut buf = [0_u8; BTRFS_DEV_ITEM_SIZE];
+            buf[0..8].copy_from_slice(&devid.to_le_bytes());
+            buf[8..16].copy_from_slice(&total_bytes.to_le_bytes());
+            buf[16..24].copy_from_slice(&bytes_used.to_le_bytes());
+            buf[24..28].copy_from_slice(&io_align.to_le_bytes());
+            buf[28..32].copy_from_slice(&io_width.to_le_bytes());
+            buf[32..36].copy_from_slice(&sector_size.to_le_bytes());
+            buf[36..44].copy_from_slice(&dev_type.to_le_bytes());
+            buf[44..52].copy_from_slice(&generation.to_le_bytes());
+            buf[52..60].copy_from_slice(&start_offset.to_le_bytes());
+            buf[60..64].copy_from_slice(&dev_group.to_le_bytes());
+            buf[64] = seek_speed;
+            buf[65] = bandwidth;
+            buf[66..82].copy_from_slice(&uuid);
+            buf[82..98].copy_from_slice(&fsid);
+
+            let item = parse_dev_item(&buf).expect("synthesised payload must parse");
+            prop_assert_eq!(item.devid, devid);
+            prop_assert_eq!(item.total_bytes, total_bytes);
+            prop_assert_eq!(item.bytes_used, bytes_used);
+            prop_assert_eq!(item.io_align, io_align);
+            prop_assert_eq!(item.io_width, io_width);
+            prop_assert_eq!(item.sector_size, sector_size);
+            prop_assert_eq!(item.dev_type, dev_type);
+            prop_assert_eq!(item.generation, generation);
+            prop_assert_eq!(item.start_offset, start_offset);
+            prop_assert_eq!(item.dev_group, dev_group);
+            prop_assert_eq!(item.seek_speed, seek_speed);
+            prop_assert_eq!(item.bandwidth, bandwidth);
+            prop_assert_eq!(item.uuid, uuid);
+            prop_assert_eq!(item.fsid, fsid);
+        }
     }
 
     // ── RAID profile identification ────────────────────────────────
