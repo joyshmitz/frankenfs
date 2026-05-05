@@ -13,11 +13,37 @@
 # Environment:
 #   SKIP_MOUNT=1    Skip FUSE mount tests
 #   RUST_LOG=info   Rust log level
+#   RCH_BIN=rch     Remote cargo wrapper
+#   RCH_CARGO_TARGET_DIR=...  Target dir forwarded to RCH cargo
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
+
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:-CARGO_TARGET_DIR,RUST_LOG,RUST_BACKTRACE}"
+RCH_AGENT_TARGET_SUFFIX="${AGENT_NAME:-${USER:-agent}}"
+RCH_CARGO_TARGET_DIR="${RCH_CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_frankenfs_run_e2e_$RCH_AGENT_TARGET_SUFFIX}"
+
+rch_allow_env() {
+    local name="$1"
+    if [[ ",$RCH_ENV_ALLOWLIST," != *",$name,"* ]]; then
+        RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST},$name"
+    fi
+}
+
+rch_allow_env CARGO_TARGET_DIR
+rch_allow_env RUST_LOG
+rch_allow_env RUST_BACKTRACE
+
+run_rch_cargo() {
+    CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" \
+        RCH_ENV_ALLOWLIST="$RCH_ENV_ALLOWLIST" \
+        RCH_VISIBILITY="$RCH_VISIBILITY" \
+        "$RCH_BIN" exec -- cargo "$@"
+}
 
 # ── Options ──────────────────────────────────────────────────────────────────
 
@@ -71,7 +97,7 @@ fi
 
 if [[ "$SHELL_ONLY" -eq 0 ]]; then
     echo "=== Rust E2E Tests ==="
-    if cargo test -p ffs-harness --lib e2e:: 2>&1; then
+    if run_rch_cargo test -p ffs-harness --lib e2e:: 2>&1; then
         record "cargo test -p ffs-harness (e2e)" "PASS"
     else
         record "cargo test -p ffs-harness (e2e)" "FAIL"
