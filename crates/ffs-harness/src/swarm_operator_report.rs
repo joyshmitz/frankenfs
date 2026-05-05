@@ -489,6 +489,21 @@ mod tests {
         assert!(markdown.contains("proof-bundle"));
     }
 
+    /// bd-rchk0.33 - golden-output snapshot for
+    /// `render_swarm_operator_report_markdown`.
+    ///
+    /// The renderer output is consumed by proof-bundle/release-gate operator
+    /// workflows. The substring smoke above proves key text exists; this
+    /// snapshot pins the exact title, metadata bullets, table header, row
+    /// ordering, evidence-count formatting, and linked-bead rendering.
+    #[test]
+    fn render_swarm_operator_report_markdown_sample_snapshot() {
+        let validation = validate_swarm_operator_report(&sample_report());
+        let markdown = render_swarm_operator_report_markdown(&validation);
+
+        insta::assert_snapshot!("render_swarm_operator_report_markdown_sample", markdown);
+    }
+
     fn sample_report() -> SwarmOperatorReport {
         SwarmOperatorReport {
             schema_version: SWARM_OPERATOR_REPORT_SCHEMA_VERSION,

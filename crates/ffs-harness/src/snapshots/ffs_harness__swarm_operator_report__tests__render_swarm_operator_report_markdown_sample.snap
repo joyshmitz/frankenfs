@@ -1,0 +1,21 @@
+---
+source: crates/ffs-harness/src/swarm_operator_report.rs
+expression: markdown
+---
+# Swarm Operator Decision Report
+
+- Report: `bd-p2j3e.7-swarm-operator-report-test`
+- Valid: `true`
+- Cards: `6`
+- Required cards: `6`
+- Proof-bundle consumers: `proof-bundle`
+- Release-gate consumers: `release-gate`
+
+| Idea | Lane | Pattern | Claim | Evidence | Beads |
+|------|------|---------|-------|----------|-------|
+| `tail_latency_decomposition` | `bd-p2j3e.1` | `tail_latency_decomposition_pattern` | `experimental` | `1` | `bd-p2j3e.1` |
+| `numa_shard_harness` | `bd-p2j3e.2` | `numa_shard_harness_pattern` | `experimental` | `1` | `bd-p2j3e.2` |
+| `rcu_qsbr_metadata` | `bd-p2j3e.3` | `rcu_qsbr_metadata_pattern` | `experimental` | `1` | `bd-p2j3e.3` |
+| `parallel_wal_group_commit` | `bd-p2j3e.4` | `parallel_wal_group_commit_pattern` | `experimental` | `1` | `bd-p2j3e.4` |
+| `cache_budget_controller` | `bd-p2j3e.5` | `cache_budget_controller_pattern` | `experimental` | `1` | `bd-p2j3e.5` |
+| `scrub_repair_scheduler` | `bd-p2j3e.6` | `scrub_repair_scheduler_pattern` | `experimental` | `1` | `bd-p2j3e.6` |
