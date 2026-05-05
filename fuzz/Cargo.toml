@@ -12,6 +12,7 @@ anyhow = "1.0.102"
 asupersync = "0.3.1"
 brotli = "8.0"
 crc32c = "0.6.8"
+libc = "0.2.185"
 libfuzzer-sys = "0.4"
 zstd = "0.13"
 
@@ -172,6 +173,11 @@ doc = false
 [[bin]]
 name = "fuzz_detect_filesystem"
 path = "fuzz_targets/fuzz_detect_filesystem.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_file_handle"
+path = "fuzz_targets/fuzz_file_handle.rs"
 doc = false
 
 [[bin]]

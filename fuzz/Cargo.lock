@@ -535,6 +535,7 @@ dependencies = [
  "ffs-repair",
  "ffs-types",
  "ffs-xattr",
+ "libc",
  "libfuzzer-sys",
  "zstd",
 ]
