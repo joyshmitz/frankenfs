@@ -1575,6 +1575,38 @@ mod tests {
         assert!(markdown.contains("threshold"));
     }
 
+    /// bd-4lro0 — golden-output snapshot for
+    /// `render_release_gate_markdown` on the deterministic
+    /// `evaluate_release_gates(&sample_policy(), &proof)` fixture
+    /// (passing_proof with totals.pass = 8 to deliberately fail the
+    /// pass_lanes >= 9 threshold and produce a single
+    /// `threshold_failure` finding).
+    ///
+    /// Pins:
+    ///   * the title line `# FrankenFS Release Gate`
+    ///   * the 6-bullet metadata header (Policy / Bundle / Valid /
+    ///     Release ready / Diagnostics / Reproduction)
+    ///   * the Feature States section with its 6-column table
+    ///   * the Generated Wording section
+    ///   * the Findings section with its 6-column table
+    ///
+    /// Substring-only assertions in
+    /// `markdown_renders_feature_states_and_findings` cannot detect
+    /// column reorders, section ordering swaps, or table-cell drift;
+    /// this snapshot does. Sixth in the golden-snapshot series for
+    /// ffs-harness markdown renderers.
+    #[test]
+    fn render_release_gate_markdown_failing_threshold_snapshot() {
+        let mut proof = passing_proof();
+        proof.totals.pass = 8;
+        let report = evaluate_release_gates(&sample_policy(), &proof);
+        let markdown = render_release_gate_markdown(&report);
+        insta::assert_snapshot!(
+            "render_release_gate_markdown_failing_threshold",
+            markdown
+        );
+    }
+
     fn canonical_policy_path() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/release-gates/release_gate_policy_v1.json")

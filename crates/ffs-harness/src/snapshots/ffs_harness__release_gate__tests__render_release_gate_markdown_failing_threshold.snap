@@ -1,0 +1,25 @@
+---
+source: crates/ffs-harness/src/release_gate.rs
+expression: markdown
+---
+# FrankenFS Release Gate
+
+- Policy: `bd-rchk0.5.6.1-release-gate`
+- Bundle: `release-gate-proof`
+- Valid: `false`
+- Release ready: `false`
+- Diagnostics: findings=1 errors=0 warnings=0
+- Reproduction: `cargo run -p ffs-harness -- evaluate-release-gates --bundle manifest.json --policy release_gate.json`
+
+## Feature States
+| Feature | Previous | Target | Final | Upgrade allowed | Wording ID |
+|---|---:|---:|---:|---:|---|
+| `writeback_cache` | `experimental` | `validated` | `experimental` | `false` | `readme.writeback_cache` |
+
+## Generated Wording
+- `writeback_cache` / `readme.writeback_cache`: writeback_cache is experimental and requires operator caution.
+
+## Findings
+| ID | Feature | Severity | Final | Reason | Remediation |
+|---|---|---:|---:|---|---|
+| `writeback_cache::threshold_failure::1` | `writeback_cache` | `block` | `experimental` | threshold pass_lanes at_least 9 observed 8 | `bd-rchk0.5.6.1` |
