@@ -1121,6 +1121,9 @@ def excluded_row(case):
 errors = []
 if manifest.get("schema_version") != 1:
     errors.append("xfstests baseline manifest schema_version must be 1")
+expected_baseline_bead_id = "bd-rchk3.3"
+if manifest.get("bead_id") != expected_baseline_bead_id:
+    errors.append(f"xfstests baseline manifest bead_id must be {expected_baseline_bead_id}")
 
 raw_by_path = {}
 for artifact in manifest.get("raw_artifacts", []):
