@@ -16,6 +16,27 @@ REPO_ROOT="$(pwd)"
 IMAGES_DIR="tests/fixtures/images"
 GOLDEN_DIR="tests/fixtures/golden"
 CHECKSUM_FILE="$GOLDEN_DIR/checksums.txt"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:-CARGO_TARGET_DIR}"
+RCH_AGENT_TARGET_SUFFIX="${AGENT_NAME:-${USER:-agent}}"
+RCH_CARGO_TARGET_DIR="${RCH_CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_frankenfs_update_goldens_$RCH_AGENT_TARGET_SUFFIX}"
+
+rch_allow_env() {
+    local name="$1"
+    if [[ ",$RCH_ENV_ALLOWLIST," != *",$name,"* ]]; then
+        RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST},$name"
+    fi
+}
+
+rch_allow_env CARGO_TARGET_DIR
+
+run_rch_cargo() {
+    CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" \
+        RCH_ENV_ALLOWLIST="$RCH_ENV_ALLOWLIST" \
+        RCH_VISIBILITY="$RCH_VISIBILITY" \
+        "$RCH_BIN" exec -- cargo "$@"
+}
 
 write_golden_checksums() {
     (
@@ -64,7 +85,7 @@ echo ""
 
 # Build ffs-cli
 echo "=== Building ffs-cli ==="
-cargo build -p ffs-cli --release 2>&1 | tail -5
+run_rch_cargo build -p ffs-cli --release 2>&1 | tail -5
 echo ""
 
 # Regenerate all golden outputs
@@ -74,7 +95,7 @@ for img in "$IMAGES_DIR"/*.img; do
     golden="$GOLDEN_DIR/${name}.json"
 
     echo "  Generating: $name"
-    cargo run -p ffs-cli --release -- inspect "$img" --json 2>/dev/null > "$golden"
+    run_rch_cargo run -p ffs-cli --release -- inspect "$img" --json 2>/dev/null > "$golden"
 done
 echo ""
 
