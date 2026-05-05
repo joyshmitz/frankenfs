@@ -19,15 +19,16 @@ const RIGHT_LOGICAL: u64 = 0x30_000;
 const OWNER: u64 = 5;
 const GENERATION: u64 = 77;
 const PHYSICAL_SHIFT: u64 = 0x80_000;
+const MAX_INPUT_BYTES: usize = 4096;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Topology {
     Absent,
     SingleLeaf,
     InternalTwoLeaf,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CorruptionMode {
     None,
     BadChecksum,
@@ -497,7 +498,41 @@ fn assert_results_match(
     }
 }
 
+fn assert_shifted_reads_match(identity_reads: &[u64], shifted_reads: &[u64]) {
+    assert_eq!(
+        identity_reads.len(),
+        shifted_reads.len(),
+        "equivalent chunk mappings should issue the same number of physical reads"
+    );
+    for (identity, shifted) in identity_reads.iter().zip(shifted_reads) {
+        assert_eq!(
+            *identity + PHYSICAL_SHIFT,
+            *shifted,
+            "shifted chunk mapping should translate each physical read by PHYSICAL_SHIFT"
+        );
+    }
+}
+
+fn assert_corruption_contract(
+    image: &TreeImage,
+    result: &std::result::Result<TreeLogReplayResult, ParseError>,
+) {
+    if image.topology != Topology::Absent && image.corruption != CorruptionMode::None {
+        assert!(
+            result.is_err(),
+            "modeled non-absent corrupted tree-log was accepted: topology={:?} corruption={:?} result={:?}",
+            image.topology,
+            image.corruption,
+            result
+        );
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
+    if data.len() > MAX_INPUT_BYTES {
+        return;
+    }
+
     let image = build_tree_image(data);
 
     let (first_identity, first_reads) = run_replay(
@@ -530,6 +565,8 @@ fuzz_target!(|data: &[u8]| {
         &shifted_result,
         "equivalent chunk mappings for the same tree-log image",
     );
+    assert_shifted_reads_match(&first_reads, &shifted_reads);
+    assert_corruption_contract(&image, &first_identity);
 
     if image.topology == Topology::Absent {
         if let Ok(result) = &first_identity {
