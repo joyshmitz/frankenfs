@@ -3,8 +3,8 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_harness::load_sparse_fixture;
 use ffs_ondisk::{
-    BtrfsHeader, BtrfsSuperblock, Ext4GroupDesc, Ext4Inode, parse_dev_item, parse_dir_block,
-    parse_dx_root, parse_extent_tree, parse_internal_items, parse_leaf_items,
+    BtrfsHeader, BtrfsSuperblock, Ext4GroupDesc, Ext4Inode, dx_hash, parse_dev_item,
+    parse_dir_block, parse_dx_root, parse_extent_tree, parse_internal_items, parse_leaf_items,
     parse_sys_chunk_array, parse_xattr_block,
 };
 use std::hint::black_box;
@@ -236,6 +236,62 @@ fn bench_ext4_extent_tree_index_parse(c: &mut Criterion) {
     });
 }
 
+// bd-7pfh0 — bench coverage for ext4 dx_hash directory hash function
+// across all 5 supported hash versions plus the unknown-version
+// fallback. dx_hash is on every htree directory lookup; a regression
+// in any variant (swapped LEGACY multiplier, mis-aligned MD4 chunk
+// loop, slower TEA Feistel rounds) would silently degrade lookup
+// throughput without tripping any existing perf gate. Pairs with
+// bd-590tc (proptest MRs) and the existing dx_hash unit tests for
+// correctness; this pins the latency floor.
+
+fn bench_ext4_dx_hash(c: &mut Criterion) {
+    // Hash-version constants per fs/ext4/ext4.h (private in ondisk):
+    //   0 = LEGACY (signed), 1 = HALF_MD4, 2 = TEA (signed),
+    //   3 = LEGACY_UNSIGNED, 4 = HALF_MD4_UNSIGNED, 5 = TEA_UNSIGNED.
+    const HASH_VERSIONS: [(u8, &str); 6] = [
+        (0, "legacy_signed"),
+        (1, "half_md4_signed"),
+        (2, "tea_signed"),
+        (3, "legacy_unsigned"),
+        (4, "half_md4_unsigned"),
+        (5, "tea_unsigned"),
+    ];
+
+    // Representative directory-name workload: 32 names of varying
+    // lengths covering short ("a"), typical ("README.md"), nested
+    // ("path/to/some/deeply/nested/file.txt"), max-length-ish, and
+    // unicode-heavy patterns (as raw bytes — dx_hash takes &[u8]).
+    let names: Vec<Vec<u8>> = (0..32)
+        .map(|i| {
+            let mut name = format!("entry_{i:04}_").into_bytes();
+            // Pad to varying lengths to exercise both single-chunk
+            // and multi-chunk paths in HALF_MD4 (32-byte chunks) and
+            // TEA (16-byte chunks).
+            let pad_len = 4 + (i as usize % 64);
+            name.extend(std::iter::repeat_n(b'A' + (i as u8 % 26), pad_len));
+            name
+        })
+        .collect();
+
+    let seed: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
+
+    for (version, label) in HASH_VERSIONS {
+        c.bench_function(&format!("ext4_dx_hash_{label}"), |b| {
+            b.iter(|| {
+                for name in &names {
+                    let (major, minor) = dx_hash(
+                        black_box(version),
+                        black_box(name),
+                        black_box(&seed),
+                    );
+                    black_box((major, minor));
+                }
+            });
+        });
+    }
+}
+
 criterion_group!(
     ondisk,
     bench_ext4_inode_parse,
@@ -254,5 +310,6 @@ criterion_group!(
     bench_btrfs_leaf_items_parse,
     bench_btrfs_internal_items_parse,
     bench_btrfs_header_parse_from_block,
+    bench_ext4_dx_hash,
 );
 criterion_main!(ondisk);
