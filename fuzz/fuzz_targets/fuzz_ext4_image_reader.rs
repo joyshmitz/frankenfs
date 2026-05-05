@@ -37,13 +37,19 @@ struct ReaderOutcome {
     group0_ok: bool,
     root_mode: Option<u16>,
     file_mode: Option<u16>,
+    file_read_len: Option<usize>,
+    file_read_prefix: Option<Vec<u8>>,
+    file_xattr_count: Option<usize>,
+    root_dir_count: Option<usize>,
+    root_dir_has_file: Option<bool>,
+    lookup_file_inode: Option<u32>,
     fast_link_target: Option<Vec<u8>>,
     long_link_target: Option<Vec<u8>>,
     root_block_ok: bool,
     file_block_ok: bool,
-    lookup_file: bool,
-    follow_fast_link: bool,
-    follow_long_link: bool,
+    resolve_file_ino: Option<u64>,
+    follow_fast_link_ino: Option<u64>,
+    follow_long_link_ino: Option<u64>,
 }
 
 struct ByteCursor<'a> {
@@ -227,6 +233,10 @@ fn build_input(data: &[u8]) -> Vec<u8> {
     }
 }
 
+fn input_selects_clean_image(data: &[u8]) -> bool {
+    data.first().copied().unwrap_or(0) % 4 == 0
+}
+
 fn run_reader_workflow(image: &[u8]) -> Option<ReaderOutcome> {
     let reader = Ext4ImageReader::new(image).ok()?;
     let root_inode = reader
@@ -242,20 +252,48 @@ fn run_reader_workflow(image: &[u8]) -> Option<ReaderOutcome> {
         .read_inode(image, InodeNumber(u64::from(LONG_LINK_INO)))
         .ok();
 
-    if let Some(inode) = file_inode.as_ref() {
+    let (file_read_len, file_read_prefix) = if let Some(inode) = file_inode.as_ref() {
         let mut buf = [0_u8; 32];
-        let _ = reader.read_inode_data(image, inode, 0, &mut buf);
-        let _ = reader.read_xattrs_ibody(inode);
-    }
-    if let Some(inode) = root_inode.as_ref() {
-        let _ = reader.read_dir(image, inode);
-        let _ = reader.lookup(image, inode, b"file");
-    }
+        match reader.read_inode_data(image, inode, 0, &mut buf) {
+            Ok(len) => {
+                let prefix_len = len.min(buf.len());
+                (Some(len), Some(buf[..prefix_len].to_vec()))
+            }
+            Err(_) => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+
+    let file_xattr_count = file_inode
+        .as_ref()
+        .and_then(|inode| reader.read_xattrs_ibody(inode).ok())
+        .map(|xattrs| xattrs.len());
+
+    let root_dir_entries = root_inode
+        .as_ref()
+        .and_then(|inode| reader.read_dir(image, inode).ok());
+    let root_dir_count = root_dir_entries.as_ref().map(Vec::len);
+    let root_dir_has_file = root_dir_entries
+        .as_ref()
+        .map(|entries| entries.iter().any(|entry| entry.name == b"file"));
+
+    let lookup_file_inode = root_inode
+        .as_ref()
+        .and_then(|inode| reader.lookup(image, inode, b"file").ok())
+        .flatten()
+        .map(|entry| entry.inode);
 
     Some(ReaderOutcome {
         group0_ok: reader.read_group_desc(image, GroupNumber(0)).is_ok(),
         root_mode: root_inode.as_ref().map(|inode| inode.mode),
         file_mode: file_inode.as_ref().map(|inode| inode.mode),
+        file_read_len,
+        file_read_prefix,
+        file_xattr_count,
+        root_dir_count,
+        root_dir_has_file,
+        lookup_file_inode,
         fast_link_target: fast_link_inode
             .as_ref()
             .and_then(|inode| reader.read_symlink(image, inode).ok()),
@@ -268,14 +306,47 @@ fn run_reader_workflow(image: &[u8]) -> Option<ReaderOutcome> {
         file_block_ok: reader
             .read_block(image, BlockNumber(u64::from(FILE_DATA_BLOCK)))
             .is_ok(),
-        lookup_file: root_inode
-            .as_ref()
-            .and_then(|inode| reader.lookup(image, inode, b"file").ok())
-            .flatten()
-            .is_some(),
-        follow_fast_link: reader.resolve_path_follow(image, "/link").is_ok(),
-        follow_long_link: reader.resolve_path_follow(image, "/longlink").is_ok(),
+        resolve_file_ino: reader
+            .resolve_path(image, "/file")
+            .ok()
+            .map(|(ino, _)| ino.0),
+        follow_fast_link_ino: reader
+            .resolve_path_follow(image, "/link")
+            .ok()
+            .map(|(ino, _)| ino.0),
+        follow_long_link_ino: reader
+            .resolve_path_follow(image, "/longlink")
+            .ok()
+            .map(|(ino, _)| ino.0),
     })
+}
+
+fn assert_clean_image_outcome(outcome: &ReaderOutcome) {
+    assert!(outcome.group0_ok);
+    assert_eq!(outcome.root_mode, Some(0o040_755));
+    assert_eq!(outcome.file_mode, Some(0o100_644));
+    assert_eq!(outcome.file_read_len, Some(27));
+    assert_eq!(
+        outcome.file_read_prefix.as_deref(),
+        Some(b"FrankenFS ext4 reader fuzz\n".as_slice())
+    );
+    assert_eq!(outcome.file_xattr_count, Some(0));
+    assert_eq!(outcome.root_dir_count, Some(5));
+    assert_eq!(outcome.root_dir_has_file, Some(true));
+    assert_eq!(outcome.lookup_file_inode, Some(FILE_INO));
+    assert_eq!(
+        outcome.fast_link_target.as_deref(),
+        Some(b"file".as_slice())
+    );
+    assert_eq!(
+        outcome.long_link_target.as_deref(),
+        Some(b"file".as_slice())
+    );
+    assert!(outcome.root_block_ok);
+    assert!(outcome.file_block_ok);
+    assert_eq!(outcome.resolve_file_ino, Some(u64::from(FILE_INO)));
+    assert_eq!(outcome.follow_fast_link_ino, Some(u64::from(FILE_INO)));
+    assert_eq!(outcome.follow_long_link_ino, Some(u64::from(FILE_INO)));
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -284,5 +355,8 @@ fuzz_target!(|data: &[u8]| {
     let second = run_reader_workflow(&image);
     if first != second {
         std::process::abort();
+    }
+    if input_selects_clean_image(data) {
+        assert_clean_image_outcome(first.as_ref().expect("clean synthetic image must mount"));
     }
 });
