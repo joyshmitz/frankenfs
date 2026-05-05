@@ -9953,6 +9953,79 @@ mod tests {
         assert_eq!(result, !standard);
     }
 
+    /// bd-qfzk2 / CR-A — Conformance against the canonical CRC32C
+    /// (Castagnoli) reference vectors. ext4_chksum bridges the kernel's
+    /// raw-register `crc32c_le` to Rust's standard-convention
+    /// `crc32c_append`; for seed `~0` the bridged value is the bitwise
+    /// complement of the standard CRC32C (because the kernel returns
+    /// the raw register state, not the standard input/output-XORed
+    /// value). The reference vectors are the IETF-published
+    /// CRC32C-Castagnoli check values.
+    #[test]
+    fn ext4_chksum_matches_kernel_reference_vectors() {
+        // Standard CRC32C (Castagnoli) reference values:
+        // ""             → 0x00000000
+        // "a"            → 0xC1D04330
+        // "123456789"    → 0xE3069283 (canonical CRC32C check value)
+        // ext4_chksum(~0, x) returns the kernel raw-register state, which
+        // is the bitwise complement of the standard CRC32C value.
+        assert_eq!(ext4_chksum(!0, b""), !0x0000_0000_u32, "empty");
+        assert_eq!(ext4_chksum(!0, b"a"), !0xC1D0_4330_u32, "single-byte");
+        assert_eq!(
+            ext4_chksum(!0, b"123456789"),
+            !0xE306_9283_u32,
+            "canonical CRC32C check value"
+        );
+    }
+
+    /// bd-qfzk2 / CR-B — Hop-by-hop append associativity (the kernel's
+    /// incremental checksum protocol):
+    /// ext4_chksum(seed, A ++ B) == ext4_chksum(ext4_chksum(seed, A), B)
+    /// The kernel uses this to compute a single checksum across
+    /// disjoint memory regions (e.g., struct prefix + zeroed-csum-field
+    /// + remainder). A regression breaking this would make our
+    /// re-encoded checksums diverge silently from kernel-mounted images.
+    /// Property test under the existing proptest! block at the end of
+    /// `tests` exercises arbitrary seed + A + B; here we pin one fixed
+    /// case for fast feedback.
+    #[test]
+    fn ext4_chksum_hop_by_hop_append_fixed_case() {
+        let seed = 0x1234_5678_u32;
+        let a = b"prefix-region";
+        let b = b"-suffix-region";
+        let mut concat = Vec::with_capacity(a.len() + b.len());
+        concat.extend_from_slice(a);
+        concat.extend_from_slice(b);
+        let direct = ext4_chksum(seed, &concat);
+        let two_hop = ext4_chksum(ext4_chksum(seed, a), b);
+        assert_eq!(
+            direct, two_hop,
+            "ext4_chksum must be associative across disjoint region appends"
+        );
+    }
+
+    /// bd-qfzk2 / CR-C — Empty-suffix idempotence:
+    /// ext4_chksum(seed, &[]) == seed.
+    /// Trivial corollary of CR-B with B=empty, but worth pinning
+    /// because a regression that accidentally negated empty input
+    /// would silently corrupt every incremental checksum continuation.
+    #[test]
+    fn ext4_chksum_empty_suffix_is_seed_identity() {
+        for &seed in &[
+            0x0000_0000_u32,
+            0xFFFF_FFFF,
+            0x1234_5678,
+            0xDEAD_BEEF,
+            0xCAFE_BABE,
+        ] {
+            assert_eq!(
+                ext4_chksum(seed, &[]),
+                seed,
+                "appending an empty region must leave the seed unchanged (seed={seed:#x})"
+            );
+        }
+    }
+
     #[test]
     fn ext4_extent_is_unwritten_boundary() {
         let written = Ext4Extent {
