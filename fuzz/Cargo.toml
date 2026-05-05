@@ -293,3 +293,8 @@ doc = false
 name = "fuzz_ext4_group_desc_roundtrip"
 path = "fuzz_targets/fuzz_ext4_group_desc_roundtrip.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_btrfs_devitem_roundtrip"
+path = "fuzz_targets/fuzz_btrfs_devitem_roundtrip.rs"
+doc = false
