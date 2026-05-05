@@ -2,11 +2,11 @@
 
 use ffs_ondisk::Ext4Inode;
 use ffs_xattr::{
-    list_xattrs, list_xattrs_for_access, parse_xattr_name, set_xattr, XattrReadAccess,
-    XattrWriteAccess,
+    get_xattr_for_access, list_xattrs, list_xattrs_for_access, parse_xattr_name, remove_xattr,
+    set_xattr, XattrReadAccess, XattrWriteAccess,
 };
 use libfuzzer_sys::fuzz_target;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const INLINE_IBODY_LEN: usize = 160;
 const EXTERNAL_BLOCK_LEN: usize = 4096;
@@ -119,6 +119,14 @@ fn normalize_list(result: ffs_error::Result<Vec<String>>) -> Result<Vec<String>,
     result.map_err(|err| err.to_string())
 }
 
+fn normalize_get(result: ffs_error::Result<Option<Vec<u8>>>) -> Result<Option<Vec<u8>>, String> {
+    result.map_err(|err| err.to_string())
+}
+
+fn normalize_remove(result: ffs_error::Result<bool>) -> Result<bool, String> {
+    result.map_err(|err| err.to_string())
+}
+
 fuzz_target!(|data: &[u8]| {
     let mut cursor = ByteCursor::new(data);
     let entry_count = 1 + cursor.next_index(MAX_ENTRIES);
@@ -136,6 +144,7 @@ fuzz_target!(|data: &[u8]| {
 
     let mut expected_default = BTreeSet::new();
     let mut expected_admin = BTreeSet::new();
+    let mut expected_values = BTreeMap::new();
 
     for _ in 0..entry_count {
         let full_name = build_name(&mut cursor);
@@ -158,6 +167,7 @@ fuzz_target!(|data: &[u8]| {
             )
             .is_ok()
             {
+                expected_values.insert(full_name.clone(), value);
                 expected_admin.insert(full_name.clone());
                 if is_default_visible(&full_name) {
                     expected_default.insert(full_name);
@@ -202,6 +212,126 @@ fuzz_target!(|data: &[u8]| {
             actual_admin, expected_admin,
             "admin xattr listing should match all successfully stored names"
         );
+    }
+
+    for (name, value) in &expected_values {
+        let admin_get_first = normalize_get(get_xattr_for_access(
+            &inode,
+            Some(&external_block),
+            name,
+            admin_read,
+        ));
+        let admin_get_second = normalize_get(get_xattr_for_access(
+            &inode,
+            Some(&external_block),
+            name,
+            admin_read,
+        ));
+        assert_eq!(
+            admin_get_first, admin_get_second,
+            "admin xattr get path must be deterministic"
+        );
+        assert_eq!(
+            admin_get_first,
+            Ok(Some(value.clone())),
+            "admin xattr get should return the last successfully stored value"
+        );
+
+        let default_get = normalize_get(get_xattr_for_access(
+            &inode,
+            Some(&external_block),
+            name,
+            XattrReadAccess::default(),
+        ));
+        let expected_default_value = if is_default_visible(name) {
+            Ok(Some(value.clone()))
+        } else {
+            Ok(None)
+        };
+        assert_eq!(
+            default_get, expected_default_value,
+            "default xattr get visibility should match default list visibility"
+        );
+    }
+
+    if !expected_values.is_empty() {
+        let remove_name = expected_values
+            .keys()
+            .nth(cursor.next_index(expected_values.len()))
+            .cloned()
+            .unwrap_or_default();
+        let mut first_inode = inode.clone();
+        let mut first_external_block = external_block.clone();
+        let mut second_inode = inode.clone();
+        let mut second_external_block = external_block.clone();
+
+        let remove_first = normalize_remove(remove_xattr(
+            &mut first_inode,
+            Some(&mut first_external_block),
+            &remove_name,
+            admin,
+        ));
+        let remove_second = normalize_remove(remove_xattr(
+            &mut second_inode,
+            Some(&mut second_external_block),
+            &remove_name,
+            admin,
+        ));
+        assert_eq!(
+            remove_first, remove_second,
+            "xattr removal must be deterministic on identical state"
+        );
+        assert_eq!(
+            remove_first,
+            Ok(true),
+            "removing a successfully stored xattr should report success"
+        );
+
+        let removed_admin = normalize_get(get_xattr_for_access(
+            &first_inode,
+            Some(&first_external_block),
+            &remove_name,
+            admin_read,
+        ));
+        assert_eq!(
+            removed_admin,
+            Ok(None),
+            "removed xattr should no longer be visible to admin get"
+        );
+
+        if let Ok(names) =
+            list_xattrs_for_access(&first_inode, Some(&first_external_block), admin_read)
+        {
+            assert!(
+                !names.iter().any(|name| name == &remove_name),
+                "removed xattr should no longer appear in admin listing"
+            );
+        }
+        if is_default_visible(&remove_name) {
+            if let Ok(names) = list_xattrs(&first_inode, Some(&first_external_block)) {
+                assert!(
+                    !names.iter().any(|name| name == &remove_name),
+                    "removed xattr should no longer appear in default listing"
+                );
+            }
+        }
+
+        for (name, value) in expected_values
+            .iter()
+            .filter(|(name, _)| *name != &remove_name)
+        {
+            let remaining_admin = normalize_get(get_xattr_for_access(
+                &first_inode,
+                Some(&first_external_block),
+                name,
+                admin_read,
+            ));
+            assert_eq!(
+                remaining_admin,
+                Ok(Some(value.clone())),
+                "removing one xattr should preserve the other stored values"
+            );
+        }
     }
 
     if inode.file_acl != 0 {
