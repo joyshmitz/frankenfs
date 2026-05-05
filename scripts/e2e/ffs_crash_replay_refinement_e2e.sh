@@ -78,13 +78,32 @@ write_permissioned_blocker() {
     local reason="$4"
     shift 4
     local path="$E2E_LOG_DIR/${scenario_id}.json"
-    python3 - "$path" "$scenario_id" "$lane_type" "$classification" "$reason" "$PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK" "$@" <<'PY'
+    local stdout_path="$E2E_LOG_DIR/${scenario_id}.stdout.not_started"
+    local stderr_path="$E2E_LOG_DIR/${scenario_id}.stderr.not_started"
+    printf 'permissioned crash replay was not started for %s\n' "$scenario_id" >"$stdout_path"
+    printf 'missing prerequisites: %s\n' "$*" >"$stderr_path"
+    python3 - "$path" "$scenario_id" "$lane_type" "$classification" "$reason" "$PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK" "$stdout_path" "$stderr_path" "$@" <<'PY'
 import json
 import shutil
 import sys
 from pathlib import Path
 
-path, scenario_id, lane_type, classification, reason, ack_token, *missing = sys.argv[1:]
+(
+    path,
+    scenario_id,
+    lane_type,
+    classification,
+    reason,
+    ack_token,
+    stdout_path,
+    stderr_path,
+    *missing,
+) = sys.argv[1:]
+rerun = (
+    "FFS_ENABLE_PERMISSIONED_CRASH_REPLAY=1 "
+    f"FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK={ack_token} "
+    "./scripts/e2e/ffs_crash_replay_refinement_e2e.sh"
+)
 payload = {
     "scenario_id": scenario_id,
     "outcome": "SKIP",
@@ -94,7 +113,10 @@ payload = {
     "reason": reason,
     "missing_prerequisites": missing,
     "permissioned_execution_attempted": False,
+    "cleanup_status": "not_mounted_no_image_mutation",
     "hides_product_failure": False,
+    "stdout_path": stdout_path,
+    "stderr_path": stderr_path,
     "host_probe": {
         "dev_fuse_present": Path("/dev/fuse").exists(),
         "fusermount3_path": shutil.which("fusermount3"),
@@ -105,11 +127,8 @@ payload = {
         "env": "FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK",
         "expected": ack_token,
     },
-    "rerun": (
-        "FFS_ENABLE_PERMISSIONED_CRASH_REPLAY=1 "
-        f"FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK={ack_token} "
-        "./scripts/e2e/ffs_crash_replay_refinement_e2e.sh"
-    ),
+    "rerun": rerun,
+    "reproduction_command": rerun,
 }
 Path(path).write_text(json.dumps(payload, indent=2) + "\n")
 PY
@@ -135,6 +154,71 @@ permissioned_lane_or_blocker() {
     fi
 }
 
+validate_permissioned_blocker_artifacts() {
+    python3 - "$PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK" "$@" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+ack_token, *artifact_paths = sys.argv[1:]
+if not artifact_paths:
+    raise SystemExit("missing blocker artifact paths")
+
+for artifact_arg in artifact_paths:
+    artifact_path = Path(artifact_arg)
+    artifact = json.loads(artifact_path.read_text())
+    scenario_id = artifact.get("scenario_id", artifact_path.name)
+    required_fields = [
+        "scenario_id",
+        "outcome",
+        "lane_type",
+        "classification",
+        "blocker_kind",
+        "reason",
+        "missing_prerequisites",
+        "permissioned_execution_attempted",
+        "cleanup_status",
+        "stdout_path",
+        "stderr_path",
+        "host_probe",
+        "required_ack",
+        "rerun",
+        "reproduction_command",
+    ]
+    missing_fields = [field for field in required_fields if field not in artifact]
+    if missing_fields:
+        raise SystemExit(f"{scenario_id}: blocker missing fields {missing_fields}")
+    if artifact["outcome"] != "SKIP":
+        raise SystemExit(f"{scenario_id}: blocker outcome must be SKIP")
+    if artifact["blocker_kind"] != "permissioned_crash_replay_capability_blocker":
+        raise SystemExit(f"{scenario_id}: wrong blocker_kind")
+    if artifact["permissioned_execution_attempted"] is not False:
+        raise SystemExit(f"{scenario_id}: permissioned execution must not be attempted")
+    if artifact["cleanup_status"] != "not_mounted_no_image_mutation":
+        raise SystemExit(f"{scenario_id}: cleanup_status does not prove non-mutation")
+    host_probe = artifact["host_probe"]
+    if host_probe.get("mount_attempted") is not False:
+        raise SystemExit(f"{scenario_id}: mount_attempted must be false")
+    required_ack = artifact["required_ack"]
+    if required_ack.get("env") != "FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK":
+        raise SystemExit(f"{scenario_id}: required_ack env drifted")
+    if required_ack.get("expected") != ack_token:
+        raise SystemExit(f"{scenario_id}: required_ack token drifted")
+    missing_prereqs = artifact["missing_prerequisites"]
+    if "missing_FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK" not in missing_prereqs:
+        raise SystemExit(f"{scenario_id}: probe-only blocker must record missing ACK")
+    for command_field in ["rerun", "reproduction_command"]:
+        command = artifact[command_field]
+        if ack_token not in command or "FFS_ENABLE_PERMISSIONED_CRASH_REPLAY=1" not in command:
+            raise SystemExit(f"{scenario_id}: {command_field} lacks permissioned rerun context")
+    for path_field in ["stdout_path", "stderr_path"]:
+        if not Path(artifact[path_field]).exists():
+            raise SystemExit(f"{scenario_id}: {path_field} artifact missing")
+
+print(f"validated {len(artifact_paths)} permissioned blocker artifacts")
+PY
+}
+
 run_rch_capture() {
     local log_path="$1"
     shift
@@ -147,6 +231,10 @@ run_rch_capture() {
 }
 
 e2e_init "ffs_crash_replay_refinement"
+if [[ "${FFS_E2E_DISABLE_TEMP_CLEANUP:-0}" == "1" ]]; then
+    E2E_CLEANUP_ITEMS=()
+    e2e_log "Temp cleanup disabled by FFS_E2E_DISABLE_TEMP_CLEANUP=1"
+fi
 
 REPORT_JSON="$E2E_LOG_DIR/crash_replay_report.json"
 RUN_RAW="$E2E_LOG_DIR/crash_replay_run.raw"
@@ -165,6 +253,13 @@ if [[ "${FFS_CRASH_REPLAY_PERMISSIONED_PROBE_ONLY:-0}" == "1" ]]; then
         "repair_interruption" \
         "repair_interruption" \
         "permissioned repair interruption prerequisites are present, but real repair-interruption execution remains parent bd-8bg7c work"
+    if validate_permissioned_blocker_artifacts \
+        "$E2E_LOG_DIR/crash_replay_mounted_write_reopen.json" \
+        "$E2E_LOG_DIR/crash_replay_repair_interruption.json"; then
+        e2e_log "PERMISSIONED_CRASH_REPLAY_BLOCKER_CONTRACT|outcome=PASS|artifacts=${E2E_LOG_DIR}/crash_replay_mounted_write_reopen.json,${E2E_LOG_DIR}/crash_replay_repair_interruption.json"
+    else
+        scenario_result "permissioned_crash_replay_blocker_contract" "FAIL" "blocker contract validation failed"
+    fi
     if ((FAIL_COUNT == 0)); then
         e2e_log "Permissioned crash replay blocker probe passed: ${PASS_COUNT}/${TOTAL} (skipped=${SKIP_COUNT})"
         e2e_pass
