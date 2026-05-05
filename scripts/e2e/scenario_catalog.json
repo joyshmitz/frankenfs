@@ -736,10 +736,40 @@
           "evidence": "xfstests_preflight_blocked"
         },
         {
+          "id": "xfstests_preflight_host_missing",
+          "category": "error",
+          "status": "active",
+          "evidence": "xfstests_preflight_host_missing"
+        },
+        {
+          "id": "xfstests_preflight_permission_denied",
+          "category": "error",
+          "status": "active",
+          "evidence": "xfstests_preflight_permission_denied"
+        },
+        {
+          "id": "xfstests_preflight_dpkg_locked",
+          "category": "error",
+          "status": "active",
+          "evidence": "xfstests_preflight_dpkg_locked"
+        },
+        {
           "id": "xfstests_preflight_worker",
           "category": "happy",
           "status": "active",
           "evidence": "xfstests_preflight_worker"
+        },
+        {
+          "id": "xfstests_preflight_worker_mismatch",
+          "category": "error",
+          "status": "active",
+          "evidence": "xfstests_preflight_worker_mismatch"
+        },
+        {
+          "id": "xfstests_preflight_unsupported_local",
+          "category": "edge",
+          "status": "active",
+          "evidence": "xfstests_preflight_unsupported_local"
         }
       ]
     },

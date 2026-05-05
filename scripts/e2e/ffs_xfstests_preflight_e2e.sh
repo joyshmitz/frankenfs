@@ -21,7 +21,9 @@ Usage: scripts/e2e/ffs_xfstests_preflight_e2e.sh [OPTIONS]
 
 Options:
   --out FILE          Write the prerequisite manifest to FILE.
-  --fixture NAME     Use a simulated host state: all-present, blocked, worker.
+  --fixture NAME     Use a simulated host state: all-present, blocked,
+                     host-missing, permission-denied, dpkg-locked,
+                     worker, worker-mismatch, unsupported-local.
   --self-test        Run fixture-mode script tests and write a self-test report.
   -h, --help         Show this help.
 EOF
@@ -82,6 +84,8 @@ STATUS_VALUES = {
     "available-on-worker",
 }
 
+PREFLIGHT_ID = "xfstests-preflight-v1"
+PROBE_VERSION = "xfstests-preflight-2026-05-05"
 RISK_VALUES = {"satisfied", "blocking", "advisory"}
 LANE_IMPACT_VALUES = {
     "none",
@@ -251,21 +255,42 @@ def prereq(
     evidence: list[str] | None = None,
     version: str | None = None,
     probes: list[dict] | None = None,
+    observed_value: str | None = None,
 ) -> dict:
     assert status in STATUS_VALUES, status
     risk_level = risk_level_for(status, blocks)
     lane_impact = lane_impact_for(name, status, blocks)
+    observed = observed_value
+    if observed is None:
+        observed = "; ".join(evidence or []) or status
+    requires_operator_action = status != "present"
     return {
         "name": name,
+        "prerequisite_id": name,
+        "preflight_id": PREFLIGHT_ID,
+        "probe_version": PROBE_VERSION,
         "status": status,
         "classification": f"{name}:{status}",
         "blocks_real_xfstests": blocks,
+        "observed_value": observed,
         "remediation": remediation,
         "remediation_text_id": f"xfstests-preflight-{name.replace('_', '-')}",
         "risk_level": risk_level,
         "authoritative_lane_impact": lane_impact,
         "side_effect_policy": SIDE_EFFECT_POLICY,
         "safe_remediation": dict(SAFE_REMEDIATION),
+        "safe_guidance": {
+            "user_action_text": remediation,
+            "requires_operator_action": requires_operator_action,
+            "requires_fresh_follow_up_probe": True,
+            "may_run_package_manager": False,
+            "may_run_install": False,
+            "may_mount_or_unmount": False,
+            "may_create_persistent_paths": False,
+            "claim_state_after_remediation": (
+                "blocked_until_fresh_probe" if requires_operator_action else "satisfied_by_current_probe"
+            ),
+        },
         "reproduction_command": preflight_reproduction_command(),
         "evidence": evidence or [],
         "version": version,
@@ -274,40 +299,86 @@ def prereq(
 
 
 def fixture_manifest(mode: str, artifact_dir: pathlib.Path) -> dict:
-    if mode not in {"all-present", "blocked", "worker"}:
+    fixture_modes = {
+        "all-present",
+        "blocked",
+        "host-missing",
+        "permission-denied",
+        "dpkg-locked",
+        "worker",
+        "worker-mismatch",
+        "unsupported-local",
+    }
+    if mode not in fixture_modes:
         raise SystemExit(f"unknown fixture mode: {mode}")
 
     status_by_name: dict[str, tuple[str, bool, str]] = {
         name: ("present", False, "fixture marks prerequisite present")
         for name in REQUIRED_PROBES
     }
+
+    def set_status(name: str, status: str, blocks: bool, remediation: str) -> None:
+        status_by_name[name] = (status, blocks, remediation)
+
     if mode == "blocked":
-        status_by_name.update(
-            {
-                "xfs_headers": ("missing", True, "install xfslibs-dev or xfsprogs-devel"),
-                "libaio": ("missing", True, "install libaio-dev"),
-                "ltp_fsstress": ("missing", True, "build xfstests ltp/fsstress helper"),
-                "xfstests_helpers": ("missing", True, "provide a built xfstests checkout"),
-                "dev_fuse": ("blocked-by-host", True, "enable /dev/fuse with read/write access"),
-                "fusermount3": ("missing", True, "install fuse3"),
-                "scratch_test_directories": (
-                    "blocked-by-host",
-                    True,
-                    "provide writable TEST_DIR and SCRATCH_MNT",
-                ),
-                "dpkg_lock_state": ("blocked-by-lock", True, "wait for package manager lock to clear"),
-                "rch_ci_worker_identity": (
-                    "unsupported-locally",
-                    False,
-                    "run through RCH/CI to record worker identity",
-                ),
-            }
+        set_status("xfs_headers", "missing", True, "install xfslibs-dev or xfsprogs-devel")
+        set_status("libaio", "missing", True, "install libaio-dev")
+        set_status("ltp_fsstress", "missing", True, "build xfstests ltp/fsstress helper")
+        set_status("xfstests_helpers", "missing", True, "provide a built xfstests checkout")
+        set_status("mkfs_mount_helpers", "missing", True, "install e2fsprogs, xfsprogs, and util-linux helpers")
+        set_status("dev_fuse", "blocked-by-host", True, "enable /dev/fuse with read/write access")
+        set_status("fusermount3", "missing", True, "install fuse3")
+        set_status("scratch_test_directories", "blocked-by-host", True, "provide writable TEST_DIR and SCRATCH_MNT")
+        set_status("dpkg_lock_state", "blocked-by-lock", True, "wait for package manager lock to clear")
+        set_status(
+            "rch_ci_worker_identity",
+            "unsupported-locally",
+            False,
+            "run through RCH/CI to record worker identity",
         )
+    elif mode == "host-missing":
+        set_status("xfs_headers", "missing", True, "install xfslibs-dev or xfsprogs-devel")
+        set_status("libaio", "missing", True, "install libaio-dev")
+        set_status("ltp_fsstress", "missing", True, "build xfstests ltp/fsstress helper")
+        set_status("xfstests_helpers", "missing", True, "provide a built xfstests checkout")
+        set_status("mkfs_mount_helpers", "missing", True, "install e2fsprogs, xfsprogs, and util-linux helpers")
+        set_status("fusermount3", "missing", True, "install fuse3")
+    elif mode == "permission-denied":
+        set_status("dev_fuse", "blocked-by-host", True, "grant the runner read/write access to /dev/fuse")
+        set_status("fusermount3", "blocked-by-host", True, "fix fusermount3 permission for the runner user")
+        set_status(
+            "user_namespace_or_mount_permissions",
+            "blocked-by-host",
+            True,
+            "run as a user with mount permission or enable unprivileged user namespaces",
+        )
+        set_status(
+            "scratch_test_directories",
+            "blocked-by-host",
+            True,
+            "provide writable TEST_DIR and SCRATCH_MNT owned by the runner user",
+        )
+    elif mode == "dpkg-locked":
+        set_status("dpkg_lock_state", "blocked-by-lock", True, "wait for apt/dpkg locks to clear before installing prerequisites")
     elif mode == "worker":
         status_by_name["rch_ci_worker_identity"] = (
             "available-on-worker",
             False,
             "worker identity captured from fixture",
+        )
+    elif mode == "worker-mismatch":
+        set_status(
+            "rch_ci_worker_identity",
+            "blocked-by-host",
+            True,
+            "rerun on the configured RCH/CI worker identity before claiming release evidence",
+        )
+    elif mode == "unsupported-local":
+        set_status(
+            "rch_ci_worker_identity",
+            "unsupported-locally",
+            False,
+            "local lane is advisory only; rerun through RCH/CI for authoritative release evidence",
         )
 
     return build_manifest(
@@ -319,6 +390,7 @@ def fixture_manifest(mode: str, artifact_dir: pathlib.Path) -> dict:
                 remediation=remediation,
                 evidence=[f"fixture:{mode}:{name}"],
                 version=f"fixture-{mode}",
+                observed_value=f"fixture:{mode}:{name}:{status}",
             )
             for name, (status, blocks, remediation) in status_by_name.items()
         ],
@@ -563,6 +635,8 @@ def build_manifest(prereqs: list[dict], *, artifact_dir: pathlib.Path, fixture: 
         status_counts[item["status"]] = status_counts.get(item["status"], 0) + 1
     return {
         "schema_version": 1,
+        "preflight_id": PREFLIGHT_ID,
+        "probe_version": PROBE_VERSION,
         "bead_id": "bd-rchk3.1.1",
         "refinement_bead_id": "bd-f3hug",
         "created_at": iso_now(),
@@ -581,6 +655,13 @@ def build_manifest(prereqs: list[dict], *, artifact_dir: pathlib.Path, fixture: 
             "mounts_or_unmounts": False,
             "creates_persistent_paths": False,
             "requires_fresh_follow_up_probe": True,
+        },
+        "coverage_claim_policy": {
+            "product_baseline_requires_verdict": "pass",
+            "missing_or_blocked_prerequisites_block_product_baseline": True,
+            "remediation_never_satisfies_without_fresh_probe": True,
+            "unsupported_local_lane_is_advisory_for_local_runs": True,
+            "authoritative_release_evidence_requires_worker_or_ci": True,
         },
         "host": {
             "hostname": socket.gethostname(),
@@ -637,6 +718,10 @@ def validate_manifest(manifest: dict) -> list[str]:
     errors: list[str] = []
     if manifest.get("schema_version") != 1:
         errors.append("manifest schema_version must be 1")
+    if manifest.get("preflight_id") != PREFLIGHT_ID:
+        errors.append(f"manifest preflight_id must be {PREFLIGHT_ID}")
+    if manifest.get("probe_version") != PROBE_VERSION:
+        errors.append(f"manifest probe_version must be {PROBE_VERSION}")
     if manifest.get("bead_id") != "bd-rchk3.1.1":
         errors.append("manifest bead_id must be bd-rchk3.1.1")
     if set(manifest.get("status_vocabulary", [])) != STATUS_VALUES:
@@ -663,6 +748,20 @@ def validate_manifest(manifest: dict) -> list[str]:
         if safety.get("requires_fresh_follow_up_probe") is not True:
             errors.append("manifest remediation_safety requires_fresh_follow_up_probe must be true")
 
+    claim_policy = manifest.get("coverage_claim_policy")
+    if not isinstance(claim_policy, dict):
+        errors.append("manifest missing coverage_claim_policy")
+    else:
+        if claim_policy.get("product_baseline_requires_verdict") != "pass":
+            errors.append("coverage_claim_policy product_baseline_requires_verdict must be pass")
+        for field in [
+            "missing_or_blocked_prerequisites_block_product_baseline",
+            "remediation_never_satisfies_without_fresh_probe",
+            "authoritative_release_evidence_requires_worker_or_ci",
+        ]:
+            if claim_policy.get(field) is not True:
+                errors.append(f"coverage_claim_policy {field} must be true")
+
     prereqs = manifest.get("prerequisites")
     if not isinstance(prereqs, list):
         return ["manifest prerequisites must be a list"]
@@ -675,8 +774,16 @@ def validate_manifest(manifest: dict) -> list[str]:
             errors.append("prerequisite row must be an object")
             continue
         name = item.get("name", "<unknown>")
+        if item.get("preflight_id") != PREFLIGHT_ID:
+            errors.append(f"{name} missing preflight_id {PREFLIGHT_ID}")
+        if item.get("probe_version") != PROBE_VERSION:
+            errors.append(f"{name} missing probe_version {PROBE_VERSION}")
+        if item.get("prerequisite_id") != name:
+            errors.append(f"{name} prerequisite_id must match name")
         if item.get("status") not in STATUS_VALUES:
             errors.append(f"{name} has invalid status {item.get('status')!r}")
+        if not item.get("observed_value"):
+            errors.append(f"{name} missing observed_value")
         if not item.get("remediation"):
             errors.append(f"{name} missing remediation")
         if not str(item.get("remediation_text_id", "")).startswith("xfstests-preflight-"):
@@ -703,6 +810,30 @@ def validate_manifest(manifest: dict) -> list[str]:
             ]:
                 if safe.get(field) is not False:
                     errors.append(f"{name} safe_remediation {field} must be false")
+        guidance = item.get("safe_guidance")
+        if not isinstance(guidance, dict):
+            errors.append(f"{name} missing safe_guidance")
+        else:
+            if guidance.get("user_action_text") != item.get("remediation"):
+                errors.append(f"{name} safe_guidance must repeat remediation text")
+            if guidance.get("requires_fresh_follow_up_probe") is not True:
+                errors.append(f"{name} safe_guidance must require a fresh follow-up probe")
+            for field in [
+                "may_run_package_manager",
+                "may_run_install",
+                "may_mount_or_unmount",
+                "may_create_persistent_paths",
+            ]:
+                if guidance.get(field) is not False:
+                    errors.append(f"{name} safe_guidance {field} must be false")
+            requires_action = item.get("status") != "present"
+            if guidance.get("requires_operator_action") is not requires_action:
+                errors.append(f"{name} safe_guidance requires_operator_action mismatch")
+            expected_claim_state = (
+                "blocked_until_fresh_probe" if requires_action else "satisfied_by_current_probe"
+            )
+            if guidance.get("claim_state_after_remediation") != expected_claim_state:
+                errors.append(f"{name} safe_guidance claim_state_after_remediation must be {expected_claim_state}")
         if not item.get("reproduction_command"):
             errors.append(f"{name} missing reproduction_command")
         if "blocks_real_xfstests" not in item:
@@ -834,7 +965,30 @@ def run_self_test() -> int:
     expected = {
         "all-present": ("pass", "xfstests_preflight_all_present"),
         "blocked": ("blocked", "xfstests_preflight_blocked"),
+        "host-missing": ("blocked", "xfstests_preflight_host_missing"),
+        "permission-denied": ("blocked", "xfstests_preflight_permission_denied"),
+        "dpkg-locked": ("blocked", "xfstests_preflight_dpkg_locked"),
         "worker": ("pass", "xfstests_preflight_worker"),
+        "worker-mismatch": ("blocked", "xfstests_preflight_worker_mismatch"),
+        "unsupported-local": ("pass", "xfstests_preflight_unsupported_local"),
+    }
+    expected_blockers = {
+        "host-missing": {
+            "xfs_headers",
+            "libaio",
+            "ltp_fsstress",
+            "xfstests_helpers",
+            "mkfs_mount_helpers",
+            "fusermount3",
+        },
+        "permission-denied": {
+            "dev_fuse",
+            "fusermount3",
+            "user_namespace_or_mount_permissions",
+            "scratch_test_directories",
+        },
+        "dpkg-locked": {"dpkg_lock_state"},
+        "worker-mismatch": {"rch_ci_worker_identity"},
     }
     for mode, (expected_verdict, scenario_id) in expected.items():
         manifest = fixture_manifest(mode, base / mode)
@@ -857,14 +1011,33 @@ def run_self_test() -> int:
             ]
             if unsafe_rows:
                 errors.append(f"blocked fixture missing blocking risk rows: {unsafe_rows}")
+        if mode in expected_blockers:
+            blockers = set(manifest.get("blocking_prerequisites", []))
+            missing = sorted(expected_blockers[mode] - blockers)
+            if missing:
+                errors.append(f"fixture {mode} missing expected blockers: {missing}")
         if mode == "worker":
             worker_row = next(row for row in manifest["prerequisites"] if row["name"] == "rch_ci_worker_identity")
             if worker_row["status"] != "available-on-worker":
                 errors.append("worker fixture did not classify worker identity as available-on-worker")
+        if mode == "unsupported-local":
+            worker_row = next(row for row in manifest["prerequisites"] if row["name"] == "rch_ci_worker_identity")
+            if worker_row["status"] != "unsupported-locally":
+                errors.append("unsupported-local fixture did not classify worker identity as unsupported-locally")
+            if worker_row["risk_level"] != "advisory":
+                errors.append("unsupported-local fixture should keep worker identity advisory")
         for row in manifest["prerequisites"]:
             safe = row.get("safe_remediation", {})
             if safe.get("runner_executes_remediation") is not False or safe.get("auto_install") is not False:
                 errors.append(f"fixture {mode} unsafe remediation row: {row.get('name')}")
+            guidance = row.get("safe_guidance", {})
+            if (
+                guidance.get("may_run_package_manager") is not False
+                or guidance.get("may_mount_or_unmount") is not False
+                or guidance.get("may_create_persistent_paths") is not False
+                or guidance.get("requires_fresh_follow_up_probe") is not True
+            ):
+                errors.append(f"fixture {mode} unsafe guidance row: {row.get('name')}")
         out = base / mode / "preflight.json"
         write_manifest(manifest, out)
         errors.extend(validate_written_artifacts(manifest))
