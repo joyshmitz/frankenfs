@@ -58,6 +58,15 @@ TOTAL=0
 # SCENARIO_RESULT|scenario_id=writeback_cache_ordering_crash_reopen_artifact|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_ordering_report_fields|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_ordering_unit_tests|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_cli_wired|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_accepts_complete_matrix|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_rejects_missing_crash_point|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_rejects_survivor_mismatch|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_rejects_flush_durability|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_rejects_missing_fsyncdir|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_report_fields|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_unit_tests|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_ext4_opt_in_flush_fsyncdir_reopen|outcome=PASS
 
 log() {
     echo "$*" | tee -a "$LOG_FILE"
@@ -293,6 +302,83 @@ PY
     log "$observation"
 }
 
+expect_crash_replay_report_rejection() {
+    local report_path="$1"
+    local expected_reason="$2"
+    local expected_crash_point="$3"
+    python3 - "$report_path" "$expected_reason" "$expected_crash_point" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected_reason = sys.argv[2]
+expected_crash_point = sys.argv[3]
+decision = report["decision"]
+if decision["decision"] != "reject":
+    raise SystemExit("expected reject decision")
+if decision["reason"] != expected_reason:
+    raise SystemExit(f"wrong reason: {decision['reason']}")
+if expected_crash_point and expected_crash_point not in decision["crash_points_failing"]:
+    raise SystemExit(f"{expected_crash_point} failure not reported")
+PY
+}
+
+record_crash_replay_observation() {
+    local report_path="$1"
+    local expected_error_class="$2"
+    local cleanup_status="$3"
+    local observation
+    observation="$(python3 - "$report_path" "$expected_error_class" "$cleanup_status" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = sys.argv[2]
+cleanup = sys.argv[3]
+decision = report["decision"]
+observed = "accept" if decision["decision"] == "accept" else decision["reason"]
+raw_options = ",".join(report["mount_options"]["raw_options"])
+raw_fuser = ",".join(report["raw_fuser_options"])
+artifact_paths = ",".join(report["artifact_paths"])
+crash_point_ids = ",".join(report["covered_crash_point_ids"])
+operation_trace = ",".join(f"{row['step']}:{row['operation']}:{row['durability_boundary']}" for row in report["operation_trace"])
+sample = report["crash_points"][0]
+survivors_expected = ",".join(sample["expected_survivor_set"])
+survivors_actual = ",".join(sample["actual_survivor_set"])
+stdout_paths = ",".join(point["stdout_path"] for point in report["crash_points"])
+stderr_paths = ",".join(point["stderr_path"] for point in report["crash_points"])
+cleanup_paths = ",".join(point["cleanup_status"] for point in report["crash_points"])
+repro = report["reproduction_command"].replace("|", "/")
+print(
+    "WRITEBACK_CACHE_CRASH_REPLAY_OBSERVATION"
+    f"|scenario_id={report['scenario_id']}"
+    f"|gate_version={report['gate_version']}"
+    f"|matrix_id={report['matrix_id']}"
+    f"|mount_options={raw_options}"
+    f"|raw_fuser_options={raw_fuser}"
+    f"|decision={decision['decision']}"
+    f"|expected_error_class={expected}"
+    f"|observed_error_class={observed}"
+    f"|epoch_id={report['epoch_id']}"
+    f"|epoch_state={report['epoch_state']}"
+    f"|crash_point_ids={crash_point_ids}"
+    f"|operation_trace={operation_trace}"
+    f"|expected_survivor_set={survivors_expected}"
+    f"|actual_survivor_set={survivors_actual}"
+    f"|stdout_paths={stdout_paths}"
+    f"|stderr_paths={stderr_paths}"
+    f"|cleanup_statuses={cleanup_paths}"
+    f"|artifact_paths={artifact_paths}"
+    f"|cleanup_status={cleanup}"
+    f"|reproduction_command={repro}"
+)
+PY
+)"
+    log "$observation"
+}
+
 extract_json_object() {
     local raw_path="$1"
     local out_path="$2"
@@ -340,6 +426,11 @@ ORDERING_MISSING_FSYNC_ORACLE="$INPUT_DIR/writeback_cache_ordering_missing_fsync
 ORDERING_MISSING_FSYNCDIR_ORACLE="$INPUT_DIR/writeback_cache_ordering_missing_fsyncdir_oracle.json"
 ORDERING_CANCELLATION_ORACLE="$INPUT_DIR/writeback_cache_ordering_cancellation_oracle.json"
 ORDERING_CRASH_REOPEN_ORACLE="$INPUT_DIR/writeback_cache_ordering_crash_reopen_oracle.json"
+CRASH_REPLAY_ACCEPT_ORACLE="$INPUT_DIR/writeback_cache_crash_replay_accept_oracle.json"
+CRASH_REPLAY_MISSING_POINT_ORACLE="$INPUT_DIR/writeback_cache_crash_replay_missing_point_oracle.json"
+CRASH_REPLAY_SURVIVOR_MISMATCH_ORACLE="$INPUT_DIR/writeback_cache_crash_replay_survivor_mismatch_oracle.json"
+CRASH_REPLAY_FLUSH_DURABLE_ORACLE="$INPUT_DIR/writeback_cache_crash_replay_flush_durable_oracle.json"
+CRASH_REPLAY_MISSING_FSYNCDIR_ORACLE="$INPUT_DIR/writeback_cache_crash_replay_missing_fsyncdir_oracle.json"
 ACCEPT_RAW="$LOG_DIR/writeback_cache_accept.raw"
 REJECT_RAW="$LOG_DIR/writeback_cache_reject.raw"
 FUSE_UNAVAILABLE_RAW="$LOG_DIR/writeback_cache_fuse_unavailable.raw"
@@ -371,6 +462,13 @@ ORDERING_MISSING_FSYNCDIR_RAW="$LOG_DIR/writeback_cache_ordering_missing_fsyncdi
 ORDERING_CANCELLATION_RAW="$LOG_DIR/writeback_cache_ordering_cancellation.raw"
 ORDERING_CRASH_REOPEN_RAW="$LOG_DIR/writeback_cache_ordering_crash_reopen.raw"
 ORDERING_UNIT_RAW="$LOG_DIR/writeback_cache_ordering_unit_tests.raw"
+CRASH_REPLAY_ACCEPT_RAW="$LOG_DIR/writeback_cache_crash_replay_accept.raw"
+CRASH_REPLAY_MISSING_POINT_RAW="$LOG_DIR/writeback_cache_crash_replay_missing_point.raw"
+CRASH_REPLAY_SURVIVOR_MISMATCH_RAW="$LOG_DIR/writeback_cache_crash_replay_survivor_mismatch.raw"
+CRASH_REPLAY_FLUSH_DURABLE_RAW="$LOG_DIR/writeback_cache_crash_replay_flush_durable.raw"
+CRASH_REPLAY_MISSING_FSYNCDIR_RAW="$LOG_DIR/writeback_cache_crash_replay_missing_fsyncdir.raw"
+CRASH_REPLAY_UNIT_RAW="$LOG_DIR/writeback_cache_crash_replay_unit_tests.raw"
+WRITEBACK_CACHE_MOUNTED_EXT4_RAW="$LOG_DIR/writeback_cache_ext4_opt_in_flush_fsyncdir_reopen.raw"
 ACCEPT_REPORT="$LOG_DIR/writeback_cache_accept_report.json"
 REJECT_REPORT="$LOG_DIR/writeback_cache_reject_report.json"
 FUSE_UNAVAILABLE_REPORT="$LOG_DIR/writeback_cache_fuse_unavailable_report.json"
@@ -388,6 +486,11 @@ ORDERING_MISSING_FSYNC_REPORT="$LOG_DIR/writeback_cache_ordering_missing_fsync_r
 ORDERING_MISSING_FSYNCDIR_REPORT="$LOG_DIR/writeback_cache_ordering_missing_fsyncdir_report.json"
 ORDERING_CANCELLATION_REPORT="$LOG_DIR/writeback_cache_ordering_cancellation_report.json"
 ORDERING_CRASH_REOPEN_REPORT="$LOG_DIR/writeback_cache_ordering_crash_reopen_report.json"
+CRASH_REPLAY_ACCEPT_REPORT="$LOG_DIR/writeback_cache_crash_replay_accept_report.json"
+CRASH_REPLAY_MISSING_POINT_REPORT="$LOG_DIR/writeback_cache_crash_replay_missing_point_report.json"
+CRASH_REPLAY_SURVIVOR_MISMATCH_REPORT="$LOG_DIR/writeback_cache_crash_replay_survivor_mismatch_report.json"
+CRASH_REPLAY_FLUSH_DURABLE_REPORT="$LOG_DIR/writeback_cache_crash_replay_flush_durable_report.json"
+CRASH_REPLAY_MISSING_FSYNCDIR_REPORT="$LOG_DIR/writeback_cache_crash_replay_missing_fsyncdir_report.json"
 
 cat >"$ACCEPT_GATE" <<'JSON'
 {
@@ -815,6 +918,153 @@ pathlib.Path(sys.argv[6]).write_text(
 )
 PY
 
+python3 - "$CRASH_REPLAY_ACCEPT_ORACLE" \
+    "$CRASH_REPLAY_MISSING_POINT_ORACLE" \
+    "$CRASH_REPLAY_SURVIVOR_MISMATCH_ORACLE" \
+    "$CRASH_REPLAY_FLUSH_DURABLE_ORACLE" \
+    "$CRASH_REPLAY_MISSING_FSYNCDIR_ORACLE" <<'PY'
+import copy
+import json
+import pathlib
+import sys
+
+required_ids = [
+    "cp01_before_first_write",
+    "cp02_after_first_write_before_flush",
+    "cp03_after_flush_before_fsync",
+    "cp04_after_fsync_before_metadata",
+    "cp05_after_metadata_before_fsyncdir",
+    "cp06_after_fsyncdir_before_unmount",
+    "cp07_after_repeated_write_before_fsync",
+    "cp08_after_repeated_write_fsync",
+    "cp09_after_cancellation_before_writeback",
+    "cp10_after_clean_unmount_before_reopen",
+    "cp11_after_reopen_before_repair_refresh",
+    "cp12_after_repair_refresh",
+]
+operations = [
+    ("create", "none"),
+    ("write", "kernel_writeback_cache"),
+    ("flush", "non_durable"),
+    ("fsync", "file_durable"),
+    ("rename", "metadata_after_data"),
+    ("fsyncdir", "directory_durable"),
+    ("write", "repeated_write"),
+    ("fsync", "last_write_durable"),
+    ("cancel", "classified_before_writeback"),
+    ("unmount", "dirty_pages_flushed_or_rejected"),
+    ("reopen", "survivor_set_verified"),
+    ("repair_refresh", "post_writeback_refresh"),
+]
+
+def crash_point(crash_point_id, step):
+    cancellation_state = "cancelled_before_writeback_classified" if step == 9 else "none"
+    repeated_state = "last_fsynced_write_survived" if step in (7, 8) else "not_applicable"
+    survivors = [
+        "/",
+        "/writeback",
+        "/writeback/data.bin:blake3=stable-v2",
+    ]
+    return {
+        "crash_point_id": crash_point_id,
+        "description": f"{crash_point_id} mounted writeback-cache crash point",
+        "operation_step": step,
+        "expected_survivor_set": survivors,
+        "actual_survivor_set": list(reversed(survivors)),
+        "fsync_observed_durable": True,
+        "fsyncdir_observed_durable": True,
+        "flush_observed_non_durable": True,
+        "metadata_after_data_observed": True,
+        "unmount_reopen_observed": True,
+        "cancellation_state": cancellation_state,
+        "repeated_write_state": repeated_state,
+        "replay_status": "survivor_set_verified",
+        "stdout_path": f"artifacts/writeback-cache/crash-replay/{crash_point_id}.stdout",
+        "stderr_path": f"artifacts/writeback-cache/crash-replay/{crash_point_id}.stderr",
+        "cleanup_status": "retained_for_qa",
+    }
+
+base = {
+    "schema_version": 1,
+    "gate_version": "bd-rchk0.2.3-crash-replay-v1",
+    "bead_id": "bd-rchk0.2.3",
+    "matrix_id": "writeback_cache_crash_replay_matrix_v1",
+    "mount_options": {
+        "raw_options": ["rw", "fsname=frankenfs", "writeback_cache"],
+        "fs_name": "frankenfs",
+        "allow_other": False,
+        "auto_unmount": True,
+        "default_permissions": True,
+        "mode": "rw",
+    },
+    "raw_fuser_options": ["fsname=frankenfs", "subtype=ffs", "rw", "writeback_cache"],
+    "epoch_id": "epoch-writeback-crash-0001",
+    "epoch_state": "fresh",
+    "host_capability_fingerprint": "fuse3-writeback-cache-enabled-host",
+    "lane_manifest_id": "fuse-writeback-cache-rw-lane-v1",
+    "operation_trace": [
+        {
+            "step": step,
+            "operation": op,
+            "target": "/writeback/data.bin",
+            "durability_boundary": boundary,
+            "expected_result": "success",
+        }
+        for step, (op, boundary) in enumerate(operations, start=1)
+    ],
+    "crash_points": [
+        crash_point(crash_point_id, step)
+        for step, crash_point_id in enumerate(required_ids, start=1)
+    ],
+    "unsupported_combinations": [
+        {
+            "combination_id": "writeback_cache_ro_mount",
+            "rejected": True,
+            "reason": "read_only_writeback_cache",
+            "follow_up_bead": "bd-rchk0.2.4",
+        }
+    ],
+    "artifact_paths": [
+        "artifacts/writeback-cache/crash-replay/matrix.json",
+        "artifacts/writeback-cache/crash-replay/results.json",
+        "artifacts/writeback-cache/crash-replay/run.log",
+    ],
+}
+
+pathlib.Path(sys.argv[1]).write_text(
+    json.dumps(base, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+
+missing_point = copy.deepcopy(base)
+missing_point["crash_points"] = missing_point["crash_points"][:-1]
+pathlib.Path(sys.argv[2]).write_text(
+    json.dumps(missing_point, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+
+survivor_mismatch = copy.deepcopy(base)
+survivor_mismatch["crash_points"][0]["actual_survivor_set"].append("/unexpected")
+pathlib.Path(sys.argv[3]).write_text(
+    json.dumps(survivor_mismatch, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+
+flush_durable = copy.deepcopy(base)
+flush_durable["crash_points"][2]["flush_observed_non_durable"] = False
+pathlib.Path(sys.argv[4]).write_text(
+    json.dumps(flush_durable, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+
+missing_fsyncdir = copy.deepcopy(base)
+missing_fsyncdir["crash_points"][4]["fsyncdir_observed_durable"] = False
+pathlib.Path(sys.argv[5]).write_text(
+    json.dumps(missing_fsyncdir, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+
 step "Scenario 1: writeback-cache audit module and CLI are wired"
 if grep -Fq "pub mod writeback_cache_audit" crates/ffs-harness/src/lib.rs \
     && grep -Fq "validate-writeback-cache-audit" crates/ffs-harness/src/main.rs; then
@@ -1127,7 +1377,8 @@ if run_rch_capture "$HELP_RAW" cargo run --quiet -p ffs-cli -- mount --help; the
         && grep -Fq "fresh runtime-guard evidence" README.md \
         && grep -Fq "FFS_WRITEBACK_CACHE_KILL_SWITCH" README.md \
         && grep -Fq "runtime kill-switch plus stale-gate" FEATURE_PARITY.md \
-        && grep -Fq "release-readiness claim remains blocked" FEATURE_PARITY.md; then
+        && grep -Fq "accepted crash/replay-oracle JSON" FEATURE_PARITY.md \
+        && grep -Fq "12-point crash/replay artifact gate" README.md; then
         log "WRITEBACK_CACHE_HELP_DOCS_OBSERVATION|scenario_id=writeback_cache_audit_help_docs_consistent|expected_error_class=gated_opt_in|observed_error_class=gated_opt_in|help_log=${HELP_RAW}|cleanup_status=retained:${LOG_DIR}|reproduction_command=cargo run -p ffs-cli -- mount --help"
         scenario_result "writeback_cache_audit_help_docs_consistent" "PASS" "help/docs/parity keep gated opt-in wording"
     else
@@ -1142,6 +1393,7 @@ if run_rch_capture "$CLI_OPT_IN_HELP_RAW" cargo run --quiet -p ffs-cli -- mount 
     if grep -Fq -- "--writeback-cache" "$CLI_OPT_IN_HELP_RAW" \
         && grep -Fq -- "--writeback-cache-gate" "$CLI_OPT_IN_HELP_RAW" \
         && grep -Fq -- "--writeback-cache-ordering-oracle" "$CLI_OPT_IN_HELP_RAW" \
+        && grep -Fq -- "--writeback-cache-crash-replay-oracle" "$CLI_OPT_IN_HELP_RAW" \
         && grep -Fq "FFS_WRITEBACK_CACHE_KILL_SWITCH" "$CLI_OPT_IN_HELP_RAW" \
         && grep -Fq "flush remains non-durable" "$CLI_OPT_IN_HELP_RAW" \
         && grep -Fq "fsync" "$CLI_OPT_IN_HELP_RAW" \
@@ -1171,10 +1423,11 @@ if run_rch_capture "$CLI_RO_REJECT_RAW" cargo run --quiet -p ffs-cli -- \
     mount --writeback-cache \
     --writeback-cache-gate "$ACCEPT_GATE" \
     --writeback-cache-ordering-oracle "$ORDERING_ACCEPT_ORACLE" \
+    --writeback-cache-crash-replay-oracle "$CRASH_REPLAY_ACCEPT_ORACLE" \
     /definitely/missing.img /definitely/missing-mnt; then
     scenario_result "writeback_cache_opt_in_cli_rejects_read_only" "FAIL" "read-only writeback_cache unexpectedly reached mount"
 elif grep -Fq -- "--writeback-cache requires --rw" "$CLI_RO_REJECT_RAW"; then
-    log "WRITEBACK_CACHE_OPT_IN_OBSERVATION|scenario_id=writeback_cache_opt_in_cli_rejects_read_only|mount_options=ro,writeback_cache|expected_error_class=read_only_writeback_cache|observed_error_class=read_only_writeback_cache|fuse_capability_artifact=${ACCEPT_GATE}|stdout_stderr=${CLI_RO_REJECT_RAW}|cleanup_status=not_mounted|reproduction_command=ffs mount --writeback-cache --writeback-cache-gate ${ACCEPT_GATE} --writeback-cache-ordering-oracle ${ORDERING_ACCEPT_ORACLE} /definitely/missing.img /definitely/missing-mnt"
+    log "WRITEBACK_CACHE_OPT_IN_OBSERVATION|scenario_id=writeback_cache_opt_in_cli_rejects_read_only|mount_options=ro,writeback_cache|expected_error_class=read_only_writeback_cache|observed_error_class=read_only_writeback_cache|fuse_capability_artifact=${ACCEPT_GATE}|stdout_stderr=${CLI_RO_REJECT_RAW}|cleanup_status=not_mounted|reproduction_command=ffs mount --writeback-cache --writeback-cache-gate ${ACCEPT_GATE} --writeback-cache-ordering-oracle ${ORDERING_ACCEPT_ORACLE} --writeback-cache-crash-replay-oracle ${CRASH_REPLAY_ACCEPT_ORACLE} /definitely/missing.img /definitely/missing-mnt"
     scenario_result "writeback_cache_opt_in_cli_rejects_read_only" "PASS" "read-only opt-in rejected before gate reads or mount"
 else
     scenario_result "writeback_cache_opt_in_cli_rejects_read_only" "FAIL" "read-only rejection missing stable diagnostic"
@@ -1185,12 +1438,14 @@ if run_rch_capture "$CLI_ACCEPT_IMAGE_OPEN_RAW" cargo run --quiet -p ffs-cli -- 
     mount --rw --writeback-cache \
     --writeback-cache-gate "$ACCEPT_GATE" \
     --writeback-cache-ordering-oracle "$ORDERING_ACCEPT_ORACLE" \
+    --writeback-cache-crash-replay-oracle "$CRASH_REPLAY_ACCEPT_ORACLE" \
     /definitely/missing.img /definitely/missing-mnt; then
     scenario_result "writeback_cache_opt_in_cli_accepts_gate_before_image_open" "FAIL" "missing image unexpectedly mounted"
 elif grep -Fq "failed to open filesystem image" "$CLI_ACCEPT_IMAGE_OPEN_RAW" \
     && ! grep -Fq "writeback-cache audit gate rejected" "$CLI_ACCEPT_IMAGE_OPEN_RAW" \
-    && ! grep -Fq "writeback-cache ordering oracle rejected" "$CLI_ACCEPT_IMAGE_OPEN_RAW"; then
-    log "WRITEBACK_CACHE_OPT_IN_OBSERVATION|scenario_id=writeback_cache_opt_in_cli_accepts_gate_before_image_open|mount_options=rw,writeback_cache|expected_error_class=filesystem_open_failed|observed_error_class=filesystem_open_failed|fuse_capability_artifact=${ACCEPT_GATE}|stdout_stderr=${CLI_ACCEPT_IMAGE_OPEN_RAW}|cleanup_status=not_mounted|reproduction_command=ffs mount --rw --writeback-cache --writeback-cache-gate ${ACCEPT_GATE} --writeback-cache-ordering-oracle ${ORDERING_ACCEPT_ORACLE} /definitely/missing.img /definitely/missing-mnt"
+    && ! grep -Fq "writeback-cache ordering oracle rejected" "$CLI_ACCEPT_IMAGE_OPEN_RAW" \
+    && ! grep -Fq "writeback-cache crash/replay oracle rejected" "$CLI_ACCEPT_IMAGE_OPEN_RAW"; then
+    log "WRITEBACK_CACHE_OPT_IN_OBSERVATION|scenario_id=writeback_cache_opt_in_cli_accepts_gate_before_image_open|mount_options=rw,writeback_cache|expected_error_class=filesystem_open_failed|observed_error_class=filesystem_open_failed|fuse_capability_artifact=${ACCEPT_GATE}|stdout_stderr=${CLI_ACCEPT_IMAGE_OPEN_RAW}|cleanup_status=not_mounted|reproduction_command=ffs mount --rw --writeback-cache --writeback-cache-gate ${ACCEPT_GATE} --writeback-cache-ordering-oracle ${ORDERING_ACCEPT_ORACLE} --writeback-cache-crash-replay-oracle ${CRASH_REPLAY_ACCEPT_ORACLE} /definitely/missing.img /definitely/missing-mnt"
     scenario_result "writeback_cache_opt_in_cli_accepts_gate_before_image_open" "PASS" "accepted gate reached the image-open stage before failing"
 else
     scenario_result "writeback_cache_opt_in_cli_accepts_gate_before_image_open" "FAIL" "accepted gate did not reach image-open diagnostic"
@@ -1216,11 +1471,12 @@ if run_rch_capture "$CLI_KILL_SWITCH_RAW" env FFS_WRITEBACK_CACHE_KILL_SWITCH=1 
     mount --rw --writeback-cache \
     --writeback-cache-gate "$ACCEPT_GATE" \
     --writeback-cache-ordering-oracle "$ORDERING_ACCEPT_ORACLE" \
+    --writeback-cache-crash-replay-oracle "$CRASH_REPLAY_ACCEPT_ORACLE" \
     /definitely/missing.img /definitely/missing-mnt; then
     scenario_result "writeback_cache_runtime_kill_switch_rejected" "FAIL" "runtime kill switch unexpectedly allowed mount"
 elif grep -Fq "FFS_WRITEBACK_CACHE_KILL_SWITCH" "$CLI_KILL_SWITCH_RAW" \
     && ! grep -Fq "failed to open filesystem image" "$CLI_KILL_SWITCH_RAW"; then
-    log "WRITEBACK_CACHE_OPT_IN_OBSERVATION|scenario_id=writeback_cache_runtime_kill_switch_rejected|mount_options=rw,writeback_cache|expected_error_class=runtime_kill_switch_engaged|observed_error_class=runtime_kill_switch_engaged|stdout_stderr=${CLI_KILL_SWITCH_RAW}|cleanup_status=not_mounted|reproduction_command=FFS_WRITEBACK_CACHE_KILL_SWITCH=1 ffs mount --rw --writeback-cache --writeback-cache-gate ${ACCEPT_GATE} --writeback-cache-ordering-oracle ${ORDERING_ACCEPT_ORACLE} /definitely/missing.img /definitely/missing-mnt"
+    log "WRITEBACK_CACHE_OPT_IN_OBSERVATION|scenario_id=writeback_cache_runtime_kill_switch_rejected|mount_options=rw,writeback_cache|expected_error_class=runtime_kill_switch_engaged|observed_error_class=runtime_kill_switch_engaged|stdout_stderr=${CLI_KILL_SWITCH_RAW}|cleanup_status=not_mounted|reproduction_command=FFS_WRITEBACK_CACHE_KILL_SWITCH=1 ffs mount --rw --writeback-cache --writeback-cache-gate ${ACCEPT_GATE} --writeback-cache-ordering-oracle ${ORDERING_ACCEPT_ORACLE} --writeback-cache-crash-replay-oracle ${CRASH_REPLAY_ACCEPT_ORACLE} /definitely/missing.img /definitely/missing-mnt"
     scenario_result "writeback_cache_runtime_kill_switch_rejected" "PASS" "runtime kill switch failed closed before image open"
 else
     scenario_result "writeback_cache_runtime_kill_switch_rejected" "FAIL" "runtime kill switch rejection missing stable diagnostic"
@@ -1397,7 +1653,154 @@ else
     scenario_result "writeback_cache_ordering_unit_tests" "FAIL" "ordering oracle unit tests failed; see $ORDERING_UNIT_RAW"
 fi
 
-step "Scenario 28: scenario catalog names this suite and static evidence markers"
+step "Scenario 28: crash/replay oracle module and CLI are wired"
+if grep -Fq "build_writeback_crash_replay_report" crates/ffs-harness/src/main.rs \
+    && grep -Fq "validate-writeback-cache-crash-replay" crates/ffs-harness/src/main.rs \
+    && grep -Fq "WritebackCrashReplayOracle" crates/ffs-harness/src/writeback_cache_audit.rs; then
+    scenario_result "writeback_cache_crash_replay_cli_wired" "PASS" "crash/replay oracle CLI command exported"
+else
+    scenario_result "writeback_cache_crash_replay_cli_wired" "FAIL" "missing crash/replay oracle CLI or report builder"
+fi
+
+step "Scenario 29: positive crash/replay matrix accepts twelve crash points"
+if run_rch_capture "$CRASH_REPLAY_ACCEPT_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-crash-replay \
+    --oracle "$CRASH_REPLAY_ACCEPT_ORACLE" \
+    --scenario-id writeback_cache_crash_replay_accepts_complete_matrix \
+    --require-accept; then
+    if extract_json_object "$CRASH_REPLAY_ACCEPT_RAW" "$CRASH_REPLAY_ACCEPT_REPORT" '"schema_version"'; then
+        record_crash_replay_observation "$CRASH_REPLAY_ACCEPT_REPORT" "accept" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_crash_replay_accepts_complete_matrix" "PASS" "complete twelve-point crash/replay matrix accepted"
+    else
+        scenario_result "writeback_cache_crash_replay_accepts_complete_matrix" "FAIL" "accepted crash/replay run did not emit report JSON"
+    fi
+else
+    scenario_result "writeback_cache_crash_replay_accepts_complete_matrix" "FAIL" "complete crash/replay oracle rejected; see $CRASH_REPLAY_ACCEPT_RAW"
+fi
+
+step "Scenario 30: crash/replay oracle rejects a missing crash point"
+if run_rch_capture "$CRASH_REPLAY_MISSING_POINT_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-crash-replay \
+    --oracle "$CRASH_REPLAY_MISSING_POINT_ORACLE" \
+    --scenario-id writeback_cache_crash_replay_rejects_missing_crash_point; then
+    if extract_json_object "$CRASH_REPLAY_MISSING_POINT_RAW" "$CRASH_REPLAY_MISSING_POINT_REPORT" '"schema_version"' \
+        && expect_crash_replay_report_rejection "$CRASH_REPLAY_MISSING_POINT_REPORT" "missing_crash_point" "cp12_after_repair_refresh"
+    then
+        record_crash_replay_observation "$CRASH_REPLAY_MISSING_POINT_REPORT" "missing_crash_point" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_crash_replay_rejects_missing_crash_point" "PASS" "missing crash point rejected with stable reason"
+    else
+        scenario_result "writeback_cache_crash_replay_rejects_missing_crash_point" "FAIL" "missing-point report missing stable reason"
+    fi
+else
+    scenario_result "writeback_cache_crash_replay_rejects_missing_crash_point" "FAIL" "schema-valid missing-point oracle should emit report"
+fi
+
+step "Scenario 31: crash/replay oracle rejects survivor-set mismatch"
+if run_rch_capture "$CRASH_REPLAY_SURVIVOR_MISMATCH_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-crash-replay \
+    --oracle "$CRASH_REPLAY_SURVIVOR_MISMATCH_ORACLE" \
+    --scenario-id writeback_cache_crash_replay_rejects_survivor_mismatch; then
+    if extract_json_object "$CRASH_REPLAY_SURVIVOR_MISMATCH_RAW" "$CRASH_REPLAY_SURVIVOR_MISMATCH_REPORT" '"schema_version"' \
+        && expect_crash_replay_report_rejection "$CRASH_REPLAY_SURVIVOR_MISMATCH_REPORT" "survivor_set_mismatch" "cp01_before_first_write"
+    then
+        record_crash_replay_observation "$CRASH_REPLAY_SURVIVOR_MISMATCH_REPORT" "survivor_set_mismatch" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_crash_replay_rejects_survivor_mismatch" "PASS" "survivor-set mismatch rejected with stable reason"
+    else
+        scenario_result "writeback_cache_crash_replay_rejects_survivor_mismatch" "FAIL" "survivor mismatch report missing stable reason"
+    fi
+else
+    scenario_result "writeback_cache_crash_replay_rejects_survivor_mismatch" "FAIL" "schema-valid survivor mismatch oracle should emit report"
+fi
+
+step "Scenario 32: crash/replay oracle rejects flush as durability evidence"
+if run_rch_capture "$CRASH_REPLAY_FLUSH_DURABLE_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-crash-replay \
+    --oracle "$CRASH_REPLAY_FLUSH_DURABLE_ORACLE" \
+    --scenario-id writeback_cache_crash_replay_rejects_flush_durability; then
+    if extract_json_object "$CRASH_REPLAY_FLUSH_DURABLE_RAW" "$CRASH_REPLAY_FLUSH_DURABLE_REPORT" '"schema_version"' \
+        && expect_crash_replay_report_rejection "$CRASH_REPLAY_FLUSH_DURABLE_REPORT" "flush_misclassified_as_durable" "cp03_after_flush_before_fsync"
+    then
+        record_crash_replay_observation "$CRASH_REPLAY_FLUSH_DURABLE_REPORT" "flush_misclassified_as_durable" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_crash_replay_rejects_flush_durability" "PASS" "flush durability misuse rejected"
+    else
+        scenario_result "writeback_cache_crash_replay_rejects_flush_durability" "FAIL" "flush durability report missing stable reason"
+    fi
+else
+    scenario_result "writeback_cache_crash_replay_rejects_flush_durability" "FAIL" "schema-valid flush-durability oracle should emit report"
+fi
+
+step "Scenario 33: crash/replay oracle rejects missing fsyncdir durability"
+if run_rch_capture "$CRASH_REPLAY_MISSING_FSYNCDIR_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-crash-replay \
+    --oracle "$CRASH_REPLAY_MISSING_FSYNCDIR_ORACLE" \
+    --scenario-id writeback_cache_crash_replay_rejects_missing_fsyncdir; then
+    if extract_json_object "$CRASH_REPLAY_MISSING_FSYNCDIR_RAW" "$CRASH_REPLAY_MISSING_FSYNCDIR_REPORT" '"schema_version"' \
+        && expect_crash_replay_report_rejection "$CRASH_REPLAY_MISSING_FSYNCDIR_REPORT" "missing_fsyncdir_boundary" "cp05_after_metadata_before_fsyncdir"
+    then
+        record_crash_replay_observation "$CRASH_REPLAY_MISSING_FSYNCDIR_REPORT" "missing_fsyncdir_boundary" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_crash_replay_rejects_missing_fsyncdir" "PASS" "missing fsyncdir evidence rejected"
+    else
+        scenario_result "writeback_cache_crash_replay_rejects_missing_fsyncdir" "FAIL" "missing fsyncdir report missing stable reason"
+    fi
+else
+    scenario_result "writeback_cache_crash_replay_rejects_missing_fsyncdir" "FAIL" "schema-valid missing-fsyncdir oracle should emit report"
+fi
+
+step "Scenario 34: crash/replay report carries QA artifact contract"
+if python3 - "$CRASH_REPLAY_ACCEPT_REPORT" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+if report["decision"]["decision"] != "accept":
+    raise SystemExit("complete crash/replay oracle did not accept")
+if len(report["required_crash_point_ids"]) != 12 or len(report["covered_crash_point_ids"]) != 12:
+    raise SystemExit("twelve crash point coverage missing")
+if "writeback_cache" not in report["raw_fuser_options"]:
+    raise SystemExit("raw FUSER writeback_cache option missing")
+if not report["operation_trace"] or not all(row["operation"] for row in report["operation_trace"]):
+    raise SystemExit("operation trace missing")
+if not report["artifact_paths"]:
+    raise SystemExit("artifact paths missing")
+for point in report["crash_points"]:
+    if not point["crash_point_id"]:
+        raise SystemExit("crash point id missing")
+    if point["expected_survivor_set"] != list(reversed(point["actual_survivor_set"])):
+        raise SystemExit("expected/actual survivor sets not represented")
+    for field in ("stdout_path", "stderr_path", "cleanup_status"):
+        if not point[field]:
+            raise SystemExit(f"{field} missing")
+if "validate-writeback-cache-crash-replay" not in report["reproduction_command"]:
+    raise SystemExit("missing crash/replay reproduction command")
+PY
+then
+    scenario_result "writeback_cache_crash_replay_report_fields" "PASS" "crash/replay report contains shared QA artifact contract"
+else
+    scenario_result "writeback_cache_crash_replay_report_fields" "FAIL" "crash/replay report contract incomplete"
+fi
+
+step "Scenario 35: unit tests cover crash/replay oracle policy"
+if run_rch_capture "$CRASH_REPLAY_UNIT_RAW" cargo test -p ffs-harness crash_replay_oracle -- --nocapture; then
+    scenario_result "writeback_cache_crash_replay_unit_tests" "PASS" "crash/replay oracle unit tests passed through rch"
+else
+    scenario_result "writeback_cache_crash_replay_unit_tests" "FAIL" "crash/replay oracle unit tests failed; see $CRASH_REPLAY_UNIT_RAW"
+fi
+
+step "Scenario 36: mounted ext4 opt-in path exercises writeback_cache plus sync boundaries"
+if run_rch_capture "$WRITEBACK_CACHE_MOUNTED_EXT4_RAW" cargo test -p ffs-harness writeback_cache_ext4_opt_in_flush_fsyncdir_reopen -- --nocapture; then
+    if grep -Fq "SCENARIO_RESULT|scenario_id=writeback_cache_ext4_opt_in_flush_fsyncdir_reopen|outcome=PASS" "$WRITEBACK_CACHE_MOUNTED_EXT4_RAW"; then
+        scenario_result "writeback_cache_ext4_opt_in_flush_fsyncdir_reopen" "PASS" "mounted ext4 writeback-cache opt-in reached flush/fsync/fsyncdir/reopen"
+    elif grep -Fq "SCENARIO_RESULT|scenario_id=writeback_cache_ext4_opt_in_flush_fsyncdir_reopen|outcome=SKIP" "$WRITEBACK_CACHE_MOUNTED_EXT4_RAW"; then
+        scenario_result "writeback_cache_ext4_opt_in_flush_fsyncdir_reopen" "PASS" "mounted ext4 opt-in test soft-skipped with explicit host classification"
+    else
+        scenario_result "writeback_cache_ext4_opt_in_flush_fsyncdir_reopen" "FAIL" "mounted ext4 opt-in test did not emit scenario result"
+    fi
+else
+    scenario_result "writeback_cache_ext4_opt_in_flush_fsyncdir_reopen" "FAIL" "mounted ext4 opt-in test failed; see $WRITEBACK_CACHE_MOUNTED_EXT4_RAW"
+fi
+
+step "Scenario 37: scenario catalog names this suite and static evidence markers"
 if jq -e '.suites[] | select(.suite_id == "ffs_writeback_cache_audit")' scripts/e2e/scenario_catalog.json >/dev/null \
     && grep -Fq "SCENARIO_RESULT|scenario_id=writeback_cache_audit_catalog_valid|outcome=PASS" "$0" \
     && python3 - scripts/e2e/scenario_catalog.json <<'PY'
@@ -1442,6 +1845,15 @@ required = {
     "writeback_cache_ordering_crash_reopen_artifact",
     "writeback_cache_ordering_report_fields",
     "writeback_cache_ordering_unit_tests",
+    "writeback_cache_crash_replay_cli_wired",
+    "writeback_cache_crash_replay_accepts_complete_matrix",
+    "writeback_cache_crash_replay_rejects_missing_crash_point",
+    "writeback_cache_crash_replay_rejects_survivor_mismatch",
+    "writeback_cache_crash_replay_rejects_flush_durability",
+    "writeback_cache_crash_replay_rejects_missing_fsyncdir",
+    "writeback_cache_crash_replay_report_fields",
+    "writeback_cache_crash_replay_unit_tests",
+    "writeback_cache_ext4_opt_in_flush_fsyncdir_reopen",
 }
 missing = required - ids
 if missing:

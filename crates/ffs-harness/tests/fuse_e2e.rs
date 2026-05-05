@@ -16,7 +16,7 @@ use asupersync::Cx;
 use ffs_core::{
     BtrfsMountSelection, Ext4JournalReplayMode, FsOps, OpenFs, OpenOptions, RequestScope,
 };
-use ffs_fuse::{MountOptions, mount_background};
+use ffs_fuse::{MountOptions, WritebackCacheMode, mount_background};
 use ffs_harness::load_sparse_fixture;
 use ffs_types::InodeNumber;
 use serde_json::Value;
@@ -9511,6 +9511,84 @@ fn ext4_fuse_flush_emits_scenario_result_and_preserves_data() {
         assert_eq!(content, "flushed content\n");
         emit_scenario_result(scenario_id, "PASS", Some("explicit_flush_and_close"));
     });
+}
+
+#[test]
+fn writeback_cache_ext4_opt_in_flush_fsyncdir_reopen() {
+    let scenario_id = "writeback_cache_ext4_opt_in_flush_fsyncdir_reopen";
+    if !fuse_available() {
+        emit_scenario_result(scenario_id, "SKIP", Some("fuse_prerequisites_unavailable"));
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image(tmp.path());
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        writeback_cache: WritebackCacheMode::Enabled,
+        ..MountOptions::default()
+    };
+    let Some(session) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        emit_scenario_result(scenario_id, "SKIP", Some("fuse_mount_failed"));
+        return;
+    };
+
+    let dir = mnt.join("writeback_cache");
+    fs::create_dir(&dir).expect("mkdir writeback_cache");
+    let tmp_file = dir.join("data.tmp");
+    let final_file = dir.join("data.bin");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .read(true)
+        .open(&tmp_file)
+        .expect("create writeback-cache temp file");
+
+    file.write_all(b"writeback-cache v1\n")
+        .expect("write first payload");
+    file.flush().expect("flush remains non-durable lifecycle");
+    file.sync_all().expect("fsync first payload");
+    file.set_len(0).expect("truncate before repeated write");
+    file.seek(SeekFrom::Start(0))
+        .expect("rewind before repeated write");
+    file.write_all(b"writeback-cache v2\n")
+        .expect("write repeated payload");
+    file.sync_all().expect("fsync repeated payload");
+    drop(file);
+
+    fs::rename(&tmp_file, &final_file).expect("rename after fsynced data");
+    let dirfd = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .open(&dir)
+        .expect("open writeback-cache directory fd");
+    dirfd.sync_all().expect("fsyncdir after rename");
+    drop(dirfd);
+    assert_eq!(
+        fs::read_to_string(&final_file).expect("read final file before remount"),
+        "writeback-cache v2\n"
+    );
+
+    drop(session);
+    thread::sleep(Duration::from_millis(150));
+
+    let Some(_remount) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        emit_scenario_result(scenario_id, "SKIP", Some("fuse_remount_failed"));
+        return;
+    };
+    assert_eq!(
+        fs::read_to_string(&final_file).expect("read final file after remount"),
+        "writeback-cache v2\n"
+    );
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("writeback_cache_flush_fsync_fsyncdir_reopen"),
+    );
 }
 
 #[test]

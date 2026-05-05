@@ -11,12 +11,14 @@
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::{fmt::Write as _, fs, path::Path};
+use std::{collections::BTreeSet, fmt::Write as _, fs, path::Path};
 
 pub const WRITEBACK_CACHE_AUDIT_SCHEMA_VERSION: u32 = 1;
 pub const WRITEBACK_CACHE_AUDIT_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const WRITEBACK_CACHE_ORDERING_SCHEMA_VERSION: u32 = 1;
 pub const WRITEBACK_CACHE_ORDERING_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const WRITEBACK_CACHE_CRASH_REPLAY_SCHEMA_VERSION: u32 = 1;
+pub const WRITEBACK_CACHE_CRASH_REPLAY_REPORT_SCHEMA_VERSION: u32 = 1;
 
 /// Required invariant identifiers for the writeback-cache gate.
 ///
@@ -27,6 +29,20 @@ pub const WRITEBACK_CACHE_ORDERING_REPORT_SCHEMA_VERSION: u32 = 1;
 /// I5 = Flush Non-Durability.
 /// I6 = Cross-Epoch Order.
 pub const REQUIRED_INVARIANT_IDS: [&str; 6] = ["I1", "I2", "I3", "I4", "I5", "I6"];
+pub const REQUIRED_CRASH_POINT_IDS: [&str; 12] = [
+    "cp01_before_first_write",
+    "cp02_after_first_write_before_flush",
+    "cp03_after_flush_before_fsync",
+    "cp04_after_fsync_before_metadata",
+    "cp05_after_metadata_before_fsyncdir",
+    "cp06_after_fsyncdir_before_unmount",
+    "cp07_after_repeated_write_before_fsync",
+    "cp08_after_repeated_write_fsync",
+    "cp09_after_cancellation_before_writeback",
+    "cp10_after_clean_unmount_before_reopen",
+    "cp11_after_reopen_before_repair_refresh",
+    "cp12_after_repair_refresh",
+];
 
 pub const ALLOWED_REJECTION_REASONS: [&str; 13] = [
     "missing_epoch_barrier_artifact",
@@ -87,6 +103,23 @@ pub const ALLOWED_ORDERING_REJECTION_REASONS: [&str; 11] = [
     "stale_epoch_state",
     "repair_refresh_missing",
     "ordering_mismatch",
+];
+
+pub const ALLOWED_CRASH_REPLAY_REJECTION_REASONS: [&str; 14] = [
+    "default_off_or_not_opted_in",
+    "raw_fuser_option_missing",
+    "missing_operation_trace",
+    "missing_crash_point",
+    "survivor_set_mismatch",
+    "flush_misclassified_as_durable",
+    "missing_fsync_boundary",
+    "missing_fsyncdir_boundary",
+    "metadata_after_data_violation",
+    "unmount_reopen_missing",
+    "cancellation_not_classified",
+    "stale_epoch_state",
+    "unsupported_combination_not_rejected",
+    "replay_status_mismatch",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,6 +301,97 @@ pub struct WritebackOrderingReport {
     pub reproduction_command: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritebackCrashReplayOracle {
+    pub schema_version: u32,
+    pub gate_version: String,
+    pub bead_id: String,
+    pub matrix_id: String,
+    pub mount_options: WritebackMountOptions,
+    pub raw_fuser_options: Vec<String>,
+    pub epoch_id: String,
+    pub epoch_state: String,
+    pub host_capability_fingerprint: String,
+    pub lane_manifest_id: String,
+    pub operation_trace: Vec<WritebackCrashReplayOperation>,
+    pub crash_points: Vec<WritebackCrashPointEvidence>,
+    pub unsupported_combinations: Vec<WritebackUnsupportedCombination>,
+    pub artifact_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritebackCrashReplayOperation {
+    pub step: u32,
+    pub operation: String,
+    pub target: String,
+    pub durability_boundary: String,
+    pub expected_result: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritebackCrashPointEvidence {
+    pub crash_point_id: String,
+    pub description: String,
+    pub operation_step: u32,
+    pub expected_survivor_set: Vec<String>,
+    pub actual_survivor_set: Vec<String>,
+    pub fsync_observed_durable: bool,
+    pub fsyncdir_observed_durable: bool,
+    pub flush_observed_non_durable: bool,
+    pub metadata_after_data_observed: bool,
+    pub unmount_reopen_observed: bool,
+    pub cancellation_state: String,
+    pub repeated_write_state: String,
+    pub replay_status: String,
+    pub stdout_path: String,
+    pub stderr_path: String,
+    pub cleanup_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritebackUnsupportedCombination {
+    pub combination_id: String,
+    pub rejected: bool,
+    pub reason: String,
+    pub follow_up_bead: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum WritebackCrashReplayDecision {
+    Accept,
+    Reject {
+        reason: String,
+        crash_points_failing: Vec<String>,
+        remediation: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritebackCrashReplayReport {
+    pub schema_version: u32,
+    pub gate_version: String,
+    pub bead_id: String,
+    pub scenario_id: String,
+    pub valid: bool,
+    pub decision: WritebackCrashReplayDecision,
+    pub matrix_id: String,
+    pub required_crash_point_ids: Vec<String>,
+    pub covered_crash_point_ids: Vec<String>,
+    pub failure_modes: Vec<String>,
+    pub mount_options: WritebackMountOptions,
+    pub raw_fuser_options: Vec<String>,
+    pub epoch_id: String,
+    pub epoch_state: String,
+    pub host_capability_fingerprint: String,
+    pub lane_manifest_id: String,
+    pub operation_trace: Vec<WritebackCrashReplayOperation>,
+    pub crash_points: Vec<WritebackCrashPointEvidence>,
+    pub unsupported_combinations: Vec<WritebackUnsupportedCombination>,
+    pub artifact_paths: Vec<String>,
+    pub reproduction_command: String,
+}
+
 pub fn load_writeback_cache_audit_gate(path: &Path) -> Result<WritebackCacheAuditGate> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     serde_json::from_slice(&bytes).with_context(|| {
@@ -283,6 +407,16 @@ pub fn load_writeback_ordering_oracle(path: &Path) -> Result<WritebackOrderingOr
     serde_json::from_slice(&bytes).with_context(|| {
         format!(
             "failed to parse writeback-cache ordering oracle {}",
+            path.display()
+        )
+    })
+}
+
+pub fn load_writeback_crash_replay_oracle(path: &Path) -> Result<WritebackCrashReplayOracle> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "failed to parse writeback-cache crash/replay oracle {}",
             path.display()
         )
     })
@@ -366,6 +500,48 @@ pub fn build_writeback_ordering_report(
     })
 }
 
+pub fn build_writeback_crash_replay_report(
+    oracle: &WritebackCrashReplayOracle,
+    scenario_id: &str,
+    reproduction_command: &str,
+) -> Result<WritebackCrashReplayReport> {
+    validate_writeback_crash_replay_oracle(oracle)?;
+    let decision = evaluate_writeback_crash_replay_oracle(oracle);
+    Ok(WritebackCrashReplayReport {
+        schema_version: WRITEBACK_CACHE_CRASH_REPLAY_REPORT_SCHEMA_VERSION,
+        gate_version: oracle.gate_version.clone(),
+        bead_id: oracle.bead_id.clone(),
+        scenario_id: scenario_id.to_owned(),
+        valid: true,
+        decision,
+        matrix_id: oracle.matrix_id.clone(),
+        required_crash_point_ids: REQUIRED_CRASH_POINT_IDS
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect(),
+        covered_crash_point_ids: oracle
+            .crash_points
+            .iter()
+            .map(|point| point.crash_point_id.clone())
+            .collect(),
+        failure_modes: ALLOWED_CRASH_REPLAY_REJECTION_REASONS
+            .iter()
+            .map(|reason| (*reason).to_owned())
+            .collect(),
+        mount_options: oracle.mount_options.clone(),
+        raw_fuser_options: oracle.raw_fuser_options.clone(),
+        epoch_id: oracle.epoch_id.clone(),
+        epoch_state: oracle.epoch_state.clone(),
+        host_capability_fingerprint: oracle.host_capability_fingerprint.clone(),
+        lane_manifest_id: oracle.lane_manifest_id.clone(),
+        operation_trace: oracle.operation_trace.clone(),
+        crash_points: oracle.crash_points.clone(),
+        unsupported_combinations: oracle.unsupported_combinations.clone(),
+        artifact_paths: oracle.artifact_paths.clone(),
+        reproduction_command: reproduction_command.to_owned(),
+    })
+}
+
 pub fn fail_on_writeback_cache_audit_errors(report: &WritebackCacheAuditReport) -> Result<()> {
     if !report.valid {
         bail!("writeback-cache audit report is invalid");
@@ -382,6 +558,16 @@ pub fn fail_on_writeback_ordering_errors(report: &WritebackOrderingReport) -> Re
     }
     if let WritebackOrderingDecision::Reject { reason, .. } = &report.decision {
         bail!("writeback-cache ordering oracle rejected opt-in: {reason}");
+    }
+    Ok(())
+}
+
+pub fn fail_on_writeback_crash_replay_errors(report: &WritebackCrashReplayReport) -> Result<()> {
+    if !report.valid {
+        bail!("writeback-cache crash/replay report is invalid");
+    }
+    if let WritebackCrashReplayDecision::Reject { reason, .. } = &report.decision {
+        bail!("writeback-cache crash/replay oracle rejected opt-in: {reason}");
     }
     Ok(())
 }
@@ -465,6 +651,40 @@ pub fn render_writeback_ordering_markdown(report: &WritebackOrderingReport) -> S
             evidence.release_gate_consumer,
             evidence.unsupported_rationale
         );
+    }
+    text.push_str("\n## Failure Modes\n\n");
+    for mode in &report.failure_modes {
+        let _ = writeln!(text, "- {mode}");
+    }
+    text
+}
+
+#[must_use]
+pub fn render_writeback_crash_replay_markdown(report: &WritebackCrashReplayReport) -> String {
+    let decision = match &report.decision {
+        WritebackCrashReplayDecision::Accept => "accept".to_owned(),
+        WritebackCrashReplayDecision::Reject { reason, .. } => {
+            format!("reject ({reason})")
+        }
+    };
+    let mut text = String::new();
+    text.push_str("# Writeback-Cache Crash/Replay Oracle\n\n");
+    let _ = writeln!(text, "- schema_version: {}", report.schema_version);
+    let _ = writeln!(text, "- gate_version: {}", report.gate_version);
+    let _ = writeln!(text, "- bead_id: {}", report.bead_id);
+    let _ = writeln!(text, "- scenario_id: {}", report.scenario_id);
+    let _ = writeln!(text, "- matrix_id: {}", report.matrix_id);
+    let _ = writeln!(text, "- decision: {decision}");
+    let _ = writeln!(text, "- epoch_id: {}", report.epoch_id);
+    let _ = writeln!(text, "- epoch_state: {}", report.epoch_state);
+    let _ = writeln!(
+        text,
+        "- reproduction_command: `{}`\n",
+        report.reproduction_command
+    );
+    text.push_str("## Required Crash Points\n\n");
+    for id in &report.required_crash_point_ids {
+        let _ = writeln!(text, "- {id}");
     }
     text.push_str("\n## Failure Modes\n\n");
     for mode in &report.failure_modes {
@@ -920,6 +1140,186 @@ fn reject_ordering(
     }
 }
 
+#[must_use]
+pub fn evaluate_writeback_crash_replay_oracle(
+    oracle: &WritebackCrashReplayOracle,
+) -> WritebackCrashReplayDecision {
+    if oracle.mount_options.mode != "rw"
+        || !oracle.mount_options.raw_options.iter().any(|v| v == "rw")
+    {
+        return reject_crash_replay(
+            "default_off_or_not_opted_in",
+            Vec::<String>::new(),
+            "writeback-cache crash/replay proof requires an explicit read-write opt-in mount",
+        );
+    }
+    if !oracle
+        .raw_fuser_options
+        .iter()
+        .any(|v| v == "writeback_cache")
+    {
+        return reject_crash_replay(
+            "raw_fuser_option_missing",
+            Vec::<String>::new(),
+            "crash/replay proof must record that raw FUSE options included writeback_cache",
+        );
+    }
+    if oracle.operation_trace.is_empty() {
+        return reject_crash_replay(
+            "missing_operation_trace",
+            Vec::<String>::new(),
+            "crash/replay proof must include the mounted-path operation trace",
+        );
+    }
+    if oracle.epoch_id.trim().is_empty() || oracle.epoch_state != "fresh" {
+        return reject_crash_replay(
+            "stale_epoch_state",
+            Vec::<String>::new(),
+            "crash/replay proof must name a fresh epoch barrier before accepting",
+        );
+    }
+    if let Some(decision) = check_required_crash_points(oracle) {
+        return decision;
+    }
+    if let Some(decision) = check_unsupported_combinations(oracle) {
+        return decision;
+    }
+    for point in &oracle.crash_points {
+        if survivor_set(&point.expected_survivor_set) != survivor_set(&point.actual_survivor_set) {
+            return reject_crash_replay(
+                "survivor_set_mismatch",
+                [point.crash_point_id.clone()],
+                "actual survivor set must match the oracle expected survivor set after replay",
+            );
+        }
+        if !point.flush_observed_non_durable {
+            return reject_crash_replay(
+                "flush_misclassified_as_durable",
+                [point.crash_point_id.clone()],
+                "flush evidence must remain non-durable for every crash point",
+            );
+        }
+        if !point.fsync_observed_durable {
+            return reject_crash_replay(
+                "missing_fsync_boundary",
+                [point.crash_point_id.clone()],
+                "file data survivors must cross an observed fsync boundary",
+            );
+        }
+        if !point.fsyncdir_observed_durable {
+            return reject_crash_replay(
+                "missing_fsyncdir_boundary",
+                [point.crash_point_id.clone()],
+                "metadata survivors must cross an observed fsyncdir boundary",
+            );
+        }
+        if !point.metadata_after_data_observed {
+            return reject_crash_replay(
+                "metadata_after_data_violation",
+                [point.crash_point_id.clone()],
+                "metadata durability must not overtake dependent data durability",
+            );
+        }
+        if !point.unmount_reopen_observed {
+            return reject_crash_replay(
+                "unmount_reopen_missing",
+                [point.crash_point_id.clone()],
+                "each crash point must include unmount/reopen recovery evidence",
+            );
+        }
+        if !["cancelled_before_writeback_classified", "none"]
+            .contains(&point.cancellation_state.as_str())
+        {
+            return reject_crash_replay(
+                "cancellation_not_classified",
+                [point.crash_point_id.clone()],
+                "cancellation-before-writeback points must be explicitly classified",
+            );
+        }
+        if !["last_fsynced_write_survived", "not_applicable"]
+            .contains(&point.repeated_write_state.as_str())
+        {
+            return reject_crash_replay(
+                "replay_status_mismatch",
+                [point.crash_point_id.clone()],
+                "repeated-write points must prove the last fsynced write survived",
+            );
+        }
+        if point.replay_status != "survivor_set_verified" {
+            return reject_crash_replay(
+                "replay_status_mismatch",
+                [point.crash_point_id.clone()],
+                "replay status must verify the survivor set for every crash point",
+            );
+        }
+    }
+    WritebackCrashReplayDecision::Accept
+}
+
+fn check_required_crash_points(
+    oracle: &WritebackCrashReplayOracle,
+) -> Option<WritebackCrashReplayDecision> {
+    let covered: BTreeSet<&str> = oracle
+        .crash_points
+        .iter()
+        .map(|point| point.crash_point_id.as_str())
+        .collect();
+    let missing: Vec<String> = REQUIRED_CRASH_POINT_IDS
+        .iter()
+        .filter(|id| !covered.contains(**id))
+        .map(|id| (*id).to_owned())
+        .collect();
+    if missing.is_empty() {
+        None
+    } else {
+        Some(reject_crash_replay(
+            "missing_crash_point",
+            missing,
+            "writeback-cache crash/replay matrix must cover all twelve declared crash points or split an explicit follow-up bead",
+        ))
+    }
+}
+
+fn check_unsupported_combinations(
+    oracle: &WritebackCrashReplayOracle,
+) -> Option<WritebackCrashReplayDecision> {
+    let unclassified: Vec<String> = oracle
+        .unsupported_combinations
+        .iter()
+        .filter(|combo| {
+            !combo.rejected
+                || combo.reason.trim().is_empty()
+                || combo.follow_up_bead.trim().is_empty()
+        })
+        .map(|combo| combo.combination_id.clone())
+        .collect();
+    if unclassified.is_empty() {
+        None
+    } else {
+        Some(reject_crash_replay(
+            "unsupported_combination_not_rejected",
+            unclassified,
+            "unsupported writeback-cache combinations must fail closed with reason and follow-up bead",
+        ))
+    }
+}
+
+fn survivor_set(values: &[String]) -> BTreeSet<&str> {
+    values.iter().map(String::as_str).collect()
+}
+
+fn reject_crash_replay(
+    reason: &str,
+    crash_points_failing: impl IntoIterator<Item = String>,
+    remediation: &str,
+) -> WritebackCrashReplayDecision {
+    WritebackCrashReplayDecision::Reject {
+        reason: reason.to_owned(),
+        crash_points_failing: crash_points_failing.into_iter().collect(),
+        remediation: remediation.to_owned(),
+    }
+}
+
 pub fn validate_writeback_cache_audit_gate(gate: &WritebackCacheAuditGate) -> Result<()> {
     if gate.schema_version != WRITEBACK_CACHE_AUDIT_SCHEMA_VERSION {
         bail!(
@@ -1028,6 +1428,130 @@ pub fn validate_writeback_ordering_oracle(oracle: &WritebackOrderingOracle) -> R
         if path.trim().is_empty() {
             bail!("writeback cache ordering artifact path must not be empty");
         }
+    }
+    Ok(())
+}
+
+pub fn validate_writeback_crash_replay_oracle(oracle: &WritebackCrashReplayOracle) -> Result<()> {
+    if oracle.schema_version != WRITEBACK_CACHE_CRASH_REPLAY_SCHEMA_VERSION {
+        bail!(
+            "writeback cache crash/replay schema_version must be {WRITEBACK_CACHE_CRASH_REPLAY_SCHEMA_VERSION}, got {}",
+            oracle.schema_version
+        );
+    }
+    if !oracle.bead_id.starts_with("bd-") {
+        bail!(
+            "writeback cache crash/replay bead_id must look like bd-..., got `{}`",
+            oracle.bead_id
+        );
+    }
+    if oracle.gate_version.trim().is_empty() {
+        bail!("writeback cache crash/replay gate_version must not be empty");
+    }
+    if oracle.matrix_id.trim().is_empty() {
+        bail!("writeback cache crash/replay matrix_id must not be empty");
+    }
+    validate_writeback_mount_options(&oracle.mount_options)?;
+    if oracle.raw_fuser_options.is_empty() {
+        bail!("writeback cache crash/replay raw_fuser_options must not be empty");
+    }
+    if oracle.epoch_id.trim().is_empty() {
+        bail!("writeback cache crash/replay epoch_id must not be empty");
+    }
+    if oracle.epoch_state.trim().is_empty() {
+        bail!("writeback cache crash/replay epoch_state must not be empty");
+    }
+    if oracle.host_capability_fingerprint.trim().is_empty() {
+        bail!("writeback cache crash/replay host_capability_fingerprint must not be empty");
+    }
+    if oracle.lane_manifest_id.trim().is_empty() {
+        bail!("writeback cache crash/replay lane_manifest_id must not be empty");
+    }
+    if oracle.operation_trace.is_empty() {
+        bail!("writeback cache crash/replay operation_trace must not be empty");
+    }
+    if oracle.crash_points.is_empty() {
+        bail!("writeback cache crash/replay crash_points must not be empty");
+    }
+    if oracle.artifact_paths.is_empty() {
+        bail!("writeback cache crash/replay artifact_paths must not be empty");
+    }
+    for path in &oracle.artifact_paths {
+        if path.trim().is_empty() {
+            bail!("writeback cache crash/replay artifact path must not be empty");
+        }
+    }
+    for operation in &oracle.operation_trace {
+        if operation.step == 0 {
+            bail!("writeback cache crash/replay operation step must be nonzero");
+        }
+        if operation.operation.trim().is_empty()
+            || operation.target.trim().is_empty()
+            || operation.durability_boundary.trim().is_empty()
+            || operation.expected_result.trim().is_empty()
+        {
+            bail!("writeback cache crash/replay operation fields must not be empty");
+        }
+    }
+    for point in &oracle.crash_points {
+        validate_crash_point_evidence(point)?;
+    }
+    for combo in &oracle.unsupported_combinations {
+        if combo.combination_id.trim().is_empty()
+            || combo.reason.trim().is_empty()
+            || combo.follow_up_bead.trim().is_empty()
+        {
+            bail!("writeback cache crash/replay unsupported combination fields must not be empty");
+        }
+    }
+    Ok(())
+}
+
+fn validate_crash_point_evidence(point: &WritebackCrashPointEvidence) -> Result<()> {
+    if point.crash_point_id.trim().is_empty() {
+        bail!("writeback cache crash/replay crash_point_id must not be empty");
+    }
+    if point.description.trim().is_empty() {
+        bail!(
+            "writeback cache crash/replay description must not be empty for {}",
+            point.crash_point_id
+        );
+    }
+    if point.operation_step == 0 {
+        bail!(
+            "writeback cache crash/replay operation_step must be nonzero for {}",
+            point.crash_point_id
+        );
+    }
+    if point.expected_survivor_set.is_empty() || point.actual_survivor_set.is_empty() {
+        bail!(
+            "writeback cache crash/replay survivor sets must not be empty for {}",
+            point.crash_point_id
+        );
+    }
+    for survivor in point
+        .expected_survivor_set
+        .iter()
+        .chain(point.actual_survivor_set.iter())
+    {
+        if survivor.trim().is_empty() {
+            bail!(
+                "writeback cache crash/replay survivor set entries must not be empty for {}",
+                point.crash_point_id
+            );
+        }
+    }
+    if point.cancellation_state.trim().is_empty()
+        || point.repeated_write_state.trim().is_empty()
+        || point.replay_status.trim().is_empty()
+        || point.stdout_path.trim().is_empty()
+        || point.stderr_path.trim().is_empty()
+        || point.cleanup_status.trim().is_empty()
+    {
+        bail!(
+            "writeback cache crash/replay artifact fields must not be empty for {}",
+            point.crash_point_id
+        );
     }
     Ok(())
 }
@@ -1178,6 +1702,115 @@ mod tests {
         }
     }
 
+    fn crash_replay_operation(
+        step: u32,
+        operation: &str,
+        boundary: &str,
+    ) -> WritebackCrashReplayOperation {
+        WritebackCrashReplayOperation {
+            step,
+            operation: operation.to_owned(),
+            target: "/writeback/data.bin".to_owned(),
+            durability_boundary: boundary.to_owned(),
+            expected_result: "success".to_owned(),
+        }
+    }
+
+    fn crash_point(id: &str, step: u32) -> WritebackCrashPointEvidence {
+        WritebackCrashPointEvidence {
+            crash_point_id: id.to_owned(),
+            description: format!("{id} mounted writeback-cache crash point"),
+            operation_step: step,
+            expected_survivor_set: vec![
+                "/".to_owned(),
+                "/writeback".to_owned(),
+                "/writeback/data.bin:blake3=stable-v2".to_owned(),
+            ],
+            actual_survivor_set: vec![
+                "/writeback/data.bin:blake3=stable-v2".to_owned(),
+                "/".to_owned(),
+                "/writeback".to_owned(),
+            ],
+            fsync_observed_durable: true,
+            fsyncdir_observed_durable: true,
+            flush_observed_non_durable: true,
+            metadata_after_data_observed: true,
+            unmount_reopen_observed: true,
+            cancellation_state: "none".to_owned(),
+            repeated_write_state: "not_applicable".to_owned(),
+            replay_status: "survivor_set_verified".to_owned(),
+            stdout_path: format!("artifacts/writeback-cache/crash-replay/{id}.stdout"),
+            stderr_path: format!("artifacts/writeback-cache/crash-replay/{id}.stderr"),
+            cleanup_status: "retained_for_qa".to_owned(),
+        }
+    }
+
+    fn happy_crash_replay_oracle() -> WritebackCrashReplayOracle {
+        let mut crash_points: Vec<_> = REQUIRED_CRASH_POINT_IDS
+            .iter()
+            .enumerate()
+            .map(|(index, id)| crash_point(id, (index + 1) as u32))
+            .collect();
+        crash_points[6].repeated_write_state = "last_fsynced_write_survived".to_owned();
+        crash_points[7].repeated_write_state = "last_fsynced_write_survived".to_owned();
+        crash_points[8].cancellation_state = "cancelled_before_writeback_classified".to_owned();
+
+        WritebackCrashReplayOracle {
+            schema_version: WRITEBACK_CACHE_CRASH_REPLAY_SCHEMA_VERSION,
+            gate_version: "bd-rchk0.2.3-crash-replay-v1".to_owned(),
+            bead_id: "bd-rchk0.2.3".to_owned(),
+            matrix_id: "writeback_cache_crash_replay_matrix_v1".to_owned(),
+            mount_options: WritebackMountOptions {
+                raw_options: vec![
+                    "rw".to_owned(),
+                    "fsname=frankenfs".to_owned(),
+                    "writeback_cache".to_owned(),
+                ],
+                fs_name: "frankenfs".to_owned(),
+                allow_other: false,
+                auto_unmount: true,
+                default_permissions: true,
+                mode: "rw".to_owned(),
+            },
+            raw_fuser_options: vec![
+                "fsname=frankenfs".to_owned(),
+                "subtype=ffs".to_owned(),
+                "rw".to_owned(),
+                "writeback_cache".to_owned(),
+            ],
+            epoch_id: "epoch-writeback-crash-0001".to_owned(),
+            epoch_state: "fresh".to_owned(),
+            host_capability_fingerprint: "fuse3-writeback-cache-enabled-host".to_owned(),
+            lane_manifest_id: "fuse-writeback-cache-rw-lane-v1".to_owned(),
+            operation_trace: vec![
+                crash_replay_operation(1, "create", "none"),
+                crash_replay_operation(2, "write", "kernel_writeback_cache"),
+                crash_replay_operation(3, "flush", "non_durable"),
+                crash_replay_operation(4, "fsync", "file_durable"),
+                crash_replay_operation(5, "rename", "metadata_after_data"),
+                crash_replay_operation(6, "fsyncdir", "directory_durable"),
+                crash_replay_operation(7, "write", "repeated_write"),
+                crash_replay_operation(8, "fsync", "last_write_durable"),
+                crash_replay_operation(9, "cancel", "classified_before_writeback"),
+                crash_replay_operation(10, "unmount", "dirty_pages_flushed_or_rejected"),
+                crash_replay_operation(11, "reopen", "survivor_set_verified"),
+                crash_replay_operation(12, "repair_refresh", "post_writeback_refresh"),
+            ],
+            crash_points,
+            unsupported_combinations: vec![WritebackUnsupportedCombination {
+                combination_id: "writeback_cache_ro_mount".to_owned(),
+                rejected: true,
+                reason: "read_only_writeback_cache".to_owned(),
+                follow_up_bead: "bd-rchk0.2.4".to_owned(),
+            }],
+            artifact_paths: vec![
+                "artifacts/writeback-cache/crash-replay/matrix.json".to_owned(),
+                "artifacts/writeback-cache/crash-replay/results.json".to_owned(),
+                "artifacts/writeback-cache/crash-replay/run.log".to_owned(),
+            ],
+        }
+    }
+
     fn rejection_reason(decision: &WritebackCacheAuditDecision) -> Option<&str> {
         if let WritebackCacheAuditDecision::Reject { reason, .. } = decision {
             Some(reason.as_str())
@@ -1188,6 +1821,14 @@ mod tests {
 
     fn ordering_rejection_reason(decision: &WritebackOrderingDecision) -> Option<&str> {
         if let WritebackOrderingDecision::Reject { reason, .. } = decision {
+            Some(reason.as_str())
+        } else {
+            None
+        }
+    }
+
+    fn crash_replay_rejection_reason(decision: &WritebackCrashReplayDecision) -> Option<&str> {
+        if let WritebackCrashReplayDecision::Reject { reason, .. } = decision {
             Some(reason.as_str())
         } else {
             None
@@ -1885,6 +2526,179 @@ mod tests {
         .expect("schema-valid rejection should still build report");
 
         let result = fail_on_writeback_ordering_errors(&report);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn crash_replay_oracle_accepts_complete_matrix() {
+        let decision = evaluate_writeback_crash_replay_oracle(&happy_crash_replay_oracle());
+        assert!(matches!(decision, WritebackCrashReplayDecision::Accept));
+    }
+
+    #[test]
+    fn crash_replay_oracle_rejects_missing_crash_point() {
+        let mut oracle = happy_crash_replay_oracle();
+        oracle.crash_points.pop();
+        let decision = evaluate_writeback_crash_replay_oracle(&oracle);
+        assert_eq!(
+            crash_replay_rejection_reason(&decision),
+            Some("missing_crash_point")
+        );
+    }
+
+    #[test]
+    fn crash_replay_oracle_rejects_survivor_set_mismatch() {
+        let mut oracle = happy_crash_replay_oracle();
+        oracle.crash_points[0]
+            .actual_survivor_set
+            .push("/unexpected".to_owned());
+        let decision = evaluate_writeback_crash_replay_oracle(&oracle);
+        assert_eq!(
+            crash_replay_rejection_reason(&decision),
+            Some("survivor_set_mismatch")
+        );
+    }
+
+    #[test]
+    fn crash_replay_oracle_rejects_flush_as_durable() {
+        let mut oracle = happy_crash_replay_oracle();
+        oracle.crash_points[2].flush_observed_non_durable = false;
+        let decision = evaluate_writeback_crash_replay_oracle(&oracle);
+        assert_eq!(
+            crash_replay_rejection_reason(&decision),
+            Some("flush_misclassified_as_durable")
+        );
+    }
+
+    #[test]
+    fn crash_replay_oracle_rejects_missing_fsync_boundary() {
+        let mut oracle = happy_crash_replay_oracle();
+        oracle.crash_points[3].fsync_observed_durable = false;
+        let decision = evaluate_writeback_crash_replay_oracle(&oracle);
+        assert_eq!(
+            crash_replay_rejection_reason(&decision),
+            Some("missing_fsync_boundary")
+        );
+    }
+
+    #[test]
+    fn crash_replay_oracle_rejects_missing_fsyncdir_boundary() {
+        let mut oracle = happy_crash_replay_oracle();
+        oracle.crash_points[4].fsyncdir_observed_durable = false;
+        let decision = evaluate_writeback_crash_replay_oracle(&oracle);
+        assert_eq!(
+            crash_replay_rejection_reason(&decision),
+            Some("missing_fsyncdir_boundary")
+        );
+    }
+
+    #[test]
+    fn crash_replay_oracle_rejects_metadata_overtaking_data() {
+        let mut oracle = happy_crash_replay_oracle();
+        oracle.crash_points[4].metadata_after_data_observed = false;
+        let decision = evaluate_writeback_crash_replay_oracle(&oracle);
+        assert_eq!(
+            crash_replay_rejection_reason(&decision),
+            Some("metadata_after_data_violation")
+        );
+    }
+
+    #[test]
+    fn crash_replay_oracle_rejects_missing_unmount_reopen_evidence() {
+        let mut oracle = happy_crash_replay_oracle();
+        oracle.crash_points[9].unmount_reopen_observed = false;
+        let decision = evaluate_writeback_crash_replay_oracle(&oracle);
+        assert_eq!(
+            crash_replay_rejection_reason(&decision),
+            Some("unmount_reopen_missing")
+        );
+    }
+
+    #[test]
+    fn crash_replay_oracle_rejects_unclassified_cancellation() {
+        let mut oracle = happy_crash_replay_oracle();
+        oracle.crash_points[8].cancellation_state = "cancelled_unclassified".to_owned();
+        let decision = evaluate_writeback_crash_replay_oracle(&oracle);
+        assert_eq!(
+            crash_replay_rejection_reason(&decision),
+            Some("cancellation_not_classified")
+        );
+    }
+
+    #[test]
+    fn crash_replay_oracle_rejects_stale_epoch_state() {
+        let mut oracle = happy_crash_replay_oracle();
+        oracle.epoch_state = "stale".to_owned();
+        let decision = evaluate_writeback_crash_replay_oracle(&oracle);
+        assert_eq!(
+            crash_replay_rejection_reason(&decision),
+            Some("stale_epoch_state")
+        );
+    }
+
+    #[test]
+    fn crash_replay_oracle_rejects_unsupported_combo_without_follow_up() {
+        let mut oracle = happy_crash_replay_oracle();
+        oracle.unsupported_combinations[0].rejected = false;
+        let decision = evaluate_writeback_crash_replay_oracle(&oracle);
+        assert_eq!(
+            crash_replay_rejection_reason(&decision),
+            Some("unsupported_combination_not_rejected")
+        );
+    }
+
+    #[test]
+    fn crash_replay_report_includes_required_artifact_contract() {
+        let report = build_writeback_crash_replay_report(
+            &happy_crash_replay_oracle(),
+            "writeback_cache_crash_replay_accepts_complete_matrix",
+            "ffs-harness validate-writeback-cache-crash-replay --oracle oracle.json",
+        )
+        .expect("happy crash/replay oracle should build report");
+
+        assert!(matches!(
+            report.decision,
+            WritebackCrashReplayDecision::Accept
+        ));
+        assert_eq!(
+            report.schema_version,
+            WRITEBACK_CACHE_CRASH_REPLAY_REPORT_SCHEMA_VERSION
+        );
+        assert_eq!(report.required_crash_point_ids.len(), 12);
+        assert_eq!(report.covered_crash_point_ids.len(), 12);
+        assert_eq!(report.operation_trace.len(), 12);
+        assert!(
+            report
+                .raw_fuser_options
+                .contains(&"writeback_cache".to_owned())
+        );
+        assert!(
+            report
+                .crash_points
+                .iter()
+                .all(|point| !point.stdout_path.is_empty()
+                    && !point.stderr_path.is_empty()
+                    && !point.cleanup_status.is_empty())
+        );
+        assert!(
+            report
+                .reproduction_command
+                .contains("validate-writeback-cache-crash-replay")
+        );
+    }
+
+    #[test]
+    fn crash_replay_require_accept_fails_closed_on_rejection() {
+        let mut oracle = happy_crash_replay_oracle();
+        oracle.crash_points[0].replay_status = "not_verified".to_owned();
+        let report = build_writeback_crash_replay_report(
+            &oracle,
+            "writeback_cache_crash_replay_rejects_unverified_replay",
+            "ffs-harness validate-writeback-cache-crash-replay --oracle oracle.json --require-accept",
+        )
+        .expect("schema-valid rejection should still build report");
+
+        let result = fail_on_writeback_crash_replay_errors(&report);
         assert!(result.is_err());
     }
 }

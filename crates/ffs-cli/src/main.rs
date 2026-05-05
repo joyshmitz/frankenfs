@@ -31,9 +31,11 @@ use ffs_fuse::{MountConfig, MountOptions, WritebackCacheMode, mount_managed};
 use ffs_harness::{
     ParityReport,
     writeback_cache_audit::{
-        build_writeback_cache_audit_report, build_writeback_ordering_report,
-        fail_on_writeback_cache_audit_errors, fail_on_writeback_ordering_errors,
-        load_writeback_cache_audit_gate, load_writeback_ordering_oracle,
+        build_writeback_cache_audit_report, build_writeback_crash_replay_report,
+        build_writeback_ordering_report, fail_on_writeback_cache_audit_errors,
+        fail_on_writeback_crash_replay_errors, fail_on_writeback_ordering_errors,
+        load_writeback_cache_audit_gate, load_writeback_crash_replay_oracle,
+        load_writeback_ordering_oracle,
     },
 };
 use ffs_ondisk::{
@@ -299,6 +301,7 @@ struct MountWritebackCacheConfig {
     enabled: bool,
     audit_gate_path: Option<PathBuf>,
     ordering_oracle_path: Option<PathBuf>,
+    crash_replay_oracle_path: Option<PathBuf>,
     runtime_kill_switch: bool,
 }
 
@@ -309,6 +312,7 @@ impl MountWritebackCacheConfig {
             enabled: false,
             audit_gate_path: None,
             ordering_oracle_path: None,
+            crash_replay_oracle_path: None,
             runtime_kill_switch: false,
         }
     }
@@ -317,11 +321,13 @@ impl MountWritebackCacheConfig {
         enabled: bool,
         audit_gate_path: Option<PathBuf>,
         ordering_oracle_path: Option<PathBuf>,
+        crash_replay_oracle_path: Option<PathBuf>,
     ) -> Self {
         Self {
             enabled,
             audit_gate_path,
             ordering_oracle_path,
+            crash_replay_oracle_path,
             runtime_kill_switch: writeback_cache_runtime_kill_switch_enabled(),
         }
     }
@@ -331,12 +337,14 @@ impl MountWritebackCacheConfig {
         enabled: bool,
         audit_gate_path: Option<PathBuf>,
         ordering_oracle_path: Option<PathBuf>,
+        crash_replay_oracle_path: Option<PathBuf>,
         runtime_kill_switch: bool,
     ) -> Self {
         Self {
             enabled,
             audit_gate_path,
             ordering_oracle_path,
+            crash_replay_oracle_path,
             runtime_kill_switch,
         }
     }
@@ -536,8 +544,8 @@ enum Command {
         /// - `per-core`: managed mount with thread-per-core dispatch. Sets worker
         ///   threads to match detected cores and logs per-core metrics on shutdown.
         /// - Kernel FUSE `writeback_cache` mode is default-off in V1.x and only
-        ///   enabled by `--writeback-cache` after the audit gate and ordering
-        ///   oracle accept.
+        ///   enabled by `--writeback-cache` after the audit gate, ordering
+        ///   oracle, and crash/replay oracle accept.
         #[arg(long = "runtime-mode", value_enum, default_value_t = MountRuntimeMode::Standard)]
         runtime_mode: MountRuntimeMode,
         /// Graceful unmount timeout for managed/per-core modes (seconds).
@@ -553,8 +561,9 @@ enum Command {
         rw: bool,
         /// Opt into kernel FUSE writeback_cache after the safety gate accepts.
         ///
-        /// Requires `--rw`, `--writeback-cache-gate`, and
-        /// `--writeback-cache-ordering-oracle`. flush remains non-durable;
+        /// Requires `--rw`, `--writeback-cache-gate`,
+        /// `--writeback-cache-ordering-oracle`, and
+        /// `--writeback-cache-crash-replay-oracle`. flush remains non-durable;
         /// fsync and fsyncdir are the durability boundaries. The
         /// FFS_WRITEBACK_CACHE_KILL_SWITCH environment variable fails closed.
         #[arg(long = "writeback-cache")]
@@ -565,6 +574,9 @@ enum Command {
         /// Dirty-page ordering oracle JSON required by `--writeback-cache`.
         #[arg(long = "writeback-cache-ordering-oracle")]
         writeback_cache_ordering_oracle: Option<PathBuf>,
+        /// Crash/replay matrix oracle JSON required by `--writeback-cache`.
+        #[arg(long = "writeback-cache-crash-replay-oracle")]
+        writeback_cache_crash_replay_oracle: Option<PathBuf>,
         /// Force background scrub even when mounting read-write.
         ///
         /// Without this flag, read-only mounts start a detection-only scrub
@@ -1588,6 +1600,7 @@ fn run() -> Result<()> {
             writeback_cache,
             writeback_cache_gate,
             writeback_cache_ordering_oracle,
+            writeback_cache_crash_replay_oracle,
             background_scrub,
             no_background_scrub,
             background_scrub_interval_secs,
@@ -1636,6 +1649,7 @@ fn run() -> Result<()> {
                         writeback_cache,
                         writeback_cache_gate,
                         writeback_cache_ordering_oracle,
+                        writeback_cache_crash_replay_oracle,
                     ),
                 },
             )
@@ -4158,6 +4172,7 @@ fn log_mount_writeback_cache_accepted(
     scenario_id: &str,
     audit_gate_path: &Path,
     ordering_oracle_path: &Path,
+    crash_replay_oracle_path: &Path,
 ) {
     info!(
         target: "ffs::cli::mount",
@@ -4166,6 +4181,7 @@ fn log_mount_writeback_cache_accepted(
         outcome = "writeback_cache_accepted",
         audit_gate = %audit_gate_path.display(),
         ordering_oracle = %ordering_oracle_path.display(),
+        crash_replay_oracle = %crash_replay_oracle_path.display(),
         durability_flush = "non_durable",
         durability_boundaries = "fsync,fsyncdir",
         "mount_writeback_cache_accepted"
@@ -4230,6 +4246,7 @@ fn emit_optional_recovery_banner(open_fs: &OpenFs) {
 struct MountWritebackCacheEvidence<'a> {
     audit_gate_path: &'a Path,
     ordering_oracle_path: &'a Path,
+    crash_replay_oracle_path: &'a Path,
     reproduction_command: String,
 }
 
@@ -4242,8 +4259,11 @@ fn prepare_mount_writeback_cache_evidence<'a>(
 ) -> Result<Option<MountWritebackCacheEvidence<'a>>> {
     let request = &options.writeback_cache;
     if !request.enabled {
-        if request.audit_gate_path.is_some() || request.ordering_oracle_path.is_some() {
-            let reason = "--writeback-cache-gate and --writeback-cache-ordering-oracle require --writeback-cache";
+        if request.audit_gate_path.is_some()
+            || request.ordering_oracle_path.is_some()
+            || request.crash_replay_oracle_path.is_some()
+        {
+            let reason = "--writeback-cache-gate, --writeback-cache-ordering-oracle, and --writeback-cache-crash-replay-oracle require --writeback-cache";
             log_mount_writeback_cache_rejected(
                 operation_id,
                 scenario_id,
@@ -4292,17 +4312,29 @@ fn prepare_mount_writeback_cache_evidence<'a>(
         );
         bail!("{reason}");
     };
+    let Some(crash_replay_oracle_path) = request.crash_replay_oracle_path.as_deref() else {
+        let reason = "--writeback-cache requires --writeback-cache-crash-replay-oracle";
+        log_mount_writeback_cache_rejected(
+            operation_id,
+            scenario_id,
+            "missing_crash_replay_oracle",
+            reason,
+        );
+        bail!("{reason}");
+    };
 
     let reproduction_command = format!(
-        "ffs mount --rw --writeback-cache --writeback-cache-gate {} --writeback-cache-ordering-oracle {} {} {}",
+        "ffs mount --rw --writeback-cache --writeback-cache-gate {} --writeback-cache-ordering-oracle {} --writeback-cache-crash-replay-oracle {} {} {}",
         audit_gate_path.display(),
         ordering_oracle_path.display(),
+        crash_replay_oracle_path.display(),
         image_path.display(),
         mountpoint.display()
     );
     Ok(Some(MountWritebackCacheEvidence {
         audit_gate_path,
         ordering_oracle_path,
+        crash_replay_oracle_path,
         reproduction_command,
     }))
 }
@@ -4402,6 +4434,55 @@ fn validate_mount_writeback_cache_ordering_oracle(
     Ok(())
 }
 
+fn validate_mount_writeback_cache_crash_replay_oracle(
+    path: &Path,
+    scenario_id: &str,
+    reproduction_command: &str,
+    operation_id: &str,
+) -> Result<()> {
+    let crash_replay_oracle = match load_writeback_crash_replay_oracle(path) {
+        Ok(oracle) => oracle,
+        Err(error) => {
+            let reason = format!("{error:#}");
+            log_mount_writeback_cache_rejected(
+                operation_id,
+                scenario_id,
+                "crash_replay_oracle_invalid",
+                &reason,
+            );
+            return Err(error.context("failed to load writeback-cache crash/replay oracle"));
+        }
+    };
+    let crash_replay_report = match build_writeback_crash_replay_report(
+        &crash_replay_oracle,
+        scenario_id,
+        reproduction_command,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            let reason = format!("{error:#}");
+            log_mount_writeback_cache_rejected(
+                operation_id,
+                scenario_id,
+                "crash_replay_oracle_invalid",
+                &reason,
+            );
+            return Err(error.context("failed to validate writeback-cache crash/replay oracle"));
+        }
+    };
+    if let Err(error) = fail_on_writeback_crash_replay_errors(&crash_replay_report) {
+        let reason = format!("{error:#}");
+        log_mount_writeback_cache_rejected(
+            operation_id,
+            scenario_id,
+            "crash_replay_oracle_rejected",
+            &reason,
+        );
+        return Err(error.context("writeback-cache crash/replay oracle rejected CLI opt-in"));
+    }
+    Ok(())
+}
+
 fn validate_mount_writeback_cache_request(
     image_path: &Path,
     mountpoint: &Path,
@@ -4431,11 +4512,18 @@ fn validate_mount_writeback_cache_request(
         &evidence.reproduction_command,
         operation_id,
     )?;
+    validate_mount_writeback_cache_crash_replay_oracle(
+        evidence.crash_replay_oracle_path,
+        scenario_id,
+        &evidence.reproduction_command,
+        operation_id,
+    )?;
     log_mount_writeback_cache_accepted(
         operation_id,
         scenario_id,
         evidence.audit_gate_path,
         evidence.ordering_oracle_path,
+        evidence.crash_replay_oracle_path,
     );
     Ok(())
 }
@@ -6466,7 +6554,7 @@ mod tests {
         }
     }
 
-    fn write_happy_writeback_artifacts(dir: &Path) -> (PathBuf, PathBuf) {
+    fn write_happy_writeback_artifacts(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
         write_writeback_artifacts(dir, |_| {})
     }
 
@@ -6573,15 +6661,138 @@ mod tests {
         })
     }
 
+    fn happy_writeback_crash_replay_oracle() -> serde_json::Value {
+        let required_crash_points = [
+            "cp01_before_first_write",
+            "cp02_after_first_write_before_flush",
+            "cp03_after_flush_before_fsync",
+            "cp04_after_fsync_before_metadata",
+            "cp05_after_metadata_before_fsyncdir",
+            "cp06_after_fsyncdir_before_unmount",
+            "cp07_after_repeated_write_before_fsync",
+            "cp08_after_repeated_write_fsync",
+            "cp09_after_cancellation_before_writeback",
+            "cp10_after_clean_unmount_before_reopen",
+            "cp11_after_reopen_before_repair_refresh",
+            "cp12_after_repair_refresh",
+        ];
+        let operations = [
+            ("create", "none"),
+            ("write", "kernel_writeback_cache"),
+            ("flush", "non_durable"),
+            ("fsync", "file_durable"),
+            ("rename", "metadata_after_data"),
+            ("fsyncdir", "directory_durable"),
+            ("write", "repeated_write"),
+            ("fsync", "last_write_durable"),
+            ("cancel", "classified_before_writeback"),
+            ("unmount", "dirty_pages_flushed_or_rejected"),
+            ("reopen", "survivor_set_verified"),
+            ("repair_refresh", "post_writeback_refresh"),
+        ];
+        let operation_trace: Vec<_> = operations
+            .iter()
+            .enumerate()
+            .map(|(index, (operation, boundary))| {
+                serde_json::json!({
+                    "step": index + 1,
+                    "operation": operation,
+                    "target": "/writeback/data.bin",
+                    "durability_boundary": boundary,
+                    "expected_result": "success"
+                })
+            })
+            .collect();
+        let crash_points: Vec<_> = required_crash_points
+            .iter()
+            .enumerate()
+            .map(|(index, crash_point_id)| {
+                let step = index + 1;
+                let cancellation_state = if step == 9 {
+                    "cancelled_before_writeback_classified"
+                } else {
+                    "none"
+                };
+                let repeated_write_state = if step == 7 || step == 8 {
+                    "last_fsynced_write_survived"
+                } else {
+                    "not_applicable"
+                };
+                serde_json::json!({
+                    "crash_point_id": crash_point_id,
+                    "description": format!("{crash_point_id} mounted writeback-cache crash point"),
+                    "operation_step": step,
+                    "expected_survivor_set": [
+                        "/",
+                        "/writeback",
+                        "/writeback/data.bin:blake3=stable-v2"
+                    ],
+                    "actual_survivor_set": [
+                        "/writeback/data.bin:blake3=stable-v2",
+                        "/writeback",
+                        "/"
+                    ],
+                    "fsync_observed_durable": true,
+                    "fsyncdir_observed_durable": true,
+                    "flush_observed_non_durable": true,
+                    "metadata_after_data_observed": true,
+                    "unmount_reopen_observed": true,
+                    "cancellation_state": cancellation_state,
+                    "repeated_write_state": repeated_write_state,
+                    "replay_status": "survivor_set_verified",
+                    "stdout_path": format!("artifacts/writeback-cache/crash-replay/{crash_point_id}.stdout"),
+                    "stderr_path": format!("artifacts/writeback-cache/crash-replay/{crash_point_id}.stderr"),
+                    "cleanup_status": "retained_for_qa"
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "schema_version": 1,
+            "gate_version": "bd-rchk0.2.3-crash-replay-v1",
+            "bead_id": "bd-rchk0.2.3",
+            "matrix_id": "writeback_cache_crash_replay_matrix_v1",
+            "mount_options": {
+                "raw_options": ["rw", "fsname=frankenfs", "writeback_cache"],
+                "fs_name": "frankenfs",
+                "allow_other": false,
+                "auto_unmount": true,
+                "default_permissions": true,
+                "mode": "rw"
+            },
+            "raw_fuser_options": ["fsname=frankenfs", "subtype=ffs", "rw", "writeback_cache"],
+            "epoch_id": "epoch-writeback-crash-0001",
+            "epoch_state": "fresh",
+            "host_capability_fingerprint": "fuse3-writeback-cache-enabled-host",
+            "lane_manifest_id": "fuse-writeback-cache-rw-lane-v1",
+            "operation_trace": operation_trace,
+            "crash_points": crash_points,
+            "unsupported_combinations": [
+                {
+                    "combination_id": "writeback_cache_ro_mount",
+                    "rejected": true,
+                    "reason": "read_only_writeback_cache",
+                    "follow_up_bead": "bd-rchk0.2.4"
+                }
+            ],
+            "artifact_paths": [
+                "artifacts/writeback-cache/crash-replay/matrix.json",
+                "artifacts/writeback-cache/crash-replay/results.json",
+                "artifacts/writeback-cache/crash-replay/run.log"
+            ]
+        })
+    }
+
     fn write_writeback_artifacts(
         dir: &Path,
         mutate_gate: impl FnOnce(&mut serde_json::Value),
-    ) -> (PathBuf, PathBuf) {
+    ) -> (PathBuf, PathBuf, PathBuf) {
         let gate_path = dir.join("writeback_gate.json");
         let oracle_path = dir.join("writeback_ordering_oracle.json");
+        let crash_replay_path = dir.join("writeback_crash_replay_oracle.json");
         let mut gate = happy_writeback_gate();
         mutate_gate(&mut gate);
         let oracle = happy_writeback_ordering_oracle();
+        let crash_replay_oracle = happy_writeback_crash_replay_oracle();
         std::fs::write(
             &gate_path,
             serde_json::to_vec_pretty(&gate).expect("serialize gate"),
@@ -6592,7 +6803,12 @@ mod tests {
             serde_json::to_vec_pretty(&oracle).expect("serialize oracle"),
         )
         .expect("write oracle");
-        (gate_path, oracle_path)
+        std::fs::write(
+            &crash_replay_path,
+            serde_json::to_vec_pretty(&crash_replay_oracle).expect("serialize crash/replay oracle"),
+        )
+        .expect("write crash/replay oracle");
+        (gate_path, oracle_path, crash_replay_path)
     }
 
     #[derive(Clone, Default)]
@@ -9593,11 +9809,13 @@ mod tests {
                 writeback_cache,
                 writeback_cache_gate,
                 writeback_cache_ordering_oracle,
+                writeback_cache_crash_replay_oracle,
                 ..
             } => {
                 assert!(!writeback_cache);
                 assert_eq!(writeback_cache_gate, None);
                 assert_eq!(writeback_cache_ordering_oracle, None);
+                assert_eq!(writeback_cache_crash_replay_oracle, None);
             }
             other => assert!(
                 matches!(other, Command::Mount { .. }),
@@ -9617,6 +9835,8 @@ mod tests {
             "/tmp/gate.json",
             "--writeback-cache-ordering-oracle",
             "/tmp/oracle.json",
+            "--writeback-cache-crash-replay-oracle",
+            "/tmp/crash-replay.json",
             "/img",
             "/mnt",
         ])
@@ -9627,6 +9847,7 @@ mod tests {
                 writeback_cache,
                 writeback_cache_gate,
                 writeback_cache_ordering_oracle,
+                writeback_cache_crash_replay_oracle,
                 ..
             } => {
                 assert!(rw);
@@ -9635,6 +9856,10 @@ mod tests {
                 assert_eq!(
                     writeback_cache_ordering_oracle,
                     Some(PathBuf::from("/tmp/oracle.json"))
+                );
+                assert_eq!(
+                    writeback_cache_crash_replay_oracle,
+                    Some(PathBuf::from("/tmp/crash-replay.json"))
                 );
             }
             other => assert!(
@@ -9652,6 +9877,7 @@ mod tests {
                 true,
                 Some(PathBuf::from("/missing/gate.json")),
                 Some(PathBuf::from("/missing/oracle.json")),
+                Some(PathBuf::from("/missing/crash-replay.json")),
             ),
         );
         let err = validate_mount_writeback_cache_request(
@@ -9673,7 +9899,12 @@ mod tests {
     fn mount_writeback_cache_rejects_missing_gate_with_stable_diagnostic() {
         let options = test_mount_cmd_options(
             true,
-            MountWritebackCacheConfig::from_cli(true, None, Some(PathBuf::from("/tmp/oracle"))),
+            MountWritebackCacheConfig::from_cli(
+                true,
+                None,
+                Some(PathBuf::from("/tmp/oracle")),
+                Some(PathBuf::from("/tmp/crash-replay")),
+            ),
         );
         let first = validate_mount_writeback_cache_request(
             Path::new("/img"),
@@ -9707,6 +9938,7 @@ mod tests {
                 false,
                 Some(PathBuf::from("/tmp/gate")),
                 Some(PathBuf::from("/tmp/oracle")),
+                Some(PathBuf::from("/tmp/crash-replay")),
             ),
         );
         let err = validate_mount_writeback_cache_request(
@@ -9732,6 +9964,7 @@ mod tests {
                 true,
                 Some(PathBuf::from("/missing/gate.json")),
                 Some(PathBuf::from("/missing/oracle.json")),
+                Some(PathBuf::from("/missing/crash-replay.json")),
                 true,
             ),
         );
@@ -9753,12 +9986,18 @@ mod tests {
     #[test]
     fn mount_writeback_cache_rejects_stale_gate_artifact() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let (gate_path, oracle_path) = write_writeback_artifacts(temp.path(), |gate| {
-            gate["runtime_guard"]["gate_fresh"] = serde_json::Value::Bool(false);
-        });
+        let (gate_path, oracle_path, crash_replay_path) =
+            write_writeback_artifacts(temp.path(), |gate| {
+                gate["runtime_guard"]["gate_fresh"] = serde_json::Value::Bool(false);
+            });
         let options = test_mount_cmd_options(
             true,
-            MountWritebackCacheConfig::from_cli(true, Some(gate_path), Some(oracle_path)),
+            MountWritebackCacheConfig::from_cli(
+                true,
+                Some(gate_path),
+                Some(oracle_path),
+                Some(crash_replay_path),
+            ),
         );
         let err = validate_mount_writeback_cache_request(
             Path::new("/img"),
@@ -9778,13 +10017,19 @@ mod tests {
     #[test]
     fn mount_writeback_cache_rejects_downgraded_feature_state_repeatedly() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let (gate_path, oracle_path) = write_writeback_artifacts(temp.path(), |gate| {
-            gate["runtime_guard"]["feature_state"] =
-                serde_json::Value::String("downgraded".to_owned());
-        });
+        let (gate_path, oracle_path, crash_replay_path) =
+            write_writeback_artifacts(temp.path(), |gate| {
+                gate["runtime_guard"]["feature_state"] =
+                    serde_json::Value::String("downgraded".to_owned());
+            });
         let options = test_mount_cmd_options(
             true,
-            MountWritebackCacheConfig::from_cli(true, Some(gate_path), Some(oracle_path)),
+            MountWritebackCacheConfig::from_cli(
+                true,
+                Some(gate_path),
+                Some(oracle_path),
+                Some(crash_replay_path),
+            ),
         );
         let first = validate_mount_writeback_cache_request(
             Path::new("/img"),
@@ -9813,13 +10058,19 @@ mod tests {
     #[test]
     fn mount_writeback_cache_rejects_config_default_gate() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let (gate_path, oracle_path) = write_writeback_artifacts(temp.path(), |gate| {
-            gate["runtime_guard"]["config_source"] =
-                serde_json::Value::String("config_default".to_owned());
-        });
+        let (gate_path, oracle_path, crash_replay_path) =
+            write_writeback_artifacts(temp.path(), |gate| {
+                gate["runtime_guard"]["config_source"] =
+                    serde_json::Value::String("config_default".to_owned());
+            });
         let options = test_mount_cmd_options(
             true,
-            MountWritebackCacheConfig::from_cli(true, Some(gate_path), Some(oracle_path)),
+            MountWritebackCacheConfig::from_cli(
+                true,
+                Some(gate_path),
+                Some(oracle_path),
+                Some(crash_replay_path),
+            ),
         );
         let err = validate_mount_writeback_cache_request(
             Path::new("/img"),
@@ -9839,12 +10090,19 @@ mod tests {
     #[test]
     fn mount_writeback_cache_rejects_host_manifest_mismatch() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let (gate_path, oracle_path) = write_writeback_artifacts(temp.path(), |gate| {
-            gate["runtime_guard"]["lane_manifest_matches_host"] = serde_json::Value::Bool(false);
-        });
+        let (gate_path, oracle_path, crash_replay_path) =
+            write_writeback_artifacts(temp.path(), |gate| {
+                gate["runtime_guard"]["lane_manifest_matches_host"] =
+                    serde_json::Value::Bool(false);
+            });
         let options = test_mount_cmd_options(
             true,
-            MountWritebackCacheConfig::from_cli(true, Some(gate_path), Some(oracle_path)),
+            MountWritebackCacheConfig::from_cli(
+                true,
+                Some(gate_path),
+                Some(oracle_path),
+                Some(crash_replay_path),
+            ),
         );
         let err = validate_mount_writeback_cache_request(
             Path::new("/img"),
@@ -9862,12 +10120,44 @@ mod tests {
     }
 
     #[test]
-    fn mount_writeback_cache_accepts_complete_gate_and_ordering_oracle() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (gate_path, oracle_path) = write_happy_writeback_artifacts(temp.path());
+    fn mount_writeback_cache_rejects_missing_crash_replay_oracle() {
         let options = test_mount_cmd_options(
             true,
-            MountWritebackCacheConfig::from_cli(true, Some(gate_path), Some(oracle_path)),
+            MountWritebackCacheConfig::from_cli(
+                true,
+                Some(PathBuf::from("/tmp/gate")),
+                Some(PathBuf::from("/tmp/oracle")),
+                None,
+            ),
+        );
+        let err = validate_mount_writeback_cache_request(
+            Path::new("/img"),
+            Path::new("/mnt"),
+            &options,
+            "mount-op",
+            "cli_mount_runtime_standard_rw",
+        )
+        .expect_err("missing crash/replay oracle should reject before reading artifacts");
+        let message = err.to_string();
+        assert!(
+            message.contains("--writeback-cache requires --writeback-cache-crash-replay-oracle"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn mount_writeback_cache_accepts_complete_gate_ordering_and_crash_replay_oracles() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (gate_path, oracle_path, crash_replay_path) =
+            write_happy_writeback_artifacts(temp.path());
+        let options = test_mount_cmd_options(
+            true,
+            MountWritebackCacheConfig::from_cli(
+                true,
+                Some(gate_path),
+                Some(oracle_path),
+                Some(crash_replay_path),
+            ),
         );
         validate_mount_writeback_cache_request(
             Path::new("/img"),
@@ -9876,7 +10166,7 @@ mod tests {
             "mount-op",
             "cli_mount_runtime_standard_rw",
         )
-        .expect("complete gate and ordering oracle should accept before image open");
+        .expect("complete gate, ordering oracle, and crash/replay oracle should accept before image open");
     }
 
     #[test]

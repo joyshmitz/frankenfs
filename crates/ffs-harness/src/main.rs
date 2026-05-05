@@ -143,10 +143,12 @@ use ffs_harness::{
         validate_workload_corpus,
     },
     writeback_cache_audit::{
-        build_writeback_cache_audit_report, build_writeback_ordering_report,
-        fail_on_writeback_cache_audit_errors, fail_on_writeback_ordering_errors,
-        load_writeback_cache_audit_gate, load_writeback_ordering_oracle,
-        render_writeback_cache_audit_markdown, render_writeback_ordering_markdown,
+        build_writeback_cache_audit_report, build_writeback_crash_replay_report,
+        build_writeback_ordering_report, fail_on_writeback_cache_audit_errors,
+        fail_on_writeback_crash_replay_errors, fail_on_writeback_ordering_errors,
+        load_writeback_cache_audit_gate, load_writeback_crash_replay_oracle,
+        load_writeback_ordering_oracle, render_writeback_cache_audit_markdown,
+        render_writeback_crash_replay_markdown, render_writeback_ordering_markdown,
     },
     xfstests::{
         XfstestsStatus, apply_allowlist, compare_against_baseline, load_allowlist, load_baseline,
@@ -257,6 +259,9 @@ fn run() -> Result<()> {
         Some("validate-writeback-cache-ordering") => {
             validate_writeback_cache_ordering_cmd(&args[1..])
         }
+        Some("validate-writeback-cache-crash-replay") => {
+            validate_writeback_cache_crash_replay_cmd(&args[1..])
+        }
         Some("validate-workload-corpus") => validate_workload_corpus_cmd(&args[1..]),
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
         Some("validate-mounted-write-matrix") => validate_mounted_write_matrix_cmd(&args[1..]),
@@ -354,6 +359,16 @@ struct WritebackCacheAuditCmdArgs {
 
 #[derive(Debug)]
 struct WritebackCacheOrderingCmdArgs {
+    oracle_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    scenario_id: String,
+    reproduction_command: Option<String>,
+    require_accept: bool,
+}
+
+#[derive(Debug)]
+struct WritebackCacheCrashReplayCmdArgs {
     oracle_path: String,
     out_path: Option<String>,
     summary_out_path: Option<String>,
@@ -2489,6 +2504,112 @@ fn parse_writeback_cache_ordering_cmd_args(
     }))
 }
 
+fn validate_writeback_cache_crash_replay_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_writeback_cache_crash_replay_cmd_args(args)? else {
+        return Ok(());
+    };
+    let oracle = load_writeback_crash_replay_oracle(Path::new(&cmd_args.oracle_path))?;
+    let reproduction_command = cmd_args.reproduction_command.clone().unwrap_or_else(|| {
+        format!(
+            "ffs-harness validate-writeback-cache-crash-replay --oracle {} --scenario-id {}",
+            cmd_args.oracle_path, cmd_args.scenario_id
+        )
+    });
+    let report =
+        build_writeback_crash_replay_report(&oracle, &cmd_args.scenario_id, &reproduction_command)?;
+    let output = serde_json::to_string_pretty(&report)?;
+
+    if let Some(path) = &cmd_args.out_path {
+        write_text_file(Path::new(path), &format!("{output}\n"))?;
+        println!(
+            "writeback-cache crash/replay report written: {} scenario={} require_accept={}",
+            path, report.scenario_id, cmd_args.require_accept
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = &cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(path),
+            &render_writeback_crash_replay_markdown(&report),
+        )?;
+        println!("writeback-cache crash/replay summary written: {path}");
+    }
+
+    if cmd_args.require_accept {
+        fail_on_writeback_crash_replay_errors(&report)?;
+    }
+    Ok(())
+}
+
+fn parse_writeback_cache_crash_replay_cmd_args(
+    args: &[String],
+) -> Result<Option<WritebackCacheCrashReplayCmdArgs>> {
+    let mut oracle_path: Option<String> = None;
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut scenario_id = "writeback_cache_crash_replay_cli".to_owned();
+    let mut reproduction_command: Option<String> = None;
+    let mut require_accept = false;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--oracle" => {
+                i += 1;
+                oracle_path = Some(args.get(i).context("--oracle requires a path")?.to_owned());
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--scenario-id" => {
+                i += 1;
+                scenario_id = args
+                    .get(i)
+                    .context("--scenario-id requires a scenario id")?
+                    .to_owned();
+            }
+            "--reproduction-command" => {
+                i += 1;
+                reproduction_command = Some(
+                    args.get(i)
+                        .context("--reproduction-command requires a command string")?
+                        .to_owned(),
+                );
+            }
+            "--require-accept" => {
+                require_accept = true;
+            }
+            "--help" | "-h" => {
+                print_writeback_cache_crash_replay_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-writeback-cache-crash-replay argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(WritebackCacheCrashReplayCmdArgs {
+        oracle_path: oracle_path
+            .context("--oracle is required for writeback-cache crash/replay validation")?,
+        out_path,
+        summary_out_path,
+        scenario_id,
+        reproduction_command,
+        require_accept,
+    }))
+}
+
 fn validate_proof_overhead_budget_cmd(args: &[String]) -> Result<()> {
     let mut budget_path: Option<String> = None;
     let mut metrics_path: Option<String> = None;
@@ -3627,6 +3748,7 @@ fn print_usage() {
     print_repair_writeback_serialization_usage_summary();
     print_writeback_cache_audit_usage_summary();
     print_writeback_cache_ordering_usage_summary();
+    print_writeback_cache_crash_replay_usage_summary();
     print_workload_corpus_usage_summary();
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
     println!("  ffs-harness validate-mounted-recovery-matrix [--matrix FILE] [--out FILE]");
@@ -3719,6 +3841,7 @@ fn print_usage_examples() {
     print_repair_writeback_serialization_example();
     print_writeback_cache_audit_example();
     print_writeback_cache_ordering_example();
+    print_writeback_cache_crash_replay_example();
     print_workload_corpus_example();
     println!(
         "  ffs-harness validate-mounted-write-matrix --out artifacts/e2e/mounted_write_matrix.json"
@@ -3915,6 +4038,18 @@ fn print_writeback_cache_ordering_usage_summary() {
 fn print_writeback_cache_ordering_example() {
     println!(
         "  ffs-harness validate-writeback-cache-ordering --oracle artifacts/writeback-cache/ordering_oracle.json --scenario-id writeback_cache_ordering_accepts_complete_oracle --require-accept --out artifacts/writeback-cache/ordering_report.json --summary-out artifacts/writeback-cache/ordering_summary.md"
+    );
+}
+
+fn print_writeback_cache_crash_replay_usage_summary() {
+    println!(
+        "  ffs-harness validate-writeback-cache-crash-replay --oracle FILE [--scenario-id ID] [--require-accept] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_writeback_cache_crash_replay_example() {
+    println!(
+        "  ffs-harness validate-writeback-cache-crash-replay --oracle artifacts/writeback-cache/crash_replay_oracle.json --scenario-id writeback_cache_crash_replay_accepts_complete_matrix --require-accept --out artifacts/writeback-cache/crash_replay_report.json --summary-out artifacts/writeback-cache/crash_replay_summary.md"
     );
 }
 
@@ -4225,6 +4360,20 @@ fn print_writeback_cache_ordering_usage() {
     println!();
     println!("Options:");
     println!("  --oracle FILE                      Read writeback-cache ordering oracle JSON");
+    println!("  --scenario-id ID                   Scenario identifier for the emitted report");
+    println!(
+        "  --reproduction-command CMD         Command captured in the report reproduction field"
+    );
+    println!("  --require-accept                   Exit nonzero unless the oracle accepts");
+    println!("  --out FILE                         Write validation report JSON");
+    println!("  --summary-out FILE                 Write Markdown oracle summary");
+}
+
+fn print_writeback_cache_crash_replay_usage() {
+    println!("Usage: ffs-harness validate-writeback-cache-crash-replay [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --oracle FILE                      Read writeback-cache crash/replay oracle JSON");
     println!("  --scenario-id ID                   Scenario identifier for the emitted report");
     println!(
         "  --reproduction-command CMD         Command captured in the report reproduction field"

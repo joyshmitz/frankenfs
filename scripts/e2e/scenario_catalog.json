@@ -651,6 +651,60 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_ordering_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_crash_replay_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_crash_replay_accepts_complete_matrix",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_accepts_complete_matrix|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_crash_replay_rejects_missing_crash_point",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_rejects_missing_crash_point|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_crash_replay_rejects_survivor_mismatch",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_rejects_survivor_mismatch|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_crash_replay_rejects_flush_durability",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_rejects_flush_durability|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_crash_replay_rejects_missing_fsyncdir",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_rejects_missing_fsyncdir|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_crash_replay_report_fields",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_report_fields|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_crash_replay_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_crash_replay_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_ext4_opt_in_flush_fsyncdir_reopen",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_ext4_opt_in_flush_fsyncdir_reopen|outcome=PASS"
         }
       ]
     },

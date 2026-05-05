@@ -13,16 +13,17 @@ The live code establishes a strict V1.x contract:
   when `MountOptions::writeback_cache` is explicitly set on a read-write mount.
   Read-only opt-in rejects before the FUSE session is created.
 - `ffs-cli mount --writeback-cache` requires `--rw`, an accepted
-  writeback-cache audit gate, an accepted dirty-page ordering oracle, and a
-  fresh runtime guard with the kill switch disarmed before it passes the option
-  to `ffs-fuse`.
+  writeback-cache audit gate, an accepted dirty-page ordering oracle, an
+  accepted crash/replay oracle, and a fresh runtime guard with the kill switch
+  disarmed before it passes the option to `ffs-fuse`.
 - `flush` is a non-durable lifecycle hook. `ffs-core::OpenFs::flush()` logs `durability_boundary = "none"` and does not call device sync.
 - `fsync` / `fsyncdir` are the only explicit durability boundaries in the FUSE layer. `ffs-core::OpenFs::{ext4,btrfs}_sync_with_logging()` call `self.dev.sync(cx)`.
-- `ffs-core::WritebackEpochBarrier` models `staged_epoch >= visible_epoch >= durable_epoch` and the proof harness now has both the negative-option gate (`bd-rchk0.2.1.1`) and dirty-page ordering oracle (`bd-8pz7h`).
+- `ffs-core::WritebackEpochBarrier` models `staged_epoch >= visible_epoch >= durable_epoch` and the proof harness now has the negative-option gate (`bd-rchk0.2.1.1`), dirty-page ordering oracle (`bd-8pz7h`), and 12-point crash/replay oracle (`bd-rchk0.2.3`).
 
 That combination keeps ordinary mounts conservative while allowing a narrow,
-evidence-gated experimental opt-in. The user-facing release-readiness claim is
-still blocked until fresh crash/replay integration evidence is present.
+evidence-gated experimental opt-in. User-facing readiness wording must stay
+tied to accepted audit, ordering, crash/replay, runtime-guard, and host/lane
+artifacts rather than implying unconditional writeback-cache support.
 
 ## Problem Statement
 
@@ -297,12 +298,21 @@ The dry-run e2e suite
 - `writeback_cache_ordering_crash_reopen_artifact`
 - `writeback_cache_ordering_report_fields`
 - `writeback_cache_ordering_unit_tests`
+- `writeback_cache_crash_replay_cli_wired`
+- `writeback_cache_crash_replay_accepts_complete_matrix`
+- `writeback_cache_crash_replay_rejects_missing_crash_point`
+- `writeback_cache_crash_replay_rejects_survivor_mismatch`
+- `writeback_cache_crash_replay_rejects_flush_durability`
+- `writeback_cache_crash_replay_rejects_missing_fsyncdir`
+- `writeback_cache_crash_replay_report_fields`
+- `writeback_cache_crash_replay_unit_tests`
+- `writeback_cache_ext4_opt_in_flush_fsyncdir_reopen`
 
 These tests prove default-off behavior, explicit opt-in acceptance, rejection
-classes, schema failure, report artifact fields, and unit policy coverage. A
-future implementation bead must add the production mount-option plumbing only
-after this gate accepts the relevant mount class and the report artifact names
-the generated evidence paths.
+classes, schema failure, report artifact fields, dirty-page ordering, twelve
+declared crash/replay points, and unit policy coverage. The mounted ext4
+opt-in regression attempts the actual FUSE `writeback_cache` option and emits a
+host-classified scenario result when the current lane cannot mount.
 
 ## Positive Ordering Oracle
 
@@ -329,9 +339,29 @@ writeback-cache stronger than experimental unless both the negative-option
 audit and this positive ordering oracle pass with fresh authoritative
 evidence.
 
+## Crash/Replay Matrix Oracle
+
+The ordering oracle proves local sync-boundary semantics; the crash/replay
+oracle ties that proof to the mounted-path QA artifact shape required by
+`bd-rchk0.2.3`:
+
+```bash
+ffs-harness validate-writeback-cache-crash-replay --oracle FILE --scenario-id ID --require-accept
+```
+
+The report records gate version, matrix id, raw mount options, raw FUSE
+options, host and lane identifiers, fresh epoch state, the mounted operation
+trace, all twelve required crash point ids, expected and actual survivor sets,
+flush/fsync/fsyncdir observations, metadata-after-data evidence, cancellation
+classification, repeated-write state, replay status, stdout/stderr paths,
+cleanup status, unsupported-combination rejections, artifact paths, and a
+reproduction command. A release gate can therefore distinguish a real survivor
+set mismatch from missing host support or an unsupported writeback-cache
+combination without parsing prose.
+
 ## Follow-On Work
 
 1. Add a daemon-side staged writeback epoch structure instead of immediate live writes.
 2. Attach dependency metadata from namespace mutations to child inode/data epochs.
 3. Make `fsync` / `fsyncdir` wait on staged-kernel delivery before device sync.
-4. Revisit `writeback_cache` mount options only after the barrier exists and the checker is backed by real implementation state.
+4. Keep `writeback_cache` default-off; only explicit opt-in mounts with fresh accepted audit, ordering, runtime-guard, and crash/replay artifacts may forward the kernel option.
