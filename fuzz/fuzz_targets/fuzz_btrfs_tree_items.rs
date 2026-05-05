@@ -3,9 +3,14 @@
 use ffs_btrfs::{
     parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item, parse_root_ref,
     parse_xattr_items, BtrfsDirItem, BtrfsExtentData, BtrfsInodeItem, BtrfsRootItem, BtrfsRootRef,
-    BtrfsXattrItem, BTRFS_FILE_EXTENT_INLINE, BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG,
+    BtrfsXattrItem, BTRFS_COMPRESS_NONE, BTRFS_FILE_EXTENT_INLINE, BTRFS_FILE_EXTENT_PREALLOC,
+    BTRFS_FILE_EXTENT_REG,
 };
 use libfuzzer_sys::fuzz_target;
+
+const MAX_INPUT_BYTES: usize = 4096;
+const MAX_STRUCTURED_BYTES: u8 = 32;
+const NANOS_PER_SECOND: u32 = 1_000_000_000;
 
 fn read_u16(data: &[u8], off: usize) -> Option<u16> {
     let bytes = data.get(off..off + 2)?;
@@ -29,6 +34,126 @@ fn read_array_16(data: &[u8], off: usize) -> Option<[u8; 16]> {
     let mut out = [0_u8; 16];
     out.copy_from_slice(bytes);
     Some(out)
+}
+
+struct ByteCursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ByteCursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    fn next_u8(&mut self) -> u8 {
+        let value = self.data.get(self.pos).copied().unwrap_or(0);
+        self.pos = self.pos.saturating_add(1);
+        value
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        u32::from_le_bytes([
+            self.next_u8(),
+            self.next_u8(),
+            self.next_u8(),
+            self.next_u8(),
+        ])
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        u64::from_le_bytes([
+            self.next_u8(),
+            self.next_u8(),
+            self.next_u8(),
+            self.next_u8(),
+            self.next_u8(),
+            self.next_u8(),
+            self.next_u8(),
+            self.next_u8(),
+        ])
+    }
+
+    fn take_vec(&mut self, len: usize) -> Vec<u8> {
+        (0..len).map(|_| self.next_u8()).collect()
+    }
+}
+
+fn nonempty_bounded_bytes(cursor: &mut ByteCursor<'_>, max_len: u8) -> Vec<u8> {
+    let len = 1 + usize::from(cursor.next_u8() % max_len);
+    cursor.take_vec(len)
+}
+
+fn next_nsec(cursor: &mut ByteCursor<'_>) -> u32 {
+    cursor.next_u32() % NANOS_PER_SECOND
+}
+
+fn build_inode_item(cursor: &mut ByteCursor<'_>) -> BtrfsInodeItem {
+    BtrfsInodeItem {
+        generation: cursor.next_u64(),
+        size: cursor.next_u64(),
+        nbytes: cursor.next_u64(),
+        nlink: cursor.next_u32(),
+        uid: cursor.next_u32(),
+        gid: cursor.next_u32(),
+        mode: cursor.next_u32(),
+        rdev: cursor.next_u64(),
+        atime_sec: cursor.next_u64(),
+        atime_nsec: next_nsec(cursor),
+        ctime_sec: cursor.next_u64(),
+        ctime_nsec: next_nsec(cursor),
+        mtime_sec: cursor.next_u64(),
+        mtime_nsec: next_nsec(cursor),
+        otime_sec: cursor.next_u64(),
+        otime_nsec: next_nsec(cursor),
+    }
+}
+
+fn build_dir_item(cursor: &mut ByteCursor<'_>) -> BtrfsDirItem {
+    BtrfsDirItem {
+        child_objectid: cursor.next_u64(),
+        child_key_type: cursor.next_u8(),
+        child_key_offset: cursor.next_u64(),
+        file_type: cursor.next_u8(),
+        name: nonempty_bounded_bytes(cursor, MAX_STRUCTURED_BYTES),
+    }
+}
+
+fn build_inline_extent(cursor: &mut ByteCursor<'_>) -> BtrfsExtentData {
+    let inline_len = cursor.next_u8() % (MAX_STRUCTURED_BYTES + 1);
+    BtrfsExtentData::Inline {
+        generation: cursor.next_u64(),
+        ram_bytes: u64::from(inline_len),
+        compression: BTRFS_COMPRESS_NONE,
+        data: cursor.take_vec(usize::from(inline_len)),
+    }
+}
+
+fn build_regular_extent(cursor: &mut ByteCursor<'_>) -> BtrfsExtentData {
+    let extent_offset = u64::from(cursor.next_u8());
+    let num_bytes = u64::from(cursor.next_u8());
+    let disk_num_bytes = extent_offset + num_bytes;
+    let disk_bytenr = if cursor.next_u8().is_multiple_of(2) {
+        0
+    } else {
+        1 + u64::from(cursor.next_u8())
+    };
+    let extent_type = if cursor.next_u8().is_multiple_of(2) {
+        BTRFS_FILE_EXTENT_REG
+    } else {
+        BTRFS_FILE_EXTENT_PREALLOC
+    };
+
+    BtrfsExtentData::Regular {
+        generation: cursor.next_u64(),
+        ram_bytes: disk_num_bytes,
+        extent_type,
+        compression: BTRFS_COMPRESS_NONE,
+        disk_bytenr,
+        disk_num_bytes,
+        extent_offset,
+        num_bytes,
+    }
 }
 
 fn assert_root_item_invariants(data: &[u8], parsed: &BtrfsRootItem) {
@@ -232,7 +357,92 @@ fn assert_extent_data_invariants(data: &[u8], parsed: &BtrfsExtentData) {
     }
 }
 
+fn assert_structured_roundtrips(data: &[u8]) {
+    let mut cursor = ByteCursor::new(data);
+
+    let inode = build_inode_item(&mut cursor);
+    let inode_bytes = inode.to_bytes();
+    let parsed_inode = parse_inode_item(&inode_bytes).unwrap_or_else(|_| std::process::abort());
+    assert_eq!(
+        parsed_inode, inode,
+        "BtrfsInodeItem::to_bytes must round-trip through parse_inode_item"
+    );
+    let mut inode_with_tail = inode_bytes.clone();
+    inode_with_tail.push(cursor.next_u8());
+    assert!(
+        parse_inode_item(&inode_with_tail).is_err(),
+        "fixed-size inode items must reject trailing bytes"
+    );
+    assert!(
+        parse_inode_item(&inode_bytes[..inode_bytes.len() - 1]).is_err(),
+        "fixed-size inode items must reject short payloads"
+    );
+
+    let dir_first = build_dir_item(&mut cursor);
+    let dir_second = build_dir_item(&mut cursor);
+    let dir_first_bytes = dir_first
+        .try_to_bytes()
+        .unwrap_or_else(|_| std::process::abort());
+    let dir_second_bytes = dir_second
+        .try_to_bytes()
+        .unwrap_or_else(|_| std::process::abort());
+    let parsed_single_dir =
+        parse_dir_items(&dir_first_bytes).unwrap_or_else(|_| std::process::abort());
+    assert_eq!(
+        parsed_single_dir,
+        vec![dir_first.clone()],
+        "single BtrfsDirItem::try_to_bytes payload must parse exactly"
+    );
+    let mut concatenated_dirs = dir_first_bytes.clone();
+    concatenated_dirs.extend_from_slice(&dir_second_bytes);
+    let parsed_dirs = parse_dir_items(&concatenated_dirs).unwrap_or_else(|_| std::process::abort());
+    assert_eq!(
+        parsed_dirs,
+        vec![dir_first, dir_second],
+        "concatenated BtrfsDirItem payloads must parse in order"
+    );
+    let mut dir_with_tail = dir_first_bytes;
+    dir_with_tail.push(cursor.next_u8());
+    assert!(
+        parse_dir_items(&dir_with_tail).is_err(),
+        "dir-item parser must reject unconsumed trailing bytes"
+    );
+
+    for extent in [
+        build_inline_extent(&mut cursor),
+        build_regular_extent(&mut cursor),
+    ] {
+        let extent_bytes = extent.to_bytes();
+        let parsed_extent =
+            parse_extent_data(&extent_bytes).unwrap_or_else(|_| std::process::abort());
+        assert_eq!(
+            parsed_extent, extent,
+            "BtrfsExtentData::to_bytes must round-trip through parse_extent_data"
+        );
+        if matches!(
+            extent,
+            BtrfsExtentData::Regular {
+                extent_type: BTRFS_FILE_EXTENT_REG | BTRFS_FILE_EXTENT_PREALLOC,
+                ..
+            }
+        ) {
+            let mut extent_with_tail = extent_bytes;
+            extent_with_tail.push(cursor.next_u8());
+            assert!(
+                parse_extent_data(&extent_with_tail).is_err(),
+                "fixed regular/prealloc extent payloads must reject trailing bytes"
+            );
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
+    if data.len() > MAX_INPUT_BYTES {
+        return;
+    }
+
+    assert_structured_roundtrips(data);
+
     let root_item = parse_root_item(data);
     assert_eq!(
         root_item,
