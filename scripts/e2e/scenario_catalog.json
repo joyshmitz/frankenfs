@@ -774,6 +774,53 @@
       ]
     },
     {
+      "suite_id": "validate_br_dotted_id_roundtrip",
+      "script": "scripts/e2e/validate_br_dotted_id_roundtrip.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "br_dotted_no_db_exact_lookup",
+          "category": "happy",
+          "status": "active",
+          "evidence": "br_dotted_no_db_exact_lookup"
+        },
+        {
+          "id": "br_dotted_no_db_parent_update",
+          "category": "edge",
+          "status": "active",
+          "evidence": "br_dotted_no_db_parent_update"
+        },
+        {
+          "id": "br_dotted_no_db_dependency_add",
+          "category": "edge",
+          "status": "active",
+          "evidence": "br_dotted_no_db_dependency_add"
+        },
+        {
+          "id": "br_dotted_db_import_exact_lookup",
+          "category": "happy",
+          "status": "active",
+          "evidence": "br_dotted_db_import_exact_lookup"
+        },
+        {
+          "id": "br_dotted_db_flush_preserves_count",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "br_dotted_db_flush_preserves_count"
+        },
+        {
+          "id": "br_dotted_roundtrip_log_contract",
+          "category": "happy",
+          "status": "active",
+          "evidence": "br_dotted_roundtrip_log_contract"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_expansion",
       "script": "scripts/e2e/ffs_benchmark_expansion_e2e.sh",
       "required_categories": [
