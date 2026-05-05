@@ -358,14 +358,14 @@ fn validate_schedule_lane_consistency(schedule: &ChaosSchedule, errors: &mut Vec
 }
 
 fn validate_schedule_required_text(schedule: &ChaosSchedule, errors: &mut Vec<String>) {
-    if schedule.lane != "host_skip" {
-        if schedule.expected_survivor_paths.is_empty() && schedule.expected_absent_paths.is_empty()
-        {
-            errors.push(format!(
-                "schedule `{}` must declare at least one expected_survivor_path or expected_absent_path",
-                schedule.schedule_id
-            ));
-        }
+    if schedule.lane != "host_skip"
+        && schedule.expected_survivor_paths.is_empty()
+        && schedule.expected_absent_paths.is_empty()
+    {
+        errors.push(format!(
+            "schedule `{}` must declare at least one expected_survivor_path or expected_absent_path",
+            schedule.schedule_id
+        ));
     }
     if schedule.raw_log_path.trim().is_empty() {
         errors.push(format!(

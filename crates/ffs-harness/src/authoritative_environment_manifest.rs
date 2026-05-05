@@ -113,6 +113,18 @@ pub fn evaluate_authoritative_environment(
 fn check_required_fields(
     manifest: &AuthoritativeEnvironmentManifest,
 ) -> Option<AuthoritativeEnvironmentDecision> {
+    if let Some(decision) = check_required_identity_fields(manifest) {
+        return Some(decision);
+    }
+    if let Some(decision) = check_required_runtime_fields(manifest) {
+        return Some(decision);
+    }
+    check_required_artifact_fields(manifest)
+}
+
+fn check_required_identity_fields(
+    manifest: &AuthoritativeEnvironmentManifest,
+) -> Option<AuthoritativeEnvironmentDecision> {
     if manifest.lane_id.trim().is_empty() {
         return Some(reject("missing_lane_id", "set a non-empty lane_id"));
     }
@@ -137,6 +149,12 @@ fn check_required_fields(
             "record worker_id (rch worker name or runner identifier)",
         ));
     }
+    None
+}
+
+fn check_required_runtime_fields(
+    manifest: &AuthoritativeEnvironmentManifest,
+) -> Option<AuthoritativeEnvironmentDecision> {
     if manifest.kernel.trim().is_empty() {
         return Some(reject("missing_kernel", "record uname -r"));
     }
@@ -176,6 +194,12 @@ fn check_required_fields(
             "record the mount namespace identifier (e.g. readlink /proc/self/ns/mnt)",
         ));
     }
+    None
+}
+
+fn check_required_artifact_fields(
+    manifest: &AuthoritativeEnvironmentManifest,
+) -> Option<AuthoritativeEnvironmentDecision> {
     if manifest.git_sha.trim().is_empty() || manifest.git_sha.len() < 7 {
         return Some(reject(
             "missing_git_sha",
@@ -325,7 +349,6 @@ fn check_observed_match(
 
 fn privilege_rank(value: &str) -> u8 {
     match value {
-        "unprivileged" => 0,
         "user_namespace" => 1,
         "sudo_capability" => 2,
         "rootful" => 3,

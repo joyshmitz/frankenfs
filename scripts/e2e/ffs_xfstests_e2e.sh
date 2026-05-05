@@ -45,12 +45,16 @@ JUNIT_FILE="$ARTIFACT_DIR/junit.xml"
 CHECK_LOG="$ARTIFACT_DIR/check.log"
 POLICY_PLAN_JSON="$ARTIFACT_DIR/policy_plan.json"
 POLICY_REPORT_MD="$ARTIFACT_DIR/policy_report.md"
+BASELINE_MANIFEST_JSON="$ARTIFACT_DIR/baseline_manifest.json"
+BASELINE_REPORT_MD="$ARTIFACT_DIR/baseline_report.md"
 XFSTESTS_PREFLIGHT_JSON="${XFSTESTS_PREFLIGHT_JSON:-$ARTIFACT_DIR/preflight.json}"
 mkdir -p "$ARTIFACT_DIR"
 RESULT_BASE="${RESULT_BASE:-$ARTIFACT_DIR/raw_xfstests}"
 export RESULT_BASE
 XFSTESTS_CLEANUP_STATUS="not_started"
 XFSTESTS_PARTIAL_RUN_STATUS="not_started"
+XFSTESTS_SUBSET_VERSION="${XFSTESTS_SUBSET_VERSION:-xfstests-curated-v1}"
+XFSTESTS_BASELINE_ID="${XFSTESTS_BASELINE_ID:-xfstests-baseline-$(basename "$E2E_LOG_DIR")}"
 
 declare -a GENERIC_TESTS=()
 declare -a EXT4_TESTS=()
@@ -97,6 +101,8 @@ write_summary() {
     local safe_check_log="${CHECK_LOG//\"/\\\"}"
     local safe_policy_plan="${POLICY_PLAN_JSON//\"/\\\"}"
     local safe_policy_report="${POLICY_REPORT_MD//\"/\\\"}"
+    local safe_baseline_manifest="${BASELINE_MANIFEST_JSON//\"/\\\"}"
+    local safe_baseline_report="${BASELINE_REPORT_MD//\"/\\\"}"
     local safe_preflight="${XFSTESTS_PREFLIGHT_JSON//\"/\\\"}"
     local safe_summary="${SUMMARY_JSON//\"/\\\"}"
     local safe_result_base="${RESULT_BASE//\"/\\\"}"
@@ -155,6 +161,8 @@ write_summary() {
   "preflight_json": "$safe_preflight",
   "policy_plan_json": "$safe_policy_plan",
   "policy_report_md": "$safe_policy_report",
+  "baseline_manifest_json": "$safe_baseline_manifest",
+  "baseline_report_md": "$safe_baseline_report",
   "run_log": "$safe_run_log",
   "stdout_log": "$safe_stdout",
   "stderr_log": "$safe_stderr",
@@ -184,6 +192,8 @@ write_summary() {
     "preflight_json": "$safe_preflight",
     "policy_plan_json": "$safe_policy_plan",
     "policy_report_md": "$safe_policy_report",
+    "baseline_manifest_json": "$safe_baseline_manifest",
+    "baseline_report_md": "$safe_baseline_report",
     "summary_json": "$safe_summary",
     "run_log": "$safe_run_log",
     "stdout_log": "$safe_stdout",
@@ -729,6 +739,228 @@ PY
 EOF
 }
 
+write_baseline_manifest_artifacts() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        e2e_log "python3 not found; unable to emit xfstests baseline manifest"
+        return 0
+    fi
+
+    local command_transcript="./check"
+    if [[ "$XFSTESTS_DRY_RUN" == "1" ]]; then
+        command_transcript+=" -n"
+    fi
+    command_transcript+=" ${SELECTED_TESTS[*]}"
+    local resume_command="XFSTESTS_MODE=run XFSTESTS_DRY_RUN=$XFSTESTS_DRY_RUN XFSTESTS_FILTER=$XFSTESTS_FILTER RESULT_BASE=$RESULT_BASE ./scripts/e2e/ffs_xfstests_e2e.sh"
+    local reproduction_command="XFSTESTS_MODE=$XFSTESTS_MODE XFSTESTS_DRY_RUN=$XFSTESTS_DRY_RUN XFSTESTS_FILTER=$XFSTESTS_FILTER ./scripts/e2e/ffs_xfstests_e2e.sh"
+    local checkpoint_id="checkpoint:$(basename "$ARTIFACT_DIR")"
+    local environment_manifest_id="preflight:missing"
+    if [[ -f "$XFSTESTS_PREFLIGHT_JSON" ]]; then
+        environment_manifest_id="sha256:$(sha256sum "$XFSTESTS_PREFLIGHT_JSON" | awk '{print $1}')"
+    fi
+
+    local -a raw_artifacts=()
+    local candidate
+    for candidate in \
+        "$SELECTED_FILE" \
+        "$RESULTS_JSON" \
+        "$JUNIT_FILE" \
+        "$CHECK_LOG" \
+        "$POLICY_PLAN_JSON" \
+        "$POLICY_REPORT_MD" \
+        "$XFSTESTS_PREFLIGHT_JSON" \
+        "$ARTIFACT_DIR/stdout.log" \
+        "$ARTIFACT_DIR/stderr.log"; do
+        if [[ -f "$candidate" ]]; then
+            raw_artifacts+=("$candidate")
+        fi
+    done
+
+    python3 - \
+        "$SELECTED_FILE" \
+        "$RESULTS_JSON" \
+        "$BASELINE_MANIFEST_JSON" \
+        "$BASELINE_REPORT_MD" \
+        "$XFSTESTS_BASELINE_ID" \
+        "$XFSTESTS_SUBSET_VERSION" \
+        "$environment_manifest_id" \
+        "$command_transcript" \
+        "$checkpoint_id" \
+        "$resume_command" \
+        "$XFSTESTS_CLEANUP_STATUS" \
+        "$reproduction_command" \
+        "$SUMMARY_JSON" \
+        "$XFSTESTS_ALLOWLIST_JSON" \
+        "${raw_artifacts[@]}" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+from collections import Counter
+
+(
+    selected_path,
+    results_path,
+    manifest_path,
+    report_path,
+    baseline_id,
+    subset_version,
+    environment_manifest_id,
+    command_transcript,
+    checkpoint_id,
+    resume_command,
+    cleanup_status,
+    reproduction_command,
+    summary_path,
+    allowlist_path,
+    *raw_paths,
+) = sys.argv[1:]
+
+selected = [
+    line.strip()
+    for line in pathlib.Path(selected_path).read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+results = json.loads(pathlib.Path(results_path).read_text(encoding="utf-8"))
+case_by_id = {case.get("id"): case for case in results.get("tests", [])}
+policy_by_id = {
+    row.get("test_id"): row
+    for row in json.loads(pathlib.Path(allowlist_path).read_text(encoding="utf-8"))
+    if isinstance(row, dict)
+}
+status_vocabulary = [
+    "passed",
+    "failed",
+    "skipped",
+    "not_run",
+    "unsupported",
+    "host_blocked",
+    "harness_failed",
+    "interrupted",
+    "resumed",
+]
+
+def sha256_file(path):
+    data = pathlib.Path(path).read_bytes()
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+raw_artifacts = [
+    {"path": path, "sha256": sha256_file(path), "immutable": True}
+    for path in raw_paths
+    if pathlib.Path(path).is_file()
+]
+combined = hashlib.sha256()
+for artifact in raw_artifacts:
+    combined.update(artifact["path"].encode())
+    combined.update(b"\0")
+    combined.update(artifact["sha256"].encode())
+    combined.update(b"\0")
+raw_log_hash = "sha256:" + combined.hexdigest()
+raw_refs = [artifact["path"] for artifact in raw_artifacts]
+
+def row_status(case):
+    status = case.get("status", "not_run")
+    classification = case.get("classification")
+    if "interrupted" in cleanup_status:
+        return "interrupted"
+    if "resumed" in cleanup_status:
+        return "resumed"
+    if status in {"passed", "failed", "skipped"}:
+        return status
+    if classification == "unsupported_by_v1":
+        return "unsupported"
+    if classification == "environment_blocked":
+        return "host_blocked"
+    if classification == "harness_blocked":
+        return "harness_failed"
+    return "not_run"
+
+cases = []
+for test_id in selected:
+    case = case_by_id.get(test_id, {"id": test_id, "status": "not_run"})
+    policy = policy_by_id.get(test_id, {})
+    status = row_status(case)
+    classification = case.get("classification") or policy.get("classification") or "unclassified"
+    remediation = None
+    if status in {"not_run", "interrupted", "host_blocked", "harness_failed"}:
+        remediation = resume_command
+    elif status == "unsupported":
+        remediation = "document unsupported scope rationale before failure triage"
+    cases.append({
+        "test_id": test_id,
+        "status": status,
+        "raw_artifact_refs": raw_refs,
+        "raw_log_hash": raw_log_hash,
+        "command": command_transcript,
+        "not_run_reason": case.get("output_snippet") or case.get("failure_reason") or policy.get("failure_reason"),
+        "partial_run_checkpoint": checkpoint_id,
+        "resume_command": resume_command,
+        "cleanup_status": cleanup_status,
+        "immutable_raw_artifacts": True,
+        "classification": classification,
+        "remediation": remediation,
+    })
+
+counts = dict(sorted(Counter(case["status"] for case in cases).items()))
+manifest = {
+    "schema_version": 1,
+    "baseline_id": baseline_id,
+    "bead_id": "bd-kr3qu",
+    "subset_version": subset_version,
+    "environment": {
+        "manifest_id": environment_manifest_id,
+        "age_secs": 0,
+        "max_age_secs": 3600,
+        "freshness_verdict": "fresh",
+    },
+    "status_vocabulary": status_vocabulary,
+    "raw_artifact_policy": "raw artifacts are immutable inputs; summaries are derived and may not rewrite raw logs",
+    "generated_summary_path": summary_path,
+    "command_transcript": command_transcript,
+    "checkpoint_id": checkpoint_id,
+    "resume_command": resume_command,
+    "cleanup_status": cleanup_status,
+    "output_paths": {
+        "summary_json": summary_path,
+        "results_json": results_path,
+        "baseline_manifest_json": manifest_path,
+        "baseline_report_md": report_path,
+    },
+    "reproduction_command": reproduction_command,
+    "disposition_counts": counts,
+    "raw_artifacts": raw_artifacts,
+    "cases": cases,
+}
+pathlib.Path(manifest_path).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+lines = [
+    f"# xfstests baseline manifest `{baseline_id}`",
+    "",
+    f"- subset version: `{subset_version}`",
+    f"- environment manifest: `{environment_manifest_id}`",
+    f"- checkpoint: `{checkpoint_id}`",
+    f"- resume command: `{resume_command}`",
+    f"- cleanup status: `{cleanup_status}`",
+    "",
+    "## Dispositions",
+    "",
+]
+for key, value in counts.items():
+    lines.append(f"- {key}: {value}")
+lines.extend([
+    "",
+    "## Cases",
+    "",
+    "| Test | Status | Classification | Raw hash | Resume |",
+    "|---|---|---|---|---|",
+])
+for case in cases:
+    lines.append(
+        f"| {case['test_id']} | {case['status']} | {case['classification']} | `{case['raw_log_hash']}` | `{case['resume_command']}` |"
+    )
+pathlib.Path(report_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+}
+
 prepare_safe_dry_run_config() {
     if [[ "$XFSTESTS_DRY_RUN" != "1" || "$XFSTESTS_INVOKE_CHECK_DRY_RUN" == "1" ]]; then
         return 0
@@ -805,6 +1037,7 @@ skip_or_fail() {
     if [[ ! -f "$RESULTS_JSON" ]]; then
         write_uniform_results "not_run" "$reason"
     fi
+    write_baseline_manifest_artifacts
     write_summary "skipped" "$EFFECTIVE_MODE" "$reason" "$LAST_CHECK_RC"
     if [[ "$XFSTESTS_STRICT" == "1" ]]; then
         e2e_fail "$reason"
@@ -1352,6 +1585,7 @@ run_xfstests_subset() {
         e2e_run tail -n 120 "$CHECK_LOG" || true
         XFSTESTS_CLEANUP_STATUS="xfstests_check_failed_artifacts_preserved"
         XFSTESTS_PARTIAL_RUN_STATUS="summary_results_junit_check_log_preserved_after_failure"
+        write_baseline_manifest_artifacts
         write_summary "failed" "$EFFECTIVE_MODE" "xfstests check failed with exit code $rc; artifacts preserved" "$LAST_CHECK_RC"
         e2e_fail "xfstests check failed with exit code $rc"
     fi
@@ -1396,6 +1630,22 @@ if [[ "$EFFECTIVE_MODE" == "plan" ]]; then
     else
         write_uniform_results "planned" "subset materialized; execution not requested"
     fi
+    XFSTESTS_CLEANUP_STATUS="plan_mode_no_xfstests_check_invoked"
+    XFSTESTS_PARTIAL_RUN_STATUS="selected_policy_summary_results_junit_check_log_preserved"
+    {
+        echo "plan mode: xfstests check was not invoked"
+        echo "planned command:"
+        echo "  ./check -n ${SELECTED_TESTS[*]}"
+        echo
+        echo "selected tests:"
+        printf '  %s planned\n' "${SELECTED_TESTS[@]}"
+    } >"$CHECK_LOG"
+    {
+        echo "plan mode stdout placeholder"
+        echo "planned command: ./check -n ${SELECTED_TESTS[*]}"
+    } >"$ARTIFACT_DIR/stdout.log"
+    : >"$ARTIFACT_DIR/stderr.log"
+    write_baseline_manifest_artifacts
     write_summary "planned" "$EFFECTIVE_MODE" "subset materialized; execution not requested" "null"
     e2e_log "Plan summary: $SUMMARY_JSON"
     e2e_pass
@@ -1423,6 +1673,7 @@ if [[ "$XFSTESTS_DRY_RUN" == "1" && "$XFSTESTS_INVOKE_CHECK_DRY_RUN" != "1" ]]; 
     e2e_log "Not invoking upstream ./check -n because it performs mount/mkfs validation before listing tests"
     verify_tests_exist
     write_safe_dry_run_artifacts
+    write_baseline_manifest_artifacts
     write_summary "planned" "$EFFECTIVE_MODE" "safe dry-run artifacts emitted without invoking xfstests check" "$LAST_CHECK_RC"
     e2e_log "Run summary: $SUMMARY_JSON"
     e2e_pass
@@ -1444,6 +1695,7 @@ run_xfstests_subset
 
 XFSTESTS_CLEANUP_STATUS="xfstests_check_completed"
 XFSTESTS_PARTIAL_RUN_STATUS="selected_policy_summary_results_junit_check_log_preserved"
+write_baseline_manifest_artifacts
 write_summary "passed" "$EFFECTIVE_MODE" "xfstests subset check completed" "$LAST_CHECK_RC"
 e2e_log "Run summary: $SUMMARY_JSON"
 e2e_pass

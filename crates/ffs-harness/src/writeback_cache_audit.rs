@@ -329,6 +329,10 @@ pub struct WritebackCrashReplayOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the artifact schema records independent observed durability facts as booleans"
+)]
 pub struct WritebackCrashPointEvidence {
     pub crash_point_id: String,
     pub description: String,
@@ -1185,75 +1189,92 @@ pub fn evaluate_writeback_crash_replay_oracle(
         return decision;
     }
     for point in &oracle.crash_points {
-        if survivor_set(&point.expected_survivor_set) != survivor_set(&point.actual_survivor_set) {
-            return reject_crash_replay(
-                "survivor_set_mismatch",
-                [point.crash_point_id.clone()],
-                "actual survivor set must match the oracle expected survivor set after replay",
-            );
-        }
-        if !point.flush_observed_non_durable {
-            return reject_crash_replay(
-                "flush_misclassified_as_durable",
-                [point.crash_point_id.clone()],
-                "flush evidence must remain non-durable for every crash point",
-            );
-        }
-        if !point.fsync_observed_durable {
-            return reject_crash_replay(
-                "missing_fsync_boundary",
-                [point.crash_point_id.clone()],
-                "file data survivors must cross an observed fsync boundary",
-            );
-        }
-        if !point.fsyncdir_observed_durable {
-            return reject_crash_replay(
-                "missing_fsyncdir_boundary",
-                [point.crash_point_id.clone()],
-                "metadata survivors must cross an observed fsyncdir boundary",
-            );
-        }
-        if !point.metadata_after_data_observed {
-            return reject_crash_replay(
-                "metadata_after_data_violation",
-                [point.crash_point_id.clone()],
-                "metadata durability must not overtake dependent data durability",
-            );
-        }
-        if !point.unmount_reopen_observed {
-            return reject_crash_replay(
-                "unmount_reopen_missing",
-                [point.crash_point_id.clone()],
-                "each crash point must include unmount/reopen recovery evidence",
-            );
-        }
-        if !["cancelled_before_writeback_classified", "none"]
-            .contains(&point.cancellation_state.as_str())
-        {
-            return reject_crash_replay(
-                "cancellation_not_classified",
-                [point.crash_point_id.clone()],
-                "cancellation-before-writeback points must be explicitly classified",
-            );
-        }
-        if !["last_fsynced_write_survived", "not_applicable"]
-            .contains(&point.repeated_write_state.as_str())
-        {
-            return reject_crash_replay(
-                "replay_status_mismatch",
-                [point.crash_point_id.clone()],
-                "repeated-write points must prove the last fsynced write survived",
-            );
-        }
-        if point.replay_status != "survivor_set_verified" {
-            return reject_crash_replay(
-                "replay_status_mismatch",
-                [point.crash_point_id.clone()],
-                "replay status must verify the survivor set for every crash point",
-            );
+        if let Some(decision) = check_crash_point_evidence(point) {
+            return decision;
         }
     }
     WritebackCrashReplayDecision::Accept
+}
+
+fn check_crash_point_evidence(
+    point: &WritebackCrashPointEvidence,
+) -> Option<WritebackCrashReplayDecision> {
+    if survivor_set(&point.expected_survivor_set) != survivor_set(&point.actual_survivor_set) {
+        return Some(reject_crash_point(
+            point,
+            "survivor_set_mismatch",
+            "actual survivor set must match the oracle expected survivor set after replay",
+        ));
+    }
+    if !point.flush_observed_non_durable {
+        return Some(reject_crash_point(
+            point,
+            "flush_misclassified_as_durable",
+            "flush evidence must remain non-durable for every crash point",
+        ));
+    }
+    if !point.fsync_observed_durable {
+        return Some(reject_crash_point(
+            point,
+            "missing_fsync_boundary",
+            "file data survivors must cross an observed fsync boundary",
+        ));
+    }
+    if !point.fsyncdir_observed_durable {
+        return Some(reject_crash_point(
+            point,
+            "missing_fsyncdir_boundary",
+            "metadata survivors must cross an observed fsyncdir boundary",
+        ));
+    }
+    if !point.metadata_after_data_observed {
+        return Some(reject_crash_point(
+            point,
+            "metadata_after_data_violation",
+            "metadata durability must not overtake dependent data durability",
+        ));
+    }
+    if !point.unmount_reopen_observed {
+        return Some(reject_crash_point(
+            point,
+            "unmount_reopen_missing",
+            "each crash point must include unmount/reopen recovery evidence",
+        ));
+    }
+    if !["cancelled_before_writeback_classified", "none"]
+        .contains(&point.cancellation_state.as_str())
+    {
+        return Some(reject_crash_point(
+            point,
+            "cancellation_not_classified",
+            "cancellation-before-writeback points must be explicitly classified",
+        ));
+    }
+    if !["last_fsynced_write_survived", "not_applicable"]
+        .contains(&point.repeated_write_state.as_str())
+    {
+        return Some(reject_crash_point(
+            point,
+            "replay_status_mismatch",
+            "repeated-write points must prove the last fsynced write survived",
+        ));
+    }
+    if point.replay_status != "survivor_set_verified" {
+        return Some(reject_crash_point(
+            point,
+            "replay_status_mismatch",
+            "replay status must verify the survivor set for every crash point",
+        ));
+    }
+    None
+}
+
+fn reject_crash_point(
+    point: &WritebackCrashPointEvidence,
+    reason: &str,
+    remediation: &str,
+) -> WritebackCrashReplayDecision {
+    reject_crash_replay(reason, [point.crash_point_id.clone()], remediation)
 }
 
 fn check_required_crash_points(

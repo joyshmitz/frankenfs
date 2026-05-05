@@ -1030,8 +1030,9 @@ The xfstests E2E suite exercises:
 2. Planning artifacts for CI (`selected_tests.txt`, `summary.json`, `policy_plan.json`, `policy_report.md`)
 3. Optional direct `xfstests check` execution when a configured checkout is available
 4. Structured result artifacts (`results.json`, `junit.xml`) for per-commit tracking
-5. Regression guard enforcement in run mode (`must_pass`, `min_pass_count`, `min_pass_rate`)
-6. Safe skip/fail behavior via strictness toggle
+5. Immutable baseline artifacts (`baseline_manifest.json`, `baseline_report.md`) with raw log hashes, checkpoint/resume commands, cleanup status, and per-test dispositions
+6. Regression guard enforcement in run mode (`must_pass`, `min_pass_count`, `min_pass_rate`)
+7. Safe skip/fail behavior via strictness toggle
 
 The policy plan is a non-destructive planning artifact by default. It records
 one row per curated xfstests id with the policy row id, filesystem flavor, V1
@@ -1041,6 +1042,14 @@ reproduction command. The Markdown report counts product-actionable failures,
 environment blockers, harness blockers, expected unsupported rows, not-run rows,
 and pass candidates separately; CI and README wording must not compress those
 categories into an xfstests pass claim.
+
+The baseline manifest is the only durable input for later xfstests failure
+triage. Every row records the subset version, environment manifest id, exact
+command, raw artifact refs and SHA256 hashes, status vocabulary, checkpoint id,
+resume command, cleanup status, output paths, and reproduction command.
+Downstream triage must reject rows whose raw artifacts are missing, mutable, or
+hash-drifted unless the row is explicitly `not_run` or `interrupted` with a
+remediation/resume command.
 
 Each row also carries a command-plan proof. The plan must name a temp-root
 scratch path, temp-root mountpoint, image hash, helper binaries, required

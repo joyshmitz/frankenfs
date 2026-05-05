@@ -265,14 +265,10 @@ fn validate_scenario_mode_and_flags(scenario: &MountedRepairScenario, errors: &m
                 ));
             }
         }
-        "ledger_evidence_lifecycle" => {
-            if !scenario.ledger_present {
-                errors.push(format!(
-                    "scenario `{}` ledger_evidence_lifecycle requires ledger_present=true",
-                    scenario.scenario_id
-                ));
-            }
-        }
+        "ledger_evidence_lifecycle" if !scenario.ledger_present => errors.push(format!(
+            "scenario `{}` ledger_evidence_lifecycle requires ledger_present=true",
+            scenario.scenario_id
+        )),
         _ => {}
     }
 }

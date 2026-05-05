@@ -287,7 +287,6 @@ fn validate_case_classification(
         "lookup_hit" | "lookup_miss" => Some("lookup"),
         "create_success" | "create_collision_refused" => Some("create"),
         "rename_success" => Some("rename"),
-        "rename_collision_refused" => None,
         "mount_feature_accepted" => Some("mount_feature_check"),
         _ => None,
     };

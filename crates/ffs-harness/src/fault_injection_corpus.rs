@@ -97,7 +97,7 @@ pub struct FaultInjectionCase {
     pub adversarial: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FaultInjectionCorpusReport {
     pub schema_version: u32,
     pub corpus_id: String,
@@ -329,38 +329,22 @@ fn validate_case_confidence(
                 ));
             }
         }
-        "partial_repair" => {
-            if case.expected_confidence_lower_bound < 0.25 {
-                errors.push(format!(
-                    "case `{}` partial_repair must declare expected_confidence_lower_bound >= 0.25",
-                    case.case_id
-                ));
-            }
-        }
-        "detection_only" => {
-            if case.expected_confidence_lower_bound != 0.0 {
-                errors.push(format!(
-                    "case `{}` detection_only must declare expected_confidence_lower_bound = 0.0",
-                    case.case_id
-                ));
-            }
-        }
-        "false_positive" => {
-            if case.expected_confidence_lower_bound > 0.05 {
-                errors.push(format!(
-                    "case `{}` false_positive must declare expected_confidence_lower_bound <= 0.05",
-                    case.case_id
-                ));
-            }
-        }
-        "unsafe_to_repair" => {
-            if case.expected_confidence_lower_bound != 0.0 {
-                errors.push(format!(
-                    "case `{}` unsafe_to_repair must declare expected_confidence_lower_bound = 0.0",
-                    case.case_id
-                ));
-            }
-        }
+        "partial_repair" if case.expected_confidence_lower_bound < 0.25 => errors.push(format!(
+            "case `{}` partial_repair must declare expected_confidence_lower_bound >= 0.25",
+            case.case_id
+        )),
+        "detection_only" if case.expected_confidence_lower_bound != 0.0 => errors.push(format!(
+            "case `{}` detection_only must declare expected_confidence_lower_bound = 0.0",
+            case.case_id
+        )),
+        "false_positive" if case.expected_confidence_lower_bound > 0.05 => errors.push(format!(
+            "case `{}` false_positive must declare expected_confidence_lower_bound <= 0.05",
+            case.case_id
+        )),
+        "unsafe_to_repair" if case.expected_confidence_lower_bound != 0.0 => errors.push(format!(
+            "case `{}` unsafe_to_repair must declare expected_confidence_lower_bound = 0.0",
+            case.case_id
+        )),
         _ => {}
     }
 }

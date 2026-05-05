@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -161,6 +162,122 @@ pub struct XfstestsBaselineEntry {
     pub expected_status: XfstestsStatus,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum XfstestsBaselineRowStatus {
+    Passed,
+    Failed,
+    Skipped,
+    NotRun,
+    Unsupported,
+    HostBlocked,
+    HarnessFailed,
+    Interrupted,
+    Resumed,
+}
+
+impl XfstestsBaselineRowStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+            Self::NotRun => "not_run",
+            Self::Unsupported => "unsupported",
+            Self::HostBlocked => "host_blocked",
+            Self::HarnessFailed => "harness_failed",
+            Self::Interrupted => "interrupted",
+            Self::Resumed => "resumed",
+        }
+    }
+}
+
+pub const XFSTESTS_BASELINE_STATUS_VOCABULARY: &[XfstestsBaselineRowStatus] = &[
+    XfstestsBaselineRowStatus::Passed,
+    XfstestsBaselineRowStatus::Failed,
+    XfstestsBaselineRowStatus::Skipped,
+    XfstestsBaselineRowStatus::NotRun,
+    XfstestsBaselineRowStatus::Unsupported,
+    XfstestsBaselineRowStatus::HostBlocked,
+    XfstestsBaselineRowStatus::HarnessFailed,
+    XfstestsBaselineRowStatus::Interrupted,
+    XfstestsBaselineRowStatus::Resumed,
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XfstestsRawArtifact {
+    pub path: String,
+    pub sha256: String,
+    pub immutable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XfstestsBaselineEnvironment {
+    pub manifest_id: String,
+    pub age_secs: u64,
+    pub max_age_secs: u64,
+    pub freshness_verdict: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XfstestsBaselineCase {
+    pub test_id: String,
+    pub status: XfstestsBaselineRowStatus,
+    pub raw_artifact_refs: Vec<String>,
+    pub raw_log_hash: String,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_run_reason: Option<String>,
+    pub partial_run_checkpoint: String,
+    pub resume_command: String,
+    pub cleanup_status: String,
+    pub immutable_raw_artifacts: bool,
+    pub classification: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XfstestsBaselineManifest {
+    pub schema_version: u32,
+    pub baseline_id: String,
+    pub bead_id: String,
+    pub subset_version: String,
+    pub environment: XfstestsBaselineEnvironment,
+    pub status_vocabulary: Vec<String>,
+    pub raw_artifact_policy: String,
+    pub generated_summary_path: String,
+    pub command_transcript: String,
+    pub checkpoint_id: String,
+    pub resume_command: String,
+    pub cleanup_status: String,
+    pub output_paths: BTreeMap<String, String>,
+    pub reproduction_command: String,
+    pub disposition_counts: BTreeMap<String, usize>,
+    pub raw_artifacts: Vec<XfstestsRawArtifact>,
+    pub cases: Vec<XfstestsBaselineCase>,
+}
+
+#[derive(Debug, Clone)]
+pub struct XfstestsBaselineManifestInput<'a> {
+    pub baseline_id: &'a str,
+    pub subset_version: &'a str,
+    pub environment_manifest_id: &'a str,
+    pub environment_age_secs: u64,
+    pub environment_max_age_secs: u64,
+    pub selected_tests: &'a [String],
+    pub run: &'a XfstestsRun,
+    pub raw_artifact_paths: &'a [&'a Path],
+    pub generated_summary_path: &'a Path,
+    pub command_transcript: &'a str,
+    pub checkpoint_id: &'a str,
+    pub resume_command: &'a str,
+    pub cleanup_status: &'a str,
+    pub reproduction_command: &'a str,
+    pub output_paths: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct XfstestsComparison {
     pub regressions: Vec<String>,
@@ -261,6 +378,226 @@ pub fn load_baseline(path: &Path) -> Result<Vec<XfstestsBaselineEntry>> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("failed to read baseline {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("invalid baseline json {}", path.display()))
+}
+
+pub fn build_xfstests_baseline_manifest(
+    input: XfstestsBaselineManifestInput<'_>,
+) -> Result<XfstestsBaselineManifest> {
+    let raw_artifacts = input
+        .raw_artifact_paths
+        .iter()
+        .map(|path| hash_raw_artifact(path))
+        .collect::<Result<Vec<_>>>()?;
+    let artifact_refs = raw_artifacts
+        .iter()
+        .map(|artifact| artifact.path.clone())
+        .collect::<Vec<_>>();
+    let raw_log_hash = hash_raw_artifact_set(&raw_artifacts);
+
+    let run_by_id = input
+        .run
+        .tests
+        .iter()
+        .map(|case| (case.id.as_str(), case))
+        .collect::<BTreeMap<_, _>>();
+    let immutable_raw_artifacts = raw_artifacts.iter().all(|artifact| artifact.immutable);
+    let cases = input
+        .selected_tests
+        .iter()
+        .map(|test_id| {
+            let case = run_by_id.get(test_id.as_str());
+            let status = case.map_or(XfstestsBaselineRowStatus::NotRun, |case| {
+                baseline_status_for_case(case, input.cleanup_status)
+            });
+            let not_run_reason = case
+                .and_then(|case| {
+                    case.output_snippet
+                        .clone()
+                        .or_else(|| case.failure_reason.clone())
+                })
+                .filter(|_| {
+                    matches!(
+                        status,
+                        XfstestsBaselineRowStatus::NotRun
+                            | XfstestsBaselineRowStatus::Interrupted
+                            | XfstestsBaselineRowStatus::HostBlocked
+                            | XfstestsBaselineRowStatus::HarnessFailed
+                            | XfstestsBaselineRowStatus::Unsupported
+                    )
+                });
+            let remediation = remediation_for_status(status, input.resume_command);
+            XfstestsBaselineCase {
+                test_id: test_id.clone(),
+                status,
+                raw_artifact_refs: artifact_refs.clone(),
+                raw_log_hash: raw_log_hash.clone(),
+                command: input.command_transcript.to_owned(),
+                not_run_reason,
+                partial_run_checkpoint: input.checkpoint_id.to_owned(),
+                resume_command: input.resume_command.to_owned(),
+                cleanup_status: input.cleanup_status.to_owned(),
+                immutable_raw_artifacts,
+                classification: case
+                    .and_then(|case| case.classification.clone())
+                    .unwrap_or_else(|| "unclassified".to_owned()),
+                remediation,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let disposition_counts = disposition_counts(&cases);
+    let freshness_verdict = if input.environment_age_secs <= input.environment_max_age_secs {
+        "fresh"
+    } else {
+        "stale"
+    }
+    .to_owned();
+
+    Ok(XfstestsBaselineManifest {
+        schema_version: 1,
+        baseline_id: input.baseline_id.to_owned(),
+        bead_id: "bd-kr3qu".to_owned(),
+        subset_version: input.subset_version.to_owned(),
+        environment: XfstestsBaselineEnvironment {
+            manifest_id: input.environment_manifest_id.to_owned(),
+            age_secs: input.environment_age_secs,
+            max_age_secs: input.environment_max_age_secs,
+            freshness_verdict,
+        },
+        status_vocabulary: XFSTESTS_BASELINE_STATUS_VOCABULARY
+            .iter()
+            .map(|status| status.as_str().to_owned())
+            .collect(),
+        raw_artifact_policy:
+            "raw artifacts are immutable inputs; summaries are derived and may not rewrite raw logs"
+                .to_owned(),
+        generated_summary_path: input.generated_summary_path.display().to_string(),
+        command_transcript: input.command_transcript.to_owned(),
+        checkpoint_id: input.checkpoint_id.to_owned(),
+        resume_command: input.resume_command.to_owned(),
+        cleanup_status: input.cleanup_status.to_owned(),
+        output_paths: input.output_paths,
+        reproduction_command: input.reproduction_command.to_owned(),
+        disposition_counts,
+        raw_artifacts,
+        cases,
+    })
+}
+
+#[must_use]
+pub fn validate_xfstests_baseline_manifest(manifest: &XfstestsBaselineManifest) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    if manifest.schema_version != 1 {
+        errors.push("xfstests baseline manifest schema_version must be 1".to_owned());
+    }
+    require_non_empty("baseline_id", &manifest.baseline_id, &mut errors);
+    require_non_empty("subset_version", &manifest.subset_version, &mut errors);
+    require_non_empty(
+        "environment.manifest_id",
+        &manifest.environment.manifest_id,
+        &mut errors,
+    );
+    require_non_empty(
+        "command_transcript",
+        &manifest.command_transcript,
+        &mut errors,
+    );
+    require_non_empty("checkpoint_id", &manifest.checkpoint_id, &mut errors);
+    require_non_empty("resume_command", &manifest.resume_command, &mut errors);
+    require_non_empty("cleanup_status", &manifest.cleanup_status, &mut errors);
+    require_non_empty(
+        "reproduction_command",
+        &manifest.reproduction_command,
+        &mut errors,
+    );
+    if manifest.environment.age_secs > manifest.environment.max_age_secs
+        || manifest.environment.freshness_verdict != "fresh"
+    {
+        errors.push(format!(
+            "xfstests baseline environment manifest is stale: age_secs={} max_age_secs={} verdict={}",
+            manifest.environment.age_secs,
+            manifest.environment.max_age_secs,
+            manifest.environment.freshness_verdict
+        ));
+    }
+    let expected_vocabulary = XFSTESTS_BASELINE_STATUS_VOCABULARY
+        .iter()
+        .map(|status| status.as_str().to_owned())
+        .collect::<Vec<_>>();
+    if manifest.status_vocabulary != expected_vocabulary {
+        errors.push(
+            "xfstests baseline status_vocabulary does not match required statuses".to_owned(),
+        );
+    }
+    if manifest.raw_artifact_policy.trim().is_empty() {
+        errors.push("xfstests baseline raw_artifact_policy is required".to_owned());
+    }
+    if manifest.raw_artifacts.is_empty() {
+        errors.push("xfstests baseline raw_artifacts must not be empty".to_owned());
+    }
+    for artifact in &manifest.raw_artifacts {
+        validate_raw_artifact(artifact, &mut errors);
+    }
+
+    let mut seen = BTreeSet::new();
+    for case in &manifest.cases {
+        if !seen.insert(case.test_id.as_str()) {
+            errors.push(format!(
+                "xfstests baseline has duplicate test row: {}",
+                case.test_id
+            ));
+        }
+        validate_baseline_case(case, &mut errors);
+    }
+
+    errors
+}
+
+#[must_use]
+pub fn render_xfstests_baseline_markdown(manifest: &XfstestsBaselineManifest) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# xfstests baseline manifest `{}`",
+        manifest.baseline_id
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "- subset version: `{}`", manifest.subset_version);
+    let _ = writeln!(
+        out,
+        "- environment manifest: `{}` ({})",
+        manifest.environment.manifest_id, manifest.environment.freshness_verdict
+    );
+    let _ = writeln!(out, "- checkpoint: `{}`", manifest.checkpoint_id);
+    let _ = writeln!(out, "- resume command: `{}`", manifest.resume_command);
+    let _ = writeln!(out, "- cleanup status: `{}`", manifest.cleanup_status);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Dispositions");
+    let _ = writeln!(out);
+    for (status, count) in &manifest.disposition_counts {
+        let _ = writeln!(out, "- {status}: {count}");
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Cases");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "| Test | Status | Classification | Raw hash | Resume |"
+    );
+    let _ = writeln!(out, "|---|---|---|---|---|");
+    for case in &manifest.cases {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | `{}` | `{}` |",
+            case.test_id,
+            case.status.as_str(),
+            case.classification,
+            case.raw_log_hash,
+            case.resume_command
+        );
+    }
+    out
 }
 
 #[must_use]
@@ -1215,10 +1552,176 @@ fn escape_xml(input: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn baseline_status_for_case(
+    case: &XfstestsCase,
+    cleanup_status: &str,
+) -> XfstestsBaselineRowStatus {
+    if cleanup_status.contains("interrupted") {
+        return XfstestsBaselineRowStatus::Interrupted;
+    }
+    if cleanup_status.contains("resumed") {
+        return XfstestsBaselineRowStatus::Resumed;
+    }
+
+    match case.status {
+        XfstestsStatus::Passed => XfstestsBaselineRowStatus::Passed,
+        XfstestsStatus::Failed => XfstestsBaselineRowStatus::Failed,
+        XfstestsStatus::Skipped => XfstestsBaselineRowStatus::Skipped,
+        XfstestsStatus::Planned | XfstestsStatus::NotRun => match case.classification.as_deref() {
+            Some("unsupported_by_v1") => XfstestsBaselineRowStatus::Unsupported,
+            Some("environment_blocked") => XfstestsBaselineRowStatus::HostBlocked,
+            Some("harness_blocked") => XfstestsBaselineRowStatus::HarnessFailed,
+            _ => XfstestsBaselineRowStatus::NotRun,
+        },
+    }
+}
+
+fn remediation_for_status(
+    status: XfstestsBaselineRowStatus,
+    resume_command: &str,
+) -> Option<String> {
+    match status {
+        XfstestsBaselineRowStatus::NotRun
+        | XfstestsBaselineRowStatus::Interrupted
+        | XfstestsBaselineRowStatus::HostBlocked
+        | XfstestsBaselineRowStatus::HarnessFailed => Some(resume_command.to_owned()),
+        XfstestsBaselineRowStatus::Unsupported => {
+            Some("document unsupported scope rationale before failure triage".to_owned())
+        }
+        XfstestsBaselineRowStatus::Passed
+        | XfstestsBaselineRowStatus::Failed
+        | XfstestsBaselineRowStatus::Skipped
+        | XfstestsBaselineRowStatus::Resumed => None,
+    }
+}
+
+fn disposition_counts(cases: &[XfstestsBaselineCase]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for case in cases {
+        *counts.entry(case.status.as_str().to_owned()).or_default() += 1;
+    }
+    counts
+}
+
+fn hash_raw_artifact(path: &Path) -> Result<XfstestsRawArtifact> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read raw xfstests artifact {}", path.display()))?;
+    Ok(XfstestsRawArtifact {
+        path: path.display().to_string(),
+        sha256: sha256_hex(&bytes),
+        immutable: true,
+    })
+}
+
+fn hash_raw_artifact_set(raw_artifacts: &[XfstestsRawArtifact]) -> String {
+    let mut hasher = Sha256::new();
+    for artifact in raw_artifacts {
+        hasher.update(artifact.path.as_bytes());
+        hasher.update([0]);
+        hasher.update(artifact.sha256.as_bytes());
+        hasher.update([0]);
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
+fn require_non_empty(field: &str, value: &str, errors: &mut Vec<String>) {
+    if value.trim().is_empty() {
+        errors.push(format!("xfstests baseline manifest missing {field}"));
+    }
+}
+
+fn validate_raw_artifact(artifact: &XfstestsRawArtifact, errors: &mut Vec<String>) {
+    if artifact.path.trim().is_empty() {
+        errors.push("xfstests baseline raw artifact missing path".to_owned());
+        return;
+    }
+    if !artifact.immutable {
+        errors.push(format!(
+            "xfstests baseline raw artifact {} is not immutable",
+            artifact.path
+        ));
+    }
+    if !artifact.sha256.starts_with("sha256:") || artifact.sha256.len() != "sha256:".len() + 64 {
+        errors.push(format!(
+            "xfstests baseline raw artifact {} has malformed sha256",
+            artifact.path
+        ));
+        return;
+    }
+    match fs::read(&artifact.path) {
+        Ok(bytes) => {
+            let actual = sha256_hex(&bytes);
+            if actual != artifact.sha256 {
+                errors.push(format!(
+                    "xfstests baseline raw artifact hash changed: {} expected={} actual={actual}",
+                    artifact.path, artifact.sha256
+                ));
+            }
+        }
+        Err(err) => errors.push(format!(
+            "xfstests baseline raw artifact missing: {} ({err})",
+            artifact.path
+        )),
+    }
+}
+
+fn validate_baseline_case(case: &XfstestsBaselineCase, errors: &mut Vec<String>) {
+    require_non_empty("case.test_id", &case.test_id, errors);
+    require_non_empty("case.command", &case.command, errors);
+    require_non_empty(
+        "case.partial_run_checkpoint",
+        &case.partial_run_checkpoint,
+        errors,
+    );
+    require_non_empty("case.resume_command", &case.resume_command, errors);
+    require_non_empty("case.cleanup_status", &case.cleanup_status, errors);
+    if case.raw_artifact_refs.is_empty() {
+        errors.push(format!(
+            "xfstests baseline case {} has no raw artifact refs",
+            case.test_id
+        ));
+    }
+    if !case.raw_log_hash.starts_with("sha256:") {
+        errors.push(format!(
+            "xfstests baseline case {} has malformed raw_log_hash",
+            case.test_id
+        ));
+    }
+    if !case.immutable_raw_artifacts {
+        errors.push(format!(
+            "xfstests baseline case {} does not prove immutable raw artifacts",
+            case.test_id
+        ));
+    }
+    if matches!(
+        case.status,
+        XfstestsBaselineRowStatus::NotRun
+            | XfstestsBaselineRowStatus::Interrupted
+            | XfstestsBaselineRowStatus::HostBlocked
+            | XfstestsBaselineRowStatus::HarnessFailed
+    ) && case
+        .remediation
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        errors.push(format!(
+            "xfstests baseline case {} lacks remediation for {:?}",
+            case.test_id, case.status
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     fn repo_xfstests_allowlist_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1299,6 +1802,87 @@ mod tests {
                 expected_plan_outcome: "dry_run_only".to_owned(),
                 command_summary: format!("dry-run xfstests plan for {test_id} under temp root"),
             }),
+        }
+    }
+
+    fn test_case(id: &str, status: XfstestsStatus, classification: Option<&str>) -> XfstestsCase {
+        XfstestsCase {
+            id: id.to_owned(),
+            status,
+            duration_secs: None,
+            output_snippet: Some(format!("{id} {status:?}")),
+            allowlist_status: None,
+            failure_reason: None,
+            policy_row_id: None,
+            classification: classification.map(ToOwned::to_owned),
+            expected_outcome: None,
+            user_risk_category: None,
+            expected_operation_class: None,
+            required_capabilities: Vec::new(),
+            tracker_id: None,
+            comparison: Vec::new(),
+        }
+    }
+
+    fn baseline_case(id: &str, status: XfstestsBaselineRowStatus) -> XfstestsBaselineCase {
+        XfstestsBaselineCase {
+            test_id: id.to_owned(),
+            status,
+            raw_artifact_refs: vec!["raw.log".to_owned()],
+            raw_log_hash: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
+            command: "./check generic/001".to_owned(),
+            not_run_reason: None,
+            partial_run_checkpoint: "checkpoint:001".to_owned(),
+            resume_command: "XFSTESTS_MODE=run ./scripts/e2e/ffs_xfstests_e2e.sh".to_owned(),
+            cleanup_status: "artifacts_preserved".to_owned(),
+            immutable_raw_artifacts: true,
+            classification: "product_actionable".to_owned(),
+            remediation: matches!(
+                status,
+                XfstestsBaselineRowStatus::NotRun
+                    | XfstestsBaselineRowStatus::Interrupted
+                    | XfstestsBaselineRowStatus::HostBlocked
+                    | XfstestsBaselineRowStatus::HarnessFailed
+                    | XfstestsBaselineRowStatus::Unsupported
+            )
+            .then(|| "rerun or classify before triage".to_owned()),
+        }
+    }
+
+    fn manifest_with_cases(
+        raw_path: &std::path::Path,
+        cases: Vec<XfstestsBaselineCase>,
+    ) -> XfstestsBaselineManifest {
+        XfstestsBaselineManifest {
+            schema_version: 1,
+            baseline_id: "xfstests-baseline-test".to_owned(),
+            bead_id: "bd-kr3qu".to_owned(),
+            subset_version: "xfstests-curated-v1".to_owned(),
+            environment: XfstestsBaselineEnvironment {
+                manifest_id: "sha256:env".to_owned(),
+                age_secs: 0,
+                max_age_secs: 3600,
+                freshness_verdict: "fresh".to_owned(),
+            },
+            status_vocabulary: XFSTESTS_BASELINE_STATUS_VOCABULARY
+                .iter()
+                .map(|status| status.as_str().to_owned())
+                .collect(),
+            raw_artifact_policy: "raw artifacts are immutable inputs".to_owned(),
+            generated_summary_path: "baseline_report.md".to_owned(),
+            command_transcript: "./check generic/001".to_owned(),
+            checkpoint_id: "checkpoint:001".to_owned(),
+            resume_command: "XFSTESTS_MODE=run ./scripts/e2e/ffs_xfstests_e2e.sh".to_owned(),
+            cleanup_status: "artifacts_preserved".to_owned(),
+            output_paths: BTreeMap::from([(
+                "baseline_manifest_json".to_owned(),
+                "baseline_manifest.json".to_owned(),
+            )]),
+            reproduction_command: "XFSTESTS_MODE=run ./scripts/e2e/ffs_xfstests_e2e.sh".to_owned(),
+            disposition_counts: disposition_counts(&cases),
+            raw_artifacts: vec![hash_raw_artifact(raw_path).expect("hash raw artifact")],
+            cases,
         }
     }
 
@@ -1906,5 +2490,235 @@ generic/001  2s ... pass\n";
         assert!(run.tests[0].comparison[0].contains("regression"));
         assert!(run.tests[1].comparison[0].contains("improvement"));
         let _ = selected;
+    }
+
+    #[test]
+    fn baseline_manifest_accepts_required_fields_and_status_vocabulary() {
+        let tmp = tempdir().expect("tempdir");
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "generic/001 pass\n").expect("write raw log");
+        let cases = vec![
+            baseline_case("generic/001", XfstestsBaselineRowStatus::Passed),
+            baseline_case("generic/002", XfstestsBaselineRowStatus::Failed),
+            baseline_case("generic/003", XfstestsBaselineRowStatus::Skipped),
+            baseline_case("generic/004", XfstestsBaselineRowStatus::NotRun),
+            baseline_case("generic/005", XfstestsBaselineRowStatus::Unsupported),
+            baseline_case("generic/006", XfstestsBaselineRowStatus::HostBlocked),
+            baseline_case("generic/007", XfstestsBaselineRowStatus::HarnessFailed),
+            baseline_case("generic/008", XfstestsBaselineRowStatus::Interrupted),
+            baseline_case("generic/009", XfstestsBaselineRowStatus::Resumed),
+        ];
+        let manifest = manifest_with_cases(&raw, cases);
+
+        let errors = validate_xfstests_baseline_manifest(&manifest);
+
+        assert!(
+            errors.is_empty(),
+            "expected valid manifest, got {errors:#?}"
+        );
+        assert_eq!(manifest.disposition_counts.get("passed"), Some(&1));
+        assert_eq!(manifest.disposition_counts.get("interrupted"), Some(&1));
+        assert_eq!(
+            manifest.status_vocabulary,
+            vec![
+                "passed",
+                "failed",
+                "skipped",
+                "not_run",
+                "unsupported",
+                "host_blocked",
+                "harness_failed",
+                "interrupted",
+                "resumed",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_baseline_manifest_hashes_raw_artifacts_and_classifies_rows() -> Result<()> {
+        let tmp = tempdir()?;
+        let raw = tmp.path().join("check.log");
+        fs::write(
+            &raw,
+            "generic/001 pass\ngeneric/002 failed\ngeneric/003 skipped\ngeneric/004 not run\n",
+        )?;
+        let summary = tmp.path().join("baseline_report.md");
+        let selected = vec![
+            "generic/001".to_owned(),
+            "generic/002".to_owned(),
+            "generic/003".to_owned(),
+            "generic/004".to_owned(),
+            "generic/005".to_owned(),
+            "generic/006".to_owned(),
+            "generic/007".to_owned(),
+        ];
+        let run = summarize_run(
+            "fixture",
+            1,
+            false,
+            vec![
+                test_case(
+                    "generic/001",
+                    XfstestsStatus::Passed,
+                    Some("product_actionable"),
+                ),
+                test_case(
+                    "generic/002",
+                    XfstestsStatus::Failed,
+                    Some("product_actionable"),
+                ),
+                test_case(
+                    "generic/003",
+                    XfstestsStatus::Skipped,
+                    Some("expected_failure"),
+                ),
+                test_case("generic/004", XfstestsStatus::NotRun, None),
+                test_case(
+                    "generic/005",
+                    XfstestsStatus::NotRun,
+                    Some("unsupported_by_v1"),
+                ),
+                test_case(
+                    "generic/006",
+                    XfstestsStatus::NotRun,
+                    Some("environment_blocked"),
+                ),
+                test_case(
+                    "generic/007",
+                    XfstestsStatus::NotRun,
+                    Some("harness_blocked"),
+                ),
+            ],
+        );
+        let manifest = build_xfstests_baseline_manifest(XfstestsBaselineManifestInput {
+            baseline_id: "xfstests-baseline-fixture",
+            subset_version: "xfstests-curated-v1",
+            environment_manifest_id: "sha256:env",
+            environment_age_secs: 0,
+            environment_max_age_secs: 3600,
+            selected_tests: &selected,
+            run: &run,
+            raw_artifact_paths: &[raw.as_path()],
+            generated_summary_path: &summary,
+            command_transcript: "./check generic/001 generic/002",
+            checkpoint_id: "checkpoint:fixture",
+            resume_command: "XFSTESTS_MODE=run RESULT_BASE=fixture ./scripts/e2e/ffs_xfstests_e2e.sh",
+            cleanup_status: "partial_artifacts_preserved",
+            reproduction_command: "XFSTESTS_MODE=run ./scripts/e2e/ffs_xfstests_e2e.sh",
+            output_paths: BTreeMap::new(),
+        })?;
+
+        let errors = validate_xfstests_baseline_manifest(&manifest);
+
+        assert!(
+            errors.is_empty(),
+            "expected valid manifest, got {errors:#?}"
+        );
+        assert_eq!(
+            manifest.raw_artifacts[0].sha256,
+            sha256_hex(&fs::read(&raw)?)
+        );
+        assert_eq!(manifest.cases[0].status, XfstestsBaselineRowStatus::Passed);
+        assert_eq!(manifest.cases[1].status, XfstestsBaselineRowStatus::Failed);
+        assert_eq!(manifest.cases[2].status, XfstestsBaselineRowStatus::Skipped);
+        assert_eq!(manifest.cases[3].status, XfstestsBaselineRowStatus::NotRun);
+        assert_eq!(
+            manifest.cases[4].status,
+            XfstestsBaselineRowStatus::Unsupported
+        );
+        assert_eq!(
+            manifest.cases[5].status,
+            XfstestsBaselineRowStatus::HostBlocked
+        );
+        assert_eq!(
+            manifest.cases[6].status,
+            XfstestsBaselineRowStatus::HarnessFailed
+        );
+        assert!(manifest.cases[3].remediation.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn baseline_manifest_rejects_duplicate_missing_changed_and_stale_inputs() {
+        let tmp = tempdir().expect("tempdir");
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "generic/001 pass\n").expect("write raw log");
+        let mut manifest = manifest_with_cases(
+            &raw,
+            vec![
+                baseline_case("generic/001", XfstestsBaselineRowStatus::Passed),
+                baseline_case("generic/001", XfstestsBaselineRowStatus::Failed),
+            ],
+        );
+
+        let errors = validate_xfstests_baseline_manifest(&manifest);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("duplicate test row")),
+            "expected duplicate row error, got {errors:#?}"
+        );
+
+        manifest.raw_artifacts[0].path = tmp.path().join("missing.log").display().to_string();
+        let errors = validate_xfstests_baseline_manifest(&manifest);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("raw artifact missing")),
+            "expected missing raw artifact error, got {errors:#?}"
+        );
+
+        let mut changed = manifest_with_cases(
+            &raw,
+            vec![baseline_case(
+                "generic/001",
+                XfstestsBaselineRowStatus::Passed,
+            )],
+        );
+        fs::write(&raw, "generic/001 failed\n").expect("mutate raw log");
+        let errors = validate_xfstests_baseline_manifest(&changed);
+        assert!(
+            errors.iter().any(|error| error.contains("hash changed")),
+            "expected changed hash error, got {errors:#?}"
+        );
+
+        changed.environment.age_secs = 7_200;
+        changed.environment.max_age_secs = 3_600;
+        changed.environment.freshness_verdict = "stale".to_owned();
+        changed.cases[0].command.clear();
+        let errors = validate_xfstests_baseline_manifest(&changed);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("environment manifest is stale")),
+            "expected stale environment error, got {errors:#?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("missing case.command")),
+            "expected missing command error, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn baseline_manifest_renders_markdown_summary_without_counting_not_run_as_pass() {
+        let tmp = tempdir().expect("tempdir");
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "generic/001 not run\n").expect("write raw log");
+        let manifest = manifest_with_cases(
+            &raw,
+            vec![
+                baseline_case("generic/001", XfstestsBaselineRowStatus::NotRun),
+                baseline_case("generic/002", XfstestsBaselineRowStatus::Interrupted),
+            ],
+        );
+
+        let markdown = render_xfstests_baseline_markdown(&manifest);
+
+        assert!(markdown.contains("- not_run: 1"));
+        assert!(markdown.contains("- interrupted: 1"));
+        assert!(!markdown.contains("- passed: 2"));
+        assert!(markdown.contains("XFSTESTS_MODE=run"));
     }
 }

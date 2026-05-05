@@ -155,15 +155,17 @@ use ffs_harness::{
         render_writeback_crash_replay_markdown, render_writeback_ordering_markdown,
     },
     xfstests::{
-        XfstestsStatus, apply_allowlist, compare_against_baseline, load_allowlist, load_baseline,
-        load_selected_tests, parse_check_output, summarize_uniform, write_junit_xml,
+        XfstestsBaselineManifestInput, XfstestsRun, XfstestsStatus, apply_allowlist,
+        build_xfstests_baseline_manifest, compare_against_baseline, load_allowlist, load_baseline,
+        load_selected_tests, parse_check_output, render_xfstests_baseline_markdown,
+        summarize_uniform, validate_xfstests_baseline_manifest, write_junit_xml,
     },
 };
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default)]
 struct XfstestsReportConfig {
@@ -177,6 +179,26 @@ struct XfstestsReportConfig {
     uniform_note: Option<String>,
     check_rc: i32,
     dry_run: bool,
+}
+
+#[derive(Debug, Default)]
+struct XfstestsBaselineManifestConfig {
+    selected: Option<String>,
+    results_json: Option<String>,
+    manifest_out: Option<String>,
+    summary_out: Option<String>,
+    baseline_id: Option<String>,
+    subset_version: Option<String>,
+    environment_manifest_id: Option<String>,
+    environment_age_secs: u64,
+    environment_max_age_secs: u64,
+    command_transcript: Option<String>,
+    checkpoint_id: Option<String>,
+    resume_command: Option<String>,
+    cleanup_status: Option<String>,
+    reproduction_command: Option<String>,
+    raw_artifacts: Vec<String>,
+    output_paths: Vec<(String, String)>,
 }
 
 fn main() {
@@ -216,6 +238,7 @@ fn run() -> Result<()> {
         Some("run-crash-replay") => run_crash_replay(&args[1..]),
         Some("run-fsx-stress") => run_fsx_stress_cmd(&args[1..]),
         Some("xfstests-report") => xfstests_report(&args[1..]),
+        Some("xfstests-baseline-manifest") => xfstests_baseline_manifest(&args[1..]),
         Some("validate-operational-manifest") => validate_operational_manifest_cmd(&args[1..]),
         Some("validate-artifact-schema-fixtures") => {
             validate_artifact_schema_fixtures_cmd(&args[1..])
@@ -2417,10 +2440,9 @@ fn parse_writeback_cache_audit_cmd_args(
             }
             "--scenario-id" => {
                 i += 1;
-                scenario_id = args
-                    .get(i)
+                args.get(i)
                     .context("--scenario-id requires a scenario id")?
-                    .to_owned();
+                    .clone_into(&mut scenario_id);
             }
             "--reproduction-command" => {
                 i += 1;
@@ -2522,10 +2544,9 @@ fn parse_writeback_cache_ordering_cmd_args(
             }
             "--scenario-id" => {
                 i += 1;
-                scenario_id = args
-                    .get(i)
+                args.get(i)
                     .context("--scenario-id requires a scenario id")?
-                    .to_owned();
+                    .clone_into(&mut scenario_id);
             }
             "--reproduction-command" => {
                 i += 1;
@@ -2628,10 +2649,9 @@ fn parse_writeback_cache_crash_replay_cmd_args(
             }
             "--scenario-id" => {
                 i += 1;
-                scenario_id = args
-                    .get(i)
+                args.get(i)
                     .context("--scenario-id requires a scenario id")?
-                    .to_owned();
+                    .clone_into(&mut scenario_id);
             }
             "--reproduction-command" => {
                 i += 1;
@@ -2755,6 +2775,110 @@ fn xfstests_report(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn xfstests_baseline_manifest(args: &[String]) -> Result<()> {
+    let config = parse_xfstests_baseline_manifest_config(args)?;
+    let selected_path = Path::new(
+        config
+            .selected
+            .as_deref()
+            .context("--selected is required")?,
+    );
+    let results_path = Path::new(
+        config
+            .results_json
+            .as_deref()
+            .context("--results-json is required")?,
+    );
+    let manifest_out_path = Path::new(
+        config
+            .manifest_out
+            .as_deref()
+            .context("--manifest-out is required")?,
+    );
+    let summary_out_path = Path::new(
+        config
+            .summary_out
+            .as_deref()
+            .context("--summary-out is required")?,
+    );
+    let selected_tests = load_selected_tests(selected_path)?;
+    let run: XfstestsRun = serde_json::from_str(
+        &fs::read_to_string(results_path)
+            .with_context(|| format!("failed to read {}", results_path.display()))?,
+    )
+    .with_context(|| format!("invalid xfstests results JSON {}", results_path.display()))?;
+    let raw_artifact_paths = config
+        .raw_artifacts
+        .iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    let raw_artifact_refs = raw_artifact_paths
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
+    let output_paths = config.output_paths.into_iter().collect();
+
+    let manifest = build_xfstests_baseline_manifest(XfstestsBaselineManifestInput {
+        baseline_id: config
+            .baseline_id
+            .as_deref()
+            .context("--baseline-id is required")?,
+        subset_version: config
+            .subset_version
+            .as_deref()
+            .context("--subset-version is required")?,
+        environment_manifest_id: config
+            .environment_manifest_id
+            .as_deref()
+            .context("--environment-manifest-id is required")?,
+        environment_age_secs: config.environment_age_secs,
+        environment_max_age_secs: config.environment_max_age_secs,
+        selected_tests: &selected_tests,
+        run: &run,
+        raw_artifact_paths: &raw_artifact_refs,
+        generated_summary_path: summary_out_path,
+        command_transcript: config
+            .command_transcript
+            .as_deref()
+            .context("--command-transcript is required")?,
+        checkpoint_id: config
+            .checkpoint_id
+            .as_deref()
+            .context("--checkpoint-id is required")?,
+        resume_command: config
+            .resume_command
+            .as_deref()
+            .context("--resume-command is required")?,
+        cleanup_status: config
+            .cleanup_status
+            .as_deref()
+            .context("--cleanup-status is required")?,
+        reproduction_command: config
+            .reproduction_command
+            .as_deref()
+            .context("--reproduction-command is required")?,
+        output_paths,
+    })?;
+    let errors = validate_xfstests_baseline_manifest(&manifest);
+    if !errors.is_empty() {
+        bail!(
+            "xfstests baseline manifest validation failed: {}",
+            errors.join("; ")
+        );
+    }
+
+    write_text_file(
+        manifest_out_path,
+        &(serde_json::to_string_pretty(&manifest)? + "\n"),
+    )?;
+    write_text_file(
+        summary_out_path,
+        &render_xfstests_baseline_markdown(&manifest),
+    )?;
+    println!("{}", serde_json::to_string_pretty(&manifest)?);
+    Ok(())
+}
+
 fn parse_xfstests_report_config(args: &[String]) -> Result<XfstestsReportConfig> {
     let mut config = XfstestsReportConfig::default();
     let mut index = 0_usize;
@@ -2816,6 +2940,115 @@ fn parse_xfstests_report_config(args: &[String]) -> Result<XfstestsReportConfig>
     }
 
     Ok(config)
+}
+
+fn parse_xfstests_baseline_manifest_config(
+    args: &[String],
+) -> Result<XfstestsBaselineManifestConfig> {
+    let mut config = XfstestsBaselineManifestConfig {
+        environment_max_age_secs: 3600,
+        ..XfstestsBaselineManifestConfig::default()
+    };
+    let mut index = 0_usize;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--selected" => {
+                config.selected = Some(require_value(args, index, "--selected")?.clone());
+                index += 2;
+            }
+            "--results-json" => {
+                config.results_json = Some(require_value(args, index, "--results-json")?.clone());
+                index += 2;
+            }
+            "--manifest-out" => {
+                config.manifest_out = Some(require_value(args, index, "--manifest-out")?.clone());
+                index += 2;
+            }
+            "--summary-out" => {
+                config.summary_out = Some(require_value(args, index, "--summary-out")?.clone());
+                index += 2;
+            }
+            "--baseline-id" => {
+                config.baseline_id = Some(require_value(args, index, "--baseline-id")?.clone());
+                index += 2;
+            }
+            "--subset-version" => {
+                config.subset_version =
+                    Some(require_value(args, index, "--subset-version")?.clone());
+                index += 2;
+            }
+            "--environment-manifest-id" => {
+                config.environment_manifest_id =
+                    Some(require_value(args, index, "--environment-manifest-id")?.clone());
+                index += 2;
+            }
+            "--environment-age-secs" => {
+                config.environment_age_secs = require_value(args, index, "--environment-age-secs")?
+                    .parse()
+                    .context("invalid --environment-age-secs value")?;
+                index += 2;
+            }
+            "--environment-max-age-secs" => {
+                config.environment_max_age_secs =
+                    require_value(args, index, "--environment-max-age-secs")?
+                        .parse()
+                        .context("invalid --environment-max-age-secs value")?;
+                index += 2;
+            }
+            "--command-transcript" => {
+                config.command_transcript =
+                    Some(require_value(args, index, "--command-transcript")?.clone());
+                index += 2;
+            }
+            "--checkpoint-id" => {
+                config.checkpoint_id = Some(require_value(args, index, "--checkpoint-id")?.clone());
+                index += 2;
+            }
+            "--resume-command" => {
+                config.resume_command =
+                    Some(require_value(args, index, "--resume-command")?.clone());
+                index += 2;
+            }
+            "--cleanup-status" => {
+                config.cleanup_status =
+                    Some(require_value(args, index, "--cleanup-status")?.clone());
+                index += 2;
+            }
+            "--reproduction-command" => {
+                config.reproduction_command =
+                    Some(require_value(args, index, "--reproduction-command")?.clone());
+                index += 2;
+            }
+            "--raw-artifact" => {
+                config
+                    .raw_artifacts
+                    .push(require_value(args, index, "--raw-artifact")?.clone());
+                index += 2;
+            }
+            "--output-path" => {
+                let (key, value) = parse_key_value(require_value(args, index, "--output-path")?)?;
+                config.output_paths.push((key, value));
+                index += 2;
+            }
+            other => bail!("unknown xfstests-baseline-manifest option: {other}"),
+        }
+    }
+
+    if config.raw_artifacts.is_empty() {
+        bail!("--raw-artifact is required at least once");
+    }
+    Ok(config)
+}
+
+fn parse_key_value(raw: &str) -> Result<(String, String)> {
+    let (key, value) = raw
+        .split_once('=')
+        .with_context(|| format!("expected KEY=VALUE, got {raw}"))?;
+    if key.is_empty() || value.is_empty() {
+        bail!("expected non-empty KEY=VALUE, got {raw}");
+    }
+    Ok((key.to_owned(), value.to_owned()))
 }
 
 fn require_value<'a>(args: &'a [String], index: usize, flag: &str) -> Result<&'a String> {
@@ -3027,10 +3260,9 @@ fn parse_artifact_schema_fixtures_args(
             }
             "--reproduction-command" => {
                 i += 1;
-                reproduction_command = args
-                    .get(i)
+                args.get(i)
                     .context("--reproduction-command requires a value")?
-                    .to_owned();
+                    .clone_into(&mut reproduction_command);
             }
             "--help" | "-h" => {
                 print_artifact_schema_fixtures_usage();
@@ -3926,6 +4158,31 @@ fn print_usage() {
     println!("ffs-harness — fixture management and parity reporting");
     println!();
     println!("USAGE:");
+    print_usage_commands();
+    println!();
+    println!("FIXTURE GENERATION:");
+    println!("  Extracts sparse JSON fixtures from real filesystem images.");
+    println!("  In 'auto' mode (default), detects ext4/btrfs and extracts the superblock.");
+    println!("  Use 'region' mode to extract arbitrary byte ranges for group descriptors,");
+    println!("  inodes, directory blocks, or any other metadata structure.");
+    println!();
+    println!("CRASH REPLAY:");
+    println!("  Runs deterministic crash/replay schedules and emits a JSON summary.");
+    println!("  Use --out DIR to persist schedule artifacts + repro pack.");
+    println!();
+    println!("FSX STRESS:");
+    println!(
+        "  Runs weighted fsx-style read/write/truncate/fsync/fallocate/punch-hole/reopen operations."
+    );
+    println!(
+        "  Periodically injects corruption and verifies deterministic repair + full-file integrity."
+    );
+    println!();
+    println!("EXAMPLES:");
+    print_usage_examples();
+}
+
+fn print_usage_commands() {
     println!("  ffs-harness parity");
     println!("  ffs-harness check-fixtures");
     println!(
@@ -3939,6 +4196,9 @@ fn print_usage() {
     );
     println!(
         "  ffs-harness xfstests-report --selected FILE --results-json FILE --junit-xml FILE [--check-log FILE --check-rc N --dry-run 0|1] [--allowlist-json FILE] [--baseline-json FILE] [--uniform-status STATUS --uniform-note NOTE]"
+    );
+    println!(
+        "  ffs-harness xfstests-baseline-manifest --selected FILE --results-json FILE --manifest-out FILE --summary-out FILE --baseline-id ID --subset-version VERSION --environment-manifest-id ID --command-transcript CMD --checkpoint-id ID --resume-command CMD --cleanup-status STATUS --reproduction-command CMD --raw-artifact FILE [--raw-artifact FILE ...]"
     );
     println!("  ffs-harness validate-operational-manifest <manifest.json>");
     println!(
@@ -4007,27 +4267,6 @@ fn print_usage() {
     print_workload_corpus_usage_summary();
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
     println!("  ffs-harness validate-mounted-recovery-matrix [--matrix FILE] [--out FILE]");
-    println!();
-    println!("FIXTURE GENERATION:");
-    println!("  Extracts sparse JSON fixtures from real filesystem images.");
-    println!("  In 'auto' mode (default), detects ext4/btrfs and extracts the superblock.");
-    println!("  Use 'region' mode to extract arbitrary byte ranges for group descriptors,");
-    println!("  inodes, directory blocks, or any other metadata structure.");
-    println!();
-    println!("CRASH REPLAY:");
-    println!("  Runs deterministic crash/replay schedules and emits a JSON summary.");
-    println!("  Use --out DIR to persist schedule artifacts + repro pack.");
-    println!();
-    println!("FSX STRESS:");
-    println!(
-        "  Runs weighted fsx-style read/write/truncate/fsync/fallocate/punch-hole/reopen operations."
-    );
-    println!(
-        "  Periodically injects corruption and verifies deterministic repair + full-file integrity."
-    );
-    println!();
-    println!("EXAMPLES:");
-    print_usage_examples();
 }
 
 fn print_usage_examples() {
