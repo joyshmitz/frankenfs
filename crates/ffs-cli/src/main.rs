@@ -113,6 +113,7 @@ impl LogFormat {
 
 const DEFAULT_MANAGED_UNMOUNT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_MOUNT_BACKGROUND_SCRUB_INTERVAL_SECS: u64 = 5;
+const WRITEBACK_CACHE_KILL_SWITCH_ENV: &str = "FFS_WRITEBACK_CACHE_KILL_SWITCH";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum MountRuntimeMode {
@@ -298,6 +299,7 @@ struct MountWritebackCacheConfig {
     enabled: bool,
     audit_gate_path: Option<PathBuf>,
     ordering_oracle_path: Option<PathBuf>,
+    runtime_kill_switch: bool,
 }
 
 impl MountWritebackCacheConfig {
@@ -307,6 +309,7 @@ impl MountWritebackCacheConfig {
             enabled: false,
             audit_gate_path: None,
             ordering_oracle_path: None,
+            runtime_kill_switch: false,
         }
     }
 
@@ -319,8 +322,28 @@ impl MountWritebackCacheConfig {
             enabled,
             audit_gate_path,
             ordering_oracle_path,
+            runtime_kill_switch: writeback_cache_runtime_kill_switch_enabled(),
         }
     }
+
+    #[cfg(test)]
+    fn from_cli_with_runtime_kill_switch(
+        enabled: bool,
+        audit_gate_path: Option<PathBuf>,
+        ordering_oracle_path: Option<PathBuf>,
+        runtime_kill_switch: bool,
+    ) -> Self {
+        Self {
+            enabled,
+            audit_gate_path,
+            ordering_oracle_path,
+            runtime_kill_switch,
+        }
+    }
+}
+
+fn writeback_cache_runtime_kill_switch_enabled() -> bool {
+    env_bool(WRITEBACK_CACHE_KILL_SWITCH_ENV, false).unwrap_or(true)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -532,7 +555,8 @@ enum Command {
         ///
         /// Requires `--rw`, `--writeback-cache-gate`, and
         /// `--writeback-cache-ordering-oracle`. flush remains non-durable;
-        /// fsync and fsyncdir are the durability boundaries.
+        /// fsync and fsyncdir are the durability boundaries. The
+        /// FFS_WRITEBACK_CACHE_KILL_SWITCH environment variable fails closed.
         #[arg(long = "writeback-cache")]
         writeback_cache: bool,
         /// Audit gate JSON required by `--writeback-cache`.
@@ -4231,6 +4255,17 @@ fn prepare_mount_writeback_cache_evidence<'a>(
         return Ok(None);
     }
 
+    if request.runtime_kill_switch {
+        let reason = "writeback_cache blocked by FFS_WRITEBACK_CACHE_KILL_SWITCH";
+        log_mount_writeback_cache_rejected(
+            operation_id,
+            scenario_id,
+            "runtime_kill_switch_engaged",
+            reason,
+        );
+        bail!("{reason}");
+    }
+
     if !options.read_write {
         let reason = "--writeback-cache requires --rw; flush is non-durable and fsync/fsyncdir are the durability boundaries";
         log_mount_writeback_cache_rejected(
@@ -6366,8 +6401,9 @@ mod tests {
         MAX_EXT4_INFO_GROUPS, MountAccessMode, MountBackgroundRepairMode,
         MountBackgroundScrubConfig, MountBackgroundScrubMode, MountBackgroundScrubRequest,
         MountCmdOptions, MountMode, MountRuntimeConfig, MountRuntimeMode,
-        MountWritebackCacheConfig, RepairCommandOptions, RepairFlags, btrfs_chunk_type_flag_names,
-        build_ext4_group_info, build_fsck_output, build_info_output, build_mount_open_options,
+        MountWritebackCacheConfig, RepairCommandOptions, RepairFlags,
+        WRITEBACK_CACHE_KILL_SWITCH_ENV, btrfs_chunk_type_flag_names, build_ext4_group_info,
+        build_fsck_output, build_info_output, build_mount_open_options,
         choose_btrfs_scrub_block_size, ext4_appears_clean_state, ext4_mount_replay_mode,
         format_ratio_thousandths, log_mount_runtime_rejected, log_mount_runtime_selected,
         mount_cmd, mount_operation_id, open_filesystem_for_mount, parse_btrfs_mount_selection,
@@ -6431,18 +6467,21 @@ mod tests {
     }
 
     fn write_happy_writeback_artifacts(dir: &Path) -> (PathBuf, PathBuf) {
-        let gate_path = dir.join("writeback_gate.json");
-        let oracle_path = dir.join("writeback_ordering_oracle.json");
-        let artifact = |id: &str| {
-            serde_json::json!({
-                "artifact_id": id,
-                "present": true,
-                "fresh": true,
-                "passed": true,
-                "artifact_path": format!("artifacts/writeback-cache/{id}.json")
-            })
-        };
-        let gate = serde_json::json!({
+        write_writeback_artifacts(dir, |_| {})
+    }
+
+    fn writeback_artifact_state(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "artifact_id": id,
+            "present": true,
+            "fresh": true,
+            "passed": true,
+            "artifact_path": format!("artifacts/writeback-cache/{id}.json")
+        })
+    }
+
+    fn happy_writeback_gate() -> serde_json::Value {
+        serde_json::json!({
             "schema_version": 1,
             "gate_version": "bd-rchk0.2.2-cli-gate-v1",
             "bead_id": "bd-rchk0.2.2",
@@ -6460,14 +6499,32 @@ mod tests {
                 "kernel_supports_writeback_cache": true,
                 "helper_binary_present": true
             },
-            "epoch_barrier_artifact": artifact("epoch_barrier_proof"),
-            "crash_matrix_artifact": artifact("writeback_crash_matrix"),
-            "fsync_evidence_artifact": artifact("fsync_fsyncdir_boundary"),
+            "epoch_barrier_artifact": writeback_artifact_state("epoch_barrier_proof"),
+            "crash_matrix_artifact": writeback_artifact_state("writeback_crash_matrix"),
+            "fsync_evidence_artifact": writeback_artifact_state("fsync_fsyncdir_boundary"),
             "filesystem_flavor": "ext4",
             "operation_class": "mounted_write",
             "explicit_opt_in": true,
-            "conflicting_flags": []
-        });
+            "conflicting_flags": [],
+            "runtime_guard": {
+                "kill_switch_state": "disarmed",
+                "feature_state": "accepted",
+                "config_source": "cli_explicit",
+                "gate_artifact_hash": "blake3:bd-rchk0.2.2-cli-gate-v1",
+                "gate_fresh": true,
+                "gate_age_secs": 30,
+                "gate_max_age_secs": 86400,
+                "host_capability_fingerprint": "linux-fuse-writeback-cache-v1",
+                "lane_manifest_id": "authoritative-env-frankenfs-fuse-v1",
+                "lane_manifest_path": "artifacts/qa/authoritative_environment_manifest.json",
+                "lane_manifest_fresh": true,
+                "lane_manifest_matches_host": true,
+                "release_gate_consumer": "writeback_cache.release_gate"
+            }
+        })
+    }
+
+    fn happy_writeback_ordering_oracle() -> serde_json::Value {
         let invariant_evidence: Vec<_> = ["I1", "I2", "I3", "I4", "I5", "I6"]
             .into_iter()
             .map(|id| {
@@ -6481,7 +6538,7 @@ mod tests {
                 })
             })
             .collect();
-        let oracle = serde_json::json!({
+        serde_json::json!({
             "schema_version": 1,
             "gate_version": "bd-rchk0.2.2-ordering-v1",
             "bead_id": "bd-rchk0.2.2",
@@ -6513,7 +6570,18 @@ mod tests {
                 "artifacts/writeback-cache/ordering.json",
                 "artifacts/writeback-cache/crash_reopen.json"
             ]
-        });
+        })
+    }
+
+    fn write_writeback_artifacts(
+        dir: &Path,
+        mutate_gate: impl FnOnce(&mut serde_json::Value),
+    ) -> (PathBuf, PathBuf) {
+        let gate_path = dir.join("writeback_gate.json");
+        let oracle_path = dir.join("writeback_ordering_oracle.json");
+        let mut gate = happy_writeback_gate();
+        mutate_gate(&mut gate);
+        let oracle = happy_writeback_ordering_oracle();
         std::fs::write(
             &gate_path,
             serde_json::to_vec_pretty(&gate).expect("serialize gate"),
@@ -9652,6 +9720,143 @@ mod tests {
         let message = err.to_string();
         assert!(
             message.contains("require --writeback-cache"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn mount_writeback_cache_runtime_kill_switch_rejects_before_gate_io() {
+        let options = test_mount_cmd_options(
+            true,
+            MountWritebackCacheConfig::from_cli_with_runtime_kill_switch(
+                true,
+                Some(PathBuf::from("/missing/gate.json")),
+                Some(PathBuf::from("/missing/oracle.json")),
+                true,
+            ),
+        );
+        let err = validate_mount_writeback_cache_request(
+            Path::new("/img"),
+            Path::new("/mnt"),
+            &options,
+            "mount-op",
+            "cli_mount_runtime_standard_rw",
+        )
+        .expect_err("runtime kill switch should reject before reading gate files");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(WRITEBACK_CACHE_KILL_SWITCH_ENV),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn mount_writeback_cache_rejects_stale_gate_artifact() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (gate_path, oracle_path) = write_writeback_artifacts(temp.path(), |gate| {
+            gate["runtime_guard"]["gate_fresh"] = serde_json::Value::Bool(false);
+        });
+        let options = test_mount_cmd_options(
+            true,
+            MountWritebackCacheConfig::from_cli(true, Some(gate_path), Some(oracle_path)),
+        );
+        let err = validate_mount_writeback_cache_request(
+            Path::new("/img"),
+            Path::new("/mnt"),
+            &options,
+            "mount-op",
+            "cli_mount_runtime_standard_rw",
+        )
+        .expect_err("stale runtime gate should reject");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("stale_gate_artifact"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn mount_writeback_cache_rejects_downgraded_feature_state_repeatedly() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (gate_path, oracle_path) = write_writeback_artifacts(temp.path(), |gate| {
+            gate["runtime_guard"]["feature_state"] =
+                serde_json::Value::String("downgraded".to_owned());
+        });
+        let options = test_mount_cmd_options(
+            true,
+            MountWritebackCacheConfig::from_cli(true, Some(gate_path), Some(oracle_path)),
+        );
+        let first = validate_mount_writeback_cache_request(
+            Path::new("/img"),
+            Path::new("/mnt"),
+            &options,
+            "mount-op-a",
+            "cli_mount_runtime_standard_rw",
+        )
+        .expect_err("downgraded feature state should reject");
+        let second = validate_mount_writeback_cache_request(
+            Path::new("/img"),
+            Path::new("/mnt"),
+            &options,
+            "mount-op-b",
+            "cli_mount_runtime_standard_rw",
+        )
+        .expect_err("repeated downgraded state should reject");
+        assert_eq!(first.to_string(), second.to_string());
+        let message = format!("{first:#}");
+        assert!(
+            message.contains("writeback_feature_downgraded"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn mount_writeback_cache_rejects_config_default_gate() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (gate_path, oracle_path) = write_writeback_artifacts(temp.path(), |gate| {
+            gate["runtime_guard"]["config_source"] =
+                serde_json::Value::String("config_default".to_owned());
+        });
+        let options = test_mount_cmd_options(
+            true,
+            MountWritebackCacheConfig::from_cli(true, Some(gate_path), Some(oracle_path)),
+        );
+        let err = validate_mount_writeback_cache_request(
+            Path::new("/img"),
+            Path::new("/mnt"),
+            &options,
+            "mount-op",
+            "cli_mount_runtime_standard_rw",
+        )
+        .expect_err("config-default gate should reject");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("config_default_attempt"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn mount_writeback_cache_rejects_host_manifest_mismatch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (gate_path, oracle_path) = write_writeback_artifacts(temp.path(), |gate| {
+            gate["runtime_guard"]["lane_manifest_matches_host"] = serde_json::Value::Bool(false);
+        });
+        let options = test_mount_cmd_options(
+            true,
+            MountWritebackCacheConfig::from_cli(true, Some(gate_path), Some(oracle_path)),
+        );
+        let err = validate_mount_writeback_cache_request(
+            Path::new("/img"),
+            Path::new("/mnt"),
+            &options,
+            "mount-op",
+            "cli_mount_runtime_standard_rw",
+        )
+        .expect_err("host-mismatch gate should reject");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("host_capability_mismatch"),
             "unexpected error: {message}"
         );
     }

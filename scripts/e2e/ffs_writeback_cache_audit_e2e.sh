@@ -31,6 +31,10 @@ TOTAL=0
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_fuse_unavailable_rejected|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_unsupported_mode_rejected|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_repeated_mount_attempts|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_audit_stale_gate_rejected|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_audit_repeated_downgrade_rejections|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_audit_config_default_rejected|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_audit_host_manifest_mismatch_rejected|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_fuser_options_default_off|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_bad_schema_fails|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_audit_report_fields|outcome=PASS
@@ -42,6 +46,7 @@ TOTAL=0
 # SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_cli_rejects_read_only|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_cli_accepts_gate_before_image_open|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_cli_repeated_rejections|outcome=PASS
+# SCENARIO_RESULT|scenario_id=writeback_cache_runtime_kill_switch_rejected|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_fuser_options_enabled|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_unit_tests|outcome=PASS
 # SCENARIO_RESULT|scenario_id=writeback_cache_ordering_cli_wired|outcome=PASS
@@ -178,6 +183,7 @@ observed = "accept" if decision["decision"] == "accept" else decision["reason"]
 invariants = ",".join(row["id"] for row in report["invariant_map"])
 raw_options = ",".join(report["mount_options"]["raw_options"])
 artifact_paths = ",".join(report["artifact_paths"])
+guard = report["runtime_guard"]
 repro = report["reproduction_command"].replace("|", "/")
 print(
     "WRITEBACK_CACHE_AUDIT_OBSERVATION"
@@ -189,6 +195,19 @@ print(
     f"|expected_error_class={expected}"
     f"|observed_error_class={observed}"
     f"|artifact_paths={artifact_paths}"
+    f"|feature_state={guard['feature_state']}"
+    f"|config_source={guard['config_source']}"
+    f"|kill_switch_state={guard['kill_switch_state']}"
+    f"|gate_artifact_hash={guard['gate_artifact_hash']}"
+    f"|gate_fresh={guard['gate_fresh']}"
+    f"|gate_age_secs={guard['gate_age_secs']}"
+    f"|gate_max_age_secs={guard['gate_max_age_secs']}"
+    f"|host_capability_fingerprint={guard['host_capability_fingerprint']}"
+    f"|lane_manifest_id={guard['lane_manifest_id']}"
+    f"|lane_manifest_path={guard['lane_manifest_path']}"
+    f"|lane_manifest_fresh={guard['lane_manifest_fresh']}"
+    f"|lane_manifest_matches_host={guard['lane_manifest_matches_host']}"
+    f"|release_gate_consumer={guard['release_gate_consumer']}"
     f"|cleanup_status={cleanup}"
     f"|reproduction_command={repro}"
 )
@@ -310,6 +329,10 @@ ACCEPT_GATE="$INPUT_DIR/writeback_cache_accept_gate.json"
 DEFAULT_REJECT_GATE="$INPUT_DIR/writeback_cache_default_reject_gate.json"
 FUSE_UNAVAILABLE_GATE="$INPUT_DIR/writeback_cache_fuse_unavailable_gate.json"
 UNSUPPORTED_MODE_GATE="$INPUT_DIR/writeback_cache_unsupported_mode_gate.json"
+STALE_GATE="$INPUT_DIR/writeback_cache_stale_gate.json"
+DOWNGRADED_GATE="$INPUT_DIR/writeback_cache_downgraded_gate.json"
+CONFIG_DEFAULT_GATE="$INPUT_DIR/writeback_cache_config_default_gate.json"
+HOST_MISMATCH_GATE="$INPUT_DIR/writeback_cache_host_mismatch_gate.json"
 BAD_SCHEMA_GATE="$INPUT_DIR/writeback_cache_bad_schema_gate.json"
 ORDERING_ACCEPT_ORACLE="$INPUT_DIR/writeback_cache_ordering_accept_oracle.json"
 ORDERING_DEFAULT_OFF_ORACLE="$INPUT_DIR/writeback_cache_ordering_default_off_oracle.json"
@@ -323,6 +346,11 @@ FUSE_UNAVAILABLE_RAW="$LOG_DIR/writeback_cache_fuse_unavailable.raw"
 UNSUPPORTED_MODE_RAW="$LOG_DIR/writeback_cache_unsupported_mode.raw"
 REPEATED_RAW_A="$LOG_DIR/writeback_cache_repeated_a.raw"
 REPEATED_RAW_B="$LOG_DIR/writeback_cache_repeated_b.raw"
+STALE_GATE_RAW="$LOG_DIR/writeback_cache_stale_gate.raw"
+DOWNGRADED_RAW_A="$LOG_DIR/writeback_cache_downgraded_a.raw"
+DOWNGRADED_RAW_B="$LOG_DIR/writeback_cache_downgraded_b.raw"
+CONFIG_DEFAULT_RAW="$LOG_DIR/writeback_cache_config_default.raw"
+HOST_MISMATCH_RAW="$LOG_DIR/writeback_cache_host_mismatch.raw"
 FUSER_OPTIONS_RAW="$LOG_DIR/writeback_cache_fuser_options.raw"
 BAD_SCHEMA_RAW="$LOG_DIR/writeback_cache_bad_schema.raw"
 UNIT_RAW="$LOG_DIR/writeback_cache_unit_tests.raw"
@@ -333,6 +361,7 @@ CLI_RO_REJECT_RAW="$LOG_DIR/writeback_cache_opt_in_read_only.raw"
 CLI_ACCEPT_IMAGE_OPEN_RAW="$LOG_DIR/writeback_cache_opt_in_accept_image_open.raw"
 CLI_REPEATED_RAW_A="$LOG_DIR/writeback_cache_opt_in_repeated_a.raw"
 CLI_REPEATED_RAW_B="$LOG_DIR/writeback_cache_opt_in_repeated_b.raw"
+CLI_KILL_SWITCH_RAW="$LOG_DIR/writeback_cache_runtime_kill_switch.raw"
 FUSER_OPT_IN_RAW="$LOG_DIR/writeback_cache_opt_in_fuser_options.raw"
 CLI_OPT_IN_UNIT_RAW="$LOG_DIR/writeback_cache_opt_in_unit_tests.raw"
 ORDERING_ACCEPT_RAW="$LOG_DIR/writeback_cache_ordering_accept.raw"
@@ -348,6 +377,11 @@ FUSE_UNAVAILABLE_REPORT="$LOG_DIR/writeback_cache_fuse_unavailable_report.json"
 UNSUPPORTED_MODE_REPORT="$LOG_DIR/writeback_cache_unsupported_mode_report.json"
 REPEATED_REPORT_A="$LOG_DIR/writeback_cache_repeated_a_report.json"
 REPEATED_REPORT_B="$LOG_DIR/writeback_cache_repeated_b_report.json"
+STALE_GATE_REPORT="$LOG_DIR/writeback_cache_stale_gate_report.json"
+DOWNGRADED_REPORT_A="$LOG_DIR/writeback_cache_downgraded_a_report.json"
+DOWNGRADED_REPORT_B="$LOG_DIR/writeback_cache_downgraded_b_report.json"
+CONFIG_DEFAULT_REPORT="$LOG_DIR/writeback_cache_config_default_report.json"
+HOST_MISMATCH_REPORT="$LOG_DIR/writeback_cache_host_mismatch_report.json"
 ORDERING_ACCEPT_REPORT="$LOG_DIR/writeback_cache_ordering_accept_report.json"
 ORDERING_DEFAULT_OFF_REPORT="$LOG_DIR/writeback_cache_ordering_default_off_report.json"
 ORDERING_MISSING_FSYNC_REPORT="$LOG_DIR/writeback_cache_ordering_missing_fsync_report.json"
@@ -402,7 +436,22 @@ cat >"$ACCEPT_GATE" <<'JSON'
   "filesystem_flavor": "ext4",
   "operation_class": "mounted_write",
   "explicit_opt_in": true,
-  "conflicting_flags": []
+  "conflicting_flags": [],
+  "runtime_guard": {
+    "kill_switch_state": "disarmed",
+    "feature_state": "accepted",
+    "config_source": "cli_explicit",
+    "gate_artifact_hash": "blake3:writeback-cache-accept-gate-v1",
+    "gate_fresh": true,
+    "gate_age_secs": 30,
+    "gate_max_age_secs": 86400,
+    "host_capability_fingerprint": "linux-fuse-writeback-cache-v1",
+    "lane_manifest_id": "authoritative-env-frankenfs-fuse-v1",
+    "lane_manifest_path": "artifacts/qa/authoritative_environment_manifest.json",
+    "lane_manifest_fresh": true,
+    "lane_manifest_matches_host": true,
+    "release_gate_consumer": "writeback_cache.release_gate"
+  }
 }
 JSON
 
@@ -453,7 +502,22 @@ cat >"$DEFAULT_REJECT_GATE" <<'JSON'
   "filesystem_flavor": "ext4",
   "operation_class": "mounted_write",
   "explicit_opt_in": false,
-  "conflicting_flags": []
+  "conflicting_flags": [],
+  "runtime_guard": {
+    "kill_switch_state": "disarmed",
+    "feature_state": "accepted",
+    "config_source": "cli_explicit",
+    "gate_artifact_hash": "blake3:writeback-cache-default-reject-gate-v1",
+    "gate_fresh": true,
+    "gate_age_secs": 30,
+    "gate_max_age_secs": 86400,
+    "host_capability_fingerprint": "linux-fuse-writeback-cache-v1",
+    "lane_manifest_id": "authoritative-env-frankenfs-fuse-v1",
+    "lane_manifest_path": "artifacts/qa/authoritative_environment_manifest.json",
+    "lane_manifest_fresh": true,
+    "lane_manifest_matches_host": true,
+    "release_gate_consumer": "writeback_cache.release_gate"
+  }
 }
 JSON
 
@@ -502,11 +566,32 @@ cat >"$BAD_SCHEMA_GATE" <<'JSON'
   "filesystem_flavor": "ext4",
   "operation_class": "mounted_write",
   "explicit_opt_in": true,
-  "conflicting_flags": []
+  "conflicting_flags": [],
+  "runtime_guard": {
+    "kill_switch_state": "disarmed",
+    "feature_state": "accepted",
+    "config_source": "cli_explicit",
+    "gate_artifact_hash": "blake3:writeback-cache-bad-schema-gate-v1",
+    "gate_fresh": true,
+    "gate_age_secs": 30,
+    "gate_max_age_secs": 86400,
+    "host_capability_fingerprint": "linux-fuse-writeback-cache-v1",
+    "lane_manifest_id": "authoritative-env-frankenfs-fuse-v1",
+    "lane_manifest_path": "artifacts/qa/authoritative_environment_manifest.json",
+    "lane_manifest_fresh": true,
+    "lane_manifest_matches_host": true,
+    "release_gate_consumer": "writeback_cache.release_gate"
+  }
 }
 JSON
 
-python3 - "$ACCEPT_GATE" "$FUSE_UNAVAILABLE_GATE" "$UNSUPPORTED_MODE_GATE" <<'PY'
+python3 - "$ACCEPT_GATE" \
+    "$FUSE_UNAVAILABLE_GATE" \
+    "$UNSUPPORTED_MODE_GATE" \
+    "$STALE_GATE" \
+    "$DOWNGRADED_GATE" \
+    "$CONFIG_DEFAULT_GATE" \
+    "$HOST_MISMATCH_GATE" <<'PY'
 import copy
 import json
 import pathlib
@@ -532,6 +617,35 @@ unsupported_mode["mount_options"]["raw_options"] = [
 ]
 pathlib.Path(sys.argv[3]).write_text(
     json.dumps(unsupported_mode, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+
+stale_gate = copy.deepcopy(base)
+stale_gate["runtime_guard"]["gate_fresh"] = False
+stale_gate["runtime_guard"]["gate_age_secs"] = stale_gate["runtime_guard"]["gate_max_age_secs"] + 1
+pathlib.Path(sys.argv[4]).write_text(
+    json.dumps(stale_gate, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+
+downgraded = copy.deepcopy(base)
+downgraded["runtime_guard"]["feature_state"] = "downgraded"
+pathlib.Path(sys.argv[5]).write_text(
+    json.dumps(downgraded, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+
+config_default = copy.deepcopy(base)
+config_default["runtime_guard"]["config_source"] = "config_default"
+pathlib.Path(sys.argv[6]).write_text(
+    json.dumps(config_default, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+
+host_mismatch = copy.deepcopy(base)
+host_mismatch["runtime_guard"]["lane_manifest_matches_host"] = False
+pathlib.Path(sys.argv[7]).write_text(
+    json.dumps(host_mismatch, indent=2, sort_keys=True) + "\n",
     encoding="utf-8",
 )
 PY
@@ -805,6 +919,87 @@ else
     scenario_result "writeback_cache_audit_repeated_mount_attempts" "FAIL" "repeated dry-run attempts drifted; see $REPEATED_RAW_A and $REPEATED_RAW_B"
 fi
 
+step "Scenario 6a: stale runtime gate artifact rejects"
+if run_rch_capture "$STALE_GATE_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-audit \
+    --gate "$STALE_GATE" \
+    --scenario-id writeback_cache_audit_stale_gate_rejected; then
+    if extract_json_object "$STALE_GATE_RAW" "$STALE_GATE_REPORT" '"schema_version"' \
+        && expect_report_rejection "$STALE_GATE_REPORT" "stale_gate_artifact" "I1"
+    then
+        record_report_observation "$STALE_GATE_REPORT" "stale_gate_artifact" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_audit_stale_gate_rejected" "PASS" "stale runtime guard gate rejected"
+    else
+        scenario_result "writeback_cache_audit_stale_gate_rejected" "FAIL" "stale gate report missing stable reason"
+    fi
+else
+    scenario_result "writeback_cache_audit_stale_gate_rejected" "FAIL" "schema-valid stale gate should emit report"
+fi
+
+step "Scenario 6b: downgraded feature state keeps repeated rejection class"
+if run_rch_capture "$DOWNGRADED_RAW_A" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-audit \
+    --gate "$DOWNGRADED_GATE" \
+    --scenario-id writeback_cache_audit_repeated_downgrade_rejections_a \
+    && run_rch_capture "$DOWNGRADED_RAW_B" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-audit \
+    --gate "$DOWNGRADED_GATE" \
+    --scenario-id writeback_cache_audit_repeated_downgrade_rejections_b \
+    && extract_json_object "$DOWNGRADED_RAW_A" "$DOWNGRADED_REPORT_A" '"schema_version"' \
+    && extract_json_object "$DOWNGRADED_RAW_B" "$DOWNGRADED_REPORT_B" '"schema_version"' \
+    && expect_report_rejection "$DOWNGRADED_REPORT_A" "writeback_feature_downgraded" "I1" \
+    && python3 - "$DOWNGRADED_REPORT_A" "$DOWNGRADED_REPORT_B" <<'PY'
+import json
+import pathlib
+import sys
+
+a = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+b = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+for key in ("decision", "failure_modes", "required_artifact_fields", "runtime_guard"):
+    if a[key] != b[key]:
+        raise SystemExit(f"repeated downgraded report field changed: {key}")
+PY
+then
+    record_report_observation "$DOWNGRADED_REPORT_A" "writeback_feature_downgraded" "retained:${LOG_DIR}"
+    scenario_result "writeback_cache_audit_repeated_downgrade_rejections" "PASS" "downgraded feature state stayed fail-closed"
+else
+    scenario_result "writeback_cache_audit_repeated_downgrade_rejections" "FAIL" "downgraded feature rejection drifted"
+fi
+
+step "Scenario 6c: config-default writeback-cache gate rejects"
+if run_rch_capture "$CONFIG_DEFAULT_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-audit \
+    --gate "$CONFIG_DEFAULT_GATE" \
+    --scenario-id writeback_cache_audit_config_default_rejected; then
+    if extract_json_object "$CONFIG_DEFAULT_RAW" "$CONFIG_DEFAULT_REPORT" '"schema_version"' \
+        && expect_report_rejection "$CONFIG_DEFAULT_REPORT" "config_default_attempt" "I5"
+    then
+        record_report_observation "$CONFIG_DEFAULT_REPORT" "config_default_attempt" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_audit_config_default_rejected" "PASS" "config-default gate rejected"
+    else
+        scenario_result "writeback_cache_audit_config_default_rejected" "FAIL" "config-default report missing stable reason"
+    fi
+else
+    scenario_result "writeback_cache_audit_config_default_rejected" "FAIL" "schema-valid config-default gate should emit report"
+fi
+
+step "Scenario 6d: host/lane-manifest mismatch rejects"
+if run_rch_capture "$HOST_MISMATCH_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-writeback-cache-audit \
+    --gate "$HOST_MISMATCH_GATE" \
+    --scenario-id writeback_cache_audit_host_manifest_mismatch_rejected; then
+    if extract_json_object "$HOST_MISMATCH_RAW" "$HOST_MISMATCH_REPORT" '"schema_version"' \
+        && expect_report_rejection "$HOST_MISMATCH_REPORT" "host_capability_mismatch" "I5"
+    then
+        record_report_observation "$HOST_MISMATCH_REPORT" "host_capability_mismatch" "retained:${LOG_DIR}"
+        scenario_result "writeback_cache_audit_host_manifest_mismatch_rejected" "PASS" "host mismatch gate rejected"
+    else
+        scenario_result "writeback_cache_audit_host_manifest_mismatch_rejected" "FAIL" "host mismatch report missing stable reason"
+    fi
+else
+    scenario_result "writeback_cache_audit_host_manifest_mismatch_rejected" "FAIL" "schema-valid host-mismatch gate should emit report"
+fi
+
 step "Scenario 7: FUSE mount option construction keeps writeback_cache absent"
 if run_rch_capture "$FUSER_OPTIONS_RAW" cargo test -p ffs-fuse writeback_cache -- --nocapture; then
     if python3 - "$FUSER_OPTIONS_RAW" <<'PY'
@@ -866,6 +1061,11 @@ for reason in {
     "fuse_capability_unavailable",
     "stale_crash_matrix_or_missing_fsync_evidence",
     "conflicting_cli_flags",
+    "runtime_kill_switch_engaged",
+    "writeback_feature_downgraded",
+    "stale_gate_artifact",
+    "host_capability_mismatch",
+    "config_default_attempt",
 }:
     if reason not in report["failure_modes"]:
         raise SystemExit(f"missing failure mode: {reason}")
@@ -873,14 +1073,29 @@ for field in {
     "mount_options.raw_options",
     "mount_options.mode",
     "fuse_capability.probe_status",
+    "runtime_guard.kill_switch_state",
+    "runtime_guard.feature_state",
+    "runtime_guard.config_source",
+    "runtime_guard.gate_artifact_hash",
+    "runtime_guard.gate_fresh",
+    "runtime_guard.gate_age_secs",
+    "runtime_guard.gate_max_age_secs",
+    "runtime_guard.host_capability_fingerprint",
+    "runtime_guard.lane_manifest_id",
+    "runtime_guard.lane_manifest_path",
+    "runtime_guard.lane_manifest_fresh",
+    "runtime_guard.lane_manifest_matches_host",
+    "runtime_guard.release_gate_consumer",
     "epoch_barrier_artifact.artifact_path",
     "crash_matrix_artifact.artifact_path",
     "fsync_evidence_artifact.artifact_path",
 }:
     if field not in report["required_artifact_fields"]:
         raise SystemExit(f"missing artifact field: {field}")
-if len(report["artifact_paths"]) != 3:
-    raise SystemExit("expected exactly three evidence artifact paths")
+if len(report["artifact_paths"]) != 4:
+    raise SystemExit("expected exactly four evidence artifact paths")
+if report["runtime_guard"]["kill_switch_state"] != "disarmed":
+    raise SystemExit("runtime guard did not record disarmed kill switch")
 if "validate-writeback-cache-audit" not in report["reproduction_command"]:
     raise SystemExit("missing reproduction command")
 if report["decision"]["decision"] != "accept":
@@ -902,13 +1117,16 @@ fi
 step "Scenario 11: CLI help, README, and FEATURE_PARITY keep gated opt-in wording"
 if run_rch_capture "$HELP_RAW" cargo run --quiet -p ffs-cli -- mount --help; then
     if grep -Fq "writeback_cache" "$HELP_RAW" \
+        && grep -Fq "FFS_WRITEBACK_CACHE_KILL_SWITCH" "$HELP_RAW" \
         && grep -Fq "fsync" "$HELP_RAW" \
         && grep -Fq "fsyncdir" "$HELP_RAW" \
         && grep -Fq "flush remains non-durable" "$HELP_RAW" \
         && grep -Fq "bd-rchk0.2.2" README.md \
         && grep -Fq "bd-rchk0.2.1.1" FEATURE_PARITY.md \
         && grep -Fq "bd-rchk0.2.2" FEATURE_PARITY.md \
-        && grep -Fq "requires --rw, an audit gate, and an ordering oracle" README.md \
+        && grep -Fq "fresh runtime-guard evidence" README.md \
+        && grep -Fq "FFS_WRITEBACK_CACHE_KILL_SWITCH" README.md \
+        && grep -Fq "runtime kill-switch plus stale-gate" FEATURE_PARITY.md \
         && grep -Fq "release-readiness claim remains blocked" FEATURE_PARITY.md; then
         log "WRITEBACK_CACHE_HELP_DOCS_OBSERVATION|scenario_id=writeback_cache_audit_help_docs_consistent|expected_error_class=gated_opt_in|observed_error_class=gated_opt_in|help_log=${HELP_RAW}|cleanup_status=retained:${LOG_DIR}|reproduction_command=cargo run -p ffs-cli -- mount --help"
         scenario_result "writeback_cache_audit_help_docs_consistent" "PASS" "help/docs/parity keep gated opt-in wording"
@@ -924,6 +1142,7 @@ if run_rch_capture "$CLI_OPT_IN_HELP_RAW" cargo run --quiet -p ffs-cli -- mount 
     if grep -Fq -- "--writeback-cache" "$CLI_OPT_IN_HELP_RAW" \
         && grep -Fq -- "--writeback-cache-gate" "$CLI_OPT_IN_HELP_RAW" \
         && grep -Fq -- "--writeback-cache-ordering-oracle" "$CLI_OPT_IN_HELP_RAW" \
+        && grep -Fq "FFS_WRITEBACK_CACHE_KILL_SWITCH" "$CLI_OPT_IN_HELP_RAW" \
         && grep -Fq "flush remains non-durable" "$CLI_OPT_IN_HELP_RAW" \
         && grep -Fq "fsync" "$CLI_OPT_IN_HELP_RAW" \
         && grep -Fq "fsyncdir" "$CLI_OPT_IN_HELP_RAW"; then
@@ -990,6 +1209,21 @@ elif grep -Fq -- "--writeback-cache requires --writeback-cache-gate" "$CLI_REPEA
     scenario_result "writeback_cache_opt_in_cli_repeated_rejections" "PASS" "repeated guard rejections stayed stable"
 else
     scenario_result "writeback_cache_opt_in_cli_repeated_rejections" "FAIL" "repeated guard rejection class drifted"
+fi
+
+step "Scenario 16a: runtime kill switch rejects before gate and image I/O"
+if run_rch_capture "$CLI_KILL_SWITCH_RAW" env FFS_WRITEBACK_CACHE_KILL_SWITCH=1 cargo run --quiet -p ffs-cli -- \
+    mount --rw --writeback-cache \
+    --writeback-cache-gate "$ACCEPT_GATE" \
+    --writeback-cache-ordering-oracle "$ORDERING_ACCEPT_ORACLE" \
+    /definitely/missing.img /definitely/missing-mnt; then
+    scenario_result "writeback_cache_runtime_kill_switch_rejected" "FAIL" "runtime kill switch unexpectedly allowed mount"
+elif grep -Fq "FFS_WRITEBACK_CACHE_KILL_SWITCH" "$CLI_KILL_SWITCH_RAW" \
+    && ! grep -Fq "failed to open filesystem image" "$CLI_KILL_SWITCH_RAW"; then
+    log "WRITEBACK_CACHE_OPT_IN_OBSERVATION|scenario_id=writeback_cache_runtime_kill_switch_rejected|mount_options=rw,writeback_cache|expected_error_class=runtime_kill_switch_engaged|observed_error_class=runtime_kill_switch_engaged|stdout_stderr=${CLI_KILL_SWITCH_RAW}|cleanup_status=not_mounted|reproduction_command=FFS_WRITEBACK_CACHE_KILL_SWITCH=1 ffs mount --rw --writeback-cache --writeback-cache-gate ${ACCEPT_GATE} --writeback-cache-ordering-oracle ${ORDERING_ACCEPT_ORACLE} /definitely/missing.img /definitely/missing-mnt"
+    scenario_result "writeback_cache_runtime_kill_switch_rejected" "PASS" "runtime kill switch failed closed before image open"
+else
+    scenario_result "writeback_cache_runtime_kill_switch_rejected" "FAIL" "runtime kill switch rejection missing stable diagnostic"
 fi
 
 step "Scenario 17: FUSE option builder includes writeback_cache only on opt-in"
@@ -1181,6 +1415,10 @@ required = {
     "writeback_cache_audit_fuse_unavailable_rejected",
     "writeback_cache_audit_unsupported_mode_rejected",
     "writeback_cache_audit_repeated_mount_attempts",
+    "writeback_cache_audit_stale_gate_rejected",
+    "writeback_cache_audit_repeated_downgrade_rejections",
+    "writeback_cache_audit_config_default_rejected",
+    "writeback_cache_audit_host_manifest_mismatch_rejected",
     "writeback_cache_audit_fuser_options_default_off",
     "writeback_cache_audit_bad_schema_fails",
     "writeback_cache_audit_report_fields",
@@ -1192,6 +1430,7 @@ required = {
     "writeback_cache_opt_in_cli_rejects_read_only",
     "writeback_cache_opt_in_cli_accepts_gate_before_image_open",
     "writeback_cache_opt_in_cli_repeated_rejections",
+    "writeback_cache_runtime_kill_switch_rejected",
     "writeback_cache_opt_in_fuser_options_enabled",
     "writeback_cache_opt_in_unit_tests",
     "writeback_cache_ordering_cli_wired",

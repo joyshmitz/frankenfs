@@ -491,6 +491,30 @@
           "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_repeated_mount_attempts|outcome=PASS"
         },
         {
+          "id": "writeback_cache_audit_stale_gate_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_stale_gate_rejected|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_audit_repeated_downgrade_rejections",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_repeated_downgrade_rejections|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_audit_config_default_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_config_default_rejected|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_audit_host_manifest_mismatch_rejected",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_audit_host_manifest_mismatch_rejected|outcome=PASS"
+        },
+        {
           "id": "writeback_cache_audit_fuser_options_default_off",
           "category": "edge",
           "status": "active",
@@ -549,6 +573,12 @@
           "category": "recovery",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_opt_in_cli_repeated_rejections|outcome=PASS"
+        },
+        {
+          "id": "writeback_cache_runtime_kill_switch_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_cache_runtime_kill_switch_rejected|outcome=PASS"
         },
         {
           "id": "writeback_cache_opt_in_fuser_options_enabled",

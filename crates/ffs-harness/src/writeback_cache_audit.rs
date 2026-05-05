@@ -28,7 +28,7 @@ pub const WRITEBACK_CACHE_ORDERING_REPORT_SCHEMA_VERSION: u32 = 1;
 /// I6 = Cross-Epoch Order.
 pub const REQUIRED_INVARIANT_IDS: [&str; 6] = ["I1", "I2", "I3", "I4", "I5", "I6"];
 
-pub const ALLOWED_REJECTION_REASONS: [&str; 8] = [
+pub const ALLOWED_REJECTION_REASONS: [&str; 13] = [
     "missing_epoch_barrier_artifact",
     "stale_epoch_barrier_artifact",
     "rw_repair_serialization_unsupported",
@@ -37,14 +37,32 @@ pub const ALLOWED_REJECTION_REASONS: [&str; 8] = [
     "fuse_capability_unavailable",
     "stale_crash_matrix_or_missing_fsync_evidence",
     "conflicting_cli_flags",
+    "runtime_kill_switch_engaged",
+    "writeback_feature_downgraded",
+    "stale_gate_artifact",
+    "host_capability_mismatch",
+    "config_default_attempt",
 ];
 
-pub const REQUIRED_ARTIFACT_FIELDS: [&str; 15] = [
+pub const REQUIRED_ARTIFACT_FIELDS: [&str; 28] = [
     "schema_version",
     "gate_version",
     "bead_id",
     "mount_options.raw_options",
     "mount_options.mode",
+    "runtime_guard.kill_switch_state",
+    "runtime_guard.feature_state",
+    "runtime_guard.config_source",
+    "runtime_guard.gate_artifact_hash",
+    "runtime_guard.gate_fresh",
+    "runtime_guard.gate_age_secs",
+    "runtime_guard.gate_max_age_secs",
+    "runtime_guard.host_capability_fingerprint",
+    "runtime_guard.lane_manifest_id",
+    "runtime_guard.lane_manifest_path",
+    "runtime_guard.lane_manifest_fresh",
+    "runtime_guard.lane_manifest_matches_host",
+    "runtime_guard.release_gate_consumer",
     "repair_serialization_state",
     "fuse_capability.probe_status",
     "fuse_capability.kernel_supports_writeback_cache",
@@ -86,6 +104,7 @@ pub struct WritebackCacheAuditGate {
     pub operation_class: String,
     pub explicit_opt_in: bool,
     pub conflicting_flags: Vec<String>,
+    pub runtime_guard: WritebackRuntimeGuard,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +131,23 @@ pub struct ArtifactState {
     pub fresh: bool,
     pub passed: bool,
     pub artifact_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritebackRuntimeGuard {
+    pub kill_switch_state: String,
+    pub feature_state: String,
+    pub config_source: String,
+    pub gate_artifact_hash: String,
+    pub gate_fresh: bool,
+    pub gate_age_secs: u64,
+    pub gate_max_age_secs: u64,
+    pub host_capability_fingerprint: String,
+    pub lane_manifest_id: String,
+    pub lane_manifest_path: String,
+    pub lane_manifest_fresh: bool,
+    pub lane_manifest_matches_host: bool,
+    pub release_gate_consumer: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +180,7 @@ pub struct WritebackCacheAuditReport {
     pub failure_modes: Vec<String>,
     pub required_artifact_fields: Vec<String>,
     pub mount_options: WritebackMountOptions,
+    pub runtime_guard: WritebackRuntimeGuard,
     pub artifact_paths: Vec<String>,
     pub reproduction_command: String,
 }
@@ -275,10 +312,12 @@ pub fn build_writeback_cache_audit_report(
             .map(|field| (*field).to_owned())
             .collect(),
         mount_options: gate.mount_options.clone(),
+        runtime_guard: gate.runtime_guard.clone(),
         artifact_paths: vec![
             gate.epoch_barrier_artifact.artifact_path.clone(),
             gate.crash_matrix_artifact.artifact_path.clone(),
             gate.fsync_evidence_artifact.artifact_path.clone(),
+            gate.runtime_guard.lane_manifest_path.clone(),
         ],
         reproduction_command: reproduction_command.to_owned(),
     })
@@ -487,6 +526,9 @@ pub fn evaluate_writeback_cache_audit(
     if let Some(decision) = check_mount_mode_and_opt_in(gate) {
         return decision;
     }
+    if let Some(decision) = check_runtime_guard(gate) {
+        return decision;
+    }
     if let Some(decision) = check_filesystem_and_operation(gate) {
         return decision;
     }
@@ -542,6 +584,49 @@ fn check_mount_mode_and_opt_in(
             "default_or_read_only_mount",
             ["I3"],
             "operator must pass an explicit opt-in flag before writeback_cache is considered",
+        ));
+    }
+    None
+}
+
+fn check_runtime_guard(gate: &WritebackCacheAuditGate) -> Option<WritebackCacheAuditDecision> {
+    let guard = &gate.runtime_guard;
+    if guard.kill_switch_state != "disarmed" {
+        return Some(reject(
+            "runtime_kill_switch_engaged",
+            ["I5"],
+            "clear the emergency runtime kill switch before requesting kernel writeback_cache",
+        ));
+    }
+    if guard.feature_state != "accepted" {
+        return Some(reject(
+            "writeback_feature_downgraded",
+            ["I1", "I6"],
+            "rerun the feature gate; downgraded or failed writeback_cache state cannot enable the kernel cache",
+        ));
+    }
+    if guard.config_source != "cli_explicit" {
+        return Some(reject(
+            "config_default_attempt",
+            ["I5"],
+            "writeback_cache must come from a per-mount CLI opt-in, not a config default",
+        ));
+    }
+    if !guard.gate_fresh || guard.gate_age_secs > guard.gate_max_age_secs {
+        return Some(reject(
+            "stale_gate_artifact",
+            ["I1", "I6"],
+            "regenerate the writeback-cache gate artifact; stale evidence cannot enable the kernel cache",
+        ));
+    }
+    if !guard.lane_manifest_fresh
+        || !guard.lane_manifest_matches_host
+        || guard.host_capability_fingerprint.trim().is_empty()
+    {
+        return Some(reject(
+            "host_capability_mismatch",
+            ["I5"],
+            "rerun the authoritative lane manifest on this host before enabling writeback_cache",
         ));
     }
     None
@@ -863,6 +948,38 @@ pub fn validate_writeback_cache_audit_gate(gate: &WritebackCacheAuditGate) -> Re
     if gate.fuse_capability.probe_status.trim().is_empty() {
         bail!("writeback cache audit fuse probe_status must not be empty");
     }
+    if gate.runtime_guard.kill_switch_state.trim().is_empty() {
+        bail!("writeback cache audit kill_switch_state must not be empty");
+    }
+    if gate.runtime_guard.feature_state.trim().is_empty() {
+        bail!("writeback cache audit feature_state must not be empty");
+    }
+    if gate.runtime_guard.config_source.trim().is_empty() {
+        bail!("writeback cache audit config_source must not be empty");
+    }
+    if gate.runtime_guard.gate_artifact_hash.trim().is_empty() {
+        bail!("writeback cache audit gate_artifact_hash must not be empty");
+    }
+    if gate.runtime_guard.gate_max_age_secs == 0 {
+        bail!("writeback cache audit gate_max_age_secs must be nonzero");
+    }
+    if gate
+        .runtime_guard
+        .host_capability_fingerprint
+        .trim()
+        .is_empty()
+    {
+        bail!("writeback cache audit host_capability_fingerprint must not be empty");
+    }
+    if gate.runtime_guard.lane_manifest_id.trim().is_empty() {
+        bail!("writeback cache audit lane_manifest_id must not be empty");
+    }
+    if gate.runtime_guard.lane_manifest_path.trim().is_empty() {
+        bail!("writeback cache audit lane_manifest_path must not be empty");
+    }
+    if gate.runtime_guard.release_gate_consumer.trim().is_empty() {
+        bail!("writeback cache audit release_gate_consumer must not be empty");
+    }
     for artifact in [
         &gate.epoch_barrier_artifact,
         &gate.crash_matrix_artifact,
@@ -942,6 +1059,24 @@ mod tests {
         }
     }
 
+    fn happy_runtime_guard() -> WritebackRuntimeGuard {
+        WritebackRuntimeGuard {
+            kill_switch_state: "disarmed".to_owned(),
+            feature_state: "accepted".to_owned(),
+            config_source: "cli_explicit".to_owned(),
+            gate_artifact_hash: "blake3:writeback-cache-gate-v1".to_owned(),
+            gate_fresh: true,
+            gate_age_secs: 30,
+            gate_max_age_secs: 86_400,
+            host_capability_fingerprint: "linux-fuse-writeback-cache-v1".to_owned(),
+            lane_manifest_id: "authoritative-env-frankenfs-fuse-v1".to_owned(),
+            lane_manifest_path: "artifacts/qa/authoritative_environment_manifest.json".to_owned(),
+            lane_manifest_fresh: true,
+            lane_manifest_matches_host: true,
+            release_gate_consumer: "writeback_cache.release_gate".to_owned(),
+        }
+    }
+
     fn happy_gate() -> WritebackCacheAuditGate {
         WritebackCacheAuditGate {
             schema_version: WRITEBACK_CACHE_AUDIT_SCHEMA_VERSION,
@@ -968,6 +1103,7 @@ mod tests {
             operation_class: "mounted_write".to_owned(),
             explicit_opt_in: true,
             conflicting_flags: Vec::new(),
+            runtime_guard: happy_runtime_guard(),
         }
     }
 
@@ -1097,6 +1233,87 @@ mod tests {
         assert_eq!(
             rejection_reason(&decision),
             Some("default_or_read_only_mount")
+        );
+    }
+
+    #[test]
+    fn runtime_kill_switch_is_rejected() {
+        let mut gate = happy_gate();
+        gate.runtime_guard.kill_switch_state = "engaged".to_owned();
+        let decision = evaluate_writeback_cache_audit(&gate);
+        assert_eq!(
+            rejection_reason(&decision),
+            Some("runtime_kill_switch_engaged")
+        );
+    }
+
+    #[test]
+    fn downgraded_feature_state_is_rejected() {
+        let mut gate = happy_gate();
+        gate.runtime_guard.feature_state = "downgraded".to_owned();
+        let decision = evaluate_writeback_cache_audit(&gate);
+        assert_eq!(
+            rejection_reason(&decision),
+            Some("writeback_feature_downgraded")
+        );
+    }
+
+    #[test]
+    fn stale_gate_artifact_is_rejected() {
+        let mut gate = happy_gate();
+        gate.runtime_guard.gate_fresh = false;
+        let decision = evaluate_writeback_cache_audit(&gate);
+        assert_eq!(rejection_reason(&decision), Some("stale_gate_artifact"));
+    }
+
+    #[test]
+    fn gate_older_than_ttl_is_rejected() {
+        let mut gate = happy_gate();
+        gate.runtime_guard.gate_age_secs = gate.runtime_guard.gate_max_age_secs + 1;
+        let decision = evaluate_writeback_cache_audit(&gate);
+        assert_eq!(rejection_reason(&decision), Some("stale_gate_artifact"));
+    }
+
+    #[test]
+    fn host_capability_mismatch_is_rejected() {
+        let mut gate = happy_gate();
+        gate.runtime_guard.lane_manifest_matches_host = false;
+        let decision = evaluate_writeback_cache_audit(&gate);
+        assert_eq!(
+            rejection_reason(&decision),
+            Some("host_capability_mismatch")
+        );
+    }
+
+    #[test]
+    fn stale_lane_manifest_is_rejected() {
+        let mut gate = happy_gate();
+        gate.runtime_guard.lane_manifest_fresh = false;
+        let decision = evaluate_writeback_cache_audit(&gate);
+        assert_eq!(
+            rejection_reason(&decision),
+            Some("host_capability_mismatch")
+        );
+    }
+
+    #[test]
+    fn config_default_attempt_is_rejected() {
+        let mut gate = happy_gate();
+        gate.runtime_guard.config_source = "config_default".to_owned();
+        let decision = evaluate_writeback_cache_audit(&gate);
+        assert_eq!(rejection_reason(&decision), Some("config_default_attempt"));
+    }
+
+    #[test]
+    fn repeated_mount_after_downgrade_keeps_rejection_class() {
+        let mut gate = happy_gate();
+        gate.runtime_guard.feature_state = "downgraded".to_owned();
+        let first = evaluate_writeback_cache_audit(&gate);
+        let second = evaluate_writeback_cache_audit(&gate);
+        assert_eq!(first, second);
+        assert_eq!(
+            rejection_reason(&first),
+            Some("writeback_feature_downgraded")
         );
     }
 
@@ -1385,10 +1602,26 @@ mod tests {
         );
         assert!(
             report
+                .failure_modes
+                .contains(&"runtime_kill_switch_engaged".to_owned())
+        );
+        assert!(
+            report
                 .required_artifact_fields
                 .contains(&"mount_options.raw_options".to_owned())
         );
-        assert_eq!(report.artifact_paths.len(), 3);
+        assert!(
+            report
+                .required_artifact_fields
+                .contains(&"runtime_guard.gate_artifact_hash".to_owned())
+        );
+        assert!(
+            report
+                .required_artifact_fields
+                .contains(&"runtime_guard.release_gate_consumer".to_owned())
+        );
+        assert_eq!(report.artifact_paths.len(), 4);
+        assert_eq!(report.runtime_guard.feature_state, "accepted");
         assert!(matches!(
             report.decision,
             WritebackCacheAuditDecision::Accept

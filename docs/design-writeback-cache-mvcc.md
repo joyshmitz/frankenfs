@@ -13,8 +13,9 @@ The live code establishes a strict V1.x contract:
   when `MountOptions::writeback_cache` is explicitly set on a read-write mount.
   Read-only opt-in rejects before the FUSE session is created.
 - `ffs-cli mount --writeback-cache` requires `--rw`, an accepted
-  writeback-cache audit gate, and an accepted dirty-page ordering oracle before
-  it passes the option to `ffs-fuse`.
+  writeback-cache audit gate, an accepted dirty-page ordering oracle, and a
+  fresh runtime guard with the kill switch disarmed before it passes the option
+  to `ffs-fuse`.
 - `flush` is a non-durable lifecycle hook. `ffs-core::OpenFs::flush()` logs `durability_boundary = "none"` and does not call device sync.
 - `fsync` / `fsyncdir` are the only explicit durability boundaries in the FUSE layer. `ffs-core::OpenFs::{ext4,btrfs}_sync_with_logging()` call `self.dev.sync(cx)`.
 - `ffs-core::WritebackEpochBarrier` models `staged_epoch >= visible_epoch >= durable_epoch` and the proof harness now has both the negative-option gate (`bd-rchk0.2.1.1`) and dirty-page ordering oracle (`bd-8pz7h`).
@@ -227,6 +228,7 @@ The audit report records:
 |--------------|------------------|
 | Mount options | raw options, mode, `fs_name`, `allow_other`, `auto_unmount`, `default_permissions` |
 | Gate identity | schema version, gate version, bead id, scenario id, reproduction command |
+| Runtime guard | kill-switch state, feature state, config source, gate hash/freshness, host fingerprint, lane-manifest id/path/freshness/match, release-gate consumer |
 | FUSE capability | probe status, kernel writeback-cache support, helper binary presence |
 | Evidence artifacts | epoch-barrier proof, crash matrix, fsync/fsyncdir evidence |
 | Decision data | decision, invariant IDs, stable rejection reason, remediation |
@@ -253,6 +255,11 @@ readable:
 - `fuse_capability_unavailable`
 - `stale_crash_matrix_or_missing_fsync_evidence`
 - `conflicting_cli_flags`
+- `runtime_kill_switch_engaged`
+- `writeback_feature_downgraded`
+- `stale_gate_artifact`
+- `host_capability_mismatch`
+- `config_default_attempt`
 
 The dry-run e2e suite
 `scripts/e2e/ffs_writeback_cache_audit_e2e.sh` covers:
@@ -263,11 +270,23 @@ The dry-run e2e suite
 - `writeback_cache_audit_fuse_unavailable_rejected`
 - `writeback_cache_audit_unsupported_mode_rejected`
 - `writeback_cache_audit_repeated_mount_attempts`
+- `writeback_cache_audit_stale_gate_rejected`
+- `writeback_cache_audit_repeated_downgrade_rejections`
+- `writeback_cache_audit_config_default_rejected`
+- `writeback_cache_audit_host_manifest_mismatch_rejected`
 - `writeback_cache_audit_fuser_options_default_off`
 - `writeback_cache_audit_bad_schema_fails`
 - `writeback_cache_audit_report_fields`
 - `writeback_cache_audit_unit_tests`
 - `writeback_cache_audit_help_docs_consistent`
+- `writeback_cache_opt_in_cli_help_boundaries`
+- `writeback_cache_opt_in_cli_rejects_missing_gate`
+- `writeback_cache_opt_in_cli_rejects_read_only`
+- `writeback_cache_opt_in_cli_accepts_gate_before_image_open`
+- `writeback_cache_opt_in_cli_repeated_rejections`
+- `writeback_cache_runtime_kill_switch_rejected`
+- `writeback_cache_opt_in_fuser_options_enabled`
+- `writeback_cache_opt_in_unit_tests`
 - `writeback_cache_audit_catalog_valid`
 - `writeback_cache_ordering_cli_wired`
 - `writeback_cache_ordering_accepts_complete_oracle`
