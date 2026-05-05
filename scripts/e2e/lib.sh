@@ -87,6 +87,44 @@ e2e_step() {
 }
 
 #######################################
+# Check that a scenario-catalog evidence marker is backed by a script.
+# Literal evidence markers are preferred. For SCENARIO_RESULT rows, also
+# accept the project-standard helper calls that build the marker at runtime.
+# Arguments:
+#   $1 - Evidence marker from scenario_catalog.json
+#   $2 - Script path to inspect
+#######################################
+e2e_catalog_evidence_present() {
+    local evidence="$1"
+    local script_path="$2"
+
+    if grep -Fq "$evidence" "$script_path"; then
+        return 0
+    fi
+
+    local scenario_id outcome
+    if [[ "$evidence" =~ ^SCENARIO_RESULT\|scenario_id=([^|]+)\|outcome=([^|]+) ]]; then
+        scenario_id="${BASH_REMATCH[1]}"
+        outcome="${BASH_REMATCH[2]}"
+        local helper
+        for helper in scenario_result log_scenario; do
+            if grep -Fq "${helper} \"${scenario_id}\" \"${outcome}\"" "$script_path"; then
+                return 0
+            fi
+            if grep -Fq "${helper} '${scenario_id}' '${outcome}'" "$script_path"; then
+                return 0
+            fi
+            if grep -Fq "\"${scenario_id}\"" "$script_path" \
+                && grep -Fq "${helper} \"\$scenario_id\" \"${outcome}\"" "$script_path"; then
+                return 0
+            fi
+        done
+    fi
+
+    return 1
+}
+
+#######################################
 # Validate E2E scenario catalog contract
 # Arguments:
 #   $1 - Catalog path (default: $REPO_ROOT/scripts/e2e/scenario_catalog.json)
@@ -175,7 +213,7 @@ e2e_validate_scenario_catalog() {
             if [[ -z "$evidence" ]]; then
                 e2e_fail "Suite '$suite_id' active scenario is missing evidence marker"
             fi
-            if ! grep -Fq "$evidence" "$script_path"; then
+            if ! e2e_catalog_evidence_present "$evidence" "$script_path"; then
                 e2e_fail "Suite '$suite_id' evidence marker not found in $script_rel: $evidence"
             fi
         done < <(
