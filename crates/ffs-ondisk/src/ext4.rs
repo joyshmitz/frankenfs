@@ -10873,6 +10873,96 @@ mod tests {
             let _ = dx_hash(hash_version, &name, &seed);
         }
 
+        // ── dx_hash metamorphic relations (bd-590tc) ─────────────────
+
+        /// MR-A — `normalize_dx_major_hash` reserves the htree EOF
+        /// sentinel; `dx_hash` MUST never return `(EXT4_HTREE_EOF_32BIT
+        /// << 1)` as the major hash for any input. Regression here
+        /// would cause directory iteration to mistake a real entry for
+        /// the end-of-iteration marker. Crawls the input space across
+        /// every supported hash version including unknown values that
+        /// fall through to the half-md4 unsigned default.
+        #[test]
+        fn ext4_proptest_dx_hash_never_returns_eof_sentinel_as_major(
+            hash_version in 0_u8..=8,
+            name in proptest::collection::vec(any::<u8>(), 0..=128),
+            seed in proptest::array::uniform4(any::<u32>()),
+        ) {
+            let (major, _minor) = dx_hash(hash_version, &name, &seed);
+            let reserved = EXT4_HTREE_EOF_32BIT << 1;
+            prop_assert_ne!(
+                major, reserved,
+                "dx_hash MUST never return the htree-EOF sentinel as a major hash"
+            );
+        }
+
+        /// MR-B — Legacy hash variants (DX_HASH_LEGACY,
+        /// DX_HASH_LEGACY_UNSIGNED) ignore the seed parameter; their
+        /// initial state is hardcoded in `dx_hash_legacy`. Property:
+        /// changing the seed must NOT change the legacy hash output.
+        /// A regression that threads the seed into the legacy path
+        /// would make our htree reads diverge from kernel-mounted
+        /// images.
+        #[test]
+        fn ext4_proptest_dx_hash_legacy_ignores_seed(
+            name in proptest::collection::vec(any::<u8>(), 0..=128),
+            seed_a in proptest::array::uniform4(any::<u32>()),
+            seed_b in proptest::array::uniform4(any::<u32>()),
+            unsigned in any::<bool>(),
+        ) {
+            let version = if unsigned { DX_HASH_LEGACY_UNSIGNED } else { DX_HASH_LEGACY };
+            let (major_a, minor_a) = dx_hash(version, &name, &seed_a);
+            let (major_b, minor_b) = dx_hash(version, &name, &seed_b);
+            prop_assert_eq!(major_a, major_b, "legacy major hash must be seed-independent");
+            prop_assert_eq!(minor_a, minor_b, "legacy minor hash must be seed-independent");
+        }
+
+        /// MR-C — For ASCII-only names (every byte < 128), signed and
+        /// unsigned variants of each dx_hash family must produce the
+        /// SAME hash. The signed/unsigned distinction only changes the
+        /// byte reinterpretation for bytes ≥ 128 (which the kernel
+        /// reinterprets via `signed char`); for ASCII bytes both paths
+        /// agree. Pins this equivalence across all three families
+        /// (legacy, half-md4, tea).
+        #[test]
+        fn ext4_proptest_dx_hash_ascii_signed_unsigned_equivalence(
+            name in proptest::collection::vec(0_u8..=0x7F, 0..=128),
+            seed in proptest::array::uniform4(any::<u32>()),
+        ) {
+            // Legacy family.
+            let (legacy_signed_major, legacy_signed_minor) =
+                dx_hash(DX_HASH_LEGACY, &name, &seed);
+            let (legacy_unsigned_major, legacy_unsigned_minor) =
+                dx_hash(DX_HASH_LEGACY_UNSIGNED, &name, &seed);
+            prop_assert_eq!(
+                (legacy_signed_major, legacy_signed_minor),
+                (legacy_unsigned_major, legacy_unsigned_minor),
+                "legacy signed/unsigned must agree on ASCII-only names"
+            );
+
+            // Half-MD4 family.
+            let (md4_signed_major, md4_signed_minor) =
+                dx_hash(DX_HASH_HALF_MD4, &name, &seed);
+            let (md4_unsigned_major, md4_unsigned_minor) =
+                dx_hash(DX_HASH_HALF_MD4_UNSIGNED, &name, &seed);
+            prop_assert_eq!(
+                (md4_signed_major, md4_signed_minor),
+                (md4_unsigned_major, md4_unsigned_minor),
+                "half-md4 signed/unsigned must agree on ASCII-only names"
+            );
+
+            // TEA family.
+            let (tea_signed_major, tea_signed_minor) =
+                dx_hash(DX_HASH_TEA, &name, &seed);
+            let (tea_unsigned_major, tea_unsigned_minor) =
+                dx_hash(DX_HASH_TEA_UNSIGNED, &name, &seed);
+            prop_assert_eq!(
+                (tea_signed_major, tea_signed_minor),
+                (tea_unsigned_major, tea_unsigned_minor),
+                "tea signed/unsigned must agree on ASCII-only names"
+            );
+        }
+
         // ── parse_dx_root properties ──────────────────────────────────
 
         /// parse_dx_root never panics on arbitrary input.
