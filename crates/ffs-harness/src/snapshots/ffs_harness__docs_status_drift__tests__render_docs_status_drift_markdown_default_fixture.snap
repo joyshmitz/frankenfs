@@ -1,0 +1,79 @@
+---
+source: crates/ffs-harness/src/docs_status_drift.rs
+expression: markdown
+---
+# FrankenFS Docs Status Drift
+
+- Version: `bd-jtu4q-docs-status-drift-v1`
+- Release gate pass: `false`
+- Rules: `12`
+- Observations: `12`
+- Reproduction: `ffs-harness validate-docs-status-drift --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/docs-status/docs_status_drift.json --summary-out artifacts/docs-status/docs_status_drift.md`
+
+## Observations
+| Feature | Target | Expected | Drift | Wording | Remediation |
+|---|---|---|---|---|---|
+| `readonly_ext4_btrfs_inspection` | FEATURE_PARITY.md | `validated` | `matches` | `support.readonly-inspection.validated` | `bd-mpcse` |
+| `mounted_write_paths` | README.md | `experimental` | `matches` | `docs.mounted-writes.experimental` | `bd-jtu4q` |
+| `background_scrub` | COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md | `detection-only` | `matches` | `docs.background-scrub.detection-only` | `bd-wjsuj` |
+| `performance_claim_budget` | PLAN_TO_PORT_FRANKENFS_TO_RUST.md | `dry-run-only` | `matches` | `docs.performance.dry-run-only` | `bd-rchk5.2` |
+| `btrfs_send_receive_streams` | EXISTING_EXT4_BTRFS_STRUCTURE.md | `parse-only` | `matches` | `docs.btrfs-send-receive.parse-only` | `bd-naww5` |
+| `readonly_repair_with_ledger` | PROPOSED_ARCHITECTURE.md | `opt-in mutating` | `matches` | `docs.readonly-repair.opt-in-mutating` | `bd-wjsuj` |
+| `fuse_writeback_cache` | CLI help/status text | `disabled` | `matches` | `docs.writeback-cache.disabled` | `bd-4nobd` |
+| `unsupported_legacy_ext4_codecs` | scripts/e2e/README.md | `unsupported` | `matches` | `docs.ext4-legacy-codecs.unsupported` | `bd-mpcse` |
+| `writeback_cache_negative_option` | proof-bundle summaries | `deferred` | `matches` | `docs.writeback-cache.deferred` | `bd-rchk0.2.1.1` |
+| `performance_baseline_freshness` | README.md | `stale-evidence` | `matches` | `docs.performance.stale-evidence` | `bd-rchk5.2` |
+| `rw_background_repair` | README.md | `host-blocked` | `matches` | `docs.rw-background-repair.host-blocked` | `bd-bqgy8` |
+| `hostile_image_safety` | FEATURE_PARITY.md | `security-refused` | `matches` | `docs.hostile-image.security-refused` | `bd-0qx9b` |
+
+## Errors
+- source ambition evidence matrix error: required ambition source bead bd-rchk0.1.3 is missing
+- source ambition evidence matrix error: required ambition source bead bd-rchk0.2.3 is missing
+- source ambition evidence matrix error: required ambition source bead bd-rchk0.3.3 is missing
+- source ambition evidence matrix error: required ambition source bead bd-rchk0.4.1 is missing
+- source ambition evidence matrix error: required ambition source bead bd-rchk0.4.2 is missing
+- source ambition evidence matrix error: required ambition source bead bd-rchk0.4.3 is missing
+- source ambition evidence matrix error: required ambition source bead bd-rchk0.5.10 is missing
+- source ambition evidence matrix error: required ambition source bead bd-rchk4.2 is missing
+- source ambition evidence matrix error: required ambition source bead bd-rchk4.3 is missing
+- source ambition evidence matrix error: required ambition source bead bd-rchk7.2 is missing
+- source ambition evidence matrix error: dependency_gate_map missing bd-rchk0.5.10
+- source ambition evidence matrix error: operational prerequisite bd-rchk0.4.1 is missing
+- source ambition evidence matrix error: operational prerequisite bd-rchk0.4.2 is missing
+- source ambition evidence matrix error: operational prerequisite bd-rchk0.4.3 is missing
+- source ambition evidence matrix error: operational prerequisite bd-rchk4.2 is missing
+- source ambition evidence matrix error: operational prerequisite bd-rchk4.3 is missing
+- source ambition evidence matrix error: operational prerequisite bd-rchk7.2 is missing
+- source ambition evidence matrix error: operational prerequisite bd-rchk0.1.3 is missing
+- source ambition evidence matrix error: operational prerequisite bd-rchk0.2.3 is missing
+- source ambition evidence matrix error: operational prerequisite bd-rchk0.3.3 is missing
+- source ambition evidence matrix error: matrix stale reference bd-rchk0.5.10 in required_source_beads
+- source ambition evidence matrix error: matrix stale reference bd-rchk0.4.1 in required_source_beads
+- source ambition evidence matrix error: matrix stale reference bd-rchk0.4.2 in required_source_beads
+- source ambition evidence matrix error: matrix stale reference bd-rchk0.4.3 in required_source_beads
+- source ambition evidence matrix error: matrix stale reference bd-rchk4.2 in required_source_beads
+- source ambition evidence matrix error: matrix stale reference bd-rchk4.3 in required_source_beads
+- source ambition evidence matrix error: matrix stale reference bd-rchk7.2 in required_source_beads
+- source ambition evidence matrix error: matrix stale reference bd-rchk0.1.3 in required_source_beads
+- source ambition evidence matrix error: matrix stale reference bd-rchk0.2.3 in required_source_beads
+- source ambition evidence matrix error: matrix stale reference bd-rchk0.3.3 in required_source_beads
+- source ambition evidence matrix error: bd-rchk0.5.10.1 stale reference bd-rchk0.1.3 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.10.1 stale reference bd-rchk0.4.1 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.10.1 stale reference bd-rchk0.4.2 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.10.1 stale reference bd-rchk0.4.3 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.10.1 stale reference bd-rchk4.2 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.10.1 stale reference bd-rchk4.3 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.10.1 stale reference bd-rchk7.2 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.11 stale reference bd-rchk0.4.1 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.11 stale reference bd-rchk0.4.2 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.11 stale reference bd-rchk0.4.3 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.12 stale reference bd-rchk0.4.1 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.12 stale reference bd-rchk0.4.2 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.12 stale reference bd-rchk0.4.3 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.13 stale reference bd-rchk0.4.1 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.13 stale reference bd-rchk0.4.2 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.13 stale reference bd-rchk0.4.3 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.14 stale reference bd-rchk0.4.1 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.14 stale reference bd-rchk0.4.2 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.14 stale reference bd-rchk0.4.3 in prerequisites
+- source ambition evidence matrix error: bd-rchk0.5.10 output parent ambition evidence matrix and dependency gate map is not represented: required source bead is missing from matrix rows

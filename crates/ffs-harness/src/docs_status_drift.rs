@@ -1370,4 +1370,29 @@ mod tests {
         assert!(markdown.contains("rw_background_repair"));
         assert!(markdown.contains("docs.rw-background-repair.host-blocked"));
     }
+
+    /// bd-wly6z — golden-output snapshot for
+    /// `render_docs_status_drift_markdown` on the deterministic
+    /// `fixture_report(None)`. Pins:
+    ///   * the title line `# FrankenFS Docs Status Drift`
+    ///   * the 5-bullet metadata header (Version / Release gate pass /
+    ///     Rules / Observations / Reproduction)
+    ///   * the `## Observations` section heading
+    ///   * the 6-column table layout (Feature / Target / Expected /
+    ///     Drift / Wording / Remediation) with all 12 fixture rows
+    ///   * the `## Errors` section heading and the per-error bullet
+    ///     format
+    ///   * the exact ordering of observation and error bullets
+    /// Substring-only assertions in `renders_markdown_summary` cannot
+    /// detect column reorders, section ordering swaps, or table-cell
+    /// drift; this snapshot does.
+    #[test]
+    fn render_docs_status_drift_markdown_default_fixture_snapshot() {
+        let report = fixture_report(None);
+        let markdown = render_docs_status_drift_markdown(&report);
+        insta::assert_snapshot!(
+            "render_docs_status_drift_markdown_default_fixture",
+            markdown
+        );
+    }
 }
