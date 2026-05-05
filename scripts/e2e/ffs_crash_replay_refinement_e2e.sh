@@ -219,6 +219,42 @@ if artifact.get("crash_taxonomy") != classification:
     raise SystemExit(
         f"{scenario_id}: crash_taxonomy {artifact.get('crash_taxonomy')!r} != {classification!r}"
     )
+def is_sha256(value):
+    return isinstance(value, str) and re.fullmatch(r"sha256:[0-9A-Fa-f]{64}", value)
+
+required_top_level = [
+    "artifact_id",
+    "bead_id",
+    "schedule_id",
+    "oracle_verdict",
+    "reproduction_command",
+]
+missing_top_level = [
+    field for field in required_top_level if not str(artifact.get(field, "")).strip()
+]
+if missing_top_level:
+    raise SystemExit(f"{scenario_id}: permissioned artifact missing {missing_top_level}")
+if not is_sha256(artifact.get("pre_crash_image_hash")):
+    raise SystemExit(f"{scenario_id}: pre_crash_image_hash must be sha256:<64-hex>")
+if artifact.get("oracle_verdict") != "replay_failure" and not is_sha256(
+    artifact.get("post_replay_image_hash")
+):
+    raise SystemExit(f"{scenario_id}: post_replay_image_hash must be sha256:<64-hex>")
+operation_trace = artifact.get("operation_trace")
+if not isinstance(operation_trace, list) or not operation_trace:
+    raise SystemExit(f"{scenario_id}: permissioned artifact missing operation_trace")
+if not any(
+    step.get("crash_point_after") is True
+    for step in operation_trace
+    if isinstance(step, dict)
+):
+    raise SystemExit(f"{scenario_id}: operation_trace must mark a crash_point_after step")
+for step in operation_trace:
+    if not isinstance(step, dict) or not str(step.get("op", "")).strip():
+        raise SystemExit(f"{scenario_id}: operation_trace step missing op")
+for survivor_field in ["expected_survivors", "observed_survivors"]:
+    if not isinstance(artifact.get(survivor_field), dict):
+        raise SystemExit(f"{scenario_id}: missing {survivor_field}")
 if artifact.get("oracle_verdict") in {
     "missing_file",
     "unexpected_extra_file",
@@ -227,6 +263,33 @@ if artifact.get("oracle_verdict") in {
 }:
     if not artifact.get("follow_up_bead") and not artifact.get("follow_up_skip_reason"):
         raise SystemExit(f"{scenario_id}: failing permissioned verdict lacks follow-up bead data")
+    follow_up_payload = artifact.get("follow_up_dry_run_br_create")
+    if follow_up_payload is None:
+        raise SystemExit(
+            f"{scenario_id}: failing permissioned verdict lacks dry-run br create payload"
+        )
+    if isinstance(follow_up_payload, str):
+        follow_up_text = follow_up_payload
+    else:
+        follow_up_text = json.dumps(follow_up_payload, sort_keys=True)
+    required_fragments = [
+        "br create",
+        "--dry-run",
+        scenario_id,
+        classification,
+        "expected",
+        "observed",
+        "suspected",
+        "sha256:",
+        "reproduction",
+    ]
+    missing_fragments = [
+        fragment for fragment in required_fragments if fragment not in follow_up_text
+    ]
+    if missing_fragments:
+        raise SystemExit(
+            f"{scenario_id}: dry-run br create payload missing {missing_fragments}"
+        )
 context = artifact.get("permissioned_context")
 if not isinstance(context, dict):
     raise SystemExit(f"{scenario_id}: missing permissioned_context")
@@ -247,7 +310,7 @@ required_context = [
 missing = [field for field in required_context if not str(context.get(field, "")).strip()]
 if missing:
     raise SystemExit(f"{scenario_id}: permissioned_context missing {missing}")
-if not re.fullmatch(r"sha256:[0-9A-Fa-f]{64}", context["image_hash"]):
+if not is_sha256(context["image_hash"]):
     raise SystemExit(f"{scenario_id}: permissioned_context image_hash must be sha256:<64-hex>")
 if context["cleanup_status"] not in {
     "cleaned_up",

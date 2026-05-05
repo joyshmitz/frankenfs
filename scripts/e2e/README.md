@@ -288,9 +288,15 @@ missing, unresolved on `PATH`, or not executable, the smoke emits the same
 structured capability blocker instead of reporting an unimplemented-lane
 failure. A configured runner must write a mounted crash replay artifact at
 `FFS_CRASH_REPLAY_ARTIFACT_OUT` with `lane_type=mounted_e2e`,
-`permissioned_context`, image, mountpoint, daemon when applicable, survivor,
-ledger for repair interruption, stdout/stderr, cleanup, and reproduction fields
-before the smoke will count the permissioned scenario as authoritative evidence.
+`permissioned_context`, image hashes, mountpoint, daemon when applicable,
+operation trace with an explicit crash point, expected and observed survivor
+sets, ledger for repair interruption, stdout/stderr, cleanup, and reproduction
+fields before the smoke will count the permissioned scenario as authoritative
+evidence. A failing permissioned verdict must also include follow-up bead data
+and `follow_up_dry_run_br_create` text or JSON containing a
+`br create --dry-run` payload with the scenario id, expected vs. observed
+survivor data, suspected crate boundary, reproduction command, and raw artifact
+hashes.
 
 For low-privilege verification of the blocker contract without running the
 core cargo replay or any permissioned mount action:
