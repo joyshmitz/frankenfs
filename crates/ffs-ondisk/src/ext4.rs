@@ -93,6 +93,48 @@ pub const EXT4_MMP_SEQ_CLEAN: u32 = 0xFF4D_4D50;
 pub const EXT4_MMP_SEQ_FSCK: u32 = 0xE24D_4D50;
 pub const EXT4_MMP_SEQ_MAX: u32 = 0xE24D_4D4F;
 pub const EXT4_DFL_MAX_MNT_COUNT: u16 = 20;
+
+// ── Reserved-inode predicate (bd-3ydm6) ──────────────────────────────────
+
+/// Return `true` if `ino` is a reserved inode under the superblock's
+/// `s_first_ino` boundary, i.e. NOT a user-visible regular inode.
+///
+/// Mirrors the Linux kernel helper `ext4_is_reserved_inode` from
+/// `fs/ext4/ext4.h`: an inode number `ino` is reserved when
+/// `ino == 0 || ino < first_ino`. The kernel uses inode 0 as the
+/// "no inode" sentinel; values in `1..first_ino` carry filesystem
+/// metadata (bad-blocks, root, user/group/project quotas, boot
+/// loader, undelete, online-resize GDT, journal, snapshot exclude,
+/// non-upstream replica). The exact reserved-inode constants are
+/// pinned by `ext4_reserved_inode_constants_match_kernel_header`
+/// (bd-k81lq).
+///
+/// # Fail-closed reasoning mode
+///
+/// This predicate exists to make the kernel's fail-closed contract
+/// explicit. Callers that walk the inode table or iterate inode
+/// bitmaps MUST consult this function before treating an inode as a
+/// user-visible regular file. Specifically:
+///
+/// * `readdir` / `lookup` / fsck visibility: a reserved inode MUST
+///   NOT be surfaced as a directory entry to userspace. Skip,
+///   don't expose.
+/// * Parse / checksum errors on a reserved inode MUST propagate as
+///   filesystem-corruption (`FfsError::Format` or equivalent) rather
+///   than be silently masked as "user error." The metadata is
+///   structural; if it's broken, the filesystem is broken.
+/// * Allocation paths MUST refuse to allocate a reserved inode
+///   number to a new user file (the existing
+///   `reserved_inodes_in_group` helper in ffs-alloc covers this for
+///   group 0).
+///
+/// Returning `false` says "you may treat this as a user inode";
+/// returning `true` says "this is metadata — apply the fail-closed
+/// rules above."
+#[must_use]
+pub const fn is_reserved_inode(first_ino: u32, ino: u32) -> bool {
+    ino == 0 || ino < first_ino
+}
 const EXT4_MMP_CHECKSUM_OFFSET: usize = 0x3FC;
 
 // ── ext4 feature flags ─────────────────────────────────────────────────────
@@ -10054,6 +10096,78 @@ mod tests {
     /// Trivial corollary of CR-B with B=empty, but worth pinning
     /// because a regression that accidentally negated empty input
     /// would silently corrupt every incremental checksum continuation.
+    /// bd-3ydm6 — Kernel-conformance pin for `is_reserved_inode`.
+    /// Verifies the predicate matches the kernel `ext4_is_reserved_inode`
+    /// contract on every reserved-inode constant from bd-k81lq plus
+    /// boundary cases (ino=0 sentinel, ino=first_ino threshold,
+    /// ino=u32::MAX). The fail-closed reasoning mode is documented on
+    /// the function itself; this test pins the boundary so a
+    /// regression that shifted the predicate (e.g. `<=` vs `<`) would
+    /// fail loudly rather than silently expose the journal as a
+    /// regular file.
+    #[test]
+    fn is_reserved_inode_matches_kernel_contract() {
+        const FIRST_INO: u32 = EXT4_GOOD_OLD_FIRST_INO;
+
+        // Sentinel: inode 0 is always reserved (kernel "no inode" marker).
+        assert!(
+            is_reserved_inode(FIRST_INO, 0),
+            "inode 0 must always be reserved (kernel no-inode sentinel)"
+        );
+
+        // Every named reserved inode constant must satisfy the predicate.
+        for &reserved in &[
+            EXT4_BAD_INO,            // 1
+            EXT4_ROOT_INO,           // 2
+            EXT4_USR_QUOTA_INO,      // 3
+            EXT4_GRP_QUOTA_INO,      // 4
+            EXT4_BOOT_LOADER_INO,    // 5
+            EXT4_UNDEL_DIR_INO,      // 6
+            EXT4_RESIZE_INO,         // 7
+            EXT4_JOURNAL_INO,        // 8
+            EXT4_EXCLUDE_INO,        // 9
+            EXT4_REPLICA_INO,        // 10
+        ] {
+            assert!(
+                is_reserved_inode(FIRST_INO, reserved),
+                "named reserved inode {reserved} must satisfy is_reserved_inode"
+            );
+        }
+
+        // Boundary: first_ino itself is the FIRST non-reserved inode.
+        assert!(
+            !is_reserved_inode(FIRST_INO, FIRST_INO),
+            "first_ino itself must NOT be reserved (it is the first user inode)"
+        );
+
+        // Anything strictly above first_ino is a user inode.
+        for &user_ino in &[FIRST_INO + 1, FIRST_INO + 100, 1_000_000_u32, u32::MAX] {
+            assert!(
+                !is_reserved_inode(FIRST_INO, user_ino),
+                "user inode {user_ino} must not be reserved when first_ino={FIRST_INO}"
+            );
+        }
+
+        // EXT4_PRJ_QUOTA_INO (16) is reserved in modern filesystems
+        // where the kernel sets first_ino to 256 (post-quota-inode
+        // expansion), but is a user inode under the GOOD_OLD layout
+        // where first_ino == 11. Pin both regimes.
+        assert!(
+            !is_reserved_inode(FIRST_INO, EXT4_PRJ_QUOTA_INO),
+            "PRJ_QUOTA_INO is a user inode under GOOD_OLD first_ino=11"
+        );
+        assert!(
+            is_reserved_inode(256, EXT4_PRJ_QUOTA_INO),
+            "PRJ_QUOTA_INO is reserved under modern first_ino=256"
+        );
+
+        // Mid-range first_ino: pin the strict-less-than boundary.
+        assert!(is_reserved_inode(11, 10));
+        assert!(!is_reserved_inode(11, 11));
+        assert!(is_reserved_inode(256, 255));
+        assert!(!is_reserved_inode(256, 256));
+    }
+
     /// bd-k81lq — Kernel-conformance pin for ext4 reserved-inode and
     /// revision-format constants. Each value is mirrored verbatim from
     /// the Linux kernel header `fs/ext4/ext4.h`. Mismatch would

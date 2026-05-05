@@ -17,10 +17,11 @@
 //! field semantics or required fields MUST bump this version.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 /// Schema version for the artifact manifest. Bump on breaking changes.
@@ -907,9 +908,7 @@ impl ManifestValidationError {
             Self::UnknownArtifactRef { .. } => "missing_artifact",
             Self::MissingCleanupStatus(_) => "missing_cleanup_status",
             Self::MissingReadinessEvent(_) => "missing_readiness_event",
-            Self::InvalidReadinessEvent { reason, .. } => {
-                readiness_event_diagnostic_code(reason)
-            }
+            Self::InvalidReadinessEvent { reason, .. } => readiness_event_diagnostic_code(reason),
         }
     }
 
@@ -1912,23 +1911,23 @@ pub fn validate_artifact_schema_fixture_dir(
 pub fn render_artifact_schema_fixture_markdown(report: &ArtifactSchemaFixtureReport) -> String {
     let mut out = String::new();
     out.push_str("# Artifact Schema Fixture Suite\n\n");
-    out.push_str(&format!("- Fixture directory: `{}`\n", report.fixture_dir));
-    out.push_str(&format!(
-        "- Validator version: `{}`\n",
-        report.validator_version
-    ));
-    out.push_str(&format!(
-        "- Result: `{}`\n",
+    let _ = writeln!(out, "- Fixture directory: `{}`", report.fixture_dir);
+    let _ = writeln!(out, "- Validator version: `{}`", report.validator_version);
+    let _ = writeln!(
+        out,
+        "- Result: `{}`",
         if report.valid { "pass" } else { "fail" }
-    ));
-    out.push_str(&format!(
-        "- Fixtures: `{}` positive=`{}` negative=`{}`\n",
+    );
+    let _ = writeln!(
+        out,
+        "- Fixtures: `{}` positive=`{}` negative=`{}`",
         report.fixture_count, report.positive_count, report.negative_count
-    ));
-    out.push_str(&format!(
-        "- Reproduction command: `{}`\n",
+    );
+    let _ = writeln!(
+        out,
+        "- Reproduction command: `{}`",
         report.reproduction_command
-    ));
+    );
     out.push_str("\n## Fixture Rows\n\n");
     out.push_str("| Fixture | Expected | Observed | Valid | Diagnostics |\n");
     out.push_str("|---|---:|---:|---:|---|\n");
@@ -1939,19 +1938,16 @@ pub fn render_artifact_schema_fixture_markdown(report: &ArtifactSchemaFixtureRep
             .map(|diagnostic| format!("{}@{}", diagnostic.code, diagnostic.path))
             .collect::<Vec<_>>()
             .join(", ");
-        out.push_str(&format!(
-            "| `{}` | `{:?}` | `{:?}` | `{}` | {} |\n",
-            row.fixture_id,
-            row.expected_result,
-            row.observed_result,
-            row.valid,
-            diagnostics
-        ));
+        let _ = writeln!(
+            out,
+            "| `{}` | `{:?}` | `{:?}` | `{}` | {} |",
+            row.fixture_id, row.expected_result, row.observed_result, row.valid, diagnostics
+        );
     }
     if !report.errors.is_empty() {
         out.push_str("\n## Suite Errors\n\n");
         for error in &report.errors {
-            out.push_str(&format!("- {error}\n"));
+            let _ = writeln!(out, "- {error}");
         }
     }
     out
@@ -2024,13 +2020,15 @@ fn validate_fixture_manifest_value(
     fixture_dir: &Path,
     value: &serde_json::Value,
 ) -> Vec<ArtifactSchemaFixtureDiagnostic> {
-    let mut diagnostics = match serde_json::from_value::<ArtifactManifest>(value.clone()) {
-        Ok(manifest) => validate_fixture_manifest(fixture_dir, &manifest),
-        Err(_) => vec![ArtifactSchemaFixtureDiagnostic {
-            code: "manifest_json_deserialize".to_owned(),
-            path: "$.manifest".to_owned(),
-        }],
-    };
+    let mut diagnostics = serde_json::from_value::<ArtifactManifest>(value.clone()).map_or_else(
+        |_| {
+            vec![ArtifactSchemaFixtureDiagnostic {
+                code: "manifest_json_deserialize".to_owned(),
+                path: "$.manifest".to_owned(),
+            }]
+        },
+        |manifest| validate_fixture_manifest(fixture_dir, &manifest),
+    );
     diagnostics.sort();
     diagnostics
 }
@@ -2102,11 +2100,7 @@ fn artifact_schema_fixture_row(
     }
 }
 
-fn invalid_fixture_row(
-    fixture_path: &str,
-    code: &str,
-    path: &str,
-) -> ArtifactSchemaFixtureRow {
+fn invalid_fixture_row(fixture_path: &str, code: &str, path: &str) -> ArtifactSchemaFixtureRow {
     ArtifactSchemaFixtureRow {
         fixture_id: fixture_path.to_owned(),
         classification: "invalid_fixture".to_owned(),
@@ -3721,6 +3715,94 @@ mod tests {
             redacted: false,
             metadata: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn artifact_schema_fixture_suite_accepts_positives_and_rejects_negatives_exactly() {
+        let report = validate_artifact_schema_fixture_dir(
+            &artifact_schema_fixture_dir(),
+            "cargo test -p ffs-harness artifact_schema_fixture_suite",
+        );
+
+        assert!(report.valid, "fixture report errors: {report:#?}");
+        assert_eq!(report.positive_count, 1);
+        assert_eq!(report.negative_count, 1);
+
+        let positive = report
+            .fixtures
+            .iter()
+            .find(|row| row.fixture_id == "positive_matrix")
+            .expect("positive fixture row should exist");
+        assert_eq!(
+            positive.observed_result,
+            ArtifactSchemaFixtureExpectation::Accept
+        );
+        assert!(positive.observed_diagnostics.is_empty());
+        assert!(positive.classification.contains("security_refusal"));
+        assert!(
+            positive
+                .classification
+                .contains("pass_with_experimental_caveat")
+        );
+
+        let negative = report
+            .fixtures
+            .iter()
+            .find(|row| row.fixture_id == "negative_matrix")
+            .expect("negative fixture row should exist");
+        assert_eq!(
+            negative.observed_result,
+            ArtifactSchemaFixtureExpectation::Reject
+        );
+        assert_eq!(
+            negative.expected_diagnostics, negative.observed_diagnostics,
+            "negative fixture diagnostics must match exact code/path pairs"
+        );
+    }
+
+    #[test]
+    fn artifact_schema_fixture_suite_covers_required_negative_diagnostics() {
+        let report = validate_artifact_schema_fixture_dir(
+            &artifact_schema_fixture_dir(),
+            "cargo test -p ffs-harness artifact_schema_fixture_suite",
+        );
+        let negative = report
+            .fixtures
+            .iter()
+            .find(|row| row.fixture_id == "negative_matrix")
+            .expect("negative fixture row should exist");
+        let observed_codes = negative
+            .observed_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        for required_code in [
+            "missing_run_id",
+            "missing_lane_id",
+            "duplicate_scenario_id",
+            "stale_schema_version",
+            "missing_raw_log_path",
+            "artifact_sha256_mismatch",
+            "ambiguous_skip_reason",
+            "missing_cleanup_status",
+            "missing_artifact",
+            "missing_remediation_id",
+            "invalid_classification",
+            "missing_reproduction_command",
+            "redacted_reproduction_command",
+        ] {
+            assert!(
+                observed_codes.contains(required_code),
+                "missing diagnostic code {required_code}"
+            );
+        }
+    }
+
+    fn artifact_schema_fixture_dir() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tests/artifact-schema-fixtures")
     }
 
     fn make_manifest(run_id: &str, gate_id: &str, created_at: &str) -> ArtifactManifest {
