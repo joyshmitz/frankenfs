@@ -512,8 +512,7 @@ mod tests {
     #[test]
     fn duplicate_filesystem_operation_pair_is_rejected() {
         let mut catalog = fixture_catalog();
-        let template = catalog.cells[0].clone();
-        let mut clone = template.clone();
+        let mut clone = catalog.cells[0].clone();
         clone.cell_id = format!("{}_dup", clone.cell_id);
         catalog.cells.push(clone);
         let report = validate_mounted_write_errno_budget(&catalog);

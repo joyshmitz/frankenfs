@@ -1769,8 +1769,8 @@ mod tests {
     fn happy_crash_replay_oracle() -> WritebackCrashReplayOracle {
         let mut crash_points: Vec<_> = REQUIRED_CRASH_POINT_IDS
             .iter()
-            .enumerate()
-            .map(|(index, id)| crash_point(id, (index + 1) as u32))
+            .zip(1_u32..)
+            .map(|(id, index)| crash_point(id, index))
             .collect();
         for point in &mut crash_points {
             match point.crash_point_id.as_str() {

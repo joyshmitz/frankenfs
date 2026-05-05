@@ -985,8 +985,8 @@ mod tests {
     ///   * per-scenario row layout including the percent format
     ///     `{:.2}%`, freshness/foreground floats, and the route enum
     ///     name (`mounted_mutation_authority` / `detection_only`)
-    /// Pairs with bd-by4bc (perf_comparison) / bd-aofgb
-    /// (remediation_catalog) / bd-bogcc (invariant_oracle).
+    ///     Pairs with bd-by4bc (perf_comparison) / bd-aofgb
+    ///     (remediation_catalog) / bd-bogcc (invariant_oracle).
     #[test]
     fn render_scrub_repair_scheduler_markdown_default_sample_snapshot() {
         let report = validate_scrub_repair_scheduler_manifest(&sample_manifest());
