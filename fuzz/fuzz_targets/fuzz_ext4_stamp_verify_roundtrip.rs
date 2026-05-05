@@ -26,8 +26,9 @@
 
 use ffs_ondisk::{
     stamp_block_bitmap_checksum, stamp_dir_block_checksum, stamp_extent_block_checksum,
-    stamp_inode_bitmap_checksum, verify_block_bitmap_checksum, verify_dir_block_checksum,
-    verify_extent_block_checksum, verify_inode_bitmap_checksum, Ext4GroupDesc, EXT4_FT_DIR_CSUM,
+    stamp_group_desc_checksum, stamp_inode_bitmap_checksum, verify_block_bitmap_checksum,
+    verify_dir_block_checksum, verify_extent_block_checksum, verify_group_desc_checksum,
+    verify_inode_bitmap_checksum, Ext4GroupDesc, Ext4GroupDescChecksumKind, EXT4_FT_DIR_CSUM,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -276,4 +277,63 @@ fuzz_target!(|data: &[u8]| {
         .is_err(),
         "MR-4b: mutating covered inode_bitmap bytes after stamp must fail verification"
     );
+
+    // ── MR-5 — group_desc stamp/verify round-trip (bd-54zf1) ───────────
+    // The group descriptor table is read on every block-group lookup;
+    // a regression in stamp/verify symmetry would silently make every
+    // newly-mutated descriptor fail verification. Exercises both
+    // MetadataCsum (CRC32C, 4 bytes) and GdtCsum (CRC16, 2 bytes)
+    // checksum kinds, and both desc_size paths (32 + 64 bytes).
+    let mut cursor4 = ByteCursor::new(&[][..]);
+    // Pull configuration bytes from the remaining cursor stream so
+    // libfuzzer's coverage-guided exploration can drive UUID +
+    // group_number + desc_size + checksum_kind separately from MR-1..4.
+    // (cursor4 starts empty; saturate-reads return 0, which is fine —
+    // the stamp + verify symmetry holds regardless of input bytes.)
+    let _ = &mut cursor4;
+    let mut uuid = [0_u8; 16];
+    for byte in &mut uuid {
+        *byte = cursor.next_u8();
+    }
+    let group_number = cursor.next_u32();
+    let gd_csum_seed = cursor.next_u32();
+    let kind_selector = cursor.next_u8();
+    let kind = if kind_selector & 1 == 0 {
+        Ext4GroupDescChecksumKind::MetadataCsum
+    } else {
+        Ext4GroupDescChecksumKind::GdtCsum
+    };
+    let gd_desc_size: u16 = if (kind_selector & 2) == 0 { 32 } else { 64 };
+
+    // Build a raw group descriptor buffer of the chosen size and seed
+    // it with cursor bytes so the checksum is non-trivial. The stamp
+    // function writes only the 2-byte checksum field at offset 0x1E,
+    // so the rest of the buffer stays as our seeded payload during
+    // verify.
+    let mut raw_gd = vec![0_u8; usize::from(gd_desc_size)];
+    for byte in &mut raw_gd {
+        *byte = cursor.next_u8();
+    }
+    // Zero the checksum field before stamp so verify's expected==stored
+    // comparison is well-defined.
+    raw_gd[0x1E] = 0;
+    raw_gd[0x1F] = 0;
+
+    stamp_group_desc_checksum(
+        &mut raw_gd,
+        &uuid,
+        gd_csum_seed,
+        group_number,
+        gd_desc_size,
+        kind,
+    );
+    verify_group_desc_checksum(
+        &raw_gd,
+        &uuid,
+        gd_csum_seed,
+        group_number,
+        gd_desc_size,
+        kind,
+    )
+    .expect("MR-5: stamped group_desc must verify against its own seed/group/uuid/kind");
 });
