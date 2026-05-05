@@ -10100,7 +10100,7 @@ mod tests {
     /// ext4_chksum(seed, A ++ B) == ext4_chksum(ext4_chksum(seed, A), B)
     /// The kernel uses this to compute a single checksum across
     /// disjoint memory regions (e.g., struct prefix + zeroed-csum-field
-    /// + remainder). A regression breaking this would make our
+    /// and the remainder). A regression breaking this would make our
     /// re-encoded checksums diverge silently from kernel-mounted images.
     /// Property test under the existing proptest! block at the end of
     /// `tests` exercises arbitrary seed + A + B; here we pin one fixed
@@ -10183,21 +10183,23 @@ mod tests {
 
         // Cross-check: file-type values are strict-monotonic ascending
         // and the dir-csum sentinel sits well above EXT4_FT_MAX.
-        assert!(
-            EXT4_FT_UNKNOWN < EXT4_FT_REG_FILE
-                && EXT4_FT_REG_FILE < EXT4_FT_DIR
-                && EXT4_FT_DIR < EXT4_FT_CHRDEV
-                && EXT4_FT_CHRDEV < EXT4_FT_BLKDEV
-                && EXT4_FT_BLKDEV < EXT4_FT_FIFO
-                && EXT4_FT_FIFO < EXT4_FT_SOCK
-                && EXT4_FT_SOCK < EXT4_FT_SYMLINK
-                && EXT4_FT_SYMLINK < EXT4_FT_MAX,
-            "ext4 file-type values must be strict-monotonic ascending"
-        );
-        assert!(
-            EXT4_FT_DIR_CSUM > EXT4_FT_MAX,
-            "EXT4_FT_DIR_CSUM (0xDE) must sit above EXT4_FT_MAX so it never collides with a real file_type"
-        );
+        const {
+            assert!(
+                EXT4_FT_UNKNOWN < EXT4_FT_REG_FILE
+                    && EXT4_FT_REG_FILE < EXT4_FT_DIR
+                    && EXT4_FT_DIR < EXT4_FT_CHRDEV
+                    && EXT4_FT_CHRDEV < EXT4_FT_BLKDEV
+                    && EXT4_FT_BLKDEV < EXT4_FT_FIFO
+                    && EXT4_FT_FIFO < EXT4_FT_SOCK
+                    && EXT4_FT_SOCK < EXT4_FT_SYMLINK
+                    && EXT4_FT_SYMLINK < EXT4_FT_MAX,
+                "ext4 file-type values must be strict-monotonic ascending"
+            );
+            assert!(
+                EXT4_FT_DIR_CSUM > EXT4_FT_MAX,
+                "EXT4_FT_DIR_CSUM (0xDE) must sit above EXT4_FT_MAX so it never collides with a real file_type"
+            );
+        }
     }
 
     /// bd-3ydm6 — Kernel-conformance pin for `is_reserved_inode`.
@@ -10341,20 +10343,22 @@ mod tests {
         // Cross-check: the reserved-inode set is contiguous from 1 to 10
         // plus the project-quota inode at 16, and the first non-reserved
         // inode is 11 in EXT4_GOOD_OLD_REV.
-        assert!(
-            EXT4_BAD_INO < EXT4_ROOT_INO
-                && EXT4_ROOT_INO < EXT4_USR_QUOTA_INO
-                && EXT4_USR_QUOTA_INO < EXT4_GRP_QUOTA_INO
-                && EXT4_GRP_QUOTA_INO < EXT4_BOOT_LOADER_INO
-                && EXT4_BOOT_LOADER_INO < EXT4_UNDEL_DIR_INO
-                && EXT4_UNDEL_DIR_INO < EXT4_RESIZE_INO
-                && EXT4_RESIZE_INO < EXT4_JOURNAL_INO
-                && EXT4_JOURNAL_INO < EXT4_EXCLUDE_INO
-                && EXT4_EXCLUDE_INO < EXT4_REPLICA_INO
-                && EXT4_REPLICA_INO < EXT4_GOOD_OLD_FIRST_INO
-                && EXT4_GOOD_OLD_FIRST_INO < EXT4_PRJ_QUOTA_INO,
-            "reserved-inode ordering must be strict-monotonic ascending"
-        );
+        const {
+            assert!(
+                EXT4_BAD_INO < EXT4_ROOT_INO
+                    && EXT4_ROOT_INO < EXT4_USR_QUOTA_INO
+                    && EXT4_USR_QUOTA_INO < EXT4_GRP_QUOTA_INO
+                    && EXT4_GRP_QUOTA_INO < EXT4_BOOT_LOADER_INO
+                    && EXT4_BOOT_LOADER_INO < EXT4_UNDEL_DIR_INO
+                    && EXT4_UNDEL_DIR_INO < EXT4_RESIZE_INO
+                    && EXT4_RESIZE_INO < EXT4_JOURNAL_INO
+                    && EXT4_JOURNAL_INO < EXT4_EXCLUDE_INO
+                    && EXT4_EXCLUDE_INO < EXT4_REPLICA_INO
+                    && EXT4_REPLICA_INO < EXT4_GOOD_OLD_FIRST_INO
+                    && EXT4_GOOD_OLD_FIRST_INO < EXT4_PRJ_QUOTA_INO,
+                "reserved-inode ordering must be strict-monotonic ascending"
+            );
+        }
     }
 
     #[test]
