@@ -38,6 +38,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 # Plan/run curated xfstests generic+ext4 subsets
 ./scripts/e2e/ffs_xfstests_e2e.sh
 
+# Run hermetic xfstests prerequisite preflight self-test
+./scripts/e2e/ffs_xfstests_preflight_e2e.sh --self-test
+
 # Run proof overhead budget release-gate smoke
 ./scripts/e2e/ffs_proof_overhead_budget_e2e.sh
 

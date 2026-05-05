@@ -635,6 +635,17 @@ def is_safe_probe_argv(argv: object) -> bool:
 
 def validate_manifest(manifest: dict) -> list[str]:
     errors: list[str] = []
+    if manifest.get("schema_version") != 1:
+        errors.append("manifest schema_version must be 1")
+    if manifest.get("bead_id") != "bd-rchk3.1.1":
+        errors.append("manifest bead_id must be bd-rchk3.1.1")
+    if set(manifest.get("status_vocabulary", [])) != STATUS_VALUES:
+        errors.append("manifest status_vocabulary does not match required statuses")
+    if set(manifest.get("risk_vocabulary", [])) != RISK_VALUES:
+        errors.append("manifest risk_vocabulary does not match required risk levels")
+    if set(manifest.get("authoritative_lane_impact_vocabulary", [])) != LANE_IMPACT_VALUES:
+        errors.append("manifest authoritative lane-impact vocabulary does not match required values")
+
     safety = manifest.get("remediation_safety")
     if not isinstance(safety, dict):
         errors.append("manifest missing remediation_safety")
@@ -710,6 +721,9 @@ def validate_manifest(manifest: dict) -> list[str]:
     for field in [
         "created_at",
         "verdict",
+        "host",
+        "worker_identity",
+        "paths",
         "status_vocabulary",
         "risk_vocabulary",
         "authoritative_lane_impact_vocabulary",
@@ -722,6 +736,16 @@ def validate_manifest(manifest: dict) -> list[str]:
     ]:
         if field not in manifest:
             errors.append(f"manifest missing {field}")
+    blocking = manifest.get("blocking_prerequisites")
+    if not isinstance(blocking, list):
+        errors.append("manifest blocking_prerequisites must be a list")
+    else:
+        if blocking and manifest.get("verdict") != "blocked":
+            errors.append("manifest verdict must be blocked when blocking prerequisites exist")
+        if not blocking and manifest.get("verdict") != "pass":
+            errors.append("manifest verdict must be pass when no blocking prerequisites exist")
+    if manifest.get("cleanup_status") != "no_mounts_or_temp_files_created":
+        errors.append("manifest cleanup_status must prove no mounts or temp files were created")
     links = manifest.get("links", {})
     if links.get("selected_test_policy_bead") != "bd-rchk3.2":
         errors.append("manifest must link selected-test policy bead bd-rchk3.2")
@@ -733,9 +757,45 @@ def validate_manifest(manifest: dict) -> list[str]:
 def write_manifest(manifest: dict, path: pathlib.Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     artifact_dir = path.parent
-    (artifact_dir / "stdout.log").write_text("", encoding="utf-8")
-    (artifact_dir / "stderr.log").write_text("", encoding="utf-8")
+    transcript_dir = pathlib.Path(str(manifest.get("transcript_dir") or artifact_dir / "transcripts"))
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = pathlib.Path(str(manifest.get("stdout_path") or artifact_dir / "stdout.log"))
+    stderr_path = pathlib.Path(str(manifest.get("stderr_path") or artifact_dir / "stderr.log"))
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stderr_path.parent.mkdir(parents=True, exist_ok=True)
+    stdout_path.write_text("", encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def validate_written_artifacts(manifest: dict) -> list[str]:
+    errors: list[str] = []
+    for field in ["stdout_path", "stderr_path"]:
+        raw = manifest.get(field)
+        if not raw:
+            errors.append(f"manifest missing {field}")
+            continue
+        path = pathlib.Path(str(raw))
+        if not path.is_file():
+            errors.append(f"manifest {field} does not exist: {path}")
+    transcript_dir_raw = manifest.get("transcript_dir")
+    if not transcript_dir_raw:
+        errors.append("manifest missing transcript_dir")
+    else:
+        transcript_dir = pathlib.Path(str(transcript_dir_raw))
+        if not transcript_dir.is_dir():
+            errors.append(f"manifest transcript_dir does not exist: {transcript_dir}")
+    for row in manifest.get("prerequisites", []):
+        if not isinstance(row, dict):
+            continue
+        for probe in row.get("probes", []):
+            if not isinstance(probe, dict):
+                continue
+            for field in ["stdout_path", "stderr_path"]:
+                raw = probe.get(field)
+                if raw and not pathlib.Path(str(raw)).is_file():
+                    errors.append(f"{row.get('name')} probe {field} does not exist: {raw}")
+    return errors
 
 
 def run_self_test() -> int:
@@ -744,12 +804,39 @@ def run_self_test() -> int:
     base.mkdir(parents=True, exist_ok=True)
     failures: list[str] = []
     summaries = []
+
+    current_dir = base / "current_host"
+    current_manifest = detect_manifest(current_dir)
+    current_errors = validate_manifest(current_manifest)
+    if current_manifest.get("verdict") not in {"pass", "blocked"}:
+        current_errors.append(
+            f"current host expected verdict pass or blocked, got {current_manifest.get('verdict')}"
+        )
+    current_out = current_dir / "preflight.json"
+    write_manifest(current_manifest, current_out)
+    current_errors.extend(validate_written_artifacts(current_manifest))
+    current_outcome = "PASS" if not current_errors else "FAIL"
+    print(
+        f"SCENARIO_RESULT|scenario_id=xfstests_preflight_current_host|outcome={current_outcome}|detail={current_out}"
+    )
+    failures.extend(current_errors)
+    summaries.append(
+        {
+            "fixture": None,
+            "scenario_id": "xfstests_preflight_current_host",
+            "out": str(current_out),
+            "verdict": current_manifest.get("verdict"),
+            "blocking_prerequisites": current_manifest.get("blocking_prerequisites", []),
+            "errors": current_errors,
+        }
+    )
+
     expected = {
-        "all-present": "pass",
-        "blocked": "blocked",
-        "worker": "pass",
+        "all-present": ("pass", "xfstests_preflight_all_present"),
+        "blocked": ("blocked", "xfstests_preflight_blocked"),
+        "worker": ("pass", "xfstests_preflight_worker"),
     }
-    for mode, expected_verdict in expected.items():
+    for mode, (expected_verdict, scenario_id) in expected.items():
         manifest = fixture_manifest(mode, base / mode)
         errors = validate_manifest(manifest)
         if manifest.get("verdict") != expected_verdict:
@@ -780,10 +867,20 @@ def run_self_test() -> int:
                 errors.append(f"fixture {mode} unsafe remediation row: {row.get('name')}")
         out = base / mode / "preflight.json"
         write_manifest(manifest, out)
+        errors.extend(validate_written_artifacts(manifest))
         outcome = "PASS" if not errors else "FAIL"
-        print(f"SCENARIO_RESULT|scenario_id=xfstests_preflight_{mode}|outcome={outcome}|detail={out}")
+        print(f"SCENARIO_RESULT|scenario_id={scenario_id}|outcome={outcome}|detail={out}")
         failures.extend(errors)
-        summaries.append({"fixture": mode, "out": str(out), "errors": errors})
+        summaries.append(
+            {
+                "fixture": mode,
+                "scenario_id": scenario_id,
+                "out": str(out),
+                "verdict": manifest.get("verdict"),
+                "blocking_prerequisites": manifest.get("blocking_prerequisites", []),
+                "errors": errors,
+            }
+        )
     summary = {
         "schema_version": 1,
         "bead_id": "bd-rchk3.1.1",

@@ -710,6 +710,14 @@ required = {
     "rch_ci_worker_identity",
 }
 side_effect_policy = "read_only_probe_no_install_no_mount_no_host_mutation"
+status_values = {
+    "present",
+    "missing",
+    "blocked-by-host",
+    "blocked-by-lock",
+    "unsupported-locally",
+    "available-on-worker",
+}
 risk_values = {"satisfied", "blocking", "advisory"}
 lane_impacts = {
     "none",
@@ -770,6 +778,55 @@ if age > max_age_secs:
     print(f"stale preflight manifest: age_secs={age:.0f} max_age_secs={max_age_secs}")
     sys.exit(1)
 
+if manifest.get("schema_version") != 1:
+    print("preflight manifest schema_version must be 1")
+    sys.exit(1)
+if manifest.get("bead_id") != "bd-rchk3.1.1":
+    print("preflight manifest bead_id must be bd-rchk3.1.1")
+    sys.exit(1)
+if set(manifest.get("status_vocabulary", [])) != status_values:
+    print("preflight manifest status_vocabulary does not match required statuses")
+    sys.exit(1)
+if set(manifest.get("risk_vocabulary", [])) != risk_values:
+    print("preflight manifest risk_vocabulary does not match required risk levels")
+    sys.exit(1)
+if set(manifest.get("authoritative_lane_impact_vocabulary", [])) != lane_impacts:
+    print("preflight manifest lane-impact vocabulary does not match required values")
+    sys.exit(1)
+
+for field in [
+    "host",
+    "worker_identity",
+    "paths",
+    "transcript_dir",
+    "stdout_path",
+    "stderr_path",
+    "cleanup_status",
+    "reproduction_command",
+]:
+    if field not in manifest:
+        print(f"preflight manifest missing {field}")
+        sys.exit(1)
+if manifest.get("cleanup_status") != "no_mounts_or_temp_files_created":
+    print("preflight manifest cleanup_status does not prove read-only preflight cleanup")
+    sys.exit(1)
+for field in ["stdout_path", "stderr_path"]:
+    path = pathlib.Path(str(manifest.get(field)))
+    if not path.is_file():
+        print(f"preflight manifest {field} does not exist: {path}")
+        sys.exit(1)
+transcript_dir = pathlib.Path(str(manifest.get("transcript_dir")))
+if not transcript_dir.is_dir():
+    print(f"preflight manifest transcript_dir does not exist: {transcript_dir}")
+    sys.exit(1)
+links = manifest.get("links", {})
+if links.get("selected_test_policy_bead") != "bd-rchk3.2":
+    print("preflight manifest must link selected-test policy bead bd-rchk3.2")
+    sys.exit(1)
+if links.get("real_execution_bead") != "bd-rchk3.3":
+    print("preflight manifest must link real execution bead bd-rchk3.3")
+    sys.exit(1)
+
 prereqs = manifest.get("prerequisites")
 if not isinstance(prereqs, list):
     print("preflight manifest prerequisites must be a list")
@@ -816,6 +873,9 @@ for row in prereqs:
     if blocks and status != "present":
         print(f"blocking prerequisite is not present: {name} status={status}")
         sys.exit(1)
+    if status not in status_values:
+        print(f"preflight prerequisite {name} has invalid status")
+        sys.exit(1)
     if row.get("risk_level") not in risk_values:
         print(f"preflight prerequisite {name} has invalid risk_level")
         sys.exit(1)
@@ -854,6 +914,12 @@ for row in prereqs:
         if isinstance(probe, dict) and not safe_probe_argv(probe.get("argv")):
             print(f"preflight prerequisite {name} has mutating probe argv: {probe.get('argv')}")
             sys.exit(1)
+        if isinstance(probe, dict):
+            for field in ["stdout_path", "stderr_path"]:
+                raw = probe.get(field)
+                if raw and not pathlib.Path(str(raw)).is_file():
+                    print(f"preflight prerequisite {name} probe {field} does not exist: {raw}")
+                    sys.exit(1)
 
 print("preflight passed")
 PY

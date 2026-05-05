@@ -709,6 +709,41 @@
       ]
     },
     {
+      "suite_id": "ffs_xfstests_preflight",
+      "script": "scripts/e2e/ffs_xfstests_preflight_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "xfstests_preflight_current_host",
+          "category": "edge",
+          "status": "active",
+          "evidence": "xfstests_preflight_current_host"
+        },
+        {
+          "id": "xfstests_preflight_all_present",
+          "category": "happy",
+          "status": "active",
+          "evidence": "xfstests_preflight_all_present"
+        },
+        {
+          "id": "xfstests_preflight_blocked",
+          "category": "error",
+          "status": "active",
+          "evidence": "xfstests_preflight_blocked"
+        },
+        {
+          "id": "xfstests_preflight_worker",
+          "category": "happy",
+          "status": "active",
+          "evidence": "xfstests_preflight_worker"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_expansion",
       "script": "scripts/e2e/ffs_benchmark_expansion_e2e.sh",
       "required_categories": [
