@@ -3,21 +3,43 @@
 Initial baseline analysis for the curated xfstests subset against FrankenFS
 FUSE mount. Established 2026-03-18.
 
-> **Freshness note (2026-05-01):** The curated subset was re-materialized and
-> regression-gated on the current tree, but a real pass/fail execution remains
-> blocked by the local xfstests checkout/tooling environment. The wrapper
-> selected all 11 tests, then `./check -n ...` stopped before execution because
-> `ltp/fsstress` is not built. Rebuilding xfstests stopped at missing
-> `<xfs/xfs.h>` (`xfslibs-dev`), and installing that dependency is currently
-> blocked by an existing `apt-get upgrade -y` process holding the dpkg frontend
-> lock. Treat the table below as the last executable taxonomy plus the dated
-> 2026-05-01 environment-blocked baseline attempt.
+> **Freshness note (2026-05-05):** The current host prerequisite preflight now
+> passes with explicit `XFSTESTS_DIR`, `TEST_DIR`, and `SCRATCH_MNT`. The host
+> has xfs headers, libaio headers, built `ltp/fsstress`, xfstests helpers,
+> `/dev/fuse`, `fusermount3`, mount helpers, and writable scratch/test
+> directories. This is prerequisite evidence only; the curated subset still has
+> no fresh runtime pass/fail signal until `bd-rchk3.3` executes xfstests.
 >
 > **Policy refresh (2026-05-04):** The dry-run subset policy now also includes
 > explicit btrfs planning rows (`btrfs/001`, `btrfs/008`) so the xfstests
 > artifacts distinguish generic, ext4, and btrfs scope. These rows are not new
 > pass/fail runtime evidence; they are classified before execution until the
 > permissioned xfstests lane is available.
+
+## Prerequisite Preflight - 2026-05-05
+
+| Item | Result |
+|------|--------|
+| Commit | `226e763e` (`main`) |
+| Host/kernel | `thinkstation1`, Linux `6.17.0-14-generic` |
+| Rust | `rustc 1.97.0-nightly (37d85e592 2026-04-28)` |
+| Package install command | `sudo apt-get install -y xfslibs-dev libaio-dev` |
+| xfstests build command | `make -C third_party/xfstests-dev` |
+| Preflight command | `XFSTESTS_DIR=third_party/xfstests-dev TEST_DIR=artifacts/e2e/20260505_blacklynx_xfstests_preflight/test_dir SCRATCH_MNT=artifacts/e2e/20260505_blacklynx_xfstests_preflight/scratch_mnt ./scripts/e2e/ffs_xfstests_preflight_e2e.sh --out artifacts/e2e/20260505_blacklynx_xfstests_preflight/preflight.json` |
+| Preflight artifact | `artifacts/e2e/20260505_blacklynx_xfstests_preflight/preflight.json` |
+| Preflight verdict | `pass` |
+| Blocking prerequisites | none |
+| Satisfied host prerequisites | `xfs_headers`, `libaio`, `ltp_fsstress`, `xfstests_helpers`, `mkfs_mount_helpers`, `/dev/fuse`, `fusermount3`, `user_namespace_or_mount_permissions`, `scratch_test_directories`, `dpkg_lock_state` |
+| Worker/release lane | `rch_ci_worker_identity=unsupported-locally`; release evidence still requires an RCH/CI worker run |
+| Side-effect policy | `read_only_probe_no_install_no_mount_no_host_mutation`; remediation is manual-only and requires a fresh follow-up probe |
+| Script-test command | `./scripts/e2e/ffs_xfstests_preflight_e2e.sh --self-test` |
+| Script-test artifact | `artifacts/e2e/20260505_020103_xfstests_preflight_selftest/self_test_summary.json` |
+| Script-test outcome | PASS for current host plus all-present, blocked, host-missing, permission-denied, dpkg-locked, worker, worker-mismatch, and unsupported-local fixtures |
+
+The remaining gap is runtime execution, not prerequisite setup. The next real
+xfstests attempt should reuse the explicit `XFSTESTS_DIR`, `TEST_DIR`, and
+`SCRATCH_MNT` values above, refresh the preflight artifact, then execute
+`bd-rchk3.3`.
 
 ## Fresh Baseline Attempt - 2026-05-01
 

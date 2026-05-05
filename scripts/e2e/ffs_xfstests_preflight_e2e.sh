@@ -637,6 +637,7 @@ def build_manifest(prereqs: list[dict], *, artifact_dir: pathlib.Path, fixture: 
         "schema_version": 1,
         "preflight_id": PREFLIGHT_ID,
         "probe_version": PROBE_VERSION,
+        "closure_bead_id": "bd-rchk3.1",
         "bead_id": "bd-rchk3.1.1",
         "refinement_bead_id": "bd-f3hug",
         "created_at": iso_now(),
@@ -724,6 +725,8 @@ def validate_manifest(manifest: dict) -> list[str]:
         errors.append(f"manifest probe_version must be {PROBE_VERSION}")
     if manifest.get("bead_id") != "bd-rchk3.1.1":
         errors.append("manifest bead_id must be bd-rchk3.1.1")
+    if manifest.get("closure_bead_id") != "bd-rchk3.1":
+        errors.append("manifest closure_bead_id must be bd-rchk3.1")
     if set(manifest.get("status_vocabulary", [])) != STATUS_VALUES:
         errors.append("manifest status_vocabulary does not match required statuses")
     if set(manifest.get("risk_vocabulary", [])) != RISK_VALUES:
@@ -1056,6 +1059,7 @@ def run_self_test() -> int:
         )
     summary = {
         "schema_version": 1,
+        "closure_bead_id": "bd-rchk3.1",
         "bead_id": "bd-rchk3.1.1",
         "created_at": iso_now(),
         "fixtures": summaries,
