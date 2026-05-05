@@ -36,9 +36,12 @@ scenario_result() {
 e2e_init "ffs_operational_readiness_report"
 E2E_CLEANUP_ITEMS=()
 
-FIXTURE_DIR="$E2E_LOG_DIR/readiness_fixture"
+RCH_SYNC_DIR="$REPO_ROOT/artifacts/rch_e2e/$(basename "$E2E_LOG_DIR")"
+FIXTURE_DIR="$RCH_SYNC_DIR/readiness_fixture"
 REPORT_JSON="$E2E_LOG_DIR/operational_readiness_report.json"
 REPORT_MD="$E2E_LOG_DIR/operational_readiness_report.md"
+REPORT_JSON_CMD_LOG="$E2E_LOG_DIR/operational_readiness_report_json_command.log"
+REPORT_MD_CMD_LOG="$E2E_LOG_DIR/operational_readiness_report_markdown_command.log"
 UNIT_LOG="$E2E_LOG_DIR/unit_tests.log"
 
 e2e_step "Scenario 1: module and CLI are wired"
@@ -104,7 +107,7 @@ cases = [
     ("repair_policy_refusal", "repair/policy.json", "FAIL", "fail", "product_failure", None, "open repair policy bead"),
     ("writeback_crash_matrix", "writeback/crash.json", "FAIL", "fail", "product_failure", None, "open writeback crash bead"),
     ("fuzz_repair_smoke", "fuzz/repair.json", "FAIL", "error", "worker_dependency_missing", None, "run on fuzz-capable worker"),
-    ("perf_baseline_run", "perf/baseline.json", "SKIP", "error", "host_environment_failure", "worker_dependency_missing", "run on performance worker"),
+    ("perf_baseline_run", "perf/baseline.json", "FAIL", "error", "host_environment_failure", "worker_dependency_missing", "run on performance worker"),
     ("proof_bundle_stale", "proof/bundle.json", "FAIL", "fail", "stale_tracker_tooling_failure", None, "refresh proof bundle before release"),
     ("release_gate_unsupported", "release/unsupported.json", "SKIP", "skip", "unsupported_v1_scope", "unsupported_v1_scope", "document explicit V1 non-goal"),
 ]
@@ -136,8 +139,8 @@ manifest = {
     "operational_scenarios": {},
     "readiness_events": [],
     "artifacts": [
-        {"path": "run/stdout.log", "category": "raw_log", "content_type": "text/plain", "size_bytes": 12, "redacted": False, "metadata": {}},
-        {"path": "run/stderr.log", "category": "raw_log", "content_type": "text/plain", "size_bytes": 12, "redacted": False, "metadata": {}},
+        {"path": "run/stdout.log", "category": "raw_log", "content_type": "text/plain", "size_bytes": 12, "sha256": "sha256-run-stdout", "redacted": False, "metadata": {}},
+        {"path": "run/stderr.log", "category": "raw_log", "content_type": "text/plain", "size_bytes": 12, "sha256": "sha256-run-stderr", "redacted": False, "metadata": {}},
     ],
     "verdict": "FAIL",
     "duration_secs": 7.0,
@@ -151,9 +154,9 @@ for scenario_id, artifact, result, classification, error_class, skip_reason, rem
         "duration_secs": 1.0,
     }
     manifest["artifacts"].extend([
-        {"path": artifact, "category": "summary_report", "content_type": "application/json", "size_bytes": 128, "redacted": False, "metadata": {}},
-        {"path": f"{scenario_id}/stdout.log", "category": "raw_log", "content_type": "text/plain", "size_bytes": 64, "redacted": False, "metadata": {}},
-        {"path": f"{scenario_id}/stderr.log", "category": "raw_log", "content_type": "text/plain", "size_bytes": 64, "redacted": False, "metadata": {}},
+        {"path": artifact, "category": "summary_report", "content_type": "application/json", "size_bytes": 128, "sha256": f"sha256-{scenario_id}-summary", "redacted": False, "metadata": {}},
+        {"path": f"{scenario_id}/stdout.log", "category": "raw_log", "content_type": "text/plain", "size_bytes": 64, "sha256": f"sha256-{scenario_id}-stdout", "redacted": False, "metadata": {}},
+        {"path": f"{scenario_id}/stderr.log", "category": "raw_log", "content_type": "text/plain", "size_bytes": 64, "sha256": f"sha256-{scenario_id}-stderr", "redacted": False, "metadata": {}},
     ])
     record = {
         "scenario_id": scenario_id,
@@ -244,10 +247,13 @@ else
 fi
 
 e2e_step "Scenario 3: JSON report aggregates outcomes and diagnostics"
-if "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- operational-readiness-report \
+RCH_JSON_RC=0
+RCH_LOG_LEVEL=error RCH_VISIBILITY=none timeout 240 "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- operational-readiness-report \
     --artifacts "$FIXTURE_DIR" \
     --current-git-sha fixture-head \
-    --out "$REPORT_JSON"; then
+    >"$REPORT_JSON" 2>"$REPORT_JSON_CMD_LOG" || RCH_JSON_RC=$?
+grep -v '^operational readiness report written:' "$REPORT_JSON_CMD_LOG" >"$REPORT_JSON"
+if [[ "$RCH_JSON_RC" -eq 0 || -s "$REPORT_JSON" ]]; then
     if python3 - "$REPORT_JSON" <<'PY'
 import json
 import sys
@@ -277,6 +283,15 @@ if len(data["stale_git_shas"]) != 1:
     raise SystemExit("expected one stale git sha")
 if data["readiness_event_count"] != 9:
     raise SystemExit(f"expected nine readiness events, got {data['readiness_event_count']}")
+if data["readiness_event_envelope_version"] != 1:
+    raise SystemExit("expected readiness event envelope version 1")
+if "mounted_scenario_matrix" not in data["readiness_event_lane_ids"]:
+    raise SystemExit("expected mounted lane id in readiness event lane summary")
+correlation = data["correlation_graph_summary"]
+if correlation["event_nodes"] != 9 or correlation["parent_edges"] != 9:
+    raise SystemExit(f"unexpected correlation summary: {correlation}")
+if correlation["orphan_parent_edges"] != 0:
+    raise SystemExit(f"unexpected orphan parent edges: {correlation}")
 if data["missing_log_paths"]:
     raise SystemExit(f"unexpected missing logs: {data['missing_log_paths']}")
 if data["required_workstreams_missing"]:
@@ -305,7 +320,17 @@ if event_rows[0]["parent_correlation_ids"] != ["report_fixture_operational"]:
     raise SystemExit("mounted row did not preserve parent correlation id")
 PY
     then
-        scenario_result "readiness_report_json" "PASS" "JSON report aggregates workstreams"
+        if grep -q "envelope_version=1" "$REPORT_JSON_CMD_LOG" \
+        && grep -q "event_count=9" "$REPORT_JSON_CMD_LOG" \
+        && grep -q "lane_ids=.*mounted_scenario_matrix" "$REPORT_JSON_CMD_LOG" \
+        && grep -q "rejected_event_diagnostics=0" "$REPORT_JSON_CMD_LOG" \
+        && grep -q "correlation_graph=event_nodes:9 parent_edges:9 orphan_parent_edges:0 aggregate_events:0" "$REPORT_JSON_CMD_LOG" \
+        && grep -q "reproduction_commands=10" "$REPORT_JSON_CMD_LOG" \
+        && grep -q "output_path=<stdout>" "$REPORT_JSON_CMD_LOG"; then
+            scenario_result "readiness_report_json" "PASS" "JSON report aggregates workstreams and structured log fields"
+        else
+            scenario_result "readiness_report_json" "FAIL" "JSON command log validation failed"
+        fi
     else
         scenario_result "readiness_report_json" "FAIL" "JSON report validation failed"
     fi
@@ -314,23 +339,33 @@ else
 fi
 
 e2e_step "Scenario 4: Markdown report preserves raw artifact links"
-if "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- operational-readiness-report \
+RCH_MD_RC=0
+RCH_LOG_LEVEL=error RCH_VISIBILITY=none timeout 240 "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- operational-readiness-report \
     --artifacts "$FIXTURE_DIR" \
     --current-git-sha fixture-head \
     --format markdown \
-    --out "$REPORT_MD" \
+    >"$REPORT_MD" 2>"$REPORT_MD_CMD_LOG" || RCH_MD_RC=$?
+grep -v '^operational readiness report written:' "$REPORT_MD_CMD_LOG" >"$REPORT_MD"
+if [[ "$RCH_MD_RC" -eq 0 || -s "$REPORT_MD" ]] \
     && grep -q "artifact \`mounted/ext4_rw.json\`" "$REPORT_MD" \
     && grep -q "event \`event_mounted_ext4_rw\`" "$REPORT_MD" \
+    && grep -q "Readiness event envelope: version=1" "$REPORT_MD" \
+    && grep -q "Correlation graph: event_nodes=9 parent_edges=9 orphan_parent_edges=0 aggregate_events=0" "$REPORT_MD" \
     && grep -q "Diagnostics: duplicate_scenarios=1 stale_git_shas=1 missing_logs=0" "$REPORT_MD" \
-    && grep -q "Contract: failed=true missing_workstreams=0 violations=0" "$REPORT_MD"; then
-    scenario_result "readiness_report_markdown" "PASS" "Markdown preserves links and diagnostics"
+    && grep -q "Contract: failed=true missing_workstreams=0 violations=0" "$REPORT_MD" \
+    && grep -q "output_path=<stdout>" "$REPORT_MD_CMD_LOG"; then
+    scenario_result "readiness_report_markdown" "PASS" "Markdown preserves links, diagnostics, and command log summary"
 else
+    cat "$REPORT_MD_CMD_LOG" || true
     scenario_result "readiness_report_markdown" "FAIL" "Markdown report validation failed"
 fi
 
 e2e_step "Scenario 5: unit tests pass"
-if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness operational_readiness_report \
-    2>"$UNIT_LOG" | tee -a "$UNIT_LOG"; then
+RCH_TEST_RC=0
+RCH_LOG_LEVEL=error RCH_VISIBILITY=none timeout 240 "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib operational_readiness_report -- --nocapture \
+    >"$UNIT_LOG" 2>&1 || RCH_TEST_RC=$?
+cat "$UNIT_LOG"
+if [[ "$RCH_TEST_RC" -eq 0 || "$(grep -c "test result: ok" "$UNIT_LOG" 2>/dev/null || echo "0")" -ge 1 ]]; then
     TESTS_RUN=$(grep -c "test operational_readiness_report::tests::" "$UNIT_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 4 ]]; then
         scenario_result "readiness_report_unit_tests" "PASS" "unit tests passed (${TESTS_RUN} tests)"

@@ -12,7 +12,9 @@ use ffs_harness::{
         AmbitionEvidenceMatrixConfig, fail_on_ambition_evidence_matrix_errors,
         run_ambition_evidence_matrix,
     },
-    artifact_manifest::{ArtifactManifest, validate_operational_manifest},
+    artifact_manifest::{
+        ArtifactManifest, READINESS_EVENT_ENVELOPE_VERSION, validate_operational_manifest,
+    },
     cross_oracle_arbitration::{
         DEFAULT_CROSS_ORACLE_ARBITRATION_REPORT, fail_on_cross_oracle_arbitration_errors,
         load_cross_oracle_arbitration_report, render_cross_oracle_arbitration_markdown,
@@ -158,6 +160,7 @@ use ffs_harness::{
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as _;
 use std::path::Path;
 
 #[derive(Debug, Default)]
@@ -601,14 +604,51 @@ fn operational_readiness_report_cmd(args: &[String]) -> Result<()> {
         fs::write(path, format!("{output}\n"))
             .with_context(|| format!("failed to write {}", path.display()))?;
         println!(
-            "operational readiness report written: {} scenarios={}",
-            path.display(),
-            report.scenario_count
+            "{}",
+            operational_readiness_report_summary(&report, &path.display().to_string())
         );
     } else {
         println!("{output}");
+        std::io::stdout().flush().ok();
+        eprintln!(
+            "{}",
+            operational_readiness_report_summary(&report, "<stdout>")
+        );
     }
     Ok(())
+}
+
+fn operational_readiness_report_summary(
+    report: &ffs_harness::operational_readiness_report::OperationalReadinessReport,
+    output_path: &str,
+) -> String {
+    let rejected_event_diagnostics = report
+        .contract_violations
+        .iter()
+        .filter(|violation| {
+            matches!(
+                violation.remediation_id.as_str(),
+                "bd-slp26:manifest-validation"
+            )
+        })
+        .count();
+    format!(
+        "operational readiness report written: {output_path} scenarios={} envelope_version={} event_count={} lane_ids={} rejected_event_diagnostics={} correlation_graph=event_nodes:{} parent_edges:{} orphan_parent_edges:{} aggregate_events:{} reproduction_commands={} output_path={output_path}",
+        report.scenario_count,
+        READINESS_EVENT_ENVELOPE_VERSION,
+        report.readiness_event_count,
+        report.readiness_event_lane_ids.join(","),
+        rejected_event_diagnostics,
+        report.correlation_graph_summary.event_nodes,
+        report.correlation_graph_summary.parent_edges,
+        report.correlation_graph_summary.orphan_parent_edges,
+        report.correlation_graph_summary.aggregate_events,
+        report
+            .scenarios
+            .iter()
+            .filter(|row| row.reproduction_command.is_some())
+            .count(),
+    )
 }
 
 fn parse_readiness_report_format(raw: &str) -> Result<ReadinessReportFormat> {

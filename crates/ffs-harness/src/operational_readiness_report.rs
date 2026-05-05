@@ -9,8 +9,9 @@
 //! from host or worker blockers.
 
 use crate::artifact_manifest::{
-    ArtifactManifest, GateVerdict, OperationalErrorClass, OperationalOutcomeClass,
-    ReadinessEventEnvelope, ScenarioOutcome, ScenarioResult, SkipReason,
+    ArtifactManifest, GateVerdict, ManifestValidationError, OperationalErrorClass,
+    OperationalOutcomeClass, READINESS_EVENT_ENVELOPE_VERSION, ReadinessEventEnvelope,
+    ScenarioOutcome, ScenarioResult, SkipReason, validate_operational_manifest,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,9 @@ pub struct OperationalReadinessReport {
     pub ignored_json_count: usize,
     pub scenario_count: usize,
     pub readiness_event_count: usize,
+    pub readiness_event_envelope_version: u32,
+    pub readiness_event_lane_ids: Vec<String>,
+    pub correlation_graph_summary: ReadinessCorrelationGraphSummary,
     pub totals: ReadinessCounts,
     pub workstreams: BTreeMap<String, ReadinessCounts>,
     pub required_workstreams_missing: Vec<String>,
@@ -77,6 +81,14 @@ pub struct ReadinessCounts {
     pub error: usize,
     pub product_failures: usize,
     pub environment_blockers: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessCorrelationGraphSummary {
+    pub event_nodes: usize,
+    pub parent_edges: usize,
+    pub orphan_parent_edges: usize,
+    pub aggregate_events: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +214,8 @@ struct ReportBuilder {
     source_legacy_summary_count: usize,
     ignored_json_count: usize,
     readiness_event_count: usize,
+    readiness_event_lane_ids: BTreeSet<String>,
+    correlation_graph_summary: ReadinessCorrelationGraphSummary,
     totals: ReadinessCounts,
     workstreams: BTreeMap<String, ReadinessCounts>,
     seen_scenarios: BTreeMap<String, usize>,
@@ -254,48 +268,7 @@ pub fn build_operational_readiness_report(
 #[must_use]
 pub fn render_operational_readiness_markdown(report: &OperationalReadinessReport) -> String {
     let mut out = String::new();
-    writeln!(&mut out, "# FrankenFS Operational Readiness").ok();
-    writeln!(&mut out).ok();
-    writeln!(&mut out, "- Source root: `{}`", report.source_root).ok();
-    writeln!(
-        &mut out,
-        "- Sources: {} manifests, {} legacy summaries, {} ignored JSON files",
-        report.source_manifest_count, report.source_legacy_summary_count, report.ignored_json_count
-    )
-    .ok();
-    writeln!(
-        &mut out,
-        "- Readiness events: {}",
-        report.readiness_event_count
-    )
-    .ok();
-    writeln!(
-        &mut out,
-        "- Totals: pass={} fail={} skip={} error={} product_failures={} environment_blockers={}",
-        report.totals.pass,
-        report.totals.fail,
-        report.totals.skip,
-        report.totals.error,
-        report.totals.product_failures,
-        report.totals.environment_blockers
-    )
-    .ok();
-    writeln!(
-        &mut out,
-        "- Diagnostics: duplicate_scenarios={} stale_git_shas={} missing_logs={}",
-        report.duplicate_scenario_ids.len(),
-        report.stale_git_shas.len(),
-        report.missing_log_paths.len()
-    )
-    .ok();
-    writeln!(
-        &mut out,
-        "- Contract: failed={} missing_workstreams={} violations={}",
-        report.contract_failed,
-        report.required_workstreams_missing.len(),
-        report.contract_violations.len()
-    )
-    .ok();
+    render_operational_readiness_markdown_summary(&mut out, report);
     writeln!(&mut out).ok();
     writeln!(&mut out, "## Workstreams").ok();
     for (workstream, counts) in &report.workstreams {
@@ -340,6 +313,65 @@ pub fn render_operational_readiness_markdown(report: &OperationalReadinessReport
     out
 }
 
+fn render_operational_readiness_markdown_summary(
+    out: &mut String,
+    report: &OperationalReadinessReport,
+) {
+    writeln!(out, "# FrankenFS Operational Readiness").ok();
+    writeln!(out).ok();
+    writeln!(out, "- Source root: `{}`", report.source_root).ok();
+    writeln!(
+        out,
+        "- Sources: {} manifests, {} legacy summaries, {} ignored JSON files",
+        report.source_manifest_count, report.source_legacy_summary_count, report.ignored_json_count
+    )
+    .ok();
+    writeln!(out, "- Readiness events: {}", report.readiness_event_count).ok();
+    writeln!(
+        out,
+        "- Readiness event envelope: version={} lanes={}",
+        report.readiness_event_envelope_version,
+        report.readiness_event_lane_ids.join(",")
+    )
+    .ok();
+    writeln!(
+        out,
+        "- Correlation graph: event_nodes={} parent_edges={} orphan_parent_edges={} aggregate_events={}",
+        report.correlation_graph_summary.event_nodes,
+        report.correlation_graph_summary.parent_edges,
+        report.correlation_graph_summary.orphan_parent_edges,
+        report.correlation_graph_summary.aggregate_events
+    )
+    .ok();
+    writeln!(
+        out,
+        "- Totals: pass={} fail={} skip={} error={} product_failures={} environment_blockers={}",
+        report.totals.pass,
+        report.totals.fail,
+        report.totals.skip,
+        report.totals.error,
+        report.totals.product_failures,
+        report.totals.environment_blockers
+    )
+    .ok();
+    writeln!(
+        out,
+        "- Diagnostics: duplicate_scenarios={} stale_git_shas={} missing_logs={}",
+        report.duplicate_scenario_ids.len(),
+        report.stale_git_shas.len(),
+        report.missing_log_paths.len()
+    )
+    .ok();
+    writeln!(
+        out,
+        "- Contract: failed={} missing_workstreams={} violations={}",
+        report.contract_failed,
+        report.required_workstreams_missing.len(),
+        report.contract_violations.len()
+    )
+    .ok();
+}
+
 impl ReportBuilder {
     fn ingest_manifest(
         &mut self,
@@ -358,6 +390,8 @@ impl ReportBuilder {
         );
         self.record_manifest_run_logs(config, source_path, &source_path_text, manifest);
         self.readiness_event_count += manifest.readiness_events.len();
+        self.record_readiness_event_graph(manifest);
+        self.record_manifest_validation_errors(&source_path_text, manifest);
         let readiness_events = readiness_events_by_scenario(manifest);
 
         for (scenario_id, scenario) in &manifest.scenarios {
@@ -560,6 +594,9 @@ impl ReportBuilder {
             ignored_json_count: self.ignored_json_count,
             scenario_count: self.scenarios.len(),
             readiness_event_count: self.readiness_event_count,
+            readiness_event_envelope_version: READINESS_EVENT_ENVELOPE_VERSION,
+            readiness_event_lane_ids: self.readiness_event_lane_ids.into_iter().collect(),
+            correlation_graph_summary: self.correlation_graph_summary,
             totals: self.totals,
             workstreams: self.workstreams,
             contract_failed: !required_workstreams_missing.is_empty()
@@ -642,6 +679,46 @@ impl ReportBuilder {
                 "operational_context.stderr_path",
                 &context.stderr_path,
                 &artifacts,
+            );
+        }
+    }
+
+    fn record_readiness_event_graph(&mut self, manifest: &ArtifactManifest) {
+        let event_ids = manifest
+            .readiness_events
+            .iter()
+            .map(|event| event.event_id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        for event in &manifest.readiness_events {
+            if !event.lane_id.trim().is_empty() {
+                self.readiness_event_lane_ids.insert(event.lane_id.clone());
+            }
+            self.correlation_graph_summary.event_nodes += 1;
+            if event.aggregate_marker.is_some() {
+                self.correlation_graph_summary.aggregate_events += 1;
+            }
+            if let Some(parent_id) = event.parent_correlation_id.as_deref() {
+                self.correlation_graph_summary.parent_edges += 1;
+                if parent_id != event.report_id && !event_ids.contains(parent_id) {
+                    self.correlation_graph_summary.orphan_parent_edges += 1;
+                }
+            }
+        }
+    }
+
+    fn record_manifest_validation_errors(
+        &mut self,
+        source_path_text: &str,
+        manifest: &ArtifactManifest,
+    ) {
+        for error in validate_operational_manifest(manifest) {
+            let scenario_id = validation_error_scenario_id(&error);
+            self.record_contract_violation(
+                source_path_text,
+                scenario_id,
+                format!("rejected manifest validation error: {error}"),
+                "bd-slp26:manifest-validation",
             );
         }
     }
@@ -764,6 +841,40 @@ fn readiness_events_by_scenario(
         }
     }
     events
+}
+
+fn validation_error_scenario_id(error: &ManifestValidationError) -> Option<&str> {
+    match error {
+        ManifestValidationError::MissingOperationalScenario(id)
+        | ManifestValidationError::MissingCleanupStatus(id)
+        | ManifestValidationError::MissingReadinessEvent(id) => Some(id),
+        ManifestValidationError::OperationalScenarioIdMismatch { key, .. }
+        | ManifestValidationError::MissingOperationalLogPath {
+            scenario_id: key, ..
+        }
+        | ManifestValidationError::InvalidOperationalClassification {
+            scenario_id: key, ..
+        }
+        | ManifestValidationError::UnknownArtifactRef {
+            scenario_id: key, ..
+        } => Some(key),
+        ManifestValidationError::UnsupportedVersion(_)
+        | ManifestValidationError::EmptyRunId
+        | ManifestValidationError::EmptyGateId
+        | ManifestValidationError::InvalidTimestamp(_)
+        | ManifestValidationError::EmptyGitCommit
+        | ManifestValidationError::InvalidScenarioId(_)
+        | ManifestValidationError::EmptyArtifactPath
+        | ManifestValidationError::MalformedArtifactPath(_)
+        | ManifestValidationError::DuplicateScenarioId(_)
+        | ManifestValidationError::ScenarioIdMismatch { .. }
+        | ManifestValidationError::InconsistentVerdict
+        | ManifestValidationError::MissingOperationalContext
+        | ManifestValidationError::EmptyOperationalCommandLine
+        | ManifestValidationError::EmptyOperationalHost
+        | ManifestValidationError::FuseCapabilityNotChecked
+        | ManifestValidationError::InvalidReadinessEvent { .. } => None,
+    }
 }
 
 fn build_manifest_row(
@@ -1190,6 +1301,13 @@ mod tests {
         assert_eq!(report.source_manifest_count, 1);
         assert_eq!(report.scenario_count, 9);
         assert_eq!(report.readiness_event_count, 9);
+        assert_eq!(
+            report.readiness_event_envelope_version,
+            crate::artifact_manifest::READINESS_EVENT_ENVELOPE_VERSION
+        );
+        assert_eq!(report.correlation_graph_summary.event_nodes, 9);
+        assert_eq!(report.correlation_graph_summary.parent_edges, 9);
+        assert_eq!(report.correlation_graph_summary.orphan_parent_edges, 0);
         assert_eq!(report.totals.pass, 2);
         assert_eq!(report.totals.fail, 3);
         assert_eq!(report.totals.skip, 2);
@@ -1207,6 +1325,16 @@ mod tests {
         assert!(report.workstreams.contains_key("performance"));
         assert!(report.workstreams.contains_key("proof_bundle"));
         assert!(report.workstreams.contains_key("release_gate"));
+        assert!(
+            report
+                .readiness_event_lane_ids
+                .contains(&"xfstests".to_owned())
+        );
+        assert!(
+            report
+                .readiness_event_lane_ids
+                .contains(&"release_gate".to_owned())
+        );
         assert!(report.scenarios.iter().any(|row| {
             row.scenario_id == "proof_bundle_stale"
                 && row.taxonomy_class == ReadinessTaxonomyClass::StaleArtifact
@@ -1276,6 +1404,8 @@ mod tests {
         assert!(markdown.contains("`mounted_ext4_rw`"));
         assert!(markdown.contains("artifact `mounted/ext4_rw.json`"));
         assert!(markdown.contains("Readiness events: 9"));
+        assert!(markdown.contains("Readiness event envelope: version=1"));
+        assert!(markdown.contains("Correlation graph: event_nodes=9 parent_edges=9"));
         assert!(markdown.contains("event `event_mounted_ext4_rw`"));
         assert!(markdown.contains("Contract: failed=false missing_workstreams=0 violations=0"));
     }
@@ -1299,161 +1429,201 @@ mod tests {
     }
 
     #[test]
-    fn taxonomy_covers_actionable_failure_contract_values() {
-        let cases = [
-            (
-                ReadinessTaxonomyClass::ProductFailure,
-                ReadinessOutcome::Fail,
-                Some(OperationalErrorClass::ProductFailure),
-                None,
-                "repair_policy",
-                false,
-                &["repair/policy.json"][..],
-                "",
-                "open repair policy bead",
-            ),
-            (
-                ReadinessTaxonomyClass::HostCapabilitySkip,
-                ReadinessOutcome::Skip,
-                Some(OperationalErrorClass::FusePermissionSkip),
-                Some(SkipReason::FusePermissionDenied),
-                "fuse_lane",
-                false,
-                &["fuse/capability.json"][..],
-                "",
-                "rerun with /dev/fuse access",
-            ),
-            (
-                ReadinessTaxonomyClass::AuthoritativeLaneUnavailable,
-                ReadinessOutcome::Skip,
-                Some(OperationalErrorClass::HostEnvironmentFailure),
-                Some(SkipReason::WorkerDependencyMissing),
-                "mounted_scenario_matrix",
-                false,
-                &["mounted/capability.json"][..],
-                "authoritative required lane unavailable",
-                "rerun on permissioned worker",
-            ),
-            (
-                ReadinessTaxonomyClass::HarnessFailure,
-                ReadinessOutcome::Error,
-                Some(OperationalErrorClass::HarnessBug),
-                None,
-                "xfstests",
-                false,
-                &["xfstests/raw.log"][..],
-                "",
-                "fix harness parser",
-            ),
-            (
-                ReadinessTaxonomyClass::UnsupportedByScope,
-                ReadinessOutcome::Skip,
-                Some(OperationalErrorClass::UnsupportedV1Scope),
-                Some(SkipReason::UnsupportedV1Scope),
-                "release_gate",
-                false,
-                &["release/unsupported.json"][..],
-                "",
-                "explicit V1 non-goal",
-            ),
-            (
-                ReadinessTaxonomyClass::StaleArtifact,
-                ReadinessOutcome::Fail,
-                Some(OperationalErrorClass::StaleTrackerToolingFailure),
-                None,
-                "proof_bundle",
-                false,
-                &["proof/stale.json"][..],
-                "",
-                "refresh proof bundle",
-            ),
-            (
-                ReadinessTaxonomyClass::MissingArtifact,
-                ReadinessOutcome::Error,
-                None,
-                None,
-                "proof_bundle",
-                false,
-                &[][..],
-                "",
-                "attach missing report",
-            ),
-            (
-                ReadinessTaxonomyClass::NoisyMeasurement,
-                ReadinessOutcome::Error,
-                Some(OperationalErrorClass::ResourceLimit),
-                None,
-                "performance",
-                false,
-                &["perf/baseline.json"][..],
-                "",
-                "rerun with isolated worker",
-            ),
-            (
-                ReadinessTaxonomyClass::SecurityRefusal,
-                ReadinessOutcome::Fail,
-                Some(OperationalErrorClass::ProductFailure),
-                None,
-                "release_gate",
-                false,
-                &["security/refusal.json"][..],
-                "security refusal for hostile proof path",
-                "keep release blocked",
-            ),
-            (
-                ReadinessTaxonomyClass::UnsafeRepairRefusal,
-                ReadinessOutcome::Fail,
-                Some(OperationalErrorClass::ProductFailure),
-                None,
-                "repair_policy",
-                false,
-                &["repair/refusal.json"][..],
-                "unsafe repair refused before mutation",
-                "use dry-run first",
-            ),
-            (
-                ReadinessTaxonomyClass::PassWithExperimentalCaveat,
-                ReadinessOutcome::Pass,
-                None,
-                None,
-                "performance",
-                false,
-                &["perf/smoke.json"][..],
-                "pass with experimental caveat",
-                "",
-            ),
-        ];
+    fn invalid_readiness_event_fails_report_contract() {
+        let fixture = ReadinessFixture::new();
+        let mut manifest = sample_operational_manifest("abc123");
+        let event = manifest
+            .readiness_events
+            .iter_mut()
+            .find(|event| event.scenario_id.as_deref() == Some("mounted_ext4_rw"))
+            .expect("event exists");
+        event.raw_log_refs.clear();
+        event.parent_correlation_id = Some("missing-parent-event".to_owned());
+        fixture.write_manifest("operational.json", &manifest);
 
-        for (
-            expected,
-            outcome,
-            error_class,
-            skip_reason,
-            workstream,
-            stale_git_sha,
-            artifact_refs,
-            detail,
-            remediation_hint,
-        ) in cases
+        let report = fixture.report(Some("abc123"));
+
+        assert!(report.contract_failed);
+        assert_eq!(report.correlation_graph_summary.orphan_parent_edges, 1);
+        assert!(report.contract_violations.iter().any(|violation| {
+            violation.remediation_id == "bd-slp26:manifest-validation"
+                && violation.violation.contains("raw_log_refs")
+        }));
+        assert!(report.contract_violations.iter().any(|violation| {
+            violation.remediation_id == "bd-slp26:manifest-validation"
+                && violation.violation.contains("parent_correlation_id")
+        }));
+    }
+
+    #[test]
+    fn taxonomy_covers_actionable_failure_contract_values() {
+        for case in taxonomy_primary_cases()
+            .into_iter()
+            .chain(taxonomy_secondary_cases())
         {
-            let artifact_refs = artifact_refs
+            let artifact_refs = case
+                .artifact_refs
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>();
             assert_eq!(
                 classify_taxonomy(&TaxonomyInput {
-                    outcome,
-                    error_class,
-                    skip_reason,
-                    workstream,
-                    stale_git_sha,
+                    outcome: case.outcome,
+                    error_class: case.error_class,
+                    skip_reason: case.skip_reason,
+                    workstream: case.workstream,
+                    stale_git_sha: case.stale_git_sha,
                     artifact_refs: &artifact_refs,
-                    detail: Some(detail),
-                    remediation_hint: Some(remediation_hint),
+                    detail: Some(case.detail),
+                    remediation_hint: Some(case.remediation_hint),
                 }),
-                expected
+                case.expected
             );
         }
+    }
+
+    #[derive(Clone, Copy)]
+    struct TaxonomyCase {
+        expected: ReadinessTaxonomyClass,
+        outcome: ReadinessOutcome,
+        error_class: Option<OperationalErrorClass>,
+        skip_reason: Option<SkipReason>,
+        workstream: &'static str,
+        stale_git_sha: bool,
+        artifact_refs: &'static [&'static str],
+        detail: &'static str,
+        remediation_hint: &'static str,
+    }
+
+    fn taxonomy_primary_cases() -> [TaxonomyCase; 6] {
+        [
+            TaxonomyCase {
+                expected: ReadinessTaxonomyClass::ProductFailure,
+                outcome: ReadinessOutcome::Fail,
+                error_class: Some(OperationalErrorClass::ProductFailure),
+                skip_reason: None,
+                workstream: "repair_policy",
+                stale_git_sha: false,
+                artifact_refs: &["repair/policy.json"],
+                detail: "",
+                remediation_hint: "open repair policy bead",
+            },
+            TaxonomyCase {
+                expected: ReadinessTaxonomyClass::HostCapabilitySkip,
+                outcome: ReadinessOutcome::Skip,
+                error_class: Some(OperationalErrorClass::FusePermissionSkip),
+                skip_reason: Some(SkipReason::FusePermissionDenied),
+                workstream: "fuse_lane",
+                stale_git_sha: false,
+                artifact_refs: &["fuse/capability.json"],
+                detail: "",
+                remediation_hint: "rerun with /dev/fuse access",
+            },
+            TaxonomyCase {
+                expected: ReadinessTaxonomyClass::AuthoritativeLaneUnavailable,
+                outcome: ReadinessOutcome::Skip,
+                error_class: Some(OperationalErrorClass::HostEnvironmentFailure),
+                skip_reason: Some(SkipReason::WorkerDependencyMissing),
+                workstream: "mounted_scenario_matrix",
+                stale_git_sha: false,
+                artifact_refs: &["mounted/capability.json"],
+                detail: "authoritative required lane unavailable",
+                remediation_hint: "rerun on permissioned worker",
+            },
+            TaxonomyCase {
+                expected: ReadinessTaxonomyClass::HarnessFailure,
+                outcome: ReadinessOutcome::Error,
+                error_class: Some(OperationalErrorClass::HarnessBug),
+                skip_reason: None,
+                workstream: "xfstests",
+                stale_git_sha: false,
+                artifact_refs: &["xfstests/raw.log"],
+                detail: "",
+                remediation_hint: "fix harness parser",
+            },
+            TaxonomyCase {
+                expected: ReadinessTaxonomyClass::UnsupportedByScope,
+                outcome: ReadinessOutcome::Skip,
+                error_class: Some(OperationalErrorClass::UnsupportedV1Scope),
+                skip_reason: Some(SkipReason::UnsupportedV1Scope),
+                workstream: "release_gate",
+                stale_git_sha: false,
+                artifact_refs: &["release/unsupported.json"],
+                detail: "",
+                remediation_hint: "explicit V1 non-goal",
+            },
+            TaxonomyCase {
+                expected: ReadinessTaxonomyClass::StaleArtifact,
+                outcome: ReadinessOutcome::Fail,
+                error_class: Some(OperationalErrorClass::StaleTrackerToolingFailure),
+                skip_reason: None,
+                workstream: "proof_bundle",
+                stale_git_sha: false,
+                artifact_refs: &["proof/stale.json"],
+                detail: "",
+                remediation_hint: "refresh proof bundle",
+            },
+        ]
+    }
+
+    fn taxonomy_secondary_cases() -> [TaxonomyCase; 5] {
+        [
+            TaxonomyCase {
+                expected: ReadinessTaxonomyClass::MissingArtifact,
+                outcome: ReadinessOutcome::Error,
+                error_class: None,
+                skip_reason: None,
+                workstream: "proof_bundle",
+                stale_git_sha: false,
+                artifact_refs: &[],
+                detail: "",
+                remediation_hint: "attach missing report",
+            },
+            TaxonomyCase {
+                expected: ReadinessTaxonomyClass::NoisyMeasurement,
+                outcome: ReadinessOutcome::Error,
+                error_class: Some(OperationalErrorClass::ResourceLimit),
+                skip_reason: None,
+                workstream: "performance",
+                stale_git_sha: false,
+                artifact_refs: &["perf/baseline.json"],
+                detail: "",
+                remediation_hint: "rerun with isolated worker",
+            },
+            TaxonomyCase {
+                expected: ReadinessTaxonomyClass::SecurityRefusal,
+                outcome: ReadinessOutcome::Fail,
+                error_class: Some(OperationalErrorClass::ProductFailure),
+                skip_reason: None,
+                workstream: "release_gate",
+                stale_git_sha: false,
+                artifact_refs: &["security/refusal.json"],
+                detail: "security refusal for hostile proof path",
+                remediation_hint: "keep release blocked",
+            },
+            TaxonomyCase {
+                expected: ReadinessTaxonomyClass::UnsafeRepairRefusal,
+                outcome: ReadinessOutcome::Fail,
+                error_class: Some(OperationalErrorClass::ProductFailure),
+                skip_reason: None,
+                workstream: "repair_policy",
+                stale_git_sha: false,
+                artifact_refs: &["repair/refusal.json"],
+                detail: "unsafe repair refused before mutation",
+                remediation_hint: "use dry-run first",
+            },
+            TaxonomyCase {
+                expected: ReadinessTaxonomyClass::PassWithExperimentalCaveat,
+                outcome: ReadinessOutcome::Pass,
+                error_class: None,
+                skip_reason: None,
+                workstream: "performance",
+                stale_git_sha: false,
+                artifact_refs: &["perf/smoke.json"],
+                detail: "pass with experimental caveat",
+                remediation_hint: "",
+            },
+        ]
     }
 
     struct ReadinessFixture {
@@ -1613,7 +1783,7 @@ mod tests {
             Case {
                 scenario_id: "perf_baseline_run",
                 gate_hint: "perf/baseline.json",
-                result: ScenarioResult::Skip,
+                result: ScenarioResult::Fail,
                 classification: OperationalOutcomeClass::Error,
                 error_class: Some(OperationalErrorClass::HostEnvironmentFailure),
                 skip_reason: Some(SkipReason::WorkerDependencyMissing),
@@ -1735,7 +1905,7 @@ mod tests {
             category,
             content_type: Some("application/json".to_owned()),
             size_bytes: 128,
-            sha256: None,
+            sha256: Some(format!("checksum-for-{}", path.replace('/', "-"))),
             redacted: false,
             metadata: BTreeMap::new(),
         }
