@@ -119,8 +119,33 @@ fuzz_target!(|data: &[u8]| {
     buf[66..82].copy_from_slice(&uuid);
     buf[82..98].copy_from_slice(&fsid);
 
-    let canonical = parse_dev_item(&buf)
-        .expect("synthesised 98-byte payload with valid accounting must parse");
+    let canonical =
+        parse_dev_item(&buf).expect("synthesised 98-byte payload with valid accounting must parse");
+
+    // MR-0: structured accounting rejects must stay reject-only at
+    // fuzz scale, not just in fixed unit examples.
+    let mut zero_devid = buf;
+    zero_devid[0..8].copy_from_slice(&0_u64.to_le_bytes());
+    assert!(
+        parse_dev_item(&zero_devid).is_err(),
+        "MR-0: zero devid must be rejected"
+    );
+
+    let mut zero_total = buf;
+    zero_total[8..16].copy_from_slice(&0_u64.to_le_bytes());
+    zero_total[16..24].copy_from_slice(&0_u64.to_le_bytes());
+    assert!(
+        parse_dev_item(&zero_total).is_err(),
+        "MR-0: zero total_bytes must be rejected"
+    );
+
+    let mut overused = buf;
+    overused[8..16].copy_from_slice(&1_u64.to_le_bytes());
+    overused[16..24].copy_from_slice(&2_u64.to_le_bytes());
+    assert!(
+        parse_dev_item(&overused).is_err(),
+        "MR-0: bytes_used greater than total_bytes must be rejected"
+    );
 
     // MR-1: every field round-trips through its documented offset.
     assert_eq!(canonical.devid, devid, "MR-1: devid round-trip @0");
@@ -132,8 +157,14 @@ fuzz_target!(|data: &[u8]| {
         canonical.bytes_used, bytes_used,
         "MR-1: bytes_used round-trip @16"
     );
-    assert_eq!(canonical.io_align, io_align, "MR-1: io_align round-trip @24");
-    assert_eq!(canonical.io_width, io_width, "MR-1: io_width round-trip @28");
+    assert_eq!(
+        canonical.io_align, io_align,
+        "MR-1: io_align round-trip @24"
+    );
+    assert_eq!(
+        canonical.io_width, io_width,
+        "MR-1: io_width round-trip @28"
+    );
     assert_eq!(
         canonical.sector_size, sector_size,
         "MR-1: sector_size round-trip @32"
