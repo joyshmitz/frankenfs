@@ -1751,9 +1751,17 @@ mod tests {
             .enumerate()
             .map(|(index, id)| crash_point(id, (index + 1) as u32))
             .collect();
-        crash_points[6].repeated_write_state = "last_fsynced_write_survived".to_owned();
-        crash_points[7].repeated_write_state = "last_fsynced_write_survived".to_owned();
-        crash_points[8].cancellation_state = "cancelled_before_writeback_classified".to_owned();
+        for point in &mut crash_points {
+            match point.crash_point_id.as_str() {
+                "cp07_after_repeated_write_before_fsync" | "cp08_after_repeated_write_fsync" => {
+                    point.repeated_write_state = "last_fsynced_write_survived".to_owned();
+                }
+                "cp09_after_cancellation_before_writeback" => {
+                    point.cancellation_state = "cancelled_before_writeback_classified".to_owned();
+                }
+                _ => {}
+            }
+        }
 
         WritebackCrashReplayOracle {
             schema_version: WRITEBACK_CACHE_CRASH_REPLAY_SCHEMA_VERSION,
