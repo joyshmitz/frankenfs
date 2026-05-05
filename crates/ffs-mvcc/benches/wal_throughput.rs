@@ -1251,6 +1251,98 @@ fn bench_coalesced_append(c: &mut Criterion) {
     group.finish();
 }
 
+// bd-enfch — bench coverage for PersistentMvccStore maintenance ops
+// (checkpoint + truncate_wal). These are on the operator-facing
+// maintenance path; a regression that made checkpoint quadratic in
+// version count, or truncate_wal slower because of an extra fsync,
+// would silently degrade the maintenance window without tripping any
+// existing bench gate.
+
+fn bench_checkpoint_throughput(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    let block_data = vec![0xAB_u8; 4096];
+
+    c.bench_function("persistent_mvcc_checkpoint_256blocks_8versions", |b| {
+        b.iter_batched(
+            || {
+                // Seed: 256 blocks × 8 versions each.
+                let tmp = NamedTempFile::new().expect("temp file");
+                let path = tmp.path().to_path_buf();
+                std::fs::remove_file(&path).ok();
+                let store = PersistentMvccStore::open_with_options(
+                    &cx,
+                    &path,
+                    &PersistOptions {
+                        sync_on_commit: false,
+                        ..PersistOptions::default()
+                    },
+                )
+                .expect("open");
+                for v in 0..8_u64 {
+                    for blk in 0..256_u64 {
+                        let mut txn = store.begin();
+                        // Vary payload per version so dedup doesn't
+                        // collapse the chain.
+                        let mut data = block_data.clone();
+                        data[0] = u8::try_from(v).unwrap_or(0);
+                        txn.stage_write(BlockNumber(blk), data);
+                        store.commit(txn).expect("commit");
+                    }
+                }
+                let ckpt_dir = tempfile::tempdir().expect("ckpt dir");
+                let ckpt_path = ckpt_dir.path().join("ckpt.bin");
+                (store, ckpt_dir, ckpt_path)
+            },
+            |(store, _ckpt_dir, ckpt_path)| {
+                store.checkpoint(black_box(&ckpt_path)).expect("checkpoint");
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+}
+
+fn bench_truncate_wal_throughput(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    let block_data = vec![0xAB_u8; 4096];
+
+    c.bench_function("persistent_mvcc_truncate_wal_after_checkpoint", |b| {
+        b.iter_batched(
+            || {
+                // Seed: 64 commits, then checkpoint so truncate_wal
+                // sees a fresh checkpoint horizon (no staleness
+                // rejection). Without the checkpoint, truncate_wal
+                // would Err on the staleness check rather than
+                // exercise the truncate fast-path.
+                let tmp = NamedTempFile::new().expect("temp file");
+                let path = tmp.path().to_path_buf();
+                std::fs::remove_file(&path).ok();
+                let store = PersistentMvccStore::open_with_options(
+                    &cx,
+                    &path,
+                    &PersistOptions {
+                        sync_on_commit: false,
+                        ..PersistOptions::default()
+                    },
+                )
+                .expect("open");
+                for i in 0..64_u64 {
+                    let mut txn = store.begin();
+                    txn.stage_write(BlockNumber(i % 32), block_data.clone());
+                    store.commit(txn).expect("commit");
+                }
+                let ckpt_dir = tempfile::tempdir().expect("ckpt dir");
+                let ckpt_path = ckpt_dir.path().join("ckpt.bin");
+                store.checkpoint(&ckpt_path).expect("checkpoint");
+                (store, ckpt_dir)
+            },
+            |(store, _ckpt_dir)| {
+                store.truncate_wal().expect("truncate_wal");
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+}
+
 criterion_group!(
     wal_benches,
     bench_wal_commit_throughput,
@@ -1261,6 +1353,8 @@ criterion_group!(
     bench_mvcc_contention,
     bench_sharded_mvcc_contention,
     bench_pruning_throughput,
-    bench_coalesced_append
+    bench_coalesced_append,
+    bench_checkpoint_throughput,
+    bench_truncate_wal_throughput,
 );
 criterion_main!(wal_benches);
