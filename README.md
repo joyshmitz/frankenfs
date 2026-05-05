@@ -1358,7 +1358,7 @@ Rows in the btrfs experimental RW contract can still say `partially supported` o
 - **btrfs:** Superblock, B-tree header, leaf item metadata, geometry validation, RAID stripe mapping, FUSE mount (RO default, experimental RW with core mutations)
 - **MVCC:** Snapshot visibility, commit sequencing, first-committer-wins conflict detection, safe-merge proof resolution (AppendOnly, IndependentKeys, NonOverlappingExtents, TimestampOnlyInode, DisjointBlocks), adaptive conflict policy with EMA contention tracking, sharded concurrent store, WAL persistence and crash recovery
 - **Self-healing:** Bayesian durability autopilot, RaptorQ symbol generation/recovery, hybrid refresh policy (age + block-count triggers), stale-window SLO monitoring with percentile-based breach detection, multi-host repair ownership coordination, expected-loss model for policy comparison
-- **Writeback-cache:** Epoch-based commit barriers with per-inode staged/visible/durable tracking, deferred visibility for MVCC isolation, dirty-page ordering oracle, 12-point crash/replay matrix artifact gate, benchmark framework for barrier overhead measurement
+- **Writeback-cache:** Epoch-based commit barriers with per-inode staged/visible/durable tracking, deferred visibility for MVCC isolation, dirty-page ordering oracle, 12-point crash/replay matrix artifact gate, runtime guard, and host/lane manifest checks. The kernel FUSE option remains default-off; explicit opt-in is evidence-gated and operationally experimental.
 - **Observability:** Evidence ledger (23 event types, 5 presets), contention metrics (EMA conflict/merge/abort rates), policy-switch detection, structured logging across all subsystems
 - **CLI:** `inspect`, `mvcc-stats`, `info`, `dump`, `fsck`, `repair`, `mount`, `scrub`, `parity`, `evidence`, `mkfs`
 - **Testing:** 5,368+ `#[test]` / `proptest!` entries across 21 crates as of 2026-05-01, including property-based tests, crash matrices, 120-writer stress tests, and verification gates
@@ -1461,6 +1461,64 @@ lanes, thresholds, kill switches, remediation beads, or explicit non-goals.
 | `performance.baseline` | performance claims are current for representative workloads | Fresh dated throughput/latency artifacts with host/runtime metadata; no readiness wording may imply performance tuning is complete before this lands | `bd-rchk5`, `bd-rchk5.1`, `bd-rchk5.3` |
 | `operational.soak_canary` | mounted and repair behavior remains stable over repeated realistic use | `validate-soak-canary-campaigns` defines bounded smoke/nightly/stress/canary profiles, heartbeat logs, resource caps, flake follow-up rules, and proof-bundle/release-gate consumers before long campaigns can upgrade readiness wording | `bd-rchk0.5.9`, `bd-t21em` |
 
+### Writeback-Cache Operator Evidence
+
+The only supported kernel `writeback_cache` path is explicit, read-write, and
+artifact-gated:
+
+```bash
+ffs mount --rw --writeback-cache \
+  --writeback-cache-gate artifacts/writeback-cache/audit_gate.json \
+  --writeback-cache-ordering-oracle artifacts/writeback-cache/ordering_oracle.json \
+  --writeback-cache-crash-replay-oracle artifacts/writeback-cache/crash_replay_oracle.json \
+  IMAGE MOUNTPOINT
+```
+
+The three accepted artifacts are produced or checked by:
+
+```bash
+ffs-harness validate-writeback-cache-audit --gate FILE --scenario-id ID --require-accept
+ffs-harness validate-writeback-cache-ordering --oracle FILE --scenario-id ID --require-accept
+ffs-harness validate-writeback-cache-crash-replay --oracle FILE --scenario-id ID --require-accept
+./scripts/e2e/ffs_writeback_cache_audit_e2e.sh
+```
+
+The E2E script records the dry-run audit, opt-in, ordering, and crash/replay
+scenario ids, including
+`writeback_cache_audit_fuser_options_default_off`,
+`writeback_cache_opt_in_fuser_options_enabled`,
+`writeback_cache_runtime_kill_switch_rejected`,
+`writeback_cache_ordering_accepts_complete_oracle`,
+`writeback_cache_ordering_rejects_missing_fsync`,
+`writeback_cache_ordering_rejects_missing_fsyncdir`,
+`writeback_cache_crash_replay_accepts_complete_matrix`,
+`writeback_cache_crash_replay_rejects_missing_crash_point`,
+`writeback_cache_crash_replay_rejects_survivor_mismatch`,
+`writeback_cache_crash_replay_rejects_flush_durability`,
+`writeback_cache_crash_replay_rejects_missing_fsyncdir`, and
+`writeback_cache_ext4_opt_in_flush_fsyncdir_reopen`.
+
+The unit-test groups are:
+
+```bash
+cargo test -p ffs-fuse writeback_cache
+cargo test -p ffs-cli mount_writeback_cache
+cargo test -p ffs-harness writeback_cache_audit
+cargo test -p ffs-harness ordering_oracle
+cargo test -p ffs-harness crash_replay_oracle
+```
+
+The crash/replay oracle artifact records all 12 crash point ids, the mounted
+operation trace, raw FUSE options, survivor sets, flush/fsync/fsyncdir
+observations, cancellation and repeated-write classification, stdout/stderr
+paths, cleanup status, unsupported-combination rejections, and the reproduction
+command.
+
+This is not a production-readiness claim. Stronger wording remains blocked on
+the permissioned mounted lane (`bd-rchk4`), xfstests baseline (`bd-rchk3`),
+performance baselines (`bd-rchk5`), and soak/canary evidence
+(`bd-rchk0.5.9`/`bd-t21em`).
+
 ### Allowed Deferrals and Non-Goals
 
 - Local developer machines may skip mounted gates when `/dev/fuse`,
@@ -1524,7 +1582,7 @@ See [COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1
 - **Linux only.** FUSE is the sole mount target. No macOS or Windows support planned.
 - **Nightly Rust required.** Edition 2024 features require the nightly toolchain.
 - **Runtime is still early-stage.** Full tracked parity means the current V1 matrix is implemented and tested; it does not mean operational hardening, performance tuning, or future-scope features are finished. Mount/write paths should still be treated as experimental in operational environments.
-- **Kernel FUSE writeback-cache mode is gated in V1.x.** Default mounts do not enable it. The explicit `--writeback-cache` path requires `--rw`, an accepted audit gate, an accepted ordering oracle, fresh runtime-guard evidence, an accepted crash/replay oracle, a matching host/lane manifest, and a disarmed `FFS_WRITEBACK_CACHE_KILL_SWITCH` before `ffs-cli` forwards the FUSE option. `flush` is a non-durability lifecycle hook; `fsync` / `fsyncdir` are the explicit durability boundaries.
+- **Kernel FUSE writeback-cache mode is gated in V1.x.** Default mounts do not enable it. The explicit `--writeback-cache` path requires `--rw`, an accepted audit gate, an accepted ordering oracle, fresh runtime-guard evidence, an accepted crash/replay oracle, a matching host/lane manifest, and a disarmed `FFS_WRITEBACK_CACHE_KILL_SWITCH` before `ffs-cli` forwards the FUSE option. `flush` is a non-durability lifecycle hook; `fsync` / `fsyncdir` are the explicit durability boundaries. See the writeback-cache operator evidence checklist above for the validator commands, unit-test groups, E2E scenario ids, crash/replay artifact fields, and remaining deferral beads.
 - **Default CLI mount path does not enable optional backpressure/per-core scheduling hooks.** `ffs-cli mount` currently uses the standard `ffs-fuse` mount path without wiring `BackpressureGate` controls.
 - **Mount background scrub is detection-only by default, with explicit automatic repair available.** `ffs mount` starts `ffs-repair::ScrubDaemon` automatically for default read-only mounts, owns cancellation through the mount lifecycle, and joins the worker on shutdown. Read-write mounts keep the daemon disabled by default; `--background-scrub` can opt into detection-only monitoring, `--no-background-scrub` disables the read-only default, and `--background-scrub-ledger` records evidence JSONL. `--background-repair --background-scrub-ledger <jsonl>` enables real block recovery and repair-symbol refresh after checking writable backing-image access. Read-write repair uses the mounted MVCC request-scope authority so recovered source blocks share the same serializer as client writes.
 - **External dependencies.** Workspace dependencies currently use crates.io releases (`asupersync = 0.2.5`, `ftui = 0.2.1`); local path overrides can be supplied with Cargo `[patch]` during sibling-repo development.

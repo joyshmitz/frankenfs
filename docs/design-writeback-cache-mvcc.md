@@ -19,6 +19,11 @@ The live code establishes a strict V1.x contract:
 - `flush` is a non-durable lifecycle hook. `ffs-core::OpenFs::flush()` logs `durability_boundary = "none"` and does not call device sync.
 - `fsync` / `fsyncdir` are the only explicit durability boundaries in the FUSE layer. `ffs-core::OpenFs::{ext4,btrfs}_sync_with_logging()` call `self.dev.sync(cx)`.
 - `ffs-core::WritebackEpochBarrier` models `staged_epoch >= visible_epoch >= durable_epoch` and the proof harness now has the negative-option gate (`bd-rchk0.2.1.1`), dirty-page ordering oracle (`bd-8pz7h`), and 12-point crash/replay oracle (`bd-rchk0.2.3`).
+- Operator-facing README and `ffs mount --help` wording are part of the same
+  contract: default-off, explicit `--rw --writeback-cache`, accepted
+  audit/ordering/crash-replay artifacts, fresh runtime guard, matching host/lane
+  manifest, disarmed kill switch, and no production wording until permissioned
+  mounted, xfstests, performance, and soak/canary evidence land.
 
 That combination keeps ordinary mounts conservative while allowing a narrow,
 evidence-gated experimental opt-in. User-facing readiness wording must stay
@@ -313,6 +318,12 @@ classes, schema failure, report artifact fields, dirty-page ordering, twelve
 declared crash/replay points, and unit policy coverage. The mounted ext4
 opt-in regression attempts the actual FUSE `writeback_cache` option and emits a
 host-classified scenario result when the current lane cannot mount.
+
+README and help text must also cite the companion unit-test groups
+(`ffs-fuse writeback_cache`, `ffs-cli mount_writeback_cache`, and the
+`ffs-harness` audit/ordering/crash-replay filters), because operators should be
+able to connect the policy wording to executable checks without source
+archaeology.
 
 ## Positive Ordering Oracle
 

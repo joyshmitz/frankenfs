@@ -545,7 +545,8 @@ enum Command {
         ///   threads to match detected cores and logs per-core metrics on shutdown.
         /// - Kernel FUSE `writeback_cache` mode is default-off in V1.x and only
         ///   enabled by `--writeback-cache` after the audit gate, ordering
-        ///   oracle, and crash/replay oracle accept.
+        ///   oracle, crash/replay oracle, runtime guard, and host/lane evidence
+        ///   accept.
         #[arg(long = "runtime-mode", value_enum, default_value_t = MountRuntimeMode::Standard)]
         runtime_mode: MountRuntimeMode,
         /// Graceful unmount timeout for managed/per-core modes (seconds).
@@ -563,9 +564,12 @@ enum Command {
         ///
         /// Requires `--rw`, `--writeback-cache-gate`,
         /// `--writeback-cache-ordering-oracle`, and
-        /// `--writeback-cache-crash-replay-oracle`. flush remains non-durable;
-        /// fsync and fsyncdir are the durability boundaries. The
-        /// FFS_WRITEBACK_CACHE_KILL_SWITCH environment variable fails closed.
+        /// `--writeback-cache-crash-replay-oracle`. The gate must also carry a
+        /// fresh runtime guard with CLI-explicit config source, accepted feature
+        /// state, matching host/lane manifest, and disarmed kill switch.
+        /// `flush` remains non-durable; `fsync` and `fsyncdir` are the
+        /// durability boundaries. `FFS_WRITEBACK_CACHE_KILL_SWITCH` fails
+        /// closed before artifact I/O.
         #[arg(long = "writeback-cache")]
         writeback_cache: bool,
         /// Audit gate JSON required by `--writeback-cache`.
