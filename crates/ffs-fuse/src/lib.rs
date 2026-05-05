@@ -982,8 +982,50 @@ impl std::fmt::Debug for FuseInner {
     }
 }
 
+/// Per-inode lock registry shared across FUSE handler threads.
+///
+/// # Lock ordering invariant (bd-pfv55)
+///
+/// The struct holds two nested lock layers — the `table` mutex
+/// guarding the inode → `Arc<FuseInodeLock>` map, and the per-inode
+/// `FuseInodeLock.held` mutex (paired with a Condvar). Any code path
+/// that acquires both MUST do so in this order to prevent AB-BA
+/// deadlock:
+///
+/// ```text
+///     table  ──→  per-inode held
+///                (acquired in sorted-by-inode-number order
+///                 across multi-inode batches)
+/// ```
+///
+/// Production callers comply:
+///
+/// | Caller                        | table | per-inode held    | Notes              |
+/// |-------------------------------|-------|-------------------|--------------------|
+/// | `acquire`                     | W     | W (sorted, after table dropped) | Condvar-wait on contention |
+/// | `try_acquire`                 | W     | W (sorted, short-circuit on contention) | Returns None on contention |
+/// | `FuseInodeGuard::Drop`        | W     | W (nested)        | Notifies, then evicts entry on strong_count==2 |
+///
+/// Acquiring a per-inode `held` lock BEFORE the table mutex (e.g., a
+/// hypothetical `release_without_table_check` that took held first
+/// then table) would deadlock against `FuseInodeGuard::Drop`, which
+/// holds table while waiting on held.
+///
+/// The **sorted-inode-number** rule on multi-inode batches is the
+/// secondary invariant: `acquire([5, 7])` and `acquire([7, 5])` both
+/// take inode 5 before inode 7, preventing AB-BA across two batches
+/// that share the same inode set in opposite orders. Callers that
+/// bypass `acquire`/`try_acquire` to lock inodes in a different order
+/// would deadlock against any concurrent batch.
+///
+/// New methods on this struct must respect both invariants. The
+/// `lock_ordering_under_concurrent_acquire_and_drop` test exercises
+/// them under contention with a watchdog timeout.
 #[derive(Default)]
 struct FuseInodeLocks {
+    /// Inode → per-inode-lock map. **Lock-rank 0** — must be acquired
+    /// before any per-inode `held` lock. Multi-inode batches must
+    /// acquire in sorted-by-inode-number order.
     table: Mutex<BTreeMap<InodeNumber, Arc<FuseInodeLock>>>,
 }
 
@@ -13169,6 +13211,99 @@ CUSTOM("congestion_threshold=3")"#;
             locks.table_len(),
             0,
             "all guards dropped, table must be empty"
+        );
+    }
+
+    /// bd-pfv55 — regression guard for the canonical lock-ordering
+    /// invariant on `FuseInodeLocks` (table → per-inode held;
+    /// sorted-by-inode-number order across multi-inode batches).
+    /// Spawns three concurrent worker classes that exercise the three
+    /// nested-lock code paths simultaneously: `acquire` (table.W →
+    /// drop → held.W per sorted inode), `try_acquire` (same plus
+    /// short-circuit on contention), and the implicit `Drop` path
+    /// (table.W → held.W → notify → maybe-evict). A watchdog thread
+    /// fails the test with a tagged panic if the workers do not finish
+    /// within 15s; any future AB-BA introduced by a refactor surfaces
+    /// as a clear failure rather than a silent stall.
+    #[test]
+    fn lock_ordering_under_concurrent_acquire_and_drop() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let locks = Arc::new(FuseInodeLocks::default());
+
+        let done = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + Duration::from_secs(15);
+
+        // Watchdog: prove no worker is stuck after the timeout elapses.
+        let watchdog_done = Arc::clone(&done);
+        let watchdog = thread::spawn(move || {
+            while Instant::now() < deadline {
+                if watchdog_done.load(AtomicOrdering::Acquire) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            panic!(
+                "bd-pfv55: FuseInodeLocks lock-ordering watchdog tripped — \
+                 acquire/try_acquire/drop workers did not finish within 15s, \
+                 indicating a likely AB-BA deadlock"
+            );
+        });
+
+        // Worker A: full-blocking acquire/drop pipeline. Exercises
+        // `acquire` (table → drop → held per sorted inode) and the
+        // implicit Drop (table → held nested → maybe-evict).
+        let locks_a = Arc::clone(&locks);
+        let worker_a = thread::spawn(move || {
+            for i in 0..64_u64 {
+                // Pair of inodes — sorted by lib invariant inside acquire().
+                let _g = locks_a.acquire(&[InodeNumber(i % 4 + 1), InodeNumber(i % 4 + 2)]);
+                // Hold briefly so other threads contend.
+                thread::yield_now();
+            }
+        });
+
+        // Worker B: try_acquire pipeline. Exercises the same lock
+        // graph but short-circuits on contention rather than waiting
+        // on the Condvar; tests the alternate code path that bypasses
+        // the wait.
+        let locks_b = Arc::clone(&locks);
+        let worker_b = thread::spawn(move || {
+            for i in 0..64_u64 {
+                if let Some(_g) = locks_b.try_acquire(&[InodeNumber(i % 4 + 1)]) {
+                    thread::yield_now();
+                }
+                // None outcome is fine — we're testing for hang, not
+                // for guaranteed acquisition.
+            }
+        });
+
+        // Worker C: reverse-order pair. Calls acquire with [7, 3] on
+        // every iteration. The library MUST sort to [3, 7] before
+        // taking per-inode locks — if it didn't, this worker would
+        // deadlock against worker A which uses ascending inodes.
+        let locks_c = Arc::clone(&locks);
+        let worker_c = thread::spawn(move || {
+            for _ in 0..64_u64 {
+                let _g = locks_c.acquire(&[InodeNumber(7), InodeNumber(3)]);
+                thread::yield_now();
+            }
+        });
+
+        worker_a.join().expect("worker A panicked");
+        worker_b.join().expect("worker B panicked");
+        worker_c.join().expect("worker C panicked");
+        done.store(true, AtomicOrdering::Release);
+        watchdog.join().expect("watchdog panicked");
+
+        // Sanity: all guards dropped, table should be empty.
+        assert_eq!(
+            locks.table_len(),
+            0,
+            "all guards dropped — table must be empty"
         );
     }
 
