@@ -4,7 +4,8 @@ use asupersync::Cx;
 use ffs_block::{BlockBuf, BlockDevice};
 use ffs_error::{FfsError, Result};
 use ffs_journal::{
-    replay_jbd2, replay_jbd2_segments, Jbd2Superblock, JournalRegion, JournalSegment, ReplayOutcome,
+    replay_jbd2, replay_jbd2_segments, Jbd2Superblock, Jbd2Writer, JournalRegion, JournalSegment,
+    ReplayOutcome,
 };
 use ffs_types::BlockNumber;
 use libfuzzer_sys::fuzz_target;
@@ -14,6 +15,34 @@ use std::sync::RwLock;
 const BLOCK_SIZE: usize = 512;
 const MIN_BLOCK_COUNT: u64 = 4_096;
 const MAX_JOURNAL_BYTES: usize = 128 * BLOCK_SIZE;
+const STRUCTURED_REGION_BLOCKS: u64 = 32;
+const STRUCTURED_TARGET_BASE: u64 = 512;
+
+struct ByteCursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ByteCursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    fn next_u8(&mut self) -> u8 {
+        let byte = self.data.get(self.pos).copied().unwrap_or(0);
+        self.pos = self.pos.saturating_add(1);
+        byte
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        u32::from_le_bytes([
+            self.next_u8(),
+            self.next_u8(),
+            self.next_u8(),
+            self.next_u8(),
+        ])
+    }
+}
 
 #[derive(Debug)]
 struct MemBlockDevice {
@@ -23,14 +52,18 @@ struct MemBlockDevice {
 }
 
 impl MemBlockDevice {
-    fn from_journal_blocks(journal_blocks: &[Vec<u8>]) -> Self {
-        let block_count =
-            MIN_BLOCK_COUNT.max(u64::try_from(journal_blocks.len()).unwrap_or(u64::MAX));
-        let device = Self {
+    fn empty(block_count: u64) -> Self {
+        Self {
             blocks: RwLock::new(BTreeMap::new()),
             block_size: u32::try_from(BLOCK_SIZE).expect("block size fits u32"),
             block_count,
-        };
+        }
+    }
+
+    fn from_journal_blocks(journal_blocks: &[Vec<u8>]) -> Self {
+        let block_count =
+            MIN_BLOCK_COUNT.max(u64::try_from(journal_blocks.len()).unwrap_or(u64::MAX));
+        let device = Self::empty(block_count);
         for (index, block) in journal_blocks.iter().enumerate() {
             device.raw_write(
                 BlockNumber(u64::try_from(index).expect("block index fits u64")),
@@ -149,6 +182,78 @@ fn equivalent_segments(total_blocks: u64, selector: u8) -> Vec<JournalSegment> {
     ]
 }
 
+fn next_payload(cursor: &mut ByteCursor<'_>, marker: u8) -> Vec<u8> {
+    let len = 1 + (usize::from(cursor.next_u8()) % BLOCK_SIZE);
+    let mut payload: Vec<_> = (0..len).map(|_| cursor.next_u8()).collect();
+    payload[0] = marker;
+    payload
+}
+
+fn padded_payload(payload: &[u8]) -> Vec<u8> {
+    let mut padded = vec![0_u8; BLOCK_SIZE];
+    padded[..payload.len()].copy_from_slice(payload);
+    padded
+}
+
+fn structured_targets(cursor: &mut ByteCursor<'_>) -> (BlockNumber, BlockNumber) {
+    let first = STRUCTURED_TARGET_BASE + u64::from(cursor.next_u8());
+    (BlockNumber(first), BlockNumber(first.saturating_add(1)))
+}
+
+fn structured_journal_blocks(
+    data: &[u8],
+) -> (Vec<Vec<u8>>, Vec<u32>, BlockNumber, Vec<u8>, BlockNumber) {
+    let mut cursor = ByteCursor::new(data);
+    let start_seq = cursor.next_u32();
+    let (target_a, target_b) = structured_targets(&mut cursor);
+    let first_payload_a = next_payload(&mut cursor, 0xA1);
+    let first_payload_b = next_payload(&mut cursor, 0xB2);
+    let second_payload_a = next_payload(&mut cursor, 0xC3);
+
+    let cx = Cx::for_testing();
+    let region = JournalRegion {
+        start: BlockNumber(0),
+        blocks: STRUCTURED_REGION_BLOCKS,
+    };
+    let dev = MemBlockDevice::empty(MIN_BLOCK_COUNT);
+    let mut writer = Jbd2Writer::new(region, start_seq);
+
+    let mut first_txn = writer.begin_transaction();
+    first_txn.add_write(target_a, first_payload_a);
+    first_txn.add_write(target_b, first_payload_b);
+    first_txn.add_revoke(target_b);
+    let first_seq = first_txn.sequence();
+    if writer.commit_transaction(&cx, &dev, &first_txn).is_err() {
+        std::process::abort();
+    }
+
+    let mut second_txn = writer.begin_transaction();
+    second_txn.add_write(target_a, second_payload_a.clone());
+    let second_seq = second_txn.sequence();
+    if writer.commit_transaction(&cx, &dev, &second_txn).is_err() {
+        std::process::abort();
+    }
+
+    let journal_len = usize::try_from(writer.head()).unwrap_or(usize::MAX);
+    let snapshot = dev.snapshot();
+    let journal = (0..journal_len)
+        .map(|index| {
+            snapshot
+                .get(&(u64::try_from(index).unwrap_or(u64::MAX)))
+                .cloned()
+                .unwrap_or_else(|| vec![0_u8; BLOCK_SIZE])
+        })
+        .collect();
+
+    (
+        journal,
+        vec![first_seq, second_seq],
+        target_a,
+        padded_payload(&second_payload_a),
+        target_b,
+    )
+}
+
 fn assert_superblock_invariants(block: &[u8]) {
     let first = Jbd2Superblock::parse(block);
     let second = Jbd2Superblock::parse(block);
@@ -242,16 +347,69 @@ fn assert_results_match(
                 "{context} should deterministically reject the same malformed journal"
             );
         }
-        (left, right) => {
-            panic!("{context} changed success/failure mode: left={left:?} right={right:?}");
-        }
+        _ => std::process::abort(),
     }
+}
+
+fn assert_structured_writer_replay(data: &[u8]) {
+    let (journal, expected_sequences, target_a, expected_a, target_b) =
+        structured_journal_blocks(data);
+    let region = region_for(journal.len());
+    let cx = Cx::for_testing();
+
+    let direct = MemBlockDevice::from_journal_blocks(&journal);
+    let direct_result = replay_jbd2(&cx, &direct, region);
+    let outcome = match &direct_result {
+        Ok(outcome) => outcome,
+        Err(_) => std::process::abort(),
+    };
+
+    assert_eq!(outcome.committed_sequences, expected_sequences);
+    assert_eq!(outcome.stats.descriptor_blocks, 2);
+    assert_eq!(outcome.stats.descriptor_tags, 3);
+    assert_eq!(outcome.stats.revoke_blocks, 1);
+    assert_eq!(outcome.stats.revoke_entries, 1);
+    assert_eq!(outcome.stats.commit_blocks, 2);
+    assert_eq!(outcome.stats.replayed_blocks, 1);
+    assert_eq!(outcome.stats.skipped_revoked_blocks, 1);
+    assert_eq!(outcome.stats.incomplete_transactions, 0);
+    assert_eq!(outcome.stats.orphaned_commit_blocks, 0);
+    assert_replay_invariants(outcome);
+
+    let target_a_block = direct
+        .read_block(&cx, target_a)
+        .unwrap_or_else(|_| std::process::abort());
+    assert_eq!(target_a_block.as_slice(), expected_a.as_slice());
+
+    let target_b_block = direct
+        .read_block(&cx, target_b)
+        .unwrap_or_else(|_| std::process::abort());
+    assert!(
+        target_b_block.as_slice().iter().all(|byte| *byte == 0),
+        "revoked structured JBD2 write target must remain zeroed"
+    );
+
+    let segmented = MemBlockDevice::from_journal_blocks(&journal);
+    let segments = equivalent_segments(region.blocks, data.first().copied().unwrap_or(0));
+    let segmented_result = replay_jbd2_segments(&cx, &segmented, &segments);
+    assert_results_match(
+        &direct_result,
+        &segmented_result,
+        "structured replay_jbd2_segments",
+    );
+    assert_eq!(
+        direct.snapshot(),
+        segmented.snapshot(),
+        "structured segment replay should match direct replay device mutations"
+    );
 }
 
 fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_JOURNAL_BYTES {
         return;
     }
+
+    assert_structured_writer_replay(data);
 
     let journal = journal_blocks(data);
     let region = region_for(journal.len());
