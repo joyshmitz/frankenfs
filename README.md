@@ -1400,6 +1400,7 @@ the suite artifact directory:
 | `fuse_capability.json` | all mounted gates | Host capability result, `skip_reason`, `failure_kind`, remediation hint, and mount/unmount probe exits |
 | `fuse_permissioned_lane.json` | permissioned mounted gates | Worker identity, kernel, fusermount version, mount options, stdout/stderr paths, and cleanup status |
 | `mounted_scenario_matrix.json` | production mounted matrix | Filesystem flavor, mount options, operation sequence, expected outcome, actual outcome, duration, detail, and artifact references |
+| `crash_replay_report.json` and permissioned crash replay artifacts | mounted crash replay refinement | Core deterministic replay report, default host-skip records, permissioned blocker records, and configured `FFS_PERMISSIONED_CRASH_REPLAY_RUNNER` artifacts. Mounted write/reopen or repair-interruption claims are authoritative only when a fresh runner artifact includes `mounted_e2e` `permissioned_context`, survivor paths, cleanup status, and reproduction data |
 | `junit.xml` and `run.log` | all E2E suites | CI-readable verdict and full command transcript |
 | `mount_*.log` | every mounted scenario | Raw `ffs-cli mount` stdout/stderr for postmortem debugging |
 | operational manifest JSON | readiness report consumers | `pass`/`fail`/`skip`/`error` records using the shared artifact schema |
@@ -1525,6 +1526,11 @@ lane (`bd-rchk0.5.9`/`bd-t21em`).
   `fusermount3`, kernel FUSE support, namespace permissions, or helper packages
   are missing. Permissioned CI/RCH lanes that promise mounted coverage must fail
   closed once `bd-rchk4.4` lands.
+- Crash replay mounted write/reopen and repair-interruption lanes default to
+  structured SKIP locally. `FFS_ENABLE_PERMISSIONED_CRASH_REPLAY=1` still
+  requires the explicit real-run acknowledgement and a configured
+  `FFS_PERMISSIONED_CRASH_REPLAY_RUNNER`; otherwise the lane emits a
+  capability blocker, not authoritative mounted crash replay evidence.
 - Full xfstests execution is a separate gate (`bd-rchk3`). The SLOs above may
   use a curated mounted matrix before the full xfstests environment is ready,
   but they must not imply a current xfstests pass rate.

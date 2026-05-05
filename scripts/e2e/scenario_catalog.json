@@ -1796,6 +1796,18 @@
           "evidence": "scenario_result \"permissioned_crash_replay_blocker_contract\" \"PASS\""
         },
         {
+          "id": "crash_replay_permissioned_runner_contract",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "FFS_PERMISSIONED_CRASH_REPLAY_RUNNER"
+        },
+        {
+          "id": "crash_replay_permissioned_runner_artifact_validation",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "validate_permissioned_runner_artifact"
+        },
+        {
           "id": "crash_replay_refinement_unit_tests",
           "category": "happy",
           "status": "active",
