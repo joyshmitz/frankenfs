@@ -7,7 +7,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
-REPO_ROOT="$(pwd)"
+REPO_ROOT="$(pwd -P)"
 export REPO_ROOT
 
 source "$REPO_ROOT/scripts/e2e/lib.sh"
@@ -15,6 +15,9 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 PARENT_ID="${BR_DOTTED_PARENT_ID:-bd-rchk0.5.6}"
 CHILD_ID="${BR_DOTTED_CHILD_ID:-bd-rchk0.5.6.1}"
 RELATED_TARGET_ID="${BR_DOTTED_RELATED_TARGET_ID:-bd-rchk0.4.1}"
+PREFIX_REFUSAL_ID="${BR_DOTTED_PREFIX_REFUSAL_ID:-bd-rchk0.5.}"
+DRY_RUN_DEP_ID="${BR_DOTTED_DRY_RUN_DEP_ID:-bd-rchk0.5.6}"
+OVERLAY_ID="${BR_DOTTED_OVERLAY_ID:-bd-qjy0p-dotted-canary}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -55,10 +58,14 @@ FIXTURE_BEADS="$FIXTURE_ROOT/.beads"
 COMMAND_DIR="$E2E_LOG_DIR/commands"
 COMMAND_TRANSCRIPT="$E2E_LOG_DIR/command_transcript.tsv"
 REPORT_JSON="$E2E_LOG_DIR/br_dotted_id_roundtrip_report.json"
+INITIAL_JSONL_COPY="$E2E_LOG_DIR/issues.initial.jsonl"
+OVERLAY_EDGES_JSON="$E2E_LOG_DIR/deferred_overlay_edges.json"
+DIFF_SUMMARY_JSON="$E2E_LOG_DIR/jsonl_diff_summary.json"
 FIXTURE_DB="$FIXTURE_BEADS/br-dotted-roundtrip.db"
 
 mkdir -p "$FIXTURE_BEADS" "$COMMAND_DIR"
 cp "$REPO_ROOT/.beads/issues.jsonl" "$FIXTURE_BEADS/issues.jsonl"
+cp "$FIXTURE_BEADS/issues.jsonl" "$INITIAL_JSONL_COPY"
 
 printf 'id\tworkdir\texit_code\tstdout\tstderr\targv\n' >"$COMMAND_TRANSCRIPT"
 
@@ -110,6 +117,45 @@ INITIAL_COUNT="$(jsonl_count "$FIXTURE_BEADS/issues.jsonl")"
 INITIAL_HASH="$(sha256sum "$FIXTURE_BEADS/issues.jsonl" | awk '{print $1}')"
 BR_VERSION="$(br --version)"
 
+python3 - "$OVERLAY_EDGES_JSON" "$OVERLAY_ID" "$PARENT_ID" "$CHILD_ID" "$RELATED_TARGET_ID" "$INITIAL_HASH" <<'PY'
+import json
+import pathlib
+import sys
+
+(
+    overlay_path,
+    overlay_id,
+    parent_id,
+    child_id,
+    related_target_id,
+    initial_hash,
+) = sys.argv[1:]
+
+overlay = {
+    "schema_version": 1,
+    "overlay_id": overlay_id,
+    "mode": "fixture_only_dry_run",
+    "source_jsonl_sha256": initial_hash,
+    "live_overlay_allowed": False,
+    "edges": [
+        {
+            "issue_id": parent_id,
+            "depends_on_id": related_target_id,
+            "type": "related",
+            "rationale": "canary parent edge matching deferred overlay shape",
+        },
+        {
+            "issue_id": child_id,
+            "depends_on_id": parent_id,
+            "type": "related",
+            "rationale": "canary dotted child edge matching prior failure shape",
+        },
+    ],
+    "reproduction_command": "scripts/e2e/validate_br_dotted_id_roundtrip.sh",
+}
+pathlib.Path(overlay_path).write_text(json.dumps(overlay, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
 e2e_step "Scenario 1: exact no-db lookup preserves dotted parent and child"
 run_fixture_cmd "no_db_show_parent_initial" br show "$PARENT_ID" --no-db --json
 run_fixture_cmd "no_db_show_child_initial" br show "$CHILD_ID" --no-db --json
@@ -120,7 +166,28 @@ else
     scenario_result "br_dotted_no_db_exact_lookup" "FAIL" "exact lookup failed"
 fi
 
-e2e_step "Scenario 2: no-db update targets parent without dropping child"
+e2e_step "Scenario 2: non-exact dotted prefix lookup is refused"
+if run_fixture_cmd "no_db_show_prefix_refused" br show "$PREFIX_REFUSAL_ID" --no-db --json; then
+    scenario_result "br_dotted_prefix_lookup_refused" "FAIL" "non-exact dotted prefix unexpectedly resolved"
+elif assert_json_field "$COMMAND_DIR/no_db_show_prefix_refused.stderr" ".error.code == \"ISSUE_NOT_FOUND\"" "prefix refusal error code mismatch"; then
+    scenario_result "br_dotted_prefix_lookup_refused" "PASS" "non-exact prefix refused for $PREFIX_REFUSAL_ID"
+else
+    scenario_result "br_dotted_prefix_lookup_refused" "FAIL" "prefix refusal did not emit ISSUE_NOT_FOUND"
+fi
+
+e2e_step "Scenario 3: no-db create dry-run preserves fixture JSONL"
+DRY_RUN_BEFORE_HASH="$(sha256sum "$FIXTURE_BEADS/issues.jsonl" | awk '{print $1}')"
+run_fixture_cmd "no_db_create_dotted_canary_dry_run" br create "bd-qjy0p dotted canary dry run" \
+    --deps "related:$DRY_RUN_DEP_ID" --dry-run --no-db --json
+DRY_RUN_AFTER_HASH="$(sha256sum "$FIXTURE_BEADS/issues.jsonl" | awk '{print $1}')"
+if [[ "$DRY_RUN_BEFORE_HASH" == "$DRY_RUN_AFTER_HASH" ]] \
+    && assert_json_field "$COMMAND_DIR/no_db_create_dotted_canary_dry_run.stdout" ".dependencies[0].depends_on_id == \"$DRY_RUN_DEP_ID\"" "dry-run dependency target mismatch"; then
+    scenario_result "br_dotted_no_db_create_dry_run" "PASS" "dry-run left fixture hash unchanged"
+else
+    scenario_result "br_dotted_no_db_create_dry_run" "FAIL" "dry-run mutated fixture or lost dependency"
+fi
+
+e2e_step "Scenario 4: no-db update targets parent without dropping child"
 run_fixture_cmd "no_db_update_parent_notes" br update "$PARENT_ID" \
     --notes "bd-suf84 fixture exact parent update proof" \
     --no-db --json
@@ -135,23 +202,29 @@ else
     scenario_result "br_dotted_no_db_parent_update" "FAIL" "no-db update changed count or lost child"
 fi
 
-e2e_step "Scenario 3: no-db dependency add keeps graph acyclic"
+e2e_step "Scenario 5: no-db dependency add/remove keeps graph acyclic"
 run_fixture_cmd "no_db_dep_add_parent_related" br dep add "$PARENT_ID" "$RELATED_TARGET_ID" \
     --type related --no-db --json
 run_fixture_cmd "no_db_dep_add_child_parent" br dep add "$CHILD_ID" "$PARENT_ID" \
+    --type related --no-db --json
+run_fixture_cmd "no_db_dep_remove_child_parent" br dep remove "$CHILD_ID" "$PARENT_ID" \
+    --no-db --json
+run_fixture_cmd "no_db_dep_readd_child_parent" br dep add "$CHILD_ID" "$PARENT_ID" \
     --type related --no-db --json
 run_fixture_cmd "no_db_dep_cycles" br dep cycles --no-db --json
 AFTER_DEP_COUNT="$(jsonl_count "$FIXTURE_BEADS/issues.jsonl")"
 if [[ "$AFTER_DEP_COUNT" == "$INITIAL_COUNT" ]] \
     && assert_json_field "$COMMAND_DIR/no_db_dep_add_parent_related.stdout" ".issue_id == \"$PARENT_ID\" and .depends_on_id == \"$RELATED_TARGET_ID\" and (.action == \"added\" or .action == \"already_exists\")" "parent dependency add mismatch" \
     && assert_json_field "$COMMAND_DIR/no_db_dep_add_child_parent.stdout" ".issue_id == \"$CHILD_ID\" and .depends_on_id == \"$PARENT_ID\" and (.action == \"added\" or .action == \"already_exists\")" "child dependency add mismatch" \
+    && assert_json_field "$COMMAND_DIR/no_db_dep_remove_child_parent.stdout" ".issue_id == \"$CHILD_ID\" and .depends_on_id == \"$PARENT_ID\" and (.action == \"removed\" or .action == \"not_found\")" "child dependency remove mismatch" \
+    && assert_json_field "$COMMAND_DIR/no_db_dep_readd_child_parent.stdout" ".issue_id == \"$CHILD_ID\" and .depends_on_id == \"$PARENT_ID\" and (.action == \"added\" or .action == \"already_exists\")" "child dependency re-add mismatch" \
     && assert_json_field "$COMMAND_DIR/no_db_dep_cycles.stdout" ".count == 0" "dependency cycle detected"; then
-    scenario_result "br_dotted_no_db_dependency_add" "PASS" "dependency operations preserved count and cycles=0"
+    scenario_result "br_dotted_no_db_dependency_add_remove" "PASS" "dependency operations preserved count and cycles=0"
 else
-    scenario_result "br_dotted_no_db_dependency_add" "FAIL" "dependency operation failed"
+    scenario_result "br_dotted_no_db_dependency_add_remove" "FAIL" "dependency operation failed"
 fi
 
-e2e_step "Scenario 4: fresh DB import preserves exact dotted IDs"
+e2e_step "Scenario 6: fresh DB import preserves exact dotted IDs"
 run_fixture_cmd "db_import_only" br sync --import-only --db "$FIXTURE_DB" --no-auto-flush --json
 run_fixture_cmd "db_show_parent_after_import" br show "$PARENT_ID" \
     --db "$FIXTURE_DB" --no-auto-flush --no-auto-import --json
@@ -168,7 +241,7 @@ else
     scenario_result "br_dotted_db_import_exact_lookup" "FAIL" "fresh DB import lost dotted IDs"
 fi
 
-e2e_step "Scenario 5: DB update and flush preserve issue count"
+e2e_step "Scenario 7: DB update and flush preserve issue count"
 run_fixture_cmd "db_update_parent_priority" br update "$PARENT_ID" --priority 1 \
     --db "$FIXTURE_DB" --no-auto-flush --no-auto-import --json
 run_fixture_cmd "db_dep_add_parent_related" br dep add "$PARENT_ID" "$RELATED_TARGET_ID" \
@@ -186,11 +259,20 @@ else
     scenario_result "br_dotted_db_flush_preserves_count" "FAIL" "flush lost records"
 fi
 
-e2e_step "Scenario 6: log contract and report fields"
+e2e_step "Scenario 8: doctor output is captured after overlay canary"
+run_fixture_cmd "db_doctor_after_flush" br doctor --db "$FIXTURE_DB" --no-auto-flush --no-auto-import --json
+if assert_json_field "$COMMAND_DIR/db_doctor_after_flush.stdout" ".status == \"ok\" or .ok == true or .healthy == true" "doctor did not report healthy status"; then
+    scenario_result "br_dotted_doctor_output" "PASS" "doctor output captured"
+else
+    scenario_result "br_dotted_doctor_output" "FAIL" "doctor output missing healthy status"
+fi
+
+e2e_step "Scenario 9: log contract and report fields"
 python3 - "$REPORT_JSON" "$COMMAND_TRANSCRIPT" "$FIXTURE_ROOT" "$FIXTURE_DB" \
     "$INITIAL_COUNT" "$AFTER_UPDATE_COUNT" "$AFTER_DEP_COUNT" "$DB_IMPORT_COUNT" \
     "$AFTER_FLUSH_COUNT" "$INITIAL_HASH" "$AFTER_FLUSH_HASH" "$BR_VERSION" \
-    "$PARENT_ID" "$CHILD_ID" "$RELATED_TARGET_ID" "$REPO_ROOT" <<'PY'
+    "$PARENT_ID" "$CHILD_ID" "$RELATED_TARGET_ID" "$REPO_ROOT" "$INITIAL_JSONL_COPY" \
+    "$FIXTURE_BEADS/issues.jsonl" "$OVERLAY_EDGES_JSON" "$DIFF_SUMMARY_JSON" <<'PY'
 import csv
 import json
 import pathlib
@@ -214,6 +296,10 @@ from datetime import datetime, timezone
     child_id,
     related_target_id,
     repo_root,
+    initial_jsonl_path,
+    final_jsonl_path,
+    overlay_edges_path,
+    diff_summary_path,
 ) = sys.argv[1:]
 
 commands = []
@@ -247,14 +333,90 @@ required_command_ids = {
     "db_sync_flush_only",
     "no_db_show_parent_after_flush",
     "no_db_show_child_after_flush",
+    "no_db_show_prefix_refused",
+    "no_db_create_dotted_canary_dry_run",
+    "no_db_dep_remove_child_parent",
+    "no_db_dep_readd_child_parent",
+    "db_doctor_after_flush",
 }
 observed_ids = {command["id"] for command in commands}
 missing_ids = sorted(required_command_ids - observed_ids)
 if missing_ids:
     raise SystemExit(f"missing commands: {missing_ids}")
-if any(command["exit_code"] != 0 for command in commands):
-    failed = [command["id"] for command in commands if command["exit_code"] != 0]
+allowed_nonzero = {"no_db_show_prefix_refused"}
+if any(command["exit_code"] != 0 and command["id"] not in allowed_nonzero for command in commands):
+    failed = [
+        command["id"]
+        for command in commands
+        if command["exit_code"] != 0 and command["id"] not in allowed_nonzero
+    ]
     raise SystemExit(f"failed commands: {failed}")
+
+def load_jsonl(path):
+    rows = []
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                rows.append(json.loads(line))
+    return rows
+
+initial_rows = load_jsonl(initial_jsonl_path)
+final_rows = load_jsonl(final_jsonl_path)
+initial_by_id = {row["id"]: row for row in initial_rows}
+final_by_id = {row["id"]: row for row in final_rows}
+initial_ids = [row["id"] for row in initial_rows]
+final_ids = [row["id"] for row in final_rows]
+if initial_ids != final_ids:
+    raise SystemExit("JSONL issue ordering changed")
+if set(initial_by_id) != set(final_by_id):
+    raise SystemExit("JSONL issue id set changed")
+
+changed_ids = []
+unexpected_changes = []
+allowed_fields = {
+    parent_id: {"notes", "priority", "updated_at", "dependencies"},
+    child_id: {"updated_at", "dependencies"},
+}
+for issue_id, initial in initial_by_id.items():
+    final = final_by_id[issue_id]
+    if initial == final:
+        continue
+    changed_ids.append(issue_id)
+    for field in sorted(set(initial) | set(final)):
+        if initial.get(field) != final.get(field) and field not in allowed_fields.get(issue_id, set()):
+            unexpected_changes.append({"issue_id": issue_id, "field": field})
+if unexpected_changes:
+    raise SystemExit(f"unexpected JSONL churn: {unexpected_changes}")
+
+overlay_edges = json.loads(pathlib.Path(overlay_edges_path).read_text(encoding="utf-8"))
+expected_edges = {
+    (edge["issue_id"], edge["depends_on_id"], edge["type"])
+    for edge in overlay_edges["edges"]
+}
+final_edges = {
+    (row["id"], dep["depends_on_id"], dep.get("type", "blocks"))
+    for row in final_rows
+    for dep in row.get("dependencies", [])
+}
+missing_edges = sorted(expected_edges - final_edges)
+if missing_edges:
+    raise SystemExit(f"missing overlay edges: {missing_edges}")
+
+diff_summary = {
+    "schema_version": 1,
+    "initial_issue_count": len(initial_rows),
+    "final_issue_count": len(final_rows),
+    "issue_order_preserved": True,
+    "changed_issue_ids": changed_ids,
+    "unexpected_changes": unexpected_changes,
+    "allowed_changed_fields": {key: sorted(value) for key, value in allowed_fields.items()},
+    "expected_overlay_edges": [
+        {"issue_id": issue, "depends_on_id": depends_on, "type": dep_type}
+        for issue, depends_on, dep_type in sorted(expected_edges)
+    ],
+    "missing_overlay_edges": [],
+}
+pathlib.Path(diff_summary_path).write_text(json.dumps(diff_summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 report = {
     "schema_version": 1,
@@ -268,6 +430,9 @@ report = {
     "parent_id": parent_id,
     "child_id": child_id,
     "related_target_id": related_target_id,
+    "overlay_id": json.loads(pathlib.Path(overlay_edges_path).read_text(encoding="utf-8"))["overlay_id"],
+    "overlay_edges_path": overlay_edges_path,
+    "diff_summary_path": diff_summary_path,
     "counts": {
         "initial": int(initial_count),
         "after_no_db_update": int(after_update_count),
@@ -279,17 +444,22 @@ report = {
         "initial_jsonl_sha256": initial_hash,
         "after_flush_jsonl_sha256": after_flush_hash,
     },
+    "jsonl_churn": diff_summary,
     "command_transcript": transcript_path,
     "commands": commands,
     "required_proof": [
         "exact no-db lookup for dotted parent",
         "exact no-db lookup for dotted child",
+        "non-exact dotted prefix refusal",
+        "no-db create dry-run leaves fixture unchanged",
         "no-db update of dotted parent",
-        "no-db dependency add involving dotted parent and child",
+        "no-db dependency add/remove involving dotted parent and child",
         "fresh DB import from fixture JSONL",
         "DB exact lookup for dotted parent and child",
         "DB update and flush-only export",
         "post-flush no-db exact lookup",
+        "doctor output after fixture overlay",
+        "JSONL diff permits only expected edge and metadata changes",
     ],
     "reproduction_command": "scripts/e2e/validate_br_dotted_id_roundtrip.sh",
     "outcome": "PASS",
@@ -301,6 +471,8 @@ if [[ -f "$REPORT_JSON" ]] \
     && grep -q '"source_jsonl_path"' "$REPORT_JSON" \
     && grep -q '"db_path"' "$REPORT_JSON" \
     && grep -q '"command_transcript"' "$REPORT_JSON" \
+    && grep -q '"diff_summary_path"' "$REPORT_JSON" \
+    && grep -q '"overlay_edges_path"' "$REPORT_JSON" \
     && grep -q '"reproduction_command"' "$REPORT_JSON"; then
     scenario_result "br_dotted_roundtrip_log_contract" "PASS" "report=$REPORT_JSON"
 else

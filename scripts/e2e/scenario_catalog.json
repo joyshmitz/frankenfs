@@ -789,16 +789,28 @@
           "evidence": "br_dotted_no_db_exact_lookup"
         },
         {
+          "id": "br_dotted_prefix_lookup_refused",
+          "category": "edge",
+          "status": "active",
+          "evidence": "br_dotted_prefix_lookup_refused"
+        },
+        {
+          "id": "br_dotted_no_db_create_dry_run",
+          "category": "edge",
+          "status": "active",
+          "evidence": "br_dotted_no_db_create_dry_run"
+        },
+        {
           "id": "br_dotted_no_db_parent_update",
           "category": "edge",
           "status": "active",
           "evidence": "br_dotted_no_db_parent_update"
         },
         {
-          "id": "br_dotted_no_db_dependency_add",
+          "id": "br_dotted_no_db_dependency_add_remove",
           "category": "edge",
           "status": "active",
-          "evidence": "br_dotted_no_db_dependency_add"
+          "evidence": "br_dotted_no_db_dependency_add_remove"
         },
         {
           "id": "br_dotted_db_import_exact_lookup",
@@ -811,6 +823,12 @@
           "category": "recovery",
           "status": "active",
           "evidence": "br_dotted_db_flush_preserves_count"
+        },
+        {
+          "id": "br_dotted_doctor_output",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "br_dotted_doctor_output"
         },
         {
           "id": "br_dotted_roundtrip_log_contract",
