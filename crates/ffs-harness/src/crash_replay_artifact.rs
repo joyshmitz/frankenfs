@@ -26,7 +26,7 @@ const ALLOWED_LANE_TYPES: [&str; 4] = [
     "host_skip",
 ];
 
-const ALLOWED_CRASH_TAXONOMY: [&str; 8] = [
+const ALLOWED_CRASH_TAXONOMY: [&str; 9] = [
     "pre_commit_crash",
     "post_commit_pre_flush_crash",
     "replay_interruption",
@@ -34,6 +34,7 @@ const ALLOWED_CRASH_TAXONOMY: [&str; 8] = [
     "concurrent_writer_conflict",
     "metadata_data_ordering_boundary",
     "mount_teardown_race",
+    "mounted_write_reopen",
     "no_crash_baseline",
 ];
 
@@ -62,6 +63,13 @@ const FAIL_CLOSED_VERDICTS: [&str; 4] = [
     "replay_failure",
 ];
 
+const ALLOWED_PERMISSIONED_CLEANUP_STATUSES: [&str; 4] = [
+    "cleaned_up",
+    "cleanup_verified",
+    "retained_for_debug",
+    "host_blocked_before_mount",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrashReplayArtifact {
     pub schema_version: u32,
@@ -81,6 +89,8 @@ pub struct CrashReplayArtifact {
     pub minimization_status: String,
     pub raw_log_path: String,
     pub reproduction_command: String,
+    #[serde(default)]
+    pub permissioned_context: Option<PermissionedCrashReplayContext>,
     #[serde(default)]
     pub follow_up_bead: String,
     #[serde(default)]
@@ -107,6 +117,28 @@ pub struct CrashOperationStep {
     pub op: String,
     pub args: Vec<String>,
     pub crash_point_after: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCrashReplayContext {
+    pub lane_id: String,
+    pub host_capability_proof: String,
+    pub image_path: String,
+    pub image_hash: String,
+    pub mountpoint_path: String,
+    #[serde(default)]
+    pub daemon_pid: Option<u32>,
+    #[serde(default)]
+    pub termination_method: String,
+    pub operation_trace_path: String,
+    pub expected_survivors_path: String,
+    pub observed_survivors_path: String,
+    #[serde(default)]
+    pub repair_ledger_path: String,
+    pub stdout_path: String,
+    pub stderr_path: String,
+    pub cleanup_status: String,
+    pub repro_command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +179,7 @@ pub fn validate_crash_replay_artifact(artifact: &CrashReplayArtifact) -> CrashRe
     validate_artifact_required_text(artifact, &mut errors);
     validate_artifact_image_hashes(artifact, &mut errors);
     validate_artifact_operation_trace(artifact, &mut errors);
+    validate_artifact_permissioned_context(artifact, &mut errors);
     validate_artifact_follow_up(artifact, &mut errors);
     let fail_closed = FAIL_CLOSED_VERDICTS.contains(&artifact.oracle_verdict.as_str());
     CrashReplayArtifactReport {
@@ -281,6 +314,71 @@ fn validate_artifact_operation_trace(artifact: &CrashReplayArtifact, errors: &mu
     {
         errors.push(format!(
             "crash replay artifact `{}` operation_trace must declare a crash_point_after step",
+            artifact.artifact_id
+        ));
+    }
+}
+
+fn validate_artifact_permissioned_context(
+    artifact: &CrashReplayArtifact,
+    errors: &mut Vec<String>,
+) {
+    if artifact.lane_type == "mounted_e2e" && artifact.permissioned_context.is_none() {
+        errors.push(format!(
+            "crash replay artifact `{}` mounted_e2e lane must declare permissioned_context",
+            artifact.artifact_id
+        ));
+        return;
+    }
+
+    let Some(context) = &artifact.permissioned_context else {
+        return;
+    };
+
+    let required_text = [
+        ("lane_id", &context.lane_id),
+        ("host_capability_proof", &context.host_capability_proof),
+        ("image_path", &context.image_path),
+        ("mountpoint_path", &context.mountpoint_path),
+        ("operation_trace_path", &context.operation_trace_path),
+        ("expected_survivors_path", &context.expected_survivors_path),
+        ("observed_survivors_path", &context.observed_survivors_path),
+        ("stdout_path", &context.stdout_path),
+        ("stderr_path", &context.stderr_path),
+        ("repro_command", &context.repro_command),
+    ];
+    for (field, value) in required_text {
+        if value.trim().is_empty() {
+            errors.push(format!(
+                "crash replay artifact `{}` permissioned_context missing {field}",
+                artifact.artifact_id
+            ));
+        }
+    }
+
+    if !is_valid_sha256(&context.image_hash) {
+        errors.push(format!(
+            "crash replay artifact `{}` permissioned_context image_hash must be sha256:<64-hex>",
+            artifact.artifact_id
+        ));
+    }
+    if !ALLOWED_PERMISSIONED_CLEANUP_STATUSES.contains(&context.cleanup_status.as_str()) {
+        errors.push(format!(
+            "crash replay artifact `{}` permissioned_context unsupported cleanup_status `{}`",
+            artifact.artifact_id, context.cleanup_status
+        ));
+    }
+    if context.daemon_pid.is_some() && context.termination_method.trim().is_empty() {
+        errors.push(format!(
+            "crash replay artifact `{}` permissioned_context daemon_pid requires termination_method",
+            artifact.artifact_id
+        ));
+    }
+    if artifact.crash_taxonomy == "repair_interruption"
+        && context.repair_ledger_path.trim().is_empty()
+    {
+        errors.push(format!(
+            "crash replay artifact `{}` repair_interruption lane must declare repair_ledger_path",
             artifact.artifact_id
         ));
     }
@@ -436,6 +534,38 @@ mod tests {
             .expect("default crash replay artifact parses")
     }
 
+    fn fixture_permissioned_context() -> PermissionedCrashReplayContext {
+        PermissionedCrashReplayContext {
+            lane_id: "permissioned_mounted_crash_replay_v1".to_owned(),
+            host_capability_proof: "artifacts/crash-replay/host_capability.json".to_owned(),
+            image_path: "artifacts/crash-replay/images/ext4-mounted.img".to_owned(),
+            image_hash:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            mountpoint_path: "artifacts/crash-replay/mnt/ext4".to_owned(),
+            daemon_pid: Some(42),
+            termination_method: "SIGTERM_then_fusermount_unmount".to_owned(),
+            operation_trace_path: "artifacts/crash-replay/operation_trace.json".to_owned(),
+            expected_survivors_path: "artifacts/crash-replay/expected_survivors.json".to_owned(),
+            observed_survivors_path: "artifacts/crash-replay/observed_survivors.json".to_owned(),
+            repair_ledger_path: String::new(),
+            stdout_path: "artifacts/crash-replay/stdout.log".to_owned(),
+            stderr_path: "artifacts/crash-replay/stderr.log".to_owned(),
+            cleanup_status: "cleanup_verified".to_owned(),
+            repro_command:
+                "FFS_ENABLE_PERMISSIONED_CRASH_REPLAY=1 scripts/e2e/ffs_crash_replay_refinement_e2e.sh"
+                    .to_owned(),
+        }
+    }
+
+    fn fixture_permissioned_artifact(crash_taxonomy: &str) -> CrashReplayArtifact {
+        let mut artifact = fixture_artifact();
+        artifact.bead_id = "bd-8bg7c.1".to_owned();
+        artifact.lane_type = "mounted_e2e".to_owned();
+        artifact.crash_taxonomy = crash_taxonomy.to_owned();
+        artifact.permissioned_context = Some(fixture_permissioned_context());
+        artifact
+    }
+
     #[test]
     fn default_artifact_validates() {
         let report = validate_default_crash_replay_artifact()
@@ -562,6 +692,125 @@ mod tests {
         assert!(
             report.valid,
             "host skip should not require post_replay_image_hash: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn mounted_e2e_lane_requires_permissioned_context() {
+        let mut artifact = fixture_artifact();
+        artifact.lane_type = "mounted_e2e".to_owned();
+        artifact.permissioned_context = None;
+        let report = validate_crash_replay_artifact(&artifact);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("mounted_e2e lane must declare permissioned_context"))
+        );
+    }
+
+    #[test]
+    fn permissioned_mounted_write_reopen_artifact_validates() {
+        let artifact = fixture_permissioned_artifact("mounted_write_reopen");
+        let report = validate_crash_replay_artifact(&artifact);
+        assert!(
+            report.valid,
+            "permissioned mounted write/reopen context should validate: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn permissioned_context_rejects_missing_artifact_paths() {
+        let mut artifact = fixture_permissioned_artifact("mounted_write_reopen");
+        let context = artifact
+            .permissioned_context
+            .as_mut()
+            .expect("permissioned context");
+        context.host_capability_proof.clear();
+        context.stdout_path.clear();
+        let report = validate_crash_replay_artifact(&artifact);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("permissioned_context missing host_capability_proof"))
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("permissioned_context missing stdout_path"))
+        );
+    }
+
+    #[test]
+    fn permissioned_context_rejects_bad_image_hash_and_cleanup_status() {
+        let mut artifact = fixture_permissioned_artifact("mounted_write_reopen");
+        let context = artifact
+            .permissioned_context
+            .as_mut()
+            .expect("permissioned context");
+        context.image_hash = "sha1:not-supported".to_owned();
+        context.cleanup_status = "maybe_clean".to_owned();
+        let report = validate_crash_replay_artifact(&artifact);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("permissioned_context image_hash must be sha256"))
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported cleanup_status"))
+        );
+    }
+
+    #[test]
+    fn permissioned_daemon_pid_requires_termination_method() {
+        let mut artifact = fixture_permissioned_artifact("mounted_write_reopen");
+        artifact
+            .permissioned_context
+            .as_mut()
+            .expect("permissioned context")
+            .termination_method
+            .clear();
+        let report = validate_crash_replay_artifact(&artifact);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("daemon_pid requires termination_method"))
+        );
+    }
+
+    #[test]
+    fn repair_interruption_requires_repair_ledger_artifact() {
+        let artifact = fixture_permissioned_artifact("repair_interruption");
+        let report = validate_crash_replay_artifact(&artifact);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("repair_interruption lane must declare repair_ledger_path"))
+        );
+    }
+
+    #[test]
+    fn repair_interruption_accepts_repair_ledger_artifact() {
+        let mut artifact = fixture_permissioned_artifact("repair_interruption");
+        artifact
+            .permissioned_context
+            .as_mut()
+            .expect("permissioned context")
+            .repair_ledger_path = "artifacts/crash-replay/repair_ledger.jsonl".to_owned();
+        let report = validate_crash_replay_artifact(&artifact);
+        assert!(
+            report.valid,
+            "permissioned repair interruption context should validate: {:?}",
             report.errors
         );
     }
