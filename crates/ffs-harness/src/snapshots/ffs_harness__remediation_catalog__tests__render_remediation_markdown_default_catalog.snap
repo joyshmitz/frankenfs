@@ -1,0 +1,15 @@
+---
+source: crates/ffs-harness/src/remediation_catalog.rs
+expression: markdown
+---
+# Remediation Catalog `frankenfs_readiness_remediation_v1` (bead bd-rchk0.5.12)
+
+| ID | Outcome | Feature State | Data-Safety | Mutation | Owner | Action |
+|----|---------|---------------|-------------|----------|-------|--------|
+| rem_core_unit_product_failure | product_failure | validated | potential_data_loss | none | bd-rchk0.5.1 | Stop using this build for any read-write workload. Rebuild from the previous known-good tag and capture the failing test output. |
+| rem_mounted_smoke_host_skip | host_capability_skip | experimental | no_user_data_at_risk | none | bd-rchk4 | Re-run on a host with fuser >= 0.16 and /dev/fuse available, or treat the mounted lane as authoritatively unavailable for this build. |
+| rem_unsupported_mknod_block | unsupported_operation | unsupported | no_user_data_at_risk | refused | bd-rchk0.3.4 | Use a regular file or a kernel-mounted filesystem if device nodes are required; otherwise treat the rejection as the documented contract. |
+| rem_stale_proof_bundle | stale_artifact | deferred | no_user_data_at_risk | none | bd-rchk0.5.4 | Regenerate the proof bundle and rerun the release-gate evaluator before publishing readiness claims. |
+| rem_security_refusal_hostile_image | security_refusal | validated | data_loss_blocked_by_refusal | refused | bd-rchk0.5.11 | Do not retry; capture the refusal artifact and route the image through the security review pipeline before any further use. |
+| rem_unsafe_repair_refused | unsafe_repair_refusal | detection_only | data_loss_blocked_by_refusal | refused | bd-rchk0.5.3 | Capture the detection report, take a manual backup before any further attempts, and route the image to the repair-confidence calibration corpus. |
+| rem_passing_with_experimental_caveat | passing_with_caveat | experimental | no_user_data_at_risk | dry_run | bd-mpcse | Continue using only as experimental; record the caveat in any README/FEATURE_PARITY status update derived from this run. |

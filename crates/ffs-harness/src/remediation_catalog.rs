@@ -632,4 +632,20 @@ mod tests {
             );
         }
     }
+
+    /// bd-aofgb — golden-output snapshot for
+    /// `render_remediation_markdown` on the default catalog. Pins the
+    /// title format, blank line, table header, alignment row, the
+    /// per-row cell field order
+    /// (id|outcome|feature_state|data_safety|mutation|owner|action),
+    /// and the `\|` escape rule for the `immediate_action` column.
+    /// Substring-only assertions in `render_markdown_includes_all_entries`
+    /// cannot detect column reorders or alignment-row drift; this
+    /// snapshot does.
+    #[test]
+    fn render_remediation_markdown_default_catalog_snapshot() {
+        let catalog = fixture_catalog();
+        let markdown = render_remediation_markdown(&catalog);
+        insta::assert_snapshot!("render_remediation_markdown_default_catalog", markdown);
+    }
 }
