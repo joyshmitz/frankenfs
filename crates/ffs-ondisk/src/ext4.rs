@@ -12721,6 +12721,61 @@ mod tests {
             }
         }
 
+        // ── is_reserved_inode metamorphic relations (bd-x1t2n) ───────
+
+        /// MR-A — Zero sentinel always reserved. The kernel uses inode 0
+        /// as the "no inode" marker; `is_reserved_inode` must always
+        /// classify it as reserved regardless of `first_ino` (even when
+        /// first_ino == 0, where the predicate's `< first_ino` arm
+        /// degenerates).
+        #[test]
+        fn ext4_proptest_is_reserved_inode_zero_sentinel(first_ino in any::<u32>()) {
+            prop_assert!(is_reserved_inode(first_ino, 0));
+        }
+
+        /// MR-B — Cut-off boundary: for any first_ino > 0,
+        ///   * is_reserved_inode(first_ino, first_ino) == false
+        ///     (first_ino is the FIRST user inode)
+        ///   * is_reserved_inode(first_ino, first_ino - 1) == true
+        ///     (the slot immediately below is reserved)
+        /// Pins the strict-less-than boundary so a regression that
+        /// flipped `<` to `<=` would fail here.
+        #[test]
+        fn ext4_proptest_is_reserved_inode_strict_cutoff(first_ino in 1_u32..=u32::MAX) {
+            prop_assert!(
+                !is_reserved_inode(first_ino, first_ino),
+                "first_ino itself must NOT be reserved (it is the first user inode)"
+            );
+            prop_assert!(
+                is_reserved_inode(first_ino, first_ino - 1),
+                "the inode immediately below first_ino must be reserved"
+            );
+        }
+
+        /// MR-C — Anti-monotonicity in first_ino: for any ino > 0,
+        /// raising the first_ino threshold can only keep `ino`
+        /// reserved or newly-reserve it — never un-reserve. Formally:
+        ///   first_ino_a <= first_ino_b  →
+        ///   is_reserved_inode(first_ino_a, ino) <= is_reserved_inode(first_ino_b, ino)
+        /// (where false < true). This pins the predicate's
+        /// directional dependency on first_ino so a regression that
+        /// inverted the comparison sense would fail here.
+        #[test]
+        fn ext4_proptest_is_reserved_inode_anti_monotonic_in_first_ino(
+            first_ino_a in 0_u32..=u32::MAX,
+            delta in 0_u32..=1_000_000,
+            ino in 1_u32..=u32::MAX,
+        ) {
+            let first_ino_b = first_ino_a.saturating_add(delta);
+            let a = is_reserved_inode(first_ino_a, ino);
+            let b = is_reserved_inode(first_ino_b, ino);
+            prop_assert!(
+                !a || b,
+                "raising first_ino must not un-reserve a previously-reserved inode \
+                 (a={a}, b={b}, first_ino_a={first_ino_a}, first_ino_b={first_ino_b}, ino={ino})"
+            );
+        }
+
         // ── rec_len_from_disk ────────────────────────────────────────
 
         /// 4-byte-aligned rec_len decodes to itself for standard blocks.
