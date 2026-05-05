@@ -2,7 +2,9 @@
 
 use asupersync::Cx;
 use ffs_block::{BlockBuf, BlockDevice};
-use ffs_repair::codec::{decode_group, encode_group, DecodeOutcome, EncodedGroup};
+use ffs_repair::codec::{
+    decode_group, decode_group_with_owned_repair_symbols, encode_group, DecodeOutcome, EncodedGroup,
+};
 use ffs_types::{BlockNumber, GroupNumber};
 use libfuzzer_sys::fuzz_target;
 use std::collections::{BTreeSet, HashMap};
@@ -151,6 +153,51 @@ fn normalize_decode(result: ffs_error::Result<DecodeOutcome>) -> Result<Normaliz
         .map_err(|err| err.to_string())
 }
 
+fn assert_empty_corruption_fast_path(
+    cx: &Cx,
+    device: &dyn BlockDevice,
+    uuid: &[u8; 16],
+    group: GroupNumber,
+    first_block: BlockNumber,
+    source_block_count: u32,
+) {
+    let malformed_symbols = vec![(
+        source_block_count,
+        vec![0_u8; (device.block_size() as usize).saturating_sub(1)],
+    )];
+    let expected = Ok((Vec::<(u64, Vec<u8>)>::new(), true));
+
+    let borrowed = normalize_decode(decode_group(
+        cx,
+        device,
+        uuid,
+        group,
+        first_block,
+        source_block_count,
+        &[],
+        &malformed_symbols,
+    ));
+    assert_eq!(
+        borrowed, expected,
+        "empty corrupt-index decode should complete without consulting malformed repair symbols"
+    );
+
+    let owned = normalize_decode(decode_group_with_owned_repair_symbols(
+        cx,
+        device,
+        uuid,
+        group,
+        first_block,
+        source_block_count,
+        &[],
+        malformed_symbols,
+    ));
+    assert_eq!(
+        owned, expected,
+        "owned empty corrupt-index decode should match borrowed fast-path semantics"
+    );
+}
+
 fuzz_target!(|data: &[u8]| {
     let cx = Cx::for_testing();
     let mut cursor = ByteCursor::new(data);
@@ -214,6 +261,14 @@ fuzz_target!(|data: &[u8]| {
             "repair symbol size must match the device block size"
         );
     }
+    assert_empty_corruption_fast_path(
+        &cx,
+        &device,
+        &uuid,
+        group,
+        first_block,
+        source_block_count as u32,
+    );
 
     let mut corrupt_set = BTreeSet::new();
     let corrupt_count = cursor.next_index(source_block_count + 1);
@@ -284,6 +339,20 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(
         decode_first, decode_second,
         "repair codec decode path must be deterministic for identical inputs"
+    );
+    let decode_owned = normalize_decode(decode_group_with_owned_repair_symbols(
+        &cx,
+        &device,
+        &uuid,
+        group,
+        first_block,
+        source_block_count as u32,
+        &corrupt_indices,
+        repair_pairs.clone(),
+    ));
+    assert_eq!(
+        decode_first, decode_owned,
+        "owned repair-symbol decode path must match borrowed decode semantics"
     );
 
     if !repair_mutated
