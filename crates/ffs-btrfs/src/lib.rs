@@ -10942,20 +10942,22 @@ mod tests {
         // Strict-monotonic ascending across the reserved range, with
         // a jump to FIRST_FREE that leaves room for non-upstream
         // tree objectids in [12, 256).
-        assert!(
-            BTRFS_ROOT_TREE_OBJECTID < BTRFS_EXTENT_TREE_OBJECTID
-                && BTRFS_EXTENT_TREE_OBJECTID < BTRFS_CHUNK_TREE_OBJECTID
-                && BTRFS_CHUNK_TREE_OBJECTID < BTRFS_DEV_TREE_OBJECTID
-                && BTRFS_DEV_TREE_OBJECTID < BTRFS_FS_TREE_OBJECTID
-                && BTRFS_FS_TREE_OBJECTID < BTRFS_ROOT_TREE_DIR_OBJECTID
-                && BTRFS_ROOT_TREE_DIR_OBJECTID < BTRFS_CSUM_TREE_OBJECTID
-                && BTRFS_CSUM_TREE_OBJECTID < BTRFS_QUOTA_TREE_OBJECTID
-                && BTRFS_QUOTA_TREE_OBJECTID < BTRFS_UUID_TREE_OBJECTID
-                && BTRFS_UUID_TREE_OBJECTID < BTRFS_FREE_SPACE_TREE_OBJECTID
-                && BTRFS_FREE_SPACE_TREE_OBJECTID < BTRFS_BLOCK_GROUP_TREE_OBJECTID
-                && BTRFS_BLOCK_GROUP_TREE_OBJECTID < BTRFS_FIRST_FREE_OBJECTID,
-            "btrfs tree objectids must be strict-monotonic ascending"
-        );
+        const {
+            assert!(
+                BTRFS_ROOT_TREE_OBJECTID < BTRFS_EXTENT_TREE_OBJECTID
+                    && BTRFS_EXTENT_TREE_OBJECTID < BTRFS_CHUNK_TREE_OBJECTID
+                    && BTRFS_CHUNK_TREE_OBJECTID < BTRFS_DEV_TREE_OBJECTID
+                    && BTRFS_DEV_TREE_OBJECTID < BTRFS_FS_TREE_OBJECTID
+                    && BTRFS_FS_TREE_OBJECTID < BTRFS_ROOT_TREE_DIR_OBJECTID
+                    && BTRFS_ROOT_TREE_DIR_OBJECTID < BTRFS_CSUM_TREE_OBJECTID
+                    && BTRFS_CSUM_TREE_OBJECTID < BTRFS_QUOTA_TREE_OBJECTID
+                    && BTRFS_QUOTA_TREE_OBJECTID < BTRFS_UUID_TREE_OBJECTID
+                    && BTRFS_UUID_TREE_OBJECTID < BTRFS_FREE_SPACE_TREE_OBJECTID
+                    && BTRFS_FREE_SPACE_TREE_OBJECTID < BTRFS_BLOCK_GROUP_TREE_OBJECTID
+                    && BTRFS_BLOCK_GROUP_TREE_OBJECTID < BTRFS_FIRST_FREE_OBJECTID,
+                "btrfs tree objectids must be strict-monotonic ascending"
+            );
+        }
 
         // The reserved range is contiguous 1..=11 (no gaps).
         assert_eq!(
