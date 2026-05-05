@@ -119,6 +119,33 @@ fn build_dir_item(cursor: &mut ByteCursor<'_>) -> BtrfsDirItem {
     }
 }
 
+fn build_xattr_item(cursor: &mut ByteCursor<'_>) -> BtrfsXattrItem {
+    let value_len = cursor.next_u8() % (MAX_STRUCTURED_BYTES + 1);
+    BtrfsXattrItem {
+        name: nonempty_bounded_bytes(cursor, MAX_STRUCTURED_BYTES),
+        value: cursor.take_vec(usize::from(value_len)),
+    }
+}
+
+fn xattr_item_to_bytes(item: &BtrfsXattrItem) -> Vec<u8> {
+    let Ok(name_len) = u16::try_from(item.name.len()) else {
+        std::process::abort();
+    };
+    let Ok(value_len) = u16::try_from(item.value.len()) else {
+        std::process::abort();
+    };
+
+    let mut bytes = Vec::with_capacity(30 + item.name.len() + item.value.len());
+    bytes.extend_from_slice(&[0_u8; 17]);
+    bytes.extend_from_slice(&[0_u8; 8]);
+    bytes.extend_from_slice(&value_len.to_le_bytes());
+    bytes.extend_from_slice(&name_len.to_le_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(&item.name);
+    bytes.extend_from_slice(&item.value);
+    bytes
+}
+
 fn build_inline_extent(cursor: &mut ByteCursor<'_>) -> BtrfsExtentData {
     let inline_len = cursor.next_u8() % (MAX_STRUCTURED_BYTES + 1);
     BtrfsExtentData::Inline {
@@ -406,6 +433,37 @@ fn assert_structured_roundtrips(data: &[u8]) {
     assert!(
         parse_dir_items(&dir_with_tail).is_err(),
         "dir-item parser must reject unconsumed trailing bytes"
+    );
+
+    let xattr_first = build_xattr_item(&mut cursor);
+    let xattr_second = build_xattr_item(&mut cursor);
+    let xattr_first_bytes = xattr_item_to_bytes(&xattr_first);
+    let xattr_second_bytes = xattr_item_to_bytes(&xattr_second);
+    let parsed_single_xattr =
+        parse_xattr_items(&xattr_first_bytes).unwrap_or_else(|_| std::process::abort());
+    assert_eq!(
+        parsed_single_xattr,
+        vec![xattr_first.clone()],
+        "single BtrfsXattrItem payload must parse exactly"
+    );
+    let mut concatenated_xattrs = xattr_first_bytes.clone();
+    concatenated_xattrs.extend_from_slice(&xattr_second_bytes);
+    let parsed_xattrs =
+        parse_xattr_items(&concatenated_xattrs).unwrap_or_else(|_| std::process::abort());
+    assert_eq!(
+        parsed_xattrs,
+        vec![xattr_first, xattr_second],
+        "concatenated BtrfsXattrItem payloads must parse in order"
+    );
+    let mut xattr_with_tail = xattr_first_bytes.clone();
+    xattr_with_tail.push(cursor.next_u8());
+    assert!(
+        parse_xattr_items(&xattr_with_tail).is_err(),
+        "xattr-item parser must reject unconsumed trailing bytes"
+    );
+    assert!(
+        parse_xattr_items(&xattr_first_bytes[..xattr_first_bytes.len() - 1]).is_err(),
+        "xattr-item parser must reject short payloads"
     );
 
     for extent in [
