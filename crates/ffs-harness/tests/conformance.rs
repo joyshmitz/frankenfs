@@ -3936,7 +3936,7 @@ fn btrfs_multi_device_raid5_read_conforms() {
         Box::new(move |_physical, _len| {
             Err(ParseError::InvalidField {
                 field: "device",
-                reason: "parity device read not implemented for test",
+                reason: "RAID5 data-stripe fixture unexpectedly read parity stripe",
             })
         }),
     );
