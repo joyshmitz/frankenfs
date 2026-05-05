@@ -259,6 +259,31 @@ The crash replay refinement smoke is:
 
 Every crash replay case artifact must include lane type, crash classification, schedule id, seed, crash point, expected survivors, observed survivors, cleanup status, raw structured log marker, minimized operation count, and a minimized reproduction command. Per-schedule artifacts must preserve the full operation trace. Core deterministic schedules must compare survivor sets after replay, while mounted-smoke and repair-interruption lanes must be represented in the taxonomy and use structured host capability skips when the lane cannot run.
 
+The safe default does not attempt mounted crash replay. If
+`FFS_ENABLE_PERMISSIONED_CRASH_REPLAY=1` is set, the smoke first emits a
+structured permissioned capability blocker unless the host has `/dev/fuse`,
+`fusermount3` or `fusermount`, and the separate real-run acknowledgement:
+
+```bash
+FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK=permissioned-crash-replay-may-mount-kill-daemon-and-mutate-images
+```
+
+The blocker artifact records `permissioned_execution_attempted=false`, the
+host probe result, missing prerequisites, the required acknowledgement, and a
+rerun command. Future real mounted write/reopen and repair-interruption lanes
+must keep those fields and add image, mountpoint, daemon, survivor, ledger,
+stdout/stderr, cleanup, and reproduction artifacts before claiming
+authoritative permissioned evidence.
+
+For low-privilege verification of the blocker contract without running the
+core cargo replay or any permissioned mount action:
+
+```bash
+FFS_CRASH_REPLAY_PERMISSIONED_PROBE_ONLY=1 \
+FFS_ENABLE_PERMISSIONED_CRASH_REPLAY=1 \
+./scripts/e2e/ffs_crash_replay_refinement_e2e.sh
+```
+
 Unreduced failing schedules must link a follow-up bead with raw logs and the full operation trace. Passing schedules still emit minimized reproduction commands so a future regression can be rerun from the artifact bundle without re-searching the corpus.
 
 ## Artifact Manifest Contract
