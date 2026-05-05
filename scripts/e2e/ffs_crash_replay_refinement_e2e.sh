@@ -257,6 +257,7 @@ if [[ "${FFS_CRASH_REPLAY_PERMISSIONED_PROBE_ONLY:-0}" == "1" ]]; then
         "$E2E_LOG_DIR/crash_replay_mounted_write_reopen.json" \
         "$E2E_LOG_DIR/crash_replay_repair_interruption.json"; then
         e2e_log "PERMISSIONED_CRASH_REPLAY_BLOCKER_CONTRACT|outcome=PASS|artifacts=${E2E_LOG_DIR}/crash_replay_mounted_write_reopen.json,${E2E_LOG_DIR}/crash_replay_repair_interruption.json"
+        scenario_result "permissioned_crash_replay_blocker_contract" "PASS" "permissioned blocker artifacts preserve cleanup/no-mutation proof"
     else
         scenario_result "permissioned_crash_replay_blocker_contract" "FAIL" "blocker contract validation failed"
     fi

@@ -1790,6 +1790,12 @@
           "evidence": "SCENARIO_RESULT|scenario_id=crash_replay_repair_interruption|outcome=SKIP"
         },
         {
+          "id": "permissioned_crash_replay_blocker_contract",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "scenario_result \"permissioned_crash_replay_blocker_contract\" \"PASS\""
+        },
+        {
           "id": "crash_replay_refinement_unit_tests",
           "category": "happy",
           "status": "active",
