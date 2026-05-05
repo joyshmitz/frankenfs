@@ -32,6 +32,30 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:-CARGO_TARGET_DIR,RUST_LOG,RUST_BACKTRACE}"
+RCH_AGENT_TARGET_SUFFIX="${AGENT_NAME:-${USER:-agent}}"
+RCH_CARGO_TARGET_DIR="${RCH_CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_frankenfs_mvcc_replay_gate_$RCH_AGENT_TARGET_SUFFIX}"
+
+rch_allow_env() {
+    local name="$1"
+    if [[ ",$RCH_ENV_ALLOWLIST," != *",$name,"* ]]; then
+        RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST},$name"
+    fi
+}
+
+rch_allow_env CARGO_TARGET_DIR
+rch_allow_env RUST_LOG
+rch_allow_env RUST_BACKTRACE
+
+run_rch_cargo() {
+    CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" \
+        RCH_ENV_ALLOWLIST="$RCH_ENV_ALLOWLIST" \
+        RCH_VISIBILITY="$RCH_VISIBILITY" \
+        "$RCH_BIN" exec -- cargo "$@"
+}
+
 PASS_COUNT=0
 FAIL_COUNT=0
 TOTAL=0
@@ -61,7 +85,7 @@ PERSIST_SRC="crates/ffs-mvcc/src/persist.rs"
 e2e_step "Scenario 1: Full ffs-mvcc test suite"
 
 TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+if run_rch_cargo test -p ffs-mvcc --lib 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
     TESTS_RUN=$(grep -c "test .*::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 300 ]]; then
         scenario_result "mvcc_full_suite" "PASS" "Full suite passed (${TESTS_RUN} tests)"
@@ -79,7 +103,7 @@ rm -f "$TEST_LOG"
 e2e_step "Scenario 2: WAL replay engine tests"
 
 TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- wal_replay::tests 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+if run_rch_cargo test -p ffs-mvcc --lib -- wal_replay::tests 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
     TESTS_RUN=$(grep -c "test wal_replay::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 15 ]]; then
         scenario_result "wal_replay_tests" "PASS" "WAL replay tests passed (${TESTS_RUN} tests)"
@@ -97,7 +121,7 @@ rm -f "$TEST_LOG"
 e2e_step "Scenario 3: Crash matrix deterministic scenarios"
 
 TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- crash_matrix 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+if run_rch_cargo test -p ffs-mvcc --lib -- crash_matrix 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
     TESTS_RUN=$(grep -c "test crash_matrix::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 15 ]]; then
         scenario_result "crash_matrix_tests" "PASS" "Crash matrix tests passed (${TESTS_RUN} tests)"
@@ -115,7 +139,7 @@ rm -f "$TEST_LOG"
 e2e_step "Scenario 4: Persist layer (checkpoint + WAL)"
 
 TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- persist::tests 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+if run_rch_cargo test -p ffs-mvcc --lib -- persist::tests 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
     TESTS_RUN=$(grep -c "test persist::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 25 ]]; then
         scenario_result "persist_layer_tests" "PASS" "Persist tests passed (${TESTS_RUN} tests)"
@@ -133,7 +157,7 @@ rm -f "$TEST_LOG"
 e2e_step "Scenario 5: CLI WAL telemetry tests"
 
 TEST_LOG=$(mktemp)
-if cargo test -p ffs-cli -- wal_replay 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+if run_rch_cargo test -p ffs-cli -- wal_replay 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
     TESTS_RUN=$(grep -c "test tests::wal_replay" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 4 ]]; then
         scenario_result "cli_wal_telemetry_tests" "PASS" "CLI WAL tests passed (${TESTS_RUN} tests)"
@@ -151,7 +175,7 @@ rm -f "$TEST_LOG"
 e2e_step "Scenario 6: ffs-core WAL recovery integration"
 
 TEST_LOG=$(mktemp)
-if cargo test -p ffs-core -- mvcc_wal_recovery 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+if run_rch_cargo test -p ffs-core -- mvcc_wal_recovery 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
     scenario_result "core_wal_recovery" "PASS" "ffs-core WAL recovery tests passed"
 else
     scenario_result "core_wal_recovery" "FAIL" "ffs-core WAL recovery tests failed"
