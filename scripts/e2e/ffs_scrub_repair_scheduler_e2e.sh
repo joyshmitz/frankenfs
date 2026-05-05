@@ -100,11 +100,75 @@ run_rch_capture() {
     return "$status"
 }
 
-run_local_capture() {
+run_rch_stdout_capture() {
     local output_path="$1"
     shift
+    local status
+    local rch_log_path="${output_path}.rch.log"
 
-    timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "$@" >"$output_path" 2>&1
+    set +e
+    RCH_VISIBILITY=none timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- bash -lc '
+        set -euo pipefail
+        stdout_path="${CARGO_TARGET_DIR}/e2e_stdout/stdout.$$"
+        mkdir -p "$(dirname "$stdout_path")"
+        set +e
+        "$@" >"$stdout_path"
+        status=$?
+        set -e
+        printf "%s\n" "__FFS_REMOTE_STDOUT_BEGIN__"
+        cat "$stdout_path"
+        printf "%s\n" "__FFS_REMOTE_STDOUT_END__"
+        exit "$status"
+    ' _ "$@" >"$rch_log_path" 2>&1
+    status=$?
+    set -e
+
+    if [[ $status -eq 0 ]] || { [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$rch_log_path"; }; then
+        awk '
+            $0 == "__FFS_REMOTE_STDOUT_BEGIN__" { capture = 1; next }
+            $0 == "__FFS_REMOTE_STDOUT_END__" { found = 1; capture = 0; next }
+            capture { print }
+            END { exit found ? 0 : 1 }
+        ' "$rch_log_path" >"$output_path"
+        if [[ $status -eq 124 ]]; then
+            e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|output=${output_path}|rch_log=${rch_log_path}|command=$*"
+        fi
+        return 0
+    fi
+    return "$status"
+}
+
+run_rch_mutated_validator_capture() {
+    local output_path="$1"
+    local local_mutated_json="$2"
+    local jq_filter="$3"
+    local source_json="$4"
+    local validator="$5"
+    local path_flag="$6"
+
+    jq "$jq_filter" "$source_json" >"$local_mutated_json"
+    if run_rch_capture "$output_path" bash -lc '
+        set -euo pipefail
+        jq_filter="$1"
+        source_json="$2"
+        local_mutated_json="$3"
+        validator="$4"
+        path_flag="$5"
+        remote_mutated_json="${CARGO_TARGET_DIR}/e2e_mutations/$(basename "$local_mutated_json")"
+        mkdir -p "$(dirname "$remote_mutated_json")"
+        jq "$jq_filter" "$source_json" >"$remote_mutated_json"
+        cargo run --quiet -p ffs-harness -- "$validator" "$path_flag" "$remote_mutated_json"
+    ' _ "$jq_filter" "$source_json" "$local_mutated_json" "$validator" "$path_flag"; then
+        if grep -q '^error:' "$output_path"; then
+            set +e
+            return 1
+        fi
+        return 0
+    else
+        local rch_status=$?
+        set +e
+        return "$rch_status"
+    fi
 }
 
 e2e_log "=============================================="
@@ -142,7 +206,7 @@ else
 fi
 
 e2e_step "Scenario 3: default manifest validates and feeds proof-bundle artifacts"
-if run_local_capture "$REPORT_RAW" cargo run --quiet -p ffs-harness -- validate-scrub-repair-scheduler --manifest "$MANIFEST_JSON"; then
+if run_rch_stdout_capture "$REPORT_RAW" cargo run --quiet -p ffs-harness -- validate-scrub-repair-scheduler --manifest "$MANIFEST_JSON"; then
     cp "$REPORT_RAW" "$REPORT_JSON"
     if jq -e '.valid == true and .scenario_count == 2 and .authoritative_claim_count == 1 and .conservative_claim_count == 1 and (.classification_counts.pass == 1) and (.classification_counts.skip == 1)' "$REPORT_JSON" >/dev/null; then
         scenario_result "scrub_repair_scheduler_default_manifest" "PASS" "valid manifest has authoritative plus conservative rows"
@@ -154,7 +218,7 @@ else
 fi
 
 e2e_step "Scenario 4: markdown rendering exposes expected-loss accounting"
-if run_local_capture "$REPORT_MD_RAW" cargo run --quiet -p ffs-harness -- validate-scrub-repair-scheduler --manifest "$MANIFEST_JSON" --format markdown; then
+if run_rch_stdout_capture "$REPORT_MD_RAW" cargo run --quiet -p ffs-harness -- validate-scrub-repair-scheduler --manifest "$MANIFEST_JSON" --format markdown; then
     if grep -q "Freshness loss" "$REPORT_MD_RAW" && grep -q "Foreground loss" "$REPORT_MD_RAW"; then
         scenario_result "scrub_repair_scheduler_markdown" "PASS" "markdown summary includes loss accounting"
     else
@@ -165,10 +229,14 @@ else
 fi
 
 e2e_step "Scenario 5: direct repair writeback bypass fails closed"
-jq '.scenarios[0].ledger.mutation_route = "direct_block_write"' \
-    "$MANIFEST_JSON" >"$MUTATED_ROUTE_JSON"
 set +e
-run_local_capture "$MUTATED_ROUTE_RAW" cargo run --quiet -p ffs-harness -- validate-scrub-repair-scheduler --manifest "$MUTATED_ROUTE_JSON"
+run_rch_mutated_validator_capture \
+    "$MUTATED_ROUTE_RAW" \
+    "$MUTATED_ROUTE_JSON" \
+    '.scenarios[0].ledger.mutation_route = "direct_block_write"' \
+    "$MANIFEST_JSON" \
+    validate-scrub-repair-scheduler \
+    --manifest
 MUTATED_ROUTE_STATUS=$?
 set -e
 if [[ $MUTATED_ROUTE_STATUS -ne 0 ]] && grep -q "bypasses the mounted mutation authority" "$MUTATED_ROUTE_RAW"; then
@@ -178,10 +246,14 @@ else
 fi
 
 e2e_step "Scenario 6: foreground p99 over-budget pass fails closed"
-jq '.scenarios[0].observed_foreground_p99_us = 7500.0' \
-    "$MANIFEST_JSON" >"$MUTATED_P99_JSON"
 set +e
-run_local_capture "$MUTATED_P99_RAW" cargo run --quiet -p ffs-harness -- validate-scrub-repair-scheduler --manifest "$MUTATED_P99_JSON"
+run_rch_mutated_validator_capture \
+    "$MUTATED_P99_RAW" \
+    "$MUTATED_P99_JSON" \
+    '.scenarios[0].observed_foreground_p99_us = 7500.0' \
+    "$MANIFEST_JSON" \
+    validate-scrub-repair-scheduler \
+    --manifest
 MUTATED_P99_STATUS=$?
 set -e
 if [[ $MUTATED_P99_STATUS -ne 0 ]] && grep -q "foreground p99 regression" "$MUTATED_P99_RAW"; then

@@ -100,11 +100,75 @@ run_rch_capture() {
     return "$status"
 }
 
-run_local_capture() {
+run_rch_stdout_capture() {
     local output_path="$1"
     shift
+    local status
+    local rch_log_path="${output_path}.rch.log"
 
-    timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "$@" >"$output_path" 2>&1
+    set +e
+    RCH_VISIBILITY=none timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- bash -lc '
+        set -euo pipefail
+        stdout_path="${CARGO_TARGET_DIR}/e2e_stdout/stdout.$$"
+        mkdir -p "$(dirname "$stdout_path")"
+        set +e
+        "$@" >"$stdout_path"
+        status=$?
+        set -e
+        printf "%s\n" "__FFS_REMOTE_STDOUT_BEGIN__"
+        cat "$stdout_path"
+        printf "%s\n" "__FFS_REMOTE_STDOUT_END__"
+        exit "$status"
+    ' _ "$@" >"$rch_log_path" 2>&1
+    status=$?
+    set -e
+
+    if [[ $status -eq 0 ]] || { [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$rch_log_path"; }; then
+        awk '
+            $0 == "__FFS_REMOTE_STDOUT_BEGIN__" { capture = 1; next }
+            $0 == "__FFS_REMOTE_STDOUT_END__" { found = 1; capture = 0; next }
+            capture { print }
+            END { exit found ? 0 : 1 }
+        ' "$rch_log_path" >"$output_path"
+        if [[ $status -eq 124 ]]; then
+            e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|output=${output_path}|rch_log=${rch_log_path}|command=$*"
+        fi
+        return 0
+    fi
+    return "$status"
+}
+
+run_rch_mutated_validator_capture() {
+    local output_path="$1"
+    local local_mutated_json="$2"
+    local jq_filter="$3"
+    local source_json="$4"
+    local validator="$5"
+    local path_flag="$6"
+
+    jq "$jq_filter" "$source_json" >"$local_mutated_json"
+    if run_rch_capture "$output_path" bash -lc '
+        set -euo pipefail
+        jq_filter="$1"
+        source_json="$2"
+        local_mutated_json="$3"
+        validator="$4"
+        path_flag="$5"
+        remote_mutated_json="${CARGO_TARGET_DIR}/e2e_mutations/$(basename "$local_mutated_json")"
+        mkdir -p "$(dirname "$remote_mutated_json")"
+        jq "$jq_filter" "$source_json" >"$remote_mutated_json"
+        cargo run --quiet -p ffs-harness -- "$validator" "$path_flag" "$remote_mutated_json"
+    ' _ "$jq_filter" "$source_json" "$local_mutated_json" "$validator" "$path_flag"; then
+        if grep -q '^error:' "$output_path"; then
+            set +e
+            return 1
+        fi
+        return 0
+    else
+        local rch_status=$?
+        set +e
+        return "$rch_status"
+    fi
 }
 
 e2e_log "=============================================="
@@ -144,7 +208,7 @@ else
 fi
 
 e2e_step "Scenario 3: default manifest validates with all required workload profiles"
-if run_local_capture "$REPORT_RAW" cargo run --quiet -p ffs-harness -- validate-swarm-workload-harness --manifest "$MANIFEST_JSON"; then
+if run_rch_stdout_capture "$REPORT_RAW" cargo run --quiet -p ffs-harness -- validate-swarm-workload-harness --manifest "$MANIFEST_JSON"; then
     cp "$REPORT_RAW" "$REPORT_JSON"
     if jq -e '.valid == true and .profile_count == 5 and .missing_workload_classes == [] and .large_host_plan_count == 1 and .host_downgrade_count == 1 and (.release_claim_counts.plan_ready == 1) and (.release_claim_counts.small_host_smoke == 1)' "$REPORT_JSON" >/dev/null; then
         scenario_result "swarm_workload_default_manifest" "PASS" "default manifest preserves plan-ready and downgraded rows"
@@ -156,7 +220,7 @@ else
 fi
 
 e2e_step "Scenario 4: markdown rendering includes host downgrade and workload matrix"
-if run_local_capture "$REPORT_MD_RAW" cargo run --quiet -p ffs-harness -- validate-swarm-workload-harness --manifest "$MANIFEST_JSON" --format markdown; then
+if run_rch_stdout_capture "$REPORT_MD_RAW" cargo run --quiet -p ffs-harness -- validate-swarm-workload-harness --manifest "$MANIFEST_JSON" --format markdown; then
     if grep -q "Host downgrades" "$REPORT_MD_RAW" && grep -q "metadata_storm" "$REPORT_MD_RAW" && grep -q "cache_pressure" "$REPORT_MD_RAW"; then
         scenario_result "swarm_workload_markdown" "PASS" "markdown summary includes downgrade and workload matrix"
     else
@@ -167,10 +231,14 @@ else
 fi
 
 e2e_step "Scenario 5: small-host 64-core claim fails closed"
-jq '.scenarios[1].classification = "pass" | .scenarios[1].release_claim_state = "measured_authoritative"' \
-    "$MANIFEST_JSON" >"$MUTATED_HOST_JSON"
 set +e
-run_local_capture "$MUTATED_HOST_RAW" cargo run --quiet -p ffs-harness -- validate-swarm-workload-harness --manifest "$MUTATED_HOST_JSON"
+run_rch_mutated_validator_capture \
+    "$MUTATED_HOST_RAW" \
+    "$MUTATED_HOST_JSON" \
+    '.scenarios[1].classification = "pass" | .scenarios[1].release_claim_state = "measured_authoritative"' \
+    "$MANIFEST_JSON" \
+    validate-swarm-workload-harness \
+    --manifest
 MUTATED_HOST_STATUS=$?
 set -e
 if [[ $MUTATED_HOST_STATUS -ne 0 ]] && grep -q "below the 64-core/256GB target" "$MUTATED_HOST_RAW"; then
@@ -180,10 +248,14 @@ else
 fi
 
 e2e_step "Scenario 6: missing NUMA visibility rationale fails closed"
-jq 'del(.scenarios[1].host.numa.missing_reason)' \
-    "$MANIFEST_JSON" >"$MUTATED_NUMA_JSON"
 set +e
-run_local_capture "$MUTATED_NUMA_RAW" cargo run --quiet -p ffs-harness -- validate-swarm-workload-harness --manifest "$MUTATED_NUMA_JSON"
+run_rch_mutated_validator_capture \
+    "$MUTATED_NUMA_RAW" \
+    "$MUTATED_NUMA_JSON" \
+    'del(.scenarios[1].host.numa.missing_reason)' \
+    "$MANIFEST_JSON" \
+    validate-swarm-workload-harness \
+    --manifest
 MUTATED_NUMA_STATUS=$?
 set -e
 if [[ $MUTATED_NUMA_STATUS -ne 0 ]] && grep -q "missing_reason" "$MUTATED_NUMA_RAW"; then
@@ -193,10 +265,14 @@ else
 fi
 
 e2e_step "Scenario 7: mutating host command plan fails closed"
-jq '.workload_profiles[0].command_plan.mutates_host_filesystems = true' \
-    "$MANIFEST_JSON" >"$MUTATED_COMMAND_JSON"
 set +e
-run_local_capture "$MUTATED_COMMAND_RAW" cargo run --quiet -p ffs-harness -- validate-swarm-workload-harness --manifest "$MUTATED_COMMAND_JSON"
+run_rch_mutated_validator_capture \
+    "$MUTATED_COMMAND_RAW" \
+    "$MUTATED_COMMAND_JSON" \
+    '.workload_profiles[0].command_plan.mutates_host_filesystems = true' \
+    "$MANIFEST_JSON" \
+    validate-swarm-workload-harness \
+    --manifest
 MUTATED_COMMAND_STATUS=$?
 set -e
 if [[ $MUTATED_COMMAND_STATUS -ne 0 ]] && grep -q "mutates host filesystems" "$MUTATED_COMMAND_RAW"; then
