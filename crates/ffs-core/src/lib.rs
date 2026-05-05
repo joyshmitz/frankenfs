@@ -20625,6 +20625,25 @@ mod tests {
     }
 
     #[test]
+    fn fsops_default_statfs_reports_supported_scope() {
+        let fs = StubFs;
+        let cx = Cx::for_testing();
+
+        let err = fs
+            .statfs(&cx, &mut RequestScope::empty(), InodeNumber(1))
+            .expect_err("StubFs should inherit the default statfs rejection");
+
+        let FfsError::UnsupportedFeature(message) = err else {
+            panic!("expected UnsupportedFeature for default statfs");
+        };
+        assert_eq!(message, "statfs is not supported by this backend");
+        assert!(
+            !message.contains("not implemented"),
+            "default statfs rejection should not look like a stub: {message}"
+        );
+    }
+
+    #[test]
     fn dir_entry_name_str() {
         let entry = DirEntry {
             ino: InodeNumber(5),

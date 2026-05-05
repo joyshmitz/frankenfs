@@ -606,7 +606,7 @@ pub trait FsOps: Send + Sync {
         _ino: InodeNumber,
     ) -> ffs_error::Result<FsStat> {
         Err(FfsError::UnsupportedFeature(
-            "statfs is not implemented by this backend".to_owned(),
+            "statfs is not supported by this backend".to_owned(),
         ))
     }
 
