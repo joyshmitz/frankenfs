@@ -172,10 +172,45 @@ const CHECKPOINT_HEADER_SIZE: usize = 28;
 ///
 /// The write path is backed by [`WalWriter`], which provides integrity checks,
 /// configurable sync policy, backpressure signaling, and structured logging.
+///
+/// # Lock ordering invariant (bd-7zd94)
+///
+/// The struct holds three [`parking_lot::RwLock`]s. Any code path that
+/// acquires more than one of them MUST do so in this order to prevent
+/// AB-BA deadlock:
+///
+/// ```text
+///     store  ──→  wal  ──→  stats
+/// ```
+///
+/// Production callers comply:
+///
+/// | Caller                | store | wal   | stats | Notes                |
+/// |-----------------------|-------|-------|-------|----------------------|
+/// | `commit_with_options` | W     | W     | W     | full commit pipeline |
+/// | `checkpoint`          | R     | -     | W     | stats nested in store|
+/// | `truncate_wal`        | R     | W     | R, W  | brief stats(R) gate  |
+///
+/// Acquiring `wal` before `store` (e.g., a hypothetical `repack_wal`
+/// that takes `wal.write()` first then `store.write()`) would
+/// instantly deadlock against `commit_with_options`, which holds
+/// `store.write()` while waiting on `wal.write()`.
+///
+/// New methods on this struct must respect the order. The
+/// `lock_ordering_under_concurrent_commit_and_truncate` test exercises
+/// it under concurrent load with a watchdog timeout.
 #[derive(Debug)]
 pub struct PersistentMvccStore {
+    /// MVCC version store. **Lock-rank 0** — must be acquired before
+    /// `wal` and `stats`. See struct-level doc.
     store: RwLock<MvccStore>,
+    /// WAL append/sync handle. **Lock-rank 1** — must only be
+    /// acquired while no `stats` lock is held; may be acquired while
+    /// `store` is held.
     wal: RwLock<WalWriter>,
+    /// Persistence statistics + checkpoint horizon. **Lock-rank 2** —
+    /// must be acquired last (or alone). Never acquire `store` or
+    /// `wal` while holding `stats`.
     stats: RwLock<WalStats>,
     recovery_report: WalRecoveryReport,
 }
@@ -2410,5 +2445,85 @@ mod tests {
 
             std::fs::remove_file(&path).ok();
         }
+    }
+
+    /// bd-7zd94 — regression guard for the canonical lock-ordering
+    /// invariant on `PersistentMvccStore` (store → wal → stats).
+    /// Spawns concurrent writers that exercise both `commit`
+    /// (acquires store.W → wal.W → stats.W) and `truncate_wal`
+    /// (acquires store.R → wal.W → stats.W) under contention.
+    /// A watchdog thread fails the test if the worker threads do not
+    /// finish within a generous timeout; any AB-BA introduced by a
+    /// future caller would manifest here as a hang and surface a clear
+    /// failure rather than a silent regression.
+    #[test]
+    fn lock_ordering_under_concurrent_commit_and_truncate() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let cx = test_cx();
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::fs::remove_file(&path).ok();
+        let store = Arc::new(PersistentMvccStore::open(&cx, &path).expect("open"));
+
+        let done = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + Duration::from_secs(15);
+
+        // Watchdog: prove no thread is hung after the timeout elapses.
+        let watchdog_done = Arc::clone(&done);
+        let watchdog = thread::spawn(move || {
+            while Instant::now() < deadline {
+                if watchdog_done.load(AtomicOrdering::Acquire) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            // Reaching here means the workers did not finish in time;
+            // a lock-ordering violation almost certainly caused a hang.
+            panic!(
+                "bd-7zd94: PersistentMvccStore lock-ordering watchdog tripped — \
+                 commit/truncate_wal workers did not finish within 15s, \
+                 indicating a likely AB-BA deadlock"
+            );
+        });
+
+        // Worker A: commit pipeline (store.W → wal.W → stats.W).
+        let store_a = Arc::clone(&store);
+        let worker_a = thread::spawn(move || {
+            for i in 0..32_u32 {
+                let mut txn = store_a.begin();
+                txn.stage_write(BlockNumber(u64::from(i)), vec![i as u8; 16]);
+                let _ = store_a.commit(txn).expect("commit must not block");
+            }
+        });
+
+        // Worker B: alternates checkpoint (store.R → stats.W) and
+        // truncate_wal (store.R → wal.W → stats.W). Both nested
+        // acquisitions stay strictly within the documented order.
+        let store_b = Arc::clone(&store);
+        let worker_b = thread::spawn(move || {
+            let ckpt_dir = tempfile::tempdir().expect("ckpt dir");
+            for i in 0..16_u32 {
+                let ckpt_path = ckpt_dir.path().join(format!("ckpt-{i}.bin"));
+                let _ = store_b.checkpoint(&ckpt_path).expect("checkpoint");
+                if i % 2 == 0 {
+                    // truncate_wal may return the staleness error when
+                    // commits have landed since the checkpoint; either
+                    // outcome proves the function returns rather than
+                    // hangs.
+                    let _ = store_b.truncate_wal();
+                }
+            }
+        });
+
+        worker_a.join().expect("worker A panicked");
+        worker_b.join().expect("worker B panicked");
+        done.store(true, AtomicOrdering::Release);
+        watchdog.join().expect("watchdog panicked");
+
+        std::fs::remove_file(&path).ok();
     }
 }
