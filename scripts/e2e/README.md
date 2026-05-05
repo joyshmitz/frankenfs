@@ -278,10 +278,19 @@ FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK=permissioned-crash-replay-may-mount-k
 
 The blocker artifact records `permissioned_execution_attempted=false`, the
 host probe result, missing prerequisites, the required acknowledgement, and a
-rerun command. Future real mounted write/reopen and repair-interruption lanes
-must keep those fields and add image, mountpoint, daemon, survivor, ledger,
-stdout/stderr, cleanup, and reproduction artifacts before claiming
-authoritative permissioned evidence.
+rerun command. When those host and acknowledgement prerequisites are present,
+real execution is delegated to `FFS_PERMISSIONED_CRASH_REPLAY_RUNNER`. The
+runner receives `FFS_CRASH_REPLAY_SCENARIO_ID`,
+`FFS_CRASH_REPLAY_SCENARIO_LANE`, `FFS_CRASH_REPLAY_CLASSIFICATION`,
+`FFS_CRASH_REPLAY_ARTIFACT_OUT`, `FFS_CRASH_REPLAY_STDOUT_OUT`,
+`FFS_CRASH_REPLAY_STDERR_OUT`, and `FFS_CRASH_REPLAY_LOG_DIR`. If the runner is
+missing, unresolved on `PATH`, or not executable, the smoke emits the same
+structured capability blocker instead of reporting an unimplemented-lane
+failure. A configured runner must write a mounted crash replay artifact at
+`FFS_CRASH_REPLAY_ARTIFACT_OUT` with `lane_type=mounted_e2e`,
+`permissioned_context`, image, mountpoint, daemon when applicable, survivor,
+ledger for repair interruption, stdout/stderr, cleanup, and reproduction fields
+before the smoke will count the permissioned scenario as authoritative evidence.
 
 For low-privilege verification of the blocker contract without running the
 core cargo replay or any permissioned mount action:

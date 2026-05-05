@@ -69,6 +69,27 @@ permissioned_missing_prerequisites() {
     if [[ "${FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK:-}" != "$PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK" ]]; then
         printf '%s\n' "missing_FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK"
     fi
+    local runner="${FFS_PERMISSIONED_CRASH_REPLAY_RUNNER:-}"
+    if [[ -z "$runner" ]]; then
+        printf '%s\n' "missing_FFS_PERMISSIONED_CRASH_REPLAY_RUNNER"
+    elif [[ "$runner" == */* && ! -x "$runner" ]]; then
+        printf '%s\n' "non_executable_FFS_PERMISSIONED_CRASH_REPLAY_RUNNER"
+    elif [[ "$runner" != */* ]] && ! command -v "$runner" >/dev/null 2>&1; then
+        printf '%s\n' "unresolved_FFS_PERMISSIONED_CRASH_REPLAY_RUNNER"
+    fi
+}
+
+permissioned_blocker_reason() {
+    local missing=("$@")
+    if ((${#missing[@]} == 1)) && [[ "${missing[0]}" == "missing_FFS_PERMISSIONED_CRASH_REPLAY_RUNNER" ]]; then
+        printf '%s\n' "permissioned crash replay external runner is not configured on this host"
+    elif ((${#missing[@]} == 1)) && [[ "${missing[0]}" == "non_executable_FFS_PERMISSIONED_CRASH_REPLAY_RUNNER" ]]; then
+        printf '%s\n' "permissioned crash replay external runner is not executable on this host"
+    elif ((${#missing[@]} == 1)) && [[ "${missing[0]}" == "unresolved_FFS_PERMISSIONED_CRASH_REPLAY_RUNNER" ]]; then
+        printf '%s\n' "permissioned crash replay external runner command is not on PATH"
+    else
+        printf '%s\n' "permissioned crash replay prerequisites are not satisfied on this host"
+    fi
 }
 
 write_permissioned_blocker() {
@@ -142,25 +163,116 @@ permissioned_lane_or_blocker() {
     local ready_detail="$4"
     mapfile -t missing < <(permissioned_missing_prerequisites)
     if ((${#missing[@]} > 0)); then
+        local reason
+        reason="$(permissioned_blocker_reason "${missing[@]}")"
         write_permissioned_blocker \
             "$scenario_id" \
             "$lane_type" \
             "$classification" \
-            "permissioned crash replay prerequisites are not satisfied on this host" \
+            "$reason" \
             "${missing[@]}"
         scenario_result "$scenario_id" "SKIP" "structured permissioned capability blocker emitted"
     else
-        scenario_result "$scenario_id" "FAIL" "$ready_detail"
+        if run_permissioned_runner "$scenario_id" "$lane_type" "$classification"; then
+            scenario_result "$scenario_id" "PASS" "permissioned external runner emitted validated artifact"
+        else
+            scenario_result "$scenario_id" "FAIL" "$ready_detail"
+        fi
     fi
 }
 
+run_permissioned_runner() {
+    local scenario_id="$1"
+    local lane_type="$2"
+    local classification="$3"
+    local runner="${FFS_PERMISSIONED_CRASH_REPLAY_RUNNER:?permissioned runner missing}"
+    local artifact_path="$E2E_LOG_DIR/${scenario_id}.json"
+    local stdout_path="$E2E_LOG_DIR/${scenario_id}.stdout"
+    local stderr_path="$E2E_LOG_DIR/${scenario_id}.stderr"
+    FFS_CRASH_REPLAY_SCENARIO_ID="$scenario_id" \
+        FFS_CRASH_REPLAY_SCENARIO_LANE="$lane_type" \
+        FFS_CRASH_REPLAY_CLASSIFICATION="$classification" \
+        FFS_CRASH_REPLAY_ARTIFACT_OUT="$artifact_path" \
+        FFS_CRASH_REPLAY_STDOUT_OUT="$stdout_path" \
+        FFS_CRASH_REPLAY_STDERR_OUT="$stderr_path" \
+        FFS_CRASH_REPLAY_LOG_DIR="$E2E_LOG_DIR" \
+        "$runner" >"$stdout_path" 2>"$stderr_path" || return 1
+    validate_permissioned_runner_artifact "$artifact_path" "$scenario_id" "$classification"
+}
+
+validate_permissioned_runner_artifact() {
+    python3 - "$@" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+artifact_path = Path(sys.argv[1])
+scenario_id = sys.argv[2]
+classification = sys.argv[3]
+if not artifact_path.exists():
+    raise SystemExit(f"{scenario_id}: permissioned runner did not emit {artifact_path}")
+artifact = json.loads(artifact_path.read_text())
+if artifact.get("lane_type") != "mounted_e2e":
+    raise SystemExit(f"{scenario_id}: permissioned artifact lane_type must be mounted_e2e")
+if artifact.get("crash_taxonomy") != classification:
+    raise SystemExit(
+        f"{scenario_id}: crash_taxonomy {artifact.get('crash_taxonomy')!r} != {classification!r}"
+    )
+if artifact.get("oracle_verdict") in {
+    "missing_file",
+    "unexpected_extra_file",
+    "metadata_only_mismatch",
+    "replay_failure",
+}:
+    if not artifact.get("follow_up_bead") and not artifact.get("follow_up_skip_reason"):
+        raise SystemExit(f"{scenario_id}: failing permissioned verdict lacks follow-up bead data")
+context = artifact.get("permissioned_context")
+if not isinstance(context, dict):
+    raise SystemExit(f"{scenario_id}: missing permissioned_context")
+required_context = [
+    "lane_id",
+    "host_capability_proof",
+    "image_path",
+    "image_hash",
+    "mountpoint_path",
+    "operation_trace_path",
+    "expected_survivors_path",
+    "observed_survivors_path",
+    "stdout_path",
+    "stderr_path",
+    "cleanup_status",
+    "repro_command",
+]
+missing = [field for field in required_context if not str(context.get(field, "")).strip()]
+if missing:
+    raise SystemExit(f"{scenario_id}: permissioned_context missing {missing}")
+if not re.fullmatch(r"sha256:[0-9A-Fa-f]{64}", context["image_hash"]):
+    raise SystemExit(f"{scenario_id}: permissioned_context image_hash must be sha256:<64-hex>")
+if context["cleanup_status"] not in {
+    "cleaned_up",
+    "cleanup_verified",
+    "retained_for_debug",
+    "host_blocked_before_mount",
+}:
+    raise SystemExit(f"{scenario_id}: unsupported cleanup_status {context['cleanup_status']!r}")
+if context.get("daemon_pid") is not None and not str(context.get("termination_method", "")).strip():
+    raise SystemExit(f"{scenario_id}: daemon_pid requires termination_method")
+if classification == "repair_interruption" and not str(context.get("repair_ledger_path", "")).strip():
+    raise SystemExit(f"{scenario_id}: repair_interruption requires repair_ledger_path")
+for path_field in ["stdout_path", "stderr_path"]:
+    if not Path(context[path_field]).exists():
+        raise SystemExit(f"{scenario_id}: permissioned_context {path_field} artifact missing")
+PY
+}
+
 validate_permissioned_blocker_artifacts() {
-    python3 - "$PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK" "$@" <<'PY'
+    python3 - "$PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK" "${FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK:-}" "$@" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-ack_token, *artifact_paths = sys.argv[1:]
+ack_token, ack_value, *artifact_paths = sys.argv[1:]
 if not artifact_paths:
     raise SystemExit("missing blocker artifact paths")
 
@@ -205,7 +317,12 @@ for artifact_arg in artifact_paths:
     if required_ack.get("expected") != ack_token:
         raise SystemExit(f"{scenario_id}: required_ack token drifted")
     missing_prereqs = artifact["missing_prerequisites"]
-    if "missing_FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK" not in missing_prereqs:
+    if not missing_prereqs:
+        raise SystemExit(f"{scenario_id}: blocker must record at least one missing prerequisite")
+    if (
+        ack_value != ack_token
+        and "missing_FFS_PERMISSIONED_CRASH_REPLAY_REAL_RUN_ACK" not in missing_prereqs
+    ):
         raise SystemExit(f"{scenario_id}: probe-only blocker must record missing ACK")
     for command_field in ["rerun", "reproduction_command"]:
         command = artifact[command_field]
@@ -247,12 +364,12 @@ if [[ "${FFS_CRASH_REPLAY_PERMISSIONED_PROBE_ONLY:-0}" == "1" ]]; then
         "crash_replay_mounted_write_reopen" \
         "mounted_smoke" \
         "mounted_write_reopen" \
-        "permissioned mounted crash replay prerequisites are present, but real mounted write/reopen execution remains parent bd-8bg7c work"
+        "permissioned mounted crash replay external runner failed or emitted an invalid artifact"
     permissioned_lane_or_blocker \
         "crash_replay_repair_interruption" \
         "repair_interruption" \
         "repair_interruption" \
-        "permissioned repair interruption prerequisites are present, but real repair-interruption execution remains parent bd-8bg7c work"
+        "permissioned repair-interruption external runner failed or emitted an invalid artifact"
     if validate_permissioned_blocker_artifacts \
         "$E2E_LOG_DIR/crash_replay_mounted_write_reopen.json" \
         "$E2E_LOG_DIR/crash_replay_repair_interruption.json"; then
@@ -352,7 +469,7 @@ else
         "crash_replay_mounted_write_reopen" \
         "mounted_smoke" \
         "mounted_write_reopen" \
-        "permissioned mounted crash replay prerequisites are present, but real mounted write/reopen execution remains parent bd-8bg7c work"
+        "permissioned mounted crash replay external runner failed or emitted an invalid artifact"
 fi
 
 e2e_step "Scenario 4: repair-interruption lane is explicit or host-skipped"
@@ -368,7 +485,7 @@ else
         "crash_replay_repair_interruption" \
         "repair_interruption" \
         "repair_interruption" \
-        "permissioned repair interruption prerequisites are present, but real repair-interruption execution remains parent bd-8bg7c work"
+        "permissioned repair-interruption external runner failed or emitted an invalid artifact"
 fi
 
 e2e_step "Scenario 5: crash replay refinement unit tests pass"
