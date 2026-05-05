@@ -2141,4 +2141,43 @@ mod tests {
         let idx = inode_index_in_group(InodeNumber(129), 128);
         assert_eq!(idx, 0);
     }
+
+    /// bd-xhswi — Kernel-conformance pin for the btrfs checksum-type
+    /// constants declared in `fs/btrfs/btrfs_tree.h`. The btrfs
+    /// superblock parser uses these for checksum dispatch via
+    /// `validate_supported_csum_type` (crates/ffs-ondisk/src/btrfs.rs).
+    /// A regression that swapped, e.g., BTRFS_CSUM_TYPE_CRC32C (0) and
+    /// BTRFS_CSUM_TYPE_XXHASH64 (1) would make the parser silently
+    /// reject every CRC32C image and masquerade-accept every xxhash64
+    /// image — both fatal contracts. This test pins each value plus
+    /// the contiguous strict-monotonic ordering 0..=3.
+    #[test]
+    fn btrfs_csum_type_constants_match_kernel_header() {
+        // Values per fs/btrfs/btrfs_tree.h:
+        //   #define BTRFS_CSUM_TYPE_CRC32      0
+        //   #define BTRFS_CSUM_TYPE_XXHASH     1
+        //   #define BTRFS_CSUM_TYPE_SHA256     2
+        //   #define BTRFS_CSUM_TYPE_BLAKE2     3
+        assert_eq!(BTRFS_CSUM_TYPE_CRC32C, 0);
+        assert_eq!(BTRFS_CSUM_TYPE_XXHASH64, 1);
+        assert_eq!(BTRFS_CSUM_TYPE_SHA256, 2);
+        assert_eq!(BTRFS_CSUM_TYPE_BLAKE2B, 3);
+
+        // Strict-monotonic ascending across the 4-element set —
+        // catches any future renumbering that would silently misroute
+        // checksum dispatch.
+        assert!(
+            BTRFS_CSUM_TYPE_CRC32C < BTRFS_CSUM_TYPE_XXHASH64
+                && BTRFS_CSUM_TYPE_XXHASH64 < BTRFS_CSUM_TYPE_SHA256
+                && BTRFS_CSUM_TYPE_SHA256 < BTRFS_CSUM_TYPE_BLAKE2B,
+            "btrfs csum-type constants must be strict-monotonic ascending"
+        );
+
+        // Contiguous range invariant: max - min == 3 (no gaps).
+        assert_eq!(
+            BTRFS_CSUM_TYPE_BLAKE2B - BTRFS_CSUM_TYPE_CRC32C,
+            3,
+            "the btrfs csum-type range must be contiguous 0..=3"
+        );
+    }
 }
