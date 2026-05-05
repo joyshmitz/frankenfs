@@ -2254,6 +2254,108 @@ mod tests {
         assert_eq!(idx, 0);
     }
 
+    /// bd-tyeic — Kernel-conformance pin for the 27 ext4 inode-flag
+    /// constants (EXT4_*_FL) declared in `fs/ext4/ext4.h`. Each flag
+    /// is a single-bit value in `inode.i_flags`; the parser reads
+    /// these to determine inode behaviour (immutable, append-only,
+    /// extents-on, htree-index, casefold, etc.).
+    ///
+    /// A regression that swapped, e.g., EXT4_INDEX_FL (0x1000) and
+    /// EXT4_EXTENTS_FL (0x80000) would silently treat htree-indexed
+    /// directories as extent-tree-using files and vice versa — both
+    /// fatal misclassifications. This test pins each value AND two
+    /// structural invariants: (1) every flag is a single power-of-2
+    /// bit, (2) no two flags share a bit (pairwise AND is zero).
+    #[test]
+    fn ext4_inode_flag_constants_match_kernel_header() {
+        // Values per fs/ext4/ext4.h (bits in `i_flags`).
+        assert_eq!(EXT4_SECRM_FL, 0x0000_0001);
+        assert_eq!(EXT4_UNRM_FL, 0x0000_0002);
+        assert_eq!(EXT4_COMPR_FL, 0x0000_0004);
+        assert_eq!(EXT4_SYNC_FL, 0x0000_0008);
+        assert_eq!(EXT4_IMMUTABLE_FL, 0x0000_0010);
+        assert_eq!(EXT4_APPEND_FL, 0x0000_0020);
+        assert_eq!(EXT4_NODUMP_FL, 0x0000_0040);
+        assert_eq!(EXT4_NOATIME_FL, 0x0000_0080);
+        assert_eq!(EXT4_COMPRBLK_FL, 0x0000_0200);
+        assert_eq!(EXT4_NOCOMPR_FL, 0x0000_0400);
+        assert_eq!(EXT4_ECOMPR_FL, 0x0000_0800);
+        assert_eq!(EXT4_INDEX_FL, 0x0000_1000);
+        assert_eq!(EXT4_IMAGIC_FL, 0x0000_2000);
+        assert_eq!(EXT4_JOURNAL_DATA_FL, 0x0000_4000);
+        assert_eq!(EXT4_NOTAIL_FL, 0x0000_8000);
+        assert_eq!(EXT4_DIRSYNC_FL, 0x0001_0000);
+        assert_eq!(EXT4_TOPDIR_FL, 0x0002_0000);
+        assert_eq!(EXT4_HUGE_FILE_FL, 0x0004_0000);
+        assert_eq!(EXT4_EXTENTS_FL, 0x0008_0000);
+        assert_eq!(EXT4_EA_INODE_FL, 0x0020_0000);
+        assert_eq!(EXT4_EOFBLOCKS_FL, 0x0040_0000);
+        assert_eq!(EXT4_SNAPFILE_FL, 0x0100_0000);
+        assert_eq!(EXT4_SNAPFILE_DELETED_FL, 0x0400_0000);
+        assert_eq!(EXT4_SNAPFILE_SHRUNK_FL, 0x0800_0000);
+        assert_eq!(EXT4_INLINE_DATA_FL, 0x1000_0000);
+        assert_eq!(EXT4_PROJINHERIT_FL, 0x2000_0000);
+        assert_eq!(EXT4_CASEFOLD_FL, 0x4000_0000);
+
+        // Invariant 1: every flag is a single power-of-2 bit.
+        let flags = [
+            EXT4_SECRM_FL,
+            EXT4_UNRM_FL,
+            EXT4_COMPR_FL,
+            EXT4_SYNC_FL,
+            EXT4_IMMUTABLE_FL,
+            EXT4_APPEND_FL,
+            EXT4_NODUMP_FL,
+            EXT4_NOATIME_FL,
+            EXT4_COMPRBLK_FL,
+            EXT4_NOCOMPR_FL,
+            EXT4_ECOMPR_FL,
+            EXT4_INDEX_FL,
+            EXT4_IMAGIC_FL,
+            EXT4_JOURNAL_DATA_FL,
+            EXT4_NOTAIL_FL,
+            EXT4_DIRSYNC_FL,
+            EXT4_TOPDIR_FL,
+            EXT4_HUGE_FILE_FL,
+            EXT4_EXTENTS_FL,
+            EXT4_EA_INODE_FL,
+            EXT4_EOFBLOCKS_FL,
+            EXT4_SNAPFILE_FL,
+            EXT4_SNAPFILE_DELETED_FL,
+            EXT4_SNAPFILE_SHRUNK_FL,
+            EXT4_INLINE_DATA_FL,
+            EXT4_PROJINHERIT_FL,
+            EXT4_CASEFOLD_FL,
+        ];
+        for &flag in &flags {
+            assert!(
+                flag.is_power_of_two(),
+                "EXT4_*_FL value {flag:#x} must be a single power-of-2 bit"
+            );
+        }
+
+        // Invariant 2: no two flags share a bit (pairwise AND zero).
+        // Total bits: 27 distinct powers of 2.
+        for (i, &a) in flags.iter().enumerate() {
+            for &b in &flags[i + 1..] {
+                assert_eq!(
+                    a & b,
+                    0,
+                    "EXT4_*_FL constants {a:#x} and {b:#x} must not share a bit"
+                );
+            }
+        }
+
+        // Cross-check: OR of all 27 flags has exactly 27 bits set.
+        let or_all: u32 = flags.iter().fold(0_u32, |acc, &f| acc | f);
+        assert_eq!(
+            or_all.count_ones() as usize,
+            flags.len(),
+            "OR of all EXT4_*_FL constants must have exactly {} bits set",
+            flags.len()
+        );
+    }
+
     /// bd-vnfhb — Kernel-conformance pin for the seven POSIX file-mode
     /// predicates that mirror `<sys/stat.h>`'s S_ISREG / S_ISDIR /
     /// S_ISLNK / S_ISCHR / S_ISBLK / S_ISFIFO / S_ISSOCK macros.
