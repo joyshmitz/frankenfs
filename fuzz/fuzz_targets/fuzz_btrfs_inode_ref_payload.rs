@@ -6,7 +6,7 @@ use libfuzzer_sys::fuzz_target;
 const MAX_INPUT_BYTES: usize = 512;
 const MAX_NAME_BYTES: usize = 64;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum SeedPayload {
     Raw,
     ValidSingle,
@@ -25,6 +25,21 @@ impl SeedPayload {
             _ => Self::DeclaredTooLong,
         }
     }
+
+    fn expectation(self) -> PayloadExpectation {
+        match self {
+            Self::Raw => PayloadExpectation::Raw,
+            Self::ValidSingle | Self::ValidPair => PayloadExpectation::ValidRoundTrip,
+            Self::TruncatedTail | Self::DeclaredTooLong => PayloadExpectation::Reject,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PayloadExpectation {
+    Raw,
+    ValidRoundTrip,
+    Reject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,7 +180,18 @@ fuzz_target!(|data: &[u8]| {
         "inode_ref payload parsing must be deterministic for identical inputs"
     );
 
-    if let ParseOutcome::Ok(entries) = &first {
-        assert_success_invariants(&payload, entries);
+    match (mode.expectation(), &first) {
+        (PayloadExpectation::Raw, ParseOutcome::Ok(entries))
+        | (PayloadExpectation::ValidRoundTrip, ParseOutcome::Ok(entries)) => {
+            assert_success_invariants(&payload, entries);
+        }
+        (PayloadExpectation::Raw, ParseOutcome::Err(_)) => {}
+        (PayloadExpectation::ValidRoundTrip, ParseOutcome::Err(err)) => {
+            panic!("{mode:?} generated a structurally valid inode_ref payload that failed: {err}");
+        }
+        (PayloadExpectation::Reject, ParseOutcome::Err(_)) => {}
+        (PayloadExpectation::Reject, ParseOutcome::Ok(entries)) => {
+            panic!("{mode:?} generated a malformed inode_ref payload that parsed as {entries:?}");
+        }
     }
 });
