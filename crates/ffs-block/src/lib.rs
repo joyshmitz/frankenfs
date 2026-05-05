@@ -4304,9 +4304,40 @@ struct FaultRule {
 /// target specific block reads or writes, and operate in one-shot or
 /// persistent mode. A deterministic seed controls fault sequencing for
 /// reproducibility.
+///
+/// # Lock-ordering invariant: never-hold-both (bd-6owbg)
+///
+/// The struct holds two `parking_lot::Mutex`es (`rules` + `log`).
+/// Production code paths NEVER hold both simultaneously:
+///
+///   * `check_fault` acquires `rules`, mutates it, **drops** the
+///     guard (explicit `drop(rules)` after the inspection loop),
+///     and only THEN acquires `log` to push a fault record.
+///   * `fail_on_read` / `fail_on_write` / `reset` acquire `rules`
+///     alone or sequentially with `log`.
+///   * `fault_log` acquires `log` alone.
+///
+/// **Any new method that needs both must follow the same
+/// sequential pattern: read out of one lock into a local, drop
+/// that lock, then take the other.** A nested acquisition (e.g.,
+/// holding `rules` while pushing into `log`) would silently
+/// introduce a deadlock against any concurrent caller that took
+/// the locks in the opposite order.
+///
+/// This is a stricter contract than the documented order on
+/// PersistentMvccStore (bd-7zd94) / ShardedMvccStore (bd-bky2f) /
+/// FuseInodeLocks (bd-pfv55), where both locks ARE held but in a
+/// fixed order. Here, neither lock is held while the other is
+/// acquired. The
+/// `fault_injector_concurrent_inject_and_reset_no_hang` regression
+/// test exercises this contract under contention.
 pub struct FaultInjector<D: BlockDevice> {
     inner: D,
+    /// Active fault rules. **Never held simultaneously with `log`.**
+    /// `check_fault` MUST `drop(rules)` before acquiring `log`.
     rules: Mutex<Vec<FaultRule>>,
+    /// Recorded fault firings. **Never held simultaneously with
+    /// `rules`.**
     log: Mutex<Vec<FaultRecord>>,
     sequence: std::sync::atomic::AtomicU64,
     seed: u64,
@@ -4508,9 +4539,35 @@ pub struct ThrottleRecord {
 /// - Cx deadline integration (respects cancellation)
 ///
 /// The configuration can be updated at runtime via `update_config`.
+/// # Lock-ordering invariant: never-hold-both (bd-6owbg)
+///
+/// Same contract as [`FaultInjector`]: this struct holds two
+/// `parking_lot::Mutex`es (`config` + `log`) and production code
+/// paths NEVER hold both simultaneously:
+///
+///   * `apply_delay` clones `config` from a brief `config.lock()`
+///     (released at the end of the cloning expression), sleeps,
+///     then acquires `log.lock()` to push a record.
+///   * `update_config` acquires `config` alone.
+///   * `throttle_log` / `reset` acquire `log` alone.
+///   * The `Debug` impl acquires one Mutex per `.field(...)` call;
+///     successive calls release their guards between calls.
+///
+/// **Any new method that needs both must follow the same
+/// sequential pattern: read out of one lock into a local, drop
+/// that lock, then take the other.** A nested acquisition would
+/// silently introduce a deadlock against any concurrent caller
+/// that took the locks in the opposite order. The
+/// `throttle_injector_concurrent_apply_and_reset_no_hang`
+/// regression test exercises this under contention.
 pub struct ThrottleInjector<D: BlockDevice> {
     inner: D,
+    /// Active throttle policy. **Never held simultaneously with
+    /// `log`.** `apply_delay` clones the config and drops the
+    /// guard before any `log` access.
     config: Mutex<ThrottleConfig>,
+    /// Recorded throttle events. **Never held simultaneously with
+    /// `config`.**
     log: Mutex<Vec<ThrottleRecord>>,
     sequence: std::sync::atomic::AtomicU64,
     seed: u64,
@@ -10330,5 +10387,208 @@ write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
             state.p,
             state.capacity
         );
+    }
+
+    /// bd-6owbg — regression guard for the never-hold-both
+    /// lock-ordering invariant on `FaultInjector` (rules + log
+    /// must NEVER be held simultaneously). Spawns 4 concurrent
+    /// workers — fail_on_read registration, check_fault via
+    /// read_block, fault_log read, and reset — guarded by a 15s
+    /// watchdog that panics with a tagged message if any worker
+    /// hangs. Any future regression that nested log.lock() under
+    /// rules.lock() would deadlock against a concurrent fault_log
+    /// caller and surface here.
+    #[test]
+    fn fault_injector_concurrent_inject_and_reset_no_hang() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use std::sync::Arc as StdArc;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        struct PassThrough;
+        impl BlockDevice for PassThrough {
+            fn read_block(&self, _cx: &Cx, _block: BlockNumber) -> Result<BlockBuf> {
+                Ok(BlockBuf::new(vec![0_u8; 4096]))
+            }
+            fn write_block(&self, _cx: &Cx, _block: BlockNumber, _data: &[u8]) -> Result<()> {
+                Ok(())
+            }
+            fn block_size(&self) -> u32 {
+                4096
+            }
+            fn block_count(&self) -> u64 {
+                1024
+            }
+            fn sync(&self, _cx: &Cx) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let injector = StdArc::new(FaultInjector::new(PassThrough, 0xCAFE_BABE));
+        let cx = Cx::for_testing();
+        let cx = StdArc::new(cx);
+
+        let done = StdArc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let watchdog_done = StdArc::clone(&done);
+        let watchdog = thread::spawn(move || {
+            while Instant::now() < deadline {
+                if watchdog_done.load(AtomicOrdering::Acquire) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            panic!(
+                "bd-6owbg: FaultInjector lock-ordering watchdog tripped — \
+                 inject/reset/log workers did not finish within 15s"
+            );
+        });
+
+        // Worker A: register faults (acquires rules alone).
+        let inj_a = StdArc::clone(&injector);
+        let worker_a = thread::spawn(move || {
+            for i in 0..64_u64 {
+                inj_a.fail_on_read(BlockNumber(i % 16), FaultMode::OneShot);
+            }
+        });
+
+        // Worker B: trigger faults (acquires rules → drop → log).
+        let inj_b = StdArc::clone(&injector);
+        let cx_b = StdArc::clone(&cx);
+        let worker_b = thread::spawn(move || {
+            for i in 0..64_u64 {
+                let _ = inj_b.read_block(&cx_b, BlockNumber(i % 16));
+            }
+        });
+
+        // Worker C: read fault_log (acquires log alone).
+        let inj_c = StdArc::clone(&injector);
+        let worker_c = thread::spawn(move || {
+            for _ in 0..64 {
+                let _ = inj_c.fault_log();
+            }
+        });
+
+        // Worker D: reset (acquires rules + log sequentially).
+        let inj_d = StdArc::clone(&injector);
+        let worker_d = thread::spawn(move || {
+            for _ in 0..16 {
+                inj_d.reset();
+            }
+        });
+
+        worker_a.join().expect("worker A panicked");
+        worker_b.join().expect("worker B panicked");
+        worker_c.join().expect("worker C panicked");
+        worker_d.join().expect("worker D panicked");
+        done.store(true, AtomicOrdering::Release);
+        watchdog.join().expect("watchdog panicked");
+    }
+
+    /// bd-6owbg — regression guard for the never-hold-both
+    /// lock-ordering invariant on `ThrottleInjector` (config + log
+    /// must NEVER be held simultaneously). Same shape as the
+    /// FaultInjector test above, with apply_delay (config-then-log)
+    /// + update_config + throttle_log + reset workers.
+    #[test]
+    fn throttle_injector_concurrent_apply_and_reset_no_hang() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use std::sync::Arc as StdArc;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        struct PassThrough;
+        impl BlockDevice for PassThrough {
+            fn read_block(&self, _cx: &Cx, _block: BlockNumber) -> Result<BlockBuf> {
+                Ok(BlockBuf::new(vec![0_u8; 4096]))
+            }
+            fn write_block(&self, _cx: &Cx, _block: BlockNumber, _data: &[u8]) -> Result<()> {
+                Ok(())
+            }
+            fn block_size(&self) -> u32 {
+                4096
+            }
+            fn block_count(&self) -> u64 {
+                1024
+            }
+            fn sync(&self, _cx: &Cx) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        // Zero-latency config so apply_delay doesn't actually sleep.
+        let config = ThrottleConfig {
+            read_latency: Duration::ZERO,
+            write_latency: Duration::ZERO,
+            bandwidth_bps: 0,
+            stall_probability: 0.0,
+            stall_duration: Duration::ZERO,
+            respect_deadline: false,
+        };
+        let injector = StdArc::new(ThrottleInjector::new(PassThrough, config, 0xDEAD_BEEF));
+        let cx = StdArc::new(Cx::for_testing());
+
+        let done = StdArc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let watchdog_done = StdArc::clone(&done);
+        let watchdog = thread::spawn(move || {
+            while Instant::now() < deadline {
+                if watchdog_done.load(AtomicOrdering::Acquire) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            panic!(
+                "bd-6owbg: ThrottleInjector lock-ordering watchdog tripped — \
+                 apply/update/log/reset workers did not finish within 15s"
+            );
+        });
+
+        // Worker A: apply_delay via read_block (config → drop → log).
+        let inj_a = StdArc::clone(&injector);
+        let cx_a = StdArc::clone(&cx);
+        let worker_a = thread::spawn(move || {
+            for i in 0..64_u64 {
+                let _ = inj_a.read_block(&cx_a, BlockNumber(i));
+            }
+        });
+
+        // Worker B: update_config (acquires config alone).
+        let inj_b = StdArc::clone(&injector);
+        let worker_b = thread::spawn(move || {
+            for _ in 0..32 {
+                inj_b.update_config(ThrottleConfig {
+                    read_latency: Duration::ZERO,
+                    write_latency: Duration::ZERO,
+                    bandwidth_bps: 0,
+                    stall_probability: 0.0,
+                    stall_duration: Duration::ZERO,
+                    respect_deadline: false,
+                });
+            }
+        });
+
+        // Worker C: throttle_log (acquires log alone).
+        let inj_c = StdArc::clone(&injector);
+        let worker_c = thread::spawn(move || {
+            for _ in 0..64 {
+                let _ = inj_c.throttle_log();
+            }
+        });
+
+        // Worker D: reset (acquires log alone).
+        let inj_d = StdArc::clone(&injector);
+        let worker_d = thread::spawn(move || {
+            for _ in 0..16 {
+                inj_d.reset();
+            }
+        });
+
+        worker_a.join().expect("worker A panicked");
+        worker_b.join().expect("worker B panicked");
+        worker_c.join().expect("worker C panicked");
+        worker_d.join().expect("worker D panicked");
+        done.store(true, AtomicOrdering::Release);
+        watchdog.join().expect("watchdog panicked");
     }
 }
