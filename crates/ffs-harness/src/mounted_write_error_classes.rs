@@ -70,6 +70,8 @@ pub struct MountedWriteErrorClasses {
     pub schema_version: u32,
     pub catalog_id: String,
     pub bead_id: String,
+    #[serde(default)]
+    pub catalog_owner_beads: Vec<String>,
     pub entries: Vec<MountedWriteErrorEntry>,
 }
 
@@ -129,9 +131,11 @@ pub fn validate_mounted_write_error_classes(
     let mut broad_fallback_count = 0_usize;
 
     validate_top_level(catalog, &mut errors);
+    validate_catalog_owner_beads(catalog, &mut errors);
     for entry in &catalog.entries {
         validate_entry(
             entry,
+            &catalog.catalog_owner_beads,
             &mut ids,
             &mut classes_seen,
             &mut broad_fallback_count,
@@ -173,8 +177,32 @@ fn validate_top_level(catalog: &MountedWriteErrorClasses, errors: &mut Vec<Strin
     }
 }
 
+fn validate_catalog_owner_beads(catalog: &MountedWriteErrorClasses, errors: &mut Vec<String>) {
+    if catalog.catalog_owner_beads.is_empty() {
+        errors.push("mounted write error classes must declare catalog_owner_beads".to_owned());
+    }
+    if !catalog
+        .catalog_owner_beads
+        .iter()
+        .any(|bead| bead == &catalog.bead_id)
+    {
+        errors.push(format!(
+            "mounted write error classes catalog_owner_beads must include bead_id `{}`",
+            catalog.bead_id
+        ));
+    }
+    for bead in &catalog.catalog_owner_beads {
+        if !bead.starts_with("bd-") {
+            errors.push(format!(
+                "mounted write error classes catalog_owner_beads entry must look like bd-..., got `{bead}`"
+            ));
+        }
+    }
+}
+
 fn validate_entry(
     entry: &MountedWriteErrorEntry,
+    catalog_owner_beads: &[String],
     ids: &mut BTreeSet<String>,
     classes_seen: &mut BTreeSet<String>,
     broad_fallback_count: &mut usize,
@@ -233,7 +261,7 @@ fn validate_entry(
 
     validate_errno_class_consistency(entry, errors);
     validate_redaction_policy_consistency(entry, errors);
-    validate_broad_fallback(entry, broad_fallback_count, errors);
+    validate_broad_fallback(entry, catalog_owner_beads, broad_fallback_count, errors);
     validate_ok_invariants(entry, errors);
 }
 
@@ -279,6 +307,7 @@ fn validate_redaction_policy_consistency(entry: &MountedWriteErrorEntry, errors:
 
 fn validate_broad_fallback(
     entry: &MountedWriteErrorEntry,
+    catalog_owner_beads: &[String],
     broad_fallback_count: &mut usize,
     errors: &mut Vec<String>,
 ) {
@@ -295,6 +324,15 @@ fn validate_broad_fallback(
             errors.push(format!(
                 "entry `{}` broad_fallback class must link a follow_up_bead (bd-...)",
                 entry.entry_id
+            ));
+        }
+        if catalog_owner_beads
+            .iter()
+            .any(|bead| bead == &entry.follow_up_bead)
+        {
+            errors.push(format!(
+                "entry `{}` broad_fallback follow_up_bead `{}` must name a distinct investigation bead, not a catalog owner bead",
+                entry.entry_id, entry.follow_up_bead
             ));
         }
     } else {
@@ -464,6 +502,28 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must link a follow_up_bead"))
         );
+    }
+
+    #[test]
+    fn broad_fallback_requires_distinct_investigation_bead() {
+        let mut catalog = fixture_catalog();
+        let owner_bead = catalog
+            .catalog_owner_beads
+            .iter()
+            .find(|bead| bead.as_str() != catalog.bead_id)
+            .expect("fixture declares supplemental catalog owner bead")
+            .clone();
+        let entry = catalog
+            .entries
+            .iter_mut()
+            .find(|e| e.error_class == "broad_fallback")
+            .expect("broad fallback fixture exists");
+        entry.follow_up_bead = owner_bead;
+        let report = validate_mounted_write_error_classes(&catalog);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("must name a distinct investigation bead")
+                && err.contains("catalog owner bead")
+        }));
     }
 
     #[test]

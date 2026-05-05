@@ -2,6 +2,10 @@
   "schema_version": 1,
   "catalog_id": "frankenfs_mounted_write_error_classes_v1",
   "bead_id": "bd-rchk0.3.4",
+  "catalog_owner_beads": [
+    "bd-rchk0.3.4",
+    "bd-6t32i"
+  ],
   "entries": [
     {
       "entry_id": "mwerr_ok_baseline_write_readback",
@@ -127,7 +131,7 @@
         "artifacts/mounted-write/broad_fallback_eio.json"
       ],
       "broad_fallback_justification": "btrfs write path returns EIO from a deeply nested branch we have not yet classified; tracked for follow-up so operators see a known broad fallback and not silent corruption",
-      "follow_up_bead": "bd-6t32i"
+      "follow_up_bead": "bd-0s5a3"
     }
   ]
 }
