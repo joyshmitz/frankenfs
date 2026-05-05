@@ -352,6 +352,109 @@ fn bench_extent_sequential_cached(c: &mut Criterion) {
     });
 }
 
+// bd-wc9v4 — bench coverage for ExtentCache mutation paths
+// (insert / invalidate_range / invalidate_all / eviction-at-capacity).
+// bd-upa13 just landed 5 MR proptests pinning correctness; these
+// benches pin the latency floor for the same code paths so a future
+// regression that swapped the BTreeMap for a slower structure or
+// removed the LRU optimisation would trip the perf gate.
+
+fn bench_extent_cache_insert_cold(c: &mut Criterion) {
+    let mapping = ffs_extent::ExtentMapping {
+        logical_start: 100,
+        physical_start: 5_000,
+        count: 50,
+        unwritten: false,
+    };
+
+    c.bench_function("extent_cache_insert_cold", |b| {
+        b.iter(|| {
+            // Fresh cache each iteration ensures we measure the cold-insert
+            // path (no eviction, no LRU update).
+            let cache = ffs_extent::ExtentCache::new();
+            cache.insert(black_box(0), black_box(mapping));
+            black_box(cache);
+        });
+    });
+}
+
+fn bench_extent_cache_invalidate_range_overlapping(c: &mut Criterion) {
+    // Pre-populate a cache with 64 mappings in a single namespace.
+    let cache = ffs_extent::ExtentCache::with_capacity(128);
+    for i in 0..64_u32 {
+        cache.insert(
+            0,
+            ffs_extent::ExtentMapping {
+                logical_start: i * 10,
+                physical_start: 1_000 + u64::from(i) * 10,
+                count: 10,
+                unwritten: false,
+            },
+        );
+    }
+
+    c.bench_function("extent_cache_invalidate_range_overlapping", |b| {
+        b.iter(|| {
+            // Re-insert and invalidate the same range — this measures
+            // the BTreeMap range-scan + filter + remove pipeline.
+            cache.insert(
+                black_box(0),
+                ffs_extent::ExtentMapping {
+                    logical_start: 200,
+                    physical_start: 9_999,
+                    count: 30,
+                    unwritten: false,
+                },
+            );
+            cache.invalidate_range(black_box(0), black_box(200), black_box(30));
+        });
+    });
+}
+
+fn bench_extent_cache_invalidate_all(c: &mut Criterion) {
+    // Pre-populate a cache with 64 mappings; each iteration re-inserts
+    // and invalidates everything to measure the bulk-reset cost.
+    let mapping = |i: u32| ffs_extent::ExtentMapping {
+        logical_start: i * 10,
+        physical_start: 1_000 + u64::from(i) * 10,
+        count: 10,
+        unwritten: false,
+    };
+
+    c.bench_function("extent_cache_invalidate_all_64entries", |b| {
+        b.iter(|| {
+            let cache = ffs_extent::ExtentCache::with_capacity(128);
+            for i in 0..64_u32 {
+                cache.insert(0, mapping(i));
+            }
+            cache.invalidate_all();
+            black_box(cache);
+        });
+    });
+}
+
+fn bench_extent_cache_eviction_at_capacity(c: &mut Criterion) {
+    // Steady-state churn: capacity 16, insert 32 mappings → 16 evictions.
+    // Pins the LRU eviction tax under the workload that triggers it.
+    c.bench_function("extent_cache_eviction_at_capacity_32inserts_cap16", |b| {
+        b.iter(|| {
+            let cache = ffs_extent::ExtentCache::with_capacity(16);
+            for i in 0..32_u32 {
+                cache.insert(
+                    black_box(0),
+                    ffs_extent::ExtentMapping {
+                        logical_start: i * 10,
+                        physical_start: 1_000 + u64::from(i) * 10,
+                        count: 10,
+                        unwritten: false,
+                    },
+                );
+            }
+            black_box(cache);
+        });
+    });
+}
+
 criterion_group!(
     extent_resolve,
     bench_extent_resolve_depth0,
@@ -361,5 +464,9 @@ criterion_group!(
     bench_extent_resolve_cached_repeated,
     bench_extent_sequential_uncached,
     bench_extent_sequential_cached,
+    bench_extent_cache_insert_cold,
+    bench_extent_cache_invalidate_range_overlapping,
+    bench_extent_cache_invalidate_all,
+    bench_extent_cache_eviction_at_capacity,
 );
 criterion_main!(extent_resolve);
