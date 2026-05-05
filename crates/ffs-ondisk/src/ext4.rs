@@ -41,8 +41,53 @@ pub const EXT4_VALID_FS: u16 = 0x0001;
 pub const EXT4_ERROR_FS: u16 = 0x0002;
 /// Filesystem is being recovered from an orphan list.
 pub const EXT4_ORPHAN_FS: u16 = 0x0004;
+
+// ── ext4 reserved inode numbers (bd-k81lq) ───────────────────────────────
+//
+// Mirrored from the Linux kernel's `fs/ext4/ext4.h`. These are the
+// well-known inode numbers that the kernel reserves for filesystem
+// metadata. Mismatch with the kernel values would silently corrupt
+// every ext4 image we mutate — the kernel-conformance unit test
+// `ext4_reserved_inode_constants_match_kernel_header` pins each
+// value.
+
+/// Bad-blocks inode (kernel: `EXT4_BAD_INO`).
+pub const EXT4_BAD_INO: u32 = 1;
+/// Root directory inode (kernel: `EXT4_ROOT_INO`).
+pub const EXT4_ROOT_INO: u32 = 2;
+/// User-quota inode (kernel: `EXT4_USR_QUOTA_INO`).
+pub const EXT4_USR_QUOTA_INO: u32 = 3;
+/// Group-quota inode (kernel: `EXT4_GRP_QUOTA_INO`).
+pub const EXT4_GRP_QUOTA_INO: u32 = 4;
+/// Boot-loader inode (kernel: `EXT4_BOOT_LOADER_INO`).
+pub const EXT4_BOOT_LOADER_INO: u32 = 5;
+/// Undelete-directory inode (kernel: `EXT4_UNDEL_DIR_INO`).
+pub const EXT4_UNDEL_DIR_INO: u32 = 6;
 /// Reserved inode used by ext4 online resize to track non-contiguous GDT growth.
+/// Kernel: `EXT4_RESIZE_INO`.
 pub const EXT4_RESIZE_INO: u32 = 7;
+/// Journal inode (kernel: `EXT4_JOURNAL_INO`).
+pub const EXT4_JOURNAL_INO: u32 = 8;
+/// Snapshot-exclude bitmap inode (kernel: `EXT4_EXCLUDE_INO`, non-upstream).
+pub const EXT4_EXCLUDE_INO: u32 = 9;
+/// Replica inode (kernel: `EXT4_REPLICA_INO`, non-upstream feature).
+pub const EXT4_REPLICA_INO: u32 = 10;
+/// First non-reserved inode in `EXT4_GOOD_OLD_REV` filesystems
+/// (kernel: `EXT4_GOOD_OLD_FIRST_INO`).
+pub const EXT4_GOOD_OLD_FIRST_INO: u32 = 11;
+/// Project-quota inode (kernel: `EXT4_PRJ_QUOTA_INO`).
+pub const EXT4_PRJ_QUOTA_INO: u32 = 16;
+
+// ── ext4 revision-format constants (bd-k81lq) ────────────────────────────
+
+/// Original ext4 (and ext2/3) on-disk format (kernel: `EXT4_GOOD_OLD_REV`).
+pub const EXT4_GOOD_OLD_REV: u32 = 0;
+/// V2 format with dynamic inode sizes (kernel: `EXT4_DYNAMIC_REV`).
+pub const EXT4_DYNAMIC_REV: u32 = 1;
+/// Inode size for `EXT4_GOOD_OLD_REV` filesystems
+/// (kernel: `EXT4_GOOD_OLD_INODE_SIZE`).
+pub const EXT4_GOOD_OLD_INODE_SIZE: u16 = 128;
+
 pub const EXT4_MMP_MAGIC: u32 = 0x004D_4D50;
 pub const EXT4_MMP_SEQ_CLEAN: u32 = 0xFF4D_4D50;
 pub const EXT4_MMP_SEQ_FSCK: u32 = 0xE24D_4D50;
@@ -10009,6 +10054,91 @@ mod tests {
     /// Trivial corollary of CR-B with B=empty, but worth pinning
     /// because a regression that accidentally negated empty input
     /// would silently corrupt every incremental checksum continuation.
+    /// bd-k81lq — Kernel-conformance pin for ext4 reserved-inode and
+    /// revision-format constants. Each value is mirrored verbatim from
+    /// the Linux kernel header `fs/ext4/ext4.h`. Mismatch would
+    /// silently corrupt every ext4 image we mutate (e.g., treating
+    /// inode 8 as a regular file rather than the journal). This test
+    /// is the canonical kernel-reference vector for these constants.
+    #[test]
+    fn ext4_reserved_inode_constants_match_kernel_header() {
+        // Reserved inode numbers (per fs/ext4/ext4.h).
+        assert_eq!(EXT4_BAD_INO, 1, "EXT4_BAD_INO must equal kernel value 1");
+        assert_eq!(EXT4_ROOT_INO, 2, "EXT4_ROOT_INO must equal kernel value 2");
+        assert_eq!(
+            EXT4_USR_QUOTA_INO, 3,
+            "EXT4_USR_QUOTA_INO must equal kernel value 3"
+        );
+        assert_eq!(
+            EXT4_GRP_QUOTA_INO, 4,
+            "EXT4_GRP_QUOTA_INO must equal kernel value 4"
+        );
+        assert_eq!(
+            EXT4_BOOT_LOADER_INO, 5,
+            "EXT4_BOOT_LOADER_INO must equal kernel value 5"
+        );
+        assert_eq!(
+            EXT4_UNDEL_DIR_INO, 6,
+            "EXT4_UNDEL_DIR_INO must equal kernel value 6"
+        );
+        assert_eq!(
+            EXT4_RESIZE_INO, 7,
+            "EXT4_RESIZE_INO must equal kernel value 7"
+        );
+        assert_eq!(
+            EXT4_JOURNAL_INO, 8,
+            "EXT4_JOURNAL_INO must equal kernel value 8"
+        );
+        assert_eq!(
+            EXT4_EXCLUDE_INO, 9,
+            "EXT4_EXCLUDE_INO must equal kernel value 9"
+        );
+        assert_eq!(
+            EXT4_REPLICA_INO, 10,
+            "EXT4_REPLICA_INO must equal kernel value 10"
+        );
+        assert_eq!(
+            EXT4_GOOD_OLD_FIRST_INO, 11,
+            "EXT4_GOOD_OLD_FIRST_INO must equal kernel value 11"
+        );
+        assert_eq!(
+            EXT4_PRJ_QUOTA_INO, 16,
+            "EXT4_PRJ_QUOTA_INO must equal kernel value 16"
+        );
+
+        // Revision-format constants (per fs/ext4/ext4.h).
+        assert_eq!(
+            EXT4_GOOD_OLD_REV, 0,
+            "EXT4_GOOD_OLD_REV must equal kernel value 0"
+        );
+        assert_eq!(
+            EXT4_DYNAMIC_REV, 1,
+            "EXT4_DYNAMIC_REV must equal kernel value 1"
+        );
+        assert_eq!(
+            EXT4_GOOD_OLD_INODE_SIZE, 128,
+            "EXT4_GOOD_OLD_INODE_SIZE must equal kernel value 128"
+        );
+
+        // Cross-check: the reserved-inode set is contiguous from 1 to 10
+        // plus the project-quota inode at 16, and the first non-reserved
+        // inode is 11 in EXT4_GOOD_OLD_REV.
+        assert!(
+            EXT4_BAD_INO < EXT4_ROOT_INO
+                && EXT4_ROOT_INO < EXT4_USR_QUOTA_INO
+                && EXT4_USR_QUOTA_INO < EXT4_GRP_QUOTA_INO
+                && EXT4_GRP_QUOTA_INO < EXT4_BOOT_LOADER_INO
+                && EXT4_BOOT_LOADER_INO < EXT4_UNDEL_DIR_INO
+                && EXT4_UNDEL_DIR_INO < EXT4_RESIZE_INO
+                && EXT4_RESIZE_INO < EXT4_JOURNAL_INO
+                && EXT4_JOURNAL_INO < EXT4_EXCLUDE_INO
+                && EXT4_EXCLUDE_INO < EXT4_REPLICA_INO
+                && EXT4_REPLICA_INO < EXT4_GOOD_OLD_FIRST_INO
+                && EXT4_GOOD_OLD_FIRST_INO < EXT4_PRJ_QUOTA_INO,
+            "reserved-inode ordering must be strict-monotonic ascending"
+        );
+    }
+
     #[test]
     fn ext4_chksum_empty_suffix_is_seed_identity() {
         for &seed in &[
