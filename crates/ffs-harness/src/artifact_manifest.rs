@@ -18,6 +18,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 /// Schema version for the artifact manifest. Bump on breaking changes.
@@ -34,6 +37,9 @@ pub const DEFAULT_MAX_TOTAL_BYTES: u64 = 500 * 1024 * 1024;
 
 /// Schema version for readiness event envelopes consumed by readiness reports.
 pub const READINESS_EVENT_ENVELOPE_VERSION: u32 = 1;
+
+/// Validator version for the executable artifact-schema fixture suite.
+pub const ARTIFACT_SCHEMA_FIXTURE_VALIDATOR_VERSION: u32 = 1;
 
 // ── Manifest schema ──────────────────────────────────────────────────────
 
@@ -872,6 +878,170 @@ pub enum ManifestValidationError {
     InvalidReadinessEvent { event_id: String, reason: String },
 }
 
+impl ManifestValidationError {
+    /// Stable machine-readable diagnostic code for fixture and report consumers.
+    #[must_use]
+    pub fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::UnsupportedVersion(_) => "unsupported_schema_version",
+            Self::EmptyRunId => "missing_run_id",
+            Self::EmptyGateId => "missing_gate_id",
+            Self::InvalidTimestamp(_) => "invalid_timestamp",
+            Self::EmptyGitCommit => "missing_git_commit",
+            Self::InvalidScenarioId(_) => "invalid_scenario_id",
+            Self::EmptyArtifactPath => "missing_artifact_path",
+            Self::MalformedArtifactPath(_) => "malformed_artifact_path",
+            Self::DuplicateScenarioId(_) => "duplicate_scenario_id",
+            Self::ScenarioIdMismatch { .. } => "scenario_id_mismatch",
+            Self::InconsistentVerdict => "inconsistent_verdict",
+            Self::MissingOperationalContext => "missing_operational_context",
+            Self::EmptyOperationalCommandLine => "missing_reproduction_command",
+            Self::EmptyOperationalHost => "missing_operational_host",
+            Self::FuseCapabilityNotChecked => "fuse_capability_not_checked",
+            Self::MissingOperationalScenario(_) => "missing_operational_scenario",
+            Self::OperationalScenarioIdMismatch { .. } => "operational_scenario_id_mismatch",
+            Self::MissingOperationalLogPath { .. } => "missing_raw_log_path",
+            Self::InvalidOperationalClassification { reason, .. } => {
+                operational_classification_diagnostic_code(reason)
+            }
+            Self::UnknownArtifactRef { .. } => "missing_artifact",
+            Self::MissingCleanupStatus(_) => "missing_cleanup_status",
+            Self::MissingReadinessEvent(_) => "missing_readiness_event",
+            Self::InvalidReadinessEvent { reason, .. } => {
+                readiness_event_diagnostic_code(reason)
+            }
+        }
+    }
+
+    /// Stable JSON-style diagnostic path for fixture and report consumers.
+    #[must_use]
+    pub fn diagnostic_path(&self) -> String {
+        match self {
+            Self::UnsupportedVersion(_) => "$.manifest.schema_version".to_owned(),
+            Self::EmptyRunId => "$.manifest.run_id".to_owned(),
+            Self::EmptyGateId => "$.manifest.gate_id".to_owned(),
+            Self::InvalidTimestamp(_) => "$.manifest.created_at".to_owned(),
+            Self::EmptyGitCommit => "$.manifest.git_context.commit".to_owned(),
+            Self::InvalidScenarioId(id) | Self::DuplicateScenarioId(id) => {
+                format!("$.manifest.scenarios.{id}")
+            }
+            Self::EmptyArtifactPath => "$.manifest.artifacts[].path".to_owned(),
+            Self::MalformedArtifactPath(path) => {
+                format!("$.manifest.artifacts[path={path}]")
+            }
+            Self::ScenarioIdMismatch { key, .. } => {
+                format!("$.manifest.scenarios.{key}.scenario_id")
+            }
+            Self::InconsistentVerdict => "$.manifest.verdict".to_owned(),
+            Self::MissingOperationalContext => "$.manifest.operational_context".to_owned(),
+            Self::EmptyOperationalCommandLine => {
+                "$.manifest.operational_context.command_line".to_owned()
+            }
+            Self::EmptyOperationalHost => "$.manifest.operational_context.worker.host".to_owned(),
+            Self::FuseCapabilityNotChecked => {
+                "$.manifest.operational_context.fuse_capability".to_owned()
+            }
+            Self::MissingOperationalScenario(id)
+            | Self::MissingCleanupStatus(id)
+            | Self::MissingReadinessEvent(id) => {
+                format!("$.manifest.operational_scenarios.{id}")
+            }
+            Self::OperationalScenarioIdMismatch { key, .. } => {
+                format!("$.manifest.operational_scenarios.{key}.scenario_id")
+            }
+            Self::MissingOperationalLogPath { scenario_id, field } => {
+                format!("$.manifest.operational_scenarios.{scenario_id}.{field}")
+            }
+            Self::InvalidOperationalClassification { scenario_id, .. } => {
+                format!("$.manifest.operational_scenarios.{scenario_id}.classification")
+            }
+            Self::UnknownArtifactRef { scenario_id, path } => {
+                format!("$.manifest.operational_scenarios.{scenario_id}.artifact_refs[{path}]")
+            }
+            Self::InvalidReadinessEvent { event_id, reason } => {
+                readiness_event_diagnostic_path(event_id, reason)
+            }
+        }
+    }
+}
+
+fn operational_classification_diagnostic_code(reason: &str) -> &'static str {
+    if reason.contains("skip_reason not_applicable is ambiguous") {
+        "ambiguous_skip_reason"
+    } else if reason.contains("classification") {
+        "invalid_classification"
+    } else if reason.contains("artifact_refs") {
+        "missing_artifact"
+    } else if reason.contains("remediation_hint") {
+        "missing_remediation_id"
+    } else {
+        "invalid_operational_classification"
+    }
+}
+
+fn readiness_event_diagnostic_code(reason: &str) -> &'static str {
+    if reason.contains("envelope_version") {
+        "stale_schema_version"
+    } else if reason.contains("event_id is duplicated") {
+        "duplicate_event_id"
+    } else if reason.contains("scenario_id is duplicated") {
+        "duplicate_scenario_id"
+    } else if reason.contains("run_id") {
+        "missing_run_id"
+    } else if reason.contains("lane_id") {
+        "missing_lane_id"
+    } else if reason.contains("scenario_id or aggregate_marker") {
+        "missing_scenario_id"
+    } else if reason.contains("classification") {
+        "invalid_classification"
+    } else if reason.contains("raw_log_refs") {
+        "missing_raw_log_path"
+    } else if reason.contains("missing sha256") {
+        "missing_artifact_hash"
+    } else if reason.contains("artifact path") && reason.contains("not listed") {
+        "missing_artifact"
+    } else if reason.contains("remediation_id") {
+        "missing_remediation_id"
+    } else if reason.contains("reproduction_command") && reason.contains("redacted") {
+        "redacted_reproduction_command"
+    } else if reason.contains("reproduction_command") {
+        "missing_reproduction_command"
+    } else if reason.contains("parent_correlation_id") {
+        "missing_parent_event"
+    } else {
+        "invalid_readiness_event"
+    }
+}
+
+fn readiness_event_diagnostic_path(event_id: &str, reason: &str) -> String {
+    let field = if reason.contains("envelope_version") {
+        "envelope_version"
+    } else if reason.contains("event_id") {
+        "event_id"
+    } else if reason.contains("run_id") {
+        "run_id"
+    } else if reason.contains("lane_id") {
+        "lane_id"
+    } else if reason.contains("scenario_id") {
+        "scenario_id"
+    } else if reason.contains("classification") {
+        "classification"
+    } else if reason.contains("raw_log_refs") {
+        "raw_log_refs"
+    } else if reason.contains("controlling_evidence") {
+        "controlling_evidence"
+    } else if reason.contains("remediation_id") {
+        "remediation_id"
+    } else if reason.contains("reproduction_command") {
+        "reproduction_command"
+    } else if reason.contains("parent_correlation_id") {
+        "parent_correlation_id"
+    } else {
+        "envelope"
+    };
+    format!("$.manifest.readiness_events[event_id={event_id}].{field}")
+}
+
 impl std::fmt::Display for ManifestValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1217,6 +1387,15 @@ fn validate_readiness_events(
             ));
         }
     }
+
+    for (scenario_id, count) in scenario_event_counts {
+        if count > 1 {
+            errors.push(ManifestValidationError::InvalidReadinessEvent {
+                event_id: scenario_id.to_owned(),
+                reason: "scenario_id is duplicated across readiness events".to_owned(),
+            });
+        }
+    }
 }
 
 fn validate_readiness_event<'a>(
@@ -1402,6 +1581,11 @@ fn validate_readiness_event_payload_refs(
     }
     if event.reproduction_command.trim().is_empty() {
         push_readiness_event_missing(errors, event_id, "reproduction_command");
+    } else if event.reproduction_command.contains(REDACTED_SENTINEL) {
+        errors.push(ManifestValidationError::InvalidReadinessEvent {
+            event_id: event_id.to_owned(),
+            reason: "reproduction_command is redacted".to_owned(),
+        });
     }
 }
 
@@ -1548,6 +1732,16 @@ fn validate_operational_classification(
                     reason: "skip scenarios require skip_reason".to_owned(),
                 });
             }
+            if operational.skip_reason == Some(SkipReason::NotApplicable)
+                && operational.filesystem != FilesystemFlavor::NotApplicable
+            {
+                errors.push(ManifestValidationError::InvalidOperationalClassification {
+                    scenario_id: scenario_id.to_owned(),
+                    reason:
+                        "skip_reason not_applicable is ambiguous for filesystem-scoped scenario"
+                            .to_owned(),
+                });
+            }
             if operational
                 .remediation_hint
                 .as_deref()
@@ -1575,6 +1769,365 @@ fn is_safe_relative_artifact_path(path: &str) -> bool {
 #[must_use]
 pub fn is_valid_scenario_id(id: &str) -> bool {
     crate::log_contract::e2e_marker::is_valid_scenario_id(id)
+}
+
+// ── Executable schema fixture suite ───────────────────────────────────────
+
+/// Expected outcome for an artifact-schema fixture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactSchemaFixtureExpectation {
+    /// The embedded manifest must pass the operational validator.
+    Accept,
+    /// The embedded manifest must fail with the listed diagnostics.
+    Reject,
+}
+
+/// Expected or observed machine-readable diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ArtifactSchemaFixtureDiagnostic {
+    /// Stable diagnostic code.
+    pub code: String,
+    /// Stable JSON-style diagnostic path.
+    pub path: String,
+}
+
+/// One checked fixture case.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactSchemaFixture {
+    /// Stable fixture identifier.
+    pub fixture_id: String,
+    /// Human-readable fixture class.
+    pub classification: String,
+    /// Expected validator result.
+    pub expectation: ArtifactSchemaFixtureExpectation,
+    /// Exact expected diagnostics for rejecting fixtures.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_diagnostics: Vec<ArtifactSchemaFixtureDiagnostic>,
+    /// Embedded artifact manifest under test.
+    pub manifest: serde_json::Value,
+}
+
+/// Per-fixture validation row emitted by the executable fixture suite.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactSchemaFixtureRow {
+    /// Stable fixture identifier.
+    pub fixture_id: String,
+    /// Fixture class, such as product failure or host capability skip.
+    pub classification: String,
+    /// Fixture file path.
+    pub fixture_path: String,
+    /// SHA-256 of the fixture JSON file.
+    pub fixture_sha256: String,
+    /// Manifest schema version when deserialization succeeded.
+    pub schema_version: Option<u32>,
+    /// Expected validator result.
+    pub expected_result: ArtifactSchemaFixtureExpectation,
+    /// Observed validator result.
+    pub observed_result: ArtifactSchemaFixtureExpectation,
+    /// Exact expected diagnostics.
+    pub expected_diagnostics: Vec<ArtifactSchemaFixtureDiagnostic>,
+    /// Exact observed diagnostics.
+    pub observed_diagnostics: Vec<ArtifactSchemaFixtureDiagnostic>,
+    /// Whether this fixture matched expectation exactly.
+    pub valid: bool,
+}
+
+/// Executable artifact-schema fixture suite report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactSchemaFixtureReport {
+    /// Report schema version.
+    pub schema_version: u32,
+    /// Validator version.
+    pub validator_version: u32,
+    /// Fixture directory that was scanned.
+    pub fixture_dir: String,
+    /// Exact reproduction command.
+    pub reproduction_command: String,
+    /// Overall result.
+    pub valid: bool,
+    /// Number of accepted fixtures.
+    pub positive_count: usize,
+    /// Number of rejected fixtures.
+    pub negative_count: usize,
+    /// Total fixture files.
+    pub fixture_count: usize,
+    /// Per-fixture rows.
+    pub fixtures: Vec<ArtifactSchemaFixtureRow>,
+    /// Suite-level diagnostics.
+    pub errors: Vec<String>,
+}
+
+/// Validate every `*.fixture.json` case in an artifact-schema fixture directory.
+#[must_use]
+pub fn validate_artifact_schema_fixture_dir(
+    fixture_dir: &Path,
+    reproduction_command: &str,
+) -> ArtifactSchemaFixtureReport {
+    let mut report = ArtifactSchemaFixtureReport {
+        schema_version: SCHEMA_VERSION,
+        validator_version: ARTIFACT_SCHEMA_FIXTURE_VALIDATOR_VERSION,
+        fixture_dir: fixture_dir.display().to_string(),
+        reproduction_command: reproduction_command.to_owned(),
+        valid: true,
+        positive_count: 0,
+        negative_count: 0,
+        fixture_count: 0,
+        fixtures: Vec::new(),
+        errors: Vec::new(),
+    };
+
+    let mut paths = Vec::new();
+    collect_fixture_paths(fixture_dir, &mut paths, &mut report.errors);
+    paths.sort();
+
+    for path in paths {
+        let row = validate_artifact_schema_fixture_path(fixture_dir, &path);
+        match row.expected_result {
+            ArtifactSchemaFixtureExpectation::Accept => report.positive_count += 1,
+            ArtifactSchemaFixtureExpectation::Reject => report.negative_count += 1,
+        }
+        report.valid &= row.valid;
+        report.fixtures.push(row);
+    }
+
+    report.fixture_count = report.fixtures.len();
+    if report.fixture_count == 0 {
+        report
+            .errors
+            .push("no *.fixture.json files found".to_owned());
+    }
+    if report.positive_count == 0 {
+        report.errors.push("no accepting fixtures found".to_owned());
+    }
+    if report.negative_count == 0 {
+        report.errors.push("no rejecting fixtures found".to_owned());
+    }
+    report.valid &= report.errors.is_empty();
+    report
+}
+
+/// Render a concise human-readable fixture-suite summary.
+#[must_use]
+pub fn render_artifact_schema_fixture_markdown(report: &ArtifactSchemaFixtureReport) -> String {
+    let mut out = String::new();
+    out.push_str("# Artifact Schema Fixture Suite\n\n");
+    out.push_str(&format!("- Fixture directory: `{}`\n", report.fixture_dir));
+    out.push_str(&format!(
+        "- Validator version: `{}`\n",
+        report.validator_version
+    ));
+    out.push_str(&format!(
+        "- Result: `{}`\n",
+        if report.valid { "pass" } else { "fail" }
+    ));
+    out.push_str(&format!(
+        "- Fixtures: `{}` positive=`{}` negative=`{}`\n",
+        report.fixture_count, report.positive_count, report.negative_count
+    ));
+    out.push_str(&format!(
+        "- Reproduction command: `{}`\n",
+        report.reproduction_command
+    ));
+    out.push_str("\n## Fixture Rows\n\n");
+    out.push_str("| Fixture | Expected | Observed | Valid | Diagnostics |\n");
+    out.push_str("|---|---:|---:|---:|---|\n");
+    for row in &report.fixtures {
+        let diagnostics = row
+            .observed_diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}@{}", diagnostic.code, diagnostic.path))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "| `{}` | `{:?}` | `{:?}` | `{}` | {} |\n",
+            row.fixture_id,
+            row.expected_result,
+            row.observed_result,
+            row.valid,
+            diagnostics
+        ));
+    }
+    if !report.errors.is_empty() {
+        out.push_str("\n## Suite Errors\n\n");
+        for error in &report.errors {
+            out.push_str(&format!("- {error}\n"));
+        }
+    }
+    out
+}
+
+fn collect_fixture_paths(dir: &Path, out: &mut Vec<PathBuf>, errors: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        errors.push(format!("failed to read fixture dir {}", dir.display()));
+        return;
+    };
+
+    for entry in entries {
+        let Ok(entry) = entry else {
+            errors.push(format!("failed to read entry under {}", dir.display()));
+            continue;
+        };
+        let path = entry.path();
+        if path.is_dir() {
+            collect_fixture_paths(&path, out, errors);
+        } else if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".fixture.json"))
+        {
+            out.push(path);
+        }
+    }
+}
+
+fn validate_artifact_schema_fixture_path(
+    fixture_dir: &Path,
+    path: &Path,
+) -> ArtifactSchemaFixtureRow {
+    let relative_path = path
+        .strip_prefix(fixture_dir)
+        .unwrap_or(path)
+        .display()
+        .to_string();
+    let Ok(text) = fs::read_to_string(path) else {
+        return invalid_fixture_row(&relative_path, "fixture_read_error", "$");
+    };
+    let fixture_sha256 = sha256_hex(text.as_bytes());
+    let Ok(fixture) = serde_json::from_str::<ArtifactSchemaFixture>(&text) else {
+        let mut row = invalid_fixture_row(&relative_path, "fixture_json_parse", "$");
+        row.fixture_sha256 = fixture_sha256;
+        return row;
+    };
+
+    let mut row = artifact_schema_fixture_row(&fixture, &relative_path, &fixture_sha256);
+    let diagnostics = validate_fixture_manifest_value(fixture_dir, &fixture.manifest);
+    row.schema_version = fixture
+        .manifest
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok());
+    row.observed_result = if diagnostics.is_empty() {
+        ArtifactSchemaFixtureExpectation::Accept
+    } else {
+        ArtifactSchemaFixtureExpectation::Reject
+    };
+    row.observed_diagnostics = diagnostics;
+    row.observed_diagnostics.sort();
+    row.expected_diagnostics.sort();
+    row.valid = row.expected_result == row.observed_result
+        && row.expected_diagnostics == row.observed_diagnostics;
+    row
+}
+
+fn validate_fixture_manifest_value(
+    fixture_dir: &Path,
+    value: &serde_json::Value,
+) -> Vec<ArtifactSchemaFixtureDiagnostic> {
+    let mut diagnostics = match serde_json::from_value::<ArtifactManifest>(value.clone()) {
+        Ok(manifest) => validate_fixture_manifest(fixture_dir, &manifest),
+        Err(_) => vec![ArtifactSchemaFixtureDiagnostic {
+            code: "manifest_json_deserialize".to_owned(),
+            path: "$.manifest".to_owned(),
+        }],
+    };
+    diagnostics.sort();
+    diagnostics
+}
+
+fn validate_fixture_manifest(
+    fixture_dir: &Path,
+    manifest: &ArtifactManifest,
+) -> Vec<ArtifactSchemaFixtureDiagnostic> {
+    let mut diagnostics = validate_operational_manifest(manifest)
+        .iter()
+        .map(manifest_error_diagnostic)
+        .collect::<Vec<_>>();
+    diagnostics.extend(validate_fixture_artifact_hashes(fixture_dir, manifest));
+    diagnostics
+}
+
+fn validate_fixture_artifact_hashes(
+    fixture_dir: &Path,
+    manifest: &ArtifactManifest,
+) -> Vec<ArtifactSchemaFixtureDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for artifact in &manifest.artifacts {
+        let expected = artifact.sha256.as_deref().unwrap_or_default();
+        if expected.is_empty() || !is_safe_relative_artifact_path(&artifact.path) {
+            continue;
+        }
+        let artifact_path = fixture_dir.join(&artifact.path);
+        let Ok(bytes) = fs::read(&artifact_path) else {
+            diagnostics.push(ArtifactSchemaFixtureDiagnostic {
+                code: "artifact_file_missing".to_owned(),
+                path: format!("$.manifest.artifacts[path={}]", artifact.path),
+            });
+            continue;
+        };
+        let actual = sha256_hex(&bytes);
+        if actual != expected {
+            diagnostics.push(ArtifactSchemaFixtureDiagnostic {
+                code: "artifact_sha256_mismatch".to_owned(),
+                path: format!("$.manifest.artifacts[path={}].sha256", artifact.path),
+            });
+        }
+    }
+    diagnostics
+}
+
+fn manifest_error_diagnostic(error: &ManifestValidationError) -> ArtifactSchemaFixtureDiagnostic {
+    ArtifactSchemaFixtureDiagnostic {
+        code: error.diagnostic_code().to_owned(),
+        path: error.diagnostic_path(),
+    }
+}
+
+fn artifact_schema_fixture_row(
+    fixture: &ArtifactSchemaFixture,
+    fixture_path: &str,
+    fixture_sha256: &str,
+) -> ArtifactSchemaFixtureRow {
+    ArtifactSchemaFixtureRow {
+        fixture_id: fixture.fixture_id.clone(),
+        classification: fixture.classification.clone(),
+        fixture_path: fixture_path.to_owned(),
+        fixture_sha256: fixture_sha256.to_owned(),
+        schema_version: None,
+        expected_result: fixture.expectation,
+        observed_result: ArtifactSchemaFixtureExpectation::Reject,
+        expected_diagnostics: fixture.expected_diagnostics.clone(),
+        observed_diagnostics: Vec::new(),
+        valid: false,
+    }
+}
+
+fn invalid_fixture_row(
+    fixture_path: &str,
+    code: &str,
+    path: &str,
+) -> ArtifactSchemaFixtureRow {
+    ArtifactSchemaFixtureRow {
+        fixture_id: fixture_path.to_owned(),
+        classification: "invalid_fixture".to_owned(),
+        fixture_path: fixture_path.to_owned(),
+        fixture_sha256: String::new(),
+        schema_version: None,
+        expected_result: ArtifactSchemaFixtureExpectation::Accept,
+        observed_result: ArtifactSchemaFixtureExpectation::Reject,
+        expected_diagnostics: Vec::new(),
+        observed_diagnostics: vec![ArtifactSchemaFixtureDiagnostic {
+            code: code.to_owned(),
+            path: path.to_owned(),
+        }],
+        valid: false,
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
 }
 
 // ── Builder convenience ──────────────────────────────────────────────────

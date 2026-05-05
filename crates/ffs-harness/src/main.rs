@@ -13,7 +13,9 @@ use ffs_harness::{
         run_ambition_evidence_matrix,
     },
     artifact_manifest::{
-        ArtifactManifest, READINESS_EVENT_ENVELOPE_VERSION, validate_operational_manifest,
+        ArtifactManifest, READINESS_EVENT_ENVELOPE_VERSION,
+        render_artifact_schema_fixture_markdown, validate_artifact_schema_fixture_dir,
+        validate_operational_manifest,
     },
     cross_oracle_arbitration::{
         DEFAULT_CROSS_ORACLE_ARBITRATION_REPORT, fail_on_cross_oracle_arbitration_errors,
@@ -215,6 +217,9 @@ fn run() -> Result<()> {
         Some("run-fsx-stress") => run_fsx_stress_cmd(&args[1..]),
         Some("xfstests-report") => xfstests_report(&args[1..]),
         Some("validate-operational-manifest") => validate_operational_manifest_cmd(&args[1..]),
+        Some("validate-artifact-schema-fixtures") => {
+            validate_artifact_schema_fixtures_cmd(&args[1..])
+        }
         Some("fuse-capability-probe") => fuse_capability_probe_cmd(&args[1..]),
         Some("validate-open-ended-inventory") => validate_open_ended_inventory_cmd(&args[1..]),
         Some("validate-source-scope-manifest") => validate_source_scope_manifest_cmd(&args[1..]),
@@ -348,6 +353,14 @@ struct RepairWritebackSerializationCmdArgs {
     artifact_out_path: Option<String>,
     summary_out_path: Option<String>,
     proof_summary_out_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct ArtifactSchemaFixturesCmdArgs {
+    fixture_dir: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    reproduction_command: String,
 }
 
 #[derive(Debug)]
@@ -2938,6 +2951,103 @@ fn validate_operational_manifest_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn validate_artifact_schema_fixtures_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_artifact_schema_fixtures_args(args)? else {
+        return Ok(());
+    };
+    let report = validate_artifact_schema_fixture_dir(
+        Path::new(&cmd_args.fixture_dir),
+        &cmd_args.reproduction_command,
+    );
+    let output = serde_json::to_string_pretty(&report)?;
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "artifact schema fixture report written: {} valid={} fixtures={} positive={} negative={} validator_version={} reproduction_command={}",
+            path,
+            report.valid,
+            report.fixture_count,
+            report.positive_count,
+            report.negative_count,
+            report.validator_version,
+            report.reproduction_command,
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        let summary = render_artifact_schema_fixture_markdown(&report);
+        write_text_file(Path::new(&path), &format!("{summary}\n"))?;
+        println!("artifact schema fixture summary written: {path}");
+    }
+
+    if !report.valid {
+        bail!(
+            "artifact schema fixture validation failed: fixtures={} suite_errors={}",
+            report.fixture_count,
+            report.errors.len()
+        );
+    }
+    Ok(())
+}
+
+fn parse_artifact_schema_fixtures_args(
+    args: &[String],
+) -> Result<Option<ArtifactSchemaFixturesCmdArgs>> {
+    let mut fixture_dir = "tests/artifact-schema-fixtures".to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut reproduction_command =
+        "ffs-harness validate-artifact-schema-fixtures --fixtures tests/artifact-schema-fixtures"
+            .to_owned();
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--fixtures" => {
+                i += 1;
+                args.get(i)
+                    .context("--fixtures requires a path")?
+                    .clone_into(&mut fixture_dir);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--reproduction-command" => {
+                i += 1;
+                reproduction_command = args
+                    .get(i)
+                    .context("--reproduction-command requires a value")?
+                    .to_owned();
+            }
+            "--help" | "-h" => {
+                print_artifact_schema_fixtures_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-artifact-schema-fixtures argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(ArtifactSchemaFixturesCmdArgs {
+        fixture_dir,
+        out_path,
+        summary_out_path,
+        reproduction_command,
+    }))
+}
+
 fn validate_open_ended_inventory_cmd(args: &[String]) -> Result<()> {
     let mut out_path: Option<String> = None;
     let mut i = 0;
@@ -3733,6 +3843,9 @@ fn print_usage() {
     );
     println!("  ffs-harness validate-operational-manifest <manifest.json>");
     println!(
+        "  ffs-harness validate-artifact-schema-fixtures [--fixtures DIR] [--out FILE] [--summary-out FILE] [--reproduction-command CMD]"
+    );
+    println!(
         "  ffs-harness operational-readiness-report [--artifacts DIR] [--current-git-sha SHA] [--format json|markdown] [--out FILE]"
     );
     println!(
@@ -3826,6 +3939,9 @@ fn print_usage_examples() {
         "  ffs-harness validate-operational-manifest artifacts/e2e/run/operational_manifest.json"
     );
     println!(
+        "  ffs-harness validate-artifact-schema-fixtures --out artifacts/artifact-schema-fixtures/report.json --summary-out artifacts/artifact-schema-fixtures/report.md"
+    );
+    println!(
         "  ffs-harness operational-readiness-report --artifacts artifacts/e2e --format markdown --out artifacts/e2e/readiness.md"
     );
     println!("  ffs-harness fuse-capability-probe --out artifacts/e2e/run/fuse_capability.json");
@@ -3889,6 +4005,17 @@ fn print_usage_examples() {
     println!(
         "  ffs-harness validate-mounted-recovery-matrix --out artifacts/e2e/mounted_recovery_matrix.json"
     );
+}
+
+fn print_artifact_schema_fixtures_usage() {
+    println!("USAGE:");
+    println!(
+        "  ffs-harness validate-artifact-schema-fixtures [--fixtures DIR] [--out FILE] [--summary-out FILE] [--reproduction-command CMD]"
+    );
+    println!();
+    println!("Validates every *.fixture.json case under the fixture directory.");
+    println!("Accept fixtures must produce zero diagnostics; reject fixtures must");
+    println!("produce exactly the listed code/path diagnostics.");
 }
 
 fn print_fuzz_smoke_usage() {
