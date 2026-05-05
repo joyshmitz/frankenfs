@@ -155,10 +155,12 @@ use ffs_harness::{
         render_writeback_crash_replay_markdown, render_writeback_ordering_markdown,
     },
     xfstests::{
-        XfstestsBaselineManifestInput, XfstestsRun, XfstestsStatus, apply_allowlist,
-        build_xfstests_baseline_manifest, compare_against_baseline, load_allowlist, load_baseline,
-        load_selected_tests, parse_check_output, render_xfstests_baseline_markdown,
-        summarize_uniform, validate_xfstests_baseline_manifest, write_junit_xml,
+        XfstestsBaselineManifest, XfstestsBaselineManifestInput, XfstestsFailureTriageInput,
+        XfstestsRun, XfstestsStatus, apply_allowlist, build_xfstests_baseline_manifest,
+        build_xfstests_failure_triage_report, compare_against_baseline, load_allowlist,
+        load_baseline, load_selected_tests, parse_check_output, render_xfstests_baseline_markdown,
+        render_xfstests_failure_triage_markdown, summarize_uniform,
+        validate_xfstests_baseline_manifest, write_junit_xml,
     },
 };
 use std::env;
@@ -201,6 +203,15 @@ struct XfstestsBaselineManifestConfig {
     output_paths: Vec<(String, String)>,
 }
 
+#[derive(Debug, Default)]
+struct XfstestsFailureTriageConfig {
+    baseline_manifest: Option<String>,
+    triage_out: Option<String>,
+    summary_out: Option<String>,
+    triage_id: Option<String>,
+    reproduction_command: Option<String>,
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("error: {err:#}");
@@ -239,6 +250,7 @@ fn run() -> Result<()> {
         Some("run-fsx-stress") => run_fsx_stress_cmd(&args[1..]),
         Some("xfstests-report") => xfstests_report(&args[1..]),
         Some("xfstests-baseline-manifest") => xfstests_baseline_manifest(&args[1..]),
+        Some("xfstests-failure-triage") => xfstests_failure_triage(&args[1..]),
         Some("validate-operational-manifest") => validate_operational_manifest_cmd(&args[1..]),
         Some("validate-artifact-schema-fixtures") => {
             validate_artifact_schema_fixtures_cmd(&args[1..])
@@ -2879,6 +2891,61 @@ fn xfstests_baseline_manifest(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn xfstests_failure_triage(args: &[String]) -> Result<()> {
+    let config = parse_xfstests_failure_triage_config(args)?;
+    let baseline_manifest_path = Path::new(
+        config
+            .baseline_manifest
+            .as_deref()
+            .context("--baseline-manifest is required")?,
+    );
+    let triage_out_path = Path::new(
+        config
+            .triage_out
+            .as_deref()
+            .context("--triage-out is required")?,
+    );
+    let summary_out_path = Path::new(
+        config
+            .summary_out
+            .as_deref()
+            .context("--summary-out is required")?,
+    );
+    let baseline_manifest: XfstestsBaselineManifest = serde_json::from_str(
+        &fs::read_to_string(baseline_manifest_path)
+            .with_context(|| format!("failed to read {}", baseline_manifest_path.display()))?,
+    )
+    .with_context(|| {
+        format!(
+            "invalid xfstests baseline manifest JSON {}",
+            baseline_manifest_path.display()
+        )
+    })?;
+    let report = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
+        triage_id: config
+            .triage_id
+            .as_deref()
+            .context("--triage-id is required")?,
+        baseline_manifest_path,
+        baseline_manifest: &baseline_manifest,
+        reproduction_command: config
+            .reproduction_command
+            .as_deref()
+            .context("--reproduction-command is required")?,
+    })?;
+
+    write_text_file(
+        triage_out_path,
+        &(serde_json::to_string_pretty(&report)? + "\n"),
+    )?;
+    write_text_file(
+        summary_out_path,
+        &render_xfstests_failure_triage_markdown(&report),
+    )?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
 fn parse_xfstests_report_config(args: &[String]) -> Result<XfstestsReportConfig> {
     let mut config = XfstestsReportConfig::default();
     let mut index = 0_usize;
@@ -3038,6 +3105,41 @@ fn parse_xfstests_baseline_manifest_config(
     if config.raw_artifacts.is_empty() {
         bail!("--raw-artifact is required at least once");
     }
+    Ok(config)
+}
+
+fn parse_xfstests_failure_triage_config(args: &[String]) -> Result<XfstestsFailureTriageConfig> {
+    let mut config = XfstestsFailureTriageConfig::default();
+    let mut index = 0_usize;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--baseline-manifest" => {
+                config.baseline_manifest =
+                    Some(require_value(args, index, "--baseline-manifest")?.clone());
+                index += 2;
+            }
+            "--triage-out" => {
+                config.triage_out = Some(require_value(args, index, "--triage-out")?.clone());
+                index += 2;
+            }
+            "--summary-out" => {
+                config.summary_out = Some(require_value(args, index, "--summary-out")?.clone());
+                index += 2;
+            }
+            "--triage-id" => {
+                config.triage_id = Some(require_value(args, index, "--triage-id")?.clone());
+                index += 2;
+            }
+            "--reproduction-command" => {
+                config.reproduction_command =
+                    Some(require_value(args, index, "--reproduction-command")?.clone());
+                index += 2;
+            }
+            other => bail!("unknown xfstests-failure-triage option: {other}"),
+        }
+    }
+
     Ok(config)
 }
 
@@ -4199,6 +4301,9 @@ fn print_usage_commands() {
     );
     println!(
         "  ffs-harness xfstests-baseline-manifest --selected FILE --results-json FILE --manifest-out FILE --summary-out FILE --baseline-id ID --subset-version VERSION --environment-manifest-id ID --command-transcript CMD --checkpoint-id ID --resume-command CMD --cleanup-status STATUS --reproduction-command CMD --raw-artifact FILE [--raw-artifact FILE ...]"
+    );
+    println!(
+        "  ffs-harness xfstests-failure-triage --baseline-manifest FILE --triage-out FILE --summary-out FILE --triage-id ID --reproduction-command CMD"
     );
     println!("  ffs-harness validate-operational-manifest <manifest.json>");
     println!(

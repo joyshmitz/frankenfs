@@ -47,6 +47,8 @@ POLICY_PLAN_JSON="$ARTIFACT_DIR/policy_plan.json"
 POLICY_REPORT_MD="$ARTIFACT_DIR/policy_report.md"
 BASELINE_MANIFEST_JSON="$ARTIFACT_DIR/baseline_manifest.json"
 BASELINE_REPORT_MD="$ARTIFACT_DIR/baseline_report.md"
+FAILURE_TRIAGE_JSON="$ARTIFACT_DIR/failure_triage.json"
+FAILURE_TRIAGE_REPORT_MD="$ARTIFACT_DIR/failure_triage.md"
 XFSTESTS_PREFLIGHT_JSON="${XFSTESTS_PREFLIGHT_JSON:-$ARTIFACT_DIR/preflight.json}"
 mkdir -p "$ARTIFACT_DIR"
 RESULT_BASE="${RESULT_BASE:-$ARTIFACT_DIR/raw_xfstests}"
@@ -66,6 +68,11 @@ LAST_CHECK_RC="null"
 harness_supports_xfstests_report() {
     [[ -x "$FFS_HARNESS_BIN" ]] || return 1
     "$FFS_HARNESS_BIN" help 2>&1 | grep -Fq "xfstests-report"
+}
+
+harness_supports_xfstests_failure_triage() {
+    [[ -x "$FFS_HARNESS_BIN" ]] || return 1
+    "$FFS_HARNESS_BIN" help 2>&1 | grep -Fq "xfstests-failure-triage"
 }
 
 resolve_xfstests_dir() {
@@ -103,6 +110,8 @@ write_summary() {
     local safe_policy_report="${POLICY_REPORT_MD//\"/\\\"}"
     local safe_baseline_manifest="${BASELINE_MANIFEST_JSON//\"/\\\"}"
     local safe_baseline_report="${BASELINE_REPORT_MD//\"/\\\"}"
+    local safe_failure_triage="${FAILURE_TRIAGE_JSON//\"/\\\"}"
+    local safe_failure_triage_report="${FAILURE_TRIAGE_REPORT_MD//\"/\\\"}"
     local safe_preflight="${XFSTESTS_PREFLIGHT_JSON//\"/\\\"}"
     local safe_summary="${SUMMARY_JSON//\"/\\\"}"
     local safe_result_base="${RESULT_BASE//\"/\\\"}"
@@ -163,6 +172,8 @@ write_summary() {
   "policy_report_md": "$safe_policy_report",
   "baseline_manifest_json": "$safe_baseline_manifest",
   "baseline_report_md": "$safe_baseline_report",
+  "failure_triage_json": "$safe_failure_triage",
+  "failure_triage_report_md": "$safe_failure_triage_report",
   "run_log": "$safe_run_log",
   "stdout_log": "$safe_stdout",
   "stderr_log": "$safe_stderr",
@@ -194,6 +205,8 @@ write_summary() {
     "policy_report_md": "$safe_policy_report",
     "baseline_manifest_json": "$safe_baseline_manifest",
     "baseline_report_md": "$safe_baseline_report",
+    "failure_triage_json": "$safe_failure_triage",
+    "failure_triage_report_md": "$safe_failure_triage_report",
     "summary_json": "$safe_summary",
     "run_log": "$safe_run_log",
     "stdout_log": "$safe_stdout",
@@ -443,6 +456,8 @@ artifact_paths = {
     "summary_json": str(artifact_dir / "summary.json"),
     "policy_plan_json": str(policy_plan),
     "policy_report_md": str(policy_report),
+    "failure_triage_json": str(artifact_dir / "failure_triage.json"),
+    "failure_triage_report_md": str(artifact_dir / "failure_triage.md"),
 }
 for test_id in selected:
     entry = policy_by_id.get(test_id, {})
@@ -924,6 +939,8 @@ manifest = {
         "results_json": results_path,
         "baseline_manifest_json": manifest_path,
         "baseline_report_md": report_path,
+        "failure_triage_json": str(pathlib.Path(manifest_path).with_name("failure_triage.json")),
+        "failure_triage_report_md": str(pathlib.Path(manifest_path).with_name("failure_triage.md")),
     },
     "reproduction_command": reproduction_command,
     "disposition_counts": counts,
@@ -958,6 +975,326 @@ for case in cases:
         f"| {case['test_id']} | {case['status']} | {case['classification']} | `{case['raw_log_hash']}` | `{case['resume_command']}` |"
     )
 pathlib.Path(report_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+
+    write_failure_triage_artifacts "$reproduction_command"
+}
+
+write_failure_triage_artifacts() {
+    local reproduction_command="$1"
+    local triage_id="xfstests-triage-$(basename "$E2E_LOG_DIR")"
+
+    if [[ ! -f "$BASELINE_MANIFEST_JSON" ]]; then
+        e2e_log "xfstests baseline manifest missing; unable to emit failure triage artifacts"
+        return 0
+    fi
+
+    if harness_supports_xfstests_failure_triage; then
+        "$FFS_HARNESS_BIN" xfstests-failure-triage \
+            --baseline-manifest "$BASELINE_MANIFEST_JSON" \
+            --triage-out "$FAILURE_TRIAGE_JSON" \
+            --summary-out "$FAILURE_TRIAGE_REPORT_MD" \
+            --triage-id "$triage_id" \
+            --reproduction-command "$reproduction_command" >/dev/null
+        return 0
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        e2e_log "python3 not found; unable to emit xfstests failure triage artifacts"
+        return 0
+    fi
+
+    python3 - \
+        "$BASELINE_MANIFEST_JSON" \
+        "$FAILURE_TRIAGE_JSON" \
+        "$FAILURE_TRIAGE_REPORT_MD" \
+        "$triage_id" \
+        "$reproduction_command" <<'PY'
+import hashlib
+import json
+import pathlib
+import re
+import sys
+from collections import OrderedDict
+
+(
+    baseline_manifest_path,
+    triage_path,
+    report_path,
+    triage_id,
+    reproduction_command,
+) = sys.argv[1:]
+
+baseline_manifest_path = pathlib.Path(baseline_manifest_path)
+triage_path = pathlib.Path(triage_path)
+report_path = pathlib.Path(report_path)
+manifest = json.loads(baseline_manifest_path.read_text(encoding="utf-8"))
+
+
+def sha256_file(path):
+    return "sha256:" + hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+
+
+def hash_raw_artifact_set(artifacts):
+    digest = hashlib.sha256()
+    for artifact in artifacts:
+        digest.update(str(artifact["path"]).encode())
+        digest.update(b"\0")
+        digest.update(str(artifact["sha256"]).encode())
+        digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
+
+
+def filesystem_flavor(test_id):
+    return test_id.split("/", 1)[0] if "/" in test_id else "generic"
+
+
+def suspected_boundary(test_id):
+    if test_id.startswith("ext4/"):
+        return "ffs-ext4"
+    if test_id.startswith("btrfs/"):
+        return "ffs-btrfs"
+    return "ffs-core"
+
+
+def normalize_fragment(value):
+    parts = [part for part in re.sub(r"[^A-Za-z0-9]+", "-", value).lower().split("-") if part]
+    return "-".join(parts[:12])
+
+
+def sh_quote(value):
+    return "'" + str(value).replace("'", "'\\''") + "'"
+
+
+def proposed_command(bead):
+    description = (
+        f"xfstests={bead['failing_test_id']} "
+        f"expected={bead['expected_behavior']} "
+        f"actual={bead['actual_behavior']} "
+        f"validation={bead['validation_command']} "
+        f"raw_hash={bead['raw_log_hash']} "
+        f"duplicate_key={bead['duplicate_key']}"
+    )
+    return (
+        "DRY_RUN br create "
+        f"--title {sh_quote(bead['title'])} "
+        "--type bug --priority 1 "
+        f"--labels {sh_quote(','.join(bead['labels']))} "
+        f"--description {sh_quote(description)} "
+        f"--depends-on {sh_quote(','.join(bead['dependency_beads']))} "
+        "--no-db --json"
+    )
+
+
+def excluded_row(case):
+    status = case.get("status", "")
+    classification = case.get("classification", "")
+    reasons = {
+        "passed": "passed rows do not create failure beads",
+        "skipped": "skipped rows require no product bead",
+        "not_run": "not-run rows require remediation or rerun first",
+        "unsupported": "unsupported-scope rows must not pollute product backlog",
+        "host_blocked": "host-blocked rows are environment work",
+        "harness_failed": "harness failures are harness work",
+        "interrupted": "interrupted rows need resume before failure triage",
+        "resumed": "resumed rows are evidence metadata, not product failures",
+    }
+    reason = reasons.get(status)
+    if reason is None and status == "failed":
+        reason = {
+            "environment_blocked": "environment failure excluded from product backlog",
+            "harness_blocked": "harness failure excluded from product backlog",
+            "unsupported_by_v1": "unsupported failure excluded from product backlog",
+        }.get(classification, "failed row is not classified product_actionable")
+    if reason is None:
+        reason = "row is outside product failure triage scope"
+    return {
+        "test_id": case.get("test_id", ""),
+        "status": status,
+        "classification": classification,
+        "reason": reason,
+        "raw_log_hash": case.get("raw_log_hash", ""),
+        "remediation": case.get("remediation"),
+    }
+
+
+errors = []
+if manifest.get("schema_version") != 1:
+    errors.append("xfstests baseline manifest schema_version must be 1")
+
+raw_by_path = {}
+for artifact in manifest.get("raw_artifacts", []):
+    path = str(artifact.get("path", ""))
+    if not path:
+        errors.append("xfstests baseline raw artifact missing path")
+        continue
+    if artifact.get("immutable") is not True:
+        errors.append(f"xfstests baseline raw artifact {path} is not immutable")
+    expected = str(artifact.get("sha256", ""))
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", expected):
+        errors.append(f"xfstests baseline raw artifact {path} has malformed sha256")
+    else:
+        try:
+            actual = sha256_file(path)
+        except OSError as exc:
+            errors.append(f"xfstests baseline raw artifact missing: {path} ({exc})")
+        else:
+            if actual != expected:
+                errors.append(
+                    f"xfstests baseline raw artifact hash changed: {path} "
+                    f"expected={expected} actual={actual}"
+                )
+    raw_by_path[path] = artifact
+
+for case in manifest.get("cases", []):
+    artifacts = []
+    refs = case.get("raw_artifact_refs", [])
+    if not refs:
+        errors.append(f"xfstests triage case {case.get('test_id', '')} has no consumable raw artifacts")
+        continue
+    for raw_ref in refs:
+        artifact = raw_by_path.get(str(raw_ref))
+        if artifact is None:
+            errors.append(
+                f"xfstests triage case {case.get('test_id', '')} references unknown raw artifact {raw_ref}"
+            )
+        elif artifact.get("immutable") is not True:
+            errors.append(
+                f"xfstests triage case {case.get('test_id', '')} references mutable raw artifact {raw_ref}"
+            )
+        else:
+            artifacts.append(artifact)
+    if artifacts:
+        actual_hash = hash_raw_artifact_set(artifacts)
+        if case.get("raw_log_hash") != actual_hash:
+            errors.append(
+                f"xfstests triage case {case.get('test_id', '')} raw_log_hash does not match "
+                f"referenced immutable artifacts: expected={case.get('raw_log_hash')} actual={actual_hash}"
+            )
+
+if errors:
+    for error in errors:
+        print(error, file=sys.stderr)
+    sys.exit(1)
+
+proposed_by_key = OrderedDict()
+excluded_rows = []
+for case in manifest.get("cases", []):
+    status = case.get("status", "")
+    classification = case.get("classification", "")
+    test_id = case.get("test_id", "")
+    if status == "failed" and classification == "product_actionable":
+        flavor = filesystem_flavor(test_id)
+        boundary = suspected_boundary(test_id)
+        actual_behavior = case.get("not_run_reason") or f"xfstests row {test_id} ended with normalized status {status}"
+        expected_behavior = (
+            f"{case.get('command', '')} should satisfy Linux xfstests row {test_id} "
+            f"for the {flavor} compatibility surface"
+        )
+        duplicate_key = f"{boundary}:{status}:{normalize_fragment(actual_behavior)}"
+        existing = proposed_by_key.get(duplicate_key)
+        if existing is None:
+            index = len(proposed_by_key) + 1
+            validation_command = (
+                f"XFSTESTS_MODE=run XFSTESTS_FILTER={flavor} "
+                f"XFSTESTS_DRY_RUN=0 {reproduction_command}"
+            )
+            existing = {
+                "proposed_id_placeholder": f"dry-run-xfstests-product-failure-{index:04}",
+                "title": f"xfstests {test_id} product failure in {boundary}",
+                "failing_test_id": test_id,
+                "related_test_ids": [test_id],
+                "filesystem_flavor": flavor,
+                "exact_command": case.get("command", ""),
+                "normalized_outcome": status,
+                "expected_behavior": expected_behavior,
+                "actual_behavior": actual_behavior,
+                "suspected_crate_boundary": boundary,
+                "minimized_repro_command": case.get("command", ""),
+                "minimization_status": "command_is_single_xfstests_row",
+                "duplicate_key": duplicate_key,
+                "labels": ["xfstests", "conformance", "product-bug", flavor],
+                "dependency_beads": ["bd-rchk3.4", manifest.get("baseline_id", "")],
+                "dependency_rationale": (
+                    "proposed product bead depends on reviewed xfstests triage policy "
+                    "and immutable baseline artifacts"
+                ),
+                "validation_command": validation_command,
+                "raw_log_refs": list(case.get("raw_artifact_refs", [])),
+                "raw_log_hash": case.get("raw_log_hash", ""),
+                "live_create": False,
+            }
+            proposed_by_key[duplicate_key] = existing
+        else:
+            if test_id not in existing["related_test_ids"]:
+                existing["related_test_ids"].append(test_id)
+            for raw_ref in case.get("raw_artifact_refs", []):
+                if raw_ref not in existing["raw_log_refs"]:
+                    existing["raw_log_refs"].append(raw_ref)
+    else:
+        excluded_rows.append(excluded_row(case))
+
+proposed_beads = list(proposed_by_key.values())
+duplicate_groups = [
+    {
+        "duplicate_key": bead["duplicate_key"],
+        "primary_test_id": bead["failing_test_id"],
+        "merged_test_ids": bead["related_test_ids"],
+    }
+    for bead in proposed_beads
+    if len(bead["related_test_ids"]) > 1
+]
+for bead in proposed_beads:
+    if not bead["minimized_repro_command"]:
+        bead["minimized_repro_command"] = None
+
+report = {
+    "schema_version": 1,
+    "triage_id": triage_id,
+    "baseline_id": manifest.get("baseline_id", ""),
+    "subset_version": manifest.get("subset_version", ""),
+    "source_baseline_manifest": str(baseline_manifest_path),
+    "live_bead_creation_enabled": False,
+    "disposition_counts": manifest.get("disposition_counts", {}),
+    "duplicate_groups": duplicate_groups,
+    "proposed_beads": proposed_beads,
+    "excluded_rows": excluded_rows,
+    "proposed_br_commands": [proposed_command(bead) for bead in proposed_beads],
+    "reproduction_command": reproduction_command,
+}
+triage_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+lines = [
+    f"# xfstests failure triage `{triage_id}`",
+    "",
+    f"- baseline: `{report['baseline_id']}`",
+    f"- subset version: `{report['subset_version']}`",
+    "- live bead creation enabled: `false`",
+    "",
+    "## Proposed Product Beads",
+    "",
+    "| Placeholder | Tests | Boundary | Duplicate key | Command |",
+    "|---|---|---|---|---|",
+]
+for bead in proposed_beads:
+    lines.append(
+        f"| {bead['proposed_id_placeholder']} | {', '.join(bead['related_test_ids'])} | "
+        f"{bead['suspected_crate_boundary']} | `{bead['duplicate_key']}` | "
+        f"`{bead['validation_command']}` |"
+    )
+lines.extend([
+    "",
+    "## Excluded Rows",
+    "",
+    "| Test | Status | Classification | Reason |",
+    "|---|---|---|---|",
+])
+for row in excluded_rows:
+    lines.append(f"| {row['test_id']} | {row['status']} | {row['classification']} | {row['reason']} |")
+lines.extend(["", "## Dry-Run br Commands", ""])
+for command in report["proposed_br_commands"]:
+    lines.append(f"- `{command}`")
+report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
 }
 

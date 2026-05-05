@@ -278,6 +278,71 @@ pub struct XfstestsBaselineManifestInput<'a> {
     pub output_paths: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct XfstestsFailureTriageInput<'a> {
+    pub triage_id: &'a str,
+    pub baseline_manifest_path: &'a Path,
+    pub baseline_manifest: &'a XfstestsBaselineManifest,
+    pub reproduction_command: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XfstestsFailureTriageReport {
+    pub schema_version: u32,
+    pub triage_id: String,
+    pub baseline_id: String,
+    pub subset_version: String,
+    pub source_baseline_manifest: String,
+    pub live_bead_creation_enabled: bool,
+    pub disposition_counts: BTreeMap<String, usize>,
+    pub duplicate_groups: Vec<XfstestsFailureDuplicateGroup>,
+    pub proposed_beads: Vec<XfstestsProposedFailureBead>,
+    pub excluded_rows: Vec<XfstestsFailureTriageExcludedRow>,
+    pub proposed_br_commands: Vec<String>,
+    pub reproduction_command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XfstestsProposedFailureBead {
+    pub proposed_id_placeholder: String,
+    pub title: String,
+    pub failing_test_id: String,
+    pub related_test_ids: Vec<String>,
+    pub filesystem_flavor: String,
+    pub exact_command: String,
+    pub normalized_outcome: String,
+    pub expected_behavior: String,
+    pub actual_behavior: String,
+    pub suspected_crate_boundary: String,
+    pub minimized_repro_command: Option<String>,
+    pub minimization_status: String,
+    pub duplicate_key: String,
+    pub labels: Vec<String>,
+    pub dependency_beads: Vec<String>,
+    pub dependency_rationale: String,
+    pub validation_command: String,
+    pub raw_log_refs: Vec<String>,
+    pub raw_log_hash: String,
+    pub live_create: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XfstestsFailureDuplicateGroup {
+    pub duplicate_key: String,
+    pub primary_test_id: String,
+    pub merged_test_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XfstestsFailureTriageExcludedRow {
+    pub test_id: String,
+    pub status: String,
+    pub classification: String,
+    pub reason: String,
+    pub raw_log_hash: String,
+    pub remediation: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct XfstestsComparison {
     pub regressions: Vec<String>,
@@ -314,6 +379,18 @@ const KNOWN_XFSTESTS_OUTCOMES: &[&str] = &[
     "environment_blocked",
     "unsupported_by_v1",
     "expected_failure",
+];
+
+const KNOWN_XFSTESTS_TRIAGE_BOUNDARIES: &[&str] = &[
+    "ffs-core",
+    "ffs-fuse",
+    "ffs-ext4",
+    "ffs-btrfs",
+    "ffs-dir",
+    "ffs-xattr",
+    "ffs-inode",
+    "ffs-journal",
+    "ffs-harness",
 ];
 
 const REQUIRED_XFSTESTS_ARTIFACTS: &[&str] = &[
@@ -552,6 +629,187 @@ pub fn validate_xfstests_baseline_manifest(manifest: &XfstestsBaselineManifest) 
     }
 
     errors
+}
+
+pub fn build_xfstests_failure_triage_report(
+    input: XfstestsFailureTriageInput<'_>,
+) -> Result<XfstestsFailureTriageReport> {
+    let baseline_errors = validate_xfstests_baseline_manifest(input.baseline_manifest);
+    if !baseline_errors.is_empty() {
+        anyhow::bail!(
+            "xfstests baseline manifest is not consumable for failure triage: {}",
+            baseline_errors.join("; ")
+        );
+    }
+    let raw_by_path = input
+        .baseline_manifest
+        .raw_artifacts
+        .iter()
+        .map(|artifact| (artifact.path.as_str(), artifact))
+        .collect::<BTreeMap<_, _>>();
+    let mut raw_ref_errors = Vec::new();
+    for case in &input.baseline_manifest.cases {
+        validate_case_raw_refs(case, &raw_by_path, &mut raw_ref_errors);
+    }
+    if !raw_ref_errors.is_empty() {
+        anyhow::bail!(
+            "xfstests baseline raw artifact refs are not consumable for failure triage: {}",
+            raw_ref_errors.join("; ")
+        );
+    }
+
+    let mut proposed_by_key: BTreeMap<String, XfstestsProposedFailureBead> = BTreeMap::new();
+    let mut excluded_rows = Vec::new();
+    for case in &input.baseline_manifest.cases {
+        if is_product_failure_row(case) {
+            let proposed = proposed_failure_bead(
+                proposed_by_key.len() + 1,
+                case,
+                input.baseline_manifest,
+                input.reproduction_command,
+            );
+            match proposed_by_key.get_mut(&proposed.duplicate_key) {
+                Some(existing) => {
+                    if !existing.related_test_ids.contains(&case.test_id) {
+                        existing.related_test_ids.push(case.test_id.clone());
+                    }
+                    merge_raw_refs(existing, case);
+                }
+                None => {
+                    proposed_by_key.insert(proposed.duplicate_key.clone(), proposed);
+                }
+            }
+        } else {
+            excluded_rows.push(excluded_triage_row(case));
+        }
+    }
+
+    let proposed_beads = proposed_by_key.into_values().collect::<Vec<_>>();
+    let duplicate_groups = proposed_beads
+        .iter()
+        .filter(|bead| bead.related_test_ids.len() > 1)
+        .map(|bead| XfstestsFailureDuplicateGroup {
+            duplicate_key: bead.duplicate_key.clone(),
+            primary_test_id: bead.failing_test_id.clone(),
+            merged_test_ids: bead.related_test_ids.clone(),
+        })
+        .collect::<Vec<_>>();
+    let proposed_br_commands = proposed_beads
+        .iter()
+        .map(XfstestsProposedFailureBead::proposed_br_command)
+        .collect::<Vec<_>>();
+    let report = XfstestsFailureTriageReport {
+        schema_version: 1,
+        triage_id: input.triage_id.to_owned(),
+        baseline_id: input.baseline_manifest.baseline_id.clone(),
+        subset_version: input.baseline_manifest.subset_version.clone(),
+        source_baseline_manifest: input.baseline_manifest_path.display().to_string(),
+        live_bead_creation_enabled: false,
+        disposition_counts: input.baseline_manifest.disposition_counts.clone(),
+        duplicate_groups,
+        proposed_beads,
+        excluded_rows,
+        proposed_br_commands,
+        reproduction_command: input.reproduction_command.to_owned(),
+    };
+    let errors = validate_xfstests_failure_triage_report(&report);
+    if !errors.is_empty() {
+        anyhow::bail!(
+            "xfstests failure triage report validation failed: {}",
+            errors.join("; ")
+        );
+    }
+    Ok(report)
+}
+
+#[must_use]
+pub fn validate_xfstests_failure_triage_report(
+    report: &XfstestsFailureTriageReport,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if report.schema_version != 1 {
+        errors.push("xfstests failure triage schema_version must be 1".to_owned());
+    }
+    require_non_empty("triage_id", &report.triage_id, &mut errors);
+    require_non_empty("baseline_id", &report.baseline_id, &mut errors);
+    require_non_empty("subset_version", &report.subset_version, &mut errors);
+    require_non_empty(
+        "source_baseline_manifest",
+        &report.source_baseline_manifest,
+        &mut errors,
+    );
+    require_non_empty(
+        "reproduction_command",
+        &report.reproduction_command,
+        &mut errors,
+    );
+    if report.live_bead_creation_enabled {
+        errors.push("xfstests failure triage must remain dry-run only".to_owned());
+    }
+    if report.proposed_br_commands.len() != report.proposed_beads.len() {
+        errors.push("xfstests failure triage proposed_br_commands count mismatch".to_owned());
+    }
+    let mut duplicate_keys = BTreeSet::new();
+    for bead in &report.proposed_beads {
+        validate_proposed_failure_bead(bead, &mut duplicate_keys, &mut errors);
+    }
+    for excluded in &report.excluded_rows {
+        require_non_empty("excluded.test_id", &excluded.test_id, &mut errors);
+        require_non_empty("excluded.reason", &excluded.reason, &mut errors);
+    }
+    errors
+}
+
+#[must_use]
+pub fn render_xfstests_failure_triage_markdown(report: &XfstestsFailureTriageReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# xfstests failure triage `{}`", report.triage_id);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "- baseline: `{}`", report.baseline_id);
+    let _ = writeln!(out, "- subset version: `{}`", report.subset_version);
+    let _ = writeln!(
+        out,
+        "- live bead creation enabled: `{}`",
+        report.live_bead_creation_enabled
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Proposed Product Beads");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "| Placeholder | Tests | Boundary | Duplicate key | Command |"
+    );
+    let _ = writeln!(out, "|---|---|---|---|---|");
+    for bead in &report.proposed_beads {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | `{}` | `{}` |",
+            bead.proposed_id_placeholder,
+            bead.related_test_ids.join(", "),
+            bead.suspected_crate_boundary,
+            bead.duplicate_key,
+            bead.validation_command
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Excluded Rows");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "| Test | Status | Classification | Reason |");
+    let _ = writeln!(out, "|---|---|---|---|");
+    for row in &report.excluded_rows {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} |",
+            row.test_id, row.status, row.classification, row.reason
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Dry-Run br Commands");
+    let _ = writeln!(out);
+    for command in &report.proposed_br_commands {
+        let _ = writeln!(out, "- `{command}`");
+    }
+    out
 }
 
 #[must_use]
@@ -1669,6 +1927,41 @@ fn validate_raw_artifact(artifact: &XfstestsRawArtifact, errors: &mut Vec<String
     }
 }
 
+fn validate_case_raw_refs(
+    case: &XfstestsBaselineCase,
+    raw_by_path: &BTreeMap<&str, &XfstestsRawArtifact>,
+    errors: &mut Vec<String>,
+) {
+    let mut artifacts: Vec<XfstestsRawArtifact> = Vec::new();
+    for raw_ref in &case.raw_artifact_refs {
+        match raw_by_path.get(raw_ref.as_str()) {
+            Some(artifact) if artifact.immutable => artifacts.push((*artifact).clone()),
+            Some(_) => errors.push(format!(
+                "xfstests triage case {} references mutable raw artifact {}",
+                case.test_id, raw_ref
+            )),
+            None => errors.push(format!(
+                "xfstests triage case {} references unknown raw artifact {}",
+                case.test_id, raw_ref
+            )),
+        }
+    }
+    if artifacts.is_empty() {
+        errors.push(format!(
+            "xfstests triage case {} has no consumable raw artifacts",
+            case.test_id
+        ));
+        return;
+    }
+    let actual_hash = hash_raw_artifact_set(&artifacts);
+    if case.raw_log_hash != actual_hash {
+        errors.push(format!(
+            "xfstests triage case {} raw_log_hash does not match referenced immutable artifacts: expected={} actual={actual_hash}",
+            case.test_id, case.raw_log_hash
+        ));
+    }
+}
+
 fn validate_baseline_case(case: &XfstestsBaselineCase, errors: &mut Vec<String>) {
     require_non_empty("case.test_id", &case.test_id, errors);
     require_non_empty("case.command", &case.command, errors);
@@ -1715,6 +2008,271 @@ fn validate_baseline_case(case: &XfstestsBaselineCase, errors: &mut Vec<String>)
             case.test_id, case.status
         ));
     }
+}
+
+fn is_product_failure_row(case: &XfstestsBaselineCase) -> bool {
+    case.status == XfstestsBaselineRowStatus::Failed && case.classification == "product_actionable"
+}
+
+fn proposed_failure_bead(
+    index: usize,
+    case: &XfstestsBaselineCase,
+    manifest: &XfstestsBaselineManifest,
+    reproduction_command: &str,
+) -> XfstestsProposedFailureBead {
+    let filesystem_flavor = filesystem_flavor_for_test(&case.test_id);
+    let suspected_crate_boundary = suspected_boundary_for_test(&case.test_id).to_owned();
+    let actual_behavior = actual_behavior_for_case(case);
+    let expected_behavior = expected_behavior_for_case(case, &filesystem_flavor);
+    let duplicate_key = duplicate_key_for_case(case, &suspected_crate_boundary, &actual_behavior);
+    let validation_command = format!(
+        "XFSTESTS_MODE=run XFSTESTS_FILTER={filesystem_flavor} XFSTESTS_DRY_RUN=0 {reproduction_command}"
+    );
+    let title = format!(
+        "xfstests {} product failure in {}",
+        case.test_id, suspected_crate_boundary
+    );
+    XfstestsProposedFailureBead {
+        proposed_id_placeholder: format!("dry-run-xfstests-product-failure-{index:04}"),
+        title,
+        failing_test_id: case.test_id.clone(),
+        related_test_ids: vec![case.test_id.clone()],
+        filesystem_flavor: filesystem_flavor.clone(),
+        exact_command: case.command.clone(),
+        normalized_outcome: case.status.as_str().to_owned(),
+        expected_behavior,
+        actual_behavior,
+        suspected_crate_boundary,
+        minimized_repro_command: Some(case.command.clone()),
+        minimization_status: "command_is_single_xfstests_row".to_owned(),
+        duplicate_key,
+        labels: vec![
+            "xfstests".to_owned(),
+            "conformance".to_owned(),
+            "product-bug".to_owned(),
+            filesystem_flavor,
+        ],
+        dependency_beads: vec!["bd-rchk3.4".to_owned(), manifest.baseline_id.clone()],
+        dependency_rationale:
+            "proposed product bead depends on reviewed xfstests triage policy and immutable baseline artifacts"
+                .to_owned(),
+        validation_command,
+        raw_log_refs: case.raw_artifact_refs.clone(),
+        raw_log_hash: case.raw_log_hash.clone(),
+        live_create: false,
+    }
+}
+
+fn merge_raw_refs(existing: &mut XfstestsProposedFailureBead, case: &XfstestsBaselineCase) {
+    for raw_ref in &case.raw_artifact_refs {
+        if !existing.raw_log_refs.contains(raw_ref) {
+            existing.raw_log_refs.push(raw_ref.clone());
+        }
+    }
+}
+
+fn excluded_triage_row(case: &XfstestsBaselineCase) -> XfstestsFailureTriageExcludedRow {
+    let reason = match (case.status, case.classification.as_str()) {
+        (XfstestsBaselineRowStatus::Passed, _) => "passed rows do not create failure beads",
+        (XfstestsBaselineRowStatus::Skipped, _) => "skipped rows require no product bead",
+        (XfstestsBaselineRowStatus::NotRun, _) => "not-run rows require remediation or rerun first",
+        (XfstestsBaselineRowStatus::Unsupported, _) => {
+            "unsupported-scope rows must not pollute product backlog"
+        }
+        (XfstestsBaselineRowStatus::HostBlocked, _) => "host-blocked rows are environment work",
+        (XfstestsBaselineRowStatus::HarnessFailed, _) => "harness failures are harness work",
+        (XfstestsBaselineRowStatus::Interrupted, _) => {
+            "interrupted rows need resume before failure triage"
+        }
+        (XfstestsBaselineRowStatus::Resumed, _) => {
+            "resumed rows are evidence metadata, not product failures"
+        }
+        (XfstestsBaselineRowStatus::Failed, "environment_blocked") => {
+            "environment failure excluded from product backlog"
+        }
+        (XfstestsBaselineRowStatus::Failed, "harness_blocked") => {
+            "harness failure excluded from product backlog"
+        }
+        (XfstestsBaselineRowStatus::Failed, "unsupported_by_v1") => {
+            "unsupported failure excluded from product backlog"
+        }
+        (XfstestsBaselineRowStatus::Failed, _) => "failed row is not classified product_actionable",
+    };
+    XfstestsFailureTriageExcludedRow {
+        test_id: case.test_id.clone(),
+        status: case.status.as_str().to_owned(),
+        classification: case.classification.clone(),
+        reason: reason.to_owned(),
+        raw_log_hash: case.raw_log_hash.clone(),
+        remediation: case.remediation.clone(),
+    }
+}
+
+fn validate_proposed_failure_bead(
+    bead: &XfstestsProposedFailureBead,
+    duplicate_keys: &mut BTreeSet<String>,
+    errors: &mut Vec<String>,
+) {
+    require_non_empty(
+        "proposed.proposed_id_placeholder",
+        &bead.proposed_id_placeholder,
+        errors,
+    );
+    require_non_empty("proposed.title", &bead.title, errors);
+    require_non_empty("proposed.failing_test_id", &bead.failing_test_id, errors);
+    require_non_empty("proposed.exact_command", &bead.exact_command, errors);
+    require_non_empty(
+        "proposed.expected_behavior",
+        &bead.expected_behavior,
+        errors,
+    );
+    require_non_empty("proposed.actual_behavior", &bead.actual_behavior, errors);
+    require_non_empty("proposed.duplicate_key", &bead.duplicate_key, errors);
+    require_non_empty(
+        "proposed.validation_command",
+        &bead.validation_command,
+        errors,
+    );
+    if !duplicate_keys.insert(bead.duplicate_key.clone()) {
+        errors.push(format!(
+            "xfstests failure triage duplicate proposed bead key: {}",
+            bead.duplicate_key
+        ));
+    }
+    if !KNOWN_XFSTESTS_TRIAGE_BOUNDARIES.contains(&bead.suspected_crate_boundary.as_str()) {
+        errors.push(format!(
+            "xfstests failure triage has unknown suspected boundary: {}",
+            bead.suspected_crate_boundary
+        ));
+    }
+    if bead.related_test_ids.is_empty() || !bead.related_test_ids.contains(&bead.failing_test_id) {
+        errors.push(format!(
+            "xfstests failure triage proposed bead {} must include primary failing test in related_test_ids",
+            bead.proposed_id_placeholder
+        ));
+    }
+    if bead.minimized_repro_command.is_none() && !bead.minimization_status.contains("non_minimized")
+    {
+        errors.push(format!(
+            "xfstests failure triage proposed bead {} needs minimized repro or explicit non-minimized follow-up",
+            bead.proposed_id_placeholder
+        ));
+    }
+    if !bead.labels.iter().any(|label| label == "xfstests")
+        || !bead.labels.iter().any(|label| label == "product-bug")
+    {
+        errors.push(format!(
+            "xfstests failure triage proposed bead {} missing required labels",
+            bead.proposed_id_placeholder
+        ));
+    }
+    if bead.dependency_beads.is_empty() || bead.dependency_rationale.trim().is_empty() {
+        errors.push(format!(
+            "xfstests failure triage proposed bead {} missing dependency rationale",
+            bead.proposed_id_placeholder
+        ));
+    }
+    if bead.raw_log_refs.is_empty() || !bead.raw_log_hash.starts_with("sha256:") {
+        errors.push(format!(
+            "xfstests failure triage proposed bead {} missing raw log refs/hash",
+            bead.proposed_id_placeholder
+        ));
+    }
+    if bead.live_create {
+        errors.push(format!(
+            "xfstests failure triage proposed bead {} must not create live beads",
+            bead.proposed_id_placeholder
+        ));
+    }
+}
+
+impl XfstestsProposedFailureBead {
+    fn proposed_br_command(&self) -> String {
+        format!(
+            "DRY_RUN br create --title '{}' --type bug --priority 1 --labels '{}' --description '{}' --depends-on '{}' --no-db --json",
+            shell_single_quote(&self.title),
+            shell_single_quote(&self.labels.join(",")),
+            shell_single_quote(&format!(
+                "xfstests={} expected={} actual={} validation={} raw_hash={} duplicate_key={}",
+                self.failing_test_id,
+                self.expected_behavior,
+                self.actual_behavior,
+                self.validation_command,
+                self.raw_log_hash,
+                self.duplicate_key
+            )),
+            shell_single_quote(&self.dependency_beads.join(","))
+        )
+    }
+}
+
+fn filesystem_flavor_for_test(test_id: &str) -> String {
+    test_id
+        .split_once('/')
+        .map_or("generic", |(prefix, _)| prefix)
+        .to_owned()
+}
+
+fn suspected_boundary_for_test(test_id: &str) -> &'static str {
+    if test_id.starts_with("ext4/") {
+        "ffs-ext4"
+    } else if test_id.starts_with("btrfs/") {
+        "ffs-btrfs"
+    } else {
+        "ffs-core"
+    }
+}
+
+fn expected_behavior_for_case(case: &XfstestsBaselineCase, filesystem_flavor: &str) -> String {
+    format!(
+        "{} should satisfy Linux xfstests row {} for the {} compatibility surface",
+        case.command, case.test_id, filesystem_flavor
+    )
+}
+
+fn actual_behavior_for_case(case: &XfstestsBaselineCase) -> String {
+    case.not_run_reason.clone().unwrap_or_else(|| {
+        format!(
+            "xfstests row {} ended with normalized status {}",
+            case.test_id,
+            case.status.as_str()
+        )
+    })
+}
+
+fn duplicate_key_for_case(
+    case: &XfstestsBaselineCase,
+    suspected_boundary: &str,
+    actual_behavior: &str,
+) -> String {
+    format!(
+        "{}:{}:{}",
+        suspected_boundary,
+        case.status.as_str(),
+        normalize_duplicate_fragment(actual_behavior)
+    )
+}
+
+fn normalize_duplicate_fragment(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .take(12)
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn shell_single_quote(value: &str) -> String {
+    value.replace('\'', "'\\''")
 }
 
 #[cfg(test)]
@@ -1854,6 +2412,20 @@ mod tests {
         raw_path: &std::path::Path,
         cases: Vec<XfstestsBaselineCase>,
     ) -> XfstestsBaselineManifest {
+        let raw_artifacts = vec![hash_raw_artifact(raw_path).expect("hash raw artifact")];
+        let raw_refs = raw_artifacts
+            .iter()
+            .map(|artifact| artifact.path.clone())
+            .collect::<Vec<_>>();
+        let raw_log_hash = hash_raw_artifact_set(&raw_artifacts);
+        let cases = cases
+            .into_iter()
+            .map(|mut case| {
+                case.raw_artifact_refs.clone_from(&raw_refs);
+                case.raw_log_hash.clone_from(&raw_log_hash);
+                case
+            })
+            .collect::<Vec<_>>();
         XfstestsBaselineManifest {
             schema_version: 1,
             baseline_id: "xfstests-baseline-test".to_owned(),
@@ -1881,7 +2453,7 @@ mod tests {
             )]),
             reproduction_command: "XFSTESTS_MODE=run ./scripts/e2e/ffs_xfstests_e2e.sh".to_owned(),
             disposition_counts: disposition_counts(&cases),
-            raw_artifacts: vec![hash_raw_artifact(raw_path).expect("hash raw artifact")],
+            raw_artifacts,
             cases,
         }
     }
@@ -2720,5 +3292,178 @@ generic/001  2s ... pass\n";
         assert!(markdown.contains("- interrupted: 1"));
         assert!(!markdown.contains("- passed: 2"));
         assert!(markdown.contains("XFSTESTS_MODE=run"));
+    }
+
+    #[test]
+    fn failure_triage_extracts_products_excludes_non_products_and_merges_duplicates() -> Result<()>
+    {
+        let tmp = tempdir()?;
+        let raw = tmp.path().join("check.log");
+        fs::write(
+            &raw,
+            "generic/001 failed EIO\ngeneric/002 failed EIO\next4/001 host blocked\nbtrfs/001 unsupported\n",
+        )?;
+        let mut first = baseline_case("generic/001", XfstestsBaselineRowStatus::Failed);
+        first.not_run_reason = Some("EIO after fsync boundary".to_owned());
+        let mut second = baseline_case("generic/002", XfstestsBaselineRowStatus::Failed);
+        second.not_run_reason = Some("EIO after fsync boundary".to_owned());
+        let mut host = baseline_case("ext4/001", XfstestsBaselineRowStatus::HostBlocked);
+        host.classification = "environment_blocked".to_owned();
+        let mut unsupported = baseline_case("btrfs/001", XfstestsBaselineRowStatus::Unsupported);
+        unsupported.classification = "unsupported_by_v1".to_owned();
+        let manifest = manifest_with_cases(&raw, vec![first, second, host, unsupported]);
+
+        let report = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
+            triage_id: "triage-fixture",
+            baseline_manifest_path: tmp.path().join("baseline_manifest.json").as_path(),
+            baseline_manifest: &manifest,
+            reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh",
+        })?;
+
+        assert_eq!(report.proposed_beads.len(), 1);
+        assert_eq!(
+            report.proposed_beads[0].related_test_ids,
+            vec!["generic/001".to_owned(), "generic/002".to_owned()]
+        );
+        assert_eq!(report.duplicate_groups.len(), 1);
+        assert_eq!(report.excluded_rows.len(), 2);
+        assert!(report.proposed_br_commands[0].starts_with("DRY_RUN br create"));
+        assert!(
+            report
+                .excluded_rows
+                .iter()
+                .any(|row| row.reason.contains("environment work"))
+        );
+        assert!(
+            report
+                .excluded_rows
+                .iter()
+                .any(|row| row.reason.contains("unsupported-scope"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failure_triage_rejects_stale_raw_refs_missing_command_and_bad_payloads() {
+        let tmp = tempdir().expect("tempdir");
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "generic/001 failed\n").expect("write raw log");
+        let mut product = baseline_case("generic/001", XfstestsBaselineRowStatus::Failed);
+        product.not_run_reason = Some("lost write after fsync".to_owned());
+        let mut manifest = manifest_with_cases(&raw, vec![product]);
+        fs::write(&raw, "generic/001 changed\n").expect("mutate raw log");
+
+        let error = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
+            triage_id: "triage-fixture",
+            baseline_manifest_path: tmp.path().join("baseline_manifest.json").as_path(),
+            baseline_manifest: &manifest,
+            reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh",
+        })
+        .expect_err("changed raw artifact must be rejected")
+        .to_string();
+        assert!(
+            error.contains("hash changed"),
+            "expected raw hash drift error, got {error}"
+        );
+
+        fs::write(&raw, "generic/001 failed\n").expect("restore raw log");
+        manifest = manifest_with_cases(
+            &raw,
+            vec![baseline_case(
+                "generic/001",
+                XfstestsBaselineRowStatus::Failed,
+            )],
+        );
+        manifest.cases[0].command.clear();
+        let error = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
+            triage_id: "triage-fixture",
+            baseline_manifest_path: tmp.path().join("baseline_manifest.json").as_path(),
+            baseline_manifest: &manifest,
+            reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh",
+        })
+        .expect_err("missing command must be rejected")
+        .to_string();
+        assert!(
+            error.contains("missing case.command"),
+            "expected missing command error, got {error}"
+        );
+
+        let report = XfstestsFailureTriageReport {
+            schema_version: 1,
+            triage_id: "triage-fixture".to_owned(),
+            baseline_id: "baseline".to_owned(),
+            subset_version: "subset".to_owned(),
+            source_baseline_manifest: "baseline_manifest.json".to_owned(),
+            live_bead_creation_enabled: false,
+            disposition_counts: BTreeMap::new(),
+            duplicate_groups: Vec::new(),
+            proposed_beads: vec![XfstestsProposedFailureBead {
+                proposed_id_placeholder: "dry-run".to_owned(),
+                title: "missing fields".to_owned(),
+                failing_test_id: "generic/001".to_owned(),
+                related_test_ids: vec!["generic/001".to_owned()],
+                filesystem_flavor: "generic".to_owned(),
+                exact_command: "./check generic/001".to_owned(),
+                normalized_outcome: "failed".to_owned(),
+                expected_behavior: String::new(),
+                actual_behavior: String::new(),
+                suspected_crate_boundary: "mystery-crate".to_owned(),
+                minimized_repro_command: None,
+                minimization_status: "unknown".to_owned(),
+                duplicate_key: "dup".to_owned(),
+                labels: vec!["xfstests".to_owned()],
+                dependency_beads: Vec::new(),
+                dependency_rationale: String::new(),
+                validation_command: "./check generic/001".to_owned(),
+                raw_log_refs: vec!["check.log".to_owned()],
+                raw_log_hash:
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_owned(),
+                live_create: true,
+            }],
+            excluded_rows: Vec::new(),
+            proposed_br_commands: Vec::new(),
+            reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh".to_owned(),
+        };
+        let errors = validate_xfstests_failure_triage_report(&report);
+        for expected in [
+            "missing proposed.expected_behavior",
+            "missing proposed.actual_behavior",
+            "unknown suspected boundary",
+            "minimized repro",
+            "missing required labels",
+            "missing dependency rationale",
+            "must not create live beads",
+            "proposed_br_commands count mismatch",
+        ] {
+            assert!(
+                errors.iter().any(|error| error.contains(expected)),
+                "expected {expected} error, got {errors:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn failure_triage_renders_markdown_without_live_creation() -> Result<()> {
+        let tmp = tempdir()?;
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "ext4/001 failed\n")?;
+        let mut product = baseline_case("ext4/001", XfstestsBaselineRowStatus::Failed);
+        product.not_run_reason = Some("flag mismatch".to_owned());
+        let manifest = manifest_with_cases(&raw, vec![product]);
+        let report = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
+            triage_id: "triage-fixture",
+            baseline_manifest_path: tmp.path().join("baseline_manifest.json").as_path(),
+            baseline_manifest: &manifest,
+            reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh",
+        })?;
+
+        let markdown = render_xfstests_failure_triage_markdown(&report);
+
+        assert!(markdown.contains("live bead creation enabled: `false`"));
+        assert!(markdown.contains("ext4/001"));
+        assert!(markdown.contains("ffs-ext4"));
+        assert!(markdown.contains("DRY_RUN br create"));
+        Ok(())
     }
 }

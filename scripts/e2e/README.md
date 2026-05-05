@@ -99,6 +99,23 @@ directories on exit during ordinary CI runs. Set
 sessions, or debugging runs that must preserve temp directories and direct
 `mktemp` logs.
 
+## xfstests Failure Triage Artifacts
+
+`./scripts/e2e/ffs_xfstests_e2e.sh` emits a baseline manifest plus derived
+failure-triage artifacts under the run's `xfstests/` artifact directory:
+
+- `baseline_manifest.json` and `baseline_report.md` preserve the selected
+  subset, immutable raw artifact hashes, partial-run checkpoint, cleanup status,
+  and reproduction command.
+- `failure_triage.json` and `failure_triage.md` consume only that immutable
+  baseline manifest. Product-actionable failures are grouped by duplicate key
+  into dry-run proposed beads; host, harness, unsupported, skipped, interrupted,
+  resumed, passed, and not-run rows are listed as explicit exclusions.
+
+The triage step is intentionally dry-run only. It records `DRY_RUN br create`
+commands for operator review and never creates live Beads entries from an E2E
+run.
+
 ## Scenario Catalog Contract
 
 Deterministic scenario IDs are centrally defined in:
