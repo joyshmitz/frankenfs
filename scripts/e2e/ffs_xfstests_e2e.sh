@@ -33,6 +33,8 @@ XFSTESTS_ALLOWLIST_JSON="${XFSTESTS_ALLOWLIST_JSON:-$REPO_ROOT/scripts/e2e/xfste
 XFSTESTS_BASELINE_JSON="${XFSTESTS_BASELINE_JSON:-}"
 XFSTESTS_PREFLIGHT_SCRIPT="${XFSTESTS_PREFLIGHT_SCRIPT:-$REPO_ROOT/scripts/e2e/ffs_xfstests_preflight_e2e.sh}"
 XFSTESTS_PREFLIGHT_MAX_AGE_SECS="${XFSTESTS_PREFLIGHT_MAX_AGE_SECS:-3600}"
+XFSTESTS_INVOKE_CHECK_DRY_RUN="${XFSTESTS_INVOKE_CHECK_DRY_RUN:-0}"
+XFSTESTS_REAL_RUN_ACK="${XFSTESTS_REAL_RUN_ACK:-}"
 FFS_HARNESS_BIN="${FFS_HARNESS_BIN:-$REPO_ROOT/target/debug/ffs-harness}"
 
 ARTIFACT_DIR="$E2E_LOG_DIR/xfstests"
@@ -45,6 +47,10 @@ POLICY_PLAN_JSON="$ARTIFACT_DIR/policy_plan.json"
 POLICY_REPORT_MD="$ARTIFACT_DIR/policy_report.md"
 XFSTESTS_PREFLIGHT_JSON="${XFSTESTS_PREFLIGHT_JSON:-$ARTIFACT_DIR/preflight.json}"
 mkdir -p "$ARTIFACT_DIR"
+RESULT_BASE="${RESULT_BASE:-$ARTIFACT_DIR/raw_xfstests}"
+export RESULT_BASE
+XFSTESTS_CLEANUP_STATUS="not_started"
+XFSTESTS_PARTIAL_RUN_STATUS="not_started"
 
 declare -a GENERIC_TESTS=()
 declare -a EXT4_TESTS=()
@@ -93,6 +99,28 @@ write_summary() {
     local safe_policy_report="${POLICY_REPORT_MD//\"/\\\"}"
     local safe_preflight="${XFSTESTS_PREFLIGHT_JSON//\"/\\\"}"
     local safe_summary="${SUMMARY_JSON//\"/\\\"}"
+    local safe_result_base="${RESULT_BASE//\"/\\\"}"
+    local safe_run_log="${E2E_LOG_FILE//\"/\\\"}"
+    local safe_stdout="${ARTIFACT_DIR//\"/\\\"}/stdout.log"
+    local safe_stderr="${ARTIFACT_DIR//\"/\\\"}/stderr.log"
+    local safe_preflight_stdout="${ARTIFACT_DIR//\"/\\\"}/preflight.stdout"
+    local safe_preflight_stderr="${ARTIFACT_DIR//\"/\\\"}/preflight.stderr"
+    local safe_fstyp="${FSTYP:-}"
+    safe_fstyp="${safe_fstyp//\"/\\\"}"
+    local safe_test_dev="${TEST_DEV:-}"
+    safe_test_dev="${safe_test_dev//\"/\\\"}"
+    local safe_scratch_dev="${SCRATCH_DEV:-}"
+    safe_scratch_dev="${safe_scratch_dev//\"/\\\"}"
+    local safe_test_dir="${TEST_DIR:-}"
+    safe_test_dir="${safe_test_dir//\"/\\\"}"
+    local safe_scratch_mnt="${SCRATCH_MNT:-}"
+    safe_scratch_mnt="${safe_scratch_mnt//\"/\\\"}"
+    local safe_mount_options="${MOUNT_OPTIONS:-}"
+    safe_mount_options="${safe_mount_options//\"/\\\"}"
+    local safe_cleanup="${XFSTESTS_CLEANUP_STATUS//\"/\\\"}"
+    local safe_partial="${XFSTESTS_PARTIAL_RUN_STATUS//\"/\\\"}"
+    local worker_identity="${RCH_WORKER_IDENTITY:-${RCH_WORKER:-local:$(hostname -s 2>/dev/null || printf unknown)}}"
+    local safe_worker="${worker_identity//\"/\\\"}"
     local command_plan="./check"
     if [[ "$XFSTESTS_DRY_RUN" == "1" ]]; then
         command_plan+=" -n"
@@ -101,6 +129,12 @@ write_summary() {
     local safe_command_plan="${command_plan//\"/\\\"}"
     local repro_command="XFSTESTS_MODE=$XFSTESTS_MODE XFSTESTS_FILTER=$XFSTESTS_FILTER XFSTESTS_DRY_RUN=$XFSTESTS_DRY_RUN XFSTESTS_STRICT=$XFSTESTS_STRICT ./scripts/e2e/ffs_xfstests_e2e.sh"
     local safe_repro_command="${repro_command//\"/\\\"}"
+    local side_effect_policy="permissioned_real_xfstests_may_mutate_test_and_scratch_devices"
+    if [[ "$XFSTESTS_DRY_RUN" == "1" && "$XFSTESTS_INVOKE_CHECK_DRY_RUN" != "1" ]]; then
+        side_effect_policy="safe_dry_run_no_xfstests_check_no_mount_no_mkfs"
+    elif [[ "$XFSTESTS_DRY_RUN" == "1" ]]; then
+        side_effect_policy="legacy_check_n_may_validate_mount_or_mkfs_prereqs"
+    fi
 
     cat >"$SUMMARY_JSON" <<EOF
 {
@@ -121,6 +155,25 @@ write_summary() {
   "preflight_json": "$safe_preflight",
   "policy_plan_json": "$safe_policy_plan",
   "policy_report_md": "$safe_policy_report",
+  "run_log": "$safe_run_log",
+  "stdout_log": "$safe_stdout",
+  "stderr_log": "$safe_stderr",
+  "preflight_stdout": "$safe_preflight_stdout",
+  "preflight_stderr": "$safe_preflight_stderr",
+  "raw_xfstests_result_base": "$safe_result_base",
+  "worker_identity": "$safe_worker",
+  "cleanup_status": "$safe_cleanup",
+  "partial_run_preservation": "$safe_partial",
+  "side_effect_policy": "$side_effect_policy",
+  "image_setup": {
+    "fstyp": "$safe_fstyp",
+    "test_dev": "$safe_test_dev",
+    "scratch_dev": "$safe_scratch_dev",
+    "test_dir": "$safe_test_dir",
+    "scratch_mnt": "$safe_scratch_mnt",
+    "mount_options": "$safe_mount_options",
+    "result_base": "$safe_result_base"
+  },
   "command_plan": "$safe_command_plan",
   "reproduction_command": "$safe_repro_command",
   "artifact_paths": {
@@ -131,7 +184,11 @@ write_summary() {
     "preflight_json": "$safe_preflight",
     "policy_plan_json": "$safe_policy_plan",
     "policy_report_md": "$safe_policy_report",
-    "summary_json": "$safe_summary"
+    "summary_json": "$safe_summary",
+    "run_log": "$safe_run_log",
+    "stdout_log": "$safe_stdout",
+    "stderr_log": "$safe_stderr",
+    "raw_xfstests_result_base": "$safe_result_base"
   },
   "generic_count": ${#GENERIC_TESTS[@]},
   "ext4_count": ${#EXT4_TESTS[@]},
@@ -641,6 +698,19 @@ PY
         return 0
     fi
 
+    local fallback_passed=0
+    local fallback_failed=0
+    local fallback_skipped=0
+    local fallback_not_run=0
+    local fallback_planned=0
+    case "$status" in
+        passed) fallback_passed=${#SELECTED_TESTS[@]} ;;
+        failed) fallback_failed=${#SELECTED_TESTS[@]} ;;
+        skipped) fallback_skipped=${#SELECTED_TESTS[@]} ;;
+        planned) fallback_planned=${#SELECTED_TESTS[@]} ;;
+        *) fallback_not_run=${#SELECTED_TESTS[@]} ;;
+    esac
+
     # Fallback without python3: write minimal JSON and omit JUnit.
     cat >"$RESULTS_JSON" <<EOF
 {
@@ -648,19 +718,90 @@ PY
   "status": "$status",
   "note": "$note_safe",
   "total": ${#SELECTED_TESTS[@]},
-  "passed": 0,
-  "failed": 0,
-  "skipped": 0,
-  "not_run": ${#SELECTED_TESTS[@]},
-  "planned": 0,
+  "passed": $fallback_passed,
+  "failed": $fallback_failed,
+  "skipped": $fallback_skipped,
+  "not_run": $fallback_not_run,
+  "planned": $fallback_planned,
   "pass_rate": 0.0,
   "tests": []
 }
 EOF
 }
 
+prepare_safe_dry_run_config() {
+    if [[ "$XFSTESTS_DRY_RUN" != "1" || "$XFSTESTS_INVOKE_CHECK_DRY_RUN" == "1" ]]; then
+        return 0
+    fi
+
+    FSTYP="${FSTYP:-fuse}"
+    TEST_DEV="${TEST_DEV:-frankenfs-dryrun-test}"
+    SCRATCH_DEV="${SCRATCH_DEV:-frankenfs-dryrun-scratch}"
+    TEST_DIR="${TEST_DIR:-$ARTIFACT_DIR/dryrun_test_dir}"
+    SCRATCH_MNT="${SCRATCH_MNT:-$ARTIFACT_DIR/dryrun_scratch_mnt}"
+    mkdir -p "$TEST_DIR" "$SCRATCH_MNT"
+    if [[ -d "$TEST_DIR" ]]; then
+        TEST_DIR="$(cd "$TEST_DIR" && pwd)"
+    fi
+    if [[ -d "$SCRATCH_MNT" ]]; then
+        SCRATCH_MNT="$(cd "$SCRATCH_MNT" && pwd)"
+    fi
+    export FSTYP TEST_DEV SCRATCH_DEV TEST_DIR SCRATCH_MNT
+}
+
+write_safe_dry_run_artifacts() {
+    local note="safe dry-run plan only; upstream xfstests ./check -n is not invoked because it can mount, mkfs, or unmount while validating TEST_DEV/SCRATCH_DEV"
+    LAST_CHECK_RC=0
+    XFSTESTS_CLEANUP_STATUS="no_xfstests_check_invoked_no_mount_no_mkfs"
+    XFSTESTS_PARTIAL_RUN_STATUS="selected_policy_summary_results_junit_check_log_preserved"
+
+    {
+        echo "safe dry-run: xfstests check was not invoked"
+        echo "reason: upstream ./check -n validates TEST_DEV/SCRATCH_DEV and can call mount/mkfs/unmount before listing tests"
+        echo "planned command:"
+        echo "  ./check -n ${SELECTED_TESTS[*]}"
+        echo "xfstests_dir: $XFSTESTS_DIR"
+        echo "result_base: $RESULT_BASE"
+        echo "test_dir: ${TEST_DIR:-}"
+        echo "scratch_mnt: ${SCRATCH_MNT:-}"
+        echo
+        echo "selected tests:"
+        printf '  %s planned\n' "${SELECTED_TESTS[@]}"
+    } >"$CHECK_LOG"
+    {
+        echo "safe dry-run stdout placeholder"
+        echo "planned command: ./check -n ${SELECTED_TESTS[*]}"
+    } >"$ARTIFACT_DIR/stdout.log"
+    : >"$ARTIFACT_DIR/stderr.log"
+
+    if harness_supports_xfstests_report; then
+        "$FFS_HARNESS_BIN" xfstests-report \
+            --selected "$SELECTED_FILE" \
+            --results-json "$RESULTS_JSON" \
+            --junit-xml "$JUNIT_FILE" \
+            --allowlist-json "$XFSTESTS_ALLOWLIST_JSON" \
+            --uniform-status planned \
+            --uniform-note "$note"
+    else
+        write_uniform_results "planned" "$note"
+    fi
+}
+
 skip_or_fail() {
     local reason="$1"
+    if [[ ! -f "$CHECK_LOG" ]]; then
+        {
+            echo "xfstests subset not executed"
+            echo "reason: $reason"
+            echo "planned command: ./check ${SELECTED_TESTS[*]}"
+        } >"$CHECK_LOG"
+    fi
+    if [[ ! -f "$ARTIFACT_DIR/stdout.log" ]]; then
+        : >"$ARTIFACT_DIR/stdout.log"
+    fi
+    if [[ ! -f "$ARTIFACT_DIR/stderr.log" ]]; then
+        : >"$ARTIFACT_DIR/stderr.log"
+    fi
     if [[ ! -f "$RESULTS_JSON" ]]; then
         write_uniform_results "not_run" "$reason"
     fi
@@ -1196,7 +1337,11 @@ run_xfstests_subset() {
     e2e_log "  ./check ${check_args[*]}"
 
     local rc=0
-    (cd "$XFSTESTS_DIR" && ./check "${check_args[@]}") >"$CHECK_LOG" 2>&1 || rc=$?
+    (cd "$XFSTESTS_DIR" && ./check "${check_args[@]}") >"$ARTIFACT_DIR/stdout.log" 2>"$ARTIFACT_DIR/stderr.log" || rc=$?
+    {
+        cat "$ARTIFACT_DIR/stdout.log"
+        cat "$ARTIFACT_DIR/stderr.log"
+    } >"$CHECK_LOG"
     generate_results_from_check_log "$rc"
 
     if [[ $rc -ne 0 ]]; then
@@ -1205,6 +1350,9 @@ run_xfstests_subset() {
         fi
         e2e_log "xfstests check failed; tailing log:"
         e2e_run tail -n 120 "$CHECK_LOG" || true
+        XFSTESTS_CLEANUP_STATUS="xfstests_check_failed_artifacts_preserved"
+        XFSTESTS_PARTIAL_RUN_STATUS="summary_results_junit_check_log_preserved_after_failure"
+        write_summary "failed" "$EFFECTIVE_MODE" "xfstests check failed with exit code $rc; artifacts preserved" "$LAST_CHECK_RC"
         e2e_fail "xfstests check failed with exit code $rc"
     fi
 
@@ -1258,6 +1406,7 @@ if [[ "$EFFECTIVE_MODE" != "run" ]]; then
     e2e_fail "Invalid XFSTESTS_MODE='$XFSTESTS_MODE' (expected auto|plan|run)"
 fi
 
+prepare_safe_dry_run_config
 ensure_xfstests_preflight
 
 if [[ -z "$XFSTESTS_DIR" ]]; then
@@ -1267,12 +1416,34 @@ if [[ ! -x "$XFSTESTS_DIR/check" ]]; then
     skip_or_fail "xfstests check runner not found at $XFSTESTS_DIR/check"
 fi
 
+if [[ "$XFSTESTS_DRY_RUN" == "1" && "$XFSTESTS_INVOKE_CHECK_DRY_RUN" != "1" ]]; then
+    e2e_step "Safe xfstests dry-run artifacts"
+    e2e_log "XFSTESTS_DIR: $XFSTESTS_DIR"
+    e2e_log "XFSTESTS_DRY_RUN: $XFSTESTS_DRY_RUN"
+    e2e_log "Not invoking upstream ./check -n because it performs mount/mkfs validation before listing tests"
+    verify_tests_exist
+    write_safe_dry_run_artifacts
+    write_summary "planned" "$EFFECTIVE_MODE" "safe dry-run artifacts emitted without invoking xfstests check" "$LAST_CHECK_RC"
+    e2e_log "Run summary: $SUMMARY_JSON"
+    e2e_pass
+    exit 0
+fi
+
+if [[ "$XFSTESTS_DRY_RUN" == "0" && "$XFSTESTS_REAL_RUN_ACK" != "xfstests-may-mutate-test-and-scratch-devices" ]]; then
+    XFSTESTS_CLEANUP_STATUS="real_run_not_started_missing_ack"
+    XFSTESTS_PARTIAL_RUN_STATUS="selected_policy_artifacts_preserved_before_real_execution"
+    write_uniform_results "not_run" "real xfstests execution requires XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices"
+    skip_or_fail "real xfstests execution requires XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices"
+fi
+
 e2e_step "Run xfstests subset"
 e2e_log "XFSTESTS_DIR: $XFSTESTS_DIR"
 e2e_log "XFSTESTS_DRY_RUN: $XFSTESTS_DRY_RUN"
 verify_tests_exist
 run_xfstests_subset
 
+XFSTESTS_CLEANUP_STATUS="xfstests_check_completed"
+XFSTESTS_PARTIAL_RUN_STATUS="selected_policy_summary_results_junit_check_log_preserved"
 write_summary "passed" "$EFFECTIVE_MODE" "xfstests subset check completed" "$LAST_CHECK_RC"
 e2e_log "Run summary: $SUMMARY_JSON"
 e2e_pass

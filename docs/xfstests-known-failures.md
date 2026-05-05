@@ -7,8 +7,9 @@ FUSE mount. Established 2026-03-18.
 > passes with explicit `XFSTESTS_DIR`, `TEST_DIR`, and `SCRATCH_MNT`. The host
 > has xfs headers, libaio headers, built `ltp/fsstress`, xfstests helpers,
 > `/dev/fuse`, `fusermount3`, mount helpers, and writable scratch/test
-> directories. This is prerequisite evidence only; the curated subset still has
-> no fresh runtime pass/fail signal until `bd-rchk3.3` executes xfstests.
+> directories. This is prerequisite evidence only. `bd-rchk3.3` now also emits
+> safe dry-run planning artifacts, but the curated subset still has no fresh
+> product pass/fail signal until a permissioned real xfstests run is authorized.
 >
 > **Policy refresh (2026-05-04):** The dry-run subset policy now also includes
 > explicit btrfs planning rows (`btrfs/001`, `btrfs/008`) so the xfstests
@@ -40,6 +41,25 @@ The remaining gap is runtime execution, not prerequisite setup. The next real
 xfstests attempt should reuse the explicit `XFSTESTS_DIR`, `TEST_DIR`, and
 `SCRATCH_MNT` values above, refresh the preflight artifact, then execute
 `bd-rchk3.3`.
+
+## Fresh Baseline Attempt - 2026-05-05
+
+| Item | Result |
+|------|--------|
+| Base commit | `4625abc0` (`main`); evidence captured before this `bd-rchk3.3` guard/documentation commit |
+| Host/kernel | `thinkstation1`, Linux `6.17.0-14-generic` |
+| Rust | `rustc 1.97.0-nightly (37d85e592 2026-04-28)` |
+| Safe dry-run command | `XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_STRICT=1 XFSTESTS_DIR=third_party/xfstests-dev ./scripts/e2e/ffs_xfstests_e2e.sh` |
+| Safe dry-run artifacts | `artifacts/e2e/20260505_022349_ffs_xfstests_e2e/xfstests/{selected_tests.txt,summary.json,results.json,junit.xml,check.log,policy_plan.json,policy_report.md,preflight.json,stdout.log,stderr.log}` |
+| Safe dry-run outcome | `status=planned`, `mode=run`, `dry_run=1`, `check_rc=0`, `selected_count=17`, `planned=17`, `passed=0`, `failed=0`, `skipped=0`, `not_run=0` |
+| Side-effect policy | `safe_dry_run_no_xfstests_check_no_mount_no_mkfs`; upstream `./check -n` is not invoked because xfstests validates and can mount/mkfs/unmount `TEST_DEV`/`SCRATCH_DEV` before listing tests |
+| Image setup recorded | `FSTYP=fuse`, `TEST_DEV=frankenfs-dryrun-test`, `SCRATCH_DEV=frankenfs-dryrun-scratch`, artifact-scoped `TEST_DIR`, `SCRATCH_MNT`, and `RESULT_BASE` paths in `summary.json` |
+| Direct `./check -n` probe evidence | Earlier strict attempts at `artifacts/e2e/20260505_021807_ffs_xfstests_e2e` and `artifacts/e2e/20260505_022011_ffs_xfstests_e2e` reached xfstests but failed before selected cases while requiring `TEST_DEV` or mount validation |
+| Permission guard command | `XFSTESTS_MODE=run XFSTESTS_DRY_RUN=0 XFSTESTS_STRICT=0 XFSTESTS_DIR=third_party/xfstests-dev TEST_DIR=artifacts/e2e/20260505_blacklynx_xfstests_preflight/test_dir SCRATCH_MNT=artifacts/e2e/20260505_blacklynx_xfstests_preflight/scratch_mnt ./scripts/e2e/ffs_xfstests_e2e.sh` |
+| Permission guard artifacts | `artifacts/e2e/20260505_022456_ffs_xfstests_e2e/xfstests/{selected_tests.txt,summary.json,results.json,junit.xml,check.log,policy_plan.json,policy_report.md,preflight.json,stdout.log,stderr.log}` |
+| Permission guard outcome | Real xfstests execution was not started; `summary.json` records `cleanup_status=real_run_not_started_missing_ack` and requires `XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices` |
+| Product pass/fail signal | none; no curated case is counted as product pass/fail from the safe dry-run or permission guard |
+| Tracker state | `bd-rchk3.3` remains the execution bead; `bd-rchk3.4` must not classify product failures from these planned/not-run artifacts |
 
 ## Fresh Baseline Attempt - 2026-05-01
 
@@ -94,8 +114,9 @@ wrapper with `XFSTESTS_DRY_RUN=0`.
 **Likely passable: 1/11** — generic/112 (pending runtime validation)
 
 **Current policy rows: 17** — 11 generic, 4 ext4, 2 btrfs. Runtime passability
-counts above remain tied to the 2026-05-01 execution attempt until a fresh
-permissioned run updates the baseline.
+counts above remain tied to the 2026-05-01 execution attempt. The 2026-05-05
+`bd-rchk3.3` artifacts are safe planning and permission-guard evidence only
+until a real permissioned xfstests run updates the baseline.
 
 ## Root Cause Analysis
 
