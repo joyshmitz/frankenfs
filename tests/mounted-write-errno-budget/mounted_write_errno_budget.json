@@ -198,12 +198,12 @@
       "follow_up_bead": ""
     },
     {
-      "cell_id": "ewb_btrfs_unknown_eio_broad_fallback",
+      "cell_id": "ewb_btrfs_write_readback_eio_product_failure",
       "filesystem": "btrfs",
-      "operation_class": "harness_failure",
+      "operation_class": "write_readback_failure",
       "normalized_errno": "EIO",
-      "user_facing_class": "broad_fallback",
-      "remediation_id": "rem_broad_fallback_eio_unknown_branch",
+      "user_facing_class": "product_failure",
+      "remediation_id": "rem_btrfs_write_readback_eio_product_failure",
       "artifact_fields": [
         "operation_id",
         "scenario_id",
@@ -212,9 +212,9 @@
         "remediation_id"
       ],
       "redaction_policy": "redact_paths",
-      "broad_fallback_count": 2,
-      "broad_fallback_justification": "btrfs write path returns EIO from a deeply nested branch we have not yet mapped; tracked under the configured budget so operators see a known broad fallback and not silent corruption",
-      "follow_up_bead": "bd-0s5a3"
+      "broad_fallback_count": 0,
+      "broad_fallback_justification": "",
+      "follow_up_bead": ""
     }
   ]
 }

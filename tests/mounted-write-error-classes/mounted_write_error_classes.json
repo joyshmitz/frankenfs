@@ -120,18 +120,18 @@
       "follow_up_bead": ""
     },
     {
-      "entry_id": "mwerr_broad_fallback_eio_unknown_branch",
-      "scenario_id": "mounted_write_btrfs_unknown_failure_eio",
+      "entry_id": "mwerr_product_failure_btrfs_write_readback_eio",
+      "scenario_id": "mounted_write_btrfs_small_fsync_each",
       "operation_id": "write_readback",
-      "error_class": "broad_fallback",
+      "error_class": "product_failure",
       "raw_errno": "EIO",
-      "remediation_hint": "treat this row as a placeholder until the underlying branch is mapped; do not lift README caveats",
+      "remediation_hint": "treat EIO from the btrfs positive write/readback scenario as a product failure; preserve stdout/stderr, operation trace, image fixture hash, and mounted_write_workload_results.json before filing the concrete product bug",
       "redaction_policy": "redact_paths",
       "artifact_paths": [
-        "artifacts/mounted-write/broad_fallback_eio.json"
+        "artifacts/mounted-write/btrfs_write_readback_eio_product_failure.json"
       ],
-      "broad_fallback_justification": "btrfs write path returns EIO from a deeply nested branch we have not yet classified; tracked for follow-up so operators see a known broad fallback and not silent corruption",
-      "follow_up_bead": "bd-0s5a3"
+      "broad_fallback_justification": "",
+      "follow_up_bead": ""
     }
   ]
 }

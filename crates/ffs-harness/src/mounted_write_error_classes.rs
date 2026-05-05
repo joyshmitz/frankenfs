@@ -387,6 +387,21 @@ mod tests {
             .expect("default mounted write error classes parses")
     }
 
+    fn synthetic_broad_fallback_entry(
+        catalog: &mut MountedWriteErrorClasses,
+    ) -> &mut MountedWriteErrorEntry {
+        let entry = catalog
+            .entries
+            .iter_mut()
+            .find(|e| e.entry_id == "mwerr_product_failure_btrfs_write_readback_eio")
+            .expect("btrfs write/readback product failure fixture exists");
+        entry.error_class = "broad_fallback".to_owned();
+        entry.broad_fallback_justification =
+            "synthetic opaque EIO branch for validator coverage".to_owned();
+        entry.follow_up_bead = "bd-0s5a3".to_owned();
+        entry
+    }
+
     #[test]
     fn default_catalog_validates_required_classes() {
         let report = validate_default_mounted_write_error_classes()
@@ -474,11 +489,7 @@ mod tests {
     #[test]
     fn broad_fallback_requires_justification() {
         let mut catalog = fixture_catalog();
-        let entry = catalog
-            .entries
-            .iter_mut()
-            .find(|e| e.error_class == "broad_fallback")
-            .expect("broad fallback fixture exists");
+        let entry = synthetic_broad_fallback_entry(&mut catalog);
         entry.broad_fallback_justification = String::new();
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(report.errors.iter().any(|err| {
@@ -489,11 +500,7 @@ mod tests {
     #[test]
     fn broad_fallback_requires_follow_up_bead() {
         let mut catalog = fixture_catalog();
-        let entry = catalog
-            .entries
-            .iter_mut()
-            .find(|e| e.error_class == "broad_fallback")
-            .expect("broad fallback fixture exists");
+        let entry = synthetic_broad_fallback_entry(&mut catalog);
         entry.follow_up_bead = String::new();
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(
@@ -513,11 +520,7 @@ mod tests {
             .find(|bead| bead.as_str() != catalog.bead_id)
             .expect("fixture declares supplemental catalog owner bead")
             .clone();
-        let entry = catalog
-            .entries
-            .iter_mut()
-            .find(|e| e.error_class == "broad_fallback")
-            .expect("broad fallback fixture exists");
+        let entry = synthetic_broad_fallback_entry(&mut catalog);
         entry.follow_up_bead = owner_bead;
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(report.errors.iter().any(|err| {
@@ -671,8 +674,14 @@ mod tests {
     }
 
     #[test]
-    fn broad_fallback_count_is_reported() {
+    fn default_catalog_has_no_broad_fallbacks_after_classification() {
         let report = validate_default_mounted_write_error_classes().expect("default validates");
-        assert!(report.broad_fallback_count >= 1);
+        assert_eq!(report.broad_fallback_count, 0);
+        assert!(
+            report
+                .error_classes_seen
+                .iter()
+                .any(|class| class == "product_failure")
+        );
     }
 }

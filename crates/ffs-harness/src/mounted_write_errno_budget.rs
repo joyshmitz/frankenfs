@@ -21,7 +21,7 @@ const DEFAULT_MOUNTED_WRITE_ERRNO_BUDGET_JSON: &str =
 
 const ALLOWED_FILESYSTEMS: [&str; 2] = ["ext4", "btrfs"];
 
-const ALLOWED_OPERATION_CLASSES: [&str; 11] = [
+const ALLOWED_OPERATION_CLASSES: [&str; 12] = [
     "permission_denied",
     "unsupported_operation",
     "stale_snapshot",
@@ -31,6 +31,7 @@ const ALLOWED_OPERATION_CLASSES: [&str; 11] = [
     "unsafe_repair_refusal",
     "host_fuse_skip",
     "btrfs_default_permissions_ownership",
+    "write_readback_failure",
     "harness_failure",
     "cleanup_failure",
 ];
@@ -477,6 +478,22 @@ mod tests {
             .expect("default mounted write errno budget parses")
     }
 
+    fn synthetic_broad_fallback_cell(
+        catalog: &mut MountedWriteErrnoBudget,
+    ) -> &mut MountedWriteErrnoCell {
+        let cell = catalog
+            .cells
+            .iter_mut()
+            .find(|c| c.cell_id == "ewb_btrfs_write_readback_eio_product_failure")
+            .expect("btrfs write/readback product failure fixture exists");
+        cell.user_facing_class = "broad_fallback".to_owned();
+        cell.broad_fallback_count = 1;
+        cell.broad_fallback_justification =
+            "synthetic opaque EIO branch for validator coverage".to_owned();
+        cell.follow_up_bead = "bd-0s5a3".to_owned();
+        cell
+    }
+
     #[test]
     fn default_catalog_validates_required_coverage() {
         let report = validate_default_mounted_write_errno_budget()
@@ -489,6 +506,13 @@ mod tests {
             );
         }
         assert_eq!(report.budget_exceeded_cell_count, 0);
+        assert_eq!(report.broad_fallback_total, 0);
+        assert!(
+            report
+                .operations_covered
+                .iter()
+                .any(|op| op == "write_readback_failure")
+        );
     }
 
     #[test]
@@ -649,11 +673,7 @@ mod tests {
     #[test]
     fn broad_fallback_class_requires_justification() {
         let mut catalog = fixture_catalog();
-        let cell = catalog
-            .cells
-            .iter_mut()
-            .find(|c| c.user_facing_class == "broad_fallback")
-            .expect("broad fallback cell exists");
+        let cell = synthetic_broad_fallback_cell(&mut catalog);
         cell.broad_fallback_justification = String::new();
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(report.errors.iter().any(|err| {
@@ -664,11 +684,7 @@ mod tests {
     #[test]
     fn broad_fallback_class_requires_follow_up_bead() {
         let mut catalog = fixture_catalog();
-        let cell = catalog
-            .cells
-            .iter_mut()
-            .find(|c| c.user_facing_class == "broad_fallback")
-            .expect("broad fallback cell exists");
+        let cell = synthetic_broad_fallback_cell(&mut catalog);
         cell.follow_up_bead = String::new();
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(
@@ -687,11 +703,7 @@ mod tests {
             .first()
             .expect("fixture declares catalog owner bead")
             .clone();
-        let cell = catalog
-            .cells
-            .iter_mut()
-            .find(|c| c.user_facing_class == "broad_fallback")
-            .expect("broad fallback cell exists");
+        let cell = synthetic_broad_fallback_cell(&mut catalog);
         cell.follow_up_bead = owner_bead;
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(report.errors.iter().any(|err| {
@@ -703,11 +715,7 @@ mod tests {
     #[test]
     fn broad_fallback_class_requires_positive_count() {
         let mut catalog = fixture_catalog();
-        let cell = catalog
-            .cells
-            .iter_mut()
-            .find(|c| c.user_facing_class == "broad_fallback")
-            .expect("broad fallback cell exists");
+        let cell = synthetic_broad_fallback_cell(&mut catalog);
         cell.broad_fallback_count = 0;
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(report.errors.iter().any(|err| {
@@ -737,11 +745,7 @@ mod tests {
     fn budget_exceeded_cell_is_rejected() {
         let mut catalog = fixture_catalog();
         catalog.max_broad_fallback_budget_per_cell = 1;
-        let cell = catalog
-            .cells
-            .iter_mut()
-            .find(|c| c.user_facing_class == "broad_fallback")
-            .expect("broad fallback cell exists");
+        let cell = synthetic_broad_fallback_cell(&mut catalog);
         cell.broad_fallback_count = 5;
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(
