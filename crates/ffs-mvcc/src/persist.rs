@@ -423,6 +423,33 @@ impl PersistentMvccStore {
         self.commit_internal(txn, true)
     }
 
+    /// # Atomic-or-rollback reasoning mode (bd-gqswx)
+    ///
+    /// This function implements a strict atomic-or-rollback contract:
+    /// the in-memory `MvccStore` commits FIRST (advancing
+    /// `next_commit`, appending a new `BlockVersion` to each touched
+    /// block's chain, and recording an SSI log entry under
+    /// `commit_ssi`), and the WAL append happens SECOND. If the WAL
+    /// append fails, [`rollback_in_memory_commit`] MUST reverse the
+    /// in-memory commit before returning `Err`, otherwise the system
+    /// diverges in an unrecoverable way: a reader at the latest
+    /// snapshot would see data that never reached the WAL.
+    ///
+    /// **Any new failure path inserted after the in-memory commit
+    /// (i.e. after line `commit_seq = ...`) MUST call
+    /// `rollback_in_memory_commit(&mut store_guard, txn_id.0,
+    /// commit_seq, &write_blocks, &cow_blocks, use_ssi)` before
+    /// returning the error.** Forgetting any of the five state
+    /// pieces the rollback covers
+    /// (write_blocks chain head, cow_blocks chain head, SSI log
+    /// entry, `next_commit`, `next_txn` reservation) leaves the
+    /// store wedged.
+    ///
+    /// Tests `wal_append_failure_rolls_back_commit_state`,
+    /// `wal_append_failure_rolls_back_ssi_log_and_commit_seq`, and
+    /// `wal_sync_failure_multi_block_rollback` verify the contract
+    /// for the WAL-append failure path; new failure paths must add
+    /// equivalent regression tests.
     fn commit_internal(
         &self,
         txn: Transaction,
@@ -668,6 +695,42 @@ impl PersistentMvccStore {
     }
 }
 
+/// Reverse an in-memory commit when the WAL append (or any other
+/// post-commit step) fails. **This is the rollback partner of the
+/// atomic-or-rollback contract documented on
+/// [`PersistentMvccStore::commit_internal`].** (bd-gqswx)
+///
+/// The rollback covers FIVE state pieces. Forgetting any of them
+/// leaves the store wedged in a state where a reader at the latest
+/// snapshot sees data that never reached the WAL:
+///
+/// 1. **`write_blocks` chain heads** — pop the just-inserted
+///    `BlockVersion` from each block's `versions` chain (and remove
+///    the block entry entirely if the chain becomes empty). The
+///    pop must match by `(commit_seq, txn_id)` so concurrent
+///    commits at different seqs are not affected.
+/// 2. **`cow_blocks` physical-versions chain heads** — same pop
+///    semantics applied to `physical_versions` for the subset of
+///    write_blocks that staged a physical (CoW) write.
+/// 3. **SSI log entry** — under `use_ssi`, the SSI log
+///    (`store.ssi_log`) gains an entry per commit; pop the matching
+///    `(commit_seq, txn_id)` entry.
+/// 4. **`next_commit` advance** — roll back the commit-seq counter
+///    so the failed slot can be reused. Without this rollback, every
+///    subsequent commit observes a gap in the seq sequence and the
+///    WAL replay logic must tolerate the hole.
+/// 5. **`next_txn` reservation** — the txn ID was reserved during
+///    `begin()`; this rollback intentionally does NOT release it,
+///    because the caller of `commit_internal` cannot retry with the
+///    same txn (the Transaction has been moved into commit).
+///
+/// Any new caller that needs to roll back partial commit state
+/// MUST call this function with the EXACT `txn_id` and `commit_seq`
+/// produced by the in-memory commit, plus the original
+/// `write_blocks` and `cow_blocks` lists. Calling with a wrong
+/// `commit_seq` is a no-op (the version-pop guard checks
+/// `v.commit_seq == commit_seq`); calling with a wrong txn_id
+/// likewise no-ops.
 fn rollback_in_memory_commit(
     store: &mut MvccStore,
     txn_id: u64,
