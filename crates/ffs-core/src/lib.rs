@@ -20650,6 +20650,18 @@ mod tests {
     }
 
     #[test]
+    fn fsops_default_unsupported_messages_avoid_stub_wording() {
+        let vfs_source = include_str!("vfs.rs");
+        let forbidden = ["not implemented", " by this backend"].concat();
+
+        assert!(
+            !vfs_source.contains(&forbidden),
+            "FsOps default unsupported-operation reasons should use explicit \
+             support-scope wording, not stub-like phrasing"
+        );
+    }
+
+    #[test]
     fn dir_entry_name_str() {
         let entry = DirEntry {
             ino: InodeNumber(5),
