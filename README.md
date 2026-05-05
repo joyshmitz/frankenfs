@@ -1375,7 +1375,7 @@ These items sit outside the tracked 97-row parity denominator and are the curren
 | `bd-rchk4` | Mounted FUSE CI | Use the permissioned lane documented in `scripts/e2e/README.md` to run critical mounted ext4/btrfs paths with structured capability and cleanup artifacts |
 | `bd-rchk5` | Performance | Re-measure representative throughput/latency targets and record environment metadata |
 | `bd-rchk6` | Mounted self-healing | Automatic mounted repair is implemented for explicit `--background-repair --background-scrub-ledger <jsonl>` mounts; read-write repair uses the mounted MVCC repair-writeback serializer and stale-snapshot rejection |
-| `bd-rchk7` | Fuzz/conformance | Replace remaining open-ended corpus notes with completed fixtures or narrow beads |
+| `bd-rchk7` | Fuzz/conformance | Complete: remaining open-ended corpus notes are tied to completed fixtures, closed child beads, or the fixed-seed fuzz-smoke gate |
 
 See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the full capability matrix and [PLAN_TO_PORT_FRANKENFS_TO_RUST.md](PLAN_TO_PORT_FRANKENFS_TO_RUST.md) for the 9-phase roadmap.
 
