@@ -110,22 +110,67 @@ struct CommitInstallContext {
 ///
 /// Transactions that touch multiple shards acquire shard locks in sorted
 /// order to prevent deadlocks.
+///
+/// # Lock ordering invariant (bd-bky2f)
+///
+/// The struct holds four [`parking_lot::RwLock`]s plus a publication
+/// gate `Mutex<()>`. Any code path that acquires more than one of
+/// them MUST do so in this order to prevent AB-BA deadlock:
+///
+/// ```text
+///     active_snapshots  ──→  shards  ──→  contention_metrics
+///                           (per-shard,
+///                            sorted index)
+/// ```
+///
+/// `conflict_policy` is a leaf lock — only ever acquired alone, for
+/// brief reads or a single write. The publication gate's
+/// `wait_lock` is internal to `CommitPublicationGate` and is acquired
+/// AFTER all shard locks are dropped (see `commit` line 657).
+///
+/// Production callers comply:
+///
+/// | Caller             | active_snapshots | shards     | contention_metrics |
+/// |--------------------|------------------|------------|---------------------|
+/// | `commit`           | -                | W (sorted) | W (briefly)         |
+/// | `commit_ssi`       | -                | W (sorted) | W (briefly)         |
+/// | `prune_safe`       | W                | W (per)    | -                   |
+/// | `register_snapshot`| W                | -          | -                   |
+/// | `release_snapshot` | W                | -          | -                   |
+/// | `set_conflict_policy` / `effective_policy`: leaf only       |
+///
+/// Acquiring `contention_metrics.write()` BEFORE
+/// `active_snapshots.write()` (e.g., a hypothetical `gc_with_metrics`)
+/// would deadlock against `commit`+`prune_safe` running concurrently.
+/// New methods on this struct must respect the order. The
+/// `lock_ordering_under_concurrent_commit_prune_and_register` test
+/// exercises it under concurrent load with a watchdog timeout.
 #[derive(Debug)]
 pub struct ShardedMvccStore {
+    /// Per-shard version stores. **Lock-rank 1** — must only be
+    /// acquired while no `contention_metrics` lock is held; may be
+    /// acquired while `active_snapshots` is held. Multi-shard
+    /// transactions must acquire in sorted shard-index order
+    /// (enforced by `lock_shards`).
     shards: Vec<RwLock<MvccShard>>,
     shard_count: usize,
     next_txn: AtomicU64,
     next_commit: AtomicU64,
     publication_gate: CommitPublicationGate,
-    /// Inline snapshot tracking (for callers who don't use SnapshotRegistry).
+    /// Inline snapshot tracking. **Lock-rank 0** — must be acquired
+    /// before `shards` and `contention_metrics`.
     active_snapshots: RwLock<BTreeMap<CommitSeq, u64>>,
     /// Compression policy for version chains.
     compression_policy: CompressionPolicy,
     /// Conflict resolution policy (Strict / SafeMerge / Adaptive).
+    /// **Leaf lock** — always acquired alone, never nested under
+    /// `shards`, `active_snapshots`, or `contention_metrics`.
     conflict_policy: RwLock<ConflictPolicy>,
     /// Configuration for the adaptive expected-loss decision model.
     adaptive_config: AdaptivePolicyConfig,
-    /// Runtime contention metrics tracked via EMA (behind a lock for thread safety).
+    /// Runtime contention metrics tracked via EMA. **Lock-rank 2** —
+    /// must be acquired last (or alone). Never acquire `shards` or
+    /// `active_snapshots` while holding `contention_metrics`.
     contention_metrics: RwLock<ContentionMetrics>,
 }
 
@@ -1627,5 +1672,77 @@ mod tests {
             let snap = store.current_snapshot();
             prop_assert!(store.read_visible(BlockNumber(block_id), snap).is_none());
         }
+    }
+
+    /// bd-bky2f — regression guard for the canonical lock-ordering
+    /// invariant on `ShardedMvccStore`
+    /// (active_snapshots → shards → contention_metrics). Spawns three
+    /// concurrent workers that exercise the three nested-lock code
+    /// paths simultaneously: commit (shards.W → contention_metrics.W),
+    /// prune_safe (active_snapshots.W → shards.W), and
+    /// register/release_snapshot (active_snapshots.W). A watchdog
+    /// thread fails the test with a tagged panic if the workers do not
+    /// finish within 15s; any future AB-BA introduced by a refactor
+    /// surfaces as a clear failure rather than a silent stall.
+    #[test]
+    fn lock_ordering_under_concurrent_commit_prune_and_register() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let store = Arc::new(make_store(4));
+
+        let done = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + Duration::from_secs(15);
+
+        // Watchdog: prove no worker is stuck after the timeout elapses.
+        let watchdog_done = Arc::clone(&done);
+        let watchdog = thread::spawn(move || {
+            while Instant::now() < deadline {
+                if watchdog_done.load(AtomicOrdering::Acquire) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            panic!(
+                "bd-bky2f: ShardedMvccStore lock-ordering watchdog tripped — \
+                 commit/prune/register workers did not finish within 15s, \
+                 indicating a likely AB-BA deadlock"
+            );
+        });
+
+        // Worker A: commit pipeline (shards.W → contention_metrics.W).
+        let store_a = Arc::clone(&store);
+        let worker_a = thread::spawn(move || {
+            for i in 0..64_u64 {
+                let mut txn = store_a.begin();
+                txn.stage_write(BlockNumber(i), vec![(i & 0xFF) as u8; 16]);
+                let _ = store_a.commit(txn).expect("commit must not block");
+            }
+        });
+
+        // Worker B: prune_safe (active_snapshots.W → shards.W per shard).
+        let store_b = Arc::clone(&store);
+        let worker_b = thread::spawn(move || {
+            for _ in 0..32 {
+                let _ = store_b.prune_safe();
+            }
+        });
+
+        // Worker C: register/release_snapshot (active_snapshots.W only).
+        let store_c = Arc::clone(&store);
+        let worker_c = thread::spawn(move || {
+            for _ in 0..64 {
+                let snap = store_c.current_snapshot();
+                store_c.register_snapshot(snap);
+                let _ = store_c.release_snapshot(snap);
+            }
+        });
+
+        worker_a.join().expect("worker A panicked");
+        worker_b.join().expect("worker B panicked");
+        worker_c.join().expect("worker C panicked");
+        done.store(true, AtomicOrdering::Release);
+        watchdog.join().expect("watchdog panicked");
     }
 }
