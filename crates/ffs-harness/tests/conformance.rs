@@ -21,8 +21,8 @@ use ffs_harness::{
     validate_extent_tree_fixture, validate_group_desc_fixture, validate_inode_fixture,
 };
 use ffs_ondisk::{
-    BtrfsChunkEntry, BtrfsKey, BtrfsStripe, BtrfsSuperblock, Ext4IncompatFeatures, Ext4Superblock,
-    ExtentTree, lookup_in_dir_block_casefold, parse_dev_item, parse_dir_block,
+    BtrfsChunkEntry, BtrfsKey, BtrfsStripe, BtrfsSuperblock, Ext4GroupDesc, Ext4IncompatFeatures,
+    Ext4Superblock, ExtentTree, lookup_in_dir_block_casefold, parse_dev_item, parse_dir_block,
     stamp_dir_block_checksum, verify_dir_block_checksum,
 };
 use ffs_types::{
@@ -96,6 +96,65 @@ fn ext4_group_desc_fixtures_conform() {
     assert!(
         gd64.block_bitmap > u64::from(u32::MAX),
         "64-bit path should set high bits"
+    );
+}
+
+/// bd-o6it9 — conformance contract that the encoder produces
+/// kernel-shaped bytes. Distinct from the bd-ov7zr proptest MR
+/// `parse(write(gd)) == gd` (encoder/decoder mutual consistency):
+/// here we pin `write_to_bytes(gd_from_fixture) == fixture_bytes`,
+/// which catches the case where encoder + decoder agree on a wrong
+/// offset and round-trip silently while drifting from the on-disk
+/// format the kernel writes.
+#[test]
+fn ext4_group_desc_32byte_fixture_re_encodes_byte_identical() {
+    let original = load_sparse_fixture(&fixture_path("ext4_group_desc_32byte.json"))
+        .expect("load gd32 fixture");
+    assert_eq!(
+        original.len(),
+        32,
+        "32-byte group desc fixture must materialise to exactly 32 bytes"
+    );
+
+    let gd =
+        Ext4GroupDesc::parse_from_bytes(&original, 32).expect("parse 32-byte fixture for re-encode");
+
+    let mut encoded = vec![0_u8; 32];
+    gd.write_to_bytes(&mut encoded, 32)
+        .expect("re-encode parsed 32-byte gd");
+
+    assert_eq!(
+        encoded, original,
+        "writer must produce byte-identical output to the 32-byte conformance fixture"
+    );
+}
+
+/// bd-o6it9 — same conformance contract for the 64-byte path, which
+/// exercises the lo+hi split (block_bitmap_hi / inode_bitmap_hi /
+/// inode_table_hi / free_*_hi / used_dirs_hi / itable_unused_hi at
+/// 0x20..0x34, plus the bitmap-csum hi halves at 0x38/0x3A). Drift
+/// in any of the hi-half offsets would silently corrupt 64-bit-mode
+/// images on every flush.
+#[test]
+fn ext4_group_desc_64byte_fixture_re_encodes_byte_identical() {
+    let original = load_sparse_fixture(&fixture_path("ext4_group_desc_64byte.json"))
+        .expect("load gd64 fixture");
+    assert_eq!(
+        original.len(),
+        64,
+        "64-byte group desc fixture must materialise to exactly 64 bytes"
+    );
+
+    let gd =
+        Ext4GroupDesc::parse_from_bytes(&original, 64).expect("parse 64-byte fixture for re-encode");
+
+    let mut encoded = vec![0_u8; 64];
+    gd.write_to_bytes(&mut encoded, 64)
+        .expect("re-encode parsed 64-byte gd");
+
+    assert_eq!(
+        encoded, original,
+        "writer must produce byte-identical output to the 64-byte conformance fixture"
     );
 }
 
