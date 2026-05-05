@@ -44,6 +44,39 @@ fn bench_ext4_group_desc_64(c: &mut Criterion) {
     });
 }
 
+// bd-fjeb0 — encode-side benches for Ext4GroupDesc::write_to_bytes.
+// Pair the existing parse benches above so the perf gate tracks both
+// sides of the encode/decode bijection (the bd-ov7zr proptest suite +
+// bd-38xrn fuzz target pin correctness; these benches pin latency).
+
+fn bench_ext4_group_desc_write_32(c: &mut Criterion) {
+    let data = load_sparse_fixture(&fixture_path("ext4_group_desc_32byte.json"))
+        .expect("load gd32 fixture");
+    let gd = Ext4GroupDesc::parse_from_bytes(&data, 32).expect("gd32 parse for write bench");
+    let mut buf = [0_u8; 32];
+
+    c.bench_function("ext4_group_desc_32byte_write", |b| {
+        b.iter(|| {
+            gd.write_to_bytes(black_box(&mut buf), 32)
+                .expect("gd32 write");
+        });
+    });
+}
+
+fn bench_ext4_group_desc_write_64(c: &mut Criterion) {
+    let data = load_sparse_fixture(&fixture_path("ext4_group_desc_64byte.json"))
+        .expect("load gd64 fixture");
+    let gd = Ext4GroupDesc::parse_from_bytes(&data, 64).expect("gd64 parse for write bench");
+    let mut buf = [0_u8; 64];
+
+    c.bench_function("ext4_group_desc_64byte_write", |b| {
+        b.iter(|| {
+            gd.write_to_bytes(black_box(&mut buf), 64)
+                .expect("gd64 write");
+        });
+    });
+}
+
 fn bench_ext4_dir_block_parse(c: &mut Criterion) {
     let data =
         load_sparse_fixture(&fixture_path("ext4_dir_block.json")).expect("load dir block fixture");
@@ -89,6 +122,8 @@ criterion_group!(
     bench_ext4_inode_parse,
     bench_ext4_group_desc_32,
     bench_ext4_group_desc_64,
+    bench_ext4_group_desc_write_32,
+    bench_ext4_group_desc_write_64,
     bench_ext4_dir_block_parse,
     bench_ext4_extent_tree_parse,
     bench_btrfs_sys_chunk_parse,
