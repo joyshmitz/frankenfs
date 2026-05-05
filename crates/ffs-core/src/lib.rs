@@ -15454,6 +15454,12 @@ impl OpenFs {
                         detail: "invalid inode_ref name length".into(),
                     })?,
             ));
+            if name_len == 0 {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: "inode_ref name length must be non-zero".into(),
+                });
+            }
             let name_start = cursor + 10;
             let Some(name_end) = name_start.checked_add(name_len) else {
                 return Err(FfsError::Corruption {
@@ -15476,6 +15482,9 @@ impl OpenFs {
     fn btrfs_serialize_inode_ref_payload(entries: &[(u64, Vec<u8>)]) -> ffs_error::Result<Vec<u8>> {
         let mut payload = Vec::new();
         for (index, name) in entries {
+            if name.is_empty() {
+                return Err(FfsError::Format("inode ref name must be non-empty".into()));
+            }
             let name_len = u16::try_from(name.len())
                 .map_err(|_| FfsError::Format("inode ref name too long".into()))?;
             payload.extend_from_slice(&index.to_le_bytes());
@@ -27069,6 +27078,28 @@ mod tests {
         let path = OpenFs::btrfs_build_path_from_inode_refs(&entries, 256)
             .expect("root objectid should resolve to empty path");
         assert_eq!(path, b"\0");
+    }
+
+    #[test]
+    fn btrfs_inode_ref_payload_rejects_empty_names() {
+        let payload = synth_inode_ref_entry(257, 256, 2, b"").data;
+        let err = OpenFs::btrfs_parse_inode_ref_payload(&payload)
+            .expect_err("zero-length INODE_REF names must be corrupt");
+        assert!(
+            matches!(&err, FfsError::Corruption { detail, .. } if detail.contains("non-zero")),
+            "expected Corruption mentioning non-zero name length, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_inode_ref_serializer_rejects_empty_names() {
+        let entries = vec![(2, Vec::new())];
+        let err = OpenFs::btrfs_serialize_inode_ref_payload(&entries)
+            .expect_err("zero-length INODE_REF names must not serialize");
+        assert!(
+            matches!(&err, FfsError::Format(msg) if msg.contains("non-empty")),
+            "expected Format mentioning non-empty names, got {err:?}"
+        );
     }
 
     #[test]

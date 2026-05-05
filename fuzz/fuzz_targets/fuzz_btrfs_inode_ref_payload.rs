@@ -5,6 +5,7 @@ use libfuzzer_sys::fuzz_target;
 
 const MAX_INPUT_BYTES: usize = 512;
 const MAX_NAME_BYTES: usize = 64;
+const MAX_NAME_BYTES_U8: u8 = 64;
 
 #[derive(Clone, Copy, Debug)]
 enum SeedPayload {
@@ -13,16 +14,18 @@ enum SeedPayload {
     ValidPair,
     TruncatedTail,
     DeclaredTooLong,
+    ZeroLengthName,
 }
 
 impl SeedPayload {
     fn from_selector(selector: u8) -> Self {
-        match selector % 5 {
+        match selector % 6 {
             0 => Self::Raw,
             1 => Self::ValidSingle,
             2 => Self::ValidPair,
             3 => Self::TruncatedTail,
-            _ => Self::DeclaredTooLong,
+            4 => Self::DeclaredTooLong,
+            _ => Self::ZeroLengthName,
         }
     }
 
@@ -30,7 +33,9 @@ impl SeedPayload {
         match self {
             Self::Raw => PayloadExpectation::Raw,
             Self::ValidSingle | Self::ValidPair => PayloadExpectation::ValidRoundTrip,
-            Self::TruncatedTail | Self::DeclaredTooLong => PayloadExpectation::Reject,
+            Self::TruncatedTail | Self::DeclaredTooLong | Self::ZeroLengthName => {
+                PayloadExpectation::Reject
+            }
         }
     }
 }
@@ -87,6 +92,11 @@ fn bounded_name(cursor: &mut ByteCursor<'_>) -> Vec<u8> {
     (0..len).map(|_| cursor.next_u8()).collect()
 }
 
+fn bounded_nonempty_name(cursor: &mut ByteCursor<'_>) -> Vec<u8> {
+    let len = 1 + usize::from(cursor.next_u8() % MAX_NAME_BYTES_U8);
+    (0..len).map(|_| cursor.next_u8()).collect()
+}
+
 fn encode_entry(index: u64, name: &[u8]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(10 + name.len());
     payload.extend_from_slice(&index.to_le_bytes());
@@ -98,19 +108,20 @@ fn encode_entry(index: u64, name: &[u8]) -> Vec<u8> {
 fn build_payload(mode: SeedPayload, cursor: &mut ByteCursor<'_>) -> Vec<u8> {
     match mode {
         SeedPayload::Raw => {
-            cursor.remaining()[..cursor.remaining().len().min(MAX_INPUT_BYTES)].to_vec()
+            let limit = cursor.remaining().len().min(MAX_INPUT_BYTES);
+            cursor.remaining().iter().copied().take(limit).collect()
         }
         SeedPayload::ValidSingle => {
-            let name = bounded_name(cursor);
+            let name = bounded_nonempty_name(cursor);
             encode_entry(cursor.next_u64(), &name)
         }
         SeedPayload::ValidPair => {
-            let first = encode_entry(cursor.next_u64(), &bounded_name(cursor));
-            let second = encode_entry(cursor.next_u64(), &bounded_name(cursor));
+            let first = encode_entry(cursor.next_u64(), &bounded_nonempty_name(cursor));
+            let second = encode_entry(cursor.next_u64(), &bounded_nonempty_name(cursor));
             [first, second].concat()
         }
         SeedPayload::TruncatedTail => {
-            let mut payload = encode_entry(cursor.next_u64(), &bounded_name(cursor));
+            let mut payload = encode_entry(cursor.next_u64(), &bounded_nonempty_name(cursor));
             let trim = usize::from(cursor.next_u8()) % payload.len().max(1);
             payload.truncate(payload.len().saturating_sub(trim.max(1)));
             payload
@@ -128,6 +139,12 @@ fn build_payload(mode: SeedPayload, cursor: &mut ByteCursor<'_>) -> Vec<u8> {
             payload.extend_from_slice(&name);
             payload
         }
+        SeedPayload::ZeroLengthName => {
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&cursor.next_u64().to_le_bytes());
+            payload.extend_from_slice(&0_u16.to_le_bytes());
+            payload
+        }
     }
 }
 
@@ -139,20 +156,28 @@ fn normalize(payload: &[u8]) -> ParseOutcome {
 }
 
 fn assert_success_invariants(payload: &[u8], entries: &[(u64, Vec<u8>)]) {
-    let reparsed = fuzz_btrfs_parse_inode_ref_payload(payload).expect("payload should parse");
+    let reparsed = fuzz_btrfs_parse_inode_ref_payload(payload).unwrap_or_else(|_| {
+        std::process::abort();
+    });
     assert_eq!(
         entries,
         reparsed.as_slice(),
         "parsed entries must be stable"
     );
 
-    let encoded = fuzz_btrfs_serialize_inode_ref_payload(entries).expect("serialize parsed refs");
+    let encoded = fuzz_btrfs_serialize_inode_ref_payload(entries).unwrap_or_else(|_| {
+        std::process::abort();
+    });
     assert_eq!(
         encoded, payload,
         "serialize(parse(payload)) must roundtrip exactly"
     );
 
     let total_name_bytes: usize = entries.iter().map(|(_, name)| name.len()).sum();
+    assert!(
+        entries.iter().all(|(_, name)| !name.is_empty()),
+        "successful INODE_REF parse must not contain empty names"
+    );
     assert!(
         total_name_bytes <= payload.len(),
         "name bytes must remain bounded by payload length"
