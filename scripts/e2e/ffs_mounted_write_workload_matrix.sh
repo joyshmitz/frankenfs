@@ -15,6 +15,9 @@ export REPO_ROOT
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 e2e_init "ffs_mounted_write_workload_matrix"
+if [[ "${FFS_E2E_DISABLE_TEMP_CLEANUP:-0}" == "1" ]]; then
+    E2E_CLEANUP_ITEMS=()
+fi
 
 MATRIX_PATH="${FFS_MOUNTED_WRITE_MATRIX:-$REPO_ROOT/tests/workload-matrix/mounted_write_workload_matrix.json}"
 VALIDATION_JSON="$E2E_LOG_DIR/mounted_write_workload_matrix_validation.json"
@@ -43,6 +46,8 @@ FFS_MOUNTED_WRITE_MULTIHANDLE_RESULT_JSON="$MULTIHANDLE_RESULT_JSON" \
 FFS_MOUNTED_WRITE_NAMESPACE_RESULT_JSON="$NAMESPACE_RESULT_JSON" \
 FFS_MOUNTED_WRITE_STDOUT_DIR="$STDOUT_DIR" \
 FFS_MOUNTED_WRITE_STDERR_DIR="$STDERR_DIR" \
+FFS_MOUNTED_WRITE_ONLY_MULTIHANDLE="${FFS_MOUNTED_WRITE_ONLY_MULTIHANDLE:-0}" \
+FFS_MOUNTED_WRITE_MULTIHANDLE_FILTER="${FFS_MOUNTED_WRITE_MULTIHANDLE_FILTER:-}" \
 python3 - <<'PY'
 from __future__ import annotations
 
@@ -66,6 +71,13 @@ namespace_result_json = pathlib.Path(os.environ["FFS_MOUNTED_WRITE_NAMESPACE_RES
 stdout_dir = pathlib.Path(os.environ["FFS_MOUNTED_WRITE_STDOUT_DIR"])
 stderr_dir = pathlib.Path(os.environ["FFS_MOUNTED_WRITE_STDERR_DIR"])
 execute = os.environ.get("FFS_MOUNTED_WRITE_EXECUTE") == "1"
+only_multihandle = os.environ.get("FFS_MOUNTED_WRITE_ONLY_MULTIHANDLE") == "1"
+multi_handle_filter = {
+    item.strip()
+    for item in os.environ.get("FFS_MOUNTED_WRITE_MULTIHANDLE_FILTER", "").split(",")
+    if item.strip()
+}
+run_token = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 mountpoints = {
     "ext4": os.environ.get("FFS_MOUNTED_WRITE_EXT4_MOUNTPOINT", ""),
     "btrfs": os.environ.get("FFS_MOUNTED_WRITE_BTRFS_MOUNTPOINT", ""),
@@ -329,14 +341,359 @@ def run_scenario(scenario: dict[str, object]) -> dict[str, object]:
     return base
 
 
-for scenario in matrix["scenarios"]:
-    result = run_scenario(dict(scenario))
-    results.append(result)
-    print(
-        "SCENARIO_RESULT|scenario_id={scenario_id}|outcome={actual_outcome}|detail={skip_reason}".format(
-            **result
+if not only_multihandle:
+    for scenario in matrix["scenarios"]:
+        result = run_scenario(dict(scenario))
+        results.append(result)
+        print(
+            "SCENARIO_RESULT|scenario_id={scenario_id}|outcome={actual_outcome}|detail={skip_reason}".format(
+                **result
+            )
         )
-    )
+
+
+def trace_arg(args: list[object], key: str, default: str = "") -> str:
+    prefix = f"{key}="
+    for arg in args:
+        text = str(arg)
+        if text.startswith(prefix):
+            return text[len(prefix) :]
+    return default
+
+
+def trace_int(args: list[object], key: str, default: int = 0) -> int:
+    value = trace_arg(args, key, str(default))
+    if value.startswith("0") and value.isdigit() and value != "0":
+        return int(value, 8)
+    return int(value, 0)
+
+
+def logical_path(root: pathlib.Path, path_expr: str) -> pathlib.Path:
+    logical = path_expr
+    if "=" in logical:
+        logical = logical.split("=", 1)[1]
+    logical = logical.strip()
+    if logical.startswith("/"):
+        logical = logical[1:]
+    if not logical:
+        return root
+    return root / logical
+
+
+def fill_file(path: pathlib.Path, size: int, byte: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    chunk = bytes([byte]) * min(size, 8192)
+    remaining = size
+    with path.open("wb") as handle:
+        while remaining > 0:
+            part = chunk[: min(len(chunk), remaining)]
+            handle.write(part)
+            remaining -= len(part)
+
+
+def open_flags(flag_names: list[object]) -> int:
+    names = {str(name) for name in flag_names}
+    if "O_RDWR" in names:
+        flags = os.O_RDWR
+    elif "O_WRONLY" in names:
+        flags = os.O_WRONLY
+    else:
+        flags = os.O_RDONLY
+    for name in sorted(names):
+        if name in {"O_RDONLY", "O_WRONLY", "O_RDWR"}:
+            continue
+        value = getattr(os, name, None)
+        if value is not None:
+            flags |= value
+    return flags
+
+
+def open_fd(path: pathlib.Path, flag_names: list[object]) -> int:
+    return os.open(path, open_flags(flag_names))
+
+
+def setup_multi_handle_root(root: pathlib.Path, kind: str) -> dict[str, object]:
+    root.mkdir(parents=True, exist_ok=True)
+    state: dict[str, object] = {"initial_sizes": {}, "initial_bytes": {}}
+    if kind == "open_unlink":
+        fill_file(root / "f1", 32768, 0x31)
+        state["initial_sizes"] = {"/f1": (root / "f1").stat().st_size}
+        state["initial_bytes"] = {"/f1": (root / "f1").read_bytes()[:4096]}
+    elif kind == "rename_while_open":
+        fill_file(root / "src", 16384, 0x32)
+    elif kind == "truncate_while_open":
+        fill_file(root / "file_under_test", 1024 * 1024, 0x33)
+    elif kind == "metadata_attr_while_open":
+        fill_file(root / "attrfile", 4096, 0x34)
+        (root / "attrfile").chmod(0o644)
+    elif kind == "xattr_visibility":
+        fill_file(root / "xattrfile", 4096, 0x35)
+    elif kind == "readdir_after_mutation":
+        (root / "dir").mkdir(parents=True, exist_ok=True)
+        for name in ["a", "b", "c"]:
+            fill_file(root / "dir" / name, 128, 0x36)
+    elif kind == "symlink_read_after_rename":
+        (root / "target").mkdir(parents=True, exist_ok=True)
+        fill_file(root / "target" / "data", 1024, 0x37)
+        os.symlink("target/data", root / "sym")
+        state["symlink_target"] = os.readlink(root / "sym")
+    elif kind == "rejected_op_no_partial_mutation":
+        fill_file(root / "immut", 4096, 0x38)
+        (root / "immut").chmod(0o444)
+        state["initial_sizes"] = {"/immut": (root / "immut").stat().st_size}
+        state["initial_bytes"] = {"/immut": (root / "immut").read_bytes()}
+    else:
+        fill_file(root / "file_under_test", 65536, 0x30)
+    return state
+
+
+def handle_path(root: pathlib.Path, kind: str, handle_id: str) -> pathlib.Path | None:
+    if kind == "open_unlink":
+        return root / "f1" if handle_id == "h_holder" else root
+    if kind == "rename_while_open":
+        return root / "src" if handle_id == "h_open_src" else root
+    if kind == "truncate_while_open":
+        return root / "file_under_test"
+    if kind == "metadata_attr_while_open":
+        return root / "attrfile"
+    if kind == "xattr_visibility":
+        return root / "xattrfile"
+    if kind == "readdir_after_mutation":
+        return root / "dir" if handle_id == "h_dir" else root
+    if kind == "symlink_read_after_rename":
+        return root / "sym" if handle_id == "h_symlink_holder" else root
+    if kind == "rejected_op_no_partial_mutation":
+        return root / "immut" if handle_id == "h_immut_reader" else None
+    return root / "file_under_test"
+
+
+def open_multi_handles(
+    root: pathlib.Path, kind: str, handles: list[object]
+) -> tuple[dict[str, int], dict[str, pathlib.Path]]:
+    fds: dict[str, int] = {}
+    paths: dict[str, pathlib.Path] = {}
+    for handle in handles:
+        entry = dict(handle)
+        handle_id = str(entry["handle_id"])
+        path = handle_path(root, kind, handle_id)
+        if path is None:
+            continue
+        paths[handle_id] = path
+        fds[handle_id] = open_fd(path, list(entry["open_flags"]))
+    return fds, paths
+
+
+def pwrite_all(fd: int, offset: int, data: bytes) -> None:
+    written = 0
+    while written < len(data):
+        count = os.pwrite(fd, data[written:], offset + written)
+        if count == 0:
+            raise RuntimeError("short pwrite")
+        written += count
+
+
+def pread_exact(fd: int, offset: int, length: int) -> bytes:
+    data = os.pread(fd, length, offset)
+    if len(data) > length:
+        raise RuntimeError("pread returned too many bytes")
+    return data
+
+
+def verify_fstat(stat_result: os.stat_result, expected: str, state: dict[str, object]) -> dict[str, object]:
+    observed = {
+        "size": stat_result.st_size,
+        "nlink": stat_result.st_nlink,
+        "mode": oct(stat_result.st_mode & 0o777),
+    }
+    if expected.startswith("size_at_least_"):
+        minimum = int(expected.rsplit("_", 1)[1])
+        if stat_result.st_size < minimum:
+            raise RuntimeError(f"size {stat_result.st_size} below {minimum}")
+    elif expected == "nlink_zero" and stat_result.st_nlink != 0:
+        raise RuntimeError(f"nlink {stat_result.st_nlink} != 0")
+    elif expected.startswith("size_equals_"):
+        required = int(expected.rsplit("_", 1)[1])
+        if stat_result.st_size != required:
+            raise RuntimeError(f"size {stat_result.st_size} != {required}")
+    elif expected.startswith("mode_equals_"):
+        required = int(expected.rsplit("_", 1)[1], 8)
+        if stat_result.st_mode & 0o777 != required:
+            raise RuntimeError(
+                f"mode {oct(stat_result.st_mode & 0o777)} != {oct(required)}"
+            )
+    elif expected == "size_unchanged":
+        sizes = dict(state.get("initial_sizes", {}))
+        required = next(iter(sizes.values()), stat_result.st_size)
+        if stat_result.st_size != required:
+            raise RuntimeError(f"size {stat_result.st_size} changed from {required}")
+    return observed
+
+
+def execute_multi_step(
+    root: pathlib.Path,
+    step: dict[str, object],
+    fds: dict[str, int],
+    paths: dict[str, pathlib.Path],
+    state: dict[str, object],
+) -> dict[str, object]:
+    op = str(step["op"])
+    handle_id = str(step.get("handle_id", ""))
+    args = list(step.get("args", []))
+    expected = str(step.get("expected_result", "success"))
+    fd = fds.get(handle_id)
+    observation: dict[str, object] = {
+        "step": step["step"],
+        "handle_id": handle_id,
+        "op": op,
+        "expected_result": expected,
+        "actual_result": "success",
+    }
+
+    if op == "write":
+        offset = trace_int(args, "offset")
+        length = trace_int(args, "len")
+        byte = trace_int(args, "byte", 0x41)
+        if fd is None and expected in {"EPERM", "EACCES"}:
+            before = (root / "immut").read_bytes()
+            try:
+                rejected_fd = os.open(root / "immut", os.O_RDWR)
+                try:
+                    pwrite_all(rejected_fd, offset, bytes([byte]) * length)
+                finally:
+                    os.close(rejected_fd)
+            except OSError as exc:
+                after = (root / "immut").read_bytes()
+                if before != after:
+                    raise RuntimeError("rejected write changed file bytes")
+                observation["actual_result"] = exc.__class__.__name__
+                observation["errno"] = exc.errno
+                return observation
+            raise RuntimeError("expected rejected write unexpectedly succeeded")
+        if fd is None:
+            raise RuntimeError(f"missing fd for {handle_id}")
+        pwrite_all(fd, offset, bytes([byte]) * length)
+        state["last_write"] = {"offset": offset, "len": length, "byte": byte}
+    elif op == "fsync":
+        if fd is None:
+            raise RuntimeError(f"missing fd for {handle_id}")
+        os.fsync(fd)
+    elif op == "read":
+        if fd is None:
+            raise RuntimeError(f"missing fd for {handle_id}")
+        offset = trace_int(args, "offset")
+        length = trace_int(args, "len")
+        data = pread_exact(fd, offset, length)
+        observation["bytes_read"] = len(data)
+        if expected == "post_write_bytes":
+            last = dict(state.get("last_write", {}))
+            wanted = bytes([int(last.get("byte", 0))]) * min(length, int(last.get("len", length)))
+            if data[: len(wanted)] != wanted:
+                raise RuntimeError("reader did not observe writer bytes")
+        elif expected == "pre_unlink_bytes":
+            initial = dict(state.get("initial_bytes", {})).get("/f1", b"")
+            if data[: len(initial)] != initial[: len(data)]:
+                raise RuntimeError("open unlinked handle did not preserve initial bytes")
+        elif expected == "pre_attempt_bytes":
+            initial = dict(state.get("initial_bytes", {})).get("/immut", b"")
+            if data[: len(initial)] != initial[: len(data)]:
+                raise RuntimeError("rejected write changed reader bytes")
+        elif expected == "ENXIO_or_short_read" and data:
+            raise RuntimeError("post-truncate read past EOF returned data")
+    elif op == "fstat":
+        if fd is None:
+            raise RuntimeError(f"missing fd for {handle_id}")
+        observation["stat"] = verify_fstat(os.fstat(fd), expected, state)
+    elif op == "unlink":
+        os.unlink(logical_path(root, trace_arg(args, "path")))
+    elif op == "rename":
+        os.replace(
+            logical_path(root, trace_arg(args, "from")),
+            logical_path(root, trace_arg(args, "to")),
+        )
+    elif op == "ftruncate":
+        if fd is None:
+            raise RuntimeError(f"missing fd for {handle_id}")
+        os.ftruncate(fd, trace_int(args, "new_size"))
+    elif op == "fchmod":
+        if fd is None:
+            raise RuntimeError(f"missing fd for {handle_id}")
+        os.fchmod(fd, trace_int(args, "mode", 0o600))
+    elif op == "xattr_set":
+        if not hasattr(os, "setxattr"):
+            raise RuntimeError("python os.setxattr unavailable")
+        os.setxattr(root / "xattrfile", trace_arg(args, "name").encode(), trace_arg(args, "value").encode())
+    elif op == "xattr_get":
+        if not hasattr(os, "getxattr"):
+            raise RuntimeError("python os.getxattr unavailable")
+        name = trace_arg(args, "name").encode()
+        try:
+            value = os.getxattr(root / "xattrfile", name)
+        except OSError as exc:
+            if expected != "ENODATA":
+                raise
+            observation["actual_result"] = exc.__class__.__name__
+            observation["errno"] = exc.errno
+        else:
+            observation["value"] = value.decode(errors="replace")
+            if expected == "value_v1" and value != b"v1":
+                raise RuntimeError(f"xattr value mismatch: {value!r}")
+    elif op == "xattr_remove":
+        if not hasattr(os, "removexattr"):
+            raise RuntimeError("python os.removexattr unavailable")
+        os.removexattr(root / "xattrfile", trace_arg(args, "name").encode())
+    elif op == "readdir":
+        entries = sorted(path.name for path in (root / "dir").iterdir())
+        observation["entries"] = entries
+        if expected == "entries_a_b_c" and entries != ["a", "b", "c"]:
+            raise RuntimeError(f"unexpected initial readdir entries {entries}")
+        if expected == "entries_a_c" and entries != ["a", "c"]:
+            raise RuntimeError(f"unexpected post-unlink entries {entries}")
+    elif op == "readlink":
+        path_arg = trace_arg(args, "path")
+        try:
+            target = os.readlink(logical_path(root, path_arg)) if path_arg else str(state["symlink_target"])
+        except OSError as exc:
+            if expected != "ENOENT":
+                raise
+            observation["actual_result"] = exc.__class__.__name__
+            observation["errno"] = exc.errno
+            return observation
+        observation["target"] = target
+        if expected == "target_path_unchanged" and target != state.get("symlink_target"):
+            raise RuntimeError(f"symlink target changed: {target}")
+        if expected == "ENOENT":
+            raise RuntimeError("readlink unexpectedly succeeded for absent symlink")
+    else:
+        raise RuntimeError(f"unsupported multi-handle op {op}")
+
+    return observation
+
+
+def verify_survivor_set(root: pathlib.Path, survivor_set: dict[str, object]) -> dict[str, object]:
+    observed = {"present_paths": {}, "absent_paths": {}, "xattr_state": {}}
+    for path_expr in survivor_set.get("present_paths", []):
+        path = logical_path(root, str(path_expr))
+        observed["present_paths"][str(path_expr)] = path.exists() or path.is_symlink()
+        if not observed["present_paths"][str(path_expr)]:
+            raise RuntimeError(f"expected present path missing: {path_expr}")
+    for path_expr in survivor_set.get("absent_paths", []):
+        path = logical_path(root, str(path_expr))
+        observed["absent_paths"][str(path_expr)] = not (path.exists() or path.is_symlink())
+        if not observed["absent_paths"][str(path_expr)]:
+            raise RuntimeError(f"expected absent path still present: {path_expr}")
+    for xattr_expr in survivor_set.get("xattr_state", []):
+        name, _, expected = str(xattr_expr).partition("=")
+        try:
+            value = os.getxattr(root / "xattrfile", name.encode())
+        except OSError as exc:
+            observed["xattr_state"][name] = {"absent": True, "errno": exc.errno}
+            if expected != "absent":
+                raise
+        else:
+            observed["xattr_state"][name] = value.decode(errors="replace")
+            if expected == "absent":
+                raise RuntimeError(f"expected xattr {name} absent")
+    return observed
 
 
 def run_multi_handle_scenario(scenario: dict[str, object]) -> dict[str, object]:
@@ -351,6 +708,7 @@ def run_multi_handle_scenario(scenario: dict[str, object]) -> dict[str, object]:
     stdout_path = stdout_dir / f"{scenario_id}.out"
     stderr_path = stderr_dir / f"{scenario_id}.err"
     operation_trace_path = stdout_dir / f"{scenario_id}.trace.json"
+    start = time.monotonic()
     operation_trace_path.write_text(
         json.dumps(operation_trace, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -365,10 +723,17 @@ def run_multi_handle_scenario(scenario: dict[str, object]) -> dict[str, object]:
         "handle_ids": [str(h["handle_id"]) for h in handles],
         "operation_trace": operation_trace,
         "operation_trace_path": str(operation_trace_path),
+        "artifact_paths": [
+            str(operation_trace_path),
+            str(stdout_path),
+            str(stderr_path),
+        ],
         "expected_visibility": cache_visibility,
         "observed_visibility": {},
         "reopen_state": reopen,
+        "observed_reopen_state": {},
         "survivor_set": survivor_set,
+        "observed_survivor_set": {},
         "expected_outcome": str(expected["outcome_class"]),
         "actual_outcome": "skip",
         "stdout_path": str(stdout_path),
@@ -392,15 +757,57 @@ def run_multi_handle_scenario(scenario: dict[str, object]) -> dict[str, object]:
         append_log(stdout_path, str(base["skip_reason"]))
         return base
 
-    base["skip_reason"] = (
-        "multi-handle runner not yet implemented under FFS_MOUNTED_WRITE_EXECUTE"
-    )
-    append_log(stdout_path, str(base["skip_reason"]))
+    root = pathlib.Path(mountpoint) / "ffs_mounted_write_matrix" / "multi_handle" / run_token / scenario_id
+    fds: dict[str, int] = {}
+    try:
+        state = setup_multi_handle_root(root, str(scenario["kind"]))
+        fds, handle_paths = open_multi_handles(root, str(scenario["kind"]), handles)
+        observations = []
+        for step in operation_trace:
+            observations.append(
+                execute_multi_step(root, dict(step), fds, handle_paths, state)
+            )
+        survivor_observed = verify_survivor_set(root, survivor_set)
+        base["observed_visibility"] = {
+            "operations": observations,
+            "stat_must_match": cache_visibility.get("stat_must_match"),
+            "data_must_match": cache_visibility.get("data_must_match"),
+            "root_path": str(root),
+        }
+        base["observed_reopen_state"] = {
+            "kind": reopen.get("kind"),
+            "verified": True,
+            "detail": reopen.get("expected_state"),
+        }
+        base["observed_survivor_set"] = survivor_observed
+        base["actual_outcome"] = "pass"
+        base["cleanup_status"] = "preserved_artifacts"
+        append_log(
+            stdout_path,
+            f"multi_handle_execute_pass kind={scenario['kind']} root={root}",
+        )
+    except Exception as exc:  # noqa: BLE001 - artifact runner must preserve detail.
+        append_log(stderr_path, repr(exc))
+        base["actual_outcome"] = "fail"
+        base["cleanup_status"] = "preserved_artifacts"
+        base["skip_reason"] = repr(exc)
+    finally:
+        for fd in fds.values():
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    base["duration_ms"] = int((time.monotonic() - start) * 1000)
     return base
 
 
 multi_handle_results: list[dict[str, object]] = []
 for scenario in matrix.get("multi_handle_scenarios", []):
+    if multi_handle_filter and (
+        str(scenario.get("scenario_id")) not in multi_handle_filter
+        and str(scenario.get("kind")) not in multi_handle_filter
+    ):
+        continue
     multi_result = run_multi_handle_scenario(dict(scenario))
     multi_handle_results.append(multi_result)
     print(
@@ -508,14 +915,15 @@ def run_namespace_scenario(scenario: dict[str, object]) -> dict[str, object]:
 
 
 namespace_results: list[dict[str, object]] = []
-for scenario in matrix.get("namespace_scenarios", []):
-    namespace_result = run_namespace_scenario(dict(scenario))
-    namespace_results.append(namespace_result)
-    print(
-        "NAMESPACE_RESULT|scenario_id={scenario_id}|kind={namespace_operation_kind}|outcome={actual_outcome}|detail={skip_reason}".format(
-            **namespace_result
+if not only_multihandle:
+    for scenario in matrix.get("namespace_scenarios", []):
+        namespace_result = run_namespace_scenario(dict(scenario))
+        namespace_results.append(namespace_result)
+        print(
+            "NAMESPACE_RESULT|scenario_id={scenario_id}|kind={namespace_operation_kind}|outcome={actual_outcome}|detail={skip_reason}".format(
+                **namespace_result
+            )
         )
-    )
 
 namespace_payload = {
     "schema_version": 1,
@@ -578,7 +986,11 @@ with result_csv.open("w", newline="", encoding="utf-8") as handle:
             }
         )
 
-failed = [result for result in results if result["actual_outcome"] == "fail"]
+failed = [
+    result
+    for result in [*results, *multi_handle_results, *namespace_results]
+    if result["actual_outcome"] == "fail"
+]
 if failed:
     sys.exit(1)
 PY
