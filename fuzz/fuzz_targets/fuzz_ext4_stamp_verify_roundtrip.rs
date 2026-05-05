@@ -25,9 +25,9 @@
 //! failure rather than a silent on-disk corruption.
 
 use ffs_ondisk::{
-    EXT4_FT_DIR_CSUM, Ext4GroupDesc, stamp_block_bitmap_checksum, stamp_dir_block_checksum,
-    stamp_extent_block_checksum, stamp_inode_bitmap_checksum, verify_block_bitmap_checksum,
-    verify_dir_block_checksum, verify_extent_block_checksum, verify_inode_bitmap_checksum,
+    stamp_block_bitmap_checksum, stamp_dir_block_checksum, stamp_extent_block_checksum,
+    stamp_inode_bitmap_checksum, verify_block_bitmap_checksum, verify_dir_block_checksum,
+    verify_extent_block_checksum, verify_inode_bitmap_checksum, Ext4GroupDesc, EXT4_FT_DIR_CSUM,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -78,8 +78,9 @@ fuzz_target!(|data: &[u8]| {
     let generation = cursor.next_u32();
 
     // ── MR-1 — dir_block stamp/verify round-trip ────────────────────────
-    let dir_block_size = MIN_DIR_BLOCK_BYTES
-        .saturating_add(usize::from(cursor.next_u16()) % (MAX_DIR_BLOCK_BYTES - MIN_DIR_BLOCK_BYTES));
+    let dir_block_size = MIN_DIR_BLOCK_BYTES.saturating_add(
+        usize::from(cursor.next_u16()) % (MAX_DIR_BLOCK_BYTES - MIN_DIR_BLOCK_BYTES),
+    );
     let mut dir_block = vec![0_u8; dir_block_size];
 
     // Fill the body with cursor bytes so the checksum covers structured
@@ -105,6 +106,12 @@ fuzz_target!(|data: &[u8]| {
     stamp_dir_block_checksum(&mut dir_block, csum_seed, ino, generation);
     verify_dir_block_checksum(&dir_block, csum_seed, ino, generation)
         .expect("MR-1: stamped dir_block must verify successfully");
+    let mut corrupt_dir_block = dir_block.clone();
+    corrupt_dir_block[0] ^= 1;
+    assert!(
+        verify_dir_block_checksum(&corrupt_dir_block, csum_seed, ino, generation).is_err(),
+        "MR-1b: mutating covered dir_block bytes after stamp must fail verification"
+    );
 
     // ── MR-2 — extent_block stamp/verify round-trip ────────────────────
     let mut cursor2 = ByteCursor::new(cursor.remainder());
@@ -118,8 +125,7 @@ fuzz_target!(|data: &[u8]| {
     let extent_block_size = 12_usize
         .saturating_add(12 * usize::from(eh_max))
         .saturating_add(4);
-    let extent_block_size =
-        extent_block_size.clamp(MIN_EXTENT_BLOCK_BYTES, MAX_EXTENT_BLOCK_BYTES);
+    let extent_block_size = extent_block_size.clamp(MIN_EXTENT_BLOCK_BYTES, MAX_EXTENT_BLOCK_BYTES);
     let mut extent_block = vec![0_u8; extent_block_size];
 
     // ext4_extent_header layout (12 bytes):
@@ -129,10 +135,10 @@ fuzz_target!(|data: &[u8]| {
     //   [4..6]   eh_max ← must be set so verify computes the right tail offset
     //   [6..8]   eh_depth
     //   [8..12]  eh_generation
-    extent_block[0..2].copy_from_slice(&0xF30A_u16.to_le_bytes()); // magic
-    extent_block[4..6].copy_from_slice(&eh_max.to_le_bytes()); // eh_max
-    // tail_off computed inside verify as 12 + 12 * eh_max — must fit in
-    // extent_block. We sized the buffer to fit, so no overflow risk.
+    extent_block[0..2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+    // tail_off is computed inside verify as 12 + 12 * eh_max. The buffer
+    // sizing above keeps that offset in bounds.
+    extent_block[4..6].copy_from_slice(&eh_max.to_le_bytes());
 
     // Fill body with structured bytes so the checksum is non-trivial.
     // Body covers offsets 12..tail_off (the slot table).
@@ -144,6 +150,12 @@ fuzz_target!(|data: &[u8]| {
     stamp_extent_block_checksum(&mut extent_block, csum_seed, ino, generation);
     verify_extent_block_checksum(&extent_block, csum_seed, ino, generation)
         .expect("MR-2: stamped extent_block must verify successfully");
+    let mut corrupt_extent_block = extent_block.clone();
+    corrupt_extent_block[12] ^= 1;
+    assert!(
+        verify_extent_block_checksum(&corrupt_extent_block, csum_seed, ino, generation).is_err(),
+        "MR-2b: mutating covered extent_block bytes after stamp must fail verification"
+    );
 
     // ── MR-3 — block-bitmap stamp/verify round-trip ────────────────────
     // (bd-7x87u — extends bd-nkfga's dir/extent coverage to bitmaps.)
@@ -164,7 +176,7 @@ fuzz_target!(|data: &[u8]| {
     // clusters_per_group must be a multiple of 8 and <= bitmap_len * 8;
     // pick a value that keeps `checksum_len = clusters_per_group/8`
     // strictly within the bitmap.
-    let clusters_per_group = (u32::from(cursor3.next_u8()) % 32 + 1) * 8 // [8, 264) clusters
+    let clusters_per_group = ((u32::from(cursor3.next_u8()) % 32 + 1) * 8)
         .min(u32::try_from(bitmap_len).unwrap_or(u32::MAX) * 8);
     let desc_size: u16 = if cursor3.next_u8() & 1 == 0 { 32 } else { 64 };
 
@@ -196,6 +208,19 @@ fuzz_target!(|data: &[u8]| {
         desc_size,
     )
     .expect("MR-3: stamped block_bitmap must verify against its own gd");
+    let mut corrupt_block_bitmap = block_bitmap.clone();
+    corrupt_block_bitmap[0] ^= 1;
+    assert!(
+        verify_block_bitmap_checksum(
+            &corrupt_block_bitmap,
+            csum_seed,
+            clusters_per_group,
+            &block_gd,
+            desc_size,
+        )
+        .is_err(),
+        "MR-3b: mutating covered block_bitmap bytes after stamp must fail verification"
+    );
 
     // ── MR-4 — inode-bitmap stamp/verify round-trip ───────────────────
     // Same shape, distinct code path: writes to gd.inode_bitmap_csum,
@@ -206,7 +231,7 @@ fuzz_target!(|data: &[u8]| {
     for byte in &mut inode_bitmap {
         *byte = cursor3.next_u8();
     }
-    let inodes_per_group = (u32::from(cursor3.next_u8()) % 32 + 1) * 8
+    let inodes_per_group = ((u32::from(cursor3.next_u8()) % 32 + 1) * 8)
         .min(u32::try_from(inode_bitmap_len).unwrap_or(u32::MAX) * 8);
     let inode_desc_size: u16 = if cursor3.next_u8() & 1 == 0 { 32 } else { 64 };
 
@@ -238,4 +263,17 @@ fuzz_target!(|data: &[u8]| {
         inode_desc_size,
     )
     .expect("MR-4: stamped inode_bitmap must verify against its own gd");
+    let mut corrupt_inode_bitmap = inode_bitmap.clone();
+    corrupt_inode_bitmap[0] ^= 1;
+    assert!(
+        verify_inode_bitmap_checksum(
+            &corrupt_inode_bitmap,
+            csum_seed,
+            inodes_per_group,
+            &inode_gd,
+            inode_desc_size,
+        )
+        .is_err(),
+        "MR-4b: mutating covered inode_bitmap bytes after stamp must fail verification"
+    );
 });
