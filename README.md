@@ -1331,7 +1331,7 @@ cargo test --workspace
 
 ## Project Status
 
-FrankenFS is in **early development**. The tracked V1 parity matrix is complete (100%), meaning every item in [FEATURE_PARITY.md](FEATURE_PARITY.md)'s current denominator has an implemented and tested contract. That is a feature-matrix claim, not a production-readiness claim: runtime hardening, fresh xfstests validation, CI-mounted coverage, performance baselines, and mounted self-healing policy still have their own bridge work tracked below. Ongoing work is focused on operational hardening of three major subsystems that already reached verification-gate maturity:
+FrankenFS is in **early development**. The tracked V1 parity matrix is complete (100%), meaning every item in [FEATURE_PARITY.md](FEATURE_PARITY.md)'s current denominator has an implemented and tested contract. That is a feature-matrix claim, not a production-readiness claim: runtime hardening, fresh xfstests validation, mounted-lane evidence, performance quarantines, and mounted self-healing policy still have their own bridge status tracked below. Ongoing work is focused on operational hardening of three major subsystems that already reached verification-gate maturity:
 
 | Subsystem | Status | Key metric |
 |-----------|--------|------------|
@@ -1373,7 +1373,7 @@ These items sit outside the tracked 97-row parity denominator and are the curren
 | `bd-rchk2` | btrfs delayed refs | Complete: `DISC-004` accepted as a scoped V1 model with retry-safe failed-flush and overflow coverage |
 | `bd-rchk3` | xfstests | Fresh 2026-05-01 subset/regression gate recorded; real execution is blocked by unbuilt xfstests helpers and a dpkg lock blocking `xfslibs-dev`/`libaio-dev` install |
 | `bd-rchk4` | Mounted FUSE CI | Use the permissioned lane documented in `scripts/e2e/README.md` to run critical mounted ext4/btrfs paths with structured capability and cleanup artifacts |
-| `bd-rchk5` | Performance | Re-measure representative throughput/latency targets and record environment metadata |
+| `bd-rchk5` | Performance | Complete: dated 2026-05-03 core and mounted throughput/latency artifacts, host/runtime metadata, delta closeout, no-reference decisions, and quarantined mounted latency claims are recorded |
 | `bd-rchk6` | Mounted self-healing | Automatic mounted repair is implemented for explicit `--background-repair --background-scrub-ledger <jsonl>` mounts; read-write repair uses the mounted MVCC repair-writeback serializer and stale-snapshot rejection |
 | `bd-rchk7` | Fuzz/conformance | Complete: remaining open-ended corpus notes are tied to completed fixtures, closed child beads, or the fixed-seed fuzz-smoke gate |
 
@@ -1458,7 +1458,7 @@ lanes, thresholds, kill switches, remediation beads, or explicit non-goals.
 | `security.hostile_image` | hostile images and hostile proof artifacts cannot escape the safety envelope or create misleading readiness claims | `validate-adversarial-threat-model` plus the security E2E smoke prove path traversal/symlink refusal, critical fail-closed handling, resource caps with observed counters, bounded hostile fixture classifications, repair-ledger tamper refusal, and docs-safe wording | `bd-rchk0.5.11`, `bd-0qx9b` |
 | `writeback_cache` | kernel FUSE writeback-cache mode can be enabled | Default mounts still keep `writeback_cache` off. `bd-rchk0.2.1.1` freezes the negative-option proof, `bd-8pz7h` adds the dirty-page/fsync ordering oracle, `bd-rchk0.2.2` wires the explicit CLI/FUSE opt-in, `bd-4nobd` adds runtime kill-switch, stale-gate, config-default, feature-downgrade, and host-manifest refusal, and `bd-rchk0.2.3` adds the 12-point crash/replay artifact gate plus mounted ext4 opt-in regression. `--writeback-cache` requires `--rw`, an audit gate, an ordering oracle, fresh runtime-guard evidence, a crash/replay oracle, a matching host/lane manifest, and a disarmed `FFS_WRITEBACK_CACHE_KILL_SWITCH` before the kernel option is forwarded. | `bd-rchk0.2.1`, `bd-rchk0.2.1.1`, `bd-8pz7h`, `bd-rchk0.2.2`, `bd-4nobd`, `bd-rchk0.2.3` |
 | `errors.evidence` | mounted failures are actionable rather than opaque | Every failure path reports `operation_id`, `scenario_id`, `outcome`, `error_class`, remediation hint where applicable, raw logs, and cleanup status | `bd-rchk0.3.4`, `bd-rchk0.4.3` |
-| `performance.baseline` | performance claims are current for representative workloads | Fresh dated throughput/latency artifacts with host/runtime metadata; no readiness wording may imply performance tuning is complete before this lands | `bd-rchk5`, `bd-rchk5.1`, `bd-rchk5.3` |
+| `performance.baseline` | performance claims are current for representative workloads | Dated throughput/latency artifacts with host/runtime metadata, manifest validation, delta closeout, follow-up ownership, and explicit downgraded wording for mounted latency regressions or no-reference rows; no readiness wording may imply performance tuning is complete beyond the supported evidence tier | `bd-rchk5`, `bd-rchk5.1`, `bd-rchk5.2`, `bd-rchk5.3`, `bd-rchk5.4`, `bd-rchk5.5`, `bd-rchk5.6`, `bd-rchk5.7`, `bd-rchk5.8` |
 | `operational.soak_canary` | mounted and repair behavior remains stable over repeated realistic use | `validate-soak-canary-campaigns` defines bounded smoke/nightly/stress/canary profiles, heartbeat logs, resource caps, flake follow-up rules, and proof-bundle/release-gate consumers before long campaigns can upgrade readiness wording | `bd-rchk0.5.9`, `bd-t21em` |
 
 ### Writeback-Cache Operator Evidence
@@ -1515,9 +1515,9 @@ paths, cleanup status, unsupported-combination rejections, and the reproduction
 command.
 
 This is not a production-readiness claim. Stronger wording remains blocked on
-the permissioned mounted lane (`bd-rchk4`), xfstests baseline (`bd-rchk3`),
-performance baselines (`bd-rchk5`), and soak/canary evidence
-(`bd-rchk0.5.9`/`bd-t21em`).
+fresh xfstests baseline (`bd-rchk3`), residual performance quarantines
+captured by `bd-rchk5`, and campaign evidence tiers owned by the soak/canary
+lane (`bd-rchk0.5.9`/`bd-t21em`).
 
 ### Allowed Deferrals and Non-Goals
 
@@ -1528,8 +1528,9 @@ performance baselines (`bd-rchk5`), and soak/canary evidence
 - Full xfstests execution is a separate gate (`bd-rchk3`). The SLOs above may
   use a curated mounted matrix before the full xfstests environment is ready,
   but they must not imply a current xfstests pass rate.
-- Performance readiness is explicitly delegated to `bd-rchk5`; correctness
-  gates cannot silently upgrade throughput or latency claims.
+- Performance wording is bounded by the `bd-rchk5` closeout; correctness gates
+  cannot silently upgrade throughput or latency claims beyond the measured,
+  comparable, and non-quarantined evidence tier.
 - Soak/canary readiness is separate from single-scenario E2E success. Local
   smoke validates the campaign contract; nightly/stress/canary profiles require
   RCH, CI, or manual permissioned hosts and fresh resource/cleanup evidence.
