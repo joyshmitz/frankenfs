@@ -587,6 +587,56 @@ pub const S_IFLNK: u16 = 0o120_000;
 /// Socket.
 pub const S_IFSOCK: u16 = 0o140_000;
 
+// ── POSIX file-mode predicates (bd-vnfhb) ────────────────────────────────
+//
+// Mirrored from `<sys/stat.h>`. Each predicate masks `mode & S_IFMT`
+// and compares to the corresponding S_IF* constant. A regression in
+// the mask or the comparison sense would silently misclassify file
+// kinds at every callsite that uses the predicate. Pinned by
+// `posix_file_mode_predicates_match_kernel_macros`.
+
+/// Predicate for "is regular file" (kernel: `S_ISREG(m)`).
+#[must_use]
+pub const fn is_regular_file(mode: u16) -> bool {
+    (mode & S_IFMT) == S_IFREG
+}
+
+/// Predicate for "is directory" (kernel: `S_ISDIR(m)`).
+#[must_use]
+pub const fn is_directory(mode: u16) -> bool {
+    (mode & S_IFMT) == S_IFDIR
+}
+
+/// Predicate for "is symbolic link" (kernel: `S_ISLNK(m)`).
+#[must_use]
+pub const fn is_symlink(mode: u16) -> bool {
+    (mode & S_IFMT) == S_IFLNK
+}
+
+/// Predicate for "is character device" (kernel: `S_ISCHR(m)`).
+#[must_use]
+pub const fn is_character_device(mode: u16) -> bool {
+    (mode & S_IFMT) == S_IFCHR
+}
+
+/// Predicate for "is block device" (kernel: `S_ISBLK(m)`).
+#[must_use]
+pub const fn is_block_device(mode: u16) -> bool {
+    (mode & S_IFMT) == S_IFBLK
+}
+
+/// Predicate for "is FIFO / named pipe" (kernel: `S_ISFIFO(m)`).
+#[must_use]
+pub const fn is_fifo(mode: u16) -> bool {
+    (mode & S_IFMT) == S_IFIFO
+}
+
+/// Predicate for "is socket" (kernel: `S_ISSOCK(m)`).
+#[must_use]
+pub const fn is_socket(mode: u16) -> bool {
+    (mode & S_IFMT) == S_IFSOCK
+}
+
 // ── ext4 inode flags (i_flags) ──────────────────────────────────────────────
 
 /// Secure deletion (not actually implemented in ext4).
@@ -2140,6 +2190,106 @@ mod tests {
     fn inode_index_in_group_first_of_next_group() {
         let idx = inode_index_in_group(InodeNumber(129), 128);
         assert_eq!(idx, 0);
+    }
+
+    /// bd-vnfhb — Kernel-conformance pin for the seven POSIX file-mode
+    /// predicates that mirror `<sys/stat.h>`'s S_ISREG / S_ISDIR /
+    /// S_ISLNK / S_ISCHR / S_ISBLK / S_ISFIFO / S_ISSOCK macros.
+    ///
+    /// A regression that flipped the mask sense (e.g., `&` to `|`) or
+    /// dropped the `& S_IFMT` would silently misclassify every file
+    /// kind. Each predicate is exercised against the corresponding
+    /// S_IF* constant AND every other constant — to verify mutually-
+    /// exclusive classification, every mode must satisfy EXACTLY ONE
+    /// S_IS* predicate, not zero, not two.
+    #[test]
+    fn posix_file_mode_predicates_match_kernel_macros() {
+        // Each constant must satisfy its corresponding predicate.
+        assert!(is_regular_file(S_IFREG));
+        assert!(is_directory(S_IFDIR));
+        assert!(is_symlink(S_IFLNK));
+        assert!(is_character_device(S_IFCHR));
+        assert!(is_block_device(S_IFBLK));
+        assert!(is_fifo(S_IFIFO));
+        assert!(is_socket(S_IFSOCK));
+
+        // Predicates honor the S_IFMT mask: lower 12 bits (permissions
+        // and sticky/setuid/setgid) must NOT influence classification.
+        // Use 0o7777 to set every permission/sticky bit.
+        assert!(is_regular_file(S_IFREG | 0o7777));
+        assert!(is_directory(S_IFDIR | 0o7777));
+        assert!(is_symlink(S_IFLNK | 0o7777));
+        assert!(is_character_device(S_IFCHR | 0o7777));
+        assert!(is_block_device(S_IFBLK | 0o7777));
+        assert!(is_fifo(S_IFIFO | 0o7777));
+        assert!(is_socket(S_IFSOCK | 0o7777));
+
+        // Mutually-exclusive classification: every S_IF* constant
+        // satisfies EXACTLY ONE predicate.
+        let preds: [(u16, [bool; 7]); 7] = [
+            // (mode, [is_reg, is_dir, is_sym, is_chr, is_blk, is_fifo, is_sock])
+            (
+                S_IFREG,
+                [true, false, false, false, false, false, false],
+            ),
+            (
+                S_IFDIR,
+                [false, true, false, false, false, false, false],
+            ),
+            (
+                S_IFLNK,
+                [false, false, true, false, false, false, false],
+            ),
+            (
+                S_IFCHR,
+                [false, false, false, true, false, false, false],
+            ),
+            (
+                S_IFBLK,
+                [false, false, false, false, true, false, false],
+            ),
+            (
+                S_IFIFO,
+                [false, false, false, false, false, true, false],
+            ),
+            (
+                S_IFSOCK,
+                [false, false, false, false, false, false, true],
+            ),
+        ];
+        for (mode, expected) in preds {
+            assert_eq!(
+                [
+                    is_regular_file(mode),
+                    is_directory(mode),
+                    is_symlink(mode),
+                    is_character_device(mode),
+                    is_block_device(mode),
+                    is_fifo(mode),
+                    is_socket(mode),
+                ],
+                expected,
+                "mode {mode:#o} must satisfy exactly one S_IS* predicate"
+            );
+            // Sanity: exactly one true in the expected vector.
+            assert_eq!(
+                expected.iter().filter(|x| **x).count(),
+                1,
+                "test setup error: expected vector for mode {mode:#o} must have exactly one true"
+            );
+        }
+
+        // The S_IFMT mask itself (a synthesised mode with no file-type
+        // bits set after masking) must NOT match any predicate.
+        // mode=0 → 0 & S_IFMT == 0 ≠ any S_IF* constant.
+        let zero = 0_u16;
+        assert!(!is_regular_file(zero));
+        assert!(!is_directory(zero));
+        assert!(!is_symlink(zero));
+        assert!(!is_character_device(zero));
+        assert!(!is_block_device(zero));
+        assert!(!is_fifo(zero));
+        assert!(!is_socket(zero));
     }
 
     /// bd-xhswi — Kernel-conformance pin for the btrfs checksum-type

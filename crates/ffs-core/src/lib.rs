@@ -18099,11 +18099,17 @@ impl FsOps for OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
-        let target_len = target.as_os_str().as_encoded_bytes().len();
-        if target_len == 0
-            || u64::try_from(target_len).unwrap_or(u64::MAX) > LINUX_SYMLINK_TARGET_MAX
-        {
+        let target_bytes = target.as_os_str().as_encoded_bytes();
+        let target_len = target_bytes.len();
+        let target_len_exceeds_max =
+            u64::try_from(target_len).map_or(true, |len| len > LINUX_SYMLINK_TARGET_MAX);
+        if target_len == 0 || target_len_exceeds_max {
             return Err(FfsError::NameTooLong);
+        }
+        if target_bytes.contains(&0) {
+            return Err(FfsError::Format(
+                "symlink target must not contain NUL".into(),
+            ));
         }
         match &self.flavor {
             FsFlavor::Ext4(_) => self
@@ -37766,6 +37772,36 @@ mod tests {
             .readlink(&cx, &mut RequestScope::empty(), attr.ino)
             .expect("readlink max symlink");
         assert_eq!(target.len(), path_max - 1);
+    }
+
+    #[test]
+    fn btrfs_symlink_rejects_target_containing_nul() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let target = Path::new(OsStr::from_bytes(b"bad\0target"));
+
+        let err = ops
+            .symlink(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("nul-target-link"),
+                target,
+                0,
+                0,
+            )
+            .expect_err("symlink with NUL target should fail");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        let lookup_err = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("nul-target-link"),
+            )
+            .expect_err("failed NUL-target symlink must not create a dirent");
+        assert_eq!(lookup_err.to_errno(), libc::ENOENT);
     }
 
     #[test]

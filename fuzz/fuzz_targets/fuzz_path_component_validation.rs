@@ -8,7 +8,7 @@ use ffs_btrfs::{
 };
 use ffs_core::{DirEntry, FileType, InodeAttr, OpenFs, OpenOptions};
 use ffs_error::{FfsError, Result};
-use ffs_types::{crc32c, ByteOffset, InodeNumber, BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET};
+use ffs_types::{BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, ByteOffset, InodeNumber, crc32c};
 use libfuzzer_sys::fuzz_target;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -219,12 +219,29 @@ fn unit_result(result: Result<()>) -> OpOutcome {
     }
 }
 
-fn bytes_result(result: Result<Vec<u8>>) -> OpOutcome {
+fn fail() -> ! {
+    std::process::abort();
+}
+
+fn require(condition: bool) {
+    if !condition {
+        fail();
+    }
+}
+
+fn bytes_outcome(bytes: &[u8]) -> OpOutcome {
+    OpOutcome::Bytes {
+        len: bytes.len(),
+        crc32c: crc32c(bytes),
+    }
+}
+
+fn symlink_readback_result(result: Result<Vec<u8>>, target: &[u8]) -> OpOutcome {
     match result {
-        Ok(bytes) => OpOutcome::Bytes {
-            len: bytes.len(),
-            crc32c: crc32c(&bytes),
-        },
+        Ok(bytes) => {
+            require(bytes.as_slice() == target);
+            bytes_outcome(&bytes)
+        }
         Err(err) => OpOutcome::Err(err.to_errno()),
     }
 }
@@ -254,6 +271,12 @@ fn assert_rejected_if_invalid(name: &[u8], outcome: &OpOutcome) {
             matches!(outcome, OpOutcome::Err(_)),
             "invalid name unexpectedly accepted: {name:?} -> {outcome:?}"
         );
+    }
+}
+
+fn assert_symlink_rejected_if_invalid_target(target: &[u8], outcome: &OpOutcome) {
+    if target.is_empty() || target.contains(&0) {
+        require(matches!(outcome, OpOutcome::Err(_)));
     }
 }
 
@@ -318,9 +341,12 @@ fn classify_case(inputs: &Inputs) -> ValidationOutcome {
         0,
     ));
     assert_rejected_if_invalid(&inputs.symlink_name, &symlink);
+    assert_symlink_rejected_if_invalid_target(&inputs.symlink_target, &symlink);
 
     let symlink_readback = match &symlink {
-        OpOutcome::Attr { ino, .. } => bytes_result(fs.readlink(&cx, InodeNumber(*ino))),
+        OpOutcome::Attr { ino, .. } => {
+            symlink_readback_result(fs.readlink(&cx, InodeNumber(*ino)), &inputs.symlink_target)
+        }
         _ => OpOutcome::Skipped,
     };
 
