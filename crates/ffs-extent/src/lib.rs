@@ -4758,6 +4758,171 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
                 parts.len(),
             );
         }
+
+        // ── ExtentCache metamorphic relations (bd-upa13) ──────────────
+
+        /// MR-1 — Insert/lookup roundtrip: after `insert(ns, m)` for a
+        /// mapping with `count >= 1`, `lookup(ns, m.logical_start)`
+        /// returns a mapping that preserves the original
+        /// `physical_start`, `count`, and `unwritten` flag (the
+        /// returned `logical_start` equals the queried block, which
+        /// is the same as `m.logical_start` here).
+        #[test]
+        fn proptest_extent_cache_insert_lookup_roundtrip(
+            capacity in 1_usize..=64,
+            ns in 0_u64..=8,
+            logical_start in 0_u32..=10_000,
+            count in 1_u32..=1024,
+            physical_start in 1_u64..=100_000,
+            unwritten in any::<bool>(),
+        ) {
+            let cache = ExtentCache::with_capacity(capacity);
+            let mapping = ExtentMapping {
+                logical_start,
+                physical_start,
+                count,
+                unwritten,
+            };
+            cache.insert(ns, mapping);
+            let hit = cache
+                .lookup(ns, logical_start)
+                .expect("MR-1: lookup at logical_start must hit after insert");
+            prop_assert_eq!(hit.logical_start, logical_start);
+            prop_assert_eq!(hit.physical_start, physical_start);
+            prop_assert_eq!(hit.count, count);
+            prop_assert_eq!(hit.unwritten, unwritten);
+        }
+
+        /// MR-2 — Invalidate-range removes overlapping entries: after
+        /// `invalidate_range(ns, m.logical_start, m.count)`, lookups
+        /// for `m.logical_start` (and the rest of the original range)
+        /// return None. Pins the contract that the invalidation
+        /// surface covers the entire reported extent.
+        #[test]
+        fn proptest_extent_cache_invalidate_range_removes_overlapping(
+            ns in 0_u64..=8,
+            logical_start in 0_u32..=10_000,
+            count in 1_u32..=1024,
+            physical_start in 1_u64..=100_000,
+            unwritten in any::<bool>(),
+        ) {
+            let cache = ExtentCache::with_capacity(64);
+            let mapping = ExtentMapping {
+                logical_start,
+                physical_start,
+                count,
+                unwritten,
+            };
+            cache.insert(ns, mapping);
+            cache.invalidate_range(ns, logical_start, u64::from(count));
+            prop_assert!(
+                cache.lookup(ns, logical_start).is_none(),
+                "MR-2: lookup at the invalidated logical_start must return None"
+            );
+        }
+
+        /// MR-3 — Invalidate-all clears every namespace: after
+        /// `invalidate_all()`, every previously-inserted mapping
+        /// returns None on lookup, regardless of namespace or insert
+        /// ordering.
+        #[test]
+        fn proptest_extent_cache_invalidate_all_clears_every_namespace(
+            seeds in proptest::collection::vec(
+                (0_u64..=4_u64, 0_u32..=10_000_u32, 1_u32..=128_u32, 1_u64..=100_000_u64),
+                1..=8,
+            ),
+        ) {
+            let cache = ExtentCache::with_capacity(64);
+            for (ns, logical_start, count, physical_start) in &seeds {
+                cache.insert(
+                    *ns,
+                    ExtentMapping {
+                        logical_start: *logical_start,
+                        physical_start: *physical_start,
+                        count: *count,
+                        unwritten: false,
+                    },
+                );
+            }
+            cache.invalidate_all();
+            for (ns, logical_start, _count, _physical_start) in &seeds {
+                prop_assert!(
+                    cache.lookup(*ns, *logical_start).is_none(),
+                    "MR-3: lookup must return None after invalidate_all (ns={ns}, ls={logical_start})"
+                );
+            }
+        }
+
+        /// MR-4 — Stats monotonicity: between `reset_stats()` calls,
+        /// `hits` and `misses` only ever increase. A miss followed by
+        /// a hit grows both counters; neither decreases.
+        #[test]
+        fn proptest_extent_cache_stats_monotonic(
+            ns in 0_u64..=8,
+            logical_start in 0_u32..=10_000,
+            count in 1_u32..=1024,
+            physical_start in 1_u64..=100_000,
+            unwritten in any::<bool>(),
+        ) {
+            let cache = ExtentCache::with_capacity(16);
+            let stats0 = cache.stats();
+            // First lookup: cache empty → miss.
+            let _ = cache.lookup(ns, logical_start);
+            let stats1 = cache.stats();
+            prop_assert!(
+                stats1.hits >= stats0.hits && stats1.misses >= stats0.misses,
+                "MR-4: stats counters must not decrease between operations"
+            );
+
+            cache.insert(
+                ns,
+                ExtentMapping {
+                    logical_start,
+                    physical_start,
+                    count,
+                    unwritten,
+                },
+            );
+            // Second lookup: hit.
+            let _ = cache.lookup(ns, logical_start);
+            let stats2 = cache.stats();
+            prop_assert!(
+                stats2.hits >= stats1.hits && stats2.misses >= stats1.misses,
+                "MR-4: stats counters must not decrease between operations"
+            );
+            prop_assert!(
+                stats2.hits > stats1.hits,
+                "MR-4: hit lookup must increment the hits counter"
+            );
+        }
+
+        /// MR-5 — `reset_stats` preserves entries: zeroing the hit
+        /// counters does NOT remove cached entries. Lookups
+        /// immediately after reset_stats must still hit.
+        #[test]
+        fn proptest_extent_cache_reset_stats_preserves_entries(
+            ns in 0_u64..=8,
+            logical_start in 0_u32..=10_000,
+            count in 1_u32..=1024,
+            physical_start in 1_u64..=100_000,
+        ) {
+            let cache = ExtentCache::with_capacity(16);
+            let mapping = ExtentMapping {
+                logical_start,
+                physical_start,
+                count,
+                unwritten: false,
+            };
+            cache.insert(ns, mapping);
+            cache.reset_stats();
+            let after = cache.stats();
+            prop_assert_eq!(after.hits, 0, "MR-5: reset_stats must zero hits");
+            prop_assert_eq!(after.misses, 0, "MR-5: reset_stats must zero misses");
+            prop_assert!(
+                cache.lookup(ns, logical_start).is_some(),
+                "MR-5: cache entries must survive reset_stats"
+            );
+        }
     }
 
     // ── ExtentCache unit tests ─────────────────────────────────────────────
