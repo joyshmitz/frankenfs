@@ -973,4 +973,27 @@ mod tests {
             proof_bundle_artifact_paths: vec!["artifacts/proof/scheduler/smoke.json".to_owned()],
         }
     }
+
+    /// bd-dzdog — golden-output snapshot for
+    /// `render_scrub_repair_scheduler_markdown` on the deterministic
+    /// `sample_manifest()` fixture. The function previously had ZERO
+    /// tests despite being a public renderer. Pins:
+    ///   * the title line `# Scrub/Repair Scheduler Proof Plan`
+    ///   * the 5-bullet header (Manifest / Valid / Scenarios /
+    ///     Conservative claims / Authoritative claims)
+    ///   * the 8-column table header + alignment row
+    ///   * per-scenario row layout including the percent format
+    ///     `{:.2}%`, freshness/foreground floats, and the route enum
+    ///     name (`mounted_mutation_authority` / `detection_only`)
+    /// Pairs with bd-by4bc (perf_comparison) / bd-aofgb
+    /// (remediation_catalog) / bd-bogcc (invariant_oracle).
+    #[test]
+    fn render_scrub_repair_scheduler_markdown_default_sample_snapshot() {
+        let report = validate_scrub_repair_scheduler_manifest(&sample_manifest());
+        let markdown = render_scrub_repair_scheduler_markdown(&report);
+        insta::assert_snapshot!(
+            "render_scrub_repair_scheduler_markdown_default_sample",
+            markdown
+        );
+    }
 }

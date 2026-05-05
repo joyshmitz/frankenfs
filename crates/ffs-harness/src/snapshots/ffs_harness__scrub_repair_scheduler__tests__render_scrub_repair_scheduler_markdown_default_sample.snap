@@ -1,0 +1,16 @@
+---
+source: crates/ffs-harness/src/scrub_repair_scheduler.rs
+expression: markdown
+---
+# Scrub/Repair Scheduler Proof Plan
+
+- Manifest: `scrub-repair-scheduler-test`
+- Valid: `true`
+- Scenarios: `2`
+- Conservative claims: `1`
+- Authoritative claims: `1`
+
+| Scenario | Mode | Class | Claim | p99 delta | Freshness loss | Foreground loss | Route |
+|----------|------|-------|-------|-----------|----------------|-----------------|-------|
+| `scrub_repair_overlap_large_host` | `morsel_driven` | `pass` | `measured_authoritative` | `6.00%` | `14.92` | `6.00` | `mounted_mutation_authority` |
+| `scrub_repair_fixture_smoke` | `foreground_first` | `skip` | `fixture_smoke_only` | `1.25%` | `11.83` | `1.25` | `detection_only` |
