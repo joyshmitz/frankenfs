@@ -1,0 +1,16 @@
+---
+source: crates/ffs-harness/src/invariant_oracle.rs
+expression: markdown
+---
+# Invariant Oracle Report
+
+- Model version: `ffs-invariant-oracle-model-v1`
+- Trace: `trace-valid-write`
+- Seed: `42`
+- Deterministic replay id: `49926fc0ca6d279246270faa7333cd16679d004dd60a844a9bd457d35735a485`
+- Operations: 4 expected_failures=1 unexpected_failures=0 errors=0
+- Reproduction: `ffs-harness validate-invariant-oracle --trace artifacts/invariant/trace.json`
+
+## Violations
+
+- op `op-3` index=3 invariant=`file_size_matches_model` class=`production_bug` expected=true minimized=4/4 pre=197df2b989d912ad7d28c01bdbc9def5e272994da541621d115367d9d7c95404 post=d85d4e26e69b8198eb4b357d8e59c59ac883659f2a8661cd0494c64355786f04

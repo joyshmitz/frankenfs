@@ -1854,4 +1854,35 @@ mod tests {
         assert!(markdown.contains("file_size_matches_model"));
         assert!(markdown.contains("validate-invariant-oracle"));
     }
+
+    /// bd-bogcc — golden-output snapshot for
+    /// `render_invariant_oracle_markdown` on a deterministic trace
+    /// fixture (valid_trace + one synthetic violation). Pins the
+    /// title, header bullet structure (model_version / trace / seed /
+    /// deterministic_replay_id / operations summary / reproduction),
+    /// the violations section heading, the per-violation line shape
+    /// with all 9 fields (op id / index / invariant / class /
+    /// expected / minimized/original trace lengths / pre+post state
+    /// hashes), and the trailing newlines. Substring-only assertions
+    /// in `structured_markdown_includes_violation_and_reproduction`
+    /// cannot detect column reorders or section-heading drift; this
+    /// snapshot does.
+    #[test]
+    fn render_invariant_oracle_markdown_with_violation_snapshot() {
+        let mut trace = valid_trace();
+        let mut bad = op(
+            3,
+            InvariantAction::ModelInvariantProbe,
+            "/alpha",
+            None,
+            state(&[("/alpha", 5)], &["/alpha"]),
+            state(&[("/alpha", 4)], &["/alpha"]),
+        );
+        bad.expected_violation = Some("file_size_matches_model".to_owned());
+        bad.failure_class = Some(InvariantFailureClass::ProductionBug);
+        trace.operations.push(bad);
+        let report = validate_invariant_trace(&trace);
+        let markdown = render_invariant_oracle_markdown(&report);
+        insta::assert_snapshot!("render_invariant_oracle_markdown_with_violation", markdown);
+    }
 }
