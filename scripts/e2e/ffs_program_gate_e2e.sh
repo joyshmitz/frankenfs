@@ -82,12 +82,12 @@ fi
 e2e_step "Scenario 2: Workspace builds clean (clippy)"
 
 CLIPPY_LOG=$(mktemp)
-if cargo clippy --workspace -- -D warnings > "$CLIPPY_LOG" 2>&1; then
+if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo clippy --workspace -- -D warnings > "$CLIPPY_LOG" 2>&1; then
     scenario_result "pgat_workspace_clippy" "PASS" "Workspace clippy clean (0 warnings, 0 errors)"
 else
     scenario_result "pgat_workspace_clippy" "FAIL" "Workspace clippy has warnings or errors"
 fi
-rm -f "$CLIPPY_LOG"
+e2e_cleanup_tmp_file "$CLIPPY_LOG"
 
 #######################################
 # Scenario 3: Workspace tests pass
@@ -95,14 +95,14 @@ rm -f "$CLIPPY_LOG"
 e2e_step "Scenario 3: Workspace tests pass"
 
 TEST_LOG=$(mktemp)
-if cargo test --workspace > "$TEST_LOG" 2>&1; then
+if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo test --workspace > "$TEST_LOG" 2>&1; then
     TOTAL_PASS=$(grep -c " ok$" "$TEST_LOG" 2>/dev/null || true)
     TOTAL_PASS="${TOTAL_PASS:-0}"
     scenario_result "pgat_workspace_tests" "PASS" "All workspace tests pass (${TOTAL_PASS}+ tests)"
 else
     scenario_result "pgat_workspace_tests" "FAIL" "Workspace tests have failures"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 4: MVCC replay gate (Epic 1)
