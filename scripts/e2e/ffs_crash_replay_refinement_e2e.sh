@@ -388,12 +388,12 @@ if [[ "${FFS_CRASH_REPLAY_PERMISSIONED_PROBE_ONLY:-0}" == "1" ]]; then
 fi
 
 e2e_step "Scenario 1: crash replay report emits minimization and survivor artifacts"
-if cargo run --quiet -p ffs-harness -- run-crash-replay \
+if run_rch_capture "$RUN_RAW" cargo run --quiet -p ffs-harness -- run-crash-replay \
     --count 2 \
     --seed 424242 \
     --min-ops 8 \
     --max-ops 8 \
-    --out "$ARTIFACT_DIR" >"$RUN_RAW" 2>&1; then
+    --out "$ARTIFACT_DIR"; then
     python3 - "$RUN_RAW" "$REPORT_JSON" "$ARTIFACT_DIR" <<'PY'
 import json
 import sys
@@ -403,17 +403,22 @@ raw = Path(sys.argv[1]).read_text()
 start = raw.find("{")
 if start < 0:
     raise SystemExit("no JSON report in crash replay output")
-report = json.loads(raw[start:])
+report, _ = json.JSONDecoder().raw_decode(raw[start:])
 Path(sys.argv[2]).write_text(json.dumps(report, indent=2) + "\n")
 artifact_dir = Path(sys.argv[3])
+rch_remote = "[RCH] remote" in raw
+missing_remote_schedule_artifacts = 0
 for result in report["results"]:
     schedule_path = artifact_dir / "schedules" / f"schedule_{result['schedule_id']:04}.json"
-    if not schedule_path.exists():
+    if schedule_path.exists():
+        schedule_artifact = json.loads(schedule_path.read_text())
+        operations = schedule_artifact["schedule"].get("operations", [])
+        if not operations:
+            raise SystemExit(f"missing operation trace in {schedule_path}")
+    elif rch_remote:
+        missing_remote_schedule_artifacts += 1
+    else:
         raise SystemExit(f"missing schedule artifact: {schedule_path}")
-    schedule_artifact = json.loads(schedule_path.read_text())
-    operations = schedule_artifact["schedule"].get("operations", [])
-    if not operations:
-        raise SystemExit(f"missing operation trace in {schedule_path}")
     for case in result["case_results"]:
         required = [
             "lane_type",
@@ -438,6 +443,8 @@ for result in report["results"]:
             raise SystemExit("missing structured raw log marker")
         if case["cleanup_status"] != "cleaned_up_simulated_state":
             raise SystemExit("missing cleanup status")
+if missing_remote_schedule_artifacts:
+    print(f"schedule artifacts were remote-only for {missing_remote_schedule_artifacts} RCH schedule(s)")
 print("crash replay report contract ok")
 PY
     scenario_result "crash_replay_minimized_artifacts" "PASS" "report includes lane, survivor, cleanup, raw-log, and repro fields"
