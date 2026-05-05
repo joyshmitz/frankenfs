@@ -85,6 +85,8 @@ pub struct MountedWriteErrnoBudget {
     pub schema_version: u32,
     pub catalog_id: String,
     pub bead_id: String,
+    #[serde(default)]
+    pub catalog_owner_beads: Vec<String>,
     pub max_broad_fallback_budget_per_cell: u32,
     pub cells: Vec<MountedWriteErrnoCell>,
 }
@@ -149,9 +151,11 @@ pub fn validate_mounted_write_errno_budget(
     let mut budget_exceeded_cells = 0_usize;
 
     validate_top_level(catalog, &mut errors);
+    validate_catalog_owner_beads(catalog, &mut errors);
     for cell in &catalog.cells {
         validate_cell(
             cell,
+            &catalog.catalog_owner_beads,
             catalog.max_broad_fallback_budget_per_cell,
             &mut ids,
             &mut cell_keys,
@@ -204,9 +208,33 @@ fn validate_top_level(catalog: &MountedWriteErrnoBudget, errors: &mut Vec<String
     }
 }
 
+fn validate_catalog_owner_beads(catalog: &MountedWriteErrnoBudget, errors: &mut Vec<String>) {
+    if catalog.catalog_owner_beads.is_empty() {
+        errors.push("mounted write errno budget must declare catalog_owner_beads".to_owned());
+    }
+    if !catalog
+        .catalog_owner_beads
+        .iter()
+        .any(|bead| bead == &catalog.bead_id)
+    {
+        errors.push(format!(
+            "mounted write errno budget catalog_owner_beads must include bead_id `{}`",
+            catalog.bead_id
+        ));
+    }
+    for bead in &catalog.catalog_owner_beads {
+        if !bead.starts_with("bd-") {
+            errors.push(format!(
+                "mounted write errno budget catalog_owner_beads entry must look like bd-..., got `{bead}`"
+            ));
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_cell(
     cell: &MountedWriteErrnoCell,
+    catalog_owner_beads: &[String],
     max_budget: u32,
     ids: &mut BTreeSet<String>,
     cell_keys: &mut BTreeSet<(String, String)>,
@@ -293,6 +321,7 @@ fn validate_cell(
     validate_errno_class_consistency(cell, errors);
     validate_broad_fallback_invariants(
         cell,
+        catalog_owner_beads,
         max_budget,
         broad_fallback_total,
         budget_exceeded_cells,
@@ -333,6 +362,7 @@ fn validate_errno_class_consistency(cell: &MountedWriteErrnoCell, errors: &mut V
 
 fn validate_broad_fallback_invariants(
     cell: &MountedWriteErrnoCell,
+    catalog_owner_beads: &[String],
     max_budget: u32,
     broad_fallback_total: &mut u32,
     budget_exceeded_cells: &mut usize,
@@ -352,6 +382,15 @@ fn validate_broad_fallback_invariants(
             errors.push(format!(
                 "cell `{}` broad_fallback class must link a follow_up_bead (bd-...)",
                 cell.cell_id
+            ));
+        }
+        if catalog_owner_beads
+            .iter()
+            .any(|bead| bead == &cell.follow_up_bead)
+        {
+            errors.push(format!(
+                "cell `{}` broad_fallback follow_up_bead `{}` must name a distinct investigation bead, not a catalog owner bead",
+                cell.cell_id, cell.follow_up_bead
             ));
         }
         if cell.broad_fallback_count == 0 {
@@ -638,6 +677,27 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must link a follow_up_bead"))
         );
+    }
+
+    #[test]
+    fn broad_fallback_class_requires_distinct_investigation_bead() {
+        let mut catalog = fixture_catalog();
+        let owner_bead = catalog
+            .catalog_owner_beads
+            .first()
+            .expect("fixture declares catalog owner bead")
+            .clone();
+        let cell = catalog
+            .cells
+            .iter_mut()
+            .find(|c| c.user_facing_class == "broad_fallback")
+            .expect("broad fallback cell exists");
+        cell.follow_up_bead = owner_bead;
+        let report = validate_mounted_write_errno_budget(&catalog);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("must name a distinct investigation bead")
+                && err.contains("catalog owner bead")
+        }));
     }
 
     #[test]
