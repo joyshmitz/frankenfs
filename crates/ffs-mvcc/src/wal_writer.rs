@@ -292,6 +292,44 @@ impl WalWriter {
     /// write position, and optionally synced according to the configured
     /// [`SyncPolicy`].
     ///
+    /// # Reasoning mode: append-only + strict-monotonic + atomic-rollback (bd-chmw4)
+    ///
+    /// This function implements an **append-only WAL with a strict-
+    /// monotonic sequence check and atomic-rollback on any failure
+    /// between encoded write and synced state**. The three modes
+    /// compose as follows:
+    ///
+    /// * **Append-only**: writes always go to `self.write_pos`; the
+    ///   file is never overwritten in place. The only function that
+    ///   reduces `write_pos` is rollback (here and in
+    ///   [`Self::rollback_failed_append`]) or the explicit
+    ///   `truncate_wal` after a successful checkpoint.
+    /// * **Strict monotonic**: D1 below — `commit_seq` MUST be
+    ///   strictly greater than `last_commit_seq`. Equality is a
+    ///   FormatViolation. Replay relies on this to detect WAL
+    ///   tampering.
+    /// * **Atomic-rollback**: any failure path between the
+    ///   `raw_append` call (l. 391) and the `last_commit_seq =
+    ///   commit_seq` assignment (l. 425) MUST revert the partial
+    ///   append, otherwise a reader at the WAL tail would see a
+    ///   commit record whose in-memory state is unreachable. There
+    ///   are two rollback paths:
+    ///     1. **Verify failure** (`if self.config.verify_writes { ... }`):
+    ///        resets `self.write_pos` and truncates the file. Does
+    ///        NOT reset `appends_since_sync` because that counter is
+    ///        incremented AFTER verify; if you move verify past the
+    ///        increment, you MUST reset the counter here too.
+    ///     2. **Sync failure** (after
+    ///        `increment_pending_sync_count`): delegates to
+    ///        [`Self::rollback_failed_append`], which reverts
+    ///        `write_pos`, truncates the file, AND restores
+    ///        `appends_since_sync` to its pre-increment value.
+    ///
+    /// Any new failure path inserted between `raw_append` and the
+    /// final assignment MUST call `rollback_failed_append` (or the
+    /// equivalent inline reset for pre-counter paths) before
+    /// returning Err.
+    ///
     /// # Monotonicity (D1)
     ///
     /// The commit's `commit_seq` must be strictly greater than any previously
@@ -624,6 +662,36 @@ impl WalWriter {
         self.appends_since_sync = self.appends_since_sync.saturating_add(delta);
     }
 
+    /// Reverse a partial WAL append when the post-append sync (or
+    /// any other post-counter step) fails. **This is the rollback
+    /// partner of the append-only/atomic-rollback contract documented
+    /// on [`Self::append_commit`].** (bd-chmw4)
+    ///
+    /// The rollback covers THREE state pieces. Forgetting any of
+    /// them leaves the WAL in a state where a tail reader sees a
+    /// commit record whose corresponding in-memory state is
+    /// unreachable:
+    ///
+    /// 1. **`write_pos`** — reset to the pre-append offset so the
+    ///    next append re-uses the slot.
+    /// 2. **File length** — `set_len(write_offset)` truncates the
+    ///    on-disk record. The `let _ =` is intentional best-effort:
+    ///    if the truncate itself fails (e.g., disk full, EROFS),
+    ///    the WAL is in an undefined state but no reader can
+    ///    legitimately observe partial commits because
+    ///    `last_commit_seq` was NOT yet bumped — replay sees the
+    ///    record as orphan and stops at the first decode error.
+    /// 3. **`appends_since_sync`** — restored to its pre-increment
+    ///    value so the next append's sync-policy decision is based
+    ///    on the correct count. This is the piece the verify-failure
+    ///    inline rollback in `append_commit` SKIPS, because verify
+    ///    runs BEFORE `increment_pending_sync_count`. Any reordering
+    ///    that puts the increment before verify MUST also start
+    ///    resetting this counter on verify failure.
+    ///
+    /// Note: `last_commit_seq` is NOT yet updated when this function
+    /// is reachable, so the strict-monotonic invariant is preserved
+    /// without explicit rollback of that field.
     fn rollback_failed_append(
         &mut self,
         write_offset: u64,
