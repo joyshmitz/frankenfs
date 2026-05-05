@@ -44,10 +44,22 @@ pub const BTRFS_ITEM_FREE_SPACE_INFO: u8 = 198;
 pub const BTRFS_ITEM_FREE_SPACE_EXTENT: u8 = 199;
 pub const BTRFS_ITEM_FREE_SPACE_BITMAP: u8 = 200;
 
-/// Well-known tree objectids.
+/// Well-known tree objectids (kernel: fs/btrfs/btrfs_tree.h).
 pub const BTRFS_EXTENT_TREE_OBJECTID: u64 = 2;
 pub const BTRFS_CHUNK_TREE_OBJECTID: u64 = 3;
 pub const BTRFS_DEV_TREE_OBJECTID: u64 = 4;
+/// Root tree's dir entry inode (kernel: `BTRFS_ROOT_TREE_DIR_OBJECTID`).
+pub const BTRFS_ROOT_TREE_DIR_OBJECTID: u64 = 6;
+/// Data-checksum tree (kernel: `BTRFS_CSUM_TREE_OBJECTID`).
+pub const BTRFS_CSUM_TREE_OBJECTID: u64 = 7;
+/// Quota tree (kernel: `BTRFS_QUOTA_TREE_OBJECTID`).
+pub const BTRFS_QUOTA_TREE_OBJECTID: u64 = 8;
+/// Subvolume UUID lookup tree (kernel: `BTRFS_UUID_TREE_OBJECTID`).
+pub const BTRFS_UUID_TREE_OBJECTID: u64 = 9;
+/// Free-space tree v2 (kernel: `BTRFS_FREE_SPACE_TREE_OBJECTID`).
+pub const BTRFS_FREE_SPACE_TREE_OBJECTID: u64 = 10;
+/// Block-group tree v2 (kernel: `BTRFS_BLOCK_GROUP_TREE_OBJECTID`).
+pub const BTRFS_BLOCK_GROUP_TREE_OBJECTID: u64 = 11;
 
 /// Block group type flags.
 pub const BTRFS_BLOCK_GROUP_DATA: u64 = 1;
@@ -10902,5 +10914,54 @@ mod tests {
 
         let err = parse_send_stream(&data).unwrap_err();
         assert!(matches!(err, ffs_types::ParseError::InvalidField { .. }));
+    }
+
+    /// bd-khzn4 — Kernel-conformance pin for the well-known btrfs
+    /// tree objectids declared in `fs/btrfs/btrfs_tree.h`. A regression
+    /// that swapped, say, BTRFS_FREE_SPACE_TREE (10) and
+    /// BTRFS_BLOCK_GROUP_TREE (11) would silently mis-route v2 metadata
+    /// reads. This test pins each value AND the strict-monotonic
+    /// ordering across the contiguous reserved range 1..=11 plus the
+    /// FIRST_FREE = 256 boundary.
+    #[test]
+    fn btrfs_tree_objectid_constants_match_kernel_header() {
+        // Values per fs/btrfs/btrfs_tree.h.
+        assert_eq!(BTRFS_ROOT_TREE_OBJECTID, 1);
+        assert_eq!(BTRFS_EXTENT_TREE_OBJECTID, 2);
+        assert_eq!(BTRFS_CHUNK_TREE_OBJECTID, 3);
+        assert_eq!(BTRFS_DEV_TREE_OBJECTID, 4);
+        assert_eq!(BTRFS_FS_TREE_OBJECTID, 5);
+        assert_eq!(BTRFS_ROOT_TREE_DIR_OBJECTID, 6);
+        assert_eq!(BTRFS_CSUM_TREE_OBJECTID, 7);
+        assert_eq!(BTRFS_QUOTA_TREE_OBJECTID, 8);
+        assert_eq!(BTRFS_UUID_TREE_OBJECTID, 9);
+        assert_eq!(BTRFS_FREE_SPACE_TREE_OBJECTID, 10);
+        assert_eq!(BTRFS_BLOCK_GROUP_TREE_OBJECTID, 11);
+        assert_eq!(BTRFS_FIRST_FREE_OBJECTID, 256);
+
+        // Strict-monotonic ascending across the reserved range, with
+        // a jump to FIRST_FREE that leaves room for non-upstream
+        // tree objectids in [12, 256).
+        assert!(
+            BTRFS_ROOT_TREE_OBJECTID < BTRFS_EXTENT_TREE_OBJECTID
+                && BTRFS_EXTENT_TREE_OBJECTID < BTRFS_CHUNK_TREE_OBJECTID
+                && BTRFS_CHUNK_TREE_OBJECTID < BTRFS_DEV_TREE_OBJECTID
+                && BTRFS_DEV_TREE_OBJECTID < BTRFS_FS_TREE_OBJECTID
+                && BTRFS_FS_TREE_OBJECTID < BTRFS_ROOT_TREE_DIR_OBJECTID
+                && BTRFS_ROOT_TREE_DIR_OBJECTID < BTRFS_CSUM_TREE_OBJECTID
+                && BTRFS_CSUM_TREE_OBJECTID < BTRFS_QUOTA_TREE_OBJECTID
+                && BTRFS_QUOTA_TREE_OBJECTID < BTRFS_UUID_TREE_OBJECTID
+                && BTRFS_UUID_TREE_OBJECTID < BTRFS_FREE_SPACE_TREE_OBJECTID
+                && BTRFS_FREE_SPACE_TREE_OBJECTID < BTRFS_BLOCK_GROUP_TREE_OBJECTID
+                && BTRFS_BLOCK_GROUP_TREE_OBJECTID < BTRFS_FIRST_FREE_OBJECTID,
+            "btrfs tree objectids must be strict-monotonic ascending"
+        );
+
+        // The reserved range is contiguous 1..=11 (no gaps).
+        assert_eq!(
+            BTRFS_BLOCK_GROUP_TREE_OBJECTID - BTRFS_ROOT_TREE_OBJECTID,
+            10,
+            "the reserved tree objectid range must be contiguous 1..=11"
+        );
     }
 }
