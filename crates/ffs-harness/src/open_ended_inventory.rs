@@ -432,8 +432,13 @@ pub struct OpenEndedNoteMatch {
     pub false_positive_reason: String,
     pub linked_bead_or_artifact: String,
     pub risk_surface: String,
+    pub existing_evidence: String,
+    pub proof_type: String,
+    pub unit_test_expectation: String,
+    pub e2e_fuzz_smoke_expectation: String,
     pub required_log_fields: Vec<String>,
     pub required_artifacts: Vec<String>,
+    pub non_applicability_rationale: String,
     pub reproduction_command: String,
 }
 
@@ -1147,9 +1152,11 @@ pub fn scan_open_ended_notes(
     if output_path.trim().is_empty() {
         errors.push("open-ended note scan output_path must be nonempty".to_owned());
     }
-    if !reproduction_command.contains("open_ended_note_scanner") {
+    if !reproduction_command.contains("open_ended_note_scanner")
+        && !reproduction_command.contains("open-ended-note-scanner")
+    {
         errors.push(
-            "open-ended note scan reproduction_command must name open_ended_note_scanner"
+            "open-ended note scan reproduction_command must name open_ended_note_scanner or open-ended-note-scanner"
                 .to_owned(),
         );
     }
@@ -1260,6 +1267,7 @@ fn build_note_match(
 ) -> OpenEndedNoteMatch {
     let (decision, false_positive_reason, linked_bead_or_artifact) =
         classify_open_ended_note(line, in_fenced_code);
+    let risk_surface = infer_note_risk_surface(line, matched_phrase);
 
     OpenEndedNoteMatch {
         source_path: source.source_path.clone(),
@@ -1269,8 +1277,17 @@ fn build_note_match(
         matched_text_snippet_hash: snippet_hash(line),
         decision: decision.to_owned(),
         false_positive_reason: false_positive_reason.to_owned(),
+        existing_evidence: note_existing_evidence(
+            decision,
+            false_positive_reason,
+            &linked_bead_or_artifact,
+        ),
+        proof_type: note_proof_type(decision, risk_surface).to_owned(),
+        unit_test_expectation: "open_ended_note_scanner_fixture_docs_emit_expected_rows".to_owned(),
+        e2e_fuzz_smoke_expectation: "scripts/e2e/ffs_open_ended_inventory_scanner_e2e.sh"
+            .to_owned(),
         linked_bead_or_artifact,
-        risk_surface: infer_note_risk_surface(line, matched_phrase).to_owned(),
+        risk_surface: risk_surface.to_owned(),
         required_log_fields: REQUIRED_NOTE_LOG_FIELDS
             .iter()
             .map(|field| (*field).to_owned())
@@ -1279,6 +1296,10 @@ fn build_note_match(
             .iter()
             .map(|field| (*field).to_owned())
             .collect(),
+        non_applicability_rationale: note_non_applicability_rationale(
+            decision,
+            false_positive_reason,
+        ),
         reproduction_command: reproduction_command.to_owned(),
     }
 }
@@ -1307,6 +1328,16 @@ fn classify_open_ended_note(
             first_linked_bead_or_artifact(line).unwrap_or_else(|| "historical-context".to_owned()),
         );
     }
+    if lower.contains("phrases scanned")
+        || lower.contains("search performed")
+        || lower.contains("scanner patterns")
+    {
+        return (
+            "false_positive",
+            "scanner_methodology",
+            "scanner-methodology".to_owned(),
+        );
+    }
     if let Some(link) = first_linked_bead_or_artifact(line) {
         return ("already_linked", "n/a", link);
     }
@@ -1324,7 +1355,14 @@ fn first_linked_bead_or_artifact(line: &str) -> Option<String> {
         if token.starts_with("bd-") {
             return Some(token.to_owned());
         }
-        if token.contains('/') && (token.ends_with(".md") || token.ends_with(".json")) {
+        if token.contains('/')
+            && Path::new(token)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("json")
+                })
+        {
             return Some(token.to_owned());
         }
         if token.contains("artifact") {
@@ -1350,6 +1388,39 @@ fn infer_note_risk_surface(line: &str, matched_phrase: &str) -> &'static str {
         "parser"
     } else {
         "conformance"
+    }
+}
+
+fn note_existing_evidence(
+    decision: &str,
+    false_positive_reason: &str,
+    linked_bead_or_artifact: &str,
+) -> String {
+    match decision {
+        "already_linked" => format!("linked bead or artifact: {linked_bead_or_artifact}"),
+        "false_positive" => format!("false-positive classification: {false_positive_reason}"),
+        _ => "missing".to_owned(),
+    }
+}
+
+fn note_proof_type(decision: &str, risk_surface: &str) -> &'static str {
+    if decision == "false_positive" {
+        return "docs-non-goal";
+    }
+    match risk_surface {
+        "fuzz" => "property-test",
+        "golden-fixture" => "golden-fixture",
+        "corpus" => "corpus-seed",
+        "parser" => "parser-unit",
+        _ => "mounted-e2e",
+    }
+}
+
+fn note_non_applicability_rationale(decision: &str, false_positive_reason: &str) -> String {
+    if decision == "false_positive" {
+        false_positive_reason.to_owned()
+    } else {
+        "n/a".to_owned()
     }
 }
 
@@ -1421,6 +1492,48 @@ fn validate_open_ended_note_match(row: &OpenEndedNoteMatch, errors: &mut Vec<Str
     if row.decision != "requires_inventory_row" && row.linked_bead_or_artifact == "missing" {
         errors.push(format!(
             "open-ended note row {}:{} non-open note missing linkage marker",
+            row.source_path, row.line_number
+        ));
+    }
+    if row.existing_evidence.trim().is_empty() {
+        errors.push(format!(
+            "open-ended note row {}:{} missing existing_evidence",
+            row.source_path, row.line_number
+        ));
+    }
+    if row.decision != "requires_inventory_row" && row.existing_evidence == "missing" {
+        errors.push(format!(
+            "open-ended note row {}:{} non-open note missing existing_evidence",
+            row.source_path, row.line_number
+        ));
+    }
+    if !PROOF_TYPES.contains(&row.proof_type.as_str()) {
+        errors.push(format!(
+            "open-ended note row {}:{} invalid proof_type {}",
+            row.source_path, row.line_number, row.proof_type
+        ));
+    }
+    if row.unit_test_expectation.trim().is_empty() {
+        errors.push(format!(
+            "open-ended note row {}:{} missing unit_test_expectation",
+            row.source_path, row.line_number
+        ));
+    }
+    if row.e2e_fuzz_smoke_expectation.trim().is_empty() {
+        errors.push(format!(
+            "open-ended note row {}:{} missing e2e_fuzz_smoke_expectation",
+            row.source_path, row.line_number
+        ));
+    }
+    if row.decision == "false_positive" && row.non_applicability_rationale == "n/a" {
+        errors.push(format!(
+            "open-ended note row {}:{} false_positive needs non_applicability_rationale",
+            row.source_path, row.line_number
+        ));
+    }
+    if row.decision != "false_positive" && row.non_applicability_rationale != "n/a" {
+        errors.push(format!(
+            "open-ended note row {}:{} applicable note must use n/a non_applicability_rationale",
             row.source_path, row.line_number
         ));
     }
@@ -1579,6 +1692,23 @@ mod tests {
             "positive fixture should include false-positive controls"
         );
         assert_eq!(positive.unresolved_note_count, 0);
+        for row in &positive.rows {
+            assert!(!row.existing_evidence.is_empty());
+            assert!(PROOF_TYPES.contains(&row.proof_type.as_str()));
+            assert_eq!(
+                row.unit_test_expectation,
+                "open_ended_note_scanner_fixture_docs_emit_expected_rows"
+            );
+            assert_eq!(
+                row.e2e_fuzz_smoke_expectation,
+                "scripts/e2e/ffs_open_ended_inventory_scanner_e2e.sh"
+            );
+            if row.decision == "false_positive" {
+                assert_ne!(row.non_applicability_rationale, "n/a");
+            } else {
+                assert_eq!(row.non_applicability_rationale, "n/a");
+            }
+        }
 
         let negative = scan_open_ended_notes(
             &[note_source(
@@ -1635,7 +1765,7 @@ mod tests {
 
     #[test]
     fn open_ended_note_scanner_separates_false_positive_classes() {
-        let text = r#"
+        let text = "
 ## Scanner Examples
 
 Historical context: closed bead bd-rchk7.1 asked to expand corpus before the inventory existed.
@@ -1647,7 +1777,7 @@ TODO fuzz: future edge cases in a code block are examples, not source notes.
 ```
 
 The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.json.
-"#;
+";
         let report = scan_open_ended_notes(
             &[note_source("docs/scanner-examples.md", text)],
             "artifacts/open-ended-inventory/examples.json",

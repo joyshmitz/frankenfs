@@ -54,8 +54,8 @@ use ffs_harness::{
         validate_mounted_write_matrix,
     },
     open_ended_inventory::{
-        DEFAULT_SOURCE_SCOPE_MANIFEST_PATH, load_source_scope_manifest, scan_source_scope_manifest,
-        validate_current_inventory,
+        DEFAULT_SOURCE_SCOPE_MANIFEST_PATH, OpenEndedNoteSource, load_source_scope_manifest,
+        scan_open_ended_notes, scan_source_scope_manifest, validate_current_inventory,
     },
     operational_readiness_report::{
         OperationalReadinessReportConfig, build_operational_readiness_report,
@@ -222,6 +222,7 @@ fn run() -> Result<()> {
         }
         Some("fuse-capability-probe") => fuse_capability_probe_cmd(&args[1..]),
         Some("validate-open-ended-inventory") => validate_open_ended_inventory_cmd(&args[1..]),
+        Some("open-ended-note-scanner") => open_ended_note_scanner_cmd(&args[1..]),
         Some("validate-source-scope-manifest") => validate_source_scope_manifest_cmd(&args[1..]),
         Some("validate-deferred-parity-audit") => validate_deferred_parity_audit_cmd(&args[1..]),
         Some("validate-ambition-evidence-matrix") => {
@@ -3090,6 +3091,104 @@ fn validate_open_ended_inventory_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn open_ended_note_scanner_cmd(args: &[String]) -> Result<()> {
+    let mut source_paths = Vec::new();
+    let mut out_path: Option<String> = None;
+    let mut allow_invalid = false;
+    let mut reproduction_command: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--source" => {
+                i += 1;
+                source_paths.push(args.get(i).context("--source requires a path")?.to_owned());
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--allow-invalid" => {
+                allow_invalid = true;
+            }
+            "--reproduction-command" => {
+                i += 1;
+                reproduction_command = Some(
+                    args.get(i)
+                        .context("--reproduction-command requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_open_ended_note_scanner_usage();
+                return Ok(());
+            }
+            other => bail!("unknown open-ended-note-scanner argument: {other}"),
+        }
+        i += 1;
+    }
+
+    if source_paths.is_empty() {
+        bail!("open-ended-note-scanner requires at least one --source FILE");
+    }
+
+    let sources = source_paths
+        .iter()
+        .map(|source_path| {
+            fs::read_to_string(source_path)
+                .with_context(|| format!("failed to read {source_path}"))
+                .map(|text| OpenEndedNoteSource {
+                    source_path: source_path.to_owned(),
+                    text,
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let output_path = out_path.as_deref().unwrap_or("stdout");
+    let reproduction_command = reproduction_command.unwrap_or_else(|| {
+        let mut command = "ffs-harness open-ended-note-scanner".to_owned();
+        for source_path in &source_paths {
+            command.push_str(" --source ");
+            command.push_str(source_path);
+        }
+        if let Some(path) = &out_path {
+            command.push_str(" --out ");
+            command.push_str(path);
+        }
+        command
+    });
+
+    let report = scan_open_ended_notes(&sources, output_path, &reproduction_command);
+    let json = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = out_path {
+        let path = Path::new(&path);
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(path, format!("{json}\n"))
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        println!(
+            "open-ended note scan report written: {} matches={} unresolved={} valid={}",
+            path.display(),
+            report.match_count,
+            report.unresolved_note_count,
+            report.valid
+        );
+    } else {
+        println!("{json}");
+    }
+
+    if !report.valid && !allow_invalid {
+        bail!(
+            "open-ended note scanner failed: {}",
+            report.errors.join("; ")
+        );
+    }
+    Ok(())
+}
+
 fn validate_source_scope_manifest_cmd(args: &[String]) -> Result<()> {
     let mut manifest_path = DEFAULT_SOURCE_SCOPE_MANIFEST_PATH.to_owned();
     let mut workspace_root = ".".to_owned();
@@ -3853,6 +3952,9 @@ fn print_usage() {
     );
     println!("  ffs-harness validate-open-ended-inventory [--out FILE]");
     println!(
+        "  ffs-harness open-ended-note-scanner --source FILE [--source FILE ...] [--out FILE] [--allow-invalid] [--reproduction-command CMD]"
+    );
+    println!(
         "  ffs-harness validate-source-scope-manifest [--manifest FILE] [--workspace-root DIR] [--out FILE]"
     );
     println!(
@@ -3947,6 +4049,9 @@ fn print_usage_examples() {
     println!("  ffs-harness fuse-capability-probe --out artifacts/e2e/run/fuse_capability.json");
     println!(
         "  ffs-harness validate-open-ended-inventory --out artifacts/conformance/open_ended_inventory.json"
+    );
+    println!(
+        "  ffs-harness open-ended-note-scanner --source tests/open-ended-inventory/scanner_fixture_positive.md --out artifacts/conformance/open_ended_note_scan.json"
     );
     println!(
         "  ffs-harness validate-source-scope-manifest --out artifacts/conformance/source_scope_manifest.json"
@@ -4261,6 +4366,16 @@ fn print_open_ended_inventory_usage() {
     println!();
     println!("Options:");
     println!("  --out FILE                         Write JSON report to FILE");
+}
+
+fn print_open_ended_note_scanner_usage() {
+    println!("Usage: ffs-harness open-ended-note-scanner [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --source FILE                      Markdown/doc source to scan; repeatable");
+    println!("  --out FILE                         Write JSON report to FILE");
+    println!("  --allow-invalid                    Exit zero after writing an invalid report");
+    println!("  --reproduction-command CMD         Preserve exact reproduction command in JSON");
 }
 
 fn print_source_scope_manifest_usage() {
