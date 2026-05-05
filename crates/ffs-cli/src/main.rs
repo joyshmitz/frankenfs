@@ -6665,36 +6665,38 @@ mod tests {
         })
     }
 
-    fn happy_writeback_crash_replay_oracle() -> serde_json::Value {
-        let required_crash_points = [
-            "cp01_before_first_write",
-            "cp02_after_first_write_before_flush",
-            "cp03_after_flush_before_fsync",
-            "cp04_after_fsync_before_metadata",
-            "cp05_after_metadata_before_fsyncdir",
-            "cp06_after_fsyncdir_before_unmount",
-            "cp07_after_repeated_write_before_fsync",
-            "cp08_after_repeated_write_fsync",
-            "cp09_after_cancellation_before_writeback",
-            "cp10_after_clean_unmount_before_reopen",
-            "cp11_after_reopen_before_repair_refresh",
-            "cp12_after_repair_refresh",
-        ];
-        let operations = [
-            ("create", "none"),
-            ("write", "kernel_writeback_cache"),
-            ("flush", "non_durable"),
-            ("fsync", "file_durable"),
-            ("rename", "metadata_after_data"),
-            ("fsyncdir", "directory_durable"),
-            ("write", "repeated_write"),
-            ("fsync", "last_write_durable"),
-            ("cancel", "classified_before_writeback"),
-            ("unmount", "dirty_pages_flushed_or_rejected"),
-            ("reopen", "survivor_set_verified"),
-            ("repair_refresh", "post_writeback_refresh"),
-        ];
-        let operation_trace: Vec<_> = operations
+    const WRITEBACK_CRASH_REPLAY_REQUIRED_POINTS: &[&str] = &[
+        "cp01_before_first_write",
+        "cp02_after_first_write_before_flush",
+        "cp03_after_flush_before_fsync",
+        "cp04_after_fsync_before_metadata",
+        "cp05_after_metadata_before_fsyncdir",
+        "cp06_after_fsyncdir_before_unmount",
+        "cp07_after_repeated_write_before_fsync",
+        "cp08_after_repeated_write_fsync",
+        "cp09_after_cancellation_before_writeback",
+        "cp10_after_clean_unmount_before_reopen",
+        "cp11_after_reopen_before_repair_refresh",
+        "cp12_after_repair_refresh",
+    ];
+
+    const WRITEBACK_CRASH_REPLAY_OPERATIONS: &[(&str, &str)] = &[
+        ("create", "none"),
+        ("write", "kernel_writeback_cache"),
+        ("flush", "non_durable"),
+        ("fsync", "file_durable"),
+        ("rename", "metadata_after_data"),
+        ("fsyncdir", "directory_durable"),
+        ("write", "repeated_write"),
+        ("fsync", "last_write_durable"),
+        ("cancel", "classified_before_writeback"),
+        ("unmount", "dirty_pages_flushed_or_rejected"),
+        ("reopen", "survivor_set_verified"),
+        ("repair_refresh", "post_writeback_refresh"),
+    ];
+
+    fn writeback_crash_replay_operation_trace() -> Vec<serde_json::Value> {
+        WRITEBACK_CRASH_REPLAY_OPERATIONS
             .iter()
             .enumerate()
             .map(|(index, (operation, boundary))| {
@@ -6706,8 +6708,11 @@ mod tests {
                     "expected_result": "success"
                 })
             })
-            .collect();
-        let crash_points: Vec<_> = required_crash_points
+            .collect()
+    }
+
+    fn writeback_crash_replay_points() -> Vec<serde_json::Value> {
+        WRITEBACK_CRASH_REPLAY_REQUIRED_POINTS
             .iter()
             .enumerate()
             .map(|(index, crash_point_id)| {
@@ -6749,7 +6754,10 @@ mod tests {
                     "cleanup_status": "retained_for_qa"
                 })
             })
-            .collect();
+            .collect()
+    }
+
+    fn happy_writeback_crash_replay_oracle() -> serde_json::Value {
         serde_json::json!({
             "schema_version": 1,
             "gate_version": "bd-rchk0.2.3-crash-replay-v1",
@@ -6768,8 +6776,8 @@ mod tests {
             "epoch_state": "fresh",
             "host_capability_fingerprint": "fuse3-writeback-cache-enabled-host",
             "lane_manifest_id": "fuse-writeback-cache-rw-lane-v1",
-            "operation_trace": operation_trace,
-            "crash_points": crash_points,
+            "operation_trace": writeback_crash_replay_operation_trace(),
+            "crash_points": writeback_crash_replay_points(),
             "unsupported_combinations": [
                 {
                     "combination_id": "writeback_cache_ro_mount",
