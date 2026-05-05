@@ -10916,6 +10916,87 @@ mod tests {
         assert!(matches!(err, ffs_types::ParseError::InvalidField { .. }));
     }
 
+    /// bd-f0q7n — Kernel-conformance pin for the on-disk item-key
+    /// type field constants declared as `BTRFS_ITEM_*` in this crate.
+    /// Each value mirrors a kernel macro from `fs/btrfs/btrfs_tree.h`.
+    /// A regression that swapped, e.g., BTRFS_ITEM_DIR_ITEM (84) and
+    /// BTRFS_ITEM_DIR_INDEX (96) would silently mis-route every btrfs
+    /// directory iteration — dir_index entries would be parsed as
+    /// dir_item entries (different key.offset semantics: hash vs
+    /// sequence-counter). This test pins each value plus the
+    /// monotonic ordering across the reserved range.
+    #[test]
+    fn btrfs_item_key_constants_match_kernel_header() {
+        // Values per fs/btrfs/btrfs_tree.h:
+        //   #define BTRFS_INODE_ITEM_KEY        1
+        //   #define BTRFS_INODE_REF_KEY        12
+        //   #define BTRFS_XATTR_ITEM_KEY       24
+        //   #define BTRFS_DIR_ITEM_KEY         84
+        //   #define BTRFS_DIR_INDEX_KEY        96
+        //   #define BTRFS_EXTENT_DATA_KEY     108
+        //   #define BTRFS_ROOT_ITEM_KEY       132
+        //   #define BTRFS_EXTENT_ITEM_KEY     168
+        //   #define BTRFS_METADATA_ITEM_KEY   169
+        //   #define BTRFS_BLOCK_GROUP_ITEM_KEY 192
+        //   #define BTRFS_FREE_SPACE_INFO_KEY  198
+        //   #define BTRFS_FREE_SPACE_EXTENT_KEY 199
+        //   #define BTRFS_FREE_SPACE_BITMAP_KEY 200
+        //   #define BTRFS_DEV_ITEM_KEY        216
+        //   #define BTRFS_CHUNK_ITEM_KEY      228
+        assert_eq!(BTRFS_ITEM_INODE_ITEM, 1);
+        assert_eq!(BTRFS_ITEM_INODE_REF, 12);
+        assert_eq!(BTRFS_ITEM_XATTR_ITEM, 24);
+        assert_eq!(BTRFS_ITEM_DIR_ITEM, 84);
+        assert_eq!(BTRFS_ITEM_DIR_INDEX, 96);
+        assert_eq!(BTRFS_ITEM_EXTENT_DATA, 108);
+        assert_eq!(BTRFS_ITEM_ROOT_ITEM, 132);
+        assert_eq!(BTRFS_ITEM_EXTENT_ITEM, 168);
+        assert_eq!(BTRFS_ITEM_METADATA_ITEM, 169);
+        assert_eq!(BTRFS_ITEM_BLOCK_GROUP_ITEM, 192);
+        assert_eq!(BTRFS_ITEM_FREE_SPACE_INFO, 198);
+        assert_eq!(BTRFS_ITEM_FREE_SPACE_EXTENT, 199);
+        assert_eq!(BTRFS_ITEM_FREE_SPACE_BITMAP, 200);
+        assert_eq!(BTRFS_ITEM_DEV_ITEM, 216);
+        assert_eq!(BTRFS_ITEM_CHUNK, 228);
+
+        // Strict-monotonic ascending across the 15-element set; pins
+        // that no two constants collide and that the implicit
+        // dispatch order (small inode/ref/xattr keys before large
+        // extent/chunk keys) is preserved.
+        assert!(
+            BTRFS_ITEM_INODE_ITEM < BTRFS_ITEM_INODE_REF
+                && BTRFS_ITEM_INODE_REF < BTRFS_ITEM_XATTR_ITEM
+                && BTRFS_ITEM_XATTR_ITEM < BTRFS_ITEM_DIR_ITEM
+                && BTRFS_ITEM_DIR_ITEM < BTRFS_ITEM_DIR_INDEX
+                && BTRFS_ITEM_DIR_INDEX < BTRFS_ITEM_EXTENT_DATA
+                && BTRFS_ITEM_EXTENT_DATA < BTRFS_ITEM_ROOT_ITEM
+                && BTRFS_ITEM_ROOT_ITEM < BTRFS_ITEM_EXTENT_ITEM
+                && BTRFS_ITEM_EXTENT_ITEM < BTRFS_ITEM_METADATA_ITEM
+                && BTRFS_ITEM_METADATA_ITEM < BTRFS_ITEM_BLOCK_GROUP_ITEM
+                && BTRFS_ITEM_BLOCK_GROUP_ITEM < BTRFS_ITEM_FREE_SPACE_INFO
+                && BTRFS_ITEM_FREE_SPACE_INFO < BTRFS_ITEM_FREE_SPACE_EXTENT
+                && BTRFS_ITEM_FREE_SPACE_EXTENT < BTRFS_ITEM_FREE_SPACE_BITMAP
+                && BTRFS_ITEM_FREE_SPACE_BITMAP < BTRFS_ITEM_DEV_ITEM
+                && BTRFS_ITEM_DEV_ITEM < BTRFS_ITEM_CHUNK,
+            "btrfs item-key constants must be strict-monotonic ascending"
+        );
+
+        // Boundary checks — pin specific kernel-published gaps so a
+        // future contributor adding a constant in the middle (e.g.,
+        // BTRFS_ROOT_BACKREF_KEY=144) doesn't accidentally collide
+        // with an existing value.
+        assert!(
+            BTRFS_ITEM_ROOT_ITEM == 132 && BTRFS_ITEM_EXTENT_ITEM == 168,
+            "kernel reserves 133..168 for {{ROOT_BACKREF=144, ROOT_REF=156}} \
+             — these slots must remain free"
+        );
+        assert!(
+            BTRFS_ITEM_METADATA_ITEM == 169 && BTRFS_ITEM_BLOCK_GROUP_ITEM == 192,
+            "kernel reserves 170..192 for {{TREE_BLOCK_REF=176, EXTENT_DATA_REF=178, \
+             SHARED_BLOCK_REF=182, SHARED_DATA_REF=184}} — these slots must remain free"
+        );
+    }
+
     /// bd-khzn4 — Kernel-conformance pin for the well-known btrfs
     /// tree objectids declared in `fs/btrfs/btrfs_tree.h`. A regression
     /// that swapped, say, BTRFS_FREE_SPACE_TREE (10) and
