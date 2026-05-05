@@ -2483,7 +2483,8 @@ mod tests {
             }
             // Reaching here means the workers did not finish in time;
             // a lock-ordering violation almost certainly caused a hang.
-            panic!(
+            assert!(
+                watchdog_done.load(AtomicOrdering::Acquire),
                 "bd-7zd94: PersistentMvccStore lock-ordering watchdog tripped — \
                  commit/truncate_wal workers did not finish within 15s, \
                  indicating a likely AB-BA deadlock"
@@ -2493,9 +2494,9 @@ mod tests {
         // Worker A: commit pipeline (store.W → wal.W → stats.W).
         let store_a = Arc::clone(&store);
         let worker_a = thread::spawn(move || {
-            for i in 0..32_u32 {
+            for i in 0_u8..32 {
                 let mut txn = store_a.begin();
-                txn.stage_write(BlockNumber(u64::from(i)), vec![i as u8; 16]);
+                txn.stage_write(BlockNumber(u64::from(i)), vec![i; 16]);
                 let _ = store_a.commit(txn).expect("commit must not block");
             }
         });
@@ -2508,7 +2509,7 @@ mod tests {
             let ckpt_dir = tempfile::tempdir().expect("ckpt dir");
             for i in 0..16_u32 {
                 let ckpt_path = ckpt_dir.path().join(format!("ckpt-{i}.bin"));
-                let _ = store_b.checkpoint(&ckpt_path).expect("checkpoint");
+                store_b.checkpoint(&ckpt_path).expect("checkpoint");
                 if i % 2 == 0 {
                     // truncate_wal may return the staleness error when
                     // commits have landed since the checkpoint; either
