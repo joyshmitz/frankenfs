@@ -358,6 +358,12 @@ fn validate_outcome(
             case.case_id, case.expected_outcome, expected_subset
         ));
     }
+    if case.expected_outcome.starts_with("refused_") && case.supported_subset != "unsupported" {
+        errors.push(format!(
+            "case `{}` refusal outcome `{}` requires supported_subset=`unsupported`",
+            case.case_id, case.expected_outcome
+        ));
+    }
     if case.expected_outcome == "refused_unsupported_record" {
         if case.unsupported_record.trim().is_empty() {
             errors.push(format!(
@@ -598,6 +604,24 @@ mod tests {
         assert!(report.errors.iter().any(|err| err.contains(
             "outcome `roundtrip_success` requires supported_subset=`roundtrip_supported`"
         )));
+    }
+
+    #[test]
+    fn refusal_outcome_must_use_unsupported_subset() {
+        let mut corpus = fixture_corpus();
+        let case = corpus
+            .cases
+            .iter_mut()
+            .find(|c| c.expected_outcome == "refused_incremental_parent_mismatch")
+            .expect("incremental parent refusal fixture exists");
+        case.supported_subset = "roundtrip_supported".to_owned();
+
+        let report = validate_btrfs_send_receive_corpus(&corpus);
+        assert!(report.errors.iter().any(|err| {
+            err.contains(
+                "refusal outcome `refused_incremental_parent_mismatch` requires supported_subset=`unsupported`",
+            )
+        }));
     }
 
     #[test]
