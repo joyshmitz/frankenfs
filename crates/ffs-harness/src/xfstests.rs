@@ -799,8 +799,7 @@ pub fn validate_xfstests_failure_triage_report(
         validate_proposed_failure_bead(bead, &mut duplicate_keys, &mut errors);
     }
     for excluded in &report.excluded_rows {
-        require_non_empty("excluded.test_id", &excluded.test_id, &mut errors);
-        require_non_empty("excluded.reason", &excluded.reason, &mut errors);
+        validate_failure_triage_excluded_row(excluded, &mut errors);
     }
     errors
 }
@@ -1968,6 +1967,46 @@ fn validate_failure_triage_row_uniqueness(
             ));
         }
     }
+}
+
+fn validate_failure_triage_excluded_row(
+    excluded: &XfstestsFailureTriageExcludedRow,
+    errors: &mut Vec<String>,
+) {
+    require_non_empty("excluded.test_id", &excluded.test_id, errors);
+    require_non_empty("excluded.status", &excluded.status, errors);
+    require_non_empty("excluded.classification", &excluded.classification, errors);
+    require_non_empty("excluded.reason", &excluded.reason, errors);
+    if !XFSTESTS_BASELINE_STATUS_VOCABULARY
+        .iter()
+        .any(|status| excluded.status == status.as_str())
+    {
+        errors.push(format!(
+            "xfstests failure triage excluded row {} has unknown status {}",
+            excluded.test_id, excluded.status
+        ));
+    }
+    if !is_well_formed_sha256(&excluded.raw_log_hash) {
+        errors.push(format!(
+            "xfstests failure triage excluded row {} has malformed raw_log_hash",
+            excluded.test_id
+        ));
+    }
+    if excluded.status == XfstestsBaselineRowStatus::Failed.as_str()
+        && excluded.classification == "product_actionable"
+    {
+        errors.push(format!(
+            "xfstests failure triage excluded row {} is product_actionable and must be proposed as a product bead",
+            excluded.test_id
+        ));
+    }
+}
+
+fn is_well_formed_sha256(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64 && hex.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 fn hash_raw_artifact(path: &Path) -> Result<XfstestsRawArtifact> {
@@ -3640,6 +3679,81 @@ generic/001  2s ... pass\n";
                 .any(|error| error.contains("row generic/001 appears in multiple dispositions")),
             "expected duplicate proposed row ownership error, got {errors:#?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn failure_triage_rejects_excluded_product_actionable_failure() {
+        let mut report = XfstestsFailureTriageReport {
+            schema_version: 1,
+            triage_id: "triage-fixture".to_owned(),
+            baseline_id: "baseline".to_owned(),
+            subset_version: "subset".to_owned(),
+            source_baseline_manifest: "baseline_manifest.json".to_owned(),
+            live_bead_creation_enabled: false,
+            disposition_counts: BTreeMap::new(),
+            duplicate_groups: Vec::new(),
+            proposed_beads: Vec::new(),
+            excluded_rows: vec![XfstestsFailureTriageExcludedRow {
+                test_id: "generic/001".to_owned(),
+                status: XfstestsBaselineRowStatus::Failed.as_str().to_owned(),
+                classification: "product_actionable".to_owned(),
+                reason: "hand-edited excluded product failure".to_owned(),
+                raw_log_hash:
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_owned(),
+                remediation: None,
+            }],
+            proposed_br_commands: Vec::new(),
+            reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh".to_owned(),
+        };
+        report.disposition_counts = failure_triage_disposition_counts(&report);
+
+        let errors = validate_xfstests_failure_triage_report(&report);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("product_actionable")),
+            "expected product_actionable exclusion error, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn failure_triage_rejects_excluded_payload_drift() -> Result<()> {
+        let tmp = tempdir()?;
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "ext4/001 host blocked\n")?;
+        let mut host = baseline_case("ext4/001", XfstestsBaselineRowStatus::HostBlocked);
+        host.classification = "environment_blocked".to_owned();
+        let manifest = manifest_with_cases(&raw, vec![host]);
+        let mut report = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
+            triage_id: "triage-fixture",
+            baseline_manifest_path: tmp.path().join("baseline_manifest.json").as_path(),
+            baseline_manifest: &manifest,
+            reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh",
+        })?;
+        let excluded = report
+            .excluded_rows
+            .first_mut()
+            .context("missing excluded row")?;
+        excluded.status = "ghost_status".to_owned();
+        excluded.classification.clear();
+        excluded.raw_log_hash = "sha256:not-a-real-digest".to_owned();
+        report.disposition_counts = failure_triage_disposition_counts(&report);
+
+        let errors = validate_xfstests_failure_triage_report(&report);
+
+        for expected in [
+            "unknown status ghost_status",
+            "missing excluded.classification",
+            "malformed raw_log_hash",
+        ] {
+            assert!(
+                errors.iter().any(|error| error.contains(expected)),
+                "expected {expected} error, got {errors:#?}"
+            );
+        }
         Ok(())
     }
 
