@@ -633,6 +633,13 @@ pub fn validate_xfstests_baseline_manifest(manifest: &XfstestsBaselineManifest) 
         }
         validate_baseline_case(case, &mut errors);
     }
+    let actual_disposition_counts = disposition_counts(&manifest.cases);
+    if manifest.disposition_counts != actual_disposition_counts {
+        errors.push(format!(
+            "xfstests baseline disposition_counts mismatch: declared={:?} actual={actual_disposition_counts:?}",
+            manifest.disposition_counts
+        ));
+    }
 
     errors
 }
@@ -3299,6 +3306,31 @@ generic/001  2s ... pass\n";
         assert!(markdown.contains("- interrupted: 1"));
         assert!(!markdown.contains("- passed: 2"));
         assert!(markdown.contains("XFSTESTS_MODE=run"));
+    }
+
+    #[test]
+    fn baseline_manifest_rejects_disposition_count_drift() {
+        let tmp = tempdir().expect("tempdir");
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "generic/001 failed\n").expect("write raw log");
+        let mut manifest = manifest_with_cases(
+            &raw,
+            vec![baseline_case(
+                "generic/001",
+                XfstestsBaselineRowStatus::Failed,
+            )],
+        );
+        manifest.disposition_counts.insert("failed".to_owned(), 0);
+        manifest.disposition_counts.insert("passed".to_owned(), 1);
+
+        let errors = validate_xfstests_baseline_manifest(&manifest);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("disposition_counts mismatch")),
+            "expected disposition count mismatch error, got {errors:#?}"
+        );
     }
 
     #[test]
