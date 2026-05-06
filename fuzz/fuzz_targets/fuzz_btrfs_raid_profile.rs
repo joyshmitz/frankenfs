@@ -26,18 +26,26 @@
 //! reads to the wrong stripes. This target catches such regressions
 //! as fuzzer failures rather than silent on-disk corruption.
 
-use ffs_ondisk::{BtrfsRaidProfile, chunk_type_flags};
+use ffs_ondisk::{chunk_type_flags, BtrfsRaidProfile};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    if data.len() < 16 {
-        return;
+    let mut chunk_bytes = [0_u8; 8];
+    let chunk_len = data.len().min(chunk_bytes.len());
+    chunk_bytes[..chunk_len].copy_from_slice(&data[..chunk_len]);
+
+    let mut xor_bytes = [0_u8; 8];
+    if data.len() > chunk_bytes.len() {
+        let xor_len = (data.len() - chunk_bytes.len()).min(xor_bytes.len());
+        xor_bytes[..xor_len].copy_from_slice(&data[chunk_bytes.len()..chunk_bytes.len() + xor_len]);
     }
 
-    // Two u64s: the first as the chunk_type under classification,
-    // the second as the bit-XOR mask used for MR-2 invariance.
-    let chunk_type = u64::from_le_bytes(data[0..8].try_into().unwrap());
-    let xor_mask = u64::from_le_bytes(data[8..16].try_into().unwrap());
+    // Two zero-padded u64s: the first as the chunk_type under
+    // classification, the second as the bit-XOR mask used for MR-2
+    // invariance. Padding keeps the classifier exercised from an empty
+    // corpus instead of discarding short inputs.
+    let chunk_type = u64::from_le_bytes(chunk_bytes);
+    let xor_mask = u64::from_le_bytes(xor_bytes);
 
     // MR-1 Determinism + MR-6 implicit no-panic.
     let profile_a = BtrfsRaidProfile::from_chunk_type(chunk_type);
