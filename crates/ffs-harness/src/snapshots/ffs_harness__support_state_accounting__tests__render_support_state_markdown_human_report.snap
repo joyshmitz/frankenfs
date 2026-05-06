@@ -1,0 +1,50 @@
+---
+source: crates/ffs-harness/src/support_state_accounting.rs
+expression: markdown
+---
+# FrankenFS Support-State Accounting
+
+- Version: `bd-mpcse-support-state-accounting-v1`
+- Rows: `13`
+- Flat parity rejected: `true`
+- Release gate contract: bd-rchk0.5.6.1 fail-closed release evaluator consumes support-state rows
+- Reproduction: `ffs-harness validate-support-state-accounting --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md`
+
+## Support Rows
+| Feature | Domain | Old Claim | Support State | Owner | Gate Effect |
+|---|---|---|---|---|---|
+| `readonly_ext4_btrfs_inspection` | ext4/btrfs mounted inspection | 100 percent V1 feature coverage | `validated` | `bd-mpcse` | allows validated read-only wording only |
+| `btrfs_send_receive_streams` | btrfs metadata parsing | 100 percent btrfs metadata parsing | `parse_only` | `bd-naww5` | blocks full send/receive parity wording |
+| `btrfs_multi_device_raid` | btrfs metadata parsing | 100 percent btrfs metadata parsing | `single_device_only` | `bd-ch373` | downgrades multidevice readiness claims |
+| `ext4_casefold` | ext4 metadata parsing | 100 percent ext4 metadata parsing | `basic_coverage` | `bd-9er6s` | blocks robust casefold parity wording |
+| `mounted_write_paths` | FUSE surface | 100 percent FUSE surface | `experimental` | `bd-jtu4q` | keeps mounted write wording experimental |
+| `background_scrub` | self-healing durability policy | 100 percent self-healing durability policy | `detection_only` | `bd-wjsuj` | allows detection-only scrub wording |
+| `fuse_writeback_cache` | FUSE surface | 100 percent FUSE surface | `disabled` | `bd-4nobd` | fails closed to disabled |
+| `writeback_cache_negative_option` | FUSE surface | 100 percent FUSE surface | `deferred` | `bd-rchk0.2.1.1` | blocks writeback-cache upgrade |
+| `readonly_repair_with_ledger` | self-healing durability policy | 100 percent self-healing durability policy | `opt_in_mutating` | `bd-wjsuj` | allows opt-in-only repair wording |
+| `rw_background_repair` | self-healing durability policy | 100 percent self-healing durability policy | `host_blocked` | `bd-bqgy8` | blocks read-write automatic repair claims |
+| `performance_claim_budget` | performance evidence | historical performance wording outside feature counts | `dry_run_only` | `bd-rchk5.2` | blocks performance claims stronger than experimental |
+| `unsupported_legacy_ext4_codecs` | ext4 metadata parsing | 100 percent ext4 metadata parsing | `unsupported` | `bd-mpcse` | permits unsupported wording only |
+| `performance_budget_enforcement` | performance evidence | historical performance wording outside feature counts | `validated` | `bd-hol07` | allows only budget-enforced performance wording |
+
+## Migration Cases
+| Historical Claim | Feature | Classified State | Safe Claim |
+|---|---|---|---|
+| FEATURE_PARITY 86/86 | `btrfs_send_receive_streams` | `parse_only` | btrfs_send_receive_streams may claim `parse_only` only with wording id `support.btrfs-send-receive.parse-only` |
+| FEATURE_PARITY 86/86 | `btrfs_multi_device_raid` | `single_device_only` | btrfs_multi_device_raid may claim `single_device_only` only with wording id `support.btrfs-multidevice.single-device-only` |
+| FEATURE_PARITY 90/90 | `ext4_casefold` | `basic_coverage` | ext4_casefold may claim `basic_coverage` only with wording id `support.ext4-casefold.basic-coverage` |
+| FEATURE_PARITY 90/90 | `mounted_write_paths` | `experimental` | mounted_write_paths may claim `experimental` only with wording id `support.mounted-writes.experimental` |
+| FEATURE_PARITY 100 percent | `background_scrub` | `detection_only` | background_scrub may claim `detection_only` only with wording id `support.background-scrub.detection-only` |
+| FEATURE_PARITY 100 percent | `fuse_writeback_cache` | `disabled` | fuse_writeback_cache may claim `disabled` only with wording id `support.writeback-cache.disabled` |
+| FEATURE_PARITY 100 percent | `rw_background_repair` | `host_blocked` | rw_background_repair may claim `host_blocked` only with wording id `support.rw-background-repair.host-blocked` |
+| FEATURE_PARITY 100 percent | `readonly_ext4_btrfs_inspection` | `validated` | readonly_ext4_btrfs_inspection may claim `validated` only with wording id `support.readonly-inspection.validated` |
+
+## Required Log Fields
+- `feature_id`
+- `old_count_claim`
+- `support_state`
+- `controlling_bead_or_artifact`
+- `downgrade_or_upgrade_reason`
+- `docs_target`
+- `release_gate_effect`
+- `reproduction_command`

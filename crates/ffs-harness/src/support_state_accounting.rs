@@ -1096,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_markdown_human_report() {
+    fn render_support_state_markdown_human_report() {
         let report = analyze_support_state_accounting(
             &fixture_issues(),
             &feature_parity_fixture(),
@@ -1106,5 +1106,6 @@ mod tests {
         assert!(markdown.contains("# FrankenFS Support-State Accounting"));
         assert!(markdown.contains("btrfs_send_receive_streams"));
         assert!(markdown.contains("Required Log Fields"));
+        insta::assert_snapshot!(markdown);
     }
 }
