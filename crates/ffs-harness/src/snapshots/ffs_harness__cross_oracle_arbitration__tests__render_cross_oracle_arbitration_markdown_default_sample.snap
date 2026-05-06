@@ -1,0 +1,98 @@
+---
+source: crates/ffs-harness/src/cross_oracle_arbitration.rs
+expression: markdown
+---
+# Cross-Oracle Arbitration Validation
+
+- Valid: `true`
+- Arbitrations: `9`
+- Fail-closed impacts: `4`
+
+## Blocked Public Claims
+
+- `background_scrub_mutation`
+- `data_integrity`
+- `mounted_writes`
+- `mutating_repair`
+- `proof_bundle_completeness`
+- `writeback_cache`
+
+## Arbitrations
+
+### `arb_model_bug`: `model_bug` / `resolved`
+- Release-gate impact: `downgrade`
+- Source oracles: `invariant_model, mounted_pass`
+- Controlling artifacts: `artifacts/oracles/invariant_model.json, artifacts/oracles/mounted_pass.json`
+- Blocked claims: `proof_bundle_completeness`
+- Remediation: `remediate_cross_oracle_conflict`
+- Reproduce: `ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_model_bug/report.json`
+
+### `arb_kernel_baseline_issue`: `kernel_baseline_issue` / `unresolved`
+- Release-gate impact: `fail_closed`
+- Source oracles: `mounted_kernel, release_gate_kernel`
+- Controlling artifacts: `artifacts/oracles/mounted_kernel.json, artifacts/oracles/release_gate_kernel.json`
+- Blocked claims: `mounted_writes`
+- Follow-up bead: `bd-zj57e`
+- Remediation: `remediate_cross_oracle_conflict`
+- Reproduce: `ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_kernel_baseline_issue/report.json`
+
+### `arb_frankenfs_product_bug`: `frankenfs_product_bug` / `unresolved`
+- Release-gate impact: `fail_closed`
+- Source oracles: `invariant_product, mounted_product, release_product`
+- Controlling artifacts: `artifacts/oracles/invariant_product.json, artifacts/oracles/mounted_product.json, artifacts/oracles/release_product.json`
+- Blocked claims: `mounted_writes, data_integrity`
+- Follow-up bead: `bd-zj57e`
+- Remediation: `remediate_cross_oracle_conflict`
+- Reproduce: `ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_frankenfs_product_bug/report.json`
+
+### `arb_harness_bug`: `harness_bug` / `resolved`
+- Release-gate impact: `downgrade`
+- Source oracles: `crash_harness, invariant_harness`
+- Controlling artifacts: `artifacts/oracles/crash_harness.json, artifacts/oracles/invariant_harness.json`
+- Blocked claims: `proof_bundle_completeness`
+- Remediation: `remediate_cross_oracle_conflict`
+- Reproduce: `ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_harness_bug/report.json`
+
+### `arb_fixture_bug`: `fixture_bug` / `resolved`
+- Release-gate impact: `downgrade`
+- Source oracles: `mounted_fixture, crash_fixture`
+- Controlling artifacts: `artifacts/oracles/mounted_fixture.json, artifacts/oracles/crash_fixture.json`
+- Blocked claims: `proof_bundle_completeness`
+- Remediation: `remediate_cross_oracle_conflict`
+- Reproduce: `ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_fixture_bug/report.json`
+
+### `arb_unsupported_scope`: `unsupported_scope` / `scoped_out`
+- Release-gate impact: `downgrade`
+- Source oracles: `mounted_unsupported, release_unsupported`
+- Controlling artifacts: `artifacts/oracles/mounted_unsupported.json, artifacts/oracles/release_unsupported.json`
+- Blocked claims: `writeback_cache`
+- Remediation: `remediate_cross_oracle_conflict`
+- Non-goal: unsupported V1 scope is explicitly non-goal
+- Reproduce: `ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_unsupported_scope/report.json`
+
+### `arb_host_capability_gap`: `host_capability_gap` / `resolved`
+- Release-gate impact: `downgrade`
+- Source oracles: `mounted_host, release_host`
+- Controlling artifacts: `artifacts/oracles/mounted_host.json, artifacts/oracles/release_host.json`
+- Blocked claims: `mounted_writes`
+- Remediation: `remediate_cross_oracle_conflict`
+- Reproduce: `ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_host_capability_gap/report.json`
+
+### `arb_repair_oracle_gap`: `repair_oracle_gap` / `unresolved`
+- Release-gate impact: `fail_closed`
+- Source oracles: `repair_missing, release_repair`
+- Controlling artifacts: `artifacts/oracles/release_repair.json`
+- Blocked claims: `mutating_repair, background_scrub_mutation`
+- Follow-up bead: `bd-zj57e`
+- Remediation: `remediate_cross_oracle_conflict`
+- Reproduce: `ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_repair_oracle_gap/report.json`
+
+### `arb_inconclusive_conflict`: `inconclusive_conflict` / `unresolved`
+- Release-gate impact: `fail_closed`
+- Source oracles: `invariant_inconclusive, crash_inconclusive`
+- Controlling artifacts: `artifacts/oracles/invariant_inconclusive.json, artifacts/oracles/crash_inconclusive.json`
+- Blocked claims: `data_integrity`
+- Follow-up bead: `bd-zj57e`
+- Remediation: `remediate_cross_oracle_conflict`
+- Reproduce: `ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_inconclusive_conflict/report.json`
+

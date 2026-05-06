@@ -1211,4 +1211,16 @@ mod tests {
         assert!(markdown.contains("arb_frankenfs_product_bug"));
         assert!(markdown.contains("validate-cross-oracle-arbitration"));
     }
+
+    /// bd-0ztd2 — golden-artifact pin for the cross-oracle arbitration
+    /// markdown emitter. The substring-style sibling test catches
+    /// missing keywords; this snapshot catches whitespace, heading,
+    /// ordering, and bullet-format drift that silently breaks
+    /// downstream dashboard parsers.
+    #[test]
+    fn render_cross_oracle_arbitration_markdown_default_sample() {
+        let validation = validate_cross_oracle_arbitration_report(&valid_report());
+        let markdown = render_cross_oracle_arbitration_markdown(&validation);
+        insta::assert_snapshot!(markdown);
+    }
 }
