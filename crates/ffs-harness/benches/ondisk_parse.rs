@@ -5,7 +5,8 @@ use ffs_harness::load_sparse_fixture;
 use ffs_ondisk::{
     chunk_type_flags, dx_hash, ext4_casefold_key, parse_dev_item, parse_dir_block, parse_dx_root,
     parse_extent_tree, parse_internal_items, parse_leaf_items, parse_sys_chunk_array,
-    parse_xattr_block, BtrfsHeader, BtrfsRaidProfile, BtrfsSuperblock, Ext4GroupDesc, Ext4Inode,
+    parse_xattr_block, BtrfsHeader, BtrfsRaidProfile, BtrfsSuperblock, Ext4Extent, Ext4GroupDesc,
+    Ext4Inode, EXT_INIT_MAX_LEN,
 };
 use std::hint::black_box;
 use std::path::Path;
@@ -576,6 +577,70 @@ fn bench_ext4_inode_all_timestamps(c: &mut Criterion) {
     });
 }
 
+// bd-zc9l4 — Criterion benches for the Ext4Extent split-bit unwritten
+// decoder (actual_len + is_unwritten). These run once per extent
+// visited on every extent walk on every ext4 filesystem — high-
+// frequency hot path for read, write, scrub, and repair. A regression
+// that introduced per-call allocation, switched from a single
+// subtract to a multi-step decode, or added unnecessary bounds checks
+// would silently slow every extent walk with no CI signal.
+//
+// Pairs with bd-j0zo3 (proptest MR), bd-p0jgk (libfuzzer >1M iter)
+// — same hot-path correctness/perf trio applied to the extent
+// split-bit decoder.
+
+fn bench_ext4_extent_actual_len_written(c: &mut Criterion) {
+    // Workload of written extents (raw_len <= EXT_INIT_MAX_LEN).
+    // Representative sizes: 1, 64, 4096, 0x7FFF, 0x8000 (boundary).
+    let extents: Vec<Ext4Extent> = [1_u16, 64, 4096, 0x7FFF, EXT_INIT_MAX_LEN]
+        .iter()
+        .map(|&raw_len| Ext4Extent {
+            logical_block: 0,
+            raw_len,
+            physical_start: 0,
+        })
+        .collect();
+    c.bench_function("ext4_extent_actual_len_written", |b| {
+        b.iter(|| {
+            for ext in &extents {
+                let e = black_box(*ext);
+                black_box(e.actual_len());
+                black_box(e.is_unwritten());
+            }
+        });
+    });
+}
+
+fn bench_ext4_extent_actual_len_unwritten(c: &mut Criterion) {
+    // Workload of unwritten extents (raw_len > EXT_INIT_MAX_LEN).
+    // Representative sizes: MAX+1 (smallest unwritten, actual=1),
+    // MAX+64, MAX+4096, MAX+0x7FFE, 0xFFFF (largest unwritten,
+    // actual=0x7FFF).
+    let extents: Vec<Ext4Extent> = [
+        EXT_INIT_MAX_LEN + 1,
+        EXT_INIT_MAX_LEN + 64,
+        EXT_INIT_MAX_LEN + 4096,
+        EXT_INIT_MAX_LEN + 0x7FFE,
+        u16::MAX,
+    ]
+    .iter()
+    .map(|&raw_len| Ext4Extent {
+        logical_block: 0,
+        raw_len,
+        physical_start: 0,
+    })
+    .collect();
+    c.bench_function("ext4_extent_actual_len_unwritten", |b| {
+        b.iter(|| {
+            for ext in &extents {
+                let e = black_box(*ext);
+                black_box(e.actual_len());
+                black_box(e.is_unwritten());
+            }
+        });
+    });
+}
+
 criterion_group!(
     ondisk,
     bench_ext4_inode_parse,
@@ -606,5 +671,7 @@ criterion_group!(
     bench_ext4_extra_nsec_epoch,
     bench_ext4_inode_atime_full,
     bench_ext4_inode_all_timestamps,
+    bench_ext4_extent_actual_len_written,
+    bench_ext4_extent_actual_len_unwritten,
 );
 criterion_main!(ondisk);
