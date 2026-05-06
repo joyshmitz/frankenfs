@@ -4512,7 +4512,7 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("no btrfs context".into()))?;
         for chunk in &ctx.chunks {
             // If the chunk starts at 0, reserve the first 128 KiB to protect the superblock
-            // and the mock metadata trees created by our test image generators.
+            // and the synthetic metadata trees created by our test image generators.
             let synthetic_used = if chunk.key.offset == 0 {
                 chunk.length.min(131_072)
             } else {
@@ -8409,7 +8409,7 @@ impl OpenFs {
         cluster_raw[2] = method_idx;
         // Holemap nbytes.
         cluster_raw[3] = holemap_nbytes;
-        // Checksum placeholder (computed below).
+        // Checksum field, computed below.
         // ulen.
         cluster_raw[8..12].copy_from_slice(&ulen.to_le_bytes());
         // clen.
@@ -20402,11 +20402,11 @@ mod tests {
 
     // ── FsOps VFS trait tests ─────────────────────────────────────────
 
-    /// A stub FsOps implementation for testing that the trait is object-safe
+    /// A minimal FsOps fixture for testing that the trait is object-safe
     /// and can be used as a trait object behind `dyn`.
-    struct StubFs;
+    struct MinimalFsOpsFixture;
 
-    impl FsOps for StubFs {
+    impl FsOps for MinimalFsOpsFixture {
         fn getattr(
             &self,
             _cx: &Cx,
@@ -20530,7 +20530,7 @@ mod tests {
 
     #[test]
     fn fsops_getattr_root() {
-        let fs = StubFs;
+        let fs = MinimalFsOpsFixture;
         let cx = Cx::for_testing();
         let attr = fs
             .getattr(&cx, &mut RequestScope::empty(), InodeNumber(1))
@@ -20543,7 +20543,7 @@ mod tests {
 
     #[test]
     fn fsops_getattr_not_found() {
-        let fs = StubFs;
+        let fs = MinimalFsOpsFixture;
         let cx = Cx::for_testing();
         let err = fs
             .getattr(&cx, &mut RequestScope::empty(), InodeNumber(999))
@@ -20553,7 +20553,7 @@ mod tests {
 
     #[test]
     fn fsops_lookup_found() {
-        let fs = StubFs;
+        let fs = MinimalFsOpsFixture;
         let cx = Cx::for_testing();
         let attr = fs
             .lookup(
@@ -20569,7 +20569,7 @@ mod tests {
 
     #[test]
     fn fsops_lookup_not_found() {
-        let fs = StubFs;
+        let fs = MinimalFsOpsFixture;
         let cx = Cx::for_testing();
         let err = fs
             .lookup(
@@ -20584,7 +20584,7 @@ mod tests {
 
     #[test]
     fn fsops_readdir_with_offset() {
-        let fs = StubFs;
+        let fs = MinimalFsOpsFixture;
         let cx = Cx::for_testing();
 
         // Full listing from offset 0
@@ -20605,7 +20605,7 @@ mod tests {
 
     #[test]
     fn fsops_readdir_not_directory() {
-        let fs = StubFs;
+        let fs = MinimalFsOpsFixture;
         let cx = Cx::for_testing();
         let err = fs
             .readdir(&cx, &mut RequestScope::empty(), InodeNumber(11), 0)
@@ -20615,7 +20615,7 @@ mod tests {
 
     #[test]
     fn fsops_read_file() {
-        let fs = StubFs;
+        let fs = MinimalFsOpsFixture;
         let cx = Cx::for_testing();
         let data = fs
             .read(&cx, &mut RequestScope::empty(), InodeNumber(11), 0, 5)
@@ -20631,7 +20631,7 @@ mod tests {
 
     #[test]
     fn fsops_read_directory_returns_is_directory() {
-        let fs = StubFs;
+        let fs = MinimalFsOpsFixture;
         let cx = Cx::for_testing();
         let err = fs
             .read(&cx, &mut RequestScope::empty(), InodeNumber(1), 0, 4096)
@@ -20642,7 +20642,7 @@ mod tests {
     #[test]
     fn fsops_trait_is_object_safe() {
         // Verify FsOps can be used as dyn trait object
-        let fs: Box<dyn FsOps> = Box::new(StubFs);
+        let fs: Box<dyn FsOps> = Box::new(MinimalFsOpsFixture);
         let cx = Cx::for_testing();
         let attr = fs
             .getattr(&cx, &mut RequestScope::empty(), InodeNumber(1))
@@ -20652,12 +20652,12 @@ mod tests {
 
     #[test]
     fn fsops_default_statfs_reports_supported_scope() {
-        let fs = StubFs;
+        let fs = MinimalFsOpsFixture;
         let cx = Cx::for_testing();
 
         let err = fs
             .statfs(&cx, &mut RequestScope::empty(), InodeNumber(1))
-            .expect_err("StubFs should inherit the default statfs rejection");
+            .expect_err("fixture should inherit the default statfs rejection");
 
         let message = if let FfsError::UnsupportedFeature(message) = err {
             message
@@ -20671,19 +20671,19 @@ mod tests {
         assert_eq!(message, "statfs is not supported by this backend");
         assert!(
             !message.contains("not implemented"),
-            "default statfs rejection should not look like a stub: {message}"
+            "default statfs rejection should use supported-scope wording: {message}"
         );
     }
 
     #[test]
-    fn fsops_default_unsupported_messages_avoid_stub_wording() {
+    fn fsops_default_unsupported_messages_avoid_incomplete_wording() {
         let vfs_source = include_str!("vfs.rs");
         let forbidden = ["not implemented", " by this backend"].concat();
 
         assert!(
             !vfs_source.contains(&forbidden),
             "FsOps default unsupported-operation reasons should use explicit \
-             support-scope wording, not stub-like phrasing"
+             support-scope wording, not incomplete-code phrasing"
         );
     }
 
@@ -20908,7 +20908,7 @@ mod tests {
 
     #[test]
     fn fsops_listxattr_default_returns_empty() {
-        let fs = StubFs;
+        let fs = MinimalFsOpsFixture;
         let cx = Cx::for_testing();
         let names = fs.listxattr(&cx, InodeNumber(1)).unwrap();
         assert!(names.is_empty());
@@ -20916,7 +20916,7 @@ mod tests {
 
     #[test]
     fn fsops_getxattr_default_returns_none() {
-        let fs = StubFs;
+        let fs = MinimalFsOpsFixture;
         let cx = Cx::for_testing();
         let val = fs.getxattr(&cx, InodeNumber(1), "user.test").unwrap();
         assert!(val.is_none());
@@ -22085,7 +22085,7 @@ mod tests {
         );
         assert!(
             !message.contains("not implemented"),
-            "legacy codec exclusion must not look like an undocumented stub: {message}"
+            "legacy codec exclusion must explain explicit support scope: {message}"
         );
     }
 
@@ -24596,7 +24596,7 @@ mod tests {
     /// - Block 1: group descriptor table
     /// - Block 4+: inode table
     ///   - Inode #2 (root): directory, size=4096, extent: logical 0 → physical 10
-    ///   - Inode #11: regular file stub
+    ///   - Inode #11: regular file fixture inode
     /// - Block 10: directory data block with ".", "..", "hello.txt"
     #[allow(clippy::cast_possible_truncation)]
     fn build_ext4_image_with_dir() -> Vec<u8> {
@@ -27801,7 +27801,7 @@ mod tests {
 
     #[test]
     fn fsops_default_write_methods_return_read_only() {
-        let fs = StubFs;
+        let fs = MinimalFsOpsFixture;
         let cx = Cx::for_testing();
         let root = InodeNumber(1);
 
