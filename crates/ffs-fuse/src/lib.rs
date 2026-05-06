@@ -1946,6 +1946,17 @@ impl FrankenFuse {
         ino: u64,
         attrs: &SetAttrRequest,
     ) -> std::result::Result<InodeAttr, c_int> {
+        self.setattr_for_fuzzing_as(ino, attrs, 0)
+    }
+
+    /// Execute setattr as a specific caller without a live kernel mount.
+    #[doc(hidden)]
+    pub fn setattr_for_fuzzing_as(
+        &self,
+        ino: u64,
+        attrs: &SetAttrRequest,
+        caller_uid: u32,
+    ) -> std::result::Result<InodeAttr, c_int> {
         if self.inner.read_only {
             return Err(libc::EROFS);
         }
@@ -1953,13 +1964,45 @@ impl FrankenFuse {
             return Err(libc::EBUSY);
         }
 
+        self.dispatch_setattr(ino, attrs, caller_uid)
+            .map_err(|error| error.to_errno())
+    }
+
+    fn dispatch_setattr(
+        &self,
+        ino: u64,
+        attrs: &SetAttrRequest,
+        caller_uid: u32,
+    ) -> ffs_error::Result<InodeAttr> {
         let cx = Self::cx_for_request();
         self.with_request_scope(&cx, RequestOp::Setattr, |cx, scope| {
+            self.authorize_setattr_owner_change(cx, scope, InodeNumber(ino), attrs, caller_uid)?;
             let attr = self.inner.ops.setattr(cx, scope, InodeNumber(ino), attrs)?;
             self.inner.ops.commit_request_scope(scope)?;
             Ok(attr)
         })
-        .map_err(|error| error.to_errno())
+    }
+
+    fn authorize_setattr_owner_change(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        attrs: &SetAttrRequest,
+        caller_uid: u32,
+    ) -> ffs_error::Result<()> {
+        if caller_uid == 0 || (attrs.uid.is_none() && attrs.gid.is_none()) {
+            return Ok(());
+        }
+
+        let current = self.inner.ops.getattr(cx, scope, ino)?;
+        let uid_unchanged = attrs.uid.is_none_or(|uid| uid == current.uid);
+        let gid_unchanged = attrs.gid.is_none_or(|gid| gid == current.gid);
+        if uid_unchanged && gid_unchanged {
+            return Ok(());
+        }
+
+        Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)))
     }
 
     /// Execute mkdir with raw path-component bytes without a live kernel mount.
@@ -4276,7 +4319,7 @@ impl Filesystem for FrankenFuse {
 
     fn setattr(
         &mut self,
-        _req: &Request<'_>,
+        req: &Request<'_>,
         ino: u64,
         mode: Option<u32>,
         uid: Option<u32>,
@@ -4301,7 +4344,6 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EBUSY);
             return;
         }
-        let cx = Self::cx_for_request();
         let resolve_time = |t: TimeOrNow| -> SystemTime {
             match t {
                 TimeOrNow::SpecificTime(st) => st,
@@ -4317,14 +4359,7 @@ impl Filesystem for FrankenFuse {
             atime: atime.map(resolve_time),
             mtime: mtime.map(resolve_time),
         };
-        match self.with_request_scope(&cx, RequestOp::Setattr, |cx, scope| {
-            let attr = self
-                .inner
-                .ops
-                .setattr(cx, scope, InodeNumber(ino), &attrs)?;
-            self.inner.ops.commit_request_scope(scope)?;
-            Ok(attr)
-        }) {
+        match self.dispatch_setattr(ino, &attrs, req.uid()) {
             Ok(attr) => reply.attr(&ATTR_TTL, &to_file_attr(&attr)),
             Err(e) => {
                 Self::reply_error_attr(
@@ -9928,6 +9963,117 @@ mod tests {
                 mtime: Some(mtime),
             }]
         );
+    }
+
+    #[test]
+    fn fuse_setattr_uid_gid_same_owner_noop_commits_for_non_root() -> Result<(), String> {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+        let attrs = SetAttrRequest {
+            mode: Some(0o600),
+            uid: Some(1000),
+            gid: Some(1000),
+            size: None,
+            atime: None,
+            mtime: None,
+        };
+
+        let attr = fuse
+            .setattr_for_fuzzing_as(55, &attrs, 1000)
+            .map_err(|errno| format!("same-owner setattr returned errno {errno}"))?;
+
+        assert_eq!(attr.uid, 1000);
+        assert_eq!(attr.gid, 1000);
+        assert_eq!(attr.perm, 0o600);
+        let recorded_calls = calls
+            .lock()
+            .map_err(|_| "mutation call log poisoned".to_owned())?
+            .clone();
+        assert_eq!(
+            recorded_calls,
+            vec![
+                MutationCall::Begin {
+                    op: RequestOp::Setattr,
+                },
+                MutationCall::Getattr {
+                    ino: InodeNumber(55),
+                },
+                MutationCall::Setattr {
+                    ino: InodeNumber(55),
+                    mode: Some(0o600),
+                    uid: Some(1000),
+                    gid: Some(1000),
+                    size: None,
+                    atime: None,
+                    mtime: None,
+                },
+                MutationCall::Commit,
+                MutationCall::End {
+                    op: RequestOp::Setattr,
+                },
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fuse_setattr_uid_gid_change_rejects_non_root_before_backend_mutation() -> Result<(), String>
+    {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+        let attrs = SetAttrRequest {
+            mode: Some(0o600),
+            uid: Some(501),
+            gid: Some(20),
+            size: None,
+            atime: None,
+            mtime: None,
+        };
+
+        let result = fuse.setattr_for_fuzzing_as(55, &attrs, 1000);
+
+        assert!(
+            matches!(result, Err(errno) if errno == libc::EPERM),
+            "non-root uid/gid change must return EPERM, got {result:?}"
+        );
+        let recorded_calls = calls
+            .lock()
+            .map_err(|_| "mutation call log poisoned".to_owned())?
+            .clone();
+        assert_eq!(
+            recorded_calls,
+            vec![
+                MutationCall::Begin {
+                    op: RequestOp::Setattr,
+                },
+                MutationCall::Getattr {
+                    ino: InodeNumber(55),
+                },
+                MutationCall::End {
+                    op: RequestOp::Setattr,
+                },
+            ],
+            "unauthorized uid/gid changes must not dispatch backend setattr or commit"
+        );
+        Ok(())
     }
 
     #[test]
