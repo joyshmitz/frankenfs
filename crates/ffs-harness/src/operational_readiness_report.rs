@@ -822,7 +822,18 @@ impl ReportBuilder {
             return ArtifactRecency::not_checked();
         };
 
-        let age_days = reference_epoch_days.saturating_sub(created_epoch_days);
+        if created_epoch_days > reference_epoch_days {
+            self.record_invalid_artifact_timestamp(
+                source_path,
+                gate_id,
+                run_id,
+                Some(created_at),
+                "created_at is after the recency reference timestamp",
+            );
+            return ArtifactRecency::not_checked();
+        }
+
+        let age_days = reference_epoch_days - created_epoch_days;
         if age_days <= max_age_days {
             return ArtifactRecency::fresh(age_days);
         }
@@ -1702,6 +1713,51 @@ mod tests {
             violation.remediation_id == "bd-7pw36:artifact-recency-timestamp"
                 && violation.violation.contains("created_at")
         }));
+    }
+
+    #[test]
+    fn max_age_rejects_future_dated_artifacts() {
+        let fixture = ReadinessFixture::new();
+        let mut manifest = sample_operational_manifest("abc123");
+        manifest.created_at = "2026-05-08T00:00:00Z".to_owned();
+        let mut legacy = sample_legacy_summary("abc123", "legacy_future_timestamp");
+        legacy.created_at = Some("2026-05-09T00:00:00Z".to_owned());
+        fixture.write_manifest("manifest.json", &manifest);
+        fixture.write_legacy("legacy_result.json", &legacy);
+        fs::write(fixture.dir.path().join("run.log"), "legacy log").expect("write log");
+
+        let report = fixture.report_with_recency(Some("abc123"), 3, "2026-05-06T00:00:00Z");
+
+        assert!(report.contract_failed);
+        assert!(report.stale_artifacts.is_empty());
+        assert_eq!(report.invalid_artifact_timestamps.len(), 2);
+        assert!(report.invalid_artifact_timestamps.iter().any(|invalid| {
+            invalid.gate_id == "operational_readiness"
+                && invalid.created_at.as_deref() == Some("2026-05-08T00:00:00Z")
+                && invalid.reason.contains("after the recency reference")
+        }));
+        assert!(report.invalid_artifact_timestamps.iter().any(|invalid| {
+            invalid.gate_id == "legacy_fuse_gate"
+                && invalid.created_at.as_deref() == Some("2026-05-09T00:00:00Z")
+                && invalid.reason.contains("after the recency reference")
+        }));
+        assert!(report.scenarios.iter().any(|row| {
+            row.gate_id == "operational_readiness"
+                && row.artifact_recency == ArtifactRecencyState::NotChecked
+                && row.artifact_age_days.is_none()
+        }));
+        assert!(report.scenarios.iter().any(|row| {
+            row.gate_id == "legacy_fuse_gate"
+                && row.artifact_recency == ArtifactRecencyState::NotChecked
+                && row.artifact_age_days.is_none()
+        }));
+        assert!(report.contract_violations.iter().any(|violation| {
+            violation.remediation_id == "bd-7pw36:artifact-recency-timestamp"
+                && violation.violation.contains("after the recency reference")
+        }));
+        let markdown = render_operational_readiness_markdown(&report);
+        assert!(markdown.contains("## Invalid Artifact Timestamps"));
+        assert!(markdown.contains("after the recency reference"));
     }
 
     #[test]

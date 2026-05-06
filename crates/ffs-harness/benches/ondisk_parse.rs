@@ -262,14 +262,18 @@ fn bench_ext4_dx_hash(c: &mut Criterion) {
     // lengths covering short ("a"), typical ("README.md"), nested
     // ("path/to/some/deeply/nested/file.txt"), max-length-ish, and
     // unicode-heavy patterns (as raw bytes — dx_hash takes &[u8]).
-    let names: Vec<Vec<u8>> = (0..32)
+    const ASCII_UPPERCASE: &[u8; 26] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let names: Vec<Vec<u8>> = (0_usize..32)
         .map(|i| {
             let mut name = format!("entry_{i:04}_").into_bytes();
             // Pad to varying lengths to exercise both single-chunk
             // and multi-chunk paths in HALF_MD4 (32-byte chunks) and
             // TEA (16-byte chunks).
-            let pad_len = 4 + (i as usize % 64);
-            name.extend(std::iter::repeat_n(b'A' + (i as u8 % 26), pad_len));
+            let pad_len = 4 + (i % 64);
+            name.extend(std::iter::repeat_n(
+                ASCII_UPPERCASE[i % ASCII_UPPERCASE.len()],
+                pad_len,
+            ));
             name
         })
         .collect();
@@ -280,11 +284,8 @@ fn bench_ext4_dx_hash(c: &mut Criterion) {
         c.bench_function(&format!("ext4_dx_hash_{label}"), |b| {
             b.iter(|| {
                 for name in &names {
-                    let (major, minor) = dx_hash(
-                        black_box(version),
-                        black_box(name),
-                        black_box(&seed),
-                    );
+                    let (major, minor) =
+                        dx_hash(black_box(version), black_box(name), black_box(&seed));
                     black_box((major, minor));
                 }
             });

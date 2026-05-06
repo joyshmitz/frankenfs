@@ -1383,6 +1383,7 @@ mod tests {
     ///   * the `## Errors` section heading and the per-error bullet
     ///     format
     ///   * the exact ordering of observation and error bullets
+    ///
     /// Substring-only assertions in `renders_markdown_summary` cannot
     /// detect column reorders, section ordering swaps, or table-cell
     /// drift; this snapshot does.
