@@ -770,6 +770,23 @@ pub fn validate_xfstests_failure_triage_report(
     if report.proposed_br_commands.len() != report.proposed_beads.len() {
         errors.push("xfstests failure triage proposed_br_commands count mismatch".to_owned());
     }
+    for (index, bead) in report.proposed_beads.iter().enumerate() {
+        let Some(command) = report.proposed_br_commands.get(index) else {
+            continue;
+        };
+        if !command.starts_with("DRY_RUN br create ") {
+            errors.push(format!(
+                "xfstests failure triage proposed_br_commands[{index}] must be a dry-run br create command"
+            ));
+        }
+        let expected = bead.proposed_br_command();
+        if command != &expected {
+            errors.push(format!(
+                "xfstests failure triage proposed_br_commands[{index}] does not match proposed bead {}",
+                bead.proposed_id_placeholder
+            ));
+        }
+    }
     let mut duplicate_keys = BTreeSet::new();
     for bead in &report.proposed_beads {
         validate_proposed_failure_bead(bead, &mut duplicate_keys, &mut errors);
@@ -3443,6 +3460,40 @@ generic/001  2s ... pass\n";
                 .iter()
                 .any(|row| row.reason.contains("unsupported-scope"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn failure_triage_rejects_mutated_proposed_br_command() -> Result<()> {
+        let tmp = tempdir()?;
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "generic/001 failed EIO\n")?;
+        let mut product = baseline_case("generic/001", XfstestsBaselineRowStatus::Failed);
+        product.not_run_reason = Some("EIO after fsync boundary".to_owned());
+        let manifest = manifest_with_cases(&raw, vec![product]);
+        let mut report = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
+            triage_id: "triage-fixture",
+            baseline_manifest_path: tmp.path().join("baseline_manifest.json").as_path(),
+            baseline_manifest: &manifest,
+            reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh",
+        })?;
+        let command = report
+            .proposed_br_commands
+            .first_mut()
+            .context("missing proposed br command")?;
+        *command = "br create --title live-product-bug --type bug".to_owned();
+
+        let errors = validate_xfstests_failure_triage_report(&report);
+
+        for expected in [
+            "must be a dry-run br create command",
+            "does not match proposed bead",
+        ] {
+            assert!(
+                errors.iter().any(|error| error.contains(expected)),
+                "expected {expected} error, got {errors:#?}"
+            );
+        }
         Ok(())
     }
 
