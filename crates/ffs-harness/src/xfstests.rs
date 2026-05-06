@@ -619,6 +619,11 @@ pub fn validate_xfstests_baseline_manifest(manifest: &XfstestsBaselineManifest) 
     if manifest.raw_artifacts.is_empty() {
         errors.push("xfstests baseline raw_artifacts must not be empty".to_owned());
     }
+    let raw_by_path = manifest
+        .raw_artifacts
+        .iter()
+        .map(|artifact| (artifact.path.as_str(), artifact))
+        .collect::<BTreeMap<_, _>>();
     for artifact in &manifest.raw_artifacts {
         validate_raw_artifact(artifact, &mut errors);
     }
@@ -632,6 +637,9 @@ pub fn validate_xfstests_baseline_manifest(manifest: &XfstestsBaselineManifest) 
             ));
         }
         validate_baseline_case(case, &mut errors);
+        if !case.raw_artifact_refs.is_empty() {
+            validate_case_raw_refs("baseline", case, &raw_by_path, &mut errors);
+        }
     }
     let actual_disposition_counts = disposition_counts(&manifest.cases);
     if manifest.disposition_counts != actual_disposition_counts {
@@ -662,7 +670,7 @@ pub fn build_xfstests_failure_triage_report(
         .collect::<BTreeMap<_, _>>();
     let mut raw_ref_errors = Vec::new();
     for case in &input.baseline_manifest.cases {
-        validate_case_raw_refs(case, &raw_by_path, &mut raw_ref_errors);
+        validate_case_raw_refs("triage", case, &raw_by_path, &mut raw_ref_errors);
     }
     if !raw_ref_errors.is_empty() {
         anyhow::bail!(
@@ -1941,6 +1949,7 @@ fn validate_raw_artifact(artifact: &XfstestsRawArtifact, errors: &mut Vec<String
 }
 
 fn validate_case_raw_refs(
+    consumer: &str,
     case: &XfstestsBaselineCase,
     raw_by_path: &BTreeMap<&str, &XfstestsRawArtifact>,
     errors: &mut Vec<String>,
@@ -1950,18 +1959,18 @@ fn validate_case_raw_refs(
         match raw_by_path.get(raw_ref.as_str()) {
             Some(artifact) if artifact.immutable => artifacts.push((*artifact).clone()),
             Some(_) => errors.push(format!(
-                "xfstests triage case {} references mutable raw artifact {}",
+                "xfstests {consumer} case {} references mutable raw artifact {}",
                 case.test_id, raw_ref
             )),
             None => errors.push(format!(
-                "xfstests triage case {} references unknown raw artifact {}",
+                "xfstests {consumer} case {} references unknown raw artifact {}",
                 case.test_id, raw_ref
             )),
         }
     }
     if artifacts.is_empty() {
         errors.push(format!(
-            "xfstests triage case {} has no consumable raw artifacts",
+            "xfstests {consumer} case {} has no consumable raw artifacts",
             case.test_id
         ));
         return;
@@ -1969,7 +1978,7 @@ fn validate_case_raw_refs(
     let actual_hash = hash_raw_artifact_set(&artifacts);
     if case.raw_log_hash != actual_hash {
         errors.push(format!(
-            "xfstests triage case {} raw_log_hash does not match referenced immutable artifacts: expected={} actual={actual_hash}",
+            "xfstests {consumer} case {} raw_log_hash does not match referenced immutable artifacts: expected={} actual={actual_hash}",
             case.test_id, case.raw_log_hash
         ));
     }
@@ -3330,6 +3339,61 @@ generic/001  2s ... pass\n";
                 .iter()
                 .any(|error| error.contains("disposition_counts mismatch")),
             "expected disposition count mismatch error, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn baseline_manifest_rejects_unknown_raw_artifact_refs() {
+        let tmp = tempdir().expect("tempdir");
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "generic/001 failed\n").expect("write raw log");
+        let mut manifest = manifest_with_cases(
+            &raw,
+            vec![baseline_case(
+                "generic/001",
+                XfstestsBaselineRowStatus::Failed,
+            )],
+        );
+        let case = manifest.cases.first_mut().expect("single baseline case");
+        case.raw_artifact_refs = vec!["missing-check.log".to_owned()];
+
+        let errors = validate_xfstests_baseline_manifest(&manifest);
+
+        assert!(
+            errors.iter().any(|error| {
+                error.contains(
+                    "baseline case generic/001 references unknown raw artifact missing-check.log",
+                )
+            }),
+            "expected unknown raw artifact ref error, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn baseline_manifest_rejects_case_raw_log_hash_drift() {
+        let tmp = tempdir().expect("tempdir");
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "generic/001 failed\n").expect("write raw log");
+        let mut manifest = manifest_with_cases(
+            &raw,
+            vec![baseline_case(
+                "generic/001",
+                XfstestsBaselineRowStatus::Failed,
+            )],
+        );
+        let case = manifest.cases.first_mut().expect("single baseline case");
+        case.raw_log_hash =
+            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
+
+        let errors = validate_xfstests_baseline_manifest(&manifest);
+
+        assert!(
+            errors.iter().any(|error| {
+                error.contains(
+                    "baseline case generic/001 raw_log_hash does not match referenced immutable artifacts",
+                )
+            }),
+            "expected raw_log_hash drift error, got {errors:#?}"
         );
     }
 
