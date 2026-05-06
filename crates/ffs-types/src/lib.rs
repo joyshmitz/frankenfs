@@ -2035,6 +2035,78 @@ mod tests {
                 prop_assert_eq!(count, 0);
             }
         }
+
+        // bd-jk3wp — Metamorphic relations for ext4_block_size_from_log,
+        // the log->size mapping used by every parser that reads or
+        // writes ext4 blocks. The function computes 1 << (10 + log).
+
+        /// MR1 — Determinism: same input always yields the same Some/None.
+        #[test]
+        fn proptest_ext4_block_size_from_log_is_deterministic(log in any::<u32>()) {
+            prop_assert_eq!(
+                ext4_block_size_from_log(log),
+                ext4_block_size_from_log(log)
+            );
+        }
+
+        /// MR2 — Result is power-of-2: every Some(s) value satisfies
+        /// s.is_power_of_two().
+        #[test]
+        fn proptest_ext4_block_size_from_log_is_power_of_two(log in any::<u32>()) {
+            if let Some(size) = ext4_block_size_from_log(log) {
+                prop_assert!(
+                    size.is_power_of_two(),
+                    "block size {size} for log={log} must be a power of 2"
+                );
+            }
+        }
+
+        /// MR3 — Lower bound: the smallest valid result is 1024 (log=0)
+        /// — this is EXT4_MIN_BLOCK_SIZE per the kernel.
+        #[test]
+        fn proptest_ext4_block_size_from_log_minimum_is_1024(log in 0_u32..=21) {
+            let size = ext4_block_size_from_log(log).expect("log <= 21 must produce Some");
+            prop_assert!(
+                size >= 1024,
+                "block size {size} for log={log} must be >= 1024"
+            );
+        }
+
+        /// MR4 — Doubling: from_log(log+1) == 2 * from_log(log) when both
+        /// fit in u32. A regression that swapped left-shift for right-shift
+        /// or biased the shift constant breaks this.
+        #[test]
+        fn proptest_ext4_block_size_from_log_doubles(log in 0_u32..=20) {
+            let size = ext4_block_size_from_log(log).expect("log <= 20 must produce Some");
+            let next = ext4_block_size_from_log(log + 1).expect("log <= 20 doubles cleanly");
+            prop_assert_eq!(
+                next,
+                size.checked_mul(2).expect("doubling must not overflow"),
+                "from_log(log+1) must equal 2 * from_log(log)"
+            );
+        }
+
+        /// MR5 — Overflow boundary: log == 22 produces None because
+        /// 1 << (10 + 22) overflows u32. Pin the exact boundary so an
+        /// off-by-one in the overflow check fails immediately.
+        #[test]
+        fn proptest_ext4_block_size_from_log_overflows_at_22(log in 22_u32..=u32::MAX) {
+            prop_assert_eq!(
+                ext4_block_size_from_log(log),
+                None,
+                "log >= 22 must overflow and return None"
+            );
+        }
+
+        /// MR6 — Inverse round-trip: for a Some(s) result, the log of
+        /// the block size in bits, minus 10, recovers the original log.
+        /// A shift bias regression (e.g., 9 instead of 10) breaks this.
+        #[test]
+        fn proptest_ext4_block_size_from_log_inverse_roundtrip(log in 0_u32..=21) {
+            let size = ext4_block_size_from_log(log).expect("log <= 21 must produce Some");
+            let recovered = size.trailing_zeros() - 10;
+            prop_assert_eq!(recovered, log, "log recovery must round-trip");
+        }
     }
 
     #[test]
