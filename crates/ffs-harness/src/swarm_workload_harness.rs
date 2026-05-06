@@ -501,6 +501,16 @@ pub struct SwarmWorkloadHarnessReport {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Default)]
+struct SwarmScenarioValidationSummary {
+    classification_counts: BTreeMap<String, usize>,
+    release_claim_counts: BTreeMap<String, usize>,
+    verdict_counts: BTreeMap<String, usize>,
+    scenario_verdicts: Vec<SwarmScenarioValidationRow>,
+    large_host_plan_count: usize,
+    host_downgrade_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SwarmProfileMatrixRow {
     pub workload_profile_id: String,
@@ -550,14 +560,7 @@ pub fn validate_swarm_workload_harness_manifest_with_config(
         );
     }
 
-    let (
-        classification_counts,
-        release_claim_counts,
-        verdict_counts,
-        scenario_verdicts,
-        large_host_plan_count,
-        host_downgrade_count,
-    ) = validate_scenarios(manifest, &profile_ids, &mut issues);
+    let scenario_summary = validate_scenarios(manifest, &profile_ids, &mut issues);
     let profile_matrix = build_profile_matrix(manifest);
     let errors = issues
         .iter()
@@ -573,12 +576,12 @@ pub fn validate_swarm_workload_harness_manifest_with_config(
         command_plan_count: manifest.workload_profiles.len(),
         required_workload_class_count: REQUIRED_WORKLOAD_CLASSES.len(),
         missing_workload_classes,
-        large_host_plan_count,
-        host_downgrade_count,
-        verdict_counts,
-        classification_counts,
-        release_claim_counts,
-        scenario_verdicts,
+        large_host_plan_count: scenario_summary.large_host_plan_count,
+        host_downgrade_count: scenario_summary.host_downgrade_count,
+        verdict_counts: scenario_summary.verdict_counts,
+        classification_counts: scenario_summary.classification_counts,
+        release_claim_counts: scenario_summary.release_claim_counts,
+        scenario_verdicts: scenario_summary.scenario_verdicts,
         profile_matrix,
         issues,
         errors,
@@ -988,21 +991,9 @@ fn validate_scenarios(
     manifest: &SwarmWorkloadHarnessManifest,
     profile_ids: &BTreeSet<String>,
     issues: &mut Vec<SwarmValidationIssue>,
-) -> (
-    BTreeMap<String, usize>,
-    BTreeMap<String, usize>,
-    BTreeMap<String, usize>,
-    Vec<SwarmScenarioValidationRow>,
-    usize,
-    usize,
-) {
+) -> SwarmScenarioValidationSummary {
     let mut seen = BTreeSet::new();
-    let mut classification_counts = BTreeMap::new();
-    let mut release_claim_counts = BTreeMap::new();
-    let mut verdict_counts = BTreeMap::new();
-    let mut scenario_verdicts = Vec::new();
-    let mut large_host_plan_count = 0;
-    let mut host_downgrade_count = 0;
+    let mut summary = SwarmScenarioValidationSummary::default();
 
     for (scenario_index, scenario) in manifest.scenarios.iter().enumerate() {
         let issue_start = issues.len();
@@ -1021,10 +1012,12 @@ fn validate_scenarios(
                 format!("duplicate {}", scenario.scenario_id),
             );
         }
-        *classification_counts
+        *summary
+            .classification_counts
             .entry(scenario.classification.label().to_owned())
             .or_insert(0) += 1;
-        *release_claim_counts
+        *summary
+            .release_claim_counts
             .entry(scenario.release_claim_state.label().to_owned())
             .or_insert(0) += 1;
 
@@ -1036,7 +1029,7 @@ fn validate_scenarios(
         let numa_authoritative = scenario.host.numa.authoritative();
         let inadequate_or_unobservable = !meets_target || !numa_authoritative;
         if inadequate_or_unobservable {
-            host_downgrade_count += 1;
+            summary.host_downgrade_count += 1;
             validate_downgraded_scenario(scenario, scenario_index, issues);
         }
         if matches!(
@@ -1056,15 +1049,16 @@ fn validate_scenarios(
             SwarmHarnessReleaseClaimState::PlanReady
                 | SwarmHarnessReleaseClaimState::MeasuredAuthoritative
         ) {
-            large_host_plan_count += 1;
+            summary.large_host_plan_count += 1;
         }
 
         let scenario_issue_count = issues.len() - issue_start;
         let verdict = scenario_verdict(scenario, scenario_issue_count);
-        *verdict_counts
+        *summary
+            .verdict_counts
             .entry(verdict.label().to_owned())
             .or_insert(0) += 1;
-        scenario_verdicts.push(SwarmScenarioValidationRow {
+        summary.scenario_verdicts.push(SwarmScenarioValidationRow {
             scenario_id: scenario.scenario_id.clone(),
             verdict,
             classification: scenario.classification.label().to_owned(),
@@ -1079,14 +1073,7 @@ fn validate_scenarios(
         });
     }
 
-    (
-        classification_counts,
-        release_claim_counts,
-        verdict_counts,
-        scenario_verdicts,
-        large_host_plan_count,
-        host_downgrade_count,
-    )
+    summary
 }
 
 fn validate_scenario_shape(

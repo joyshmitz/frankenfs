@@ -130,9 +130,10 @@ use ffs_harness::{
         validate_swarm_tail_latency_ledger,
     },
     swarm_workload_harness::{
-        DEFAULT_SWARM_WORKLOAD_HARNESS_MANIFEST, fail_on_swarm_workload_harness_errors,
+        DEFAULT_SWARM_WORKLOAD_HARNESS_MANIFEST, DEFAULT_SWARM_WORKLOAD_HARNESS_MAX_AGE_DAYS,
+        SwarmWorkloadHarnessValidationConfig, fail_on_swarm_workload_harness_errors,
         load_swarm_workload_harness_manifest, render_swarm_workload_harness_markdown,
-        validate_swarm_workload_harness_manifest,
+        validate_swarm_workload_harness_manifest_with_config,
     },
     validate_btrfs_fixture, validate_ext4_fixture,
     verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
@@ -484,6 +485,8 @@ struct SwarmWorkloadHarnessCmdArgs {
     out_path: Option<String>,
     summary_out_path: Option<String>,
     format: ProofBundleFormat,
+    max_age_days: u32,
+    reference_timestamp: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1627,7 +1630,19 @@ fn validate_swarm_workload_harness_cmd(args: &[String]) -> Result<()> {
         return Ok(());
     };
     let manifest = load_swarm_workload_harness_manifest(Path::new(&cmd_args.manifest_path))?;
-    let report = validate_swarm_workload_harness_manifest(&manifest);
+    let reference_epoch_days = match &cmd_args.reference_timestamp {
+        Some(timestamp) => Some(
+            parse_manifest_timestamp_epoch_days(timestamp)
+                .with_context(|| format!("invalid --reference-timestamp {timestamp}"))?,
+        ),
+        None => SwarmWorkloadHarnessValidationConfig::with_current_reference().reference_epoch_days,
+    };
+    let validation_config = SwarmWorkloadHarnessValidationConfig {
+        reference_epoch_days,
+        max_age_days: cmd_args.max_age_days,
+    };
+    let report =
+        validate_swarm_workload_harness_manifest_with_config(&manifest, &validation_config);
     let output = match cmd_args.format {
         ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
         ProofBundleFormat::Markdown => render_swarm_workload_harness_markdown(&report),
@@ -1661,6 +1676,8 @@ fn parse_swarm_workload_harness_cmd_args(
     let mut out_path: Option<String> = None;
     let mut summary_out_path: Option<String> = None;
     let mut format = ProofBundleFormat::Json;
+    let mut max_age_days = DEFAULT_SWARM_WORKLOAD_HARNESS_MAX_AGE_DAYS;
+    let mut reference_timestamp: Option<String> = None;
     let mut i = 0;
 
     while i < args.len() {
@@ -1688,6 +1705,22 @@ fn parse_swarm_workload_harness_cmd_args(
                 format =
                     parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
             }
+            "--max-age-days" => {
+                i += 1;
+                max_age_days = args
+                    .get(i)
+                    .context("--max-age-days requires a value")?
+                    .parse()
+                    .context("--max-age-days must be an integer")?;
+            }
+            "--reference-timestamp" => {
+                i += 1;
+                reference_timestamp = Some(
+                    args.get(i)
+                        .context("--reference-timestamp requires a value")?
+                        .to_owned(),
+                );
+            }
             "--help" | "-h" => {
                 print_swarm_workload_harness_usage();
                 return Ok(None);
@@ -1702,6 +1735,8 @@ fn parse_swarm_workload_harness_cmd_args(
         out_path,
         summary_out_path,
         format,
+        max_age_days,
+        reference_timestamp,
     }))
 }
 
@@ -4911,6 +4946,10 @@ fn print_swarm_workload_harness_usage() {
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write selected-format validation report");
     println!("  --summary-out FILE                 Write Markdown inspection summary");
+    println!(
+        "  --max-age-days N                   Reject manifests older than N days (default: 14)"
+    );
+    println!("  --reference-timestamp RFC3339      Freshness reference timestamp (default: now)");
 }
 
 fn print_wal_group_commit_gate_usage() {
