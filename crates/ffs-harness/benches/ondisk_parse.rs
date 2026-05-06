@@ -10,6 +10,10 @@ use ffs_ondisk::{
 use std::hint::black_box;
 use std::path::Path;
 
+const BTRFS_BENCH_BLOCK_SIZE: usize = 4096;
+const BTRFS_HEADER_SIZE: usize = 101;
+const BTRFS_KEY_PTR_SIZE: usize = 33;
+
 fn fixture_path(name: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -17,6 +21,46 @@ fn fixture_path(name: &str) -> std::path::PathBuf {
         .expect("workspace root")
         .join("conformance/fixtures")
         .join(name)
+}
+
+fn btrfs_internal_node_block() -> Vec<u8> {
+    let mut block = vec![0_u8; BTRFS_BENCH_BLOCK_SIZE];
+    block
+        .get_mut(0x60..0x64)
+        .expect("btrfs nritems field")
+        .copy_from_slice(&2_u32.to_le_bytes());
+    *block.get_mut(0x64).expect("btrfs level field") = 1;
+    write_btrfs_key_ptr(&mut block, 0, (256, 132, 0), 0x4000, 10);
+    write_btrfs_key_ptr(&mut block, 1, (512, 132, 100), 0x8000, 10);
+    block
+}
+
+fn write_btrfs_key_ptr(
+    block: &mut [u8],
+    index: usize,
+    key: (u64, u8, u64),
+    blockptr: u64,
+    generation: u64,
+) {
+    let (objectid, item_type, offset) = key;
+    let base = BTRFS_HEADER_SIZE + index * BTRFS_KEY_PTR_SIZE;
+    block
+        .get_mut(base..base + 8)
+        .expect("btrfs key objectid field")
+        .copy_from_slice(&objectid.to_le_bytes());
+    *block.get_mut(base + 8).expect("btrfs key item_type field") = item_type;
+    block
+        .get_mut(base + 9..base + 17)
+        .expect("btrfs key offset field")
+        .copy_from_slice(&offset.to_le_bytes());
+    block
+        .get_mut(base + 17..base + 25)
+        .expect("btrfs key_ptr blockptr field")
+        .copy_from_slice(&blockptr.to_le_bytes());
+    block
+        .get_mut(base + 25..base + 33)
+        .expect("btrfs key_ptr generation field")
+        .copy_from_slice(&generation.to_le_bytes());
 }
 
 fn bench_ext4_inode_parse(c: &mut Criterion) {
@@ -192,11 +236,7 @@ fn bench_btrfs_leaf_items_parse(c: &mut Criterion) {
 }
 
 fn bench_btrfs_internal_items_parse(c: &mut Criterion) {
-    // btrfs_leaf_node.json has level=3 in the header and therefore
-    // exercises `parse_internal_items` (internal-node decoding) rather
-    // than `parse_leaf_items` (leaf decoding) — distinct code paths.
-    let data = load_sparse_fixture(&fixture_path("btrfs_leaf_node.json"))
-        .expect("load btrfs_leaf_node fixture");
+    let data = btrfs_internal_node_block();
 
     c.bench_function("btrfs_internal_items_parse", |b| {
         b.iter(|| {
