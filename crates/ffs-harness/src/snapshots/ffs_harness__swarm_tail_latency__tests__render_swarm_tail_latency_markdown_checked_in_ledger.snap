@@ -1,0 +1,38 @@
+---
+source: crates/ffs-harness/src/swarm_tail_latency.rs
+expression: markdown
+---
+# Swarm Tail-Latency Ledger
+
+- Ledger: `bd-p2j3e.1-swarm-tail-latency-v1`
+- Valid: `true`
+- Rows: `5`
+- Missing references: `1`
+- Incomplete host fingerprints: `0`
+- Component dominance alerts: `4`
+- Component sum tolerance: `35.0%`
+
+## Classification Counts
+
+- `fail`: 1
+- `missing_reference`: 1
+- `noisy`: 1
+- `pass`: 1
+- `warn`: 1
+
+## Release Claim Counts
+
+- `blocked`: 1
+- `experimental`: 1
+- `measured_authoritative`: 2
+- `missing_reference`: 1
+
+## Tail Attribution
+
+| Scenario | Workload | Seed | Class | Claim | p99 | Component Sum | Dominant | Watched Alerts | Reference |
+|---|---|---:|---|---|---:|---:|---|---|---|
+| `tail_latency_metadata_sync_dominant` | `metadata_storm_64c_sync_tail` | 7310001 | `metadata_storm` | `measured_authoritative` | 10000.0us | 10300.0us (3.0%) | `synchronization` 26.0% | synchronization | `comparable` |
+| `tail_latency_append_fsync_wal_warn` | `append_fsync_64c_wal_tail` | 7310002 | `append_fsync` | `measured_authoritative` | 12000.0us | 12800.0us (6.7%) | `wal_fsync` 35.0% | wal_fsync | `comparable` |
+| `tail_latency_mount_recovery_fuse_noisy` | `mount_recovery_local_noisy` | 7310003 | `mount_lifecycle` | `experimental` | 300000.0us | 323000.0us (7.7%) | `fuse_wrapper` 60.0% | fuse_wrapper | `noisy` |
+| `tail_latency_repair_backlog_fail` | `scrub_repair_overlap_backlog_fail` | 7310004 | `scrub_repair_overlap` | `blocked` | 18000.0us | 23000.0us (27.8%) | `repair_backlog` 50.0% | repair_backlog | `comparable` |
+| `tail_latency_cache_missing_reference` | `cache_pressure_missing_reference` | 7310005 | `cache_pressure` | `missing_reference` | 16000.0us | 16700.0us (4.4%) | `cache_pressure` 37.5% | none | `missing` |

@@ -1009,6 +1009,27 @@ mod tests {
         );
     }
 
+    /// The markdown renderer feeds proof-bundle and release-gate operator
+    /// workflows for the swarm responsiveness lane. Validator assertions above
+    /// pin row counts and classifications; this snapshot pins the title,
+    /// metadata bullets, count sections, tail-attribution table layout,
+    /// watched-alert cell escaping, and omitted Errors section for the
+    /// checked-in ledger fixture.
+    #[test]
+    fn render_swarm_tail_latency_markdown_checked_in_ledger_snapshot() {
+        let ledger = load_swarm_tail_latency_ledger(Path::new(&workspace_path(
+            DEFAULT_SWARM_TAIL_LATENCY_LEDGER,
+        )))
+        .expect("checked-in ledger loads");
+        let report = validate_swarm_tail_latency_ledger(&ledger);
+        let markdown = render_swarm_tail_latency_markdown(&report);
+
+        insta::assert_snapshot!(
+            "render_swarm_tail_latency_markdown_checked_in_ledger",
+            markdown
+        );
+    }
+
     #[test]
     fn missing_component_is_rejected() {
         let mut ledger = fixture_ledger();
