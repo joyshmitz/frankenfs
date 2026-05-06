@@ -12609,6 +12609,115 @@ mod tests {
             );
         }
 
+        // ── Ext4MmpBlock metamorphic relations (bd-pyzm5) ────────────
+
+        /// MR-A — Length rejection: any input shorter than
+        /// EXT4_SUPERBLOCK_SIZE (1024 bytes) MUST return
+        /// `InsufficientData`. Pins that the parser refuses to read
+        /// past the buffer end.
+        #[test]
+        fn ext4_proptest_mmp_block_rejects_short_input(short_len in 0_usize..=1023) {
+            let bytes = vec![0xAB_u8; short_len];
+            let result = Ext4MmpBlock::parse_from_bytes(&bytes);
+            let is_insufficient = matches!(result, Err(ParseError::InsufficientData { .. }));
+            prop_assert!(is_insufficient);
+        }
+
+        /// MR-B — Magic rejection: any input >= 1024 bytes whose
+        /// first 4 bytes are NOT EXT4_MMP_MAGIC (0x004D_4D50) MUST
+        /// return `InvalidField` for `mmp_magic`. Pins the magic
+        /// check is the FIRST gate after length validation.
+        #[test]
+        fn ext4_proptest_mmp_block_rejects_bad_magic(
+            bad_magic in any::<u32>().prop_filter("must not match EXT4_MMP_MAGIC", |m| {
+                *m != EXT4_MMP_MAGIC
+            }),
+            tail in proptest::collection::vec(any::<u8>(), 1020..=1020),
+        ) {
+            let mut bytes = Vec::with_capacity(1024);
+            bytes.extend_from_slice(&bad_magic.to_le_bytes());
+            bytes.extend_from_slice(&tail);
+            let result = Ext4MmpBlock::parse_from_bytes(&bytes);
+            let is_bad_magic = matches!(
+                result,
+                Err(ParseError::InvalidField { field: "mmp_magic", .. })
+            );
+            prop_assert!(is_bad_magic);
+        }
+
+        /// MR-C — Status total partition: for any u32 `seq` value,
+        /// `Ext4MmpBlock::status()` returns EXACTLY one of
+        /// {Clean, Fsck, Active, UnsafeUnknown}. No overlap, no
+        /// zero-coverage. Pins the kernel-defined seq classification.
+        #[test]
+        fn ext4_proptest_mmp_status_total_partition(seq in any::<u32>()) {
+            let mmp = Ext4MmpBlock {
+                magic: EXT4_MMP_MAGIC,
+                seq,
+                time: 0,
+                nodename: String::new(),
+                bdevname: String::new(),
+                check_interval: 0,
+                checksum: 0,
+            };
+            // Exactly one variant must match; encoded as a count.
+            let status = mmp.status();
+            let count = u32::from(matches!(status, Ext4MmpStatus::Clean))
+                + u32::from(matches!(status, Ext4MmpStatus::Fsck))
+                + u32::from(matches!(status, Ext4MmpStatus::Active(_)))
+                + u32::from(matches!(status, Ext4MmpStatus::UnsafeUnknown(_)));
+            prop_assert_eq!(count, 1);
+
+            // Cross-check: the variant carries the EXACT seq when
+            // Active or UnsafeUnknown.
+            match status {
+                Ext4MmpStatus::Active(s) => prop_assert_eq!(s, seq),
+                Ext4MmpStatus::UnsafeUnknown(s) => prop_assert_eq!(s, seq),
+                Ext4MmpStatus::Clean => prop_assert_eq!(seq, EXT4_MMP_SEQ_CLEAN),
+                Ext4MmpStatus::Fsck => prop_assert_eq!(seq, EXT4_MMP_SEQ_FSCK),
+            }
+        }
+
+        /// MR-D — Tail-invariance: parse_from_bytes reads only the
+        /// documented field offsets (0x00..0x72 + 0x3FC..0x400).
+        /// Bytes in the gap region (0x72..0x3FC) MUST NOT affect the
+        /// parsed struct. Pins the read-only-from-documented-offsets
+        /// contract.
+        #[test]
+        fn ext4_proptest_mmp_block_ignores_gap_bytes(
+            seq in any::<u32>(),
+            time_lo in any::<u32>(),
+            time_hi in any::<u32>(),
+            check_interval in any::<u16>(),
+            csum in any::<u32>(),
+            gap_a in proptest::collection::vec(any::<u8>(), 906..=906),
+            gap_b in proptest::collection::vec(any::<u8>(), 906..=906),
+        ) {
+            // Build two 1024-byte blocks identical except in the
+            // gap region 0x72..0x3FC (906 bytes).
+            let mut block_a = vec![0_u8; EXT4_SUPERBLOCK_SIZE];
+            let mut block_b = vec![0_u8; EXT4_SUPERBLOCK_SIZE];
+            for block in [&mut block_a, &mut block_b] {
+                block[0x00..0x04].copy_from_slice(&EXT4_MMP_MAGIC.to_le_bytes());
+                block[0x04..0x08].copy_from_slice(&seq.to_le_bytes());
+                block[0x08..0x0C].copy_from_slice(&time_lo.to_le_bytes());
+                block[0x0C..0x10].copy_from_slice(&time_hi.to_le_bytes());
+                // 0x10..0x50 nodename + 0x50..0x70 bdevname stay zero.
+                block[0x70..0x72].copy_from_slice(&check_interval.to_le_bytes());
+                block[EXT4_MMP_CHECKSUM_OFFSET..EXT4_MMP_CHECKSUM_OFFSET + 4]
+                    .copy_from_slice(&csum.to_le_bytes());
+            }
+            // Differ in the gap region.
+            block_a[0x72..0x3FC].copy_from_slice(&gap_a);
+            block_b[0x72..0x3FC].copy_from_slice(&gap_b);
+
+            let parsed_a = Ext4MmpBlock::parse_from_bytes(&block_a)
+                .expect("block_a with valid magic must parse");
+            let parsed_b = Ext4MmpBlock::parse_from_bytes(&block_b)
+                .expect("block_b with valid magic must parse");
+            prop_assert_eq!(parsed_a, parsed_b);
+        }
+
         // ── DirEntry actual_size ─────────────────────────────────────
 
         /// actual_size is always 4-byte aligned and >= 8.
