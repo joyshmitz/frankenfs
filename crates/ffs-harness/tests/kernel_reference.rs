@@ -32,7 +32,7 @@ use ffs_ondisk::{
 use ffs_types::{
     BlockNumber, EXT4_INLINE_DATA_FL, EXT4_XATTR_INDEX_POSIX_ACL_ACCESS,
     EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT, EXT4_XATTR_INDEX_SECURITY, EXT4_XATTR_INDEX_SYSTEM,
-    EXT4_XATTR_INDEX_USER,
+    EXT4_XATTR_INDEX_USER, InodeNumber,
 };
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -73,6 +73,10 @@ const ACL_GROUP_OBJ_TAG: u16 = 0x0004;
 const ACL_OTHER_TAG: u16 = 0x0020;
 const ACL_UNDEFINED_ID: u32 = u32::MAX;
 const INLINE_DATA_CONTINUATION_PATH: &str = "/inline76.txt";
+const LARGE_ISIZE_HIGH_PATH: &str = "/huge_sparse_i_size_high.bin";
+const LARGE_ISIZE_HIGH_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const LARGE_ISIZE_HIGH_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+const LARGE_ISIZE_HIGH_SEED_BYTES: usize = 4096;
 // Keep this large enough that e2fsck -D reliably promotes /htree into a real
 // hash-indexed directory across supported e2fsprogs versions.
 const DIR_INDEX_FILE_COUNT: usize = 256;
@@ -872,6 +876,111 @@ fn unique_temp_ext4_path(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ffs_{tag}_{}_{}.ext4", std::process::id(), nanos))
 }
 
+fn create_large_isize_high_reference_image(image_path: &Path) -> PathBuf {
+    let f = std::fs::File::create(image_path).expect("create image file");
+    f.set_len(LARGE_ISIZE_HIGH_IMAGE_BYTES)
+        .expect("set sparse image length");
+    drop(f);
+
+    if trace_ext4_tools() {
+        eprintln!(
+            "mkfs.ext4 params: -L ffs-isizehi -b 4096 -q -O ^has_journal {}",
+            image_path.display()
+        );
+    }
+    let st = Command::new("mkfs.ext4")
+        .args([
+            "-L",
+            "ffs-isizehi",
+            "-b",
+            "4096",
+            "-q",
+            "-O",
+            "^has_journal",
+        ])
+        .arg(image_path)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run mkfs.ext4");
+    assert!(st.success(), "mkfs.ext4 failed");
+
+    let seed_path = image_path.with_extension("i_size_high.seed.tmp");
+    std::fs::write(&seed_path, vec![b'H'; LARGE_ISIZE_HIGH_SEED_BYTES])
+        .expect("write i_size_high seed");
+    run_debugfs_w(
+        image_path,
+        &format!("write {} {LARGE_ISIZE_HIGH_PATH}", seed_path.display()),
+    );
+    run_debugfs_w(
+        image_path,
+        &format!("sif {LARGE_ISIZE_HIGH_PATH} size {LARGE_ISIZE_HIGH_BYTES}"),
+    );
+    std::fs::remove_file(&seed_path).ok();
+
+    image_path.to_path_buf()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DebugfsInodeStat {
+    inode_number: u64,
+    size: u64,
+}
+
+fn parse_debugfs_u64_field(text: &str, field: &str) -> Option<u64> {
+    let needle = format!("{field}:");
+    for line in text.lines() {
+        if let Some((_, rest)) = line.split_once(&needle) {
+            let token = rest.split_whitespace().next()?;
+            return token.parse().ok();
+        }
+    }
+    None
+}
+
+fn capture_debugfs_inode_stat(image: &Path, path: &str) -> DebugfsInodeStat {
+    let out = Command::new("debugfs")
+        .args(["-R", &format!("stat {path}")])
+        .arg(image)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .expect("run debugfs stat");
+    assert!(out.status.success(), "debugfs stat failed for {path}");
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    DebugfsInodeStat {
+        inode_number: parse_debugfs_u64_field(&text, "Inode")
+            .expect("debugfs stat missing numeric Inode field"),
+        size: parse_debugfs_u64_field(&text, "Size")
+            .expect("debugfs stat missing numeric Size field"),
+    }
+}
+
+fn raw_inode_size_words(image: &[u8], reader: &Ext4ImageReader, ino: InodeNumber) -> (u32, u32) {
+    let (group, _index, byte_offset_in_table) = reader.sb.inode_table_offset(ino);
+    let gd = reader
+        .read_group_desc(image, group)
+        .expect("read group descriptor for inode");
+    let table_start_byte = gd
+        .inode_table
+        .checked_mul(u64::from(reader.sb.block_size))
+        .expect("inode table byte offset overflow");
+    let inode_byte = table_start_byte
+        .checked_add(byte_offset_in_table)
+        .expect("inode byte offset overflow");
+    let inode_offset = usize::try_from(inode_byte).expect("inode offset fits usize");
+    let size_lo = u32::from_le_bytes(
+        image[inode_offset + 0x04..inode_offset + 0x08]
+            .try_into()
+            .expect("size_lo slice"),
+    );
+    let size_hi = u32::from_le_bytes(
+        image[inode_offset + 0x6C..inode_offset + 0x70]
+            .try_into()
+            .expect("size_hi slice"),
+    );
+    (size_lo, size_hi)
+}
+
 fn parse_reference_xattr_name(full_name: &str) -> (u8, Vec<u8>) {
     if let Some(name) = full_name.strip_prefix("user.") {
         return (EXT4_XATTR_INDEX_USER, name.as_bytes().to_vec());
@@ -1388,6 +1497,71 @@ fn ext4_kernel_vs_ffs_inode_metadata() {
         "readme.txt should be regular"
     );
     assert_eq!(readme.size, expected_size, "readme.txt size");
+
+    std::fs::remove_file(&tmp).ok();
+}
+
+#[test]
+fn ext4_large_isize_high_matches_debugfs_and_openfs() {
+    const SCENARIO_ID: &str = "ext4_large_isize_high_kernel_reference";
+
+    if !ext4_tools_available() {
+        eprintln!(
+            "SCENARIO_RESULT|scenario_id={SCENARIO_ID}|outcome=SKIP|detail=ext4_tools_unavailable_requires_mkfs_ext4_debugfs"
+        );
+        return;
+    }
+
+    let tmp = unique_temp_ext4_path("large_i_size_high");
+    create_large_isize_high_reference_image(&tmp);
+
+    let kernel = capture_debugfs_inode_stat(&tmp, LARGE_ISIZE_HIGH_PATH);
+    assert_eq!(
+        kernel.size, LARGE_ISIZE_HIGH_BYTES,
+        "debugfs must preserve the >4GiB logical size"
+    );
+
+    let image = std::fs::read(&tmp).expect("read image");
+    let reader = Ext4ImageReader::new(&image).expect("parse ext4 image");
+    let ino = InodeNumber(kernel.inode_number);
+    let (size_lo, size_hi) = raw_inode_size_words(&image, &reader, ino);
+    assert_eq!(
+        size_lo,
+        u32::try_from(LARGE_ISIZE_HIGH_BYTES & 0xffff_ffff).expect("size_lo fits u32"),
+        "raw i_size_lo must match low 32 bits"
+    );
+    assert_eq!(
+        size_hi,
+        u32::try_from(LARGE_ISIZE_HIGH_BYTES >> 32).expect("size_hi fits u32"),
+        "raw i_size_high must carry upper 32 bits"
+    );
+
+    let (_, ondisk_inode) = reader
+        .resolve_path(&image, LARGE_ISIZE_HIGH_PATH)
+        .expect("resolve large sparse file");
+    assert_eq!(
+        ondisk_inode.size, kernel.size,
+        "ffs_ondisk size must match debugfs"
+    );
+
+    let cx = Cx::for_testing();
+    let fs = OpenFs::open_with_options(&cx, &tmp, &OpenOptions::default())
+        .expect("OpenFs should open sparse large-size ext4 image");
+    let openfs_inode = fs.read_inode(&cx, ino).expect("OpenFs read_inode");
+    assert_eq!(
+        openfs_inode.size, kernel.size,
+        "OpenFs read_inode size must match debugfs"
+    );
+
+    eprintln!(
+        "SCENARIO_RESULT|scenario_id={SCENARIO_ID}|outcome=PASS|detail=file_size={};size_lo=0x{:08x};size_hi=0x{:08x};image_bytes={};seed_bytes={};inode={}",
+        kernel.size,
+        size_lo,
+        size_hi,
+        LARGE_ISIZE_HIGH_IMAGE_BYTES,
+        LARGE_ISIZE_HIGH_SEED_BYTES,
+        kernel.inode_number
+    );
 
     std::fs::remove_file(&tmp).ok();
 }
