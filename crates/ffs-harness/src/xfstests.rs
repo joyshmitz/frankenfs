@@ -769,6 +769,7 @@ pub fn validate_xfstests_failure_triage_report(
             report.duplicate_groups
         ));
     }
+    validate_failure_triage_row_uniqueness(report, &mut errors);
     for (index, bead) in report.proposed_beads.iter().enumerate() {
         let Some(command) = report.proposed_br_commands.get(index) else {
             continue;
@@ -1932,6 +1933,41 @@ fn failure_triage_duplicate_groups(
             merged_test_ids: bead.related_test_ids.clone(),
         })
         .collect()
+}
+
+fn validate_failure_triage_row_uniqueness(
+    report: &XfstestsFailureTriageReport,
+    errors: &mut Vec<String>,
+) {
+    let mut owner_by_test_id = BTreeMap::new();
+    for bead in &report.proposed_beads {
+        let owner = format!("proposed bead {}", bead.proposed_id_placeholder);
+        let mut local_related_ids = BTreeSet::new();
+        for test_id in &bead.related_test_ids {
+            if !local_related_ids.insert(test_id.as_str()) {
+                errors.push(format!(
+                    "xfstests failure triage proposed bead {} repeats related_test_id {test_id}",
+                    bead.proposed_id_placeholder
+                ));
+            }
+            if let Some(previous_owner) = owner_by_test_id.insert(test_id.clone(), owner.clone()) {
+                errors.push(format!(
+                    "xfstests failure triage row {test_id} appears in multiple dispositions: {previous_owner}; {owner}"
+                ));
+            }
+        }
+    }
+    for excluded in &report.excluded_rows {
+        let owner = format!("excluded row {}", excluded.test_id);
+        if let Some(previous_owner) =
+            owner_by_test_id.insert(excluded.test_id.clone(), owner.clone())
+        {
+            errors.push(format!(
+                "xfstests failure triage row {} appears in multiple dispositions: {previous_owner}; {owner}",
+                excluded.test_id
+            ));
+        }
+    }
 }
 
 fn hash_raw_artifact(path: &Path) -> Result<XfstestsRawArtifact> {
@@ -3524,6 +3560,85 @@ generic/001  2s ... pass\n";
                 .iter()
                 .any(|error| error.contains("duplicate_groups mismatch")),
             "expected duplicate_groups mismatch error, got {errors:#?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failure_triage_rejects_proposed_excluded_row_overlap() -> Result<()> {
+        let tmp = tempdir()?;
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "generic/001 failed EIO\next4/001 host blocked\n")?;
+        let mut product = baseline_case("generic/001", XfstestsBaselineRowStatus::Failed);
+        product.not_run_reason = Some("EIO after fsync boundary".to_owned());
+        let mut host = baseline_case("ext4/001", XfstestsBaselineRowStatus::HostBlocked);
+        host.classification = "environment_blocked".to_owned();
+        let manifest = manifest_with_cases(&raw, vec![product, host]);
+        let mut report = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
+            triage_id: "triage-fixture",
+            baseline_manifest_path: tmp.path().join("baseline_manifest.json").as_path(),
+            baseline_manifest: &manifest,
+            reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh",
+        })?;
+        let mut duplicated_exclusion = report
+            .excluded_rows
+            .first()
+            .context("missing excluded row")?
+            .clone();
+        duplicated_exclusion.test_id = "generic/001".to_owned();
+        duplicated_exclusion.status = XfstestsBaselineRowStatus::Failed.as_str().to_owned();
+        duplicated_exclusion.reason = "duplicated proposed product row".to_owned();
+        report.excluded_rows.push(duplicated_exclusion);
+        report.disposition_counts = failure_triage_disposition_counts(&report);
+
+        let errors = validate_xfstests_failure_triage_report(&report);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("row generic/001 appears in multiple dispositions")),
+            "expected row ownership overlap error, got {errors:#?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failure_triage_rejects_duplicate_proposed_row_assignment() -> Result<()> {
+        let tmp = tempdir()?;
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "generic/001 failed EIO\n")?;
+        let mut product = baseline_case("generic/001", XfstestsBaselineRowStatus::Failed);
+        product.not_run_reason = Some("EIO after fsync boundary".to_owned());
+        let manifest = manifest_with_cases(&raw, vec![product]);
+        let mut report = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
+            triage_id: "triage-fixture",
+            baseline_manifest_path: tmp.path().join("baseline_manifest.json").as_path(),
+            baseline_manifest: &manifest,
+            reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh",
+        })?;
+        let mut duplicate_bead = report
+            .proposed_beads
+            .first()
+            .context("missing proposed bead")?
+            .clone();
+        duplicate_bead.proposed_id_placeholder = "dry-run-xfstests-product-failure-9999".to_owned();
+        duplicate_bead.duplicate_key = format!("{}:manual-duplicate", duplicate_bead.duplicate_key);
+        report.proposed_beads.push(duplicate_bead);
+        report.proposed_br_commands = report
+            .proposed_beads
+            .iter()
+            .map(XfstestsProposedFailureBead::proposed_br_command)
+            .collect();
+        report.duplicate_groups = failure_triage_duplicate_groups(&report.proposed_beads);
+        report.disposition_counts = failure_triage_disposition_counts(&report);
+
+        let errors = validate_xfstests_failure_triage_report(&report);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("row generic/001 appears in multiple dispositions")),
+            "expected duplicate proposed row ownership error, got {errors:#?}"
         );
         Ok(())
     }
