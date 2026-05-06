@@ -706,15 +706,7 @@ pub fn build_xfstests_failure_triage_report(
     }
 
     let proposed_beads = proposed_by_key.into_values().collect::<Vec<_>>();
-    let duplicate_groups = proposed_beads
-        .iter()
-        .filter(|bead| bead.related_test_ids.len() > 1)
-        .map(|bead| XfstestsFailureDuplicateGroup {
-            duplicate_key: bead.duplicate_key.clone(),
-            primary_test_id: bead.failing_test_id.clone(),
-            merged_test_ids: bead.related_test_ids.clone(),
-        })
-        .collect::<Vec<_>>();
+    let duplicate_groups = failure_triage_duplicate_groups(&proposed_beads);
     let proposed_br_commands = proposed_beads
         .iter()
         .map(XfstestsProposedFailureBead::proposed_br_command)
@@ -769,6 +761,13 @@ pub fn validate_xfstests_failure_triage_report(
     }
     if report.proposed_br_commands.len() != report.proposed_beads.len() {
         errors.push("xfstests failure triage proposed_br_commands count mismatch".to_owned());
+    }
+    let expected_duplicate_groups = failure_triage_duplicate_groups(&report.proposed_beads);
+    if report.duplicate_groups != expected_duplicate_groups {
+        errors.push(format!(
+            "xfstests failure triage duplicate_groups mismatch: declared={:?} actual={expected_duplicate_groups:?}",
+            report.duplicate_groups
+        ));
     }
     for (index, bead) in report.proposed_beads.iter().enumerate() {
         let Some(command) = report.proposed_br_commands.get(index) else {
@@ -1919,6 +1918,20 @@ fn failure_triage_disposition_counts(
         *counts.entry(excluded.status.clone()).or_default() += 1;
     }
     counts
+}
+
+fn failure_triage_duplicate_groups(
+    proposed_beads: &[XfstestsProposedFailureBead],
+) -> Vec<XfstestsFailureDuplicateGroup> {
+    proposed_beads
+        .iter()
+        .filter(|bead| bead.related_test_ids.len() > 1)
+        .map(|bead| XfstestsFailureDuplicateGroup {
+            duplicate_key: bead.duplicate_key.clone(),
+            primary_test_id: bead.failing_test_id.clone(),
+            merged_test_ids: bead.related_test_ids.clone(),
+        })
+        .collect()
 }
 
 fn hash_raw_artifact(path: &Path) -> Result<XfstestsRawArtifact> {
@@ -3481,6 +3494,36 @@ generic/001  2s ... pass\n";
                 .excluded_rows
                 .iter()
                 .any(|row| row.reason.contains("unsupported-scope"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failure_triage_rejects_duplicate_group_drift() -> Result<()> {
+        let tmp = tempdir()?;
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "generic/001 failed EIO\ngeneric/002 failed EIO\n")?;
+        let mut first = baseline_case("generic/001", XfstestsBaselineRowStatus::Failed);
+        first.not_run_reason = Some("EIO after fsync boundary".to_owned());
+        let mut second = baseline_case("generic/002", XfstestsBaselineRowStatus::Failed);
+        second.not_run_reason = Some("EIO after fsync boundary".to_owned());
+        let manifest = manifest_with_cases(&raw, vec![first, second]);
+        let mut report = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
+            triage_id: "triage-fixture",
+            baseline_manifest_path: tmp.path().join("baseline_manifest.json").as_path(),
+            baseline_manifest: &manifest,
+            reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh",
+        })?;
+        assert_eq!(report.duplicate_groups.len(), 1);
+        report.duplicate_groups.clear();
+
+        let errors = validate_xfstests_failure_triage_report(&report);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("duplicate_groups mismatch")),
+            "expected duplicate_groups mismatch error, got {errors:#?}"
         );
         Ok(())
     }
