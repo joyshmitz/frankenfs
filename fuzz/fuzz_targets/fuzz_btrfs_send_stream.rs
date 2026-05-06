@@ -139,6 +139,19 @@ fn synthetic_unknown_stream(data: &[u8]) -> (Vec<u8>, Vec<u8>) {
     (stream, path)
 }
 
+fn synthetic_malformed_attr_len_stream(data: &[u8]) -> Vec<u8> {
+    let path = synthetic_path(data, 128, b"/bad_attr_len");
+    let declared_len = u16::try_from(path.len().saturating_add(1)).unwrap_or(u16::MAX);
+    let mut stream = stream_header();
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(SendAttr::Path as u16).to_le_bytes());
+    payload.extend_from_slice(&declared_len.to_le_bytes());
+    payload.extend_from_slice(&path);
+    append_send_command(&mut stream, SendCommand::Mkdir as u16, &payload);
+    append_send_command(&mut stream, SendCommand::End as u16, &[]);
+    stream
+}
+
 fn assert_success_shape(sig: &StreamSig) {
     assert_eq!(
         sig.version, BTRFS_SEND_STREAM_VERSION,
@@ -238,6 +251,18 @@ fn assert_synthetic_unknown_command(data: &[u8]) {
     assert_eq!(parsed.commands[1].cmd, SendCommand::End);
 }
 
+fn assert_synthetic_prefix_rejections(data: &[u8]) {
+    let (valid_stream, _, _, _) = synthetic_valid_stream(data);
+    let cut = usize::from(data.get(127).copied().unwrap_or(0)) % valid_stream.len();
+    assert!(
+        matches!(
+            normalize_parse(&valid_stream[..cut]),
+            ParseOutcome::Error(_)
+        ),
+        "every proper prefix of a synthetic valid send stream must reject"
+    );
+}
+
 fn assert_synthetic_rejections(data: &[u8]) {
     let (valid_stream, _, _, _) = synthetic_valid_stream(data);
 
@@ -275,11 +300,20 @@ fn assert_synthetic_rejections(data: &[u8]) {
         matches!(normalize_parse(&missing_end), ParseOutcome::Error(_)),
         "streams without END must reject"
     );
+
+    assert!(
+        matches!(
+            normalize_parse(&synthetic_malformed_attr_len_stream(data)),
+            ParseOutcome::Error(_)
+        ),
+        "attribute payload length mismatches must reject even with a valid command CRC"
+    );
 }
 
 fuzz_target!(|data: &[u8]| {
     assert_arbitrary_stream(data);
     assert_synthetic_valid_stream(data);
     assert_synthetic_unknown_command(data);
+    assert_synthetic_prefix_rejections(data);
     assert_synthetic_rejections(data);
 });
