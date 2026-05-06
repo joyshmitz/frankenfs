@@ -119,12 +119,33 @@ fn build_dir_item(cursor: &mut ByteCursor<'_>) -> BtrfsDirItem {
     }
 }
 
+fn build_root_ref(cursor: &mut ByteCursor<'_>) -> BtrfsRootRef {
+    BtrfsRootRef {
+        dirid: cursor.next_u64(),
+        sequence: cursor.next_u64(),
+        name: nonempty_bounded_bytes(cursor, MAX_STRUCTURED_BYTES),
+    }
+}
+
 fn build_xattr_item(cursor: &mut ByteCursor<'_>) -> BtrfsXattrItem {
     let value_len = cursor.next_u8() % (MAX_STRUCTURED_BYTES + 1);
     BtrfsXattrItem {
         name: nonempty_bounded_bytes(cursor, MAX_STRUCTURED_BYTES),
         value: cursor.take_vec(usize::from(value_len)),
     }
+}
+
+fn root_ref_to_bytes(item: &BtrfsRootRef) -> Vec<u8> {
+    let Ok(name_len) = u16::try_from(item.name.len()) else {
+        std::process::abort();
+    };
+
+    let mut bytes = Vec::with_capacity(18 + item.name.len());
+    bytes.extend_from_slice(&item.dirid.to_le_bytes());
+    bytes.extend_from_slice(&item.sequence.to_le_bytes());
+    bytes.extend_from_slice(&name_len.to_le_bytes());
+    bytes.extend_from_slice(&item.name);
+    bytes
 }
 
 fn xattr_item_to_bytes(item: &BtrfsXattrItem) -> Vec<u8> {
@@ -403,6 +424,33 @@ fn assert_structured_roundtrips(data: &[u8]) {
     assert!(
         parse_inode_item(&inode_bytes[..inode_bytes.len() - 1]).is_err(),
         "fixed-size inode items must reject short payloads"
+    );
+
+    let root_ref = build_root_ref(&mut cursor);
+    let root_ref_bytes = root_ref_to_bytes(&root_ref);
+    let parsed_root_ref = parse_root_ref(&root_ref_bytes).unwrap_or_else(|_| std::process::abort());
+    assert_eq!(
+        parsed_root_ref, root_ref,
+        "structured ROOT_REF payload must parse exactly"
+    );
+    let mut empty_root_ref_name = root_ref_bytes.clone();
+    let Some(name_len_bytes) = empty_root_ref_name.get_mut(16..18) else {
+        std::process::abort();
+    };
+    name_len_bytes.copy_from_slice(&0_u16.to_le_bytes());
+    assert!(
+        parse_root_ref(&empty_root_ref_name).is_err(),
+        "ROOT_REF parser must reject empty names"
+    );
+    assert!(
+        parse_root_ref(&root_ref_bytes[..root_ref_bytes.len() - 1]).is_err(),
+        "ROOT_REF parser must reject truncated names"
+    );
+    let mut root_ref_with_tail = root_ref_bytes;
+    root_ref_with_tail.push(cursor.next_u8());
+    assert!(
+        parse_root_ref(&root_ref_with_tail).is_err(),
+        "ROOT_REF parser must reject unconsumed trailing bytes"
     );
 
     let dir_first = build_dir_item(&mut cursor);
