@@ -1,0 +1,26 @@
+---
+source: crates/ffs-harness/src/performance_delta_closeout.rs
+expression: markdown
+---
+# Performance Delta Closeout
+
+- Closeout: `test`
+- Source bead: `bd-rchk5.4`
+- Generated at: `now`
+- Valid: `true`
+- Rows: `1`
+- Rows requiring follow-up: `1`
+
+## Classification Counts
+
+- `regression`: 1
+
+## Follow-Up Beads
+
+- `bd-rchk5.5`
+
+## Rows
+
+| Operation | Class | Claim state | p99 delta | Throughput delta | Follow-up | Rationale |
+|---|---:|---|---:|---:|---|---|
+| `mount_cold` | `regression` | `unknown` | 100.000% | n/a | `bd-rchk5.5` | slow |

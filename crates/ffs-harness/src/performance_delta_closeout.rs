@@ -1743,6 +1743,10 @@ mod tests {
         let markdown = render_performance_delta_closeout_markdown(&report);
         assert!(markdown.contains("bd-rchk5.5"));
         assert!(markdown.contains("mount_cold"));
+        insta::assert_snapshot!(
+            "render_performance_delta_closeout_markdown_regression_sample",
+            markdown
+        );
     }
 
     #[test]
