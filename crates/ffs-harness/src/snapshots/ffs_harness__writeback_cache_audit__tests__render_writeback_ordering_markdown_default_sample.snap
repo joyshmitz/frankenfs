@@ -1,0 +1,39 @@
+---
+source: crates/ffs-harness/src/writeback_cache_audit.rs
+expression: markdown
+---
+# Writeback-Cache Ordering Oracle
+
+- schema_version: 1
+- gate_version: bd-8pz7h-ordering-v1
+- bead_id: bd-8pz7h
+- scenario_id: writeback_ordering_default_sample
+- decision: accept
+- dirty_page_state: fsynced_durable
+- metadata_state: metadata_after_data
+- epoch_id: epoch-0007
+- repair_symbol_generation: 8
+- reproduction_command: `ffs-harness validate-writeback-ordering --oracle oracle.json`
+
+## Invariant Evidence
+
+- I1 supported=true test_id=writeback_ordering_I1_test artifact_field=ordering.I1.artifact release_gate_consumer=writeback_cache.release_gate unsupported_rationale=
+- I2 supported=true test_id=writeback_ordering_I2_test artifact_field=ordering.I2.artifact release_gate_consumer=writeback_cache.release_gate unsupported_rationale=
+- I3 supported=true test_id=writeback_ordering_I3_test artifact_field=ordering.I3.artifact release_gate_consumer=writeback_cache.release_gate unsupported_rationale=
+- I4 supported=true test_id=writeback_ordering_I4_test artifact_field=ordering.I4.artifact release_gate_consumer=writeback_cache.release_gate unsupported_rationale=
+- I5 supported=true test_id=writeback_ordering_I5_test artifact_field=ordering.I5.artifact release_gate_consumer=writeback_cache.release_gate unsupported_rationale=
+- I6 supported=true test_id=writeback_ordering_I6_test artifact_field=ordering.I6.artifact release_gate_consumer=writeback_cache.release_gate unsupported_rationale=
+
+## Failure Modes
+
+- default_off_or_not_opted_in
+- raw_fuser_option_missing
+- missing_invariant_evidence
+- flush_misclassified_as_durable
+- missing_fsync_boundary
+- missing_fsyncdir_boundary
+- metadata_after_data_violation
+- cancellation_not_classified
+- stale_epoch_state
+- repair_refresh_missing
+- ordering_mismatch

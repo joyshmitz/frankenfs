@@ -2748,4 +2748,22 @@ mod tests {
         let markdown = render_writeback_cache_audit_markdown(&report);
         insta::assert_snapshot!(markdown);
     }
+
+    /// bd-x2rhd — Golden-artifact pin for the writeback ordering
+    /// oracle markdown emitter. The 18+ sibling tests cover
+    /// validation logic; this snapshot catches whitespace, heading-
+    /// level, ordering, and bullet-format drift that silently
+    /// breaks downstream proof-bundle / release-gate dashboard
+    /// parsers. Pairs with bd-v766a (cache-audit emitter).
+    #[test]
+    fn render_writeback_ordering_markdown_default_sample() {
+        let report = build_writeback_ordering_report(
+            &happy_ordering_oracle(),
+            "writeback_ordering_default_sample",
+            "ffs-harness validate-writeback-ordering --oracle oracle.json",
+        )
+        .expect("happy_ordering_oracle() must build a valid report");
+        let markdown = render_writeback_ordering_markdown(&report);
+        insta::assert_snapshot!(markdown);
+    }
 }
