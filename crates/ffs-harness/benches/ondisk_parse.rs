@@ -1,11 +1,11 @@
 #![forbid(unsafe_code)]
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 use ffs_harness::load_sparse_fixture;
 use ffs_ondisk::{
-    BtrfsHeader, BtrfsSuperblock, Ext4GroupDesc, Ext4Inode, dx_hash, ext4_casefold_key,
-    parse_dev_item, parse_dir_block, parse_dx_root, parse_extent_tree, parse_internal_items,
-    parse_leaf_items, parse_sys_chunk_array, parse_xattr_block,
+    chunk_type_flags, dx_hash, ext4_casefold_key, parse_dev_item, parse_dir_block, parse_dx_root,
+    parse_extent_tree, parse_internal_items, parse_leaf_items, parse_sys_chunk_array,
+    parse_xattr_block, BtrfsHeader, BtrfsRaidProfile, BtrfsSuperblock, Ext4GroupDesc, Ext4Inode,
 };
 use std::hint::black_box;
 use std::path::Path;
@@ -390,6 +390,76 @@ fn bench_ext4_casefold_key_invalid_utf8(c: &mut Criterion) {
     });
 }
 
+fn bench_btrfs_raid_profile_single(c: &mut Criterion) {
+    // Single is the no-RAID-bit fallback path for single-device filesystems.
+    let inputs = [
+        chunk_type_flags::BTRFS_BLOCK_GROUP_DATA,
+        chunk_type_flags::BTRFS_BLOCK_GROUP_METADATA,
+        chunk_type_flags::BTRFS_BLOCK_GROUP_SYSTEM,
+        chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_METADATA,
+    ];
+    c.bench_function("btrfs_raid_profile_single", |b| {
+        b.iter(|| {
+            for input in &inputs {
+                black_box(BtrfsRaidProfile::from_chunk_type(black_box(*input)));
+            }
+        });
+    });
+}
+
+fn bench_btrfs_raid_profile_raid0(c: &mut Criterion) {
+    // Raid0 is the first matching cascade arm.
+    let inputs = [
+        chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0,
+        chunk_type_flags::BTRFS_BLOCK_GROUP_METADATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0,
+        chunk_type_flags::BTRFS_BLOCK_GROUP_SYSTEM | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0,
+    ];
+    c.bench_function("btrfs_raid_profile_raid0", |b| {
+        b.iter(|| {
+            for input in &inputs {
+                black_box(BtrfsRaidProfile::from_chunk_type(black_box(*input)));
+            }
+        });
+    });
+}
+
+fn bench_btrfs_raid_profile_dup(c: &mut Criterion) {
+    // Dup is the final matching cascade arm before the Single fallback.
+    let inputs = [
+        chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_DUP,
+        chunk_type_flags::BTRFS_BLOCK_GROUP_METADATA | chunk_type_flags::BTRFS_BLOCK_GROUP_DUP,
+    ];
+    c.bench_function("btrfs_raid_profile_dup", |b| {
+        b.iter(|| {
+            for input in &inputs {
+                black_box(BtrfsRaidProfile::from_chunk_type(black_box(*input)));
+            }
+        });
+    });
+}
+
+fn bench_btrfs_raid_profile_mixed(c: &mut Criterion) {
+    // Mixed workload covering all 9 profile outcomes.
+    let inputs = [
+        chunk_type_flags::BTRFS_BLOCK_GROUP_DATA, // Single
+        chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0,
+        chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1,
+        chunk_type_flags::BTRFS_BLOCK_GROUP_METADATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1C3,
+        chunk_type_flags::BTRFS_BLOCK_GROUP_METADATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1C4,
+        chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID10,
+        chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID5,
+        chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID6,
+        chunk_type_flags::BTRFS_BLOCK_GROUP_METADATA | chunk_type_flags::BTRFS_BLOCK_GROUP_DUP,
+    ];
+    c.bench_function("btrfs_raid_profile_mixed", |b| {
+        b.iter(|| {
+            for input in &inputs {
+                black_box(BtrfsRaidProfile::from_chunk_type(black_box(*input)));
+            }
+        });
+    });
+}
+
 criterion_group!(
     ondisk,
     bench_ext4_inode_parse,
@@ -413,5 +483,9 @@ criterion_group!(
     bench_ext4_casefold_key_mixed_utf8,
     bench_ext4_casefold_key_long_utf8,
     bench_ext4_casefold_key_invalid_utf8,
+    bench_btrfs_raid_profile_single,
+    bench_btrfs_raid_profile_raid0,
+    bench_btrfs_raid_profile_dup,
+    bench_btrfs_raid_profile_mixed,
 );
 criterion_main!(ondisk);
