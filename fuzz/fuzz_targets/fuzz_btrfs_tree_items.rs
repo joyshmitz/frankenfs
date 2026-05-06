@@ -11,6 +11,17 @@ use libfuzzer_sys::fuzz_target;
 const MAX_INPUT_BYTES: usize = 4096;
 const MAX_STRUCTURED_BYTES: u8 = 32;
 const NANOS_PER_SECOND: u32 = 1_000_000_000;
+const ROOT_ITEM_LEGACY_SIZE: usize = 239;
+const ROOT_ITEM_GENERATION_OFFSET: usize = 160;
+const ROOT_ITEM_ROOT_DIRID_OFFSET: usize = 168;
+const ROOT_ITEM_BYTENR_OFFSET: usize = 176;
+const ROOT_ITEM_FLAGS_OFFSET: usize = 208;
+const ROOT_ITEM_REFS_OFFSET: usize = 216;
+const ROOT_ITEM_LEVEL_OFFSET: usize = 238;
+const ROOT_ITEM_GENERATION_V2_OFFSET: usize = 239;
+const ROOT_ITEM_UUID_OFFSET: usize = 247;
+const ROOT_ITEM_PARENT_UUID_OFFSET: usize = 263;
+const ROOT_ITEM_PARENT_UUID_END: usize = ROOT_ITEM_PARENT_UUID_OFFSET + 16;
 
 fn read_u16(data: &[u8], off: usize) -> Option<u16> {
     let bytes = data.get(off..off + 2)?;
@@ -77,6 +88,14 @@ impl<'a> ByteCursor<'a> {
     fn take_vec(&mut self, len: usize) -> Vec<u8> {
         (0..len).map(|_| self.next_u8()).collect()
     }
+
+    fn next_array_16(&mut self) -> [u8; 16] {
+        let mut out = [0_u8; 16];
+        for byte in &mut out {
+            *byte = self.next_u8();
+        }
+        out
+    }
 }
 
 fn nonempty_bounded_bytes(cursor: &mut ByteCursor<'_>, max_len: u8) -> Vec<u8> {
@@ -109,6 +128,19 @@ fn build_inode_item(cursor: &mut ByteCursor<'_>) -> BtrfsInodeItem {
     }
 }
 
+fn build_root_item(cursor: &mut ByteCursor<'_>) -> BtrfsRootItem {
+    BtrfsRootItem {
+        bytenr: cursor.next_u64().max(1),
+        level: cursor.next_u8() % 8,
+        generation: cursor.next_u64(),
+        root_dirid: cursor.next_u64(),
+        flags: cursor.next_u64(),
+        refs: u64::from(cursor.next_u32()),
+        uuid: cursor.next_array_16(),
+        parent_uuid: cursor.next_array_16(),
+    }
+}
+
 fn build_dir_item(cursor: &mut ByteCursor<'_>) -> BtrfsDirItem {
     BtrfsDirItem {
         child_objectid: cursor.next_u64(),
@@ -133,6 +165,57 @@ fn build_xattr_item(cursor: &mut ByteCursor<'_>) -> BtrfsXattrItem {
         name: nonempty_bounded_bytes(cursor, MAX_STRUCTURED_BYTES),
         value: cursor.take_vec(usize::from(value_len)),
     }
+}
+
+fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
+    let Some(slot) = bytes.get_mut(offset..offset + 8) else {
+        std::process::abort();
+    };
+    slot.copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    let Some(slot) = bytes.get_mut(offset..offset + 4) else {
+        std::process::abort();
+    };
+    slot.copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_array_16(bytes: &mut [u8], offset: usize, value: [u8; 16]) {
+    let Some(slot) = bytes.get_mut(offset..offset + 16) else {
+        std::process::abort();
+    };
+    slot.copy_from_slice(&value);
+}
+
+fn root_item_to_bytes(item: &BtrfsRootItem, include_uuid_fields: bool) -> Vec<u8> {
+    let Ok(refs) = u32::try_from(item.refs) else {
+        std::process::abort();
+    };
+
+    let len = if include_uuid_fields {
+        ROOT_ITEM_PARENT_UUID_END
+    } else {
+        ROOT_ITEM_LEGACY_SIZE
+    };
+    let mut bytes = vec![0_u8; len];
+    write_u64(&mut bytes, ROOT_ITEM_GENERATION_OFFSET, item.generation);
+    write_u64(&mut bytes, ROOT_ITEM_ROOT_DIRID_OFFSET, item.root_dirid);
+    write_u64(&mut bytes, ROOT_ITEM_BYTENR_OFFSET, item.bytenr);
+    write_u64(&mut bytes, ROOT_ITEM_FLAGS_OFFSET, item.flags);
+    write_u32(&mut bytes, ROOT_ITEM_REFS_OFFSET, refs);
+    let Some(level) = bytes.get_mut(ROOT_ITEM_LEVEL_OFFSET) else {
+        std::process::abort();
+    };
+    *level = item.level;
+
+    if include_uuid_fields {
+        write_u64(&mut bytes, ROOT_ITEM_GENERATION_V2_OFFSET, item.generation);
+        write_array_16(&mut bytes, ROOT_ITEM_UUID_OFFSET, item.uuid);
+        write_array_16(&mut bytes, ROOT_ITEM_PARENT_UUID_OFFSET, item.parent_uuid);
+    }
+
+    bytes
 }
 
 fn root_ref_to_bytes(item: &BtrfsRootRef) -> Vec<u8> {
@@ -424,6 +507,67 @@ fn assert_structured_roundtrips(data: &[u8]) {
     assert!(
         parse_inode_item(&inode_bytes[..inode_bytes.len() - 1]).is_err(),
         "fixed-size inode items must reject short payloads"
+    );
+
+    let root_item = build_root_item(&mut cursor);
+    let root_item_legacy_bytes = root_item_to_bytes(&root_item, false);
+    let parsed_legacy_root_item =
+        parse_root_item(&root_item_legacy_bytes).unwrap_or_else(|_| std::process::abort());
+    assert_eq!(
+        parsed_legacy_root_item,
+        BtrfsRootItem {
+            uuid: [0_u8; 16],
+            parent_uuid: [0_u8; 16],
+            ..root_item
+        },
+        "legacy ROOT_ITEM payload must parse the fixed fields and clear UUID fields"
+    );
+
+    let root_item_uuid_bytes = root_item_to_bytes(&root_item, true);
+    let parsed_uuid_root_item =
+        parse_root_item(&root_item_uuid_bytes).unwrap_or_else(|_| std::process::abort());
+    assert_eq!(
+        parsed_uuid_root_item, root_item,
+        "UUID-era ROOT_ITEM payload must parse all structured fields"
+    );
+
+    let mut zero_bytenr = root_item_uuid_bytes.clone();
+    write_u64(&mut zero_bytenr, ROOT_ITEM_BYTENR_OFFSET, 0);
+    assert!(
+        parse_root_item(&zero_bytenr).is_err(),
+        "ROOT_ITEM parser must reject zero bytenr"
+    );
+
+    let mut bad_level = root_item_uuid_bytes.clone();
+    let Some(level) = bad_level.get_mut(ROOT_ITEM_LEVEL_OFFSET) else {
+        std::process::abort();
+    };
+    *level = 8;
+    assert!(
+        parse_root_item(&bad_level).is_err(),
+        "ROOT_ITEM parser must reject levels above BTRFS_MAX_TREE_LEVEL"
+    );
+
+    let mut partial_generation_v2 = root_item_legacy_bytes;
+    partial_generation_v2.push(cursor.next_u8());
+    assert!(
+        parse_root_item(&partial_generation_v2).is_err(),
+        "ROOT_ITEM parser must reject partial generation_v2 extension fields"
+    );
+    let Some(partial_uuid) = root_item_uuid_bytes.get(..ROOT_ITEM_UUID_OFFSET + 1) else {
+        std::process::abort();
+    };
+    assert!(
+        parse_root_item(partial_uuid).is_err(),
+        "ROOT_ITEM parser must reject partial uuid extension fields"
+    );
+    let Some(partial_parent_uuid) = root_item_uuid_bytes.get(..ROOT_ITEM_PARENT_UUID_OFFSET + 1)
+    else {
+        std::process::abort();
+    };
+    assert!(
+        parse_root_item(partial_parent_uuid).is_err(),
+        "ROOT_ITEM parser must reject partial parent_uuid extension fields"
     );
 
     let root_ref = build_root_ref(&mut cursor);
