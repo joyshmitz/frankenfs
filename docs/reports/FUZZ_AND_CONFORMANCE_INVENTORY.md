@@ -25,19 +25,19 @@ or a bead/artifact owner.
 
 | ID | Source location | Risk surface | Current evidence | Required proof type | Expected unit coverage | Expected E2E/fuzz-smoke coverage | Log/artifact expectations | Decision | Linked bead or artifact | Owner/status | Non-applicability rationale |
 |----|-----------------|--------------|------------------|---------------------|------------------------|----------------------------------|---------------------------|----------|-------------------------|--------------|-----------------------------|
-| A1 | fuzz/fuzz_targets/fuzz_fuse_splice_mount.rs; fuzz/fuzz_targets/fuzz_ioctl_dispatch.rs | FUSE and ioctl parser cursor saturation | Targets exist but synthetic seed value is limited by wide cursor consumption | long-campaign | deferred | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | active-bead | bd-rchk7.4 | open long-campaign | n/a |
-| A2 | fuzz/fuzz_targets/fuzz_inode_roundtrip.rs | Inode round-trip extra-area branches | Post-fix harness ran 8M+ clean iterations; branch-specific seeds remain useful | corpus-seed | required | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | active-bead | bd-rchk7.4 | open corpus expansion | n/a |
+| A1 | fuzz/fuzz_targets/fuzz_fuse_splice_mount.rs; fuzz/fuzz_targets/fuzz_ioctl_dispatch.rs | FUSE and ioctl parser cursor saturation | `bd-fnp56` validated both targets after source-hygiene cleanup, but high-cursor long-campaign evidence still needs a current artifact | long-campaign | deferred | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | bd-rchk0.59 | open high-cursor fuzz follow-up | n/a |
+| A2 | fuzz/fuzz_targets/fuzz_inode_roundtrip.rs | Inode round-trip extra-area branches | `bd-rchk0.21` added all seven POSIX file-type synthetic lanes plus extra-area round-trip reconciliation for `fuzz_inode_roundtrip` | corpus-seed | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | bd-rchk0.21; fuzz/fuzz_targets/fuzz_inode_roundtrip.rs | covered by closed targeted fuzz artifact | n/a |
 | B1 | crates/ffs-dir/src/lib.rs; crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs | ext4 directory entry rec_len after unlink | `ext4_dir_rec_len_kernel_reference_coalesces_after_unlink` now pins debugfs `rm` rec_len coalescing end-to-end | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs::ext4_dir_rec_len_kernel_reference_coalesces_after_unlink | covered by kernel-reference harness | n/a |
 | B2 | conformance/fixtures/ext4_inode_inline_data.json; conformance/fixtures/ext4_inode_inline_data_with_continuation.json; crates/ffs-harness/tests/kernel_reference.rs | ext4 inline data continuation fixtures | `ext4_inline_data_continuation_kernel_reference` now creates an e2fsprogs `inline_data` image through debugfs and verifies `i_block` plus `system.data` continuation bytes | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-harness/tests/kernel_reference.rs::ext4_inline_data_continuation_kernel_reference | covered by kernel-reference harness | n/a |
-| B3 | crates/ffs-harness/tests/conformance.rs | ext4 large file i_size_high over 4 GiB | Fast tests avoid multi-GB images; large-file parity needs artifact-sized execution | long-campaign | deferred | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | active-bead | bd-rchk7.4 | open long-campaign | n/a |
+| B3 | crates/ffs-harness/tests/conformance.rs; crates/ffs-inode/tests/conformance_inode_golden.rs | ext4 large file i_size_high over 4 GiB | Inode parser/encoder unit coverage round-trips >4GiB sizes; kernel-reference agreement still needs artifact-sized execution | long-campaign | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | bd-rchk0.60 | open artifact-sized kernel-reference follow-up | n/a |
 | B4 | conformance/fixtures/ext4_xattr_block.json; crates/ffs-harness/tests/kernel_reference.rs | ext4 xattr block CRC32C parity vs debugfs ea_set | `ext4_debugfs_vs_ffs_xattr_writer_reference` compares FFS external xattr block bytes against debugfs after checksum normalization | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-harness/tests/kernel_reference.rs::ext4_debugfs_vs_ffs_xattr_writer_reference | covered by kernel-reference harness | n/a |
 | B5 | crates/ffs-inode/src/lib.rs; crates/ffs-harness/tests/kernel_reference.rs | ext4 i_extra_isize preservation across xattr writes | `ext4_debugfs_vs_ffs_xattr_writer_reference` verifies inline and external inode ibody bytes match the debugfs-written reference image | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-harness/tests/kernel_reference.rs::ext4_debugfs_vs_ffs_xattr_writer_reference | covered by kernel-reference harness | n/a |
 | C1 | crates/ffs-btrfs/src/lib.rs | ffs-btrfs property coverage | `bd-rchk0.55` added `proptest!` coverage for `snapshot_diff_by_generation` self-diff, empty snapshot symmetry, and generation-increase modification invariants | property-test | existing | deferred | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | bd-rchk0.55; crates/ffs-btrfs/src/lib.rs::snapshot_diff_self_diff_proptest_is_empty | closed bead + proptest artifact | n/a |
 | C2 | crates/ffs-mvcc/src/wal_replay.rs | MVCC WAL replay invariant coverage | `wal_replay.rs` contains `proptest!` coverage for clean monotonic replay and skip cutoff invariants | property-test | existing | deferred | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-mvcc/src/wal_replay.rs::proptest_clean_monotonic_replay_applies_every_commit | covered by wal_replay proptests | n/a |
 | E1 | docs/reports/MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md:320; crates/ffs-fuse/src/lib.rs | FIEMAP short-buffer panic risk | `dispatch_ioctl_fiemap_rejects_short_input_and_output_buffers` covers every 0..31 byte FIEMAP input header and every 0..31 output size, asserting `EINVAL` before FsOps dispatch | security-audit | existing | deferred | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | bd-ocpq7; crates/ffs-fuse/src/lib.rs::dispatch_ioctl_fiemap_rejects_short_input_and_output_buffers | covered by ffs-fuse unit boundary test | n/a |
-| E2 | docs/reports/MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md:67; crates/ffs-fuse/src/lib.rs | setattr privilege escalation at FUSE boundary | Report flags FUSE trust-boundary risk; mounted permission proof is not linked here | mounted-e2e | required | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | active-bead | bd-rchk0.3.2 | open mounted matrix | n/a |
-| E3 | scripts/e2e/ffs_fuse_production.sh; scripts/e2e/scenario_catalog.json | Empty-filesystem mount coverage | Critical mounted matrix exists; empty-image scenario remains separate | mounted-e2e | deferred | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | active-bead | bd-rchk0.3.2 | open mounted matrix | n/a |
-| E4 | fuzz/fuzz_targets/fuzz_block_mem_io_engine.rs; crates/ffs-fuse/src/lib.rs | Backpressure boundary at mounted FUSE layer | Block-level fuzz exists but no mounted boundary scenario pins user-visible behavior | mounted-e2e | required | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | active-bead | bd-rchk0.3.4 | open error-evidence follow-up | n/a |
+| E2 | docs/reports/MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md:67; crates/ffs-fuse/src/lib.rs | setattr privilege escalation at FUSE boundary | Mounted chmod/truncate/utimes and DefaultPermissions EACCES coverage exist; uid/gid chown privilege proof remains separate | mounted-e2e | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | bd-rchk0.61 | open setattr uid/gid permission follow-up | n/a |
+| E3 | scripts/e2e/ffs_fuse_production.sh; scripts/e2e/scenario_catalog.json | Empty-filesystem mount coverage | Critical mounted matrix and empty-file operations exist; empty-image/root mount scenario remains separate | mounted-e2e | deferred | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | bd-rchk0.62 | open empty-filesystem mount follow-up | n/a |
+| E4 | fuzz/fuzz_targets/fuzz_block_mem_io_engine.rs; crates/ffs-fuse/src/lib.rs | Backpressure boundary at mounted FUSE layer | ffs-fuse adapter backpressure tests and core degradation gates exist; mounted-boundary artifact remains separate | mounted-e2e | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | bd-rchk0.63 | open mounted backpressure follow-up | n/a |
 | E5 | docs/design-multi-host-repair.md; crates/ffs-repair/src/lib.rs | Multi-host repair ownership protocol | Current read-only scrub does not require ownership; write-side shared-storage repair remains future scope | docs-non-goal | deferred | deferred | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | explicit-non-goal | docs/design-multi-host-repair.md | scoped non-goal for this inventory | Multi-host write-side repair is outside this fuzz/conformance inventory; readiness stays blocked by repair ownership follow-up work. |
 
 ## A. Fuzz target corpora — saturation status
@@ -56,11 +56,14 @@ the floor for previously under-corpused targets. As of this writing:
 **Open items in this category:**
 - A1: corpus growth on `fuse_splice_mount` and `ioctl_dispatch` would
   benefit from harness simplification (cursor consumption is currently
-  ~30 fields of varying types per seed).
+  ~30 fields of varying types per seed). `bd-rchk0.59` now owns this
+  long-campaign follow-up.
+
+**Covered since the original inventory:**
 - A2: `fuzz_inode_roundtrip` had six oracle bugs in the round-trip
-  contract (commits `0fed288`, `45dc836`); the post-fix harness
-  surfaces 8M+ runs clean. Future work: add structured synthetic seeds
-  exercising the now-correct extra-area branches.
+  contract (commits `0fed288`, `45dc836`); `bd-rchk0.21` added all
+  seven POSIX file-type synthetic lanes and extra-area round-trip
+  reconciliation, then validated the target with a short corpus smoke.
 
 ## B. Conformance harnesses — kernel-reference parity
 
@@ -81,7 +84,9 @@ Existing kernel-reference harnesses under `crates/ffs-harness/tests/`:
 
 **Open items in this category:**
 - B3: `ext4` large file `i_size_high` for files > 4 GiB — requires
-  building a multi-GB image, infeasible for a fast unit test.
+  a sparse or artifact-sized kernel-reference image, so `bd-rchk0.60`
+  now owns that proof. Parser/encoder unit coverage already round-trips
+  sizes above 4 GiB.
 
 **Covered since the original inventory:**
 - B1: `crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs`
@@ -142,10 +147,13 @@ session observations:
 - E1: FIEMAP ioctl handler short-buffer panic risk is covered by
   `crates/ffs-fuse/src/lib.rs::dispatch_ioctl_fiemap_rejects_short_input_and_output_buffers`.
 - E2: setattr privilege escalation gap on the FUSE trust boundary
-  (line 67 of same report).
+  (line 67 of same report). `bd-rchk0.61` now owns the uid/gid
+  permission proof that is not covered by chmod/truncate/utimes tests.
 - E3: Empty-filesystem mount test (no corresponding harness exists).
-- E4: Backpressure boundary test — exists in `fuzz_block_mem_io_engine`
-  but not at FUSE-mount layer.
+  `bd-rchk0.62` now owns the empty-image/root mounted scenario.
+- E4: Backpressure boundary test — adapter-level and core backpressure
+  tests exist, but mounted-boundary artifacting remains separate.
+  `bd-rchk0.63` now owns that proof.
 - E5: Multi-host repair ownership protocol (3rd trust boundary,
   unimplemented per line 67 of same report).
 
