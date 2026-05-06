@@ -1346,6 +1346,27 @@ mod tests {
         assert!(report.issues.is_empty());
     }
 
+    /// The markdown renderer is consumed by proof-bundle and release-gate
+    /// operator workflows. Validator assertions above pin manifest semantics;
+    /// this snapshot pins the title, metadata bullets, count sections,
+    /// workload-profile table, scenario-verdict table, boolean formatting, and
+    /// omitted Missing Workload Classes / Errors sections for the checked-in
+    /// manifest fixture.
+    #[test]
+    fn render_swarm_workload_harness_markdown_checked_in_manifest_snapshot() {
+        let manifest = load_swarm_workload_harness_manifest(Path::new(&workspace_path(
+            DEFAULT_SWARM_WORKLOAD_HARNESS_MANIFEST,
+        )))
+        .expect("load checked-in manifest");
+        let report = validate_swarm_workload_harness_manifest(&manifest);
+        let markdown = render_swarm_workload_harness_markdown(&report);
+
+        insta::assert_snapshot!(
+            "render_swarm_workload_harness_markdown_checked_in_manifest",
+            markdown
+        );
+    }
+
     #[test]
     fn small_host_pass_claim_fails_closed() {
         let mut manifest = fixture_manifest();

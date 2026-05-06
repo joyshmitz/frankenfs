@@ -1,0 +1,44 @@
+---
+source: crates/ffs-harness/src/swarm_workload_harness.rs
+expression: markdown
+---
+# Swarm Workload Harness
+
+- Manifest: `bd-p2j3e.2-swarm-workload-harness-v1`
+- Valid: `true`
+- Workload profiles: `5`
+- Scenarios: `2`
+- Large-host plans: `1`
+- Host downgrades: `1`
+
+## Verdict Counts
+
+- `pass`: 1
+- `skip`: 1
+
+## Classification Counts
+
+- `capability_skip`: 1
+- `pass`: 1
+
+## Release Claim Counts
+
+- `plan_ready`: 1
+- `small_host_smoke`: 1
+
+## Workload Profiles
+
+| Profile | Class | Plan | Max threads | Max memory | Queue cap | NUMA policy |
+|---|---|---|---:|---:|---:|---|
+| `metadata_storm_dry_run` | `metadata_storm` | `dry_run` | 64 | 64.0 GB | 4096 | pin metadata shards to observed NUMA nodes; downgrade if unavailable |
+| `append_fsync_dry_run` | `append_fsync` | `dry_run` | 64 | 48.0 GB | 2048 | co-locate WAL shard and fsync workers per NUMA node when observable |
+| `mixed_read_write_dry_run` | `mixed_read_write` | `dry_run` | 96 | 96.0 GB | 8192 | reader shards prefer local NUMA memory; writers pin to owning shard node |
+| `scrub_repair_overlap_dry_run` | `scrub_repair_overlap` | `dry_run` | 80 | 80.0 GB | 4096 | repair morsels stay on the NUMA node owning the block-group shard |
+| `cache_pressure_dry_run` | `cache_pressure` | `dry_run` | 96 | 192.0 GB | 8192 | cache shards allocate from local NUMA node; cross-node fallback is logged |
+
+## Scenario Verdicts
+
+| Scenario | Verdict | Classification | Release claim | Host lane | Target | NUMA | Issues |
+|---|---|---|---|---|---:|---:|---|
+| `swarm_workload_64c_256gb_dry_run_plan` | `pass` | `pass` | `plan_ready` | `permissioned_large_host` | true | true | none |
+| `swarm_workload_small_host_smoke` | `skip` | `capability_skip` | `small_host_smoke` | `developer_smoke` | false | false | none |
