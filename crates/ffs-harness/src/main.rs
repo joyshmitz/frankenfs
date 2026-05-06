@@ -40,6 +40,12 @@ use ffs_harness::{
         render_invariant_oracle_markdown, validate_invariant_oracle_report,
         validate_invariant_trace,
     },
+    metamorphic_workload_seed_catalog::{
+        DEFAULT_METAMORPHIC_WORKLOAD_SEED_CATALOG_PATH,
+        fail_on_metamorphic_workload_seed_catalog_errors, load_metamorphic_workload_seed_catalog,
+        render_metamorphic_workload_seed_catalog_markdown,
+        validate_metamorphic_workload_seed_catalog,
+    },
     mounted_differential_oracle::{
         DEFAULT_MOUNTED_DIFFERENTIAL_REPORT, fail_on_mounted_differential_oracle_errors,
         load_mounted_differential_oracle_report, render_mounted_differential_oracle_markdown,
@@ -293,6 +299,9 @@ fn run() -> Result<()> {
             validate_writeback_cache_crash_replay_cmd(&args[1..])
         }
         Some("validate-workload-corpus") => validate_workload_corpus_cmd(&args[1..]),
+        Some("validate-metamorphic-workload-seeds") => {
+            validate_metamorphic_workload_seed_catalog_cmd(&args[1..])
+        }
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
         Some("validate-mounted-write-error-classes") => {
             validate_mounted_write_error_classes_cmd(&args[1..])
@@ -467,6 +476,14 @@ struct WorkloadCorpusCmdArgs {
 }
 
 #[derive(Debug)]
+struct MetamorphicWorkloadSeedCatalogCmdArgs {
+    catalog_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
 struct SwarmCacheControllerCmdArgs {
     contract_path: String,
     out_path: Option<String>,
@@ -606,6 +623,92 @@ fn parse_workload_corpus_cmd_args(args: &[String]) -> Result<Option<WorkloadCorp
         out_path,
         summary_out_path,
         selected_scenario_id,
+        format,
+    }))
+}
+
+fn validate_metamorphic_workload_seed_catalog_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_metamorphic_workload_seed_catalog_cmd_args(args)? else {
+        return Ok(());
+    };
+    let catalog = load_metamorphic_workload_seed_catalog(Path::new(&cmd_args.catalog_path))?;
+    let report = validate_metamorphic_workload_seed_catalog(&catalog);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_metamorphic_workload_seed_catalog_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "metamorphic workload seed catalog report written: {} valid={} seeds={}",
+            path, report.valid, report.seed_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!(
+                "{}\n",
+                render_metamorphic_workload_seed_catalog_markdown(&report)
+            ),
+        )?;
+        println!("metamorphic workload seed catalog summary written: {path}");
+    }
+
+    fail_on_metamorphic_workload_seed_catalog_errors(&report)
+}
+
+fn parse_metamorphic_workload_seed_catalog_cmd_args(
+    args: &[String],
+) -> Result<Option<MetamorphicWorkloadSeedCatalogCmdArgs>> {
+    let mut catalog_path = DEFAULT_METAMORPHIC_WORKLOAD_SEED_CATALOG_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--catalog" => {
+                i += 1;
+                args.get(i)
+                    .context("--catalog requires a path")?
+                    .clone_into(&mut catalog_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_metamorphic_workload_seed_catalog_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-metamorphic-workload-seeds argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(MetamorphicWorkloadSeedCatalogCmdArgs {
+        catalog_path,
+        out_path,
+        summary_out_path,
         format,
     }))
 }
@@ -4492,6 +4595,7 @@ fn print_usage_commands() {
     print_writeback_cache_ordering_usage_summary();
     print_writeback_cache_crash_replay_usage_summary();
     print_workload_corpus_usage_summary();
+    print_metamorphic_workload_seed_catalog_usage_summary();
     println!(
         "  ffs-harness validate-mounted-write-error-classes [--catalog FILE] [--matrix FILE] [--out FILE]"
     );
@@ -4573,6 +4677,7 @@ fn print_usage_examples() {
     print_writeback_cache_ordering_example();
     print_writeback_cache_crash_replay_example();
     print_workload_corpus_example();
+    print_metamorphic_workload_seed_catalog_example();
     println!(
         "  ffs-harness validate-mounted-write-error-classes --out artifacts/e2e/mounted_write_error_classes.json"
     );
@@ -4806,6 +4911,18 @@ fn print_workload_corpus_usage_summary() {
 fn print_workload_corpus_example() {
     println!(
         "  ffs-harness validate-workload-corpus --corpus tests/workload-corpus/p1_workload_corpus.json --out artifacts/workload_corpus/report.json --summary-out artifacts/workload_corpus/summary.md"
+    );
+}
+
+fn print_metamorphic_workload_seed_catalog_usage_summary() {
+    println!(
+        "  ffs-harness validate-metamorphic-workload-seeds [--catalog FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_metamorphic_workload_seed_catalog_example() {
+    println!(
+        "  ffs-harness validate-metamorphic-workload-seeds --catalog tests/metamorphic-workload-seeds/metamorphic_workload_seed_catalog.json --out artifacts/metamorphic-seeds/report.json --summary-out artifacts/metamorphic-seeds/summary.md"
     );
 }
 
@@ -5158,6 +5275,16 @@ fn print_workload_corpus_usage() {
     println!(
         "  --select SCENARIO_ID               Accepted by repro commands; validates the corpus envelope"
     );
+}
+
+fn print_metamorphic_workload_seed_catalog_usage() {
+    println!("Usage: ffs-harness validate-metamorphic-workload-seeds [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --catalog FILE                     Read metamorphic workload seed catalog JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report");
+    println!("  --summary-out FILE                 Write Markdown catalog summary");
 }
 
 fn print_mounted_write_matrix_usage() {

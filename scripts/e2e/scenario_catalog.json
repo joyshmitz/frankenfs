@@ -1628,6 +1628,52 @@
       ]
     },
     {
+      "suite_id": "ffs_metamorphic_workload_seed_catalog",
+      "script": "scripts/e2e/ffs_metamorphic_workload_seed_catalog_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "metamorphic_seed_catalog_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"metamorphic_seed_catalog_cli_wired\" \"PASS\""
+        },
+        {
+          "id": "metamorphic_seed_catalog_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"metamorphic_seed_catalog_validates\" \"PASS\""
+        },
+        {
+          "id": "metamorphic_seed_catalog_coverage",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"metamorphic_seed_catalog_coverage\" \"PASS\""
+        },
+        {
+          "id": "metamorphic_seed_catalog_permissioned_ack",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"metamorphic_seed_catalog_permissioned_ack\" \"PASS\""
+        },
+        {
+          "id": "metamorphic_seed_catalog_invalid_variants_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"metamorphic_seed_catalog_invalid_variants_rejected\" \"PASS\""
+        },
+        {
+          "id": "metamorphic_seed_catalog_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"metamorphic_seed_catalog_unit_tests\" \"PASS\""
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_swarm_tail_latency",
       "script": "scripts/e2e/ffs_swarm_tail_latency_e2e.sh",
       "required_categories": [

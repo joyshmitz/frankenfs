@@ -27,6 +27,7 @@ pub mod inventory_closeout_gate;
 pub mod log_contract;
 pub mod low_privilege_demo;
 pub mod low_privilege_demo_sandbox;
+pub mod metamorphic_workload_seed_catalog;
 pub mod metrics;
 pub mod mounted_checkpoint_survivor;
 pub mod mounted_differential_oracle;
