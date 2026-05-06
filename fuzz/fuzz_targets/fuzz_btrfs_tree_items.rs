@@ -3,9 +3,11 @@
 use ffs_btrfs::{
     parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item, parse_root_ref,
     parse_xattr_items, BtrfsDirItem, BtrfsExtentData, BtrfsInodeItem, BtrfsRootItem, BtrfsRootRef,
-    BtrfsXattrItem, BTRFS_COMPRESS_NONE, BTRFS_FILE_EXTENT_INLINE, BTRFS_FILE_EXTENT_PREALLOC,
+    BtrfsXattrItem, BTRFS_COMPRESS_LZO, BTRFS_COMPRESS_NONE, BTRFS_COMPRESS_ZLIB,
+    BTRFS_COMPRESS_ZSTD, BTRFS_FILE_EXTENT_INLINE, BTRFS_FILE_EXTENT_PREALLOC,
     BTRFS_FILE_EXTENT_REG,
 };
+use ffs_types::ParseError;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_INPUT_BYTES: usize = 4096;
@@ -169,6 +171,13 @@ fn build_xattr_item(cursor: &mut ByteCursor<'_>) -> BtrfsXattrItem {
 
 fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
     let Some(slot) = bytes.get_mut(offset..offset + 8) else {
+        std::process::abort();
+    };
+    slot.copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
+    let Some(slot) = bytes.get_mut(offset..offset + 2) else {
         std::process::abort();
     };
     slot.copy_from_slice(&value.to_le_bytes());
@@ -488,6 +497,216 @@ fn assert_extent_data_invariants(data: &[u8], parsed: &BtrfsExtentData) {
     }
 }
 
+fn expect_invalid_field<T: std::fmt::Debug>(
+    result: Result<T, ParseError>,
+    field: &'static str,
+    reason: &'static str,
+    context: &str,
+) {
+    match result {
+        Err(ParseError::InvalidField {
+            field: got_field,
+            reason: got_reason,
+        }) => {
+            assert_eq!(got_field, field, "{context}: invalid field drifted");
+            assert_eq!(got_reason, reason, "{context}: invalid reason drifted");
+        }
+        other => {
+            assert!(
+                matches!(&other, Err(ParseError::InvalidField { .. })),
+                "{context}: expected InvalidField({field}, {reason}), got {other:?}"
+            );
+        }
+    }
+}
+
+fn expect_insufficient_data<T: std::fmt::Debug>(
+    result: Result<T, ParseError>,
+    needed: usize,
+    offset: usize,
+    actual: usize,
+    context: &str,
+) {
+    match result {
+        Err(ParseError::InsufficientData {
+            needed: got_needed,
+            offset: got_offset,
+            actual: got_actual,
+        }) => {
+            assert_eq!(got_needed, needed, "{context}: needed length drifted");
+            assert_eq!(got_offset, offset, "{context}: error offset drifted");
+            assert_eq!(got_actual, actual, "{context}: actual length drifted");
+        }
+        other => {
+            assert!(
+                matches!(&other, Err(ParseError::InsufficientData { .. })),
+                "{context}: expected InsufficientData({needed}, {offset}, {actual}), got {other:?}"
+            );
+        }
+    }
+}
+
+fn assert_extent_data_boundary_contracts(cursor: &mut ByteCursor<'_>) {
+    let inline_len = usize::from(cursor.next_u8() % (MAX_STRUCTURED_BYTES + 1));
+    let inline = BtrfsExtentData::Inline {
+        generation: cursor.next_u64(),
+        ram_bytes: u64::try_from(inline_len).unwrap_or_else(|_| std::process::abort()),
+        compression: BTRFS_COMPRESS_NONE,
+        data: cursor.take_vec(inline_len),
+    };
+    let inline_bytes = inline.to_bytes();
+
+    let mut inline_len_mismatch = inline_bytes.clone();
+    write_u64(
+        &mut inline_len_mismatch,
+        8,
+        u64::try_from(inline_len)
+            .unwrap_or_else(|_| std::process::abort())
+            .saturating_add(1),
+    );
+    expect_invalid_field(
+        parse_extent_data(&inline_len_mismatch),
+        "extent_data.ram_bytes",
+        "uncompressed inline length mismatch",
+        "uncompressed inline ram_bytes mismatch",
+    );
+
+    let mut unsupported_compression = inline_bytes.clone();
+    unsupported_compression[16] = 0xff;
+    expect_invalid_field(
+        parse_extent_data(&unsupported_compression),
+        "extent_data.compression",
+        "unsupported compression",
+        "unsupported compression",
+    );
+
+    let mut encrypted_inline = inline_bytes;
+    encrypted_inline[17] = 1;
+    expect_invalid_field(
+        parse_extent_data(&encrypted_inline),
+        "extent_data.encryption",
+        "unsupported encryption",
+        "unsupported encryption",
+    );
+
+    let regular = BtrfsExtentData::Regular {
+        generation: cursor.next_u64(),
+        ram_bytes: 4096,
+        extent_type: BTRFS_FILE_EXTENT_REG,
+        compression: BTRFS_COMPRESS_NONE,
+        disk_bytenr: 0x1000 + u64::from(cursor.next_u8()),
+        disk_num_bytes: 4096,
+        extent_offset: 0,
+        num_bytes: 4096,
+    };
+    let regular_bytes = regular.to_bytes();
+
+    expect_insufficient_data(
+        parse_extent_data(&regular_bytes[..regular_bytes.len() - 1]),
+        53,
+        0,
+        52,
+        "truncated regular extent",
+    );
+
+    let mut trailing_regular = regular_bytes.clone();
+    trailing_regular.push(cursor.next_u8());
+    expect_invalid_field(
+        parse_extent_data(&trailing_regular),
+        "extent_data.length",
+        "trailing bytes after fixed extent payload",
+        "regular extent trailing bytes",
+    );
+
+    let mut other_encoded = regular_bytes.clone();
+    write_u16(&mut other_encoded, 18, 1);
+    expect_invalid_field(
+        parse_extent_data(&other_encoded),
+        "extent_data.other_encoding",
+        "unsupported other encoding",
+        "unsupported other encoding",
+    );
+
+    let mut unknown_type = vec![0_u8; 21];
+    unknown_type[20] = 0xff;
+    expect_invalid_field(
+        parse_extent_data(&unknown_type),
+        "extent_data.type",
+        "unsupported extent type",
+        "unknown extent type",
+    );
+
+    let out_of_range_disk_extent = BtrfsExtentData::Regular {
+        generation: cursor.next_u64(),
+        ram_bytes: 8192,
+        extent_type: BTRFS_FILE_EXTENT_PREALLOC,
+        compression: BTRFS_COMPRESS_NONE,
+        disk_bytenr: 0x2000,
+        disk_num_bytes: 4096,
+        extent_offset: 4096,
+        num_bytes: 4096,
+    };
+    expect_invalid_field(
+        parse_extent_data(&out_of_range_disk_extent.to_bytes()),
+        "extent_data.extent_offset+num_bytes",
+        "source slice exceeds disk_num_bytes",
+        "uncompressed extent disk source bound",
+    );
+
+    let overflow_tail = u64::from(cursor.next_u8());
+    let compressed_overflow = BtrfsExtentData::Regular {
+        generation: cursor.next_u64(),
+        ram_bytes: 4096,
+        extent_type: BTRFS_FILE_EXTENT_REG,
+        compression: BTRFS_COMPRESS_ZSTD,
+        disk_bytenr: 0x3000,
+        disk_num_bytes: 2048,
+        extent_offset: u64::MAX - overflow_tail,
+        num_bytes: overflow_tail.saturating_add(1),
+    };
+    expect_invalid_field(
+        parse_extent_data(&compressed_overflow.to_bytes()),
+        "extent_data.extent_offset+num_bytes",
+        "source slice arithmetic overflow",
+        "compressed extent source arithmetic overflow",
+    );
+
+    let exceeds_ram_bytes = BtrfsExtentData::Regular {
+        generation: cursor.next_u64(),
+        ram_bytes: 4096,
+        extent_type: BTRFS_FILE_EXTENT_REG,
+        compression: BTRFS_COMPRESS_ZLIB,
+        disk_bytenr: 0x4000,
+        disk_num_bytes: 2048,
+        extent_offset: 4000,
+        num_bytes: 200,
+    };
+    expect_invalid_field(
+        parse_extent_data(&exceeds_ram_bytes.to_bytes()),
+        "extent_data.extent_offset+num_bytes",
+        "source slice exceeds ram_bytes",
+        "compressed extent ram_bytes bound",
+    );
+
+    let valid_compressed = BtrfsExtentData::Regular {
+        generation: cursor.next_u64(),
+        ram_bytes: 4096,
+        extent_type: BTRFS_FILE_EXTENT_REG,
+        compression: BTRFS_COMPRESS_LZO,
+        disk_bytenr: 0x5000,
+        disk_num_bytes: 2048,
+        extent_offset: 1024,
+        num_bytes: 3072,
+    };
+    assert_eq!(
+        parse_extent_data(&valid_compressed.to_bytes()).unwrap_or_else(|_| {
+            std::process::abort();
+        }),
+        valid_compressed,
+        "compressed extent should accept source slices ending exactly at ram_bytes"
+    );
+}
+
 fn assert_structured_roundtrips(data: &[u8]) {
     let mut cursor = ByteCursor::new(data);
 
@@ -684,6 +903,8 @@ fn assert_structured_roundtrips(data: &[u8]) {
             );
         }
     }
+
+    assert_extent_data_boundary_contracts(&mut cursor);
 }
 
 fuzz_target!(|data: &[u8]| {
