@@ -330,6 +330,11 @@ path = "fuzz_targets/fuzz_ext4_extra_bit_pack.rs"
 doc = false
 
 [[bin]]
+name = "fuzz_ext4_chksum"
+path = "fuzz_targets/fuzz_ext4_chksum.rs"
+doc = false
+
+[[bin]]
 name = "fuzz_swarm_workload_harness"
 path = "fuzz_targets/fuzz_swarm_workload_harness.rs"
 doc = false
