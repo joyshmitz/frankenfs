@@ -500,6 +500,82 @@ fn bench_btrfs_raid_profile_mixed(c: &mut Criterion) {
     });
 }
 
+// bd-ibj7e — Criterion benches for the ext4 *_extra timestamp bit-pack
+// helpers. extra_nsec / extra_epoch decode the [nsec:30][epoch:2] u32
+// layout once per timestamp read on every inode access on ext4 v6+
+// filesystems. atime_full / mtime_full / ctime_full / crtime_full are
+// the composite (i64, u32) decoders used by stat() and friends.
+//
+// Pairs with bd-834zk (proptest MR for the bit-pack algebra), bd-fqzsz
+// (libfuzzer >1M iter), and bd-rx88y / bd-obp9f (casefold + raid_profile
+// trios) — same hot-path correctness/perf trio applied to the timestamp
+// bit-pack. A regression that introduced per-call allocation, switched
+// from bit-shifts to a slower byte-extracting path, or added unnecessary
+// bounds checks would silently slow every inode timestamp read with no
+// CI signal.
+
+fn bench_ext4_extra_nsec_epoch(c: &mut Criterion) {
+    // Representative *_extra payloads: zero, all-ones, mid-range
+    // nanoseconds, all four epoch values, and the explicit kernel
+    // boundary (epoch=3, nsec=999_999_999).
+    let inputs: Vec<u32> = vec![
+        0x0000_0000,
+        0xFFFF_FFFF,
+        0x3B9A_C9FF, // nsec=249,999,999 epoch=3 — high-bit nsec
+        0x0000_0001, // epoch=1 only
+        0x0000_0002, // epoch=2 only
+        0x0000_0003, // epoch=3 only
+        // 999,999,999 ns << 2 | 0 epoch  = canonical max-nsec
+        (999_999_999_u32) << 2,
+        // 999,999,999 ns << 2 | 3 epoch  = max nsec + max epoch
+        ((999_999_999_u32) << 2) | 0x3,
+    ];
+    c.bench_function("ext4_extra_nsec_epoch", |b| {
+        b.iter(|| {
+            for &extra in &inputs {
+                black_box(Ext4Inode::extra_nsec(black_box(extra)));
+                black_box(Ext4Inode::extra_epoch(black_box(extra)));
+            }
+        });
+    });
+}
+
+fn bench_ext4_inode_atime_full(c: &mut Criterion) {
+    // The composite atime_full path: sign-extend signed_base, shift
+    // epoch into bits 32+, extract nsec, return (i64, u32). Run it
+    // on a real parsed inode so the field accesses are realistic
+    // rather than dummy struct.
+    let data = load_sparse_fixture(&fixture_path("ext4_inode_regular_file.json"))
+        .expect("load inode fixture");
+    let inode = Ext4Inode::parse_from_bytes(&data).expect("inode parse");
+
+    c.bench_function("ext4_inode_atime_full", |b| {
+        b.iter(|| {
+            black_box(black_box(&inode).atime_full());
+        });
+    });
+}
+
+fn bench_ext4_inode_all_timestamps(c: &mut Criterion) {
+    // Representative stat() workload: every stat call decodes all
+    // four timestamps (atime, mtime, ctime, crtime). A regression
+    // in any single decoder would show up here as 4× the per-call
+    // overhead.
+    let data = load_sparse_fixture(&fixture_path("ext4_inode_regular_file.json"))
+        .expect("load inode fixture");
+    let inode = Ext4Inode::parse_from_bytes(&data).expect("inode parse");
+
+    c.bench_function("ext4_inode_all_timestamps", |b| {
+        b.iter(|| {
+            let i = black_box(&inode);
+            black_box(i.atime_full());
+            black_box(i.mtime_full());
+            black_box(i.ctime_full());
+            black_box(i.crtime_full());
+        });
+    });
+}
+
 criterion_group!(
     ondisk,
     bench_ext4_inode_parse,
@@ -527,5 +603,8 @@ criterion_group!(
     bench_btrfs_raid_profile_raid0,
     bench_btrfs_raid_profile_dup,
     bench_btrfs_raid_profile_mixed,
+    bench_ext4_extra_nsec_epoch,
+    bench_ext4_inode_atime_full,
+    bench_ext4_inode_all_timestamps,
 );
 criterion_main!(ondisk);
