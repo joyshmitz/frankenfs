@@ -5276,16 +5276,16 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Instant, SystemTime};
 
-    /// Minimal FsOps stub for tests that don't need real filesystem behavior.
-    struct StubFs;
-    impl FsOps for StubFs {
+    /// Minimal FsOps test helper for tests that don't need real filesystem behavior.
+    struct MinimalTestFs;
+    impl FsOps for MinimalTestFs {
         fn getattr(
             &self,
             _cx: &Cx,
             _scope: &mut RequestScope,
             _ino: InodeNumber,
         ) -> ffs_error::Result<InodeAttr> {
-            Err(FfsError::NotFound("stub".into()))
+            Err(FfsError::NotFound("test fs miss".into()))
         }
         fn lookup(
             &self,
@@ -5294,7 +5294,7 @@ mod tests {
             _parent: InodeNumber,
             _name: &OsStr,
         ) -> ffs_error::Result<InodeAttr> {
-            Err(FfsError::NotFound("stub".into()))
+            Err(FfsError::NotFound("test fs miss".into()))
         }
         fn readdir(
             &self,
@@ -5405,7 +5405,7 @@ mod tests {
     fn mount_rejects_empty_mountpoint() {
         // We can't construct a real FsOps without a filesystem, but we can
         // verify the mountpoint validation fires before any FsOps call.
-        // Use a minimal stub.
+        // Use a minimal test helper.
         struct NeverCalledFs;
         impl FsOps for NeverCalledFs {
             fn getattr(
@@ -5459,7 +5459,7 @@ mod tests {
 
     #[test]
     fn mount_rejects_nonexistent_mountpoint() {
-        let ops: Box<dyn FsOps> = Box::new(StubFs);
+        let ops: Box<dyn FsOps> = Box::new(MinimalTestFs);
         let err = mount(
             ops,
             "/tmp/frankenfs_no_such_dir_xyzzy",
@@ -5474,7 +5474,7 @@ mod tests {
 
     #[test]
     fn mount_background_rejects_nonexistent_mountpoint() {
-        let ops: Box<dyn FsOps> = Box::new(StubFs);
+        let ops: Box<dyn FsOps> = Box::new(MinimalTestFs);
         let err = mount_background(
             ops,
             "/tmp/frankenfs_no_such_dir_xyzzy",
@@ -5490,7 +5490,7 @@ mod tests {
     #[test]
     fn mount_rejects_file_mountpoint() {
         let file_path = existing_file_mountpoint();
-        let ops: Box<dyn FsOps> = Box::new(StubFs);
+        let ops: Box<dyn FsOps> = Box::new(MinimalTestFs);
         let err = mount(ops, &file_path, &MountOptions::default()).unwrap_err();
         let err_text = err.to_string();
         assert!(
@@ -5502,7 +5502,7 @@ mod tests {
     #[test]
     fn mount_background_rejects_file_mountpoint() {
         let file_path = existing_file_mountpoint();
-        let ops: Box<dyn FsOps> = Box::new(StubFs);
+        let ops: Box<dyn FsOps> = Box::new(MinimalTestFs);
         let err = mount_background(ops, &file_path, &MountOptions::default()).unwrap_err();
         let err_text = err.to_string();
         assert!(
@@ -5513,7 +5513,7 @@ mod tests {
 
     #[test]
     fn franken_fuse_construction() {
-        let _fuse = FrankenFuse::new(Box::new(StubFs));
+        let _fuse = FrankenFuse::new(Box::new(MinimalTestFs));
         // Verify the Cx creation helper works.
         let _cx = FrankenFuse::cx_for_request();
     }
@@ -6064,7 +6064,7 @@ mod tests {
             _parent: InodeNumber,
             _name: &OsStr,
         ) -> ffs_error::Result<InodeAttr> {
-            Err(FfsError::NotFound("stub".into()))
+            Err(FfsError::NotFound("test fs miss".into()))
         }
 
         fn readdir(
@@ -6742,7 +6742,7 @@ mod tests {
         assert_eq!(
             len,
             12_288 / 3,
-            "FITRIM rewrites len with bytes_discarded (stub returns len/3)"
+            "FITRIM rewrites len with bytes_discarded (test helper returns len/3)"
         );
         assert_eq!(min_len, 4096, "FITRIM must echo minlen unchanged");
 
@@ -8857,7 +8857,7 @@ mod tests {
             _scope: &mut RequestScope,
             _ino: InodeNumber,
         ) -> ffs_error::Result<InodeAttr> {
-            Err(FfsError::NotFound("stub".into()))
+            Err(FfsError::NotFound("test fs miss".into()))
         }
 
         fn lookup(
@@ -8867,7 +8867,7 @@ mod tests {
             _parent: InodeNumber,
             _name: &OsStr,
         ) -> ffs_error::Result<InodeAttr> {
-            Err(FfsError::NotFound("stub".into()))
+            Err(FfsError::NotFound("test fs miss".into()))
         }
 
         fn readdir(
@@ -9015,7 +9015,7 @@ mod tests {
             _scope: &mut RequestScope,
             _ino: InodeNumber,
         ) -> ffs_error::Result<InodeAttr> {
-            Err(FfsError::NotFound("stub".into()))
+            Err(FfsError::NotFound("test fs miss".into()))
         }
 
         fn lookup(
@@ -9025,7 +9025,7 @@ mod tests {
             _parent: InodeNumber,
             _name: &OsStr,
         ) -> ffs_error::Result<InodeAttr> {
-            Err(FfsError::NotFound("stub".into()))
+            Err(FfsError::NotFound("test fs miss".into()))
         }
 
         fn readdir(
@@ -10420,7 +10420,7 @@ mod tests {
             _scope: &mut RequestScope,
             _ino: InodeNumber,
         ) -> ffs_error::Result<InodeAttr> {
-            Err(FfsError::NotFound("stub".into()))
+            Err(FfsError::NotFound("test fs miss".into()))
         }
 
         fn lookup(
@@ -10430,7 +10430,7 @@ mod tests {
             _parent: InodeNumber,
             _name: &OsStr,
         ) -> ffs_error::Result<InodeAttr> {
-            Err(FfsError::NotFound("stub".into()))
+            Err(FfsError::NotFound("test fs miss".into()))
         }
 
         fn readdir(
@@ -11480,7 +11480,7 @@ mod tests {
             worker_threads: 6,
             ..MountOptions::default()
         };
-        let fuse = FrankenFuse::with_options(Box::new(StubFs), &opts);
+        let fuse = FrankenFuse::with_options(Box::new(MinimalTestFs), &opts);
         assert_eq!(fuse.thread_count(), 6);
     }
 
@@ -11615,7 +11615,7 @@ mod tests {
     fn concurrent_fsops_access_no_deadlock() {
         // Verify FsOps can be called concurrently from multiple threads
         // via Arc<dyn FsOps>.
-        let fs: Arc<dyn FsOps> = Arc::new(StubFs);
+        let fs: Arc<dyn FsOps> = Arc::new(MinimalTestFs);
         let barrier = Arc::new(std::sync::Barrier::new(10));
 
         std::thread::scope(|s| {
@@ -11667,7 +11667,7 @@ mod tests {
         // Simulate multi-threaded FUSE dispatch: multiple threads share
         // the same FuseInner via Arc and call FsOps concurrently.
         let inner = Arc::new(FuseInner {
-            ops: Arc::new(StubFs),
+            ops: Arc::new(MinimalTestFs),
             metrics: Arc::new(AtomicMetrics::new()),
             thread_count: 4,
             read_only: true,
@@ -11722,7 +11722,7 @@ mod tests {
 
     #[test]
     fn mount_managed_rejects_empty_mountpoint() {
-        let ops: Box<dyn FsOps> = Box::new(StubFs);
+        let ops: Box<dyn FsOps> = Box::new(MinimalTestFs);
         let err = mount_managed(ops, "", &MountConfig::default()).unwrap_err();
         assert!(
             err.to_string().contains("empty"),
@@ -11732,7 +11732,7 @@ mod tests {
 
     #[test]
     fn mount_managed_rejects_nonexistent_mountpoint() {
-        let ops: Box<dyn FsOps> = Box::new(StubFs);
+        let ops: Box<dyn FsOps> = Box::new(MinimalTestFs);
         let err = mount_managed(
             ops,
             "/tmp/frankenfs_no_such_dir_xyzzy",
@@ -11748,7 +11748,7 @@ mod tests {
     #[test]
     fn mount_managed_rejects_file_mountpoint() {
         let file_path = existing_file_mountpoint();
-        let ops: Box<dyn FsOps> = Box::new(StubFs);
+        let ops: Box<dyn FsOps> = Box::new(MinimalTestFs);
         let err = mount_managed(ops, &file_path, &MountConfig::default()).unwrap_err();
         let err_text = err.to_string();
         assert!(
@@ -11984,7 +11984,7 @@ mod tests {
             read_only: true,
             ..Default::default()
         };
-        let fuse = FrankenFuse::with_options(Box::new(StubFs), &opts);
+        let fuse = FrankenFuse::with_options(Box::new(MinimalTestFs), &opts);
         assert!(fuse.inner.read_only);
     }
 
@@ -11994,7 +11994,7 @@ mod tests {
             read_only: false,
             ..Default::default()
         };
-        let fuse = FrankenFuse::with_options(Box::new(StubFs), &opts);
+        let fuse = FrankenFuse::with_options(Box::new(MinimalTestFs), &opts);
         assert!(!fuse.inner.read_only);
     }
 
@@ -12239,7 +12239,7 @@ mod tests {
 
     #[test]
     fn should_shed_returns_false_without_backpressure_gate() {
-        let fuse = FrankenFuse::new(Box::new(StubFs));
+        let fuse = FrankenFuse::new(Box::new(MinimalTestFs));
         // No backpressure gate → never shed.
         assert!(!fuse.should_shed(RequestOp::Read));
         assert!(!fuse.should_shed(RequestOp::Write));
@@ -12259,7 +12259,7 @@ mod tests {
         let gate = BackpressureGate::new(fsm);
 
         let opts = MountOptions::default();
-        let fuse = FrankenFuse::with_backpressure(Box::new(StubFs), &opts, gate);
+        let fuse = FrankenFuse::with_backpressure(Box::new(MinimalTestFs), &opts, gate);
 
         // Reads proceed.
         assert!(!fuse.should_shed(RequestOp::Read));
@@ -12294,7 +12294,7 @@ mod tests {
         let gate = BackpressureGate::new(fsm);
 
         let opts = MountOptions::default();
-        let fuse = FrankenFuse::with_backpressure(Box::new(StubFs), &opts, gate);
+        let fuse = FrankenFuse::with_backpressure(Box::new(MinimalTestFs), &opts, gate);
 
         assert!(!fuse.should_shed(RequestOp::Read));
         assert!(!fuse.should_shed(RequestOp::Write));
@@ -12314,7 +12314,7 @@ mod tests {
         let gate = BackpressureGate::new(fsm);
 
         let opts = MountOptions::default();
-        let fuse = FrankenFuse::with_backpressure(Box::new(StubFs), &opts, gate);
+        let fuse = FrankenFuse::with_backpressure(Box::new(MinimalTestFs), &opts, gate);
 
         let start = std::time::Instant::now();
         assert!(!fuse.should_shed(RequestOp::Write));
@@ -12551,7 +12551,7 @@ mod tests {
             worker_threads: 3,
             ..Default::default()
         };
-        let fuse = FrankenFuse::with_options(Box::new(StubFs), &opts);
+        let fuse = FrankenFuse::with_options(Box::new(MinimalTestFs), &opts);
         assert_eq!(fuse.thread_count(), 3);
     }
 
@@ -12812,7 +12812,7 @@ CUSTOM("congestion_threshold=3")"#;
         );
 
         let inner = FuseInner {
-            ops: Arc::new(StubFs),
+            ops: Arc::new(MinimalTestFs),
             metrics: Arc::new(AtomicMetrics::new()),
             thread_count: 2,
             read_only: false,
