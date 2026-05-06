@@ -1690,6 +1690,24 @@
           "evidence": "scenario_result \"swarm_workload_markdown\" \"PASS\""
         },
         {
+          "id": "swarm_workload_local_smoke_artifacts",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "scenario_result \"swarm_workload_local_smoke_artifacts\" \"PASS\""
+        },
+        {
+          "id": "swarm_workload_permissioned_blocker_contract",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "scenario_result \"swarm_workload_permissioned_blocker_contract\" \"PASS\""
+        },
+        {
+          "id": "swarm_workload_permissioned_gate",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "scenario_result \"swarm_workload_permissioned_gate\" \"PASS\""
+        },
+        {
           "id": "swarm_workload_small_host_fail_closed",
           "category": "error",
           "status": "active",
