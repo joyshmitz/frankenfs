@@ -1,0 +1,71 @@
+---
+source: crates/ffs-harness/src/workload_corpus.rs
+expression: markdown
+---
+# Workload Corpus Validation
+
+- corpus: `frankenfs_p1_user_risk_workloads`
+- version: `2026-05-04.1`
+- bead: `bd-rchk0.5.7`
+- valid: `true`
+- scenarios: `11`
+
+## Status Coverage
+- `host_skip`: `2`
+- `negative`: `2`
+- `positive`: `6`
+- `unsupported`: `1`
+
+## User Risk Coverage
+- `data_loss`: `3`
+- `host_capability_ambiguity`: `2`
+- `metadata_incoherence`: `2`
+- `permission_boundary`: `1`
+- `repair_overclaim`: `1`
+- `tail_latency`: `1`
+- `unsupported_scope_hidden`: `1`
+
+## Filesystem Coverage
+- `btrfs`: `4`
+- `ext4`: `7`
+- `mixed`: `2`
+- `native`: `1`
+- `not_applicable`: `1`
+
+## Proof Consumer Coverage
+- `crash_replay_lab`: `3`
+- `invariant_oracle`: `3`
+- `mounted_differential_oracle`: `8`
+- `operational_readiness_report`: `5`
+- `performance_baseline`: `1`
+- `proof_bundle`: `10`
+- `release_gate`: `3`
+- `repair_lab`: `1`
+
+## Coverage Matrix
+| Claim | Scenario | Risk | Tier | Filesystems | Operation | Consumers | E2E/Fuzz/Soak |
+|---|---|---|---|---|---|---|---|
+| `claim_workload_editor_save_atomic_ext4` | `workload_editor_save_atomic_ext4` | `data_loss` | `p1` | `ext4` | `editor_save` | `invariant_oracle, crash_replay_lab, proof_bundle` | `scripts/e2e/ffs_invariant_oracle_e2e.sh, scripts/e2e/ffs_crash_matrix_e2e.sh, crash_replay_lab` |
+| `claim_workload_package_extract_parallel_mixed` | `workload_package_extract_parallel_mixed` | `tail_latency` | `p2` | `mixed` | `package_extract` | `mounted_differential_oracle, performance_baseline, proof_bundle` | `scripts/e2e/ffs_mounted_differential_oracle_e2e.sh, scripts/e2e/ffs_performance_manifest_e2e.sh, performance_baseline` |
+| `claim_workload_metadata_tree_churn_64core` | `workload_metadata_tree_churn_64core` | `metadata_incoherence` | `p1` | `ext4, btrfs` | `metadata_tree_churn` | `mounted_differential_oracle, operational_readiness_report, proof_bundle` | `scripts/e2e/ffs_mounted_write_workload_matrix.sh, scripts/e2e/ffs_operational_readiness_report_e2e.sh` |
+| `claim_workload_append_truncate_log_churn` | `workload_append_truncate_log_churn` | `data_loss` | `p1` | `ext4, native` | `append_truncate` | `invariant_oracle, crash_replay_lab, release_gate` | `scripts/e2e/ffs_wal_replay_e2e.sh, scripts/e2e/ffs_invariant_oracle_e2e.sh, crash_replay_lab` |
+| `claim_workload_mount_unmount_reopen_ext4` | `workload_mount_unmount_reopen_ext4` | `data_loss` | `p1` | `ext4` | `mount_reopen` | `mounted_differential_oracle, crash_replay_lab, operational_readiness_report, proof_bundle` | `scripts/e2e/ffs_mounted_recovery_matrix_e2e.sh, scripts/e2e/ffs_operational_readiness_report_e2e.sh, crash_replay_lab` |
+| `claim_workload_ext4_dir_index_xattr_specific` | `workload_ext4_dir_index_xattr_specific` | `metadata_incoherence` | `p1` | `ext4` | `ext4_specific` | `invariant_oracle, mounted_differential_oracle, proof_bundle` | `scripts/e2e/ffs_ext4_rw_smoke.sh, scripts/e2e/ffs_mounted_differential_oracle_e2e.sh` |
+| `claim_workload_btrfs_default_permissions_owner_diagnostic` | `workload_btrfs_default_permissions_owner_diagnostic` | `host_capability_ambiguity` | `p2` | `btrfs` | `btrfs_specific` | `mounted_differential_oracle, operational_readiness_report, proof_bundle` | `scripts/e2e/ffs_mounted_write_workload_matrix.sh, scripts/e2e/ffs_btrfs_capability_drift_e2e.sh` |
+| `claim_workload_repair_corruption_scrub` | `workload_repair_corruption_scrub` | `repair_overclaim` | `p1` | `mixed` | `repair_corruption` | `repair_lab, release_gate, proof_bundle` | `scripts/e2e/ffs_repair_recovery_smoke.sh, scripts/e2e/ffs_release_gate_e2e.sh, repair_lab` |
+| `claim_workload_unsupported_device_node_reject` | `workload_unsupported_device_node_reject` | `unsupported_scope_hidden` | `p2` | `ext4, btrfs` | `unsupported_operation` | `mounted_differential_oracle, release_gate, proof_bundle` | `scripts/e2e/ffs_mounted_write_workload_matrix.sh, scripts/e2e/ffs_release_gate_e2e.sh` |
+| `claim_workload_permission_boundary_non_owner` | `workload_permission_boundary_non_owner` | `permission_boundary` | `p1` | `ext4, btrfs` | `permission_boundary` | `mounted_differential_oracle, operational_readiness_report, proof_bundle` | `scripts/e2e/ffs_fuse_production.sh, scripts/e2e/ffs_operational_readiness_report_e2e.sh` |
+| `claim_workload_expected_host_skip_fuse_permission` | `workload_expected_host_skip_fuse_permission` | `host_capability_ambiguity` | `p2` | `not_applicable` | `host_skip` | `mounted_differential_oracle, operational_readiness_report, proof_bundle` | `scripts/e2e/ffs_mount_runtime_gate_e2e.sh, scripts/e2e/ffs_operational_readiness_report_e2e.sh` |
+
+## Scenario Logs
+- `WORKLOAD_CORPUS_SCENARIO|scenario_id=workload_editor_save_atomic_ext4|status=positive|user_risk=data_loss|filesystems=ext4|proof_consumers=invariant_oracle,crash_replay_lab,proof_bundle|reproduction_command=cargo run -p ffs-harness -- validate-workload-corpus --corpus tests/workload-corpus/p1_workload_corpus.json --select workload_editor_save_atomic_ext4`
+- `WORKLOAD_CORPUS_SCENARIO|scenario_id=workload_package_extract_parallel_mixed|status=positive|user_risk=tail_latency|filesystems=mixed|proof_consumers=mounted_differential_oracle,performance_baseline,proof_bundle|reproduction_command=cargo run -p ffs-harness -- validate-performance-baseline-manifest --manifest benchmarks/performance_baseline_manifest.json`
+- `WORKLOAD_CORPUS_SCENARIO|scenario_id=workload_metadata_tree_churn_64core|status=positive|user_risk=metadata_incoherence|filesystems=ext4,btrfs|proof_consumers=mounted_differential_oracle,operational_readiness_report,proof_bundle|reproduction_command=scripts/e2e/ffs_mounted_write_workload_matrix.sh --scenario mounted_write_ext4_parallel_metadata_churn`
+- `WORKLOAD_CORPUS_SCENARIO|scenario_id=workload_append_truncate_log_churn|status=positive|user_risk=data_loss|filesystems=ext4,native|proof_consumers=invariant_oracle,crash_replay_lab,release_gate|reproduction_command=cargo run -p ffs-harness -- run-crash-replay --count 64 --seed 64001`
+- `WORKLOAD_CORPUS_SCENARIO|scenario_id=workload_mount_unmount_reopen_ext4|status=positive|user_risk=data_loss|filesystems=ext4|proof_consumers=mounted_differential_oracle,crash_replay_lab,operational_readiness_report,proof_bundle|reproduction_command=scripts/e2e/ffs_mounted_recovery_matrix_e2e.sh --scenario mounted_recovery_ext4_clean_unmount_reopen`
+- `WORKLOAD_CORPUS_SCENARIO|scenario_id=workload_ext4_dir_index_xattr_specific|status=positive|user_risk=metadata_incoherence|filesystems=ext4|proof_consumers=invariant_oracle,mounted_differential_oracle,proof_bundle|reproduction_command=scripts/e2e/ffs_ext4_rw_smoke.sh`
+- `WORKLOAD_CORPUS_SCENARIO|scenario_id=workload_btrfs_default_permissions_owner_diagnostic|status=host_skip|user_risk=host_capability_ambiguity|filesystems=btrfs|proof_consumers=mounted_differential_oracle,operational_readiness_report,proof_bundle|reproduction_command=cargo run -p ffs-harness -- fuse-capability-probe --default-permissions-eacces --out artifacts/e2e/fuse_capability.json`
+- `WORKLOAD_CORPUS_SCENARIO|scenario_id=workload_repair_corruption_scrub|status=negative|user_risk=repair_overclaim|filesystems=mixed|proof_consumers=repair_lab,release_gate,proof_bundle|reproduction_command=scripts/e2e/ffs_repair_recovery_smoke.sh`
+- `WORKLOAD_CORPUS_SCENARIO|scenario_id=workload_unsupported_device_node_reject|status=unsupported|user_risk=unsupported_scope_hidden|filesystems=ext4,btrfs|proof_consumers=mounted_differential_oracle,release_gate,proof_bundle|reproduction_command=scripts/e2e/ffs_mounted_write_workload_matrix.sh --scenario mounted_write_ext4_unsupported_mknod_reject`
+- `WORKLOAD_CORPUS_SCENARIO|scenario_id=workload_permission_boundary_non_owner|status=negative|user_risk=permission_boundary|filesystems=ext4,btrfs|proof_consumers=mounted_differential_oracle,operational_readiness_report,proof_bundle|reproduction_command=scripts/e2e/ffs_fuse_production.sh --default-permissions`
+- `WORKLOAD_CORPUS_SCENARIO|scenario_id=workload_expected_host_skip_fuse_permission|status=host_skip|user_risk=host_capability_ambiguity|filesystems=not_applicable|proof_consumers=mounted_differential_oracle,operational_readiness_report,proof_bundle|reproduction_command=cargo run -p ffs-harness -- fuse-capability-probe --require-mount-probe`

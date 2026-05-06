@@ -856,6 +856,22 @@ mod tests {
     }
 
     #[test]
+    fn render_workload_corpus_markdown_checked_in_corpus() {
+        let corpus = fixture_corpus();
+        let report = validate_workload_corpus(&corpus);
+        assert!(report.valid, "{:?}", report.errors);
+        let markdown = render_workload_corpus_markdown(&report);
+        assert!(markdown.contains("# Workload Corpus Validation"));
+        assert!(markdown.contains("## Coverage Matrix"));
+        assert!(markdown.contains("## Scenario Logs"));
+        assert!(markdown.contains("WORKLOAD_CORPUS_SCENARIO|scenario_id="));
+        insta::assert_snapshot!(
+            "render_workload_corpus_markdown_checked_in_corpus",
+            markdown
+        );
+    }
+
+    #[test]
     fn validates_selected_reproduction_scenario() {
         let corpus = fixture_corpus();
         validate_selected_workload_scenario(&corpus, "workload_editor_save_atomic_ext4")
