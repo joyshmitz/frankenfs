@@ -8,6 +8,7 @@
 //! - Crash-discovery velocity for prioritizing triage effort.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// Default threshold: throughput drop of more than 50% triggers a regression alert.
 pub const THROUGHPUT_REGRESSION_THRESHOLD: f64 = 0.5;
@@ -238,7 +239,87 @@ pub fn detect_regressions(
 ///
 /// Returns an error if the JSON is malformed or missing required fields.
 pub fn parse_campaign_summary(json: &str) -> Result<CampaignSummary, String> {
-    serde_json::from_str(json).map_err(|e| format!("failed to parse campaign summary: {e}"))
+    let summary =
+        serde_json::from_str(json).map_err(|e| format!("failed to parse campaign summary: {e}"))?;
+    let errors = validate_campaign_summary(&summary);
+    if errors.is_empty() {
+        Ok(summary)
+    } else {
+        Err(format!("invalid campaign summary: {}", errors.join("; ")))
+    }
+}
+
+/// Validate cross-field invariants for a parsed campaign summary.
+#[must_use]
+pub fn validate_campaign_summary(summary: &CampaignSummary) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    if summary.campaign_id.trim().is_empty() {
+        errors.push("campaign_id must not be empty".to_owned());
+    }
+    if summary.commit_sha.trim().is_empty() {
+        errors.push("commit_sha must not be empty".to_owned());
+    }
+    if summary.timestamp.trim().is_empty() {
+        errors.push("timestamp must not be empty".to_owned());
+    }
+    if summary.config.duration_per_target == 0 {
+        errors.push("config.duration_per_target must be positive".to_owned());
+    }
+    if summary.config.jobs == 0 {
+        errors.push("config.jobs must be positive".to_owned());
+    }
+    if summary.targets.is_empty() {
+        errors.push("targets must not be empty".to_owned());
+    }
+
+    let actual_target_count = u32::try_from(summary.targets.len()).unwrap_or(u32::MAX);
+    if summary.config.target_count != actual_target_count {
+        errors.push(format!(
+            "config.target_count {} does not match {} target row(s)",
+            summary.config.target_count,
+            summary.targets.len()
+        ));
+    }
+
+    let mut target_names = BTreeSet::new();
+    let mut total_crashes = 0_u64;
+    let mut total_coverage = 0_u64;
+    let mut total_runs = 0_u64;
+    for target in &summary.targets {
+        if target.target.trim().is_empty() {
+            errors.push("target row has empty target name".to_owned());
+        } else if !target_names.insert(target.target.as_str()) {
+            errors.push(format!("duplicate target row {}", target.target));
+        }
+        if target.status.trim().is_empty() {
+            errors.push(format!("target {} has empty status", target.target));
+        }
+        total_crashes = total_crashes.saturating_add(target.crash_count);
+        total_coverage = total_coverage.saturating_add(target.coverage);
+        total_runs = total_runs.saturating_add(target.total_runs);
+    }
+
+    if summary.totals.total_crashes != total_crashes {
+        errors.push(format!(
+            "totals.total_crashes {} does not match target sum {total_crashes}",
+            summary.totals.total_crashes
+        ));
+    }
+    if summary.totals.total_coverage != total_coverage {
+        errors.push(format!(
+            "totals.total_coverage {} does not match target sum {total_coverage}",
+            summary.totals.total_coverage
+        ));
+    }
+    if summary.totals.total_runs != total_runs {
+        errors.push(format!(
+            "totals.total_runs {} does not match target sum {total_runs}",
+            summary.totals.total_runs
+        ));
+    }
+
+    errors
 }
 
 /// Check that the nightly campaign script produces the expected JSON schema.
@@ -489,9 +570,100 @@ mod tests {
     }
 
     #[test]
+    fn parses_nightly_fuzz_script_summary_shape() {
+        let json = r#"{
+          "schema_version": 1,
+          "campaign_id": "nightly_20260506_120000",
+          "timestamp": "2026-05-06T12:00:00+00:00",
+          "created_at": "2026-05-06T12:00:00+00:00",
+          "duration_per_target_secs": 60,
+          "commit_sha": "abc1234",
+          "config": {
+            "duration_per_target": 60,
+            "jobs": 1,
+            "target_count": 2
+          },
+          "totals": {
+            "elapsed_seconds": 123,
+            "total_crashes": 1,
+            "total_coverage": 55,
+            "total_runs": 3000
+          },
+          "targets": [
+            {
+              "target": "fuzz_ext4_metadata",
+              "status": "ok",
+              "exit_code": 0,
+              "coverage": 25,
+              "total_runs": 1000,
+              "corpus_size": 12,
+              "crash_count": 0,
+              "new_inputs": 2,
+              "elapsed_seconds": 60
+            },
+            {
+              "target": "fuzz_btrfs_metadata",
+              "status": "crashes_found",
+              "exit_code": 77,
+              "coverage": 30,
+              "total_runs": 2000,
+              "corpus_size": 18,
+              "crash_count": 1,
+              "new_inputs": 0,
+              "elapsed_seconds": 63
+            }
+          ]
+        }"#;
+
+        let parsed = parse_campaign_summary(json).expect("nightly summary should parse");
+        assert_eq!(parsed.config.target_count, 2);
+        assert_eq!(parsed.totals.total_runs, 3000);
+        assert_eq!(parsed.targets[1].crash_count, 1);
+    }
+
+    #[test]
     fn parse_campaign_summary_rejects_garbage() {
         let result = parse_campaign_summary("not json at all");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_campaign_summary_rejects_target_count_drift() {
+        let mut summary = sample_campaign();
+        summary.config.target_count = 99;
+        let json = serde_json::to_string(&summary).expect("serialize");
+        let result = parse_campaign_summary(&json);
+        assert!(
+            result
+                .unwrap_err()
+                .contains("config.target_count 99 does not match 4 target row"),
+        );
+    }
+
+    #[test]
+    fn parse_campaign_summary_rejects_totals_drift() {
+        let mut summary = sample_campaign();
+        summary.totals.total_runs += 1;
+        summary.totals.total_coverage += 1;
+        summary.totals.total_crashes += 1;
+        let json = serde_json::to_string(&summary).expect("serialize");
+        let err = parse_campaign_summary(&json).unwrap_err();
+        assert!(err.contains("totals.total_runs"));
+        assert!(err.contains("totals.total_coverage"));
+        assert!(err.contains("totals.total_crashes"));
+    }
+
+    #[test]
+    fn validate_campaign_summary_rejects_duplicate_targets() {
+        let mut summary = sample_campaign();
+        summary.targets[1].target = summary.targets[0].target.clone();
+        let errors = validate_campaign_summary(&summary);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("duplicate target row fuzz_ext4_metadata")),
+            "expected duplicate target error, got {errors:?}",
+        );
     }
 
     #[test]
@@ -522,8 +694,32 @@ mod tests {
             "missing commit_sha in script"
         );
         assert!(content.contains("\"config\""), "missing config in script");
+        assert!(
+            content.contains("\"target_count\""),
+            "missing config.target_count in script"
+        );
         assert!(content.contains("\"totals\""), "missing totals in script");
+        assert!(
+            content.contains("\"total_crashes\""),
+            "missing totals.total_crashes in script"
+        );
+        assert!(
+            content.contains("\"total_coverage\""),
+            "missing totals.total_coverage in script"
+        );
+        assert!(
+            content.contains("\"total_runs\""),
+            "missing totals.total_runs in script"
+        );
         assert!(content.contains("\"targets\""), "missing targets in script");
+        assert!(
+            content.contains("crash_count"),
+            "missing target crash_count in script"
+        );
+        assert!(
+            content.contains("\"elapsed_seconds\""),
+            "missing target elapsed_seconds in script"
+        );
     }
 
     #[test]

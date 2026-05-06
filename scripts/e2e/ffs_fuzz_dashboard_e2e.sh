@@ -28,6 +28,8 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_fuzz_dashboard}"
+export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -123,8 +125,11 @@ e2e_step "Scenario 6: Nightly fuzz script"
 
 if [[ -x "fuzz/scripts/nightly_fuzz.sh" ]] && \
    grep -q "campaign_id" "fuzz/scripts/nightly_fuzz.sh" && \
+   grep -q "target_count" "fuzz/scripts/nightly_fuzz.sh" && \
+   grep -q "total_runs" "fuzz/scripts/nightly_fuzz.sh" && \
+   grep -q "crash_count" "fuzz/scripts/nightly_fuzz.sh" && \
    grep -q "campaign_summary" "fuzz/scripts/nightly_fuzz.sh"; then
-    scenario_result "dashboard_nightly_script" "PASS" "nightly_fuzz.sh exists with JSON output"
+    scenario_result "dashboard_nightly_script" "PASS" "nightly_fuzz.sh exists with dashboard-compatible JSON output"
 else
     scenario_result "dashboard_nightly_script" "FAIL" "Nightly fuzz script missing or incomplete"
 fi
@@ -160,15 +165,19 @@ fi
 e2e_step "Scenario 9: Unit tests pass"
 
 TEST_LOG=$(mktemp)
-if cargo test -p ffs-harness --lib -- fuzz_dashboard 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib -- fuzz_dashboard >"$TEST_LOG" 2>&1; then
+    cat "$TEST_LOG"
+    cat "$TEST_LOG" >> "$E2E_LOG_FILE"
     TESTS_RUN=$(grep -c "test fuzz_dashboard::tests::" "$TEST_LOG" 2>/dev/null || true)
     TESTS_RUN="${TESTS_RUN:-0}"
-    if [[ $TESTS_RUN -ge 10 ]]; then
+    if [[ $TESTS_RUN -ge 14 ]]; then
         scenario_result "dashboard_unit_tests_pass" "PASS" "Tests passed (${TESTS_RUN} tests)"
     else
-        scenario_result "dashboard_unit_tests_pass" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 10)"
+        scenario_result "dashboard_unit_tests_pass" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 14)"
     fi
 else
+    cat "$TEST_LOG"
+    cat "$TEST_LOG" >> "$E2E_LOG_FILE"
     scenario_result "dashboard_unit_tests_pass" "FAIL" "Fuzz dashboard tests failed"
 fi
 rm -f "$TEST_LOG"

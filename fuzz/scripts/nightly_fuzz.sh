@@ -53,6 +53,8 @@ echo ""
 SUMMARY_JSON="$RESULTS_DIR/campaign_summary.json"
 RESULTS=()
 TOTAL_CRASHES=0
+TOTAL_COVERAGE=0
+TOTAL_RUNS=0
 CAMPAIGN_START=$(date +%s)
 
 for target in "${TARGETS[@]}"; do
@@ -93,6 +95,25 @@ for target in "${TARGETS[@]}"; do
         CORPUS_SIZE=$(find "$CORPUS_DIR" -type f 2>/dev/null | wc -l)
     fi
 
+    # Extract best-effort libFuzzer metrics from the target log. These are
+    # intentionally fail-soft so an early harness error still produces a
+    # dashboard-consumable summary with zeroed metric fields.
+    TOTAL_RUNS_FOR_TARGET=$(grep -Eo '#[0-9]+' "$TARGET_LOG" 2>/dev/null \
+        | tr -d '#' \
+        | sort -n \
+        | tail -1 || true)
+    TOTAL_RUNS_FOR_TARGET="${TOTAL_RUNS_FOR_TARGET:-0}"
+    COVERAGE_FOR_TARGET=$(grep -Eo 'cov: *[0-9]+' "$TARGET_LOG" 2>/dev/null \
+        | awk '{print $2}' \
+        | sort -n \
+        | tail -1 || true)
+    COVERAGE_FOR_TARGET="${COVERAGE_FOR_TARGET:-0}"
+    NEW_INPUTS=$(grep -Ec '(^|[[:space:]])NEW($|[[:space:]])' "$TARGET_LOG" 2>/dev/null || true)
+    NEW_INPUTS="${NEW_INPUTS:-0}"
+
+    TOTAL_RUNS=$((TOTAL_RUNS + TOTAL_RUNS_FOR_TARGET))
+    TOTAL_COVERAGE=$((TOTAL_COVERAGE + COVERAGE_FOR_TARGET))
+
     STATUS="ok"
     if [[ $TARGET_RC -ne 0 ]] && [[ $CRASH_COUNT -gt 0 ]]; then
         STATUS="crashes_found"
@@ -102,7 +123,7 @@ for target in "${TARGETS[@]}"; do
 
     echo "  Status: $STATUS (rc=$TARGET_RC, crashes=$CRASH_COUNT, corpus=$CORPUS_SIZE, ${TARGET_DURATION}s)"
 
-    RESULTS+=("{\"target\":\"$target\",\"status\":\"$STATUS\",\"exit_code\":$TARGET_RC,\"crashes\":$CRASH_COUNT,\"corpus_size\":$CORPUS_SIZE,\"duration_secs\":$TARGET_DURATION}")
+    RESULTS+=("{\"target\":\"$target\",\"status\":\"$STATUS\",\"exit_code\":$TARGET_RC,\"coverage\":$COVERAGE_FOR_TARGET,\"total_runs\":$TOTAL_RUNS_FOR_TARGET,\"corpus_size\":$CORPUS_SIZE,\"crash_count\":$CRASH_COUNT,\"new_inputs\":$NEW_INPUTS,\"elapsed_seconds\":$TARGET_DURATION}")
 done
 
 CAMPAIGN_END=$(date +%s)
@@ -119,19 +140,26 @@ done
 RESULTS_ARRAY+="]"
 
 # Write summary
+CAMPAIGN_TIMESTAMP="$(date -Iseconds)"
 cat > "$SUMMARY_JSON" <<EOF
 {
   "schema_version": 1,
   "campaign_id": "$CAMPAIGN_ID",
-  "created_at": "$(date -Iseconds)",
+  "timestamp": "$CAMPAIGN_TIMESTAMP",
+  "created_at": "$CAMPAIGN_TIMESTAMP",
   "duration_per_target_secs": $DURATION,
-  "totals": {
-    "duration_secs": $CAMPAIGN_DURATION,
-    "targets": ${#TARGETS[@]},
-    "crashes": $TOTAL_CRASHES
-  },
   "commit_sha": "$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)",
-  "config": "default",
+  "config": {
+    "duration_per_target": $DURATION,
+    "jobs": 1,
+    "target_count": ${#TARGETS[@]}
+  },
+  "totals": {
+    "elapsed_seconds": $CAMPAIGN_DURATION,
+    "total_crashes": $TOTAL_CRASHES,
+    "total_coverage": $TOTAL_COVERAGE,
+    "total_runs": $TOTAL_RUNS
+  },
   "targets": $RESULTS_ARRAY
 }
 EOF
