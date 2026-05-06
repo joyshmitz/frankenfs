@@ -76,6 +76,8 @@ VALIDATE_RAW="$E2E_LOG_DIR/metamorphic_workload_seed_catalog_validate.raw"
 UNIT_LOG="$E2E_LOG_DIR/metamorphic_workload_seed_catalog_unit_tests.log"
 BAD_PERMISSIONED_JSON="$E2E_LOG_DIR/metamorphic_bad_permissioned_ack.json"
 BAD_SOURCE_JSON="$E2E_LOG_DIR/metamorphic_bad_source_artifact.json"
+BAD_POINTER_JSON="$E2E_LOG_DIR/metamorphic_bad_source_pointer.json"
+BAD_VALUE_JSON="$E2E_LOG_DIR/metamorphic_bad_source_value.json"
 BAD_RAW="$E2E_LOG_DIR/metamorphic_bad.raw"
 UNIT_TESTS_OK=0
 
@@ -114,6 +116,8 @@ if report["seed_count"] < 7:
     raise SystemExit("expected at least seven seed rows")
 if report["source_kind_count"] < 5:
     raise SystemExit("expected at least five source kinds")
+if report.get("source_value_verified_count") != report["seed_count"]:
+    raise SystemExit("not every source value was mechanically verified")
 for relation in [
     "replay_deterministic",
     "repair_monotonic",
@@ -135,6 +139,8 @@ for row in report["coverage_matrix"]:
         raise SystemExit(f"missing invariant: {row['seed_id']}")
     if not row["reproduction_command"].strip():
         raise SystemExit(f"missing reproduction command: {row['seed_id']}")
+    if not row.get("source_value_pointer", "").startswith("/"):
+        raise SystemExit(f"missing source value pointer: {row['seed_id']}")
     if "required" not in row["expected_artifact_fields"]:
         raise SystemExit(f"missing expected artifact fields: {row['seed_id']}")
 PY
@@ -169,12 +175,18 @@ else
 fi
 
 e2e_step "Scenario 5: invalid catalog variants fail closed"
-python3 - "$CATALOG_JSON" "$BAD_PERMISSIONED_JSON" "$BAD_SOURCE_JSON" <<'PY'
+python3 - "$CATALOG_JSON" "$BAD_PERMISSIONED_JSON" "$BAD_SOURCE_JSON" "$BAD_POINTER_JSON" "$BAD_VALUE_JSON" <<'PY'
 import json
 import pathlib
 import sys
 
-catalog_path, bad_permissioned_path, bad_source_path = map(pathlib.Path, sys.argv[1:])
+(
+    catalog_path,
+    bad_permissioned_path,
+    bad_source_path,
+    bad_pointer_path,
+    bad_value_path,
+) = map(pathlib.Path, sys.argv[1:])
 catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
 
 bad_permissioned = json.loads(json.dumps(catalog))
@@ -187,10 +199,18 @@ bad_permissioned_path.write_text(json.dumps(bad_permissioned, indent=2, sort_key
 bad_source = json.loads(json.dumps(catalog))
 bad_source["seeds"][0]["source_artifact"] = "tests/metamorphic-workload-seeds/missing_source_artifact.json"
 bad_source_path.write_text(json.dumps(bad_source, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+bad_pointer = json.loads(json.dumps(catalog))
+bad_pointer["seeds"][0]["source_value_pointer"] = "/scenarios/3/missing_seed_field"
+bad_pointer_path.write_text(json.dumps(bad_pointer, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+bad_value = json.loads(json.dumps(catalog))
+bad_value["seeds"][1]["seed_value"] = 9999999
+bad_value_path.write_text(json.dumps(bad_value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
 invalid_failures=0
-for bad_catalog in "$BAD_PERMISSIONED_JSON" "$BAD_SOURCE_JSON"; do
+for bad_catalog in "$BAD_PERMISSIONED_JSON" "$BAD_SOURCE_JSON" "$BAD_POINTER_JSON" "$BAD_VALUE_JSON"; do
     if run_cargo_cmd run --quiet -p ffs-harness -- \
         validate-metamorphic-workload-seeds \
         --catalog "$bad_catalog" >"$BAD_RAW" 2>&1; then
@@ -200,8 +220,8 @@ for bad_catalog in "$BAD_PERMISSIONED_JSON" "$BAD_SOURCE_JSON"; do
     fi
 done
 
-if ((invalid_failures == 2)); then
-    scenario_result "metamorphic_seed_catalog_invalid_variants_rejected" "PASS" "permissioned ack and missing source variants rejected"
+if ((invalid_failures == 4)); then
+    scenario_result "metamorphic_seed_catalog_invalid_variants_rejected" "PASS" "permissioned ack, source artifact, source pointer, and source value variants rejected"
 else
     scenario_result "metamorphic_seed_catalog_invalid_variants_rejected" "FAIL" "invalid_failures=${invalid_failures}"
 fi
@@ -213,6 +233,9 @@ if run_cargo_cmd test -p ffs-harness --lib metamorphic_workload_seed_catalog -- 
     for test_name in \
         "rejects_duplicate_seed_ids" \
         "rejects_missing_source_artifact" \
+        "rejects_missing_source_value_pointer_target" \
+        "rejects_mismatched_numeric_source_value" \
+        "accepts_seed_contained_in_source_command_string" \
         "rejects_permissioned_seed_without_ack_requirement" \
         "rejects_unknown_relation_type" \
         "rejects_seed_without_invariant" \

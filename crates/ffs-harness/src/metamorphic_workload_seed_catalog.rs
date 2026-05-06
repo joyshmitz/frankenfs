@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -52,6 +53,7 @@ pub struct MetamorphicWorkloadSeed {
     pub source_kind: String,
     pub source_artifact: String,
     pub source_seed_field: String,
+    pub source_value_pointer: String,
     pub relation_type: String,
     pub invariant: String,
     pub proof_consumers: Vec<String>,
@@ -112,6 +114,7 @@ pub struct MetamorphicWorkloadSeedCatalogReport {
     pub dry_run_seed_ids: Vec<String>,
     pub permissioned_seed_ids: Vec<String>,
     pub source_artifacts: Vec<String>,
+    pub source_value_verified_count: usize,
     pub coverage_matrix: Vec<MetamorphicWorkloadSeedCoverageRow>,
     pub duplicate_seed_ids: Vec<String>,
     pub errors: Vec<String>,
@@ -124,6 +127,7 @@ pub struct MetamorphicWorkloadSeedCoverageRow {
     pub seed_value: String,
     pub source_kind: String,
     pub source_artifact: String,
+    pub source_value_pointer: String,
     pub relation_type: String,
     pub invariant: String,
     pub proof_consumers: Vec<String>,
@@ -174,6 +178,7 @@ pub fn validate_metamorphic_workload_seed_catalog_with_repo_root(
     let mut dry_run_seed_ids = Vec::new();
     let mut permissioned_seed_ids = Vec::new();
     let mut source_artifacts = BTreeSet::<String>::new();
+    let mut source_value_verified_count = 0usize;
     let mut coverage_matrix = Vec::new();
 
     validate_header(catalog, &mut errors);
@@ -216,14 +221,16 @@ pub fn validate_metamorphic_workload_seed_catalog_with_repo_root(
         }
         source_artifacts.insert(seed.source_artifact.clone());
 
-        validate_seed(
+        if validate_seed(
             seed,
             repo_root,
             &relation_vocab,
             &execution_vocab,
             &proof_consumer_vocab,
             &mut errors,
-        );
+        ) {
+            source_value_verified_count += 1;
+        }
         coverage_matrix.push(build_coverage_row(seed));
     }
 
@@ -266,6 +273,7 @@ pub fn validate_metamorphic_workload_seed_catalog_with_repo_root(
         dry_run_seed_ids,
         permissioned_seed_ids,
         source_artifacts: source_artifacts.into_iter().collect(),
+        source_value_verified_count,
         coverage_matrix,
         duplicate_seed_ids,
         errors,
@@ -298,6 +306,11 @@ pub fn render_metamorphic_workload_seed_catalog_markdown(
     let _ = writeln!(out, "- valid: `{}`", report.valid);
     let _ = writeln!(out, "- seeds: `{}`", report.seed_count);
     let _ = writeln!(out, "- source kinds: `{}`", report.source_kind_count);
+    let _ = writeln!(
+        out,
+        "- source values verified: `{}`",
+        report.source_value_verified_count
+    );
     let _ = writeln!(out);
     render_counts(&mut out, "Relation Coverage", &report.relation_counts);
     render_counts(&mut out, "Source Kind Coverage", &report.source_kind_counts);
@@ -314,16 +327,17 @@ pub fn render_metamorphic_workload_seed_catalog_markdown(
     let _ = writeln!(out, "## Coverage Matrix");
     let _ = writeln!(
         out,
-        "| Seed | Source | Relation | Execution | Consumers | Invariant |"
+        "| Seed | Source | Pointer | Relation | Execution | Consumers | Invariant |"
     );
-    let _ = writeln!(out, "|---|---|---|---|---|---|");
+    let _ = writeln!(out, "|---|---|---|---|---|---|---|");
     for row in &report.coverage_matrix {
         let consumers = row.proof_consumers.join(", ");
         let _ = writeln!(
             out,
-            "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |",
+            "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |",
             row.seed_id,
             row.source_kind,
+            row.source_value_pointer,
             row.relation_type,
             row.execution_mode,
             consumers,
@@ -365,7 +379,8 @@ fn validate_seed(
     execution_vocab: &BTreeSet<&str>,
     proof_consumer_vocab: &BTreeSet<&str>,
     errors: &mut Vec<String>,
-) {
+) -> bool {
+    let initial_error_count = errors.len();
     validate_stable_seed_id(&seed.seed_id, errors);
     if !seed.seed_value.is_valid() {
         errors.push(format!(
@@ -376,6 +391,7 @@ fn validate_seed(
     validate_nonempty("source_kind", &seed.source_kind, errors);
     validate_nonempty("source_artifact", &seed.source_artifact, errors);
     validate_nonempty("source_seed_field", &seed.source_seed_field, errors);
+    validate_nonempty("source_value_pointer", &seed.source_value_pointer, errors);
     validate_nonempty("relation_type", &seed.relation_type, errors);
     validate_nonempty("invariant", &seed.invariant, errors);
     validate_nonempty("reproduction_command", &seed.reproduction_command, errors);
@@ -419,11 +435,12 @@ fn validate_seed(
             seed.seed_id
         ));
     }
-    validate_source_artifact(seed, repo_root, errors);
+    validate_source_artifact_and_value(seed, repo_root, errors);
     validate_expected_artifacts(seed, errors);
+    errors.len() == initial_error_count
 }
 
-fn validate_source_artifact(
+fn validate_source_artifact_and_value(
     seed: &MetamorphicWorkloadSeed,
     repo_root: &Path,
     errors: &mut Vec<String>,
@@ -439,6 +456,43 @@ fn validate_source_artifact(
         errors.push(format!(
             "seed {} source_artifact does not exist: {}",
             seed.seed_id, seed.source_artifact
+        ));
+        return;
+    }
+    let source_text = match fs::read_to_string(&resolved) {
+        Ok(text) => text,
+        Err(err) => {
+            errors.push(format!(
+                "seed {} source_artifact could not be read: {} ({err})",
+                seed.seed_id, seed.source_artifact
+            ));
+            return;
+        }
+    };
+    let source_json = match serde_json::from_str::<Value>(&source_text) {
+        Ok(value) => value,
+        Err(err) => {
+            errors.push(format!(
+                "seed {} source_artifact is not valid JSON: {} ({err})",
+                seed.seed_id, seed.source_artifact
+            ));
+            return;
+        }
+    };
+    let Some(source_value) = source_json.pointer(&seed.source_value_pointer) else {
+        errors.push(format!(
+            "seed {} source_value_pointer does not exist in {}: {}",
+            seed.seed_id, seed.source_artifact, seed.source_value_pointer
+        ));
+        return;
+    };
+    if !source_value_contains_seed(source_value, &seed.seed_value) {
+        errors.push(format!(
+            "seed {} seed_value {} was not found at source_value_pointer {} in {}",
+            seed.seed_id,
+            seed.seed_value.label(),
+            seed.source_value_pointer,
+            seed.source_artifact
         ));
     }
 }
@@ -490,6 +544,7 @@ fn build_coverage_row(seed: &MetamorphicWorkloadSeed) -> MetamorphicWorkloadSeed
         seed_value: seed.seed_value.label(),
         source_kind: seed.source_kind.clone(),
         source_artifact: seed.source_artifact.clone(),
+        source_value_pointer: seed.source_value_pointer.clone(),
         relation_type: seed.relation_type.clone(),
         invariant: seed.invariant.clone(),
         proof_consumers: seed.proof_consumers.clone(),
@@ -501,6 +556,23 @@ fn build_coverage_row(seed: &MetamorphicWorkloadSeed) -> MetamorphicWorkloadSeed
             .into_iter()
             .map(str::to_owned)
             .collect(),
+    }
+}
+
+fn source_value_contains_seed(source_value: &Value, seed_value: &SeedValue) -> bool {
+    match source_value {
+        Value::Number(number) => match seed_value {
+            SeedValue::Number(seed) => number.as_u64() == Some(*seed),
+            SeedValue::Symbolic(seed) => number.to_string().contains(seed),
+        },
+        Value::String(value) => value.contains(&seed_value.label()),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| source_value_contains_seed(value, seed_value)),
+        Value::Object(values) => values
+            .values()
+            .any(|value| source_value_contains_seed(value, seed_value)),
+        Value::Bool(_) | Value::Null => false,
     }
 }
 
@@ -599,12 +671,20 @@ mod tests {
         let catalog = fixture_catalog();
         let report = validate_fixture(&catalog);
         assert!(report.valid, "{:?}", report.errors);
-        assert_eq!(report.bead_id, "bd-rchk0.78");
+        assert_eq!(report.bead_id, "bd-rchk0.79");
         assert!(report.seed_count >= 7);
         assert!(report.source_kind_count >= MIN_SOURCE_KIND_COUNT);
+        assert_eq!(report.source_value_verified_count, report.seed_count);
         assert!(!report.dry_run_seed_ids.is_empty());
         assert!(!report.permissioned_seed_ids.is_empty());
         assert_eq!(report.coverage_matrix.len(), report.seed_count);
+        assert!(report.coverage_matrix.iter().all(|row| {
+            !row.source_value_pointer.is_empty()
+                && row
+                    .expected_artifact_fields
+                    .iter()
+                    .any(|field| field == "required")
+        }));
         assert!(
             report
                 .by_proof_consumer
@@ -634,6 +714,55 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("source_artifact does not exist"))
         );
+    }
+
+    #[test]
+    fn rejects_missing_source_value_pointer_target() {
+        let mut catalog = fixture_catalog();
+        catalog.seeds[0].source_value_pointer = "/scenarios/3/missing_seed_field".to_owned();
+        let report = validate_fixture(&catalog);
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("source_value_pointer does not exist")
+                && error.contains("seed_workload_append_truncate_64001")
+        }));
+    }
+
+    #[test]
+    fn rejects_mismatched_numeric_source_value() {
+        let mut catalog = fixture_catalog();
+        let seed = catalog
+            .seeds
+            .iter_mut()
+            .find(|seed| seed.seed_id == "seed_soak_mount_ext4_1001")
+            .expect("fixture has soak/canary seed");
+        seed.seed_value = SeedValue::Number(9_999_999);
+        let report = validate_fixture(&catalog);
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("seed_value 9999999 was not found")
+                && error.contains("seed_soak_mount_ext4_1001")
+        }));
+    }
+
+    #[test]
+    fn accepts_seed_contained_in_source_command_string() {
+        let catalog = fixture_catalog();
+        let seed = catalog
+            .seeds
+            .iter()
+            .find(|seed| seed.seed_id == "seed_workload_append_truncate_64001")
+            .expect("fixture has command-contained seed");
+        let resolved = resolve_catalog_relative_path(&repo_root(), &seed.source_artifact)
+            .expect("fixture source artifact path resolves");
+        let source_json: Value = serde_json::from_str(
+            &fs::read_to_string(resolved).expect("fixture source artifact is readable"),
+        )
+        .expect("fixture source artifact is JSON");
+        let source_value = source_json
+            .pointer(&seed.source_value_pointer)
+            .expect("fixture source pointer exists");
+        assert!(source_value_contains_seed(source_value, &seed.seed_value));
     }
 
     #[test]

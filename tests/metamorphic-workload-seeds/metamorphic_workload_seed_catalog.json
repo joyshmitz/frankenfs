@@ -2,7 +2,7 @@
   "schema_version": 1,
   "catalog_id": "frankenfs_metamorphic_workload_seed_catalog",
   "catalog_version": "2026-05-06.1",
-  "bead_id": "bd-rchk0.78",
+  "bead_id": "bd-rchk0.79",
   "relation_types": [
     "replay_deterministic",
     "operation_reorder_commutes",
@@ -35,6 +35,7 @@
       "source_kind": "workload_corpus",
       "source_artifact": "tests/workload-corpus/p1_workload_corpus.json",
       "source_seed_field": "scenarios[workload_append_truncate_log_churn].reproduction_command",
+      "source_value_pointer": "/scenarios/3/reproduction_command",
       "relation_type": "replay_deterministic",
       "invariant": "Repeated crash-replay validation for the same append/truncate seed must produce the same survivor classification and log-replay outcome.",
       "proof_consumers": [
@@ -61,6 +62,7 @@
       "source_kind": "soak_canary_campaign",
       "source_artifact": "benchmarks/soak_canary_campaign_manifest.json",
       "source_seed_field": "workloads[soak_mount_cycle_ext4_ro].seeds[]",
+      "source_value_pointer": "/workloads/0/seeds/0",
       "relation_type": "operation_reorder_commutes",
       "invariant": "Mount, probe, unmount, and reopen cycles with the same seed must preserve the final root metadata observation independent of heartbeat grouping.",
       "proof_consumers": [
@@ -84,6 +86,7 @@
       "source_kind": "swarm_workload_harness",
       "source_artifact": "benchmarks/swarm_workload_harness_manifest.json",
       "source_seed_field": "scenarios[swarm_metadata_storm].workload_seeds[]",
+      "source_value_pointer": "/scenarios/0/workload_seeds/0",
       "relation_type": "tail_latency_order_invariant",
       "invariant": "Dry-run expansion must preserve the same workload seed ordering and attribution lanes before any large-host campaign is permitted.",
       "proof_consumers": [
@@ -107,6 +110,7 @@
       "source_kind": "swarm_tail_latency",
       "source_artifact": "benchmarks/swarm_tail_latency_ledger.json",
       "source_seed_field": "rows[].workload_seed",
+      "source_value_pointer": "/rows/0/workload_seed",
       "relation_type": "tail_latency_order_invariant",
       "invariant": "Authoritative p99 attribution for the same workload seed must not upgrade downgrade/blocker evidence into public readiness without the large-host ack.",
       "proof_consumers": [
@@ -131,6 +135,7 @@
       "source_kind": "crash_replay_artifact",
       "source_artifact": "tests/crash-replay-artifact/crash_replay_artifact.json",
       "source_seed_field": "seed",
+      "source_value_pointer": "/seed",
       "relation_type": "replay_deterministic",
       "invariant": "LabRuntime replay for the recorded seed must keep the same operation trace, failure classification, and raw log identity.",
       "proof_consumers": [
@@ -154,6 +159,7 @@
       "source_kind": "repair_writeback_serialization",
       "source_artifact": "docs/repair-writeback-serialization-contract.json",
       "source_seed_field": "schedules[].seed",
+      "source_value_pointer": "/race_schedule_manifest/schedules/0/seed",
       "relation_type": "repair_monotonic",
       "invariant": "Increasing available repair evidence for the same writeback schedule seed may improve acceptance, but must not hide duplicate targets or stale-symbol rejection.",
       "proof_consumers": [
@@ -177,6 +183,7 @@
       "source_kind": "fault_injection_corpus",
       "source_artifact": "tests/fault-injection-corpus/fault_injection_corpus.json",
       "source_seed_field": "cases[].seed",
+      "source_value_pointer": "/cases/0/seed",
       "relation_type": "failure_classification_stable",
       "invariant": "The same injected fault seed must retain its error class and operator remediation classification across proof-bundle rebuilds.",
       "proof_consumers": [
@@ -200,6 +207,7 @@
       "source_kind": "repair_confidence_lab",
       "source_artifact": "docs/repair-confidence-mutation-safety.json",
       "source_seed_field": "fault_injection_trials[].seed",
+      "source_value_pointer": "/calibration_corpus/0/seed",
       "relation_type": "repair_monotonic",
       "invariant": "Repair confidence for the same mutation seed must preserve the threshold decision and never convert detection-only evidence into mutation permission.",
       "proof_consumers": [
