@@ -619,6 +619,9 @@ pub fn validate_xfstests_baseline_manifest(manifest: &XfstestsBaselineManifest) 
     if manifest.raw_artifacts.is_empty() {
         errors.push("xfstests baseline raw_artifacts must not be empty".to_owned());
     }
+    if manifest.cases.is_empty() {
+        errors.push("xfstests baseline cases must not be empty".to_owned());
+    }
     let raw_by_path = manifest
         .raw_artifacts
         .iter()
@@ -3466,6 +3469,23 @@ generic/001  2s ... pass\n";
                 .iter()
                 .any(|error| error.contains("disposition_counts mismatch")),
             "expected disposition count mismatch error, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn baseline_manifest_rejects_empty_case_list() {
+        let tmp = tempdir().expect("tempdir");
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "generic/001 pass\n").expect("write raw log");
+        let manifest = manifest_with_cases(&raw, Vec::new());
+
+        let errors = validate_xfstests_baseline_manifest(&manifest);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("cases must not be empty")),
+            "expected empty cases error, got {errors:#?}"
         );
     }
 
