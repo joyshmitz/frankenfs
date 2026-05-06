@@ -2771,9 +2771,9 @@ pub fn ext4_appears_clean_state(state: u16) -> bool {
 }
 
 fn ext4_group_flag_names(flags: u16) -> Vec<String> {
-    const EXT4_BG_INODE_UNINIT: u16 = 0x0001;
-    const EXT4_BG_BLOCK_UNINIT: u16 = 0x0002;
-    const EXT4_BG_INODE_ZEROED: u16 = 0x0004;
+    // bd-glkri — use the canonical kernel-conformance-pinned constants
+    // from ffs_ondisk instead of fn-local re-derivations.
+    use ffs_ondisk::{EXT4_BG_BLOCK_UNINIT, EXT4_BG_INODE_UNINIT, EXT4_BG_INODE_ZEROED};
 
     let mut names = Vec::new();
     if (flags & EXT4_BG_INODE_UNINIT) != 0 {

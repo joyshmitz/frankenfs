@@ -42,6 +42,22 @@ pub const EXT4_ERROR_FS: u16 = 0x0002;
 /// Filesystem is being recovered from an orphan list.
 pub const EXT4_ORPHAN_FS: u16 = 0x0004;
 
+// ── ext4 block-group descriptor flags (bd-glkri) ─────────────────────────
+//
+// Mirrored from the Linux kernel's `fs/ext4/ext4.h`. Each is a
+// single power-of-2 bit in the 16-bit `bg_flags` field of
+// `struct ext4_group_desc`; the constants here are the canonical
+// values used by every parser/writer that consults
+// `Ext4GroupDesc::flags`. Conformance is pinned by the
+// `ext4_block_group_flag_constants_match_kernel_header` test.
+
+/// Inode table for this group has never been initialized.
+pub const EXT4_BG_INODE_UNINIT: u16 = 0x0001;
+/// Block bitmap for this group has never been initialized.
+pub const EXT4_BG_BLOCK_UNINIT: u16 = 0x0002;
+/// Inode table for this group has been zeroed.
+pub const EXT4_BG_INODE_ZEROED: u16 = 0x0004;
+
 // ── ext4 reserved inode numbers (bd-k81lq) ───────────────────────────────
 //
 // Mirrored from the Linux kernel's `fs/ext4/ext4.h`. These are the
@@ -10542,6 +10558,69 @@ mod tests {
             EXT4_MMP_SEQ_FSCK,
             "EXT4_MMP_SEQ_MAX must be exactly one less than EXT4_MMP_SEQ_FSCK \
              (kernel reserved-sentinel invariant)"
+        );
+    }
+
+    /// bd-glkri — Kernel-conformance pin for the 3 ext4
+    /// block-group descriptor flag bits in `bg_flags` per
+    /// `fs/ext4/ext4.h`.
+    ///
+    /// Each is a single power-of-2 bit in the 16-bit `bg_flags`
+    /// field of `struct ext4_group_desc`. A regression that swapped
+    /// EXT4_BG_INODE_UNINIT (0x0001) and EXT4_BG_BLOCK_UNINIT
+    /// (0x0002) would silently mis-classify every group descriptor
+    /// — either skipping valid inode tables or reading uninitialized
+    /// memory.
+    ///
+    /// Pairs with bd-jbilz (state flags + magic), bd-bevt2
+    /// (40 feature flags), bd-tyeic (27 inode flags).
+    #[test]
+    fn ext4_block_group_flag_constants_match_kernel_header() {
+        // Canonical kernel values per fs/ext4/ext4.h.
+        assert_eq!(
+            EXT4_BG_INODE_UNINIT, 0x0001,
+            "EXT4_BG_INODE_UNINIT must equal kernel value 0x0001"
+        );
+        assert_eq!(
+            EXT4_BG_BLOCK_UNINIT, 0x0002,
+            "EXT4_BG_BLOCK_UNINIT must equal kernel value 0x0002"
+        );
+        assert_eq!(
+            EXT4_BG_INODE_ZEROED, 0x0004,
+            "EXT4_BG_INODE_ZEROED must equal kernel value 0x0004"
+        );
+
+        // Structural invariants: each is a single power-of-2 bit
+        // and no two share a bit. A regression that conflated any
+        // pair would fail this immediately.
+        let flags: &[(u16, &str)] = &[
+            (EXT4_BG_INODE_UNINIT, "EXT4_BG_INODE_UNINIT"),
+            (EXT4_BG_BLOCK_UNINIT, "EXT4_BG_BLOCK_UNINIT"),
+            (EXT4_BG_INODE_ZEROED, "EXT4_BG_INODE_ZEROED"),
+        ];
+        for (flag, name) in flags {
+            assert!(
+                flag.is_power_of_two(),
+                "{name} ({flag:#x}) must be a single power-of-two bit"
+            );
+        }
+        for (i, (a, name_a)) in flags.iter().enumerate() {
+            for (b, name_b) in &flags[i + 1..] {
+                assert_eq!(
+                    a & b,
+                    0,
+                    "{name_a} ({a:#x}) and {name_b} ({b:#x}) must not share a bit"
+                );
+            }
+        }
+
+        // Cross-check: the OR of all 3 flags has exactly 3 bits set
+        // (no duplicates, no shared bits).
+        let or_all: u16 = flags.iter().fold(0_u16, |acc, (f, _)| acc | f);
+        assert_eq!(
+            or_all.count_ones(),
+            3,
+            "OR of all bg_flag bits must have exactly 3 bits set, got {or_all:#x}"
         );
     }
 
