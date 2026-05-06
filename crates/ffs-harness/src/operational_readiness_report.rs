@@ -11,7 +11,8 @@
 use crate::artifact_manifest::{
     ArtifactManifest, GateVerdict, ManifestValidationError, OperationalErrorClass,
     OperationalOutcomeClass, READINESS_EVENT_ENVELOPE_VERSION, ReadinessEventEnvelope,
-    ScenarioOutcome, ScenarioResult, SkipReason, validate_operational_manifest,
+    ScenarioOutcome, ScenarioResult, SkipReason, parse_manifest_timestamp_epoch_days,
+    validate_operational_manifest,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const READINESS_REPORT_SCHEMA_VERSION: u32 = 1;
 const REQUIRED_WORKSTREAMS: [&str; 9] = [
@@ -37,6 +39,8 @@ const REQUIRED_WORKSTREAMS: [&str; 9] = [
 pub struct OperationalReadinessReportConfig {
     pub artifacts_dir: PathBuf,
     pub current_git_sha: Option<String>,
+    pub max_artifact_age_days: Option<u32>,
+    pub recency_reference_epoch_days: Option<u32>,
 }
 
 impl OperationalReadinessReportConfig {
@@ -45,7 +49,21 @@ impl OperationalReadinessReportConfig {
         Self {
             artifacts_dir: artifacts_dir.into(),
             current_git_sha: None,
+            max_artifact_age_days: None,
+            recency_reference_epoch_days: None,
         }
+    }
+
+    fn effective_recency_reference_epoch_days(&self) -> Result<Option<u32>> {
+        if self.max_artifact_age_days.is_none() {
+            return Ok(None);
+        }
+        if let Some(epoch_days) = self.recency_reference_epoch_days {
+            return Ok(Some(epoch_days));
+        }
+        current_manifest_epoch_days()
+            .context("failed to compute current day for readiness artifact recency")
+            .map(Some)
     }
 }
 
@@ -69,6 +87,8 @@ pub struct OperationalReadinessReport {
     pub contract_violations: Vec<ReadinessContractViolation>,
     pub duplicate_scenario_ids: Vec<String>,
     pub stale_git_shas: Vec<StaleGitSha>,
+    pub stale_artifacts: Vec<StaleArtifact>,
+    pub invalid_artifact_timestamps: Vec<InvalidArtifactTimestamp>,
     pub missing_log_paths: Vec<MissingLogPath>,
     pub scenarios: Vec<ReadinessScenarioRow>,
 }
@@ -98,6 +118,33 @@ pub struct StaleGitSha {
     pub run_id: String,
     pub observed: String,
     pub expected: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleArtifact {
+    pub source_path: String,
+    pub gate_id: String,
+    pub run_id: String,
+    pub created_at: String,
+    pub age_days: u32,
+    pub max_age_days: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvalidArtifactTimestamp {
+    pub source_path: String,
+    pub gate_id: String,
+    pub run_id: String,
+    pub created_at: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactRecencyState {
+    NotChecked,
+    Fresh,
+    Stale,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +205,8 @@ pub struct ReadinessScenarioRow {
     pub product_failure: bool,
     pub git_commit: String,
     pub stale_git_sha: bool,
+    pub artifact_recency: ArtifactRecencyState,
+    pub artifact_age_days: Option<u32>,
     pub manifest_schema_version: Option<u32>,
     pub host_fingerprint: Option<String>,
     pub stdout_path: Option<String>,
@@ -186,6 +235,8 @@ pub enum SourceKind {
 struct LegacyE2eSummary {
     gate_id: String,
     run_id: String,
+    #[serde(default)]
+    created_at: Option<String>,
     git_context: LegacyGitContext,
     scenarios: Vec<LegacyScenario>,
     verdict: String,
@@ -220,6 +271,8 @@ struct ReportBuilder {
     workstreams: BTreeMap<String, ReadinessCounts>,
     seen_scenarios: BTreeMap<String, usize>,
     stale_git_shas: Vec<StaleGitSha>,
+    stale_artifacts: Vec<StaleArtifact>,
+    invalid_artifact_timestamps: Vec<InvalidArtifactTimestamp>,
     missing_log_paths: Vec<MissingLogPath>,
     contract_violations: Vec<ReadinessContractViolation>,
     scenarios: Vec<ReadinessScenarioRow>,
@@ -238,14 +291,59 @@ struct TaxonomyInput<'a> {
     skip_reason: Option<SkipReason>,
     workstream: &'a str,
     stale_git_sha: bool,
+    stale_artifact: bool,
     artifact_refs: &'a [String],
     detail: Option<&'a str>,
     remediation_hint: Option<&'a str>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ArtifactRecency {
+    state: Option<ArtifactRecencyState>,
+    age_days: Option<u32>,
+}
+
+impl ArtifactRecency {
+    fn not_checked() -> Self {
+        Self {
+            state: Some(ArtifactRecencyState::NotChecked),
+            age_days: None,
+        }
+    }
+
+    fn fresh(age_days: u32) -> Self {
+        Self {
+            state: Some(ArtifactRecencyState::Fresh),
+            age_days: Some(age_days),
+        }
+    }
+
+    fn stale(age_days: u32) -> Self {
+        Self {
+            state: Some(ArtifactRecencyState::Stale),
+            age_days: Some(age_days),
+        }
+    }
+
+    fn state(self) -> ArtifactRecencyState {
+        self.state.unwrap_or(ArtifactRecencyState::NotChecked)
+    }
+
+    fn is_stale(self) -> bool {
+        self.state() == ArtifactRecencyState::Stale
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceDiagnostics {
+    stale_git_sha: bool,
+    artifact_recency: ArtifactRecency,
+}
+
 pub fn build_operational_readiness_report(
     config: &OperationalReadinessReportConfig,
 ) -> Result<OperationalReadinessReport> {
+    let recency_reference_epoch_days = config.effective_recency_reference_epoch_days()?;
     let source_paths = collect_json_paths(&config.artifacts_dir)
         .with_context(|| format!("failed to scan {}", config.artifacts_dir.display()))?;
     let mut builder = ReportBuilder::default();
@@ -254,9 +352,19 @@ pub fn build_operational_readiness_report(
         let text = fs::read_to_string(&source_path)
             .with_context(|| format!("failed to read {}", source_path.display()))?;
         if let Ok(manifest) = serde_json::from_str::<ArtifactManifest>(&text) {
-            builder.ingest_manifest(config, &source_path, &manifest);
+            builder.ingest_manifest(
+                config,
+                recency_reference_epoch_days,
+                &source_path,
+                &manifest,
+            );
         } else if let Ok(summary) = serde_json::from_str::<LegacyE2eSummary>(&text) {
-            builder.ingest_legacy_summary(config, &source_path, &summary);
+            builder.ingest_legacy_summary(
+                config,
+                recency_reference_epoch_days,
+                &source_path,
+                &summary,
+            );
         } else {
             builder.ignored_json_count += 1;
         }
@@ -270,6 +378,36 @@ pub fn render_operational_readiness_markdown(report: &OperationalReadinessReport
     let mut out = String::new();
     render_operational_readiness_markdown_summary(&mut out, report);
     writeln!(&mut out).ok();
+    if !report.stale_artifacts.is_empty() {
+        writeln!(&mut out, "## Stale Artifacts").ok();
+        for stale in &report.stale_artifacts {
+            writeln!(
+                &mut out,
+                "- `{}` `{}` run `{}` age={}d max={}d created_at={}",
+                stale.source_path,
+                stale.gate_id,
+                stale.run_id,
+                stale.age_days,
+                stale.max_age_days,
+                stale.created_at
+            )
+            .ok();
+        }
+        writeln!(&mut out).ok();
+    }
+    if !report.invalid_artifact_timestamps.is_empty() {
+        writeln!(&mut out, "## Invalid Artifact Timestamps").ok();
+        for invalid in &report.invalid_artifact_timestamps {
+            let created_at = invalid.created_at.as_deref().unwrap_or("<missing>");
+            writeln!(
+                &mut out,
+                "- `{}` `{}` run `{}` created_at={} reason={}",
+                invalid.source_path, invalid.gate_id, invalid.run_id, created_at, invalid.reason
+            )
+            .ok();
+        }
+        writeln!(&mut out).ok();
+    }
     writeln!(&mut out, "## Workstreams").ok();
     for (workstream, counts) in &report.workstreams {
         writeln!(
@@ -356,9 +494,11 @@ fn render_operational_readiness_markdown_summary(
     .ok();
     writeln!(
         out,
-        "- Diagnostics: duplicate_scenarios={} stale_git_shas={} missing_logs={}",
+        "- Diagnostics: duplicate_scenarios={} stale_git_shas={} stale_artifacts={} invalid_timestamps={} missing_logs={}",
         report.duplicate_scenario_ids.len(),
         report.stale_git_shas.len(),
+        report.stale_artifacts.len(),
+        report.invalid_artifact_timestamps.len(),
         report.missing_log_paths.len()
     )
     .ok();
@@ -376,6 +516,7 @@ impl ReportBuilder {
     fn ingest_manifest(
         &mut self,
         config: &OperationalReadinessReportConfig,
+        recency_reference_epoch_days: Option<u32>,
         source_path: &Path,
         manifest: &ArtifactManifest,
     ) {
@@ -388,6 +529,18 @@ impl ReportBuilder {
             &manifest.run_id,
             &manifest.git_context.commit,
         );
+        let recency = self.record_artifact_recency(
+            config,
+            recency_reference_epoch_days,
+            &source_path_text,
+            &manifest.gate_id,
+            &manifest.run_id,
+            Some(&manifest.created_at),
+        );
+        let diagnostics = SourceDiagnostics {
+            stale_git_sha,
+            artifact_recency: recency,
+        };
         self.record_manifest_run_logs(config, source_path, &source_path_text, manifest);
         self.readiness_event_count += manifest.readiness_events.len();
         self.record_readiness_event_graph(manifest);
@@ -427,54 +580,23 @@ impl ReportBuilder {
                 scenario,
                 operational,
                 &events,
-                stale_git_sha,
+                diagnostics,
             ));
         }
 
         if manifest.verdict == GateVerdict::Skip && manifest.scenarios.is_empty() {
-            let row = ReadinessScenarioRow {
-                source_path: source_path_text,
-                source_kind: SourceKind::ArtifactManifest,
-                gate_id: manifest.gate_id.clone(),
-                run_id: manifest.run_id.clone(),
-                workstream: classify_workstream(&manifest.gate_id, "gate_skipped", &[]),
-                scenario_id: "gate_skipped".to_owned(),
-                outcome: ReadinessOutcome::Skip,
-                taxonomy_class: ReadinessTaxonomyClass::AuthoritativeLaneUnavailable,
-                failure_kind: None,
-                skip_reason: Some("gate_verdict_skip".to_owned()),
-                environment_only_blocker: true,
-                product_failure: false,
-                git_commit: manifest.git_context.commit.clone(),
-                stale_git_sha,
-                manifest_schema_version: Some(manifest.schema_version),
-                host_fingerprint: Some(manifest_host_fingerprint(manifest)),
-                stdout_path: None,
-                stderr_path: None,
-                artifact_refs: Vec::new(),
-                controlling_artifact: None,
-                readiness_event_ids: Vec::new(),
-                parent_correlation_ids: Vec::new(),
-                event_artifact_ids: Vec::new(),
-                event_severities: Vec::new(),
-                reproduction_command: manifest
-                    .operational_context
-                    .as_ref()
-                    .map(|context| context.command_line.join(" ")),
-                cleanup_status: None,
-                remediation_hint: Some(
-                    "inspect gate-level skip reason in source manifest".to_owned(),
-                ),
-                owner_bead: manifest.bead_id.clone(),
-                detail: None,
-            };
-            self.push_row(row);
+            self.push_row(build_skipped_gate_row(
+                source_path_text,
+                manifest,
+                diagnostics,
+            ));
         }
     }
 
     fn ingest_legacy_summary(
         &mut self,
         config: &OperationalReadinessReportConfig,
+        recency_reference_epoch_days: Option<u32>,
         source_path: &Path,
         summary: &LegacyE2eSummary,
     ) {
@@ -486,6 +608,14 @@ impl ReportBuilder {
             &summary.gate_id,
             &summary.run_id,
             &summary.git_context.commit,
+        );
+        let recency = self.record_artifact_recency(
+            config,
+            recency_reference_epoch_days,
+            &source_path_text,
+            &summary.gate_id,
+            &summary.run_id,
+            summary.created_at.as_deref(),
         );
         self.record_log_path(
             config,
@@ -513,6 +643,7 @@ impl ReportBuilder {
                 skip_reason: None,
                 workstream: &workstream,
                 stale_git_sha,
+                stale_artifact: recency.is_stale(),
                 artifact_refs: &artifact_refs,
                 detail: scenario.detail.as_deref(),
                 remediation_hint: scenario.detail.as_deref(),
@@ -538,6 +669,8 @@ impl ReportBuilder {
                 product_failure,
                 git_commit: summary.git_context.commit.clone(),
                 stale_git_sha,
+                artifact_recency: recency.state(),
+                artifact_age_days: recency.age_days,
                 manifest_schema_version: None,
                 host_fingerprint: Some(format!(
                     "legacy:{}:{}",
@@ -602,11 +735,15 @@ impl ReportBuilder {
             contract_failed: !required_workstreams_missing.is_empty()
                 || !self.contract_violations.is_empty()
                 || !self.missing_log_paths.is_empty()
-                || !self.stale_git_shas.is_empty(),
+                || !self.stale_git_shas.is_empty()
+                || !self.stale_artifacts.is_empty()
+                || !self.invalid_artifact_timestamps.is_empty(),
             required_workstreams_missing,
             contract_violations: self.contract_violations,
             duplicate_scenario_ids,
             stale_git_shas: self.stale_git_shas,
+            stale_artifacts: self.stale_artifacts,
+            invalid_artifact_timestamps: self.invalid_artifact_timestamps,
             missing_log_paths: self.missing_log_paths,
             scenarios: self.scenarios,
         }
@@ -647,6 +784,82 @@ impl ReportBuilder {
             expected: expected.to_owned(),
         });
         true
+    }
+
+    fn record_artifact_recency(
+        &mut self,
+        config: &OperationalReadinessReportConfig,
+        recency_reference_epoch_days: Option<u32>,
+        source_path: &str,
+        gate_id: &str,
+        run_id: &str,
+        created_at: Option<&str>,
+    ) -> ArtifactRecency {
+        let Some(max_age_days) = config.max_artifact_age_days else {
+            return ArtifactRecency::not_checked();
+        };
+        let Some(reference_epoch_days) = recency_reference_epoch_days else {
+            return ArtifactRecency::not_checked();
+        };
+        let Some(created_at) = created_at else {
+            self.record_invalid_artifact_timestamp(
+                source_path,
+                gate_id,
+                run_id,
+                None,
+                "missing created_at while --max-age-days is enforced",
+            );
+            return ArtifactRecency::not_checked();
+        };
+        let Some(created_epoch_days) = parse_manifest_timestamp_epoch_days(created_at) else {
+            self.record_invalid_artifact_timestamp(
+                source_path,
+                gate_id,
+                run_id,
+                Some(created_at),
+                "created_at is not a valid ISO 8601 timestamp",
+            );
+            return ArtifactRecency::not_checked();
+        };
+
+        let age_days = reference_epoch_days.saturating_sub(created_epoch_days);
+        if age_days <= max_age_days {
+            return ArtifactRecency::fresh(age_days);
+        }
+
+        self.stale_artifacts.push(StaleArtifact {
+            source_path: source_path.to_owned(),
+            gate_id: gate_id.to_owned(),
+            run_id: run_id.to_owned(),
+            created_at: created_at.to_owned(),
+            age_days,
+            max_age_days,
+        });
+        ArtifactRecency::stale(age_days)
+    }
+
+    fn record_invalid_artifact_timestamp(
+        &mut self,
+        source_path: &str,
+        gate_id: &str,
+        run_id: &str,
+        created_at: Option<&str>,
+        reason: &str,
+    ) {
+        self.invalid_artifact_timestamps
+            .push(InvalidArtifactTimestamp {
+                source_path: source_path.to_owned(),
+                gate_id: gate_id.to_owned(),
+                run_id: run_id.to_owned(),
+                created_at: created_at.map(str::to_owned),
+                reason: reason.to_owned(),
+            });
+        self.record_contract_violation(
+            source_path,
+            None,
+            format!("{reason} for `{gate_id}` run `{run_id}`"),
+            "bd-7pw36:artifact-recency-timestamp",
+        );
     }
 
     fn record_manifest_run_logs(
@@ -806,6 +1019,13 @@ fn collect_json_paths(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+fn current_manifest_epoch_days() -> Option<u32> {
+    let unix_epoch_days = parse_manifest_timestamp_epoch_days("1970-01-01T00:00:00Z")?;
+    let elapsed_days = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() / 86_400;
+    let total_days = u64::from(unix_epoch_days).checked_add(elapsed_days)?;
+    u32::try_from(total_days).ok()
+}
+
 fn collect_json_paths_inner(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))? {
         let entry = entry?;
@@ -877,6 +1097,49 @@ fn validation_error_scenario_id(error: &ManifestValidationError) -> Option<&str>
     }
 }
 
+fn build_skipped_gate_row(
+    source_path_text: String,
+    manifest: &ArtifactManifest,
+    diagnostics: SourceDiagnostics,
+) -> ReadinessScenarioRow {
+    ReadinessScenarioRow {
+        source_path: source_path_text,
+        source_kind: SourceKind::ArtifactManifest,
+        gate_id: manifest.gate_id.clone(),
+        run_id: manifest.run_id.clone(),
+        workstream: classify_workstream(&manifest.gate_id, "gate_skipped", &[]),
+        scenario_id: "gate_skipped".to_owned(),
+        outcome: ReadinessOutcome::Skip,
+        taxonomy_class: ReadinessTaxonomyClass::AuthoritativeLaneUnavailable,
+        failure_kind: None,
+        skip_reason: Some("gate_verdict_skip".to_owned()),
+        environment_only_blocker: true,
+        product_failure: false,
+        git_commit: manifest.git_context.commit.clone(),
+        stale_git_sha: diagnostics.stale_git_sha,
+        artifact_recency: diagnostics.artifact_recency.state(),
+        artifact_age_days: diagnostics.artifact_recency.age_days,
+        manifest_schema_version: Some(manifest.schema_version),
+        host_fingerprint: Some(manifest_host_fingerprint(manifest)),
+        stdout_path: None,
+        stderr_path: None,
+        artifact_refs: Vec::new(),
+        controlling_artifact: None,
+        readiness_event_ids: Vec::new(),
+        parent_correlation_ids: Vec::new(),
+        event_artifact_ids: Vec::new(),
+        event_severities: Vec::new(),
+        reproduction_command: manifest
+            .operational_context
+            .as_ref()
+            .map(|context| context.command_line.join(" ")),
+        cleanup_status: None,
+        remediation_hint: Some("inspect gate-level skip reason in source manifest".to_owned()),
+        owner_bead: manifest.bead_id.clone(),
+        detail: None,
+    }
+}
+
 fn build_manifest_row(
     source_path_text: &str,
     manifest: &ArtifactManifest,
@@ -884,7 +1147,7 @@ fn build_manifest_row(
     scenario: &ScenarioOutcome,
     operational: Option<&crate::artifact_manifest::OperationalScenarioRecord>,
     readiness_events: &[&ReadinessEventEnvelope],
-    stale_git_sha: bool,
+    diagnostics: SourceDiagnostics,
 ) -> ReadinessScenarioRow {
     let artifact_refs = operational
         .map(|record| record.artifact_refs.clone())
@@ -905,7 +1168,8 @@ fn build_manifest_row(
         error_class,
         skip_reason,
         workstream: &workstream,
-        stale_git_sha,
+        stale_git_sha: diagnostics.stale_git_sha,
+        stale_artifact: diagnostics.artifact_recency.is_stale(),
         artifact_refs: &artifact_refs,
         detail: detail.as_deref(),
         remediation_hint: operational.and_then(|record| record.remediation_hint.as_deref()),
@@ -952,7 +1216,9 @@ fn build_manifest_row(
         environment_only_blocker,
         product_failure,
         git_commit: manifest.git_context.commit.clone(),
-        stale_git_sha,
+        stale_git_sha: diagnostics.stale_git_sha,
+        artifact_recency: diagnostics.artifact_recency.state(),
+        artifact_age_days: diagnostics.artifact_recency.age_days,
         manifest_schema_version: Some(manifest.schema_version),
         host_fingerprint: Some(manifest_host_fingerprint(manifest)),
         stdout_path: operational.map(|record| record.stdout_path.clone()),
@@ -1095,6 +1361,7 @@ fn classify_taxonomy(input: &TaxonomyInput<'_>) -> ReadinessTaxonomyClass {
     let text = format!("{detail} {remediation_hint}");
 
     if input.stale_git_sha
+        || input.stale_artifact
         || matches!(
             input.error_class,
             Some(OperationalErrorClass::StaleTrackerToolingFailure)
@@ -1368,6 +1635,76 @@ mod tests {
     }
 
     #[test]
+    fn max_age_flags_manifest_and_legacy_summary_staleness() {
+        let fixture = ReadinessFixture::new();
+        let mut manifest = sample_operational_manifest("abc123");
+        manifest.created_at = "2026-05-01T00:00:00Z".to_owned();
+        let mut legacy = sample_legacy_summary("abc123", "legacy_fuse_capability");
+        legacy.created_at = Some("2026-05-01T12:00:00Z".to_owned());
+        fixture.write_manifest("manifest.json", &manifest);
+        fixture.write_legacy("legacy_result.json", &legacy);
+        fs::write(fixture.dir.path().join("run.log"), "legacy log").expect("write log");
+
+        let report = fixture.report_with_recency(Some("abc123"), 3, "2026-05-06T00:00:00Z");
+
+        assert!(report.contract_failed);
+        assert_eq!(report.stale_artifacts.len(), 2);
+        assert!(report.invalid_artifact_timestamps.is_empty());
+        assert!(
+            report
+                .stale_artifacts
+                .iter()
+                .any(|stale| stale.gate_id == "operational_readiness"
+                    && stale.age_days == 5
+                    && stale.max_age_days == 3)
+        );
+        assert!(report.scenarios.iter().any(|row| {
+            row.gate_id == "operational_readiness"
+                && row.artifact_recency == ArtifactRecencyState::Stale
+                && row.artifact_age_days == Some(5)
+                && row.taxonomy_class == ReadinessTaxonomyClass::StaleArtifact
+        }));
+        assert!(report.scenarios.iter().any(|row| {
+            row.gate_id == "legacy_fuse_gate"
+                && row.artifact_recency == ArtifactRecencyState::Stale
+                && row.artifact_age_days == Some(5)
+                && row.taxonomy_class == ReadinessTaxonomyClass::StaleArtifact
+        }));
+        let markdown = render_operational_readiness_markdown(&report);
+        assert!(markdown.contains("## Stale Artifacts"));
+        assert!(markdown.contains("age=5d max=3d"));
+    }
+
+    #[test]
+    fn max_age_requires_parseable_timestamps() {
+        let fixture = ReadinessFixture::new();
+        let mut manifest = sample_operational_manifest("abc123");
+        manifest.created_at = "not-a-timestamp".to_owned();
+        let mut legacy = sample_legacy_summary("abc123", "legacy_missing_timestamp");
+        legacy.created_at = None;
+        fixture.write_manifest("manifest.json", &manifest);
+        fixture.write_legacy("legacy_result.json", &legacy);
+        fs::write(fixture.dir.path().join("run.log"), "legacy log").expect("write log");
+
+        let report = fixture.report_with_recency(Some("abc123"), 3, "2026-05-06T00:00:00Z");
+
+        assert!(report.contract_failed);
+        assert!(report.stale_artifacts.is_empty());
+        assert_eq!(report.invalid_artifact_timestamps.len(), 2);
+        assert!(report.invalid_artifact_timestamps.iter().any(|invalid| {
+            invalid.gate_id == "operational_readiness"
+                && invalid.created_at.as_deref() == Some("not-a-timestamp")
+        }));
+        assert!(report.invalid_artifact_timestamps.iter().any(|invalid| {
+            invalid.gate_id == "legacy_fuse_gate" && invalid.created_at.is_none()
+        }));
+        assert!(report.contract_violations.iter().any(|violation| {
+            violation.remediation_id == "bd-7pw36:artifact-recency-timestamp"
+                && violation.violation.contains("created_at")
+        }));
+    }
+
+    #[test]
     fn reports_missing_log_paths_without_failing_aggregation() {
         let fixture = ReadinessFixture::new();
         let mut manifest = sample_operational_manifest("abc123");
@@ -1473,6 +1810,7 @@ mod tests {
                     skip_reason: case.skip_reason,
                     workstream: case.workstream,
                     stale_git_sha: case.stale_git_sha,
+                    stale_artifact: false,
                     artifact_refs: &artifact_refs,
                     detail: Some(case.detail),
                     remediation_hint: Some(case.remediation_hint),
@@ -1641,6 +1979,26 @@ mod tests {
             let config = OperationalReadinessReportConfig {
                 artifacts_dir: self.dir.path().to_path_buf(),
                 current_git_sha: current_git_sha.map(str::to_owned),
+                max_artifact_age_days: None,
+                recency_reference_epoch_days: None,
+            };
+            build_operational_readiness_report(&config).expect("report builds")
+        }
+
+        fn report_with_recency(
+            &self,
+            current_git_sha: Option<&str>,
+            max_artifact_age_days: u32,
+            reference_timestamp: &str,
+        ) -> OperationalReadinessReport {
+            let config = OperationalReadinessReportConfig {
+                artifacts_dir: self.dir.path().to_path_buf(),
+                current_git_sha: current_git_sha.map(str::to_owned),
+                max_artifact_age_days: Some(max_artifact_age_days),
+                recency_reference_epoch_days: Some(
+                    parse_manifest_timestamp_epoch_days(reference_timestamp)
+                        .expect("reference timestamp parses"),
+                ),
             };
             build_operational_readiness_report(&config).expect("report builds")
         }
@@ -1915,6 +2273,7 @@ mod tests {
         LegacyE2eSummary {
             gate_id: "legacy_fuse_gate".to_owned(),
             run_id: format!("run-{commit}"),
+            created_at: Some("2026-05-03T00:00:00Z".to_owned()),
             git_context: LegacyGitContext {
                 commit: commit.to_owned(),
                 branch: "main".to_owned(),

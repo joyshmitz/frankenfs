@@ -419,11 +419,13 @@ an artifact directory for versioned `ArtifactManifest` files and legacy
 `result.json` summaries, then emits a single JSON or Markdown report that
 groups scenarios by workstream, counts pass/fail/skip/error outcomes, preserves
 links to raw logs and artifacts, flags duplicate scenario IDs, detects stale git
-SHAs when `--current-git-sha` is provided, and separates product failures from
-environment-only blockers. Each scenario row also carries a stable
-`taxonomy_class`, controlling artifact, reproduction command, cleanup status,
-manifest schema version, host fingerprint, readiness event ids, parent
-correlation ids, event artifact ids, and event severities so report consumers can distinguish
+SHAs when `--current-git-sha` is provided, enforces artifact recency when
+`--max-age-days` is provided, and separates product failures from
+environment-only blockers. Each scenario row also carries stale-artifact and
+artifact-age fields plus a stable `taxonomy_class`, controlling artifact,
+reproduction command, cleanup status, manifest schema version, host
+fingerprint, readiness event ids, parent correlation ids, event artifact ids,
+and event severities so report consumers can distinguish
 `product_failure`, `host_capability_skip`, `authoritative_lane_unavailable`,
 `harness_failure`, `unsupported_by_scope`, `stale_artifact`,
 `missing_artifact`, `noisy_measurement`, `security_refusal`,
@@ -434,6 +436,7 @@ free-form logs.
 cargo run -p ffs-harness -- operational-readiness-report \
   --artifacts artifacts/e2e \
   --current-git-sha "$(git rev-parse --short HEAD)" \
+  --max-age-days 14 \
   --format markdown \
   --out artifacts/e2e/operational_readiness.md
 ```
@@ -443,8 +446,10 @@ claims operational readiness evidence. The report is an aggregator; it does not
 replace the raw per-suite logs, manifests, or reproduction commands.
 Required readiness workstreams are fail-closed in the JSON contract through
 `required_workstreams_missing` and `contract_failed`; stale git SHAs and missing
-logs also set `contract_failed` so docs and parity claims cannot upgrade from an
-incomplete aggregate.
+logs also set `contract_failed`. When `--max-age-days` is set, stale, missing,
+or malformed `created_at` timestamps set `contract_failed` through the
+`stale_artifacts` and `invalid_artifact_timestamps` diagnostics so docs and
+parity claims cannot upgrade from an incomplete or outdated aggregate.
 
 ### Soak/Canary Campaigns
 

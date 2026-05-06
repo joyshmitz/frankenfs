@@ -13,7 +13,7 @@ use ffs_harness::{
         run_ambition_evidence_matrix,
     },
     artifact_manifest::{
-        ArtifactManifest, READINESS_EVENT_ENVELOPE_VERSION,
+        ArtifactManifest, READINESS_EVENT_ENVELOPE_VERSION, parse_manifest_timestamp_epoch_days,
         render_artifact_schema_fixture_markdown, validate_artifact_schema_fixture_dir,
         validate_operational_manifest,
     },
@@ -617,6 +617,26 @@ fn operational_readiness_report_cmd(args: &[String]) -> Result<()> {
                         .to_owned(),
                 );
             }
+            "--max-age-days" => {
+                i += 1;
+                config.max_artifact_age_days = Some(
+                    args.get(i)
+                        .context("--max-age-days requires a value")?
+                        .parse::<u32>()
+                        .context("invalid --max-age-days value")?,
+                );
+            }
+            "--recency-reference-timestamp" => {
+                i += 1;
+                let timestamp = args
+                    .get(i)
+                    .context("--recency-reference-timestamp requires a value")?;
+                config.recency_reference_epoch_days = Some(
+                    parse_manifest_timestamp_epoch_days(timestamp).with_context(|| {
+                        format!("invalid --recency-reference-timestamp value: {timestamp}")
+                    })?,
+                );
+            }
             "--format" => {
                 i += 1;
                 format = parse_readiness_report_format(
@@ -682,12 +702,14 @@ fn operational_readiness_report_summary(
         })
         .count();
     format!(
-        "operational readiness report written: {output_path} scenarios={} envelope_version={} event_count={} lane_ids={} rejected_event_diagnostics={} correlation_graph=event_nodes:{} parent_edges:{} orphan_parent_edges:{} aggregate_events:{} reproduction_commands={} output_path={output_path}",
+        "operational readiness report written: {output_path} scenarios={} envelope_version={} event_count={} lane_ids={} rejected_event_diagnostics={} stale_artifacts={} invalid_timestamps={} correlation_graph=event_nodes:{} parent_edges:{} orphan_parent_edges:{} aggregate_events:{} reproduction_commands={} output_path={output_path}",
         report.scenario_count,
         READINESS_EVENT_ENVELOPE_VERSION,
         report.readiness_event_count,
         report.readiness_event_lane_ids.join(","),
         rejected_event_diagnostics,
+        report.stale_artifacts.len(),
+        report.invalid_artifact_timestamps.len(),
         report.correlation_graph_summary.event_nodes,
         report.correlation_graph_summary.parent_edges,
         report.correlation_graph_summary.orphan_parent_edges,
@@ -4310,7 +4332,7 @@ fn print_usage_commands() {
         "  ffs-harness validate-artifact-schema-fixtures [--fixtures DIR] [--out FILE] [--summary-out FILE] [--reproduction-command CMD]"
     );
     println!(
-        "  ffs-harness operational-readiness-report [--artifacts DIR] [--current-git-sha SHA] [--format json|markdown] [--out FILE]"
+        "  ffs-harness operational-readiness-report [--artifacts DIR] [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE]"
     );
     println!(
         "  ffs-harness fuse-capability-probe [--out FILE] [--require-mount-probe] [--mount-probe-exit N] [--unmount-probe-exit N] [--user-disabled] [--default-permissions-eacces]"
@@ -4388,7 +4410,7 @@ fn print_usage_examples() {
         "  ffs-harness validate-artifact-schema-fixtures --out artifacts/artifact-schema-fixtures/report.json --summary-out artifacts/artifact-schema-fixtures/report.md"
     );
     println!(
-        "  ffs-harness operational-readiness-report --artifacts artifacts/e2e --format markdown --out artifacts/e2e/readiness.md"
+        "  ffs-harness operational-readiness-report --artifacts artifacts/e2e --current-git-sha $(git rev-parse --short HEAD) --max-age-days 14 --format markdown --out artifacts/e2e/readiness.md"
     );
     println!("  ffs-harness fuse-capability-probe --out artifacts/e2e/run/fuse_capability.json");
     println!(
@@ -4701,6 +4723,12 @@ fn print_operational_readiness_report_usage() {
     println!("Options:");
     println!("  --artifacts DIR                    Read manifest/result JSON under DIR");
     println!("  --current-git-sha SHA              Flag sources captured from a different SHA");
+    println!(
+        "  --max-age-days N                   Fail when artifact created_at is older than N days"
+    );
+    println!(
+        "  --recency-reference-timestamp TS   Compare artifact ages against TS instead of now"
+    );
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write report to FILE");
 }

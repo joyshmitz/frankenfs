@@ -613,7 +613,7 @@ fn manifest_epoch_days(manifest: &ArtifactManifest) -> Option<u32> {
     parse_manifest_timestamp_epoch_days(&manifest.created_at)
 }
 
-fn parse_manifest_timestamp_epoch_days(timestamp: &str) -> Option<u32> {
+pub fn parse_manifest_timestamp_epoch_days(timestamp: &str) -> Option<u32> {
     let bytes = timestamp.as_bytes();
     if bytes.len() < 20
         || bytes.get(4).copied()? != b'-'
