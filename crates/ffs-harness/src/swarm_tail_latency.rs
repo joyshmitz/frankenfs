@@ -19,6 +19,7 @@ use std::path::Path;
 pub const DEFAULT_SWARM_TAIL_LATENCY_LEDGER: &str = "benchmarks/swarm_tail_latency_ledger.json";
 pub const SWARM_TAIL_LATENCY_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_DOMINANCE_THRESHOLD_RATIO: f64 = 0.20;
+pub const DEFAULT_COMPONENT_SUM_TOLERANCE_RATIO: f64 = 0.35;
 
 const REQUIRED_COMPONENTS: [TailLatencyComponent; 10] = [
     TailLatencyComponent::Queueing,
@@ -41,8 +42,9 @@ const WATCHED_DOMINANT_COMPONENTS: [TailLatencyComponent; 5] = [
     TailLatencyComponent::Allocator,
 ];
 
-const REQUIRED_LOG_FIELDS: [&str; 16] = [
+const REQUIRED_LOG_FIELDS: [&str; 17] = [
     "workload_id",
+    "workload_seed",
     "scenario_id",
     "host_fingerprint",
     "cpu_cores_logical",
@@ -68,6 +70,8 @@ pub struct SwarmTailLatencyLedger {
     pub target_host: SwarmTailTargetHost,
     #[serde(default = "default_dominance_threshold_ratio")]
     pub dominance_threshold_ratio: f64,
+    #[serde(default = "default_component_sum_tolerance_ratio")]
+    pub component_sum_tolerance_ratio: f64,
     pub rows: Vec<SwarmTailLatencyRow>,
     #[serde(default)]
     pub required_log_fields: Vec<String>,
@@ -85,6 +89,8 @@ pub struct SwarmTailTargetHost {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SwarmTailLatencyRow {
     pub workload_id: String,
+    #[serde(default)]
+    pub workload_seed: u64,
     pub scenario_id: String,
     pub workload_class: SwarmTailWorkloadClass,
     pub host: SwarmTailHostFingerprint,
@@ -377,6 +383,7 @@ pub struct SwarmTailLatencyReport {
     pub missing_reference_count: usize,
     pub incomplete_host_count: usize,
     pub component_dominance_alert_count: usize,
+    pub component_sum_tolerance_ratio: f64,
     pub classification_counts: BTreeMap<String, usize>,
     pub release_claim_counts: BTreeMap<String, usize>,
     pub rows: Vec<SwarmTailLatencyReportRow>,
@@ -391,7 +398,10 @@ pub struct SwarmTailLatencyReportRow {
     pub classification: String,
     pub release_claim_state: String,
     pub host_meets_target: bool,
+    pub workload_seed: u64,
     pub p99_latency_us: f64,
+    pub component_p99_sum_us: f64,
+    pub component_sum_delta_ratio: f64,
     pub dominant_component: String,
     pub dominant_component_share: f64,
     pub watched_dominant_components: Vec<String>,
@@ -403,6 +413,11 @@ pub struct SwarmTailLatencyReportRow {
 #[must_use]
 pub const fn default_dominance_threshold_ratio() -> f64 {
     DEFAULT_DOMINANCE_THRESHOLD_RATIO
+}
+
+#[must_use]
+pub const fn default_component_sum_tolerance_ratio() -> f64 {
+    DEFAULT_COMPONENT_SUM_TOLERANCE_RATIO
 }
 
 pub fn load_swarm_tail_latency_ledger(path: &Path) -> Result<SwarmTailLatencyLedger> {
@@ -452,6 +467,7 @@ pub fn validate_swarm_tail_latency_ledger(
         missing_reference_count,
         incomplete_host_count,
         component_dominance_alert_count,
+        component_sum_tolerance_ratio: ledger.component_sum_tolerance_ratio,
         classification_counts: count_classifications(ledger),
         release_claim_counts: count_release_claims(ledger),
         rows,
@@ -492,6 +508,11 @@ pub fn render_swarm_tail_latency_markdown(report: &SwarmTailLatencyReport) -> St
         "- Component dominance alerts: `{}`",
         report.component_dominance_alert_count
     );
+    let _ = writeln!(
+        out,
+        "- Component sum tolerance: `{:.1}%`",
+        report.component_sum_tolerance_ratio * 100.0
+    );
 
     out.push_str("\n## Classification Counts\n\n");
     for (classification, count) in &report.classification_counts {
@@ -504,9 +525,9 @@ pub fn render_swarm_tail_latency_markdown(report: &SwarmTailLatencyReport) -> St
 
     out.push_str("\n## Tail Attribution\n\n");
     out.push_str(
-        "| Scenario | Workload | Class | Claim | p99 | Dominant | Watched Alerts | Reference |\n",
+        "| Scenario | Workload | Seed | Class | Claim | p99 | Component Sum | Dominant | Watched Alerts | Reference |\n",
     );
-    out.push_str("|---|---|---|---|---:|---|---|---|\n");
+    out.push_str("|---|---|---:|---|---|---:|---:|---|---|---|\n");
     for row in &report.rows {
         let watched = if row.watched_dominant_components.is_empty() {
             "none".to_owned()
@@ -515,12 +536,15 @@ pub fn render_swarm_tail_latency_markdown(report: &SwarmTailLatencyReport) -> St
         };
         let _ = writeln!(
             out,
-            "| `{}` | `{}` | `{}` | `{}` | {:.1}us | `{}` {:.1}% | {} | `{}` |",
+            "| `{}` | `{}` | {} | `{}` | `{}` | {:.1}us | {:.1}us ({:.1}%) | `{}` {:.1}% | {} | `{}` |",
             row.scenario_id,
             row.workload_id,
+            row.workload_seed,
             row.workload_class,
             row.release_claim_state,
             row.p99_latency_us,
+            row.component_p99_sum_us,
+            row.component_sum_delta_ratio * 100.0,
             row.dominant_component,
             row.dominant_component_share * 100.0,
             watched.replace('|', "/"),
@@ -558,6 +582,10 @@ fn validate_ledger_shape(ledger: &SwarmTailLatencyLedger, errors: &mut Vec<Strin
     if !(ledger.dominance_threshold_ratio > 0.0 && ledger.dominance_threshold_ratio <= 1.0) {
         errors.push("dominance_threshold_ratio must be in (0,1]".to_owned());
     }
+    if !(ledger.component_sum_tolerance_ratio >= 0.0 && ledger.component_sum_tolerance_ratio <= 1.0)
+    {
+        errors.push("component_sum_tolerance_ratio must be in [0,1]".to_owned());
+    }
     if ledger.rows.is_empty() {
         errors.push("rows must not be empty".to_owned());
     }
@@ -582,13 +610,19 @@ fn validate_row(
     errors: &mut Vec<String>,
 ) {
     require_non_empty("workload_id", &row.workload_id, errors);
+    if row.workload_seed == 0 {
+        errors.push(format!(
+            "scenario {} workload_seed must be non-zero",
+            row.scenario_id
+        ));
+    }
     require_non_empty("scenario_id", &row.scenario_id, errors);
     require_non_empty("public_wording", &row.public_wording, errors);
     require_non_empty("reproduction_command", &row.reproduction_command, errors);
     validate_paths("raw_logs", &row.raw_logs, errors);
     validate_paths("artifact_paths", &row.artifact_paths, errors);
     validate_host(ledger, row, errors);
-    validate_latency(&row.scenario_id, &row.latency, errors);
+    validate_latency(ledger, &row.scenario_id, &row.latency, errors);
     validate_queue_depth(&row.scenario_id, &row.queue_depth, errors);
     validate_reference_and_claim(ledger, row, errors);
 }
@@ -659,7 +693,12 @@ fn validate_host(
     }
 }
 
-fn validate_latency(scenario_id: &str, latency: &TailLatencyBuckets, errors: &mut Vec<String>) {
+fn validate_latency(
+    ledger: &SwarmTailLatencyLedger,
+    scenario_id: &str,
+    latency: &TailLatencyBuckets,
+    errors: &mut Vec<String>,
+) {
     if latency.p50_latency_us <= 0.0
         || latency.p95_latency_us <= 0.0
         || latency.p99_latency_us <= 0.0
@@ -725,6 +764,29 @@ fn validate_latency(scenario_id: &str, latency: &TailLatencyBuckets, errors: &mu
                 required.label()
             ));
         }
+    }
+    validate_component_total(ledger, scenario_id, latency, errors);
+}
+
+fn validate_component_total(
+    ledger: &SwarmTailLatencyLedger,
+    scenario_id: &str,
+    latency: &TailLatencyBuckets,
+    errors: &mut Vec<String>,
+) {
+    if latency.p99_latency_us <= 0.0 || latency.components.is_empty() {
+        return;
+    }
+    let component_sum = component_p99_sum(latency);
+    let delta_ratio = component_sum_delta_ratio(latency);
+    if delta_ratio > ledger.component_sum_tolerance_ratio {
+        errors.push(format!(
+            "scenario {scenario_id} component p99 sum {:.1}us differs from row p99 {:.1}us by {:.1}% (tolerance {:.1}%)",
+            component_sum,
+            latency.p99_latency_us,
+            delta_ratio * 100.0,
+            ledger.component_sum_tolerance_ratio * 100.0
+        ));
     }
 }
 
@@ -826,7 +888,10 @@ fn build_report_row(
         classification: row.classification.label().to_owned(),
         release_claim_state: row.release_claim_state.label().to_owned(),
         host_meets_target: row.host.meets_target(&ledger.target_host),
+        workload_seed: row.workload_seed,
         p99_latency_us: row.latency.p99_latency_us,
+        component_p99_sum_us: component_p99_sum(&row.latency),
+        component_sum_delta_ratio: component_sum_delta_ratio(&row.latency),
         dominant_component,
         dominant_component_share: dominant_share,
         watched_dominant_components,
@@ -852,6 +917,21 @@ fn dominant_component(latency: &TailLatencyBuckets) -> (String, f64) {
                 (component.component.label().to_owned(), share)
             },
         )
+}
+
+fn component_p99_sum(latency: &TailLatencyBuckets) -> f64 {
+    latency
+        .components
+        .iter()
+        .map(|component| component.p99_us)
+        .sum()
+}
+
+fn component_sum_delta_ratio(latency: &TailLatencyBuckets) -> f64 {
+    if latency.p99_latency_us <= 0.0 {
+        return 0.0;
+    }
+    (component_p99_sum(latency) - latency.p99_latency_us).abs() / latency.p99_latency_us
 }
 
 fn count_classifications(ledger: &SwarmTailLatencyLedger) -> BTreeMap<String, usize> {
@@ -946,6 +1026,79 @@ mod tests {
     }
 
     #[test]
+    fn invalid_component_total_is_rejected() {
+        let mut ledger = fixture_ledger();
+        ledger.rows[0].latency.components[0].p99_us = 50_000.0;
+        let report = validate_swarm_tail_latency_ledger(&ledger);
+        assert!(
+            report.errors.iter().any(|error| {
+                error.contains("component p99 sum") && error.contains("tolerance")
+            })
+        );
+    }
+
+    #[test]
+    fn missing_workload_seed_is_rejected() {
+        let mut ledger = fixture_ledger();
+        ledger.rows[0].workload_seed = 0;
+        let report = validate_swarm_tail_latency_ledger(&ledger);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("workload_seed must be non-zero"))
+        );
+    }
+
+    #[test]
+    fn missing_raw_logs_are_rejected() {
+        let mut ledger = fixture_ledger();
+        ledger.rows[0].raw_logs.clear();
+        let report = validate_swarm_tail_latency_ledger(&ledger);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("raw_logs must not be empty") })
+        );
+    }
+
+    #[test]
+    fn missing_reference_state_is_rejected() {
+        let mut ledger = fixture_ledger();
+        ledger.rows[0].reference_state.baseline_id = None;
+        ledger.rows[0].reference_state.baseline_artifact = None;
+        let report = validate_swarm_tail_latency_ledger(&ledger);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("comparable reference requires baseline_id and baseline_artifact")
+        }));
+    }
+
+    #[test]
+    fn missing_reproduction_command_is_rejected() {
+        let mut ledger = fixture_ledger();
+        ledger.rows[0].reproduction_command.clear();
+        let report = validate_swarm_tail_latency_ledger(&ledger);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("reproduction_command must not be empty"))
+        );
+    }
+
+    #[test]
+    fn unsupported_release_claim_upgrade_is_rejected() {
+        let mut ledger = fixture_ledger();
+        ledger.rows[0].host.lane = TailHostLane::DeveloperSmoke;
+        ledger.rows[0].release_claim_state = TailReleaseClaimState::MeasuredAuthoritative;
+        let report = validate_swarm_tail_latency_ledger(&ledger);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("authoritative claim must run in permissioned_large_host lane")
+        }));
+    }
+
+    #[test]
     fn missing_reference_cannot_make_measured_claim() {
         let mut ledger = fixture_ledger();
         ledger.rows[0].reference_state.state = TailReferenceKind::Missing;
@@ -1012,6 +1165,7 @@ mod tests {
                 min_ram_available_gb: 128,
             },
             dominance_threshold_ratio: DEFAULT_DOMINANCE_THRESHOLD_RATIO,
+            component_sum_tolerance_ratio: DEFAULT_COMPONENT_SUM_TOLERANCE_RATIO,
             rows: vec![
                 fixture_row(
                     "tail_latency_metadata_pass",
@@ -1045,6 +1199,7 @@ mod tests {
     ) -> SwarmTailLatencyRow {
         SwarmTailLatencyRow {
             workload_id: scenario_id.replace("tail_latency_", ""),
+            workload_seed: 7_310_001,
             scenario_id: scenario_id.to_owned(),
             workload_class: SwarmTailWorkloadClass::MetadataStorm,
             host: SwarmTailHostFingerprint {

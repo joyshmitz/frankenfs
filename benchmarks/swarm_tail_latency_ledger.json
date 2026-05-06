@@ -8,8 +8,10 @@
     "min_ram_available_gb": 128
   },
   "dominance_threshold_ratio": 0.2,
+  "component_sum_tolerance_ratio": 0.35,
   "required_log_fields": [
     "workload_id",
+    "workload_seed",
     "scenario_id",
     "host_fingerprint",
     "cpu_cores_logical",
@@ -34,6 +36,7 @@
   "rows": [
     {
       "workload_id": "metadata_storm_64c_sync_tail",
+      "workload_seed": 7310001,
       "scenario_id": "tail_latency_metadata_sync_dominant",
       "workload_class": "metadata_storm",
       "host": {
@@ -80,6 +83,7 @@
     },
     {
       "workload_id": "append_fsync_64c_wal_tail",
+      "workload_seed": 7310002,
       "scenario_id": "tail_latency_append_fsync_wal_warn",
       "workload_class": "append_fsync",
       "host": {
@@ -126,6 +130,7 @@
     },
     {
       "workload_id": "mount_recovery_local_noisy",
+      "workload_seed": 7310003,
       "scenario_id": "tail_latency_mount_recovery_fuse_noisy",
       "workload_class": "mount_lifecycle",
       "host": {
@@ -170,6 +175,7 @@
     },
     {
       "workload_id": "scrub_repair_overlap_backlog_fail",
+      "workload_seed": 7310004,
       "scenario_id": "tail_latency_repair_backlog_fail",
       "workload_class": "scrub_repair_overlap",
       "host": {
@@ -216,6 +222,7 @@
     },
     {
       "workload_id": "cache_pressure_missing_reference",
+      "workload_seed": 7310005,
       "scenario_id": "tail_latency_cache_missing_reference",
       "workload_class": "cache_pressure",
       "host": {
