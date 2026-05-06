@@ -4236,6 +4236,119 @@ mod tests {
             prop_assert_eq!(item.uuid, uuid);
             prop_assert_eq!(item.fsid, fsid);
         }
+
+        // bd-kansf — Metamorphic relations for BtrfsRaidProfile.
+        // Each MR pins a specific algebraic law of the chunk-type ->
+        // RAID classification used by every read path on a multi-
+        // device btrfs filesystem.
+
+        /// MR1 — Determinism: same input always classifies the same.
+        #[test]
+        fn btrfs_proptest_raid_profile_determinism(chunk_type in any::<u64>()) {
+            let a = BtrfsRaidProfile::from_chunk_type(chunk_type);
+            let b = BtrfsRaidProfile::from_chunk_type(chunk_type);
+            prop_assert_eq!(a, b);
+        }
+
+        /// MR2 — Non-RAID-bit invariance: only bits in RAID_MASK
+        /// affect the classification. Toggling DATA / METADATA /
+        /// SYSTEM bits MUST NOT change the profile.
+        #[test]
+        fn btrfs_proptest_raid_profile_only_raid_bits_matter(
+            raid_bits in any::<u64>(),
+            non_raid_bits in any::<u64>(),
+        ) {
+            let raid = raid_bits & chunk_type_flags::RAID_MASK;
+            let non_raid = non_raid_bits & !chunk_type_flags::RAID_MASK;
+            let p_clean = BtrfsRaidProfile::from_chunk_type(raid);
+            let p_dirty = BtrfsRaidProfile::from_chunk_type(raid | non_raid);
+            prop_assert_eq!(p_clean, p_dirty);
+        }
+
+        /// MR3 — Single is the default: clearing all RAID bits MUST
+        /// give Single.
+        #[test]
+        fn btrfs_proptest_raid_profile_single_is_default(chunk_type in any::<u64>()) {
+            let cleared = chunk_type & !chunk_type_flags::RAID_MASK;
+            prop_assert_eq!(
+                BtrfsRaidProfile::from_chunk_type(cleared),
+                BtrfsRaidProfile::Single
+            );
+        }
+
+        /// MR4 — data_copies bounds: 1 ≤ data_copies ≤ 4 for all
+        /// classifiable chunk_type values.
+        #[test]
+        fn btrfs_proptest_raid_profile_data_copies_bounded(chunk_type in any::<u64>()) {
+            let copies = BtrfsRaidProfile::from_chunk_type(chunk_type).data_copies();
+            prop_assert!((1..=4).contains(&copies));
+        }
+
+        /// MR5 — Redundancy contract: is_redundant ⇔ (data_copies > 1
+        /// OR profile in {Raid5, Raid6}). Pins the parity-vs-mirror
+        /// duality.
+        #[test]
+        fn btrfs_proptest_raid_profile_redundancy_contract(chunk_type in any::<u64>()) {
+            let p = BtrfsRaidProfile::from_chunk_type(chunk_type);
+            let mirror_redundant = p.data_copies() > 1;
+            let parity_redundant = matches!(p, BtrfsRaidProfile::Raid5 | BtrfsRaidProfile::Raid6);
+            prop_assert_eq!(p.is_redundant(), mirror_redundant || parity_redundant);
+        }
+
+        /// MR6 — Priority order: when multiple RAID bits are set,
+        /// the cascade is RAID0 > RAID1 > RAID1C3 > RAID1C4 > RAID10
+        /// > RAID5 > RAID6 > DUP > Single. Set every RAID bit and
+        /// verify the result is Raid0 (highest priority). Then walk
+        /// down the cascade by clearing one bit at a time.
+        #[test]
+        fn btrfs_proptest_raid_profile_priority_cascade(extra_bits in any::<u64>()) {
+            use chunk_type_flags::{
+                BTRFS_BLOCK_GROUP_DUP, BTRFS_BLOCK_GROUP_RAID0, BTRFS_BLOCK_GROUP_RAID1,
+                BTRFS_BLOCK_GROUP_RAID1C3, BTRFS_BLOCK_GROUP_RAID1C4, BTRFS_BLOCK_GROUP_RAID5,
+                BTRFS_BLOCK_GROUP_RAID6, BTRFS_BLOCK_GROUP_RAID10, RAID_MASK,
+            };
+            // Carry arbitrary non-RAID bits through (covered by MR2,
+            // but proves the cascade is robust to noise).
+            let noise = extra_bits & !RAID_MASK;
+            let cascade: [(u64, BtrfsRaidProfile); 8] = [
+                (RAID_MASK, BtrfsRaidProfile::Raid0),
+                (RAID_MASK & !BTRFS_BLOCK_GROUP_RAID0, BtrfsRaidProfile::Raid1),
+                (
+                    RAID_MASK & !(BTRFS_BLOCK_GROUP_RAID0 | BTRFS_BLOCK_GROUP_RAID1),
+                    BtrfsRaidProfile::Raid1C3,
+                ),
+                (
+                    RAID_MASK
+                        & !(BTRFS_BLOCK_GROUP_RAID0
+                            | BTRFS_BLOCK_GROUP_RAID1
+                            | BTRFS_BLOCK_GROUP_RAID1C3),
+                    BtrfsRaidProfile::Raid1C4,
+                ),
+                (
+                    RAID_MASK
+                        & !(BTRFS_BLOCK_GROUP_RAID0
+                            | BTRFS_BLOCK_GROUP_RAID1
+                            | BTRFS_BLOCK_GROUP_RAID1C3
+                            | BTRFS_BLOCK_GROUP_RAID1C4),
+                    BtrfsRaidProfile::Raid10,
+                ),
+                (
+                    BTRFS_BLOCK_GROUP_RAID5 | BTRFS_BLOCK_GROUP_RAID6 | BTRFS_BLOCK_GROUP_DUP,
+                    BtrfsRaidProfile::Raid5,
+                ),
+                (
+                    BTRFS_BLOCK_GROUP_RAID6 | BTRFS_BLOCK_GROUP_DUP,
+                    BtrfsRaidProfile::Raid6,
+                ),
+                (BTRFS_BLOCK_GROUP_DUP, BtrfsRaidProfile::Dup),
+            ];
+            for (input, expected) in cascade {
+                prop_assert_eq!(
+                    BtrfsRaidProfile::from_chunk_type(input | noise),
+                    expected
+                );
+            }
+        }
     }
 
     // ── RAID profile identification ────────────────────────────────
