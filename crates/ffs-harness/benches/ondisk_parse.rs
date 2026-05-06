@@ -3,9 +3,9 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_harness::load_sparse_fixture;
 use ffs_ondisk::{
-    BtrfsHeader, BtrfsSuperblock, Ext4GroupDesc, Ext4Inode, dx_hash, parse_dev_item,
-    parse_dir_block, parse_dx_root, parse_extent_tree, parse_internal_items, parse_leaf_items,
-    parse_sys_chunk_array, parse_xattr_block,
+    BtrfsHeader, BtrfsSuperblock, Ext4GroupDesc, Ext4Inode, dx_hash, ext4_casefold_key,
+    parse_dev_item, parse_dir_block, parse_dx_root, parse_extent_tree, parse_internal_items,
+    parse_leaf_items, parse_sys_chunk_array, parse_xattr_block,
 };
 use std::hint::black_box;
 use std::path::Path;
@@ -293,6 +293,103 @@ fn bench_ext4_dx_hash(c: &mut Criterion) {
     }
 }
 
+// bd-rx88y — Criterion benches for `ext4_casefold_key` across the
+// three distinct code paths in `casefold_name` (UTF-8 ASCII fast
+// path, UTF-8 with multi-codepoint sharp-s expansion, invalid-UTF-8
+// ASCII fallback). The function is on the hot path for every
+// directory lookup on a casefold-enabled ext4 filesystem
+// (lookup_in_dir_block_casefold calls it once per target plus once
+// per scanned entry). Without these benches a regression in any
+// branch — e.g., introducing per-char allocation, switching from
+// chars() to grapheme iteration — would silently slow every
+// casefold dir lookup with no signal until end users notice.
+//
+// Pairs with bd-6rsow proptest (32 cases of equivalence-relation
+// laws), bd-c7nid fuzz target (>1M iterations / session), and
+// bd-7pfh0 (dx_hash benches across 6 hash versions) — the same
+// hot-path-correctness/performance pattern, applied to the casefold
+// fold instead of the dx_hash function.
+
+fn bench_ext4_casefold_key_ascii(c: &mut Criterion) {
+    // Pure ASCII filename — the fast path: UTF-8 valid, every char
+    // is single-codepoint and lowercases in place.
+    let names: Vec<&[u8]> = vec![
+        b"README.md",
+        b"src",
+        b"main.rs",
+        b"Cargo.toml",
+        b"DOCUMENTATION_AND_NOTES.txt",
+        b"a",
+        b"some_quite_long_filename_with_many_characters_to_exercise.dat",
+    ];
+    c.bench_function("ext4_casefold_key_ascii", |b| {
+        b.iter(|| {
+            for name in &names {
+                black_box(ext4_casefold_key(black_box(name)));
+            }
+        });
+    });
+}
+
+fn bench_ext4_casefold_key_mixed_utf8(c: &mut Criterion) {
+    // UTF-8 with embedded sharp-s — exercises the multi-codepoint
+    // expansion branch. ß (U+00DF) and ẞ (U+1E9E) both expand to
+    // "ss" via the explicit match in casefold_name.
+    let names: Vec<&[u8]> = vec![
+        "Straße.txt".as_bytes(),
+        "GROẞBUCHSTABEN.md".as_bytes(),
+        "café_passé.csv".as_bytes(),
+        "MüllerStraße_Düsseldorf.log".as_bytes(),
+        "naïve_façade_ßtest.dat".as_bytes(),
+    ];
+    c.bench_function("ext4_casefold_key_mixed_utf8", |b| {
+        b.iter(|| {
+            for name in &names {
+                black_box(ext4_casefold_key(black_box(name)));
+            }
+        });
+    });
+}
+
+fn bench_ext4_casefold_key_long_utf8(c: &mut Criterion) {
+    // Long all-non-ASCII UTF-8 input — exercises the multi-byte
+    // chars() iteration path with no ASCII fast steps. Tests that
+    // long Unicode lookups don't regress with grapheme/normalization
+    // overhead.
+    let names: Vec<Vec<u8>> = vec![
+        "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ".repeat(4).into_bytes(),
+        "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ".repeat(2).into_bytes(),
+        "你好世界这是一个长的中文文件名".repeat(3).into_bytes(),
+        "אבגדהוזחטיכלמנסעפצקרשת".repeat(4).into_bytes(),
+    ];
+    c.bench_function("ext4_casefold_key_long_utf8", |b| {
+        b.iter(|| {
+            for name in &names {
+                black_box(ext4_casefold_key(black_box(name.as_slice())));
+            }
+        });
+    });
+}
+
+fn bench_ext4_casefold_key_invalid_utf8(c: &mut Criterion) {
+    // Invalid UTF-8 — exercises the ASCII-fallback branch. Bytes
+    // > 0x7F break UTF-8 validity, forcing the byte-by-byte ASCII
+    // case fold path.
+    let names: Vec<Vec<u8>> = vec![
+        b"FILE\xff\xfe\xfd.bin".to_vec(),
+        b"\x80\x81\x82SomeAsciiTail.dat".to_vec(),
+        b"prefix\xc3middle\xc3suffix".to_vec(), // truncated UTF-8 lead
+        b"\xff".repeat(64),
+    ];
+    c.bench_function("ext4_casefold_key_invalid_utf8", |b| {
+        b.iter(|| {
+            for name in &names {
+                black_box(ext4_casefold_key(black_box(name.as_slice())));
+            }
+        });
+    });
+}
+
 criterion_group!(
     ondisk,
     bench_ext4_inode_parse,
@@ -312,5 +409,9 @@ criterion_group!(
     bench_btrfs_internal_items_parse,
     bench_btrfs_header_parse_from_block,
     bench_ext4_dx_hash,
+    bench_ext4_casefold_key_ascii,
+    bench_ext4_casefold_key_mixed_utf8,
+    bench_ext4_casefold_key_long_utf8,
+    bench_ext4_casefold_key_invalid_utf8,
 );
 criterion_main!(ondisk);
