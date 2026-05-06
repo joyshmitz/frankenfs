@@ -4332,6 +4332,110 @@ mod tests {
         assert_eq!(chunk_type_flags::RAID_MASK, 0x07F8);
     }
 
+    /// bd-pvbgz — Kernel-conformance pin for the 7 on-disk btrfs
+    /// struct sizes from `include/uapi/linux/btrfs_tree.h`.
+    ///
+    /// Each constant equals `sizeof(struct ...)` under
+    /// `__attribute__((packed))`. Drift in any value would silently
+    /// mis-stride every leaf/internal-node walk and mis-locate every
+    /// chunk descriptor on a btrfs filesystem, with NO panic — just
+    /// silent on-disk corruption.
+    ///
+    /// The test pins both the canonical struct size AND the
+    /// field-by-field sum, so a developer who shrinks/grows a const
+    /// without updating the field assignments (or vice versa) fails
+    /// the test. Pairs with bd-6uu7j (chunk_type flags) and bd-f0q7n
+    /// (item keys) — those pin SCALAR macro values; this pins
+    /// STRUCT byte-sizes.
+    #[test]
+    fn btrfs_on_disk_struct_sizes_match_kernel_header() {
+        // struct btrfs_disk_key {
+        //     __le64 objectid;   // 8
+        //     __u8   type;       // 1
+        //     __le64 offset;     // 8
+        // } = 17 bytes packed.
+        assert_eq!(BTRFS_DISK_KEY_SIZE, 17, "btrfs_disk_key sizeof");
+        assert_eq!(BTRFS_DISK_KEY_SIZE, 8 + 1 + 8);
+
+        // struct btrfs_header {
+        //     u8     csum[32];           // 32
+        //     u8     fsid[16];           // 16
+        //     __le64 bytenr;             //  8
+        //     __le64 flags;              //  8
+        //     u8     chunk_tree_uuid[16];// 16
+        //     __le64 generation;         //  8
+        //     __le64 owner;              //  8
+        //     __le32 nritems;            //  4
+        //     u8     level;              //  1
+        // } = 101 bytes packed.
+        assert_eq!(BTRFS_HEADER_SIZE, 101, "btrfs_header sizeof");
+        assert_eq!(BTRFS_HEADER_SIZE, 32 + 16 + 8 + 8 + 16 + 8 + 8 + 4 + 1);
+
+        // struct btrfs_item {
+        //     struct btrfs_disk_key key; // 17
+        //     __le32 offset;             //  4
+        //     __le32 size;               //  4
+        // } = 25 bytes packed.
+        assert_eq!(BTRFS_ITEM_SIZE, 25, "btrfs_item sizeof");
+        assert_eq!(BTRFS_ITEM_SIZE, BTRFS_DISK_KEY_SIZE + 4 + 4);
+
+        // struct btrfs_key_ptr {
+        //     struct btrfs_disk_key key; // 17
+        //     __le64 blockptr;           //  8
+        //     __le64 generation;         //  8
+        // } = 33 bytes packed.
+        assert_eq!(BTRFS_KEY_PTR_SIZE, 33, "btrfs_key_ptr sizeof");
+        assert_eq!(BTRFS_KEY_PTR_SIZE, BTRFS_DISK_KEY_SIZE + 8 + 8);
+
+        // struct btrfs_stripe {
+        //     __le64 devid;              //  8
+        //     __le64 offset;             //  8
+        //     u8     dev_uuid[16];       // 16
+        // } = 32 bytes packed.
+        assert_eq!(BTRFS_STRIPE_SIZE, 32, "btrfs_stripe sizeof");
+        assert_eq!(BTRFS_STRIPE_SIZE, 8 + 8 + 16);
+
+        // struct btrfs_chunk fixed prefix (the trailing stripe[1]
+        // array is variable-length and not part of the fixed size):
+        //     __le64 length;             //  8
+        //     __le64 owner;              //  8
+        //     __le64 stripe_len;         //  8
+        //     __le64 type;               //  8
+        //     __le32 io_align;           //  4
+        //     __le32 io_width;           //  4
+        //     __le32 sector_size;        //  4
+        //     __le16 num_stripes;        //  2
+        //     __le16 sub_stripes;        //  2
+        // = 48 bytes packed (excluding stripe[]).
+        assert_eq!(BTRFS_CHUNK_FIXED_SIZE, 48, "btrfs_chunk fixed prefix");
+        assert_eq!(
+            BTRFS_CHUNK_FIXED_SIZE,
+            8 + 8 + 8 + 8 + 4 + 4 + 4 + 2 + 2
+        );
+
+        // struct btrfs_dev_item {
+        //     __le64 devid;          //  8
+        //     __le64 total_bytes;    //  8
+        //     __le64 bytes_used;     //  8
+        //     __le32 io_align;       //  4
+        //     __le32 io_width;       //  4
+        //     __le32 sector_size;    //  4
+        //     __le64 type;           //  8
+        //     __le64 generation;     //  8
+        //     __le64 start_offset;   //  8
+        //     __le32 dev_group;      //  4
+        //     u8     seek_speed;     //  1
+        //     u8     bandwidth;      //  1
+        //     u8     uuid[16];       // 16
+        //     u8     fsid[16];       // 16
+        // } = 98 bytes packed.
+        assert_eq!(BTRFS_DEV_ITEM_SIZE, 98, "btrfs_dev_item sizeof");
+        assert_eq!(
+            BTRFS_DEV_ITEM_SIZE,
+            8 + 8 + 8 + 4 + 4 + 4 + 8 + 8 + 8 + 4 + 1 + 1 + 16 + 16
+        );
+    }
+
     #[test]
     fn raid_profile_single() {
         assert_eq!(
