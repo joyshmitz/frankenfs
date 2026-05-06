@@ -1051,10 +1051,12 @@ fn collect_workspace_files_from(
 
 fn should_skip_walk_dir(root: &Path, path: &Path) -> bool {
     let relative = path.strip_prefix(root).unwrap_or(path);
+    let relative = normalize_path(relative);
     matches!(
-        normalize_path(relative).as_str(),
-        ".git" | "target" | ".rch-target" | "data/tmp"
-    ) || normalize_path(relative).starts_with("data/tmp/")
+        relative.as_str(),
+        ".git" | "target" | ".rch-target" | "data/tmp" | "vendor"
+    ) || relative.starts_with("data/tmp/")
+        || relative.starts_with("vendor/")
 }
 
 fn normalize_path(path: &Path) -> String {
@@ -2269,6 +2271,46 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                     && path.file_hash.starts_with("sha256:")
             }),
             "generated status path should be logged as excluded"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn source_scope_scan_skips_vendor_tree_before_matching() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        populate_source_scope_workspace(temp.path())?;
+        write_sample_file(
+            temp.path(),
+            "vendor/fuser/src/lib.rs",
+            "// TODO vendored dependency note should not enter project source scope\n",
+        )?;
+
+        let mut manifest = fixture_manifest();
+        let tests = manifest
+            .sources
+            .iter_mut()
+            .find(|source| source.source_family == "tests")
+            .expect("tests source exists");
+        tests.included_globs = vec!["**/*.rs".to_owned()];
+
+        let report = scan_source_scope_manifest(
+            &manifest,
+            temp.path(),
+            None,
+            "cargo run -p ffs-harness -- validate-source-scope-manifest",
+        );
+        assert!(report.valid, "scan should validate: {:?}", report.errors);
+        let tests = report
+            .scanned_sources
+            .iter()
+            .find(|source| source.source_family == "tests")
+            .expect("tests source scanned");
+        assert!(
+            tests
+                .matched_paths
+                .iter()
+                .all(|path| !path.source_path.starts_with("vendor/")),
+            "vendor tree should be pruned before source matching"
         );
         Ok(())
     }
