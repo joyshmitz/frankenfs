@@ -390,6 +390,36 @@ mod tests {
     }
 
     #[test]
+    fn default_catalog_covers_mvcc_merge_proof_refusals() {
+        let catalog = fixture_catalog();
+        let entry = catalog
+            .entries
+            .iter()
+            .find(|entry| entry.id == "rem_mvcc_merge_proof_validation_failed")
+            .expect("catalog should include MVCC merge-proof remediation");
+
+        assert_eq!(entry.proof_lane, "core_property");
+        assert_eq!(entry.feature_state, "experimental");
+        assert_eq!(entry.outcome_class, "product_failure");
+        assert_eq!(entry.data_safety_severity, "data_loss_blocked_by_refusal");
+        assert_eq!(entry.mutation_status, "refused");
+        assert_eq!(entry.safe_retry_policy, "no_retry_until_root_cause");
+        assert_eq!(entry.owning_bead, "bd-rchk0.53.11");
+        assert!(
+            entry.technical_cause.contains("merge_proof_checked=false")
+                && entry.technical_cause.contains("merge_rejected"),
+            "technical cause should point operators back to the evidence events"
+        );
+        assert!(
+            entry
+                .artifact_links
+                .iter()
+                .any(|link| link.ends_with(".evidence.jsonl")),
+            "merge-proof remediation should preserve the evidence ledger"
+        );
+    }
+
+    #[test]
     fn missing_outcome_class_is_rejected() {
         let mut catalog = fixture_catalog();
         catalog

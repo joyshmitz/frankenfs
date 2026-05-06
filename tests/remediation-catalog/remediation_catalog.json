@@ -24,6 +24,26 @@
       "docs_target": "docs/operator/triage-core-unit-failure.md"
     },
     {
+      "id": "rem_mvcc_merge_proof_validation_failed",
+      "proof_lane": "core_property",
+      "feature_state": "experimental",
+      "outcome_class": "product_failure",
+      "data_safety_severity": "data_loss_blocked_by_refusal",
+      "mutation_status": "refused",
+      "user_summary": "MVCC safe-merge proof validation failed; the conflicting write was refused before publication.",
+      "technical_cause": "The MVCC conflict resolver emitted merge_proof_checked=false or merge_rejected with a validation reason such as merge_validation_failed, overlap, stale base bytes, or touched-range mismatch.",
+      "immediate_action": "Preserve the evidence ledger and merge-proof artifact, keep the affected lane in Strict/refusal mode, and file a narrow proof-family bug before retrying SafeMerge.",
+      "safe_retry_policy": "no_retry_until_root_cause",
+      "reproduction_command": "rch exec -- cargo test -p ffs-mvcc merge_proof -- --nocapture",
+      "artifact_links": [
+        "artifacts/qa/mvcc/<run_id>.evidence.jsonl",
+        "artifacts/qa/mvcc/<run_id>.merge_proof.json"
+      ],
+      "owning_bead": "bd-rchk0.53.11",
+      "escalation_path": "mvcc@frankenfs",
+      "docs_target": "docs/design-safe-merge-taxonomy.md"
+    },
+    {
       "id": "rem_mounted_smoke_host_skip",
       "proof_lane": "mounted_smoke",
       "feature_state": "experimental",
