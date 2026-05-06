@@ -10963,38 +10963,133 @@ mod tests {
         // that no two constants collide and that the implicit
         // dispatch order (small inode/ref/xattr keys before large
         // extent/chunk keys) is preserved.
-        assert!(
-            BTRFS_ITEM_INODE_ITEM < BTRFS_ITEM_INODE_REF
-                && BTRFS_ITEM_INODE_REF < BTRFS_ITEM_XATTR_ITEM
-                && BTRFS_ITEM_XATTR_ITEM < BTRFS_ITEM_DIR_ITEM
-                && BTRFS_ITEM_DIR_ITEM < BTRFS_ITEM_DIR_INDEX
-                && BTRFS_ITEM_DIR_INDEX < BTRFS_ITEM_EXTENT_DATA
-                && BTRFS_ITEM_EXTENT_DATA < BTRFS_ITEM_ROOT_ITEM
-                && BTRFS_ITEM_ROOT_ITEM < BTRFS_ITEM_EXTENT_ITEM
-                && BTRFS_ITEM_EXTENT_ITEM < BTRFS_ITEM_METADATA_ITEM
-                && BTRFS_ITEM_METADATA_ITEM < BTRFS_ITEM_BLOCK_GROUP_ITEM
-                && BTRFS_ITEM_BLOCK_GROUP_ITEM < BTRFS_ITEM_FREE_SPACE_INFO
-                && BTRFS_ITEM_FREE_SPACE_INFO < BTRFS_ITEM_FREE_SPACE_EXTENT
-                && BTRFS_ITEM_FREE_SPACE_EXTENT < BTRFS_ITEM_FREE_SPACE_BITMAP
-                && BTRFS_ITEM_FREE_SPACE_BITMAP < BTRFS_ITEM_DEV_ITEM
-                && BTRFS_ITEM_DEV_ITEM < BTRFS_ITEM_CHUNK,
-            "btrfs item-key constants must be strict-monotonic ascending"
-        );
+        const {
+            assert!(
+                BTRFS_ITEM_INODE_ITEM < BTRFS_ITEM_INODE_REF
+                    && BTRFS_ITEM_INODE_REF < BTRFS_ITEM_XATTR_ITEM
+                    && BTRFS_ITEM_XATTR_ITEM < BTRFS_ITEM_DIR_ITEM
+                    && BTRFS_ITEM_DIR_ITEM < BTRFS_ITEM_DIR_INDEX
+                    && BTRFS_ITEM_DIR_INDEX < BTRFS_ITEM_EXTENT_DATA
+                    && BTRFS_ITEM_EXTENT_DATA < BTRFS_ITEM_ROOT_ITEM
+                    && BTRFS_ITEM_ROOT_ITEM < BTRFS_ITEM_EXTENT_ITEM
+                    && BTRFS_ITEM_EXTENT_ITEM < BTRFS_ITEM_METADATA_ITEM
+                    && BTRFS_ITEM_METADATA_ITEM < BTRFS_ITEM_BLOCK_GROUP_ITEM
+                    && BTRFS_ITEM_BLOCK_GROUP_ITEM < BTRFS_ITEM_FREE_SPACE_INFO
+                    && BTRFS_ITEM_FREE_SPACE_INFO < BTRFS_ITEM_FREE_SPACE_EXTENT
+                    && BTRFS_ITEM_FREE_SPACE_EXTENT < BTRFS_ITEM_FREE_SPACE_BITMAP
+                    && BTRFS_ITEM_FREE_SPACE_BITMAP < BTRFS_ITEM_DEV_ITEM
+                    && BTRFS_ITEM_DEV_ITEM < BTRFS_ITEM_CHUNK,
+                "btrfs item-key constants must be strict-monotonic ascending"
+            );
+        }
 
         // Boundary checks — pin specific kernel-published gaps so a
         // future contributor adding a constant in the middle (e.g.,
         // BTRFS_ROOT_BACKREF_KEY=144) doesn't accidentally collide
         // with an existing value.
-        assert!(
-            BTRFS_ITEM_ROOT_ITEM == 132 && BTRFS_ITEM_EXTENT_ITEM == 168,
-            "kernel reserves 133..168 for {{ROOT_BACKREF=144, ROOT_REF=156}} \
-             — these slots must remain free"
+        const {
+            assert!(
+                BTRFS_ITEM_ROOT_ITEM == 132 && BTRFS_ITEM_EXTENT_ITEM == 168,
+                "kernel reserves 133..168 for {{ROOT_BACKREF=144, ROOT_REF=156}} \
+                 — these slots must remain free"
+            );
+            assert!(
+                BTRFS_ITEM_METADATA_ITEM == 169 && BTRFS_ITEM_BLOCK_GROUP_ITEM == 192,
+                "kernel reserves 170..192 for {{TREE_BLOCK_REF=176, EXTENT_DATA_REF=178, \
+                 SHARED_BLOCK_REF=182, SHARED_DATA_REF=184}} — these slots must remain free"
+            );
+        }
+    }
+
+    /// bd-cwfuf — Kernel-conformance pin for directory entry file-type
+    /// values stored in `struct btrfs_dir_item.type`.
+    #[test]
+    fn btrfs_dir_file_type_constants_match_kernel_header() {
+        // Values per include/uapi/linux/btrfs_tree.h, and the kernel
+        // requires 0..7 to match the common Linux file type values.
+        assert_eq!(BTRFS_FT_UNKNOWN, 0);
+        assert_eq!(BTRFS_FT_REG_FILE, 1);
+        assert_eq!(BTRFS_FT_DIR, 2);
+        assert_eq!(BTRFS_FT_CHRDEV, 3);
+        assert_eq!(BTRFS_FT_BLKDEV, 4);
+        assert_eq!(BTRFS_FT_FIFO, 5);
+        assert_eq!(BTRFS_FT_SOCK, 6);
+        assert_eq!(BTRFS_FT_SYMLINK, 7);
+
+        const {
+            assert!(
+                BTRFS_FT_UNKNOWN < BTRFS_FT_REG_FILE
+                    && BTRFS_FT_REG_FILE < BTRFS_FT_DIR
+                    && BTRFS_FT_DIR < BTRFS_FT_CHRDEV
+                    && BTRFS_FT_CHRDEV < BTRFS_FT_BLKDEV
+                    && BTRFS_FT_BLKDEV < BTRFS_FT_FIFO
+                    && BTRFS_FT_FIFO < BTRFS_FT_SOCK
+                    && BTRFS_FT_SOCK < BTRFS_FT_SYMLINK,
+                "btrfs dir file-type constants must be strict-monotonic ascending"
+            );
+        }
+        assert_eq!(
+            BTRFS_FT_SYMLINK - BTRFS_FT_UNKNOWN,
+            7,
+            "the supported btrfs dir file-type range must be contiguous 0..=7"
         );
-        assert!(
-            BTRFS_ITEM_METADATA_ITEM == 169 && BTRFS_ITEM_BLOCK_GROUP_ITEM == 192,
-            "kernel reserves 170..192 for {{TREE_BLOCK_REF=176, EXTENT_DATA_REF=178, \
-             SHARED_BLOCK_REF=182, SHARED_DATA_REF=184}} — these slots must remain free"
+    }
+
+    /// bd-cwfuf — Kernel-conformance pin for EXTENT_DATA payload type
+    /// discriminants stored in `struct btrfs_file_extent_item.type`.
+    #[test]
+    fn btrfs_file_extent_type_constants_match_kernel_header() {
+        // Values per include/uapi/linux/btrfs_tree.h.
+        assert_eq!(BTRFS_FILE_EXTENT_INLINE, 0);
+        assert_eq!(BTRFS_FILE_EXTENT_REG, 1);
+        assert_eq!(BTRFS_FILE_EXTENT_PREALLOC, 2);
+
+        const {
+            assert!(
+                BTRFS_FILE_EXTENT_INLINE < BTRFS_FILE_EXTENT_REG
+                    && BTRFS_FILE_EXTENT_REG < BTRFS_FILE_EXTENT_PREALLOC,
+                "btrfs file extent type constants must be strict-monotonic ascending"
+            );
+        }
+        assert_eq!(
+            BTRFS_FILE_EXTENT_PREALLOC - BTRFS_FILE_EXTENT_INLINE,
+            2,
+            "the btrfs file extent type range must be contiguous 0..=2"
         );
+    }
+
+    /// bd-cwfuf — Kernel-conformance pin for btrfs compression encoding
+    /// values accepted by the EXTENT_DATA parser.
+    #[test]
+    fn btrfs_compression_type_constants_match_kernel_header() {
+        // Values per fs/btrfs/fs.h `enum btrfs_compression_type`.
+        assert_eq!(BTRFS_COMPRESS_NONE, 0);
+        assert_eq!(BTRFS_COMPRESS_ZLIB, 1);
+        assert_eq!(BTRFS_COMPRESS_LZO, 2);
+        assert_eq!(BTRFS_COMPRESS_ZSTD, 3);
+
+        const {
+            assert!(
+                BTRFS_COMPRESS_NONE < BTRFS_COMPRESS_ZLIB
+                    && BTRFS_COMPRESS_ZLIB < BTRFS_COMPRESS_LZO
+                    && BTRFS_COMPRESS_LZO < BTRFS_COMPRESS_ZSTD,
+                "btrfs compression constants must be strict-monotonic ascending"
+            );
+        }
+        assert_eq!(
+            BTRFS_COMPRESS_ZSTD - BTRFS_COMPRESS_NONE,
+            3,
+            "the btrfs compression type range must be contiguous 0..=3"
+        );
+    }
+
+    /// bd-cwfuf — Kernel-conformance pin for `BTRFS_MAX_LEVEL`.
+    #[test]
+    fn btrfs_max_tree_level_matches_kernel_level_count() {
+        // The kernel macro is a count (`BTRFS_MAX_LEVEL == 8`), while
+        // this crate stores the highest valid on-disk level (`0..=7`).
+        assert_eq!(BTRFS_MAX_TREE_LEVEL, 7);
+        assert_eq!(BTRFS_MAX_TREE_LEVEL + 1, 8);
     }
 
     /// bd-khzn4 — Kernel-conformance pin for the well-known btrfs
