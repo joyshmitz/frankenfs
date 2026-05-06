@@ -74,8 +74,8 @@ use anyhow::{Context, Result, bail};
 use ffs_ondisk::{
     BtrfsDevItem, BtrfsHeader, BtrfsItem, BtrfsSuperblock, Ext4DirEntry, Ext4DxRoot,
     Ext4ExtentHeader, Ext4GroupDesc, Ext4Inode, Ext4MmpBlock, Ext4Superblock, Ext4Xattr,
-    ExtentTree, map_logical_to_physical, parse_dev_item, parse_dir_block, parse_dx_root,
-    parse_extent_tree, parse_leaf_items, parse_sys_chunk_array, parse_xattr_block,
+    ExtentTree, ext4_chksum, map_logical_to_physical, parse_dev_item, parse_dir_block,
+    parse_dx_root, parse_extent_tree, parse_leaf_items, parse_sys_chunk_array, parse_xattr_block,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -83,6 +83,8 @@ use std::path::Path;
 
 const FEATURE_PARITY_MARKDOWN: &str = include_str!("../../../FEATURE_PARITY.md");
 const COVERAGE_SUMMARY_HEADING: &str = "Coverage Summary";
+pub const EXT4_MMP_FIXTURE_CHECKSUM_SEED: u32 = 0xAABB_CCDD;
+const EXT4_MMP_FIXTURE_CHECKSUM_OFFSET: usize = 0x3FC;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoverageDomain {
@@ -458,6 +460,20 @@ pub fn validate_mmp_block_fixture(path: &Path) -> Result<Ext4MmpBlock> {
     let data = load_sparse_fixture(path)?;
     let mmp = Ext4MmpBlock::parse_from_bytes(&data)
         .with_context(|| format!("failed MMP block parse for fixture {}", path.display()))?;
+    let checksum_region = data
+        .get(..EXT4_MMP_FIXTURE_CHECKSUM_OFFSET)
+        .context("MMP block fixture shorter than checksum-covered prefix")?;
+    let expected_checksum = ext4_chksum(EXT4_MMP_FIXTURE_CHECKSUM_SEED, checksum_region);
+    if mmp.checksum != expected_checksum {
+        bail!(
+            "MMP block fixture {} checksum mismatch: expected 0x{:08X}, got 0x{:08X}",
+            path.display(),
+            expected_checksum,
+            mmp.checksum
+        );
+    }
+    mmp.validate_checksum(&data, EXT4_MMP_FIXTURE_CHECKSUM_SEED)
+        .with_context(|| format!("failed MMP block checksum for fixture {}", path.display()))?;
     Ok(mmp)
 }
 

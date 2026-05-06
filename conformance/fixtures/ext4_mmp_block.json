@@ -8,6 +8,6 @@
     {"offset":  16, "hex": "6666732d6e6f64652d3031", "_comment": "nodename = 'ffs-node-01' (64 bytes, null-padded)"},
     {"offset":  80, "hex": "2f6465762f6e766d65306e31", "_comment": "bdevname = '/dev/nvme0n1' (32 bytes, null-padded)"},
     {"offset": 112, "hex": "0500", "_comment": "check_interval = 5 seconds"},
-    {"offset": 1020, "hex": "00000000", "_comment": "checksum placeholder (will be computed)"}
+    {"offset": 1020, "hex": "eb6bafb0", "_comment": "checksum = ext4_chksum(seed 0xAABBCCDD, bytes[0..0x3FC])"}
   ]
 }

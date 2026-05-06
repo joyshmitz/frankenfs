@@ -82,7 +82,7 @@ All fixtures are hand-crafted JSON files that encode sparse binary data using th
 - **Author:** Claude Opus 4.5
 - **Reference:** ext4.h `struct mmp_struct`
 - **Description:** Multi-mount protection block in clean state
-- **Verification:** Magic 0x004D4D50, SEQ_CLEAN 0xFF4D4D50 verified
+- **Verification:** Magic 0x004D4D50, SEQ_CLEAN 0xFF4D4D50, and CRC32C checksum 0xB0AF6BEB under seed 0xAABBCCDD verified
 
 ## btrfs Fixtures
 

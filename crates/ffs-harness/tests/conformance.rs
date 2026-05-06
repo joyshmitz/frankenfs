@@ -4269,6 +4269,10 @@ fn ext4_mmp_block_fixture_conforms() {
     assert_eq!(mmp.nodename, "ffs-node-01", "nodename should match");
     assert_eq!(mmp.bdevname, "/dev/nvme0n1", "bdevname should match");
     assert_eq!(mmp.check_interval, 5, "check_interval should be 5");
+    assert_eq!(
+        mmp.checksum, 0xB0AF_6BEB,
+        "fixture checksum should match seed 0xAABBCCDD"
+    );
 
     // Verify status decoding
     assert_eq!(
