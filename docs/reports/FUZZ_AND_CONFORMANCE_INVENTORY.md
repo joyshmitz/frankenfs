@@ -28,7 +28,7 @@ or a bead/artifact owner.
 | A1 | fuzz/fuzz_targets/fuzz_fuse_splice_mount.rs; fuzz/fuzz_targets/fuzz_ioctl_dispatch.rs | FUSE and ioctl parser cursor saturation | Targets exist but synthetic seed value is limited by wide cursor consumption | long-campaign | deferred | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | active-bead | bd-rchk7.4 | open long-campaign | n/a |
 | A2 | fuzz/fuzz_targets/fuzz_inode_roundtrip.rs | Inode round-trip extra-area branches | Post-fix harness ran 8M+ clean iterations; branch-specific seeds remain useful | corpus-seed | required | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | active-bead | bd-rchk7.4 | open corpus expansion | n/a |
 | B1 | crates/ffs-dir/src/lib.rs; crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs | ext4 directory entry rec_len after unlink | `ext4_dir_rec_len_kernel_reference_coalesces_after_unlink` now pins debugfs `rm` rec_len coalescing end-to-end | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs::ext4_dir_rec_len_kernel_reference_coalesces_after_unlink | covered by kernel-reference harness | n/a |
-| B2 | conformance/fixtures/ext4_inode_inline_data.json; conformance/fixtures/ext4_inode_inline_data_with_continuation.json | ext4 inline data continuation fixtures | Inline fixtures exist but e2fsprogs continuation coverage is not pinned as a kernel-reference lane | golden-fixture | required | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md#B2 | unowned follow-up needed | n/a |
+| B2 | conformance/fixtures/ext4_inode_inline_data.json; conformance/fixtures/ext4_inode_inline_data_with_continuation.json; crates/ffs-harness/tests/kernel_reference.rs | ext4 inline data continuation fixtures | `ext4_inline_data_continuation_kernel_reference` now creates an e2fsprogs `inline_data` image through debugfs and verifies `i_block` plus `system.data` continuation bytes | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-harness/tests/kernel_reference.rs::ext4_inline_data_continuation_kernel_reference | covered by kernel-reference harness | n/a |
 | B3 | crates/ffs-harness/tests/conformance.rs | ext4 large file i_size_high over 4 GiB | Fast tests avoid multi-GB images; large-file parity needs artifact-sized execution | long-campaign | deferred | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | active-bead | bd-rchk7.4 | open long-campaign | n/a |
 | B4 | conformance/fixtures/ext4_xattr_block.json; crates/ffs-harness/tests/kernel_reference.rs | ext4 xattr block CRC32C parity vs debugfs ea_set | `ext4_debugfs_vs_ffs_xattr_writer_reference` compares FFS external xattr block bytes against debugfs after checksum normalization | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-harness/tests/kernel_reference.rs::ext4_debugfs_vs_ffs_xattr_writer_reference | covered by kernel-reference harness | n/a |
 | B5 | crates/ffs-inode/src/lib.rs; crates/ffs-harness/tests/kernel_reference.rs | ext4 i_extra_isize preservation across xattr writes | `ext4_debugfs_vs_ffs_xattr_writer_reference` verifies inline and external inode ibody bytes match the debugfs-written reference image | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-harness/tests/kernel_reference.rs::ext4_debugfs_vs_ffs_xattr_writer_reference | covered by kernel-reference harness | n/a |
@@ -77,17 +77,19 @@ Existing kernel-reference harnesses under `crates/ffs-harness/tests/`:
 | `ext4_symlink_kernel_reference` | fast/extent symlink targets | covered |
 | `ext4_journal_recovery` | jbd2 replay | covered |
 | `ext4_generation_kernel_reference` | i_generation (NFS change cookie) | added this session (commit `9681843`) |
+| `ext4_inline_data_continuation_kernel_reference` | `EXT4_INLINE_DATA_FL` plus `system.data` ibody continuation | covered |
 
 **Open items in this category:**
-- B2: `ext4` inline data parsing (`EXT4_INLINE_DATA_FL`, defined as a
-  constant in ffs-types but not yet exercised against e2fsprogs
-  fixtures with continuation extents).
 - B3: `ext4` large file `i_size_high` for files > 4 GiB — requires
   building a multi-GB image, infeasible for a fast unit test.
 
 **Covered since the original inventory:**
 - B1: `crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs`
   now pins the debugfs `rm` rec_len coalescing contract end-to-end.
+- B2: `ext4_inline_data_continuation_kernel_reference` now creates an
+  `inline_data` image with e2fsprogs, writes a 76-byte file through
+  `debugfs`, and verifies ffs-ondisk/OpenFs observe the same 60-byte
+  `i_block` payload plus `system.data` continuation.
 - B4/B5: `ext4_debugfs_vs_ffs_xattr_writer_reference` now compares
   inline ibody bytes, external ibody bytes, parsed xattr values, and the
   canonicalized external xattr block against the debugfs-written

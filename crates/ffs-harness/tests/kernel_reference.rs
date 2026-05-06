@@ -22,14 +22,17 @@
 //! - Extent mapping: `collect_extents` matches `debugfs blocks`, including a
 //!   deterministic fragmented two-extent file
 
+use asupersync::Cx;
+use ffs_core::{OpenFs, OpenOptions};
 use ffs_harness::{GoldenDirEntry, GoldenReference};
 use ffs_ondisk::{
     Ext4ImageReader, dx_hash, parse_dx_root, parse_ibody_xattrs, parse_xattr_block,
     stamp_dir_block_checksum, verify_dir_block_checksum, verify_inode_checksum,
 };
 use ffs_types::{
-    BlockNumber, EXT4_XATTR_INDEX_POSIX_ACL_ACCESS, EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT,
-    EXT4_XATTR_INDEX_SECURITY, EXT4_XATTR_INDEX_USER,
+    BlockNumber, EXT4_INLINE_DATA_FL, EXT4_XATTR_INDEX_POSIX_ACL_ACCESS,
+    EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT, EXT4_XATTR_INDEX_SECURITY, EXT4_XATTR_INDEX_SYSTEM,
+    EXT4_XATTR_INDEX_USER,
 };
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -69,6 +72,7 @@ const ACL_USER_OBJ_TAG: u16 = 0x0001;
 const ACL_GROUP_OBJ_TAG: u16 = 0x0004;
 const ACL_OTHER_TAG: u16 = 0x0020;
 const ACL_UNDEFINED_ID: u32 = u32::MAX;
+const INLINE_DATA_CONTINUATION_PATH: &str = "/inline76.txt";
 // Keep this large enough that e2fsck -D reliably promotes /htree into a real
 // hash-indexed directory across supported e2fsprogs versions.
 const DIR_INDEX_FILE_COUNT: usize = 256;
@@ -314,6 +318,53 @@ fn create_fragmented_extent_reference_image(image_path: &Path) -> PathBuf {
     std::fs::remove_file(&first_path).ok();
     std::fs::remove_file(&second_path).ok();
     std::fs::remove_file(&target_path).ok();
+    image_path.to_path_buf()
+}
+
+fn inline_data_continuation_payload() -> Vec<u8> {
+    let mut payload = vec![b'A'; 60];
+    payload.extend(std::iter::repeat_n(b'B', 16));
+    payload
+}
+
+fn create_inline_data_reference_image(image_path: &Path) -> PathBuf {
+    let f = std::fs::File::create(image_path).expect("create image file");
+    f.set_len(8 * 1024 * 1024).expect("set image length");
+    drop(f);
+
+    if trace_ext4_tools() {
+        eprintln!(
+            "mkfs.ext4 params: -L ffs-inline-ref -b 4096 -q -O inline_data {}",
+            image_path.display()
+        );
+    }
+    let st = Command::new("mkfs.ext4")
+        .args([
+            "-L",
+            "ffs-inline-ref",
+            "-b",
+            "4096",
+            "-q",
+            "-O",
+            "inline_data",
+        ])
+        .arg(image_path)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run mkfs.ext4");
+    assert!(st.success(), "mkfs.ext4 -O inline_data failed");
+
+    let payload_path = image_path.with_extension("inline_data.content.tmp");
+    std::fs::write(&payload_path, inline_data_continuation_payload())
+        .expect("write inline-data continuation payload");
+    run_debugfs_w(
+        image_path,
+        &format!(
+            "write {} {INLINE_DATA_CONTINUATION_PATH}",
+            payload_path.display()
+        ),
+    );
+    std::fs::remove_file(&payload_path).ok();
     image_path.to_path_buf()
 }
 
@@ -1452,6 +1503,83 @@ fn ext4_kernel_vs_ffs_xattr_reference() {
         None,
         "ffs-ondisk should report no default ACL on a regular file"
     );
+
+    std::fs::remove_file(&tmp).ok();
+}
+
+#[test]
+fn ext4_inline_data_continuation_kernel_reference() {
+    if !ext4_tools_available() {
+        eprintln!("SKIPPED: ext4 kernel tools not available");
+        return;
+    }
+
+    let tmp = unique_temp_ext4_path("inline_data_continuation");
+    create_inline_data_reference_image(&tmp);
+
+    let image = std::fs::read(&tmp).expect("read inline-data reference image");
+    let reader = Ext4ImageReader::new(&image).expect("parse inline-data ext4 image");
+    let (ino, inode) = reader
+        .resolve_path(&image, INLINE_DATA_CONTINUATION_PATH)
+        .expect("resolve inline-data continuation reference path");
+    let expected = inline_data_continuation_payload();
+
+    assert_eq!(
+        inode.flags & EXT4_INLINE_DATA_FL,
+        EXT4_INLINE_DATA_FL,
+        "debugfs reference file must use EXT4_INLINE_DATA_FL"
+    );
+    assert_eq!(
+        inode.size,
+        u64::try_from(expected.len()).expect("inline payload length fits u64"),
+        "inline-data size"
+    );
+    assert_eq!(
+        inode.blocks, 0,
+        "inline-data file should allocate no data blocks"
+    );
+    assert_eq!(
+        inode.file_acl, 0,
+        "inline-data continuation should live in ibody, not external xattr block"
+    );
+    assert_eq!(
+        &inode.extent_bytes[..60],
+        &expected[..60],
+        "i_block inline payload diverged from debugfs reference"
+    );
+
+    let xattrs = parse_ibody_xattrs(&inode).expect("parse ibody xattrs");
+    let continuation = xattrs
+        .iter()
+        .find(|xattr| {
+            xattr.name_index == EXT4_XATTR_INDEX_SYSTEM && xattr.name.as_slice() == b"data"
+        })
+        .expect("debugfs inline-data reference should contain system.data continuation");
+    assert_eq!(
+        continuation.value,
+        expected[60..],
+        "system.data continuation diverged from debugfs reference"
+    );
+
+    let cx = Cx::for_testing();
+    let fs = OpenFs::open_with_options(&cx, &tmp, &OpenOptions::default())
+        .expect("open inline-data reference image through OpenFs");
+    let full = fs
+        .read(
+            &cx,
+            ino,
+            0,
+            u32::try_from(expected.len()).expect("inline payload length fits u32"),
+        )
+        .expect("read full inline-data continuation through OpenFs");
+    assert_eq!(
+        full, expected,
+        "OpenFs inline-data read diverged from debugfs reference"
+    );
+    let tail = fs
+        .read(&cx, ino, 56, 32)
+        .expect("read inline-data continuation tail through OpenFs");
+    assert_eq!(&tail, &expected[56..]);
 
     std::fs::remove_file(&tmp).ok();
 }
