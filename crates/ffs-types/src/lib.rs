@@ -639,9 +639,9 @@ pub const fn is_socket(mode: u16) -> bool {
 
 // ── ext4 inode flags (i_flags) ──────────────────────────────────────────────
 
-/// Secure deletion (not actually implemented in ext4).
+/// Legacy secure-deletion advisory flag retained for on-disk compatibility.
 pub const EXT4_SECRM_FL: u32 = 0x0000_0001;
-/// Undelete (not implemented).
+/// Legacy undelete advisory flag retained for on-disk compatibility.
 pub const EXT4_UNRM_FL: u32 = 0x0000_0002;
 /// Compressed file (e2compr: may be set on new writes).
 pub const EXT4_COMPR_FL: u32 = 0x0000_0004;
@@ -1298,11 +1298,13 @@ mod tests {
     fn ensure_slice_offset_overflow() {
         let data = [0u8; 10];
         let result = ensure_slice(&data, usize::MAX, 1);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ParseError::InvalidField { field, .. } => assert_eq!(field, "offset"),
-            other => panic!("expected InvalidField, got {other:?}"),
-        }
+        assert!(matches!(
+            result,
+            Err(ParseError::InvalidField {
+                field: "offset",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -2392,34 +2394,13 @@ mod tests {
         // satisfies EXACTLY ONE predicate.
         let preds: [(u16, [bool; 7]); 7] = [
             // (mode, [is_reg, is_dir, is_sym, is_chr, is_blk, is_fifo, is_sock])
-            (
-                S_IFREG,
-                [true, false, false, false, false, false, false],
-            ),
-            (
-                S_IFDIR,
-                [false, true, false, false, false, false, false],
-            ),
-            (
-                S_IFLNK,
-                [false, false, true, false, false, false, false],
-            ),
-            (
-                S_IFCHR,
-                [false, false, false, true, false, false, false],
-            ),
-            (
-                S_IFBLK,
-                [false, false, false, false, true, false, false],
-            ),
-            (
-                S_IFIFO,
-                [false, false, false, false, false, true, false],
-            ),
-            (
-                S_IFSOCK,
-                [false, false, false, false, false, false, true],
-            ),
+            (S_IFREG, [true, false, false, false, false, false, false]),
+            (S_IFDIR, [false, true, false, false, false, false, false]),
+            (S_IFLNK, [false, false, true, false, false, false, false]),
+            (S_IFCHR, [false, false, false, true, false, false, false]),
+            (S_IFBLK, [false, false, false, false, true, false, false]),
+            (S_IFIFO, [false, false, false, false, false, true, false]),
+            (S_IFSOCK, [false, false, false, false, false, false, true]),
         ];
         for (mode, expected) in preds {
             assert_eq!(
