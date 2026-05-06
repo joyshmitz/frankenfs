@@ -1,0 +1,17 @@
+---
+source: crates/ffs-harness/src/swarm_cache_controller.rs
+expression: markdown
+---
+# Swarm Cache Controller Contract
+
+- Contract: `bd-p2j3e.5-swarm-cache-controller-v1`
+- Valid: `true`
+- Candidates: `3`
+- Scenarios: `2`
+- Small-host downgrades: `1`
+- Authoritative claims: `1`
+
+| Scenario | Workload | Host target | Claim | Lane | Best p99 | Backpressure |
+|----------|----------|-------------|-------|------|----------|--------------|
+| `cache_pressure_256gb_authoritative_fixture` | `cache_pressure` | `true` | `measured_authoritative` | `permissioned_large_host` | `s3_fifo_guarded` `4100.0us` | `healthy` |
+| `cache_pressure_small_host_smoke` | `fixture_smoke` | `false` | `small_host_smoke` | `developer_smoke` | `s3_fifo_guarded` `6900.0us` | `healthy` |

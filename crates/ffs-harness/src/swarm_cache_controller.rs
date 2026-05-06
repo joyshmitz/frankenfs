@@ -879,6 +879,46 @@ mod tests {
     }
 
     #[test]
+    fn checked_in_swarm_cache_controller_contract_validates() {
+        let contract = load_swarm_cache_controller_contract(Path::new(&workspace_path(
+            DEFAULT_SWARM_CACHE_CONTROLLER_CONTRACT,
+        )))
+        .expect("load checked-in cache controller contract");
+        let report = validate_swarm_cache_controller_contract(&contract);
+
+        assert!(
+            report.valid,
+            "checked-in swarm cache controller contract should validate: {:?}",
+            report.errors
+        );
+        assert_eq!(report.scenario_count, 2);
+        assert_eq!(report.candidate_count, 3);
+        assert_eq!(report.small_host_downgrade_count, 1);
+        assert_eq!(report.authoritative_claim_count, 1);
+        assert!(report.errors.is_empty());
+    }
+
+    /// The markdown renderer feeds proof-bundle and release-gate operator
+    /// workflows. The checked-in fixture validation above pins semantics; this
+    /// snapshot pins the title, metadata bullets, scenario table layout,
+    /// boolean formatting, best-p99 candidate rendering, and omitted Errors
+    /// section for the committed cache-controller contract.
+    #[test]
+    fn render_swarm_cache_controller_markdown_checked_in_contract_snapshot() {
+        let contract = load_swarm_cache_controller_contract(Path::new(&workspace_path(
+            DEFAULT_SWARM_CACHE_CONTROLLER_CONTRACT,
+        )))
+        .expect("load checked-in cache controller contract");
+        let report = validate_swarm_cache_controller_contract(&contract);
+        let markdown = render_swarm_cache_controller_markdown(&report);
+
+        insta::assert_snapshot!(
+            "render_swarm_cache_controller_markdown_checked_in_contract",
+            markdown
+        );
+    }
+
+    #[test]
     fn small_host_cannot_claim_authoritative_measurement() {
         let mut contract = sample_contract();
         contract.scenarios[1].release_claim_state = CacheReleaseClaimState::MeasuredAuthoritative;
@@ -1083,5 +1123,13 @@ mod tests {
             flush_batch_size: 256,
             backpressure_state: CacheBackpressureState::Healthy,
         }
+    }
+
+    fn workspace_path(relative: &str) -> String {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(relative)
+            .display()
+            .to_string()
     }
 }
