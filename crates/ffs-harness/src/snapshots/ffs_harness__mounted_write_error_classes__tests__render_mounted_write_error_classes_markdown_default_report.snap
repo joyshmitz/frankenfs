@@ -1,0 +1,14 @@
+---
+source: crates/ffs-harness/src/mounted_write_error_classes.rs
+expression: markdown
+---
+# Mounted Write Error Classes `frankenfs_mounted_write_error_classes_v1`
+
+- Bead: `bd-rchk0.3.4`
+- Entries: `9`
+- Broad fallbacks: `0`
+- Valid: `true`
+- Classes seen: `cancelled_by_caller`, `default_permissions_eacces`, `host_capability_skip`, `ok`, `product_failure`, `repair_serialization_blocked`, `stale_snapshot_refused`, `unsupported_operation`
+
+## Errors
+- none

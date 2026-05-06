@@ -14,6 +14,7 @@ use crate::mounted_write_matrix::MountedWriteMatrix;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write;
 
 pub const MOUNTED_WRITE_ERROR_CLASSES_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_MOUNTED_WRITE_ERROR_CLASSES_PATH: &str =
@@ -174,6 +175,49 @@ pub fn validate_mounted_write_error_classes_with_matrix(
     validate_matrix_references(catalog, matrix, &mut report.errors);
     report.valid = report.errors.is_empty();
     report
+}
+
+#[must_use]
+pub fn render_mounted_write_error_classes_markdown(report: &MountedWriteErrorReport) -> String {
+    let classes = if report.error_classes_seen.is_empty() {
+        "none".to_owned()
+    } else {
+        report
+            .error_classes_seen
+            .iter()
+            .map(|class| format!("`{}`", escape_markdown_table_cell(class)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let mut output = String::new();
+    writeln!(
+        &mut output,
+        "# Mounted Write Error Classes `{}`",
+        report.catalog_id
+    )
+    .ok();
+    writeln!(&mut output).ok();
+    writeln!(&mut output, "- Bead: `{}`", report.bead_id).ok();
+    writeln!(&mut output, "- Entries: `{}`", report.entry_count).ok();
+    writeln!(
+        &mut output,
+        "- Broad fallbacks: `{}`",
+        report.broad_fallback_count
+    )
+    .ok();
+    writeln!(&mut output, "- Valid: `{}`", report.valid).ok();
+    writeln!(&mut output, "- Classes seen: {classes}").ok();
+    writeln!(&mut output).ok();
+    writeln!(&mut output, "## Errors").ok();
+    if report.errors.is_empty() {
+        writeln!(&mut output, "- none").ok();
+    } else {
+        for error in &report.errors {
+            writeln!(&mut output, "- {}", escape_markdown_table_cell(error)).ok();
+        }
+    }
+    output
 }
 
 fn validate_top_level(catalog: &MountedWriteErrorClasses, errors: &mut Vec<String>) {
@@ -455,6 +499,10 @@ fn is_synthetic_matrix_reference_escape(entry: &MountedWriteErrorEntry) -> bool 
         && entry.operation_id.starts_with("synthetic_")
 }
 
+fn escape_markdown_table_cell(raw: &str) -> String {
+    raw.replace('|', "\\|")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,6 +625,38 @@ mod tests {
             }),
             "synthetic validator-only rows should bypass matrix references: {:?}",
             report.errors
+        );
+    }
+
+    #[test]
+    fn markdown_report_includes_catalog_summary_and_errors() {
+        let mut report = validate_default_mounted_write_error_classes()
+            .expect("default mounted write error classes validates");
+        report.valid = false;
+        report.errors.push("example | escaped error".to_owned());
+        let markdown = render_mounted_write_error_classes_markdown(&report);
+        assert!(markdown.contains("# Mounted Write Error Classes"));
+        assert!(markdown.contains("frankenfs_mounted_write_error_classes_v1"));
+        assert!(markdown.contains("- Bead: `bd-rchk0.3.4`"));
+        assert!(markdown.contains("- Entries: `9`"));
+        assert!(markdown.contains("- Broad fallbacks: `0`"));
+        assert!(markdown.contains("- Valid: `false`"));
+        assert!(markdown.contains("`host_capability_skip`"));
+        assert!(markdown.contains("example \\| escaped error"));
+    }
+
+    /// bd-rchk0.73 — exact golden snapshot for the default mounted write
+    /// error-class report renderer. Pins the title, summary bullets,
+    /// class ordering, error section, and the no-error sentinel so operator
+    /// report consumers notice accidental markdown drift.
+    #[test]
+    fn render_mounted_write_error_classes_markdown_default_report() {
+        let report = validate_default_mounted_write_error_classes()
+            .expect("default mounted write error classes validates");
+        let markdown = render_mounted_write_error_classes_markdown(&report);
+        insta::assert_snapshot!(
+            "render_mounted_write_error_classes_markdown_default_report",
+            markdown
         );
     }
 
