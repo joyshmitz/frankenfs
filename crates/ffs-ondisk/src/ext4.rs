@@ -13321,5 +13321,37 @@ mod tests {
             );
         }
 
+        /// bd-6rsow — Transitivity of `ext4_casefold_names_collide`
+        /// across ASCII case variants.
+        ///
+        /// The existing transitivity proptest
+        /// (`ext4_proptest_casefold_collision_is_transitive_through_folded_key`)
+        /// proves transitivity along the chain `name -> fold(name) ->
+        /// fold(fold(name))`, which exercises the idempotence axis
+        /// but not the cross-case axis. This MR pins transitivity
+        /// along an orthogonal chain — `a (mixed case) ~ b
+        /// (uppercase) ~ c (lowercase) ⇒ a ~ c` — which is the
+        /// user-visible contract for case-insensitive lookup. A
+        /// buggy comparator that short-circuited equality on object
+        /// identity, hashed with a per-call salt, or treated the
+        /// second of a fold-pair asymmetrically could pass the
+        /// existing transitivity test but fail this one.
+        #[test]
+        fn ext4_proptest_casefold_collide_is_transitive_on_ascii_case_variants(
+            a in proptest::collection::vec(any::<u8>(), 0..=64),
+        ) {
+            let b: Vec<u8> = a.iter().map(|byte| byte.to_ascii_uppercase()).collect();
+            let c: Vec<u8> = a.iter().map(|byte| byte.to_ascii_lowercase()).collect();
+            let ab = ext4_casefold_names_collide(&a, &b);
+            let bc = ext4_casefold_names_collide(&b, &c);
+            let ac = ext4_casefold_names_collide(&a, &c);
+            if ab && bc {
+                prop_assert!(
+                    ac,
+                    "casefold collision must be transitive on ASCII case variants"
+                );
+            }
+        }
+
     }
 }
