@@ -27,13 +27,13 @@ or a bead/artifact owner.
 |----|-----------------|--------------|------------------|---------------------|------------------------|----------------------------------|---------------------------|----------|-------------------------|--------------|-----------------------------|
 | A1 | fuzz/fuzz_targets/fuzz_fuse_splice_mount.rs; fuzz/fuzz_targets/fuzz_ioctl_dispatch.rs | FUSE and ioctl parser cursor saturation | Targets exist but synthetic seed value is limited by wide cursor consumption | long-campaign | deferred | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | active-bead | bd-rchk7.4 | open long-campaign | n/a |
 | A2 | fuzz/fuzz_targets/fuzz_inode_roundtrip.rs | Inode round-trip extra-area branches | Post-fix harness ran 8M+ clean iterations; branch-specific seeds remain useful | corpus-seed | required | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | active-bead | bd-rchk7.4 | open corpus expansion | n/a |
-| B1 | crates/ffs-dir/src/lib.rs; crates/ffs-harness/tests/conformance.rs | ext4 directory entry rec_len after unlink | Current dir tests cover add/remove but do not pin debugfs rec_len coalescing end-to-end | golden-fixture | required | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md#B1 | unowned follow-up needed | n/a |
+| B1 | crates/ffs-dir/src/lib.rs; crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs | ext4 directory entry rec_len after unlink | `ext4_dir_rec_len_kernel_reference_coalesces_after_unlink` now pins debugfs `rm` rec_len coalescing end-to-end | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs::ext4_dir_rec_len_kernel_reference_coalesces_after_unlink | covered by kernel-reference harness | n/a |
 | B2 | conformance/fixtures/ext4_inode_inline_data.json; conformance/fixtures/ext4_inode_inline_data_with_continuation.json | ext4 inline data continuation fixtures | Inline fixtures exist but e2fsprogs continuation coverage is not pinned as a kernel-reference lane | golden-fixture | required | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md#B2 | unowned follow-up needed | n/a |
 | B3 | crates/ffs-harness/tests/conformance.rs | ext4 large file i_size_high over 4 GiB | Fast tests avoid multi-GB images; large-file parity needs artifact-sized execution | long-campaign | deferred | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | active-bead | bd-rchk7.4 | open long-campaign | n/a |
-| B4 | conformance/fixtures/ext4_xattr_block.json; crates/ffs-harness/tests/kernel_reference.rs | ext4 xattr block CRC32C parity vs debugfs ea_set | Fixture parser coverage exists; differential e2fsprogs write parity is not pinned | golden-fixture | required | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md#B4 | unowned follow-up needed | n/a |
-| B5 | crates/ffs-inode/src/lib.rs; crates/ffs-harness/tests/kernel_reference.rs | ext4 i_extra_isize preservation across xattr writes | Field preservation exists but no kernel-reference xattr write round-trip pins it | golden-fixture | required | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md#B5 | unowned follow-up needed | n/a |
-| C1 | crates/ffs-btrfs/src/lib.rs | ffs-btrfs property coverage | Unit coverage is broad but no proptest block exists for selected btrfs invariants | property-test | required | deferred | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md#C1 | unowned follow-up needed | n/a |
-| C2 | crates/ffs-mvcc/src/wal_replay.rs | MVCC WAL replay invariant coverage | WAL replay has unit coverage but no proptest invariant lane | property-test | required | deferred | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md#C2 | unowned follow-up needed | n/a |
+| B4 | conformance/fixtures/ext4_xattr_block.json; crates/ffs-harness/tests/kernel_reference.rs | ext4 xattr block CRC32C parity vs debugfs ea_set | `ext4_debugfs_vs_ffs_xattr_writer_reference` compares FFS external xattr block bytes against debugfs after checksum normalization | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-harness/tests/kernel_reference.rs::ext4_debugfs_vs_ffs_xattr_writer_reference | covered by kernel-reference harness | n/a |
+| B5 | crates/ffs-inode/src/lib.rs; crates/ffs-harness/tests/kernel_reference.rs | ext4 i_extra_isize preservation across xattr writes | `ext4_debugfs_vs_ffs_xattr_writer_reference` verifies inline and external inode ibody bytes match the debugfs-written reference image | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-harness/tests/kernel_reference.rs::ext4_debugfs_vs_ffs_xattr_writer_reference | covered by kernel-reference harness | n/a |
+| C1 | crates/ffs-btrfs/src/lib.rs | ffs-btrfs property coverage | `bd-rchk0.55` added `proptest!` coverage for `snapshot_diff_by_generation` self-diff, empty snapshot symmetry, and generation-increase modification invariants | property-test | existing | deferred | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | bd-rchk0.55; crates/ffs-btrfs/src/lib.rs::snapshot_diff_self_diff_proptest_is_empty | closed bead + proptest artifact | n/a |
+| C2 | crates/ffs-mvcc/src/wal_replay.rs | MVCC WAL replay invariant coverage | `wal_replay.rs` contains `proptest!` coverage for clean monotonic replay and skip cutoff invariants | property-test | existing | deferred | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-mvcc/src/wal_replay.rs::proptest_clean_monotonic_replay_applies_every_commit | covered by wal_replay proptests | n/a |
 | E1 | docs/reports/MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md:320; crates/ffs-fuse/src/lib.rs | FIEMAP short-buffer panic risk | Report flags possible panic; dedicated FUSE ioctl proof is not linked here | security-audit | required | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md#E1 | unowned security follow-up needed | n/a |
 | E2 | docs/reports/MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md:67; crates/ffs-fuse/src/lib.rs | setattr privilege escalation at FUSE boundary | Report flags FUSE trust-boundary risk; mounted permission proof is not linked here | mounted-e2e | required | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | active-bead | bd-rchk0.3.2 | open mounted matrix | n/a |
 | E3 | scripts/e2e/ffs_fuse_production.sh; scripts/e2e/scenario_catalog.json | Empty-filesystem mount coverage | Critical mounted matrix exists; empty-image scenario remains separate | mounted-e2e | deferred | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | active-bead | bd-rchk0.3.2 | open mounted matrix | n/a |
@@ -79,21 +79,19 @@ Existing kernel-reference harnesses under `crates/ffs-harness/tests/`:
 | `ext4_generation_kernel_reference` | i_generation (NFS change cookie) | added this session (commit `9681843`) |
 
 **Open items in this category:**
-- B1: `ext4` directory entry rec_len after `unlink` — debugfs `rm`
-  extends the previous live entry's rec_len to span the freed slot;
-  no harness pins ffs's add_entry/remove_entry against this
-  rec_len-coalesce contract end-to-end.
 - B2: `ext4` inline data parsing (`EXT4_INLINE_DATA_FL`, defined as a
   constant in ffs-types but not yet exercised against e2fsprogs
   fixtures with continuation extents).
 - B3: `ext4` large file `i_size_high` for files > 4 GiB — requires
   building a multi-GB image, infeasible for a fast unit test.
-- B4: `ext4` xattr block CRC32C parity vs `debugfs ea_set` — the
-  fixture-based `ext4_xattr_block_fixture_conforms` exists in
-  `conformance.rs` but no kernel-reference harness compares against
-  what e2fsprogs writes for the same xattrs.
-- B5: `ext4` `i_extra_isize` round-trip across xattr writes — the
-  field is preserved but no kernel-reference test pins it.
+
+**Covered since the original inventory:**
+- B1: `crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs`
+  now pins the debugfs `rm` rec_len coalescing contract end-to-end.
+- B4/B5: `ext4_debugfs_vs_ffs_xattr_writer_reference` now compares
+  inline ibody bytes, external ibody bytes, parsed xattr values, and the
+  canonicalized external xattr block against the debugfs-written
+  reference image.
 
 ## C. Property tests (proptest!)
 
@@ -108,19 +106,19 @@ By crate:
 | ffs-extent | 1 (8+ test fns) | split/punch/insert/collapse roundtrips |
 | ffs-inode | 1 (4+ test fns) | extra_timestamp / touch_atime / bump_inode_version (added this session, commit `c6677dc`) |
 | ffs-journal | 1 (8+ test fns) | jbd2 commit/descriptor checksum invariants |
-| ffs-mvcc | 6 across submodules | rcu, sharded, wal, wal_writer, compression — well covered |
+| ffs-mvcc | 6 across submodules | rcu, sharded, wal, wal_writer, compression, wal_replay — well covered |
 | ffs-xattr | 1 (7+ test fns) | set/get/remove/order invariance |
-| ffs-btrfs | 0 | candidate for proptest expansion (181 unit tests, no property tests) |
+| ffs-btrfs | 1 (3 test fns) | snapshot_diff_by_generation invariants added in bd-rchk0.55 |
 | ffs-ondisk | scattered | extent-tree leaf/index roundtrip in tests module |
 
-**Open items in this category:**
-- C1: `ffs-btrfs` has zero `proptest!` blocks despite 181 unit tests —
-  candidates: `snapshot_diff_by_generation` self-diff property,
-  `enumerate_subvolumes` order-independence, `parse_extent_data`
-  round-trip across the four extent types.
-- C2: `ffs-mvcc/wal_replay` has 0 proptests despite 23 unit tests —
-  candidate: `replay(empty)` is always `EmptyLog`, replay outcome
-  monotonicity invariants.
+**Covered since the original inventory:**
+- C1: `bd-rchk0.55` added `ffs-btrfs` `proptest!` coverage for
+  `snapshot_diff_by_generation` self-diff, empty snapshot symmetry, and
+  same-inode generation-increase invariants.
+- C2: `crates/ffs-mvcc/src/wal_replay.rs` already contains a
+  `proptest!` block for clean monotonic replay and `skip_up_to_seq`
+  apply-filter invariants, so this row is now tracked as covered rather
+  than unowned.
 
 ## D. Defects fixed during this session
 
