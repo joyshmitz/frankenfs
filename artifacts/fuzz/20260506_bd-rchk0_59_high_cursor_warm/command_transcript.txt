@@ -1,0 +1,9 @@
+campaign_id=20260506_bd-rchk0_59_high_cursor_warm
+bead_id=bd-rchk0.59
+created_at=2026-05-06T11:36:27Z
+worker=thinkstation1
+duration_per_target_secs=60
+run_root=/data/tmp/ffs_bd_rchk0_59_high_cursor_warm_thinkstation1_20260506T113627Z
+cargo_target_dir=/data/tmp/rch_target_frankenfs_BrightForge_bd-rchk0_59_fuzz
+targets=fuzz_fuse_splice_mount fuzz_ioctl_dispatch
+command=cargo fuzz run TARGET copied_corpus -- -max_total_time=60 -timeout=10 -max_len=4096 -artifact_prefix=ARTIFACT_DIR/

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "bead_id": "bd-rchk0.59",
+  "campaign_id": "20260506_bd-rchk0_59_high_cursor_warm",
+  "created_at": "2026-05-06T11:36:27+00:00",
+  "worker": "thinkstation1",
+  "duration_per_target_secs": 60,
+  "run_root": "/data/tmp/ffs_bd_rchk0_59_high_cursor_warm_thinkstation1_20260506T113627Z",
+  "artifact_root": "artifacts/fuzz/20260506_bd-rchk0_59_high_cursor_warm",
+  "targets": [
+    {"target":"fuzz_fuse_splice_mount","status":"pass","exit_code":0,"seed_count":451,"copied_seed_count":451,"duration_secs":314,"crashes":0,"log":"artifacts/fuzz/20260506_bd-rchk0_59_high_cursor_warm/logs/fuzz_fuse_splice_mount.log","artifact_dir":"artifacts/fuzz/20260506_bd-rchk0_59_high_cursor_warm/artifacts/fuzz_fuse_splice_mount"},
+    {"target":"fuzz_ioctl_dispatch","status":"pass","exit_code":0,"seed_count":429,"copied_seed_count":429,"duration_secs":64,"crashes":0,"log":"artifacts/fuzz/20260506_bd-rchk0_59_high_cursor_warm/logs/fuzz_ioctl_dispatch.log","artifact_dir":"artifacts/fuzz/20260506_bd-rchk0_59_high_cursor_warm/artifacts/fuzz_ioctl_dispatch"}
+  ]
+}

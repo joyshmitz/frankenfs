@@ -25,7 +25,7 @@ or a bead/artifact owner.
 
 | ID | Source location | Risk surface | Current evidence | Required proof type | Expected unit coverage | Expected E2E/fuzz-smoke coverage | Log/artifact expectations | Decision | Linked bead or artifact | Owner/status | Non-applicability rationale |
 |----|-----------------|--------------|------------------|---------------------|------------------------|----------------------------------|---------------------------|----------|-------------------------|--------------|-----------------------------|
-| A1 | fuzz/fuzz_targets/fuzz_fuse_splice_mount.rs; fuzz/fuzz_targets/fuzz_ioctl_dispatch.rs | FUSE and ioctl parser cursor saturation | `bd-fnp56` validated both targets after source-hygiene cleanup, but high-cursor long-campaign evidence still needs a current artifact | long-campaign | deferred | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | bd-rchk0.59 | open high-cursor fuzz follow-up | n/a |
+| A1 | fuzz/fuzz_targets/fuzz_fuse_splice_mount.rs; fuzz/fuzz_targets/fuzz_ioctl_dispatch.rs | FUSE and ioctl parser cursor saturation | `20260506_bd-rchk0_59_high_cursor_warm` ran both high-cursor targets for 60 seconds each with copied corpora: `fuzz_fuse_splice_mount` 451 seeds, 270632 runs, 0 crashes; `fuzz_ioctl_dispatch` 429 seeds, 463477 runs, 0 crashes | long-campaign | deferred | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | bd-rchk0.59; artifacts/fuzz/20260506_bd-rchk0_59_high_cursor_warm/campaign_summary.json | covered by bounded copied-corpus campaign on thinkstation1; logs and repro command in artifacts/fuzz/20260506_bd-rchk0_59_high_cursor_warm/ | n/a |
 | A2 | fuzz/fuzz_targets/fuzz_inode_roundtrip.rs | Inode round-trip extra-area branches | `bd-rchk0.21` added all seven POSIX file-type synthetic lanes plus extra-area round-trip reconciliation for `fuzz_inode_roundtrip` | corpus-seed | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | bd-rchk0.21; fuzz/fuzz_targets/fuzz_inode_roundtrip.rs | covered by closed targeted fuzz artifact | n/a |
 | B1 | crates/ffs-dir/src/lib.rs; crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs | ext4 directory entry rec_len after unlink | `ext4_dir_rec_len_kernel_reference_coalesces_after_unlink` now pins debugfs `rm` rec_len coalescing end-to-end | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs::ext4_dir_rec_len_kernel_reference_coalesces_after_unlink | covered by kernel-reference harness | n/a |
 | B2 | conformance/fixtures/ext4_inode_inline_data.json; conformance/fixtures/ext4_inode_inline_data_with_continuation.json; crates/ffs-harness/tests/kernel_reference.rs | ext4 inline data continuation fixtures | `ext4_inline_data_continuation_kernel_reference` now creates an e2fsprogs `inline_data` image through debugfs and verifies `i_block` plus `system.data` continuation bytes | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-harness/tests/kernel_reference.rs::ext4_inline_data_continuation_kernel_reference | covered by kernel-reference harness | n/a |
@@ -54,12 +54,17 @@ the floor for previously under-corpused targets. As of this writing:
 | Stateful-complex (15–22) | 4     | fuse_splice_mount, ioctl_dispatch, openfs_mvcc_wal_recovery, path_encoding_mount — complex cursor consumption, lower marginal value of synthetic seeds |
 
 **Open items in this category:**
-- A1: corpus growth on `fuse_splice_mount` and `ioctl_dispatch` would
-  benefit from harness simplification (cursor consumption is currently
-  ~30 fields of varying types per seed). `bd-rchk0.59` now owns this
-  long-campaign follow-up.
+- None in the `bd-rchk7.1` registry. Reopen this section only for new
+  fuzz target surfaces or post-campaign crash artifacts.
 
 **Covered since the original inventory:**
+- A1: `bd-rchk0.59` added a durable bounded campaign artifact for the
+  high-cursor `fuzz_fuse_splice_mount` and `fuzz_ioctl_dispatch` targets.
+  Reproduce with the command transcript in
+  `artifacts/fuzz/20260506_bd-rchk0_59_high_cursor_warm/command_transcript.txt`;
+  the checked artifacts include `campaign_summary.json` plus one log per
+  target. The successful campaign used copied corpora, left the checked-in
+  corpus unchanged, and produced no crash/timeout/oom artifacts.
 - A2: `fuzz_inode_roundtrip` had six oracle bugs in the round-trip
   contract (commits `0fed288`, `45dc836`); `bd-rchk0.21` added all
   seven POSIX file-type synthetic lanes and extra-area round-trip
