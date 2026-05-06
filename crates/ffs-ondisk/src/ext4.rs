@@ -10274,6 +10274,153 @@ mod tests {
         assert!(!is_reserved_inode(256, 256));
     }
 
+    /// bd-bevt2 — Kernel-conformance pin for the 40 ext4 feature-flag
+    /// constants across the three wrapper structs:
+    ///   * Ext4CompatFeatures   (10 flags, EXT4_FEATURE_COMPAT_*)
+    ///   * Ext4IncompatFeatures (16 flags, EXT4_FEATURE_INCOMPAT_*)
+    ///   * Ext4RoCompatFeatures (14 flags, EXT4_FEATURE_RO_COMPAT_*)
+    ///
+    /// Each constant mirrors a kernel macro from `fs/ext4/ext4.h`.
+    /// Mount eligibility hinges on these bits: COMPAT bits are
+    /// advisory (unknown bits ignored), INCOMPAT bits force mount
+    /// failure on unknown bits, RO_COMPAT bits force read-only mount.
+    /// A regression that swapped, e.g., FILETYPE (0x2) and EXTENTS
+    /// (0x40) would silently mis-classify every ext4 image; a
+    /// regression in BIT64 (0x80) would silently fail to recognize
+    /// 64-bit field layout.
+    ///
+    /// This test pins each value plus the structural invariant that
+    /// every flag is a single power-of-2 bit and no two flags within
+    /// the same set share a bit.
+    fn assert_ext4_feature_set_is_distinct(set_label: &str, flags: &[u32]) {
+        for &flag in flags {
+            assert!(
+                flag.is_power_of_two(),
+                "{set_label} flag {flag:#x} must be a single power-of-2 bit"
+            );
+        }
+        for (i, &a) in flags.iter().enumerate() {
+            for &b in &flags[i + 1..] {
+                assert_eq!(
+                    a & b,
+                    0,
+                    "{set_label} flags {a:#x} and {b:#x} must not share a bit"
+                );
+            }
+        }
+        let or_all: u32 = flags.iter().fold(0_u32, |acc, &f| acc | f);
+        assert_eq!(
+            or_all.count_ones() as usize,
+            flags.len(),
+            "{set_label}: OR of all flags must have exactly {} bits set",
+            flags.len()
+        );
+    }
+
+    #[test]
+    fn ext4_feature_flag_constants_match_kernel_header() {
+        // Compat (advisory) flags per fs/ext4/ext4.h.
+        assert_eq!(Ext4CompatFeatures::DIR_PREALLOC.0, 0x0001);
+        assert_eq!(Ext4CompatFeatures::IMAGIC_INODES.0, 0x0002);
+        assert_eq!(Ext4CompatFeatures::HAS_JOURNAL.0, 0x0004);
+        assert_eq!(Ext4CompatFeatures::EXT_ATTR.0, 0x0008);
+        assert_eq!(Ext4CompatFeatures::RESIZE_INODE.0, 0x0010);
+        assert_eq!(Ext4CompatFeatures::DIR_INDEX.0, 0x0020);
+        assert_eq!(Ext4CompatFeatures::SPARSE_SUPER2.0, 0x0200);
+        assert_eq!(Ext4CompatFeatures::FAST_COMMIT.0, 0x0400);
+        assert_eq!(Ext4CompatFeatures::STABLE_INODES.0, 0x0800);
+        assert_eq!(Ext4CompatFeatures::ORPHAN_FILE.0, 0x1000);
+
+        // Incompat (mount-fail-on-unknown) flags.
+        assert_eq!(Ext4IncompatFeatures::COMPRESSION.0, 0x0001);
+        assert_eq!(Ext4IncompatFeatures::FILETYPE.0, 0x0002);
+        assert_eq!(Ext4IncompatFeatures::RECOVER.0, 0x0004);
+        assert_eq!(Ext4IncompatFeatures::JOURNAL_DEV.0, 0x0008);
+        assert_eq!(Ext4IncompatFeatures::META_BG.0, 0x0010);
+        assert_eq!(Ext4IncompatFeatures::EXTENTS.0, 0x0040);
+        assert_eq!(Ext4IncompatFeatures::BIT64.0, 0x0080);
+        assert_eq!(Ext4IncompatFeatures::MMP.0, 0x0100);
+        assert_eq!(Ext4IncompatFeatures::FLEX_BG.0, 0x0200);
+        assert_eq!(Ext4IncompatFeatures::EA_INODE.0, 0x0400);
+        assert_eq!(Ext4IncompatFeatures::DIRDATA.0, 0x1000);
+        assert_eq!(Ext4IncompatFeatures::CSUM_SEED.0, 0x2000);
+        assert_eq!(Ext4IncompatFeatures::LARGEDIR.0, 0x4000);
+        assert_eq!(Ext4IncompatFeatures::INLINE_DATA.0, 0x8000);
+        assert_eq!(Ext4IncompatFeatures::ENCRYPT.0, 0x1_0000);
+        assert_eq!(Ext4IncompatFeatures::CASEFOLD.0, 0x2_0000);
+
+        // RoCompat (read-only-mount-on-unknown) flags.
+        assert_eq!(Ext4RoCompatFeatures::SPARSE_SUPER.0, 0x0001);
+        assert_eq!(Ext4RoCompatFeatures::LARGE_FILE.0, 0x0002);
+        assert_eq!(Ext4RoCompatFeatures::BTREE_DIR.0, 0x0004);
+        assert_eq!(Ext4RoCompatFeatures::HUGE_FILE.0, 0x0008);
+        assert_eq!(Ext4RoCompatFeatures::GDT_CSUM.0, 0x0010);
+        assert_eq!(Ext4RoCompatFeatures::DIR_NLINK.0, 0x0020);
+        assert_eq!(Ext4RoCompatFeatures::EXTRA_ISIZE.0, 0x0040);
+        assert_eq!(Ext4RoCompatFeatures::QUOTA.0, 0x0100);
+        assert_eq!(Ext4RoCompatFeatures::BIGALLOC.0, 0x0200);
+        assert_eq!(Ext4RoCompatFeatures::METADATA_CSUM.0, 0x0400);
+        assert_eq!(Ext4RoCompatFeatures::READONLY.0, 0x1000);
+        assert_eq!(Ext4RoCompatFeatures::PROJECT.0, 0x2000);
+        assert_eq!(Ext4RoCompatFeatures::VERITY.0, 0x8000);
+        assert_eq!(Ext4RoCompatFeatures::ORPHAN_PRESENT.0, 0x1_0000);
+
+        let compat = [
+            Ext4CompatFeatures::DIR_PREALLOC.0,
+            Ext4CompatFeatures::IMAGIC_INODES.0,
+            Ext4CompatFeatures::HAS_JOURNAL.0,
+            Ext4CompatFeatures::EXT_ATTR.0,
+            Ext4CompatFeatures::RESIZE_INODE.0,
+            Ext4CompatFeatures::DIR_INDEX.0,
+            Ext4CompatFeatures::SPARSE_SUPER2.0,
+            Ext4CompatFeatures::FAST_COMMIT.0,
+            Ext4CompatFeatures::STABLE_INODES.0,
+            Ext4CompatFeatures::ORPHAN_FILE.0,
+        ];
+        let incompat = [
+            Ext4IncompatFeatures::COMPRESSION.0,
+            Ext4IncompatFeatures::FILETYPE.0,
+            Ext4IncompatFeatures::RECOVER.0,
+            Ext4IncompatFeatures::JOURNAL_DEV.0,
+            Ext4IncompatFeatures::META_BG.0,
+            Ext4IncompatFeatures::EXTENTS.0,
+            Ext4IncompatFeatures::BIT64.0,
+            Ext4IncompatFeatures::MMP.0,
+            Ext4IncompatFeatures::FLEX_BG.0,
+            Ext4IncompatFeatures::EA_INODE.0,
+            Ext4IncompatFeatures::DIRDATA.0,
+            Ext4IncompatFeatures::CSUM_SEED.0,
+            Ext4IncompatFeatures::LARGEDIR.0,
+            Ext4IncompatFeatures::INLINE_DATA.0,
+            Ext4IncompatFeatures::ENCRYPT.0,
+            Ext4IncompatFeatures::CASEFOLD.0,
+        ];
+        let ro_compat = [
+            Ext4RoCompatFeatures::SPARSE_SUPER.0,
+            Ext4RoCompatFeatures::LARGE_FILE.0,
+            Ext4RoCompatFeatures::BTREE_DIR.0,
+            Ext4RoCompatFeatures::HUGE_FILE.0,
+            Ext4RoCompatFeatures::GDT_CSUM.0,
+            Ext4RoCompatFeatures::DIR_NLINK.0,
+            Ext4RoCompatFeatures::EXTRA_ISIZE.0,
+            Ext4RoCompatFeatures::QUOTA.0,
+            Ext4RoCompatFeatures::BIGALLOC.0,
+            Ext4RoCompatFeatures::METADATA_CSUM.0,
+            Ext4RoCompatFeatures::READONLY.0,
+            Ext4RoCompatFeatures::PROJECT.0,
+            Ext4RoCompatFeatures::VERITY.0,
+            Ext4RoCompatFeatures::ORPHAN_PRESENT.0,
+        ];
+
+        for (set_label, flags) in [
+            ("compat", &compat[..]),
+            ("incompat", &incompat[..]),
+            ("ro_compat", &ro_compat[..]),
+        ] {
+            assert_ext4_feature_set_is_distinct(set_label, flags);
+        }
+    }
+
     /// bd-k81lq — Kernel-conformance pin for ext4 reserved-inode and
     /// revision-format constants. Each value is mirrored verbatim from
     /// the Linux kernel header `fs/ext4/ext4.h`. Mismatch would
