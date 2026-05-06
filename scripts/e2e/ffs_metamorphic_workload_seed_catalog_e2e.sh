@@ -80,6 +80,8 @@ BAD_NON_JSON_SOURCE="$E2E_LOG_DIR/metamorphic_bad_source_artifact.txt"
 BAD_NON_JSON_JSON="$E2E_LOG_DIR/metamorphic_bad_non_json_source.json"
 BAD_POINTER_JSON="$E2E_LOG_DIR/metamorphic_bad_source_pointer.json"
 BAD_VALUE_JSON="$E2E_LOG_DIR/metamorphic_bad_source_value.json"
+BAD_INVARIANT_JSON="$E2E_LOG_DIR/metamorphic_bad_invariant.json"
+BAD_INVARIANT_REPORT="$E2E_LOG_DIR/metamorphic_bad_invariant_report.json"
 BAD_RAW="$E2E_LOG_DIR/metamorphic_bad.raw"
 UNIT_TESTS_OK=0
 
@@ -177,7 +179,7 @@ else
 fi
 
 e2e_step "Scenario 5: invalid catalog variants fail closed"
-python3 - "$REPO_ROOT" "$CATALOG_JSON" "$BAD_PERMISSIONED_JSON" "$BAD_SOURCE_JSON" "$BAD_NON_JSON_SOURCE" "$BAD_NON_JSON_JSON" "$BAD_POINTER_JSON" "$BAD_VALUE_JSON" <<'PY'
+python3 - "$REPO_ROOT" "$CATALOG_JSON" "$BAD_PERMISSIONED_JSON" "$BAD_SOURCE_JSON" "$BAD_NON_JSON_SOURCE" "$BAD_NON_JSON_JSON" "$BAD_POINTER_JSON" "$BAD_VALUE_JSON" "$BAD_INVARIANT_JSON" <<'PY'
 import json
 import pathlib
 import sys
@@ -191,6 +193,7 @@ import sys
     bad_non_json_path,
     bad_pointer_path,
     bad_value_path,
+    bad_invariant_path,
 ) = map(pathlib.Path, sys.argv[1:])
 catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
 
@@ -218,10 +221,14 @@ bad_pointer_path.write_text(json.dumps(bad_pointer, indent=2, sort_keys=True) + 
 bad_value = json.loads(json.dumps(catalog))
 bad_value["seeds"][1]["seed_value"] = 9999999
 bad_value_path.write_text(json.dumps(bad_value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+bad_invariant = json.loads(json.dumps(catalog))
+bad_invariant["seeds"][0]["invariant"] = ""
+bad_invariant_path.write_text(json.dumps(bad_invariant, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
 invalid_failures=0
-for bad_catalog in "$BAD_PERMISSIONED_JSON" "$BAD_SOURCE_JSON" "$BAD_NON_JSON_JSON" "$BAD_POINTER_JSON" "$BAD_VALUE_JSON"; do
+for bad_catalog in "$BAD_PERMISSIONED_JSON" "$BAD_SOURCE_JSON" "$BAD_NON_JSON_JSON" "$BAD_POINTER_JSON" "$BAD_VALUE_JSON" "$BAD_INVARIANT_JSON"; do
     if run_cargo_cmd run --quiet -p ffs-harness -- \
         validate-metamorphic-workload-seeds \
         --catalog "$bad_catalog" >"$BAD_RAW" 2>&1; then
@@ -231,10 +238,35 @@ for bad_catalog in "$BAD_PERMISSIONED_JSON" "$BAD_SOURCE_JSON" "$BAD_NON_JSON_JS
     fi
 done
 
-if ((invalid_failures == 5)); then
-    scenario_result "metamorphic_seed_catalog_invalid_variants_rejected" "PASS" "permissioned ack, missing/non-JSON source artifact, source pointer, and source value variants rejected"
+coverage_preserved=0
+if run_cargo_cmd run --quiet -p ffs-harness -- \
+    validate-metamorphic-workload-seeds \
+    --catalog "$BAD_INVARIANT_JSON" \
+    --out "$BAD_INVARIANT_REPORT" >"$BAD_RAW" 2>&1; then
+    cat "$BAD_RAW"
 else
-    scenario_result "metamorphic_seed_catalog_invalid_variants_rejected" "FAIL" "invalid_failures=${invalid_failures}"
+    if python3 - "$BAD_INVARIANT_REPORT" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+if report["valid"]:
+    raise SystemExit("bad invariant report unexpectedly valid")
+if report.get("source_value_verified_count") != report["seed_count"]:
+    raise SystemExit("source value coverage was not preserved for unrelated invariant error")
+if not any("invariant must not be empty" in error for error in report["errors"]):
+    raise SystemExit("bad invariant report did not include invariant error")
+PY
+    then
+        coverage_preserved=1
+    fi
+fi
+
+if ((invalid_failures == 6 && coverage_preserved == 1)); then
+    scenario_result "metamorphic_seed_catalog_invalid_variants_rejected" "PASS" "permissioned ack, missing/non-JSON source artifact, source pointer, source value, and invariant variants rejected"
+else
+    scenario_result "metamorphic_seed_catalog_invalid_variants_rejected" "FAIL" "invalid_failures=${invalid_failures} coverage_preserved=${coverage_preserved}"
 fi
 
 e2e_step "Scenario 6: unit coverage rejects malformed catalog rows"
@@ -245,6 +277,7 @@ if run_cargo_cmd test -p ffs-harness --lib metamorphic_workload_seed_catalog -- 
         "rejects_duplicate_seed_ids" \
         "rejects_missing_source_artifact" \
         "rejects_existing_non_json_source_artifact" \
+        "source_value_coverage_counts_valid_sources_independent_of_row_errors" \
         "rejects_missing_source_value_pointer_target" \
         "rejects_mismatched_numeric_source_value" \
         "accepts_seed_contained_in_source_command_string" \

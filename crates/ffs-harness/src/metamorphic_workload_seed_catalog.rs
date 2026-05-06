@@ -380,7 +380,6 @@ fn validate_seed(
     proof_consumer_vocab: &BTreeSet<&str>,
     errors: &mut Vec<String>,
 ) -> bool {
-    let initial_error_count = errors.len();
     validate_stable_seed_id(&seed.seed_id, errors);
     if !seed.seed_value.is_valid() {
         errors.push(format!(
@@ -435,29 +434,29 @@ fn validate_seed(
             seed.seed_id
         ));
     }
-    validate_source_artifact_and_value(seed, repo_root, errors);
+    let source_value_verified = validate_source_artifact_and_value(seed, repo_root, errors);
     validate_expected_artifacts(seed, errors);
-    errors.len() == initial_error_count
+    source_value_verified
 }
 
 fn validate_source_artifact_and_value(
     seed: &MetamorphicWorkloadSeed,
     repo_root: &Path,
     errors: &mut Vec<String>,
-) {
+) -> bool {
     let Ok(resolved) = resolve_catalog_relative_path(repo_root, &seed.source_artifact) else {
         errors.push(format!(
             "seed {} source_artifact must be a relative path without parent components: {}",
             seed.seed_id, seed.source_artifact
         ));
-        return;
+        return false;
     };
     if !resolved.exists() {
         errors.push(format!(
             "seed {} source_artifact does not exist: {}",
             seed.seed_id, seed.source_artifact
         ));
-        return;
+        return false;
     }
     let source_text = match fs::read_to_string(&resolved) {
         Ok(text) => text,
@@ -466,7 +465,7 @@ fn validate_source_artifact_and_value(
                 "seed {} source_artifact could not be read: {} ({err})",
                 seed.seed_id, seed.source_artifact
             ));
-            return;
+            return false;
         }
     };
     let source_json = match serde_json::from_str::<Value>(&source_text) {
@@ -476,7 +475,7 @@ fn validate_source_artifact_and_value(
                 "seed {} source_artifact is not valid JSON: {} ({err})",
                 seed.seed_id, seed.source_artifact
             ));
-            return;
+            return false;
         }
     };
     let Some(source_value) = source_json.pointer(&seed.source_value_pointer) else {
@@ -484,7 +483,7 @@ fn validate_source_artifact_and_value(
             "seed {} source_value_pointer does not exist in {}: {}",
             seed.seed_id, seed.source_artifact, seed.source_value_pointer
         ));
-        return;
+        return false;
     };
     if !source_value_contains_seed(source_value, &seed.seed_value) {
         errors.push(format!(
@@ -494,7 +493,9 @@ fn validate_source_artifact_and_value(
             seed.source_value_pointer,
             seed.source_artifact
         ));
+        return false;
     }
+    true
 }
 
 fn resolve_catalog_relative_path(repo_root: &Path, raw_path: &str) -> Result<PathBuf> {
@@ -689,6 +690,25 @@ mod tests {
             report
                 .by_proof_consumer
                 .contains_key("swarm_workload_harness")
+        );
+    }
+
+    #[test]
+    fn source_value_coverage_counts_valid_sources_independent_of_row_errors() {
+        let mut catalog = fixture_catalog();
+        catalog.seeds[0].invariant.clear();
+
+        let report = validate_fixture(&catalog);
+
+        assert!(!report.valid);
+        assert_eq!(report.source_value_verified_count, report.seed_count);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("invariant must not be empty")),
+            "expected invariant validation error, got {:?}",
+            report.errors
         );
     }
 
