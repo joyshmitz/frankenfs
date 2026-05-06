@@ -243,6 +243,27 @@ impl IoEngine for PreadPwriteEngine {
 ///
 /// All I/O operates on a `Vec<u8>` buffer, eliminating disk latency
 /// to isolate engine overhead.
+///
+/// # Lock-order invariant (bd-6hopq)
+///
+/// `MemIoEngine` holds two mutexes — `data` and `stats`. The
+/// established lock order is **`data` → `stats`** (the data lock is
+/// the OUTER lock, the stats lock is the INNER lock):
+///
+/// * [`MemIoEngine::submit_batch`] acquires `data` first (held for
+///   the whole batch) and then takes `stats` repeatedly (release-
+///   on-loop-iteration) for every per-op counter update.
+/// * [`MemIoEngine::stats`] and the `Debug` impl take **only**
+///   `stats`, never `data`.
+///
+/// **Any future code path that holds both locks MUST acquire `data`
+/// first.** A path that took `stats` then `data` would create an
+/// AB-BA deadlock the first time it ran concurrently with a
+/// `submit_batch` call. The
+/// `mem_io_engine_no_deadlock_under_concurrent_submit_and_stats`
+/// regression test exercises high-contention concurrent
+/// `submit_batch` + `stats()` calls and asserts no deadlock plus
+/// stats-accumulation correctness.
 pub struct MemIoEngine {
     data: parking_lot::Mutex<Vec<u8>>,
     stats: parking_lot::Mutex<IoEngineStats>,
@@ -855,5 +876,86 @@ mod tests {
             prop_assert_eq!(stats.writes, 1);
             prop_assert_eq!(stats.bytes_written, 0);
         }
+    }
+
+    /// bd-6hopq — Regression for the `MemIoEngine` data → stats
+    /// lock-order invariant.
+    ///
+    /// `submit_batch` holds `data` for the entire batch and takes
+    /// `stats` repeatedly inside the loop. `stats()` and `Debug`
+    /// take only `stats`. Any future path that took `stats` then
+    /// `data` would create an AB-BA deadlock under contention.
+    ///
+    /// This test runs N writers calling `submit_batch` and N
+    /// pollers calling `stats()` concurrently for a fixed duration,
+    /// then asserts:
+    ///
+    ///   1. No thread is stuck in a futex (the joins return).
+    ///   2. The final `stats.writes` count equals the cumulative
+    ///      writes the writers logged. This proves the inner
+    ///      `stats` lock serialized correctly under the outer
+    ///      `data` lock — a regression that violated the order
+    ///      would either deadlock or under-count.
+    #[test]
+    fn mem_io_engine_no_deadlock_under_concurrent_submit_and_stats() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::thread;
+
+        let engine = Arc::new(MemIoEngine::new(64 * 1024));
+        let writers_done = Arc::new(AtomicU64::new(0));
+        const WRITERS: usize = 4;
+        const POLLERS: usize = 4;
+        const WRITES_PER_THREAD: u64 = 256;
+
+        let mut handles = Vec::new();
+        for w in 0..WRITERS {
+            let e = Arc::clone(&engine);
+            let done = Arc::clone(&writers_done);
+            handles.push(thread::spawn(move || {
+                for i in 0..WRITES_PER_THREAD {
+                    let offset = ((w * 1024) as u64 + i % 1024) % (64 * 1024 - 8);
+                    let _ = e.submit_batch(vec![IoOp::Write {
+                        offset,
+                        data: vec![(w as u8); 8],
+                    }]);
+                }
+                done.fetch_add(WRITES_PER_THREAD, Ordering::Relaxed);
+            }));
+        }
+
+        for _ in 0..POLLERS {
+            let e = Arc::clone(&engine);
+            handles.push(thread::spawn(move || {
+                for _ in 0..1024 {
+                    let s = e.stats();
+                    // touching counters proves stats acquired
+                    // without dependency on `data`
+                    let _ = s.writes;
+                    let _ = s.bytes_written;
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("no panic in worker thread");
+        }
+
+        let expected_writes = u64::from(WRITERS as u32) * WRITES_PER_THREAD;
+        let final_stats = engine.stats();
+        assert_eq!(
+            writers_done.load(Ordering::Relaxed),
+            expected_writes,
+            "all writer batches must complete (no deadlock)"
+        );
+        assert_eq!(
+            final_stats.writes, expected_writes,
+            "stats.writes must equal total writes — proves the inner stats \
+             lock serialized correctly under the outer data lock"
+        );
+        assert_eq!(
+            final_stats.batches, expected_writes,
+            "stats.batches must equal total batches"
+        );
     }
 }
