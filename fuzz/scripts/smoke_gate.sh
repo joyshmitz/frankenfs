@@ -77,8 +77,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/cargo-target-fuzz-smoke}"
-export CARGO_TARGET_DIR
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_fuzz_smoke_gate}"
+export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+
+run_remote_cargo() {
+    RCH_LOG_LEVEL="${FFS_FUZZ_RCH_LOG_LEVEL:-error}" \
+        RCH_VISIBILITY="${FFS_FUZZ_RCH_VISIBILITY:-none}" \
+        "${RCH_BIN:-rch}" exec -- cargo "$@"
+}
 
 echo "=== fuzz smoke gate ==="
 echo "  targets:    ${#HIGH_RISK_TARGETS[@]}"
@@ -101,7 +107,7 @@ for target in "${HIGH_RISK_TARGETS[@]}"; do
     target_start=$(date +%s)
 
     # Phase 1: corpus replay (instant; catches regressions on existing seeds).
-    if ! cargo fuzz run "$target" "$corpus" -- -runs=0 >/dev/null 2>&1; then
+    if ! run_remote_cargo run --manifest-path fuzz/Cargo.toml --bin "$target" -- "$corpus" -runs=0 >/dev/null 2>&1; then
         echo "FAIL   $target: corpus replay regressed"
         results+=("{\"target\":\"$target\",\"status\":\"fail\",\"phase\":\"replay\"}")
         failures=$((failures + 1))
@@ -109,8 +115,8 @@ for target in "${HIGH_RISK_TARGETS[@]}"; do
     fi
 
     # Phase 2: small deterministic mutation budget.
-    if ! cargo fuzz run "$target" "$corpus" -- \
-            -runs="$RUNS" -seed="$SEED" -timeout=10 >/dev/null 2>&1; then
+    if ! run_remote_cargo run --manifest-path fuzz/Cargo.toml --bin "$target" -- \
+            "$corpus" -runs="$RUNS" -seed="$SEED" -timeout=10 >/dev/null 2>&1; then
         echo "FAIL   $target: mutation found new crash"
         results+=("{\"target\":\"$target\",\"status\":\"fail\",\"phase\":\"mutate\"}")
         failures=$((failures + 1))
