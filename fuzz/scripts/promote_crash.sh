@@ -4,7 +4,7 @@
 # Workflow:
 #   1. Minimize the crash input using `cargo fuzz tmin`
 #   2. Copy the minimized input to the regression corpus
-#   3. Generate a regression test stub with metadata tags
+#   3. Generate a regression test skeleton with metadata tags
 #
 # Usage:
 #   ./fuzz/scripts/promote_crash.sh <target> <crash_file> [--skip-minimize]
@@ -14,7 +14,7 @@
 #
 # Output:
 #   - Corpus seed copied to tests/fuzz_corpus/
-#   - Regression test stub printed to stdout (paste into test file)
+#   - Regression test skeleton printed to stdout (paste into test file)
 
 set -euo pipefail
 
@@ -62,7 +62,7 @@ DEST="${REPO_ROOT}/tests/fuzz_corpus/${SEED_NAME}"
 cp "$CRASH_FILE" "$DEST"
 log "Corpus seed: $DEST"
 
-# Step 3: Generate regression test stub
+# Step 3: Generate regression test skeleton
 cat <<EOF
 
 /// Regression test promoted from fuzz crash.
@@ -90,5 +90,5 @@ fn ${SEED_NAME}() {
 }
 EOF
 
-log "Done. Paste the test stub above into your regression test file."
+log "Done. Paste the test skeleton above into your regression test file."
 log "Metadata: target=${TARGET} campaign=${TIMESTAMP} commit=${COMMIT_SHA} minimized=${MINIMIZED}"
