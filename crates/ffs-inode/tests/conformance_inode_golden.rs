@@ -48,7 +48,7 @@ fn assert_inode_bitexact(fixture_name: &str, inode_size: usize, fixture: &[u8]) 
 /// - blocks   = 8 @ 0x1C (in 512-byte sectors)
 /// - flags    = 0x0008_0000 (EXT4_EXTENTS_FL) @ 0x20
 /// - version  = 0 @ 0x24
-/// - i_block  = (placeholder extent header) @ 0x28
+/// - i_block  = zeroed 60-byte extent-tree root region @ 0x28
 /// - generation = 0 @ 0x64
 /// - file_acl_lo = 0 @ 0x68
 /// - size_hi  = 0 @ 0x6C
