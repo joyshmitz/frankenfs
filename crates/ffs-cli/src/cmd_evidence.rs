@@ -242,6 +242,8 @@ pub struct EvidenceSummary {
     pub repair_summary: Option<RepairSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pressure_summary: Option<PressureSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contention_summary: Option<ContentionSummary>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -271,6 +273,35 @@ pub struct PressureSummary {
     pub policy_changes: usize,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct ContentionSummary {
+    pub merge_proofs_checked: usize,
+    pub merge_proofs_valid: usize,
+    pub merge_proofs_invalid: usize,
+    pub merges_applied: usize,
+    pub merges_rejected: usize,
+    pub total_merged_blocks: u64,
+    pub total_combined_write_set_bytes: u64,
+    pub policy_switches: usize,
+    pub contention_samples: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_conflict_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_merge_success_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_abort_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_total_commits: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_total_conflicts: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_total_merges: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_total_aborts: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_effective_policy: Option<String>,
+}
+
 /// Mutable accumulators for building an evidence summary.
 #[derive(Default)]
 struct SummaryAccumulator {
@@ -296,6 +327,24 @@ struct SummaryAccumulator {
     flush_batches: usize,
     total_blocks_flushed: u64,
     policy_changes: usize,
+    // Contention
+    merge_proofs_checked: usize,
+    merge_proofs_valid: usize,
+    merge_proofs_invalid: usize,
+    merges_applied: usize,
+    merges_rejected: usize,
+    total_merged_blocks: u64,
+    total_combined_write_set_bytes: u64,
+    policy_switches: usize,
+    contention_samples: usize,
+    latest_conflict_rate: Option<f64>,
+    latest_merge_success_rate: Option<f64>,
+    latest_abort_rate: Option<f64>,
+    latest_total_commits: Option<u64>,
+    latest_total_conflicts: Option<u64>,
+    latest_total_merges: Option<u64>,
+    latest_total_aborts: Option<u64>,
+    latest_effective_policy: Option<String>,
 }
 
 impl SummaryAccumulator {
@@ -351,6 +400,48 @@ impl SummaryAccumulator {
             | EvidenceEventType::RefreshPolicyChanged => {
                 Self::increment_usize(&mut self.policy_changes);
             }
+            EvidenceEventType::MergeProofChecked => {
+                Self::increment_usize(&mut self.merge_proofs_checked);
+                if let Some(proof) = record.merge_proof_checked.as_ref() {
+                    if proof.valid {
+                        Self::increment_usize(&mut self.merge_proofs_valid);
+                    } else {
+                        Self::increment_usize(&mut self.merge_proofs_invalid);
+                    }
+                }
+            }
+            EvidenceEventType::MergeApplied => {
+                Self::increment_usize(&mut self.merges_applied);
+                if let Some(merge) = record.merge_applied.as_ref() {
+                    Self::add_usize_as_u64(&mut self.total_merged_blocks, merge.merged_block_count);
+                    Self::add_usize_as_u64(
+                        &mut self.total_combined_write_set_bytes,
+                        merge.combined_write_set_bytes,
+                    );
+                }
+            }
+            EvidenceEventType::MergeRejected => {
+                Self::increment_usize(&mut self.merges_rejected);
+            }
+            EvidenceEventType::PolicySwitched => {
+                Self::increment_usize(&mut self.policy_switches);
+                if let Some(policy) = record.policy_switched.as_ref() {
+                    self.latest_effective_policy = Some(policy.to_policy.clone());
+                }
+            }
+            EvidenceEventType::ContentionSample => {
+                Self::increment_usize(&mut self.contention_samples);
+                if let Some(sample) = record.contention_sample.as_ref() {
+                    self.latest_conflict_rate = Some(sample.conflict_rate);
+                    self.latest_merge_success_rate = Some(sample.merge_success_rate);
+                    self.latest_abort_rate = Some(sample.abort_rate);
+                    self.latest_total_commits = Some(sample.total_commits);
+                    self.latest_total_conflicts = Some(sample.total_conflicts);
+                    self.latest_total_merges = Some(sample.total_merges);
+                    self.latest_total_aborts = Some(sample.total_aborts);
+                    self.latest_effective_policy = Some(sample.effective_policy.clone());
+                }
+            }
             _ => {}
         }
     }
@@ -363,6 +454,10 @@ impl SummaryAccumulator {
         *total = total.saturating_add(delta);
     }
 
+    fn add_usize_as_u64(total: &mut u64, delta: usize) {
+        *total = total.saturating_add(u64::try_from(delta).unwrap_or(u64::MAX));
+    }
+
     fn finalize(mut self, total: usize, preset: Option<&str>) -> EvidenceSummary {
         self.groups.sort_unstable();
         let has_replay = self.recovery_count > 0 || self.aborts > 0 || self.conflicts > 0;
@@ -373,6 +468,11 @@ impl SummaryAccumulator {
             || self.scrub_cycles > 0;
         let has_pressure =
             self.backpressure_events > 0 || self.flush_batches > 0 || self.policy_changes > 0;
+        let has_contention = self.merge_proofs_checked > 0
+            || self.merges_applied > 0
+            || self.merges_rejected > 0
+            || self.policy_switches > 0
+            || self.contention_samples > 0;
 
         EvidenceSummary {
             total_records: total,
@@ -409,6 +509,29 @@ impl SummaryAccumulator {
                     flush_batches: self.flush_batches,
                     total_blocks_flushed: self.total_blocks_flushed,
                     policy_changes: self.policy_changes,
+                })
+            } else {
+                None
+            },
+            contention_summary: if has_contention {
+                Some(ContentionSummary {
+                    merge_proofs_checked: self.merge_proofs_checked,
+                    merge_proofs_valid: self.merge_proofs_valid,
+                    merge_proofs_invalid: self.merge_proofs_invalid,
+                    merges_applied: self.merges_applied,
+                    merges_rejected: self.merges_rejected,
+                    total_merged_blocks: self.total_merged_blocks,
+                    total_combined_write_set_bytes: self.total_combined_write_set_bytes,
+                    policy_switches: self.policy_switches,
+                    contention_samples: self.contention_samples,
+                    latest_conflict_rate: self.latest_conflict_rate,
+                    latest_merge_success_rate: self.latest_merge_success_rate,
+                    latest_abort_rate: self.latest_abort_rate,
+                    latest_total_commits: self.latest_total_commits,
+                    latest_total_conflicts: self.latest_total_conflicts,
+                    latest_total_merges: self.latest_total_merges,
+                    latest_total_aborts: self.latest_total_aborts,
+                    latest_effective_policy: self.latest_effective_policy,
                 })
             } else {
                 None
@@ -489,6 +612,46 @@ fn print_summary(summary: &EvidenceSummary) {
             pressure.flush_batches, pressure.total_blocks_flushed
         );
         println!("    Policy changes: {}", pressure.policy_changes);
+    }
+
+    if let Some(contention) = summary.contention_summary.as_ref() {
+        println!();
+        println!("  Contention:");
+        println!(
+            "    Merge proofs: {} checked, {} valid, {} invalid",
+            contention.merge_proofs_checked,
+            contention.merge_proofs_valid,
+            contention.merge_proofs_invalid
+        );
+        println!(
+            "    Merges: {} applied ({} blocks, {} bytes), {} rejected",
+            contention.merges_applied,
+            contention.total_merged_blocks,
+            contention.total_combined_write_set_bytes,
+            contention.merges_rejected
+        );
+        println!(
+            "    Policy switches: {}  Samples: {}",
+            contention.policy_switches, contention.contention_samples
+        );
+        if let (Some(conflict_rate), Some(merge_success_rate), Some(abort_rate), Some(commits)) = (
+            contention.latest_conflict_rate,
+            contention.latest_merge_success_rate,
+            contention.latest_abort_rate,
+            contention.latest_total_commits,
+        ) {
+            let policy = contention
+                .latest_effective_policy
+                .as_deref()
+                .unwrap_or("unknown");
+            println!(
+                "    Latest sample: conflict_rate={conflict_rate:.4} \
+merge_success={merge_success_rate:.4} abort_rate={abort_rate:.4} \
+commits={commits} policy={policy}"
+            );
+        } else if let Some(policy) = contention.latest_effective_policy.as_ref() {
+            println!("    Latest policy: {policy}");
+        }
     }
 }
 

@@ -4,7 +4,7 @@
 # Validates operator-oriented evidence query presets and summary views.
 #
 # Scenarios:
-# 1. CLI parses --preset flag for all 3 presets
+# 1. CLI parses --preset flag for all 4 ledger presets
 # 2. CLI parses --summary flag
 # 3. Preset event type definitions exist in cmd_evidence.rs
 # 4. Summary struct has required fields (JSON schema stability)
@@ -55,21 +55,21 @@ CLI_SRC="crates/ffs-cli/src/cmd_evidence.rs"
 MAIN_SRC="crates/ffs-cli/src/main.rs"
 
 #######################################
-# Scenario 1: All 3 presets defined
+# Scenario 1: All 4 ledger presets defined
 #######################################
 e2e_step "Scenario 1: Preset definitions present"
 
 PRESETS_FOUND=0
-for preset in "replay-anomalies" "repair-failures" "pressure-transitions"; do
+for preset in "replay-anomalies" "repair-failures" "pressure-transitions" "contention"; do
     if grep -q "\"${preset}\"" "$CLI_SRC"; then
         PRESETS_FOUND=$((PRESETS_FOUND + 1))
     fi
 done
 
-if [[ $PRESETS_FOUND -eq 3 ]]; then
-    scenario_result "evidence_presets_all_defined" "PASS" "All 3 presets defined"
+if [[ $PRESETS_FOUND -eq 4 ]]; then
+    scenario_result "evidence_presets_all_defined" "PASS" "All 4 ledger presets defined"
 else
-    scenario_result "evidence_presets_all_defined" "FAIL" "Only ${PRESETS_FOUND}/3 presets found"
+    scenario_result "evidence_presets_all_defined" "FAIL" "Only ${PRESETS_FOUND}/4 ledger presets found"
 fi
 
 #######################################
@@ -78,16 +78,16 @@ fi
 e2e_step "Scenario 2: Summary struct with required fields"
 
 SUMMARY_FIELDS=0
-for field in "total_records" "event_type_counts" "time_span_ns" "block_groups_seen" "preset" "replay_summary" "repair_summary" "pressure_summary"; do
+for field in "total_records" "event_type_counts" "time_span_ns" "block_groups_seen" "preset" "replay_summary" "repair_summary" "pressure_summary" "contention_summary"; do
     if grep -q "pub $field" "$CLI_SRC"; then
         SUMMARY_FIELDS=$((SUMMARY_FIELDS + 1))
     fi
 done
 
-if [[ $SUMMARY_FIELDS -ge 8 ]]; then
-    scenario_result "evidence_summary_struct_fields" "PASS" "EvidenceSummary has ${SUMMARY_FIELDS}/8 fields"
+if [[ $SUMMARY_FIELDS -ge 9 ]]; then
+    scenario_result "evidence_summary_struct_fields" "PASS" "EvidenceSummary has ${SUMMARY_FIELDS}/9 fields"
 else
-    scenario_result "evidence_summary_struct_fields" "FAIL" "Only ${SUMMARY_FIELDS}/8 summary fields found"
+    scenario_result "evidence_summary_struct_fields" "FAIL" "Only ${SUMMARY_FIELDS}/9 summary fields found"
 fi
 
 #######################################

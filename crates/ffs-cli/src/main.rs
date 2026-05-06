@@ -8515,6 +8515,65 @@ mod tests {
     }
 
     #[test]
+    fn evidence_summary_aggregates_contention_rollup() {
+        let ledger = concat!(
+            "{\"timestamp_ns\":100,\"event_type\":\"merge_proof_checked\",\"block_group\":0,",
+            "\"merge_proof_checked\":{\"txn_id\":11,\"block_id\":7,",
+            "\"proof_variant\":\"AppendOnly\",\"valid\":true}}\n",
+            "{\"timestamp_ns\":200,\"event_type\":\"merge_proof_checked\",\"block_group\":0,",
+            "\"merge_proof_checked\":{\"txn_id\":12,\"block_id\":8,",
+            "\"proof_variant\":\"AppendOnly\",\"valid\":false,",
+            "\"rejection_reason\":\"overlap\"}}\n",
+            "{\"timestamp_ns\":300,\"event_type\":\"merge_applied\",\"block_group\":0,",
+            "\"merge_applied\":{\"txn_id\":13,\"merged_block_count\":2,",
+            "\"combined_write_set_bytes\":4096,\"proof_variant\":\"AppendOnly\"}}\n",
+            "{\"timestamp_ns\":400,\"event_type\":\"merge_rejected\",\"block_group\":0,",
+            "\"merge_rejected\":{\"txn_id\":14,\"block_id\":9,",
+            "\"proof_variant\":\"AppendOnly\",\"reason\":\"merge_validation_failed\"}}\n",
+            "{\"timestamp_ns\":500,\"event_type\":\"policy_switched\",\"block_group\":0,",
+            "\"policy_switched\":{\"from_policy\":\"Strict\",\"to_policy\":\"SafeMerge\",",
+            "\"expected_loss_delta\":0.125,\"trigger_reason\":\"contention_rate_change\"}}\n",
+            "{\"timestamp_ns\":600,\"event_type\":\"contention_sample\",\"block_group\":0,",
+            "\"contention_sample\":{\"conflict_rate\":0.25,",
+            "\"merge_success_rate\":0.5,\"abort_rate\":0.125,",
+            "\"total_commits\":101,\"total_conflicts\":25,",
+            "\"total_merges\":12,\"total_aborts\":3,",
+            "\"effective_policy\":\"SafeMerge\"}}\n",
+        );
+        with_temp_image_path(ledger.as_bytes(), |path| {
+            let records =
+                load_evidence_records(&path, None, None, Some("contention")).expect("load");
+            let summary = crate::cmd_evidence::build_summary_for_test(&records, Some("contention"));
+            let contention = summary
+                .contention_summary
+                .as_ref()
+                .expect("contention summary");
+
+            assert_eq!(summary.total_records, 6);
+            assert_eq!(contention.merge_proofs_checked, 2);
+            assert_eq!(contention.merge_proofs_valid, 1);
+            assert_eq!(contention.merge_proofs_invalid, 1);
+            assert_eq!(contention.merges_applied, 1);
+            assert_eq!(contention.merges_rejected, 1);
+            assert_eq!(contention.total_merged_blocks, 2);
+            assert_eq!(contention.total_combined_write_set_bytes, 4096);
+            assert_eq!(contention.policy_switches, 1);
+            assert_eq!(contention.contention_samples, 1);
+            assert_eq!(contention.latest_conflict_rate, Some(0.25));
+            assert_eq!(contention.latest_merge_success_rate, Some(0.5));
+            assert_eq!(contention.latest_abort_rate, Some(0.125));
+            assert_eq!(contention.latest_total_commits, Some(101));
+            assert_eq!(contention.latest_total_conflicts, Some(25));
+            assert_eq!(contention.latest_total_merges, Some(12));
+            assert_eq!(contention.latest_total_aborts, Some(3));
+            assert_eq!(
+                contention.latest_effective_policy.as_deref(),
+                Some("SafeMerge")
+            );
+        });
+    }
+
+    #[test]
     fn evidence_summary_json_schema_has_required_fields() {
         let ledger = "{\"timestamp_ns\":100,\"event_type\":\"repair_failed\",\"block_group\":1}\n";
         with_temp_image_path(ledger.as_bytes(), |path| {
@@ -8531,6 +8590,7 @@ mod tests {
             // Conditional fields omitted when empty
             assert!(json_val.get("replay_summary").is_none());
             assert!(json_val.get("pressure_summary").is_none());
+            assert!(json_val.get("contention_summary").is_none());
         });
     }
 
