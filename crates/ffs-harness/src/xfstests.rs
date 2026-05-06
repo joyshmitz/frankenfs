@@ -787,6 +787,13 @@ pub fn validate_xfstests_failure_triage_report(
             ));
         }
     }
+    let actual_disposition_counts = failure_triage_disposition_counts(report);
+    if report.disposition_counts != actual_disposition_counts {
+        errors.push(format!(
+            "xfstests failure triage disposition_counts mismatch: declared={:?} actual={actual_disposition_counts:?}",
+            report.disposition_counts
+        ));
+    }
     let mut duplicate_keys = BTreeSet::new();
     for bead in &report.proposed_beads {
         validate_proposed_failure_bead(bead, &mut duplicate_keys, &mut errors);
@@ -1895,6 +1902,21 @@ fn disposition_counts(cases: &[XfstestsBaselineCase]) -> BTreeMap<String, usize>
     let mut counts = BTreeMap::new();
     for case in cases {
         *counts.entry(case.status.as_str().to_owned()).or_default() += 1;
+    }
+    counts
+}
+
+fn failure_triage_disposition_counts(
+    report: &XfstestsFailureTriageReport,
+) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for bead in &report.proposed_beads {
+        *counts
+            .entry(XfstestsBaselineRowStatus::Failed.as_str().to_owned())
+            .or_default() += bead.related_test_ids.len();
+    }
+    for excluded in &report.excluded_rows {
+        *counts.entry(excluded.status.clone()).or_default() += 1;
     }
     counts
 }
@@ -3459,6 +3481,41 @@ generic/001  2s ... pass\n";
                 .excluded_rows
                 .iter()
                 .any(|row| row.reason.contains("unsupported-scope"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failure_triage_rejects_disposition_count_drift() -> Result<()> {
+        let tmp = tempdir()?;
+        let raw = tmp.path().join("check.log");
+        fs::write(
+            &raw,
+            "generic/001 failed EIO\ngeneric/002 failed EIO\next4/001 host blocked\n",
+        )?;
+        let mut first = baseline_case("generic/001", XfstestsBaselineRowStatus::Failed);
+        first.not_run_reason = Some("EIO after fsync boundary".to_owned());
+        let mut second = baseline_case("generic/002", XfstestsBaselineRowStatus::Failed);
+        second.not_run_reason = Some("EIO after fsync boundary".to_owned());
+        let mut host = baseline_case("ext4/001", XfstestsBaselineRowStatus::HostBlocked);
+        host.classification = "environment_blocked".to_owned();
+        let manifest = manifest_with_cases(&raw, vec![first, second, host]);
+        let mut report = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
+            triage_id: "triage-fixture",
+            baseline_manifest_path: tmp.path().join("baseline_manifest.json").as_path(),
+            baseline_manifest: &manifest,
+            reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh",
+        })?;
+        report.disposition_counts.insert("failed".to_owned(), 1);
+        report.disposition_counts.insert("passed".to_owned(), 1);
+
+        let errors = validate_xfstests_failure_triage_report(&report);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("disposition_counts mismatch")),
+            "expected disposition count mismatch error, got {errors:#?}"
         );
         Ok(())
     }
