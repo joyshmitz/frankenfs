@@ -24,6 +24,14 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_fuzz_targets_e2e}"
+export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+
+run_remote_cargo() {
+    RCH_LOG_LEVEL="${FFS_FUZZ_RCH_LOG_LEVEL:-error}" \
+        RCH_VISIBILITY="${FFS_FUZZ_RCH_VISIBILITY:-none}" \
+        "${RCH_BIN:-rch}" exec -- cargo "$@"
+}
 
 mapfile -t EXPECTED_TARGETS < <(
     find fuzz/fuzz_targets -maxdepth 1 -name '*.rs' -printf '%f\n' \
@@ -50,22 +58,20 @@ scenario_result() {
 e2e_init "ffs_fuzz_targets"
 
 #######################################
-# Scenario 1: cargo fuzz list shows all expected targets
+# Scenario 1: fuzz target manifest registers all expected targets
 #######################################
 e2e_step "Scenario 1: Verify fuzz target listing"
 
-FUZZ_LIST_OUTPUT=$(cargo fuzz list --fuzz-dir fuzz 2>&1 || true)
 ALL_FOUND=true
 for target in "${EXPECTED_TARGETS[@]}"; do
-    if ! echo "$FUZZ_LIST_OUTPUT" | grep -q "^${target}$"; then
+    if ! grep -Eq "^[[:space:]]*name = \"${target}\"$" "fuzz/Cargo.toml"; then
         ALL_FOUND=false
-        scenario_result "fuzz_list_${target}" "FAIL" "Target '${target}' not found in cargo fuzz list output"
+        scenario_result "fuzz_list_${target}" "FAIL" "Target '${target}' not registered in fuzz/Cargo.toml"
     fi
 done
 
 if [[ "$ALL_FOUND" == "true" ]]; then
-    TARGET_COUNT=$(echo "$FUZZ_LIST_OUTPUT" | wc -l)
-    scenario_result "fuzz_list_all" "PASS" "All ${TARGET_COUNT} expected fuzz targets found"
+    scenario_result "fuzz_list_all" "PASS" "All ${#EXPECTED_TARGETS[@]} expected fuzz targets are registered"
 else
     scenario_result "fuzz_list_all" "FAIL" "Some expected fuzz targets missing"
 fi
@@ -76,7 +82,7 @@ fi
 e2e_step "Scenario 2: Build all fuzz targets"
 
 BUILD_LOG=$(mktemp)
-if cargo fuzz build --fuzz-dir fuzz >"$BUILD_LOG" 2>&1; then
+if run_remote_cargo build --manifest-path fuzz/Cargo.toml --bins >"$BUILD_LOG" 2>&1; then
     scenario_result "fuzz_build" "PASS" "All fuzz targets compiled successfully"
 else
     scenario_result "fuzz_build" "FAIL" "Fuzz target build failed; see $BUILD_LOG"
@@ -93,7 +99,7 @@ e2e_step "Scenario 3: Smoke-run fuzz targets"
 
 for target in "${EXPECTED_TARGETS[@]}"; do
     SMOKE_LOG=$(mktemp)
-    if cargo fuzz run "$target" --fuzz-dir fuzz -- -runs=100 -max_total_time=10 >"$SMOKE_LOG" 2>&1; then
+    if run_remote_cargo run --manifest-path fuzz/Cargo.toml --bin "$target" -- -runs=100 -max_total_time=10 >"$SMOKE_LOG" 2>&1; then
         scenario_result "fuzz_smoke_${target}" "PASS" "100 iterations completed without crash"
     else
         EXIT_CODE=$?
@@ -171,7 +177,7 @@ fi
 e2e_step "Scenario 7: Dictionary coverage improvement"
 
 DICT_LOG=$(mktemp)
-if cargo fuzz run fuzz_ext4_metadata --fuzz-dir fuzz -- -runs=200 -max_total_time=10 -dict=fuzz/dictionaries/ext4.dict >"$DICT_LOG" 2>&1; then
+if run_remote_cargo run --manifest-path fuzz/Cargo.toml --bin fuzz_ext4_metadata -- -runs=200 -max_total_time=10 -dict=fuzz/dictionaries/ext4.dict >"$DICT_LOG" 2>&1; then
     # Check that ManualDict was used (indicates dictionary is actively helping)
     if grep -q "ManualDict\|Dict" "$DICT_LOG"; then
         scenario_result "fuzz_dict_coverage" "PASS" "Dictionary tokens actively used during fuzzing"

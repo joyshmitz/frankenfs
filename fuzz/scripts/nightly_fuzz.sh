@@ -40,9 +40,21 @@ done
 CAMPAIGN_ID="nightly_$(date +%Y%m%d_%H%M%S)"
 RESULTS_ROOT="${FUZZ_ARTIFACTS_DIR:-$FUZZ_DIR/campaigns}"
 RESULTS_DIR="$RESULTS_ROOT/$CAMPAIGN_ID"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_nightly_fuzz}"
+export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 mkdir -p "$RESULTS_DIR"
 
-mapfile -t TARGETS < <(cargo fuzz list --fuzz-dir fuzz | sed '/^$/d' | sort)
+run_remote_cargo() {
+    RCH_LOG_LEVEL="${FFS_FUZZ_RCH_LOG_LEVEL:-error}" \
+        RCH_VISIBILITY="${FFS_FUZZ_RCH_VISIBILITY:-none}" \
+        "${RCH_BIN:-rch}" exec -- cargo "$@"
+}
+
+mapfile -t TARGETS < <(
+    find fuzz/fuzz_targets -maxdepth 1 -name '*.rs' -printf '%f\n' \
+        | sed 's/\.rs$//' \
+        | sort
+)
 
 echo "=== Nightly Fuzz Campaign: $CAMPAIGN_ID ==="
 echo "Targets: ${#TARGETS[@]}"
@@ -63,18 +75,18 @@ for target in "${TARGETS[@]}"; do
     TARGET_START=$(date +%s)
     TARGET_RC=0
 
-    DICT_FLAG=""
+    DICT_ARGS=()
     if [[ "$target" == *ext4* ]]; then
-        DICT_FLAG="-dict=fuzz/dictionaries/ext4.dict"
+        DICT_ARGS=(-dict=fuzz/dictionaries/ext4.dict)
     elif [[ "$target" == *btrfs* ]]; then
-        DICT_FLAG="-dict=fuzz/dictionaries/btrfs.dict"
+        DICT_ARGS=(-dict=fuzz/dictionaries/btrfs.dict)
     fi
 
-    cargo fuzz run "$target" \
+    run_remote_cargo run --manifest-path fuzz/Cargo.toml --bin "$target" \
         -- \
         -max_total_time="$DURATION" \
         -max_len=65536 \
-        $DICT_FLAG \
+        "${DICT_ARGS[@]}" \
         > "$TARGET_LOG" 2>&1 || TARGET_RC=$?
 
     TARGET_END=$(date +%s)
