@@ -227,9 +227,10 @@ pub fn analyze_deferred_parity_audit(
     docs: &[(String, String)],
 ) -> DeferredParityAuditReport {
     let mut errors = Vec::new();
+    let issue_statuses = issue_status_by_id(issues_jsonl, &mut errors);
     let findings = detect_deferred_closure_findings(issues_jsonl, &mut errors);
     let registry_rows = parse_registry_rows(report_markdown, &mut errors);
-    validate_registry_rows(&registry_rows, &findings, &mut errors);
+    validate_registry_rows(&registry_rows, &findings, &issue_statuses, &mut errors);
     let docs_claims = detect_docs_claims(docs);
     validate_docs_claims(&registry_rows, &docs_claims, &mut errors);
 
@@ -281,6 +282,29 @@ fn detect_deferred_closure_findings(
             finding_from_issue(&value)
         })
         .collect()
+}
+
+fn issue_status_by_id(issues_jsonl: &str, errors: &mut Vec<String>) -> BTreeMap<String, String> {
+    let mut statuses = BTreeMap::new();
+    for (line_no, line) in issues_jsonl.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value = match serde_json::from_str::<Value>(line) {
+            Ok(value) => value,
+            Err(err) => {
+                errors.push(format!("invalid issue json at line {}: {err}", line_no + 1));
+                continue;
+            }
+        };
+        let id = string_field(&value, "id");
+        let status = string_field(&value, "status");
+        if !id.is_empty() && !status.is_empty() {
+            statuses.insert(id, status);
+        }
+    }
+    statuses
 }
 
 fn finding_from_issue(value: &Value) -> Option<DeferredClosureFinding> {
@@ -431,6 +455,7 @@ fn row_from_table_line(line: &str, errors: &mut Vec<String>) -> Option<DeferredP
 fn validate_registry_rows(
     rows: &[DeferredParityAuditRow],
     findings: &[DeferredClosureFinding],
+    issue_status_by_id: &BTreeMap<String, String>,
     errors: &mut Vec<String>,
 ) {
     let mut seen = BTreeSet::new();
@@ -441,6 +466,7 @@ fn validate_registry_rows(
 
     for row in rows {
         validate_row_shape(row, &mut seen, errors);
+        validate_active_follow_up_status(row, issue_status_by_id, errors);
         if let Some(finding) = finding_by_id.get(row.source_bead_id.as_str()) {
             if row.gap_class != finding.gap_class {
                 errors.push(format!(
@@ -458,6 +484,46 @@ fn validate_registry_rows(
             ));
         }
     }
+}
+
+fn validate_active_follow_up_status(
+    row: &DeferredParityAuditRow,
+    issue_status_by_id: &BTreeMap<String, String>,
+    errors: &mut Vec<String>,
+) {
+    if row.decision != "active-follow-up" {
+        return;
+    }
+
+    let linked_ids = linked_bead_ids(&row.linked_follow_up_or_non_goal);
+    if linked_ids.is_empty() {
+        errors.push(format!(
+            "row {} active-follow-up must link at least one bead id",
+            row.row_id
+        ));
+        return;
+    }
+
+    for linked_id in linked_ids {
+        match issue_status_by_id.get(linked_id) {
+            Some(status) if status == "open" || status == "in_progress" => {}
+            Some(status) => errors.push(format!(
+                "row {} active-follow-up {} is {status}; use validated-artifact, docs-downgrade, release-gate-downgrade, or explicit-non-goal instead of stale active ownership",
+                row.row_id, linked_id
+            )),
+            None => errors.push(format!(
+                "row {} active-follow-up {} is missing from tracker",
+                row.row_id, linked_id
+            )),
+        }
+    }
+}
+
+fn linked_bead_ids(value: &str) -> Vec<&str> {
+    value
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '.' || ch == '_'))
+        .filter(|part| part.starts_with("bd-"))
+        .collect()
 }
 
 fn validate_row_shape(
@@ -652,6 +718,10 @@ mod tests {
             r#"{"id":"bd-nzv3.24","title":"btrfs multi-device RAID corpus","status":"closed","labels":["btrfs","multidevice","raid"],"close_reason":"Multi-image layout corpus deferred — single-device tests cover the read path."}"#,
             r#"{"id":"bd-nzv3.15","title":"btrfs send/receive export","status":"closed","labels":["btrfs","send-receive"],"close_reason":"Send stream parse implemented. Full export deferred."}"#,
             r#"{"id":"bd-nzv3.21","title":"ext4 casefold corpus","status":"closed","labels":["casefold","ext4"],"close_reason":"Casefold adversarial fixtures: basic coverage exists."}"#,
+            r#"{"id":"bd-ch373","title":"btrfs multi-device follow-up","status":"open","labels":["btrfs","multidevice"]}"#,
+            r#"{"id":"bd-naww5","title":"btrfs send/receive follow-up","status":"open","labels":["btrfs","send-receive"]}"#,
+            r#"{"id":"bd-9er6s","title":"ext4 casefold follow-up","status":"in_progress","labels":["casefold","ext4"]}"#,
+            r#"{"id":"bd-mpcse","title":"tiered support-state accounting","status":"open","labels":["parity","docs"]}"#,
             r#"{"id":"bd-ok","title":"validated thing","status":"closed","labels":["docs"],"close_reason":"Validated with fresh artifacts."}"#,
         ]
         .join("\n")
@@ -747,6 +817,49 @@ mod tests {
                 .errors
                 .iter()
                 .any(|error| error.contains("audit_run_id"))
+        );
+    }
+
+    #[test]
+    fn active_follow_up_with_closed_tracker_row_fails() {
+        let issues = fixture_issues().replace(
+            r#""id":"bd-ch373","title":"btrfs multi-device follow-up","status":"open""#,
+            r#""id":"bd-ch373","title":"btrfs multi-device follow-up","status":"closed""#,
+        );
+        let report = analyze_deferred_parity_audit(
+            &issues,
+            &fixture_report(),
+            &[("README.md".to_owned(), "Tracked V1 parity 100%".to_owned())],
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("row D1 active-follow-up bd-ch373 is closed")),
+            "expected stale active-follow-up error, got {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn validated_artifact_accepts_closed_tracker_row() {
+        let issues = fixture_issues().replace(
+            r#""id":"bd-ch373","title":"btrfs multi-device follow-up","status":"open""#,
+            r#""id":"bd-ch373","title":"btrfs multi-device follow-up","status":"closed""#,
+        );
+        let report_markdown = fixture_report().replace(
+            "active-follow-up | bd-ch373",
+            "validated-artifact | bd-ch373",
+        );
+        let report = analyze_deferred_parity_audit(
+            &issues,
+            &report_markdown,
+            &[("README.md".to_owned(), "Tracked V1 parity 100%".to_owned())],
+        );
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
         );
     }
 
