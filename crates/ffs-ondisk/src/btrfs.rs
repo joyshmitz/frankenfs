@@ -4305,7 +4305,7 @@ mod tests {
             use chunk_type_flags::{
                 BTRFS_BLOCK_GROUP_DUP, BTRFS_BLOCK_GROUP_RAID0, BTRFS_BLOCK_GROUP_RAID1,
                 BTRFS_BLOCK_GROUP_RAID1C3, BTRFS_BLOCK_GROUP_RAID1C4, BTRFS_BLOCK_GROUP_RAID5,
-                BTRFS_BLOCK_GROUP_RAID6, BTRFS_BLOCK_GROUP_RAID10, RAID_MASK,
+                BTRFS_BLOCK_GROUP_RAID6, RAID_MASK,
             };
             // Carry arbitrary non-RAID bits through (covered by MR2,
             // but proves the cascade is robust to noise).
@@ -4521,10 +4521,7 @@ mod tests {
         //     __le16 sub_stripes;        //  2
         // = 48 bytes packed (excluding stripe[]).
         assert_eq!(BTRFS_CHUNK_FIXED_SIZE, 48, "btrfs_chunk fixed prefix");
-        assert_eq!(
-            BTRFS_CHUNK_FIXED_SIZE,
-            8 + 8 + 8 + 8 + 4 + 4 + 4 + 2 + 2
-        );
+        assert_eq!(BTRFS_CHUNK_FIXED_SIZE, 8 + 8 + 8 + 8 + 4 + 4 + 4 + 2 + 2);
 
         // struct btrfs_dev_item {
         //     __le64 devid;          //  8

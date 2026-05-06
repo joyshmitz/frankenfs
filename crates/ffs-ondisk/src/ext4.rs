@@ -12942,8 +12942,8 @@ mod tests {
         }
 
         // bd-j0zo3 — Metamorphic relations for Ext4Extent::actual_len
-        // and the unwritten-extent split-bit encoding. Each MR pins a
-        // specific algebraic law of the kernel's
+        // and the unwritten-extent split-bit encoding. These pin
+        // distinct algebraic laws of the kernel's
         // [actual_len][unwritten_bit] u16 layout.
 
         /// MR1 — actual_len boundary: raw_len == EXT_INIT_MAX_LEN
@@ -12992,34 +12992,38 @@ mod tests {
             actual in 1_u16..=EXT_INIT_MAX_LEN,
             unwritten in any::<bool>(),
         ) {
-            let raw_len = if unwritten {
-                actual + EXT_INIT_MAX_LEN
-            } else {
-                actual
-            };
             // EXT_INIT_MAX_LEN = 0x8000, so the unwritten-with-max-actual
             // case raw_len = 0x8000 + 0x8000 overflows u16. Skip it —
             // the kernel never produces that combination because an
             // unwritten extent strictly requires raw_len > EXT_INIT_MAX_LEN
             // and the actual_len for unwritten is bounded by 0x7FFF.
             prop_assume!(!(unwritten && actual == EXT_INIT_MAX_LEN));
+            let raw_len = if unwritten {
+                actual + EXT_INIT_MAX_LEN
+            } else {
+                actual
+            };
             let ext = Ext4Extent { logical_block: 0, raw_len, physical_start: 0 };
             prop_assert_eq!(ext.actual_len(), actual);
             prop_assert_eq!(ext.is_unwritten(), unwritten);
         }
 
-        /// MR5 — actual_len bound: actual_len <= EXT_INIT_MAX_LEN
-        /// for ALL u16 raw_len inputs. A regression that returned
-        /// raw_len directly for the unwritten branch would break
-        /// this on raw_len > 0xFFFF... wait, it wouldn't because
-        /// u16 caps at 0xFFFF. But returning raw_len without
-        /// subtracting EXT_INIT_MAX_LEN for the unwritten branch
-        /// (e.g. an off-by-one in the if/else) would yield up to
-        /// 0xFFFF which exceeds the bound, breaking the MR.
+        /// MR5/MR6 — actual_len is deterministic, bounded by
+        /// EXT_INIT_MAX_LEN for every raw u16 encoding, and reconstructing
+        /// raw_len from (is_unwritten, actual_len) recovers the source bits.
         #[test]
         fn ext4_proptest_extent_actual_len_is_bounded(raw_len in any::<u16>()) {
             let ext = Ext4Extent { logical_block: 0, raw_len, physical_start: 0 };
-            prop_assert!(ext.actual_len() <= EXT_INIT_MAX_LEN);
+            let actual_len = ext.actual_len();
+            prop_assert_eq!(actual_len, ext.actual_len());
+            prop_assert!(actual_len <= EXT_INIT_MAX_LEN);
+
+            let reconstructed_raw_len = if ext.is_unwritten() {
+                actual_len + EXT_INIT_MAX_LEN
+            } else {
+                actual_len
+            };
+            prop_assert_eq!(reconstructed_raw_len, raw_len);
         }
 
         // ── ext4_chksum incremental chaining ─────────────────────────
@@ -13684,8 +13688,8 @@ mod tests {
         fn ext4_proptest_casefold_collide_is_transitive_on_ascii_case_variants(
             a in proptest::collection::vec(any::<u8>(), 0..=64),
         ) {
-            let b: Vec<u8> = a.iter().map(|byte| byte.to_ascii_uppercase()).collect();
-            let c: Vec<u8> = a.iter().map(|byte| byte.to_ascii_lowercase()).collect();
+            let b: Vec<u8> = a.iter().map(u8::to_ascii_uppercase).collect();
+            let c: Vec<u8> = a.iter().map(u8::to_ascii_lowercase).collect();
             let ab = ext4_casefold_names_collide(&a, &b);
             let bc = ext4_casefold_names_collide(&b, &c);
             let ac = ext4_casefold_names_collide(&a, &c);
