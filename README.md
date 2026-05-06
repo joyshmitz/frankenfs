@@ -1371,7 +1371,7 @@ These items sit outside the tracked 97-row parity denominator and are the curren
 |------|------|----------------|
 | `bd-rchk1` | Docs/status reconciliation | Keep canonical docs explicit that tracked parity is complete while operational readiness work remains |
 | `bd-rchk2` | btrfs delayed refs | Complete: `DISC-004` accepted as a scoped V1 model with retry-safe failed-flush and overflow coverage |
-| `bd-rchk3` | xfstests | Fresh 2026-05-01 subset/regression gate recorded; real execution is blocked by unbuilt xfstests helpers and a dpkg lock blocking `xfslibs-dev`/`libaio-dev` install |
+| `bd-rchk3` | xfstests | 2026-05-05 explicit-path preflight passes and safe dry-run artifacts are recorded; real product pass/fail evidence remains blocked on permissioned execution with `XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices` |
 | `bd-rchk4` | Mounted FUSE CI | Use the permissioned lane documented in `scripts/e2e/README.md` to run critical mounted ext4/btrfs paths with structured capability and cleanup artifacts |
 | `bd-rchk5` | Performance | Complete: dated 2026-05-03 core and mounted throughput/latency artifacts, host/runtime metadata, delta closeout, no-reference decisions, and quarantined mounted latency claims are recorded |
 | `bd-rchk6` | Mounted self-healing | Automatic mounted repair is implemented for explicit `--background-repair --background-scrub-ledger <jsonl>` mounts; read-write repair uses the mounted MVCC repair-writeback serializer and stale-snapshot rejection |
