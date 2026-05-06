@@ -717,6 +717,27 @@ mod tests {
     }
 
     #[test]
+    fn rejects_existing_non_json_source_artifact() {
+        let temp = tempfile::tempdir().expect("tempdir can be created");
+        fs::write(temp.path().join("non_json_source.txt"), "seed: 64001\n")
+            .expect("non-JSON source artifact can be written");
+
+        let mut catalog = fixture_catalog();
+        catalog.seeds.truncate(1);
+        catalog.seeds[0].source_artifact = "non_json_source.txt".to_owned();
+        catalog.seeds[0].source_value_pointer = "/seed".to_owned();
+
+        let report =
+            validate_metamorphic_workload_seed_catalog_with_repo_root(&catalog, temp.path());
+        assert!(!report.valid);
+        assert_eq!(report.source_value_verified_count, 0);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("source_artifact is not valid JSON")
+                && error.contains("seed_workload_append_truncate_64001")
+        }));
+    }
+
+    #[test]
     fn rejects_missing_source_value_pointer_target() {
         let mut catalog = fixture_catalog();
         catalog.seeds[0].source_value_pointer = "/scenarios/3/missing_seed_field".to_owned();
