@@ -343,16 +343,13 @@ fn create_ext4_inline_data_test_image(dir: &Path, inode_fixture: &str) -> PathBu
     image
 }
 
-#[allow(clippy::too_many_lines)]
-fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::PathBuf {
+fn create_empty_ext4_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::PathBuf {
     let image = dir.join("test.ext4");
 
-    // Create a sparse image sized for the scenario under test.
     let f = fs::File::create(&image).expect("create image");
     f.set_len(image_size_bytes).expect("set image size");
     drop(f);
 
-    // mkfs.ext4
     let out = Command::new("mkfs.ext4")
         .args([
             "-F",
@@ -385,6 +382,13 @@ fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::
         "debugfs chmod / failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+
+    image
+}
+
+#[allow(clippy::too_many_lines)]
+fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::PathBuf {
+    let image = create_empty_ext4_test_image_with_size(dir, image_size_bytes);
 
     // Populate with test files via debugfs.
     let hello_path = dir.join("hello_src.txt");
@@ -15158,6 +15162,74 @@ fn fuse_empty_file_operations() {
         let meta = fs::metadata(&path).expect("stat empty file");
         assert_eq!(meta.len(), 0);
     });
+}
+
+#[test]
+fn fuse_empty_filesystem_root_readdir_stat_and_create_readback() {
+    const SCENARIO_ID: &str = "fuse_prod_empty_ext4_root_readdir_stat_create_readback";
+
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        emit_scenario_result(SCENARIO_ID, "SKIP", Some("fuse_prerequisites_unavailable"));
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_empty_ext4_test_image_with_size(tmp.path(), 4 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_ffs_rw(&image, &mnt) else {
+        emit_scenario_result(
+            SCENARIO_ID,
+            "SKIP",
+            Some("fuse_mount_unavailable_or_permission_denied"),
+        );
+        return;
+    };
+
+    let root_meta = fs::metadata(&mnt).expect("stat empty mounted root");
+    assert!(
+        root_meta.is_dir(),
+        "empty image mounted root should stat as directory"
+    );
+    assert_eq!(
+        root_meta.permissions().mode() & 0o777,
+        0o777,
+        "empty image root mode should preserve writable test fixture permissions"
+    );
+
+    let root_entries = snapshot_directory_entries(&mnt);
+    assert_eq!(
+        root_entries,
+        HashSet::from(["lost+found".to_owned()]),
+        "fresh mkfs.ext4 root should expose only lost+found before FrankenFS writes"
+    );
+
+    let created = mnt.join("empty_root_created.txt");
+    fs::write(&created, b"created from empty mounted root\n")
+        .expect("create file in empty mounted root");
+    assert_eq!(
+        fs::read(&created).expect("read file created in empty mounted root"),
+        b"created from empty mounted root\n",
+        "file created from empty mounted root should read back exact bytes"
+    );
+    let created_meta = fs::metadata(&created).expect("stat file created in empty mounted root");
+    assert!(created_meta.is_file(), "created empty-root child is file");
+    assert_eq!(created_meta.len(), 32, "created empty-root child size");
+
+    let root_entries_after = snapshot_directory_entries(&mnt);
+    assert_eq!(
+        root_entries_after,
+        HashSet::from(["lost+found".to_owned(), "empty_root_created.txt".to_owned()]),
+        "create/readback from empty mounted root should add exactly one visible child"
+    );
+
+    emit_scenario_result(
+        SCENARIO_ID,
+        "PASS",
+        Some("root_stat+root_readdir+create_readback+artifact_stream=rust_test_stderr"),
+    );
 }
 
 #[test]

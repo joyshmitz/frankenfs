@@ -107,6 +107,12 @@
           "evidence": "SCENARIO_RESULT|scenario_id=${scenario_id}|outcome=${outcome}"
         },
         {
+          "id": "fuse_prod_empty_ext4_root_readdir_stat_create_readback",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuse_prod_empty_ext4_root_readdir_stat_create_readback|outcome=PASS"
+        },
+        {
           "id": "fuse_prod_fuse_lane_ext4_mount_unmount_probe",
           "category": "happy",
           "status": "active",
