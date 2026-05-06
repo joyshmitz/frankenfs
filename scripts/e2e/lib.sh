@@ -121,6 +121,10 @@ e2e_catalog_evidence_present() {
                 return 0
             fi
         done
+        if grep -Fq "\"${scenario_id}\"" "$script_path" \
+            && grep -Fq 'SCENARIO_RESULT|scenario_id=${scenario_id}|outcome=${outcome}' "$script_path"; then
+            return 0
+        fi
     fi
 
     return 1
