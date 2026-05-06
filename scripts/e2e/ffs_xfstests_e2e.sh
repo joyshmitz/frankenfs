@@ -55,6 +55,7 @@ RESULT_BASE="${RESULT_BASE:-$ARTIFACT_DIR/raw_xfstests}"
 export RESULT_BASE
 XFSTESTS_CLEANUP_STATUS="not_started"
 XFSTESTS_PARTIAL_RUN_STATUS="not_started"
+XFSTESTS_PREFLIGHT_ACCEPTED="0"
 XFSTESTS_SUBSET_VERSION="${XFSTESTS_SUBSET_VERSION:-xfstests-curated-v1}"
 XFSTESTS_BASELINE_ID="${XFSTESTS_BASELINE_ID:-xfstests-baseline-$(basename "$E2E_LOG_DIR")}"
 
@@ -769,8 +770,17 @@ write_baseline_manifest_artifacts() {
     local reproduction_command="XFSTESTS_MODE=$XFSTESTS_MODE XFSTESTS_DRY_RUN=$XFSTESTS_DRY_RUN XFSTESTS_FILTER=$XFSTESTS_FILTER ./scripts/e2e/ffs_xfstests_e2e.sh"
     local checkpoint_id="checkpoint:$(basename "$ARTIFACT_DIR")"
     local environment_manifest_id="preflight:missing"
+    local environment_age_secs="$((XFSTESTS_PREFLIGHT_MAX_AGE_SECS + 1))"
+    local environment_max_age_secs="$XFSTESTS_PREFLIGHT_MAX_AGE_SECS"
+    local environment_freshness_verdict="missing"
     if [[ -f "$XFSTESTS_PREFLIGHT_JSON" ]]; then
         environment_manifest_id="sha256:$(sha256sum "$XFSTESTS_PREFLIGHT_JSON" | awk '{print $1}')"
+        if [[ "$XFSTESTS_PREFLIGHT_ACCEPTED" == "1" ]]; then
+            environment_age_secs="0"
+            environment_freshness_verdict="fresh"
+        else
+            environment_freshness_verdict="blocked"
+        fi
     fi
 
     local -a raw_artifacts=()
@@ -805,6 +815,9 @@ write_baseline_manifest_artifacts() {
         "$reproduction_command" \
         "$SUMMARY_JSON" \
         "$XFSTESTS_ALLOWLIST_JSON" \
+        "$environment_age_secs" \
+        "$environment_max_age_secs" \
+        "$environment_freshness_verdict" \
         "${raw_artifacts[@]}" <<'PY'
 import hashlib
 import json
@@ -827,6 +840,9 @@ from collections import Counter
     reproduction_command,
     summary_path,
     allowlist_path,
+    environment_age_secs,
+    environment_max_age_secs,
+    environment_freshness_verdict,
     *raw_paths,
 ) = sys.argv[1:]
 
@@ -923,9 +939,9 @@ manifest = {
     "subset_version": subset_version,
     "environment": {
         "manifest_id": environment_manifest_id,
-        "age_secs": 0,
-        "max_age_secs": 3600,
-        "freshness_verdict": "fresh",
+        "age_secs": int(environment_age_secs),
+        "max_age_secs": int(environment_max_age_secs),
+        "freshness_verdict": environment_freshness_verdict,
     },
     "status_vocabulary": status_vocabulary,
     "raw_artifact_policy": "raw artifacts are immutable inputs; summaries are derived and may not rewrite raw logs",
@@ -983,6 +999,7 @@ PY
 write_failure_triage_artifacts() {
     local reproduction_command="$1"
     local triage_id="xfstests-triage-$(basename "$E2E_LOG_DIR")"
+    local triage_stderr="$ARTIFACT_DIR/failure_triage.stderr"
 
     if [[ ! -f "$BASELINE_MANIFEST_JSON" ]]; then
         e2e_log "xfstests baseline manifest missing; unable to emit failure triage artifacts"
@@ -990,12 +1007,18 @@ write_failure_triage_artifacts() {
     fi
 
     if harness_supports_xfstests_failure_triage; then
-        "$FFS_HARNESS_BIN" xfstests-failure-triage \
+        if ! "$FFS_HARNESS_BIN" xfstests-failure-triage \
             --baseline-manifest "$BASELINE_MANIFEST_JSON" \
             --triage-out "$FAILURE_TRIAGE_JSON" \
             --summary-out "$FAILURE_TRIAGE_REPORT_MD" \
             --triage-id "$triage_id" \
-            --reproduction-command "$reproduction_command" >/dev/null
+            --reproduction-command "$reproduction_command" >/dev/null 2>"$triage_stderr"; then
+            if [[ "$XFSTESTS_PREFLIGHT_ACCEPTED" == "1" ]]; then
+                cat "$triage_stderr" >&2
+                return 1
+            fi
+            e2e_log "xfstests failure triage not emitted because baseline evidence is not consumable; stderr=$triage_stderr"
+        fi
         return 0
     fi
 
@@ -1004,12 +1027,12 @@ write_failure_triage_artifacts() {
         return 0
     fi
 
-    python3 - \
+    if ! python3 - \
         "$BASELINE_MANIFEST_JSON" \
         "$FAILURE_TRIAGE_JSON" \
         "$FAILURE_TRIAGE_REPORT_MD" \
         "$triage_id" \
-        "$reproduction_command" <<'PY'
+        "$reproduction_command" 2>"$triage_stderr" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -1124,6 +1147,33 @@ if manifest.get("schema_version") != 1:
 expected_baseline_bead_id = "bd-rchk3.3"
 if manifest.get("bead_id") != expected_baseline_bead_id:
     errors.append(f"xfstests baseline manifest bead_id must be {expected_baseline_bead_id}")
+
+environment = manifest.get("environment", {})
+if not isinstance(environment, dict):
+    errors.append("xfstests baseline environment must be an object")
+    environment = {}
+environment_manifest_id = str(environment.get("manifest_id", ""))
+if not environment_manifest_id:
+    errors.append("xfstests baseline manifest missing environment.manifest_id")
+if environment_manifest_id == "preflight:missing":
+    errors.append("xfstests baseline environment manifest is missing preflight proof")
+try:
+    environment_age_secs = int(environment.get("age_secs", 0))
+    environment_max_age_secs = int(environment.get("max_age_secs", 0))
+except (TypeError, ValueError):
+    errors.append("xfstests baseline environment age fields must be integers")
+    environment_age_secs = 0
+    environment_max_age_secs = 0
+if (
+    environment_age_secs > environment_max_age_secs
+    or environment.get("freshness_verdict") != "fresh"
+):
+    errors.append(
+        "xfstests baseline environment manifest is stale: "
+        f"age_secs={environment.get('age_secs')} "
+        f"max_age_secs={environment.get('max_age_secs')} "
+        f"verdict={environment.get('freshness_verdict')}"
+    )
 
 raw_by_path = {}
 for artifact in manifest.get("raw_artifacts", []):
@@ -1299,6 +1349,13 @@ for command in report["proposed_br_commands"]:
     lines.append(f"- `{command}`")
 report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
+    then
+        if [[ "$XFSTESTS_PREFLIGHT_ACCEPTED" == "1" ]]; then
+            cat "$triage_stderr" >&2
+            return 1
+        fi
+        e2e_log "xfstests failure triage not emitted because baseline evidence is not consumable; stderr=$triage_stderr"
+    fi
 }
 
 prepare_safe_dry_run_config() {
@@ -1641,6 +1698,7 @@ PY
         skip_or_fail "xfstests prerequisite proof unavailable for product baseline: $preflight_reason"
     fi
 
+    XFSTESTS_PREFLIGHT_ACCEPTED="1"
     e2e_log "Preflight manifest accepted: $XFSTESTS_PREFLIGHT_JSON ($preflight_reason)"
 }
 
@@ -1959,6 +2017,7 @@ fi
 
 if [[ "$EFFECTIVE_MODE" == "plan" ]]; then
     e2e_step "Plan mode"
+    ensure_xfstests_preflight
     if harness_supports_xfstests_report; then
         "$FFS_HARNESS_BIN" xfstests-report \
             --selected "$SELECTED_FILE" \

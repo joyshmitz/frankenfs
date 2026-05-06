@@ -524,7 +524,10 @@ pub fn build_xfstests_baseline_manifest(
         .collect::<Vec<_>>();
 
     let disposition_counts = disposition_counts(&cases);
-    let freshness_verdict = if input.environment_age_secs <= input.environment_max_age_secs {
+    let environment_manifest_missing = input.environment_manifest_id.trim() == "preflight:missing";
+    let freshness_verdict = if environment_manifest_missing {
+        "missing"
+    } else if input.environment_age_secs <= input.environment_max_age_secs {
         "fresh"
     } else {
         "stale"
@@ -581,6 +584,9 @@ pub fn validate_xfstests_baseline_manifest(manifest: &XfstestsBaselineManifest) 
         &manifest.environment.manifest_id,
         &mut errors,
     );
+    if manifest.environment.manifest_id.trim() == "preflight:missing" {
+        errors.push("xfstests baseline environment manifest is missing preflight proof".to_owned());
+    }
     require_non_empty(
         "command_transcript",
         &manifest.command_transcript,
@@ -3360,6 +3366,59 @@ generic/001  2s ... pass\n";
             XfstestsBaselineRowStatus::HarnessFailed
         );
         assert!(manifest.cases[3].remediation.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn baseline_manifest_rejects_missing_preflight_proof() -> Result<()> {
+        let tmp = tempdir()?;
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "generic/001 not run\n")?;
+        let summary = tmp.path().join("baseline_report.md");
+        let selected = vec!["generic/001".to_owned()];
+        let run = summarize_run(
+            "fixture",
+            0,
+            true,
+            vec![test_case(
+                "generic/001",
+                XfstestsStatus::NotRun,
+                Some("environment_blocked"),
+            )],
+        );
+
+        let manifest = build_xfstests_baseline_manifest(XfstestsBaselineManifestInput {
+            baseline_id: "xfstests-baseline-missing-preflight",
+            subset_version: "xfstests-curated-v1",
+            environment_manifest_id: "preflight:missing",
+            environment_age_secs: 0,
+            environment_max_age_secs: 3600,
+            selected_tests: &selected,
+            run: &run,
+            raw_artifact_paths: &[raw.as_path()],
+            generated_summary_path: &summary,
+            command_transcript: "./check -n generic/001",
+            checkpoint_id: "checkpoint:missing-preflight",
+            resume_command: "XFSTESTS_MODE=run RESULT_BASE=fixture ./scripts/e2e/ffs_xfstests_e2e.sh",
+            cleanup_status: "plan_mode_no_xfstests_check_invoked",
+            reproduction_command: "XFSTESTS_MODE=plan ./scripts/e2e/ffs_xfstests_e2e.sh",
+            output_paths: BTreeMap::new(),
+        })?;
+
+        assert_eq!(manifest.environment.freshness_verdict, "missing");
+        let errors = validate_xfstests_baseline_manifest(&manifest);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("missing preflight proof")),
+            "expected missing preflight proof error, got {errors:#?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("environment manifest is stale")),
+            "expected non-fresh environment error, got {errors:#?}"
+        );
         Ok(())
     }
 
