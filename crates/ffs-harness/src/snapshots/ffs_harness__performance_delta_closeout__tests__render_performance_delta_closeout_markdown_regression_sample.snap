@@ -11,6 +11,13 @@ expression: markdown
 - Rows: `1`
 - Rows requiring follow-up: `1`
 
+## Issue Ledger
+
+- Path: `.beads/issues.jsonl`
+- Issue count: `6`
+- SHA-256: `sha256:test-ledger`
+- Missing follow-up beads: `none`
+
 ## Classification Counts
 
 - `regression`: 1

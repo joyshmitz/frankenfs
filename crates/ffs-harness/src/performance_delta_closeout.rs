@@ -200,6 +200,7 @@ pub struct PerformanceDeltaCloseoutReport {
     pub closeout_id: String,
     pub source_bead_id: String,
     pub generated_at: String,
+    pub issue_ledger: PerformanceIssueLedgerDiagnostics,
     pub valid: bool,
     pub row_count: usize,
     pub classification_counts: BTreeMap<String, usize>,
@@ -208,6 +209,14 @@ pub struct PerformanceDeltaCloseoutReport {
     pub rows_requiring_follow_up: usize,
     pub rows: Vec<PerformanceDeltaRow>,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerformanceIssueLedgerDiagnostics {
+    pub path: String,
+    pub issue_count: usize,
+    pub sha256: String,
+    pub missing_follow_up_beads: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -223,6 +232,12 @@ struct Measurement {
     artifact_hash: String,
 }
 
+#[derive(Debug, Clone)]
+struct IssueLedger {
+    ids: BTreeSet<String>,
+    diagnostics: PerformanceIssueLedgerDiagnostics,
+}
+
 pub fn load_performance_delta_closeout_config(
     path: &Path,
 ) -> Result<PerformanceDeltaCloseoutConfig> {
@@ -236,7 +251,8 @@ pub fn run_performance_delta_closeout(
     config: &PerformanceDeltaCloseoutConfig,
 ) -> Result<PerformanceDeltaCloseoutReport> {
     let mut errors = validate_config_shape(config);
-    let issue_ids = load_issue_ids(Path::new(&config.issues_path))?;
+    let issue_ledger = load_issue_ledger(Path::new(&config.issues_path))?;
+    let issue_ids = &issue_ledger.ids;
     let reference_map = load_reference_measurements(config)?;
     let mut rows = Vec::new();
 
@@ -245,7 +261,7 @@ pub fn run_performance_delta_closeout(
             artifact,
             &reference_map,
             config,
-            &issue_ids,
+            issue_ids,
             &mut errors,
         )?);
     }
@@ -254,17 +270,29 @@ pub fn run_performance_delta_closeout(
         rows.extend(load_comparison_rows(
             artifact,
             config,
-            &issue_ids,
+            issue_ids,
             &mut errors,
         )?);
     }
 
     for claim in &config.unmeasured_claims {
-        rows.push(unmeasured_claim_row(claim, &issue_ids, &mut errors));
+        rows.push(unmeasured_claim_row(claim, issue_ids, &mut errors));
     }
 
-    validate_follow_up_overrides(config, &issue_ids, &mut errors);
+    validate_follow_up_overrides(config, issue_ids, &mut errors);
     validate_required_follow_ups(&rows, &mut errors);
+    let mut issue_ledger_diagnostics = issue_ledger.diagnostics;
+    issue_ledger_diagnostics.missing_follow_up_beads =
+        missing_follow_up_beads(config, &rows, issue_ids);
+    if !issue_ledger_diagnostics.missing_follow_up_beads.is_empty() {
+        errors.push(format!(
+            "issue ledger {} sha256={} issue_count={} is missing follow-up beads: {}",
+            issue_ledger_diagnostics.path,
+            issue_ledger_diagnostics.sha256,
+            issue_ledger_diagnostics.issue_count,
+            issue_ledger_diagnostics.missing_follow_up_beads.join(", ")
+        ));
+    }
     let classification_counts = count_classifications(&rows);
     let follow_up_beads = rows
         .iter()
@@ -283,6 +311,7 @@ pub fn run_performance_delta_closeout(
         closeout_id: config.closeout_id.clone(),
         source_bead_id: config.source_bead_id.clone(),
         generated_at: config.generated_at.clone(),
+        issue_ledger: issue_ledger_diagnostics,
         valid: errors.is_empty(),
         row_count: rows.len(),
         classification_counts,
@@ -310,6 +339,16 @@ pub fn render_performance_delta_closeout_markdown(
         "- Rows requiring follow-up: `{}`",
         report.rows_requiring_follow_up
     );
+    let missing_followups = if report.issue_ledger.missing_follow_up_beads.is_empty() {
+        "none".to_owned()
+    } else {
+        report.issue_ledger.missing_follow_up_beads.join(", ")
+    };
+    out.push_str("\n## Issue Ledger\n\n");
+    let _ = writeln!(out, "- Path: `{}`", report.issue_ledger.path);
+    let _ = writeln!(out, "- Issue count: `{}`", report.issue_ledger.issue_count);
+    let _ = writeln!(out, "- SHA-256: `{}`", report.issue_ledger.sha256);
+    let _ = writeln!(out, "- Missing follow-up beads: `{missing_followups}`");
     out.push('\n');
     out.push_str("## Classification Counts\n\n");
     for (class, count) in &report.classification_counts {
@@ -479,9 +518,11 @@ fn validate_missing_reference_decisions(
     }
 }
 
-fn load_issue_ids(path: &Path) -> Result<BTreeSet<String>> {
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("failed to read issue JSONL {}", path.display()))?;
+fn load_issue_ledger(path: &Path) -> Result<IssueLedger> {
+    let bytes =
+        fs::read(path).with_context(|| format!("failed to read issue JSONL {}", path.display()))?;
+    let text = std::str::from_utf8(&bytes)
+        .with_context(|| format!("issue JSONL {} is not UTF-8", path.display()))?;
     let mut ids = BTreeSet::new();
     for (line_no, line) in text.lines().enumerate() {
         let trimmed = line.trim();
@@ -499,7 +540,13 @@ fn load_issue_ids(path: &Path) -> Result<BTreeSet<String>> {
             ids.insert(id.to_owned());
         }
     }
-    Ok(ids)
+    let diagnostics = PerformanceIssueLedgerDiagnostics {
+        path: path.display().to_string(),
+        issue_count: ids.len(),
+        sha256: format!("sha256:{}", sha256_hex(&bytes)),
+        missing_follow_up_beads: Vec::new(),
+    };
+    Ok(IssueLedger { ids, diagnostics })
 }
 
 fn load_reference_measurements(
@@ -1045,6 +1092,41 @@ fn validate_required_follow_ups(rows: &[PerformanceDeltaRow], errors: &mut Vec<S
     }
 }
 
+fn missing_follow_up_beads(
+    config: &PerformanceDeltaCloseoutConfig,
+    rows: &[PerformanceDeltaRow],
+    issue_ids: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut missing = BTreeSet::new();
+    record_missing_follow_up(
+        &config.policy.missing_reference_follow_up_bead,
+        issue_ids,
+        &mut missing,
+    );
+    for override_row in &config.follow_up_overrides {
+        record_missing_follow_up(&override_row.follow_up_bead, issue_ids, &mut missing);
+    }
+    for claim in &config.unmeasured_claims {
+        record_missing_follow_up(&claim.follow_up_bead, issue_ids, &mut missing);
+    }
+    for row in rows {
+        if let Some(follow_up) = &row.follow_up_bead {
+            record_missing_follow_up(follow_up, issue_ids, &mut missing);
+        }
+    }
+    missing.into_iter().collect()
+}
+
+fn record_missing_follow_up(
+    follow_up: &str,
+    issue_ids: &BTreeSet<String>,
+    missing: &mut BTreeSet<String>,
+) {
+    if !follow_up.trim().is_empty() && !issue_ids.contains(follow_up) {
+        missing.insert(follow_up.to_owned());
+    }
+}
+
 fn validate_missing_reference_row(row: &PerformanceDeltaRow, errors: &mut Vec<String>) {
     if row.raw_logs.is_empty() {
         errors.push(format!("{} missing no-reference raw_logs", row.row_id));
@@ -1492,7 +1574,7 @@ fn format_optional_percent(value: Option<f64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::{io::Write as _, path::PathBuf};
 
     fn issue_ids() -> BTreeSet<String> {
         [
@@ -1506,6 +1588,23 @@ mod tests {
         .into_iter()
         .map(ToOwned::to_owned)
         .collect()
+    }
+
+    fn test_issue_ledger_diagnostics() -> PerformanceIssueLedgerDiagnostics {
+        PerformanceIssueLedgerDiagnostics {
+            path: ".beads/issues.jsonl".to_owned(),
+            issue_count: 6,
+            sha256: "sha256:test-ledger".to_owned(),
+            missing_follow_up_beads: Vec::new(),
+        }
+    }
+
+    fn write_issue_ledger(ids: &[&str]) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().expect("create issue ledger fixture");
+        for id in ids {
+            writeln!(file, r#"{{"id":"{id}"}}"#).expect("write issue ledger fixture row");
+        }
+        file
     }
 
     fn base_config() -> PerformanceDeltaCloseoutConfig {
@@ -1629,12 +1728,111 @@ mod tests {
     }
 
     #[test]
+    fn missing_follow_up_diagnostics_are_sorted_and_deduplicated() {
+        let mut config = base_config();
+        config.unmeasured_claims.push(PerformanceUnmeasuredClaim {
+            claim_id: "unmeasured".to_owned(),
+            operation: "long_campaign".to_owned(),
+            reason: "not measured yet".to_owned(),
+            follow_up_bead: "bd-zmissing".to_owned(),
+            reproduction_command: "cargo test".to_owned(),
+        });
+        config
+            .follow_up_overrides
+            .push(PerformanceDeltaFollowUpOverride {
+                operation: "mount_recovery".to_owned(),
+                follow_up_bead: "bd-rchk5.5".to_owned(),
+                classification: Some(PerformanceDeltaClassification::Regression),
+                source_contains: None,
+            });
+        let issue_ids = BTreeSet::from(["bd-rchk5.8".to_owned()]);
+        let row = PerformanceDeltaRow {
+            row_id: "comparison:mount_cold".to_owned(),
+            row_kind: "comparison".to_owned(),
+            operation: "mount_cold".to_owned(),
+            source_artifact: "comparison.json".to_owned(),
+            reference_artifact: None,
+            current_source_json: None,
+            reference_p99_us: None,
+            current_p99_us: None,
+            p99_delta_percent: None,
+            reference_throughput_ops_sec: None,
+            current_throughput_ops_sec: None,
+            throughput_delta_percent: None,
+            classification: PerformanceDeltaClassification::Regression,
+            release_claim_state: "unknown".to_owned(),
+            follow_up_bead: Some("bd-zmissing".to_owned()),
+            follow_up_present: false,
+            follow_up_payload: None,
+            raw_logs: Vec::new(),
+            comparison_target_rationale: None,
+            release_wording: None,
+            validation_command: None,
+            rationale: "missing tracker row".to_owned(),
+            reproduction_command: "cargo test".to_owned(),
+        };
+
+        assert_eq!(
+            missing_follow_up_beads(&config, &[row], &issue_ids),
+            vec!["bd-rchk5.5".to_owned(), "bd-zmissing".to_owned()]
+        );
+    }
+
+    #[test]
+    fn run_report_summarizes_issue_ledger_when_followups_are_missing() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let reference_path = dir.path().join("reference.json");
+        let current_path = dir.path().join("current.json");
+        fs::write(
+            &reference_path,
+            r#"{"environment":{"id":"test"},"measurements":[{"operation":"mount_cold","status":"measured","p99_us":100.0,"throughput_ops_sec":10.0,"command":"cargo bench"}]}"#,
+        )
+        .expect("write reference artifact");
+        fs::write(
+            &current_path,
+            r#"{"environment":{"id":"test"},"measurements":[{"operation":"mount_cold","status":"measured","p99_us":200.0,"throughput_ops_sec":10.0,"command":"cargo bench"}]}"#,
+        )
+        .expect("write current artifact");
+        let issue_ledger = write_issue_ledger(&["bd-rchk5.8"]);
+        let mut config = base_config();
+        config.issues_path = issue_ledger.path().display().to_string();
+        config.reference_baselines = vec![reference_path.display().to_string()];
+        config.current_baselines = vec![current_path.display().to_string()];
+        config.comparison_artifacts.clear();
+        config.unmeasured_claims.clear();
+
+        let report = run_performance_delta_closeout(&config).expect("run closeout");
+
+        assert!(!report.valid);
+        assert_eq!(report.issue_ledger.issue_count, 1);
+        assert_eq!(
+            report.issue_ledger.missing_follow_up_beads,
+            vec!["bd-rchk5.5".to_owned()]
+        );
+        assert!(report.issue_ledger.sha256.starts_with("sha256:"));
+        assert!(report.errors.iter().any(|error| {
+            error.contains("issue ledger")
+                && error.contains("issue_count=1")
+                && error.contains("bd-rchk5.5")
+        }));
+    }
+
+    #[test]
     fn checked_in_closeout_config_validates_and_links_followups() {
         let config = load_performance_delta_closeout_config(Path::new(&workspace_path(
             DEFAULT_PERFORMANCE_DELTA_CLOSEOUT_CONFIG,
         )))
         .expect("load checked-in config");
-        let config = absolutize_paths(config);
+        let issue_ledger = write_issue_ledger(&[
+            "bd-rchk5.5",
+            "bd-rchk5.6",
+            "bd-rchk5.7",
+            "bd-rchk5.8",
+            "bd-9vzzk",
+            "bd-t21em",
+        ]);
+        let mut config = absolutize_paths(config);
+        config.issues_path = issue_ledger.path().display().to_string();
         let report = run_performance_delta_closeout(&config).expect("build closeout report");
         assert!(report.valid, "{:?}", report.errors);
         assert!(report.row_count >= 10);
@@ -1692,6 +1890,7 @@ mod tests {
             closeout_id: "test".to_owned(),
             source_bead_id: "bd-rchk5.4".to_owned(),
             generated_at: "now".to_owned(),
+            issue_ledger: test_issue_ledger_diagnostics(),
             valid: true,
             row_count: 1,
             classification_counts: BTreeMap::from([("regression".to_owned(), 1)]),
