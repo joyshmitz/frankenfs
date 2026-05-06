@@ -223,6 +223,28 @@
       "quarantine": {
         "status": "none"
       }
+    },
+    {
+      "seed_id": "fs_mounted_write_error_classes_catalog",
+      "path": "tests/mounted-write-error-classes/mounted_write_error_classes.json",
+      "source": "tests/mounted-write-error-classes/mounted_write_error_classes.json",
+      "provenance": "mounted write error class catalog produced by bd-rchk0.3.4 and added to fuzz-smoke parser coverage by bd-rchk0.75",
+      "target": "mounted_write_error_classes_catalog",
+      "expected_class": "accepted",
+      "corpus_checksum": "sha256:da70f8300fd2188e392dbce09b865ea3bdee2983a369075166cdbdbb822c07be",
+      "timeout_ms": 250,
+      "resource_budget": {
+        "max_input_bytes": 32768,
+        "max_duration_ms": 250,
+        "max_artifact_bytes": 131072
+      },
+      "minimization": {
+        "status": "minimized",
+        "replay_command": "cargo run --quiet -p ffs-harness -- validate-fuzz-smoke --manifest tests/fuzz-smoke/fuzz_smoke_manifest.json --workspace-root . --out artifacts/fuzz-smoke/fuzz_smoke_report.json"
+      },
+      "quarantine": {
+        "status": "none"
+      }
     }
   ]
 }

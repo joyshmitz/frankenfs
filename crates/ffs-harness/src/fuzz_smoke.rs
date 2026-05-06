@@ -2,6 +2,9 @@
 
 //! Deterministic fuzz-smoke manifest validation for high-risk parser surfaces.
 
+use crate::mounted_write_error_classes::{
+    parse_mounted_write_error_classes, validate_mounted_write_error_classes,
+};
 use crate::repair_corpus::{parse_repair_corpus, validate_repair_corpus};
 use anyhow::{Context, Result, bail};
 use ffs_ondisk::{
@@ -35,7 +38,7 @@ const REQUIRED_ARTIFACT_FIELDS: [&str; 8] = [
 
 const SHA256_PREFIX: &str = "sha256:";
 
-const ALLOWED_TARGETS: [&str; 9] = [
+const ALLOWED_TARGETS: [&str; 10] = [
     "ext4_superblock",
     "ext4_group_desc_32",
     "ext4_inode",
@@ -45,15 +48,17 @@ const ALLOWED_TARGETS: [&str; 9] = [
     "btrfs_sys_chunk_array",
     "btrfs_leaf_items",
     "repair_corpus_manifest",
+    "mounted_write_error_classes_catalog",
 ];
 
-const ALLOWED_EXPECTED_CLASSES: [&str; 10] = [
+const ALLOWED_EXPECTED_CLASSES: [&str; 11] = [
     "accepted",
     "InsufficientData",
     "InvalidMagic",
     "InvalidField",
     "IntegerConversion",
     "RepairCorpusInvalid",
+    "MountedWriteErrorClassesInvalid",
     "Utf8Error",
     "panic",
     "timeout",
@@ -186,6 +191,7 @@ struct TargetExecution {
 enum TargetFailure {
     Parse(ParseError),
     RepairCorpusInvalid(String),
+    MountedWriteErrorClassesInvalid(String),
     Utf8(std::str::Utf8Error),
 }
 
@@ -631,6 +637,7 @@ fn execute_target(target: &str, bytes: &[u8]) -> TargetExecution {
             .map(|_| ())
             .map_err(TargetFailure::Parse),
         "repair_corpus_manifest" => validate_repair_manifest_bytes(bytes),
+        "mounted_write_error_classes_catalog" => validate_mounted_write_error_classes_bytes(bytes),
         _ => Ok(()),
     })
 }
@@ -668,11 +675,29 @@ fn validate_repair_manifest_bytes(bytes: &[u8]) -> Result<(), TargetFailure> {
     }
 }
 
+fn validate_mounted_write_error_classes_bytes(bytes: &[u8]) -> Result<(), TargetFailure> {
+    let text = std::str::from_utf8(bytes).map_err(TargetFailure::Utf8)?;
+    let catalog = parse_mounted_write_error_classes(text).map_err(|err| {
+        TargetFailure::MountedWriteErrorClassesInvalid(format!(
+            "mounted write error classes JSON decode failed: {err}"
+        ))
+    })?;
+    let report = validate_mounted_write_error_classes(&catalog);
+    if report.valid {
+        Ok(())
+    } else {
+        Err(TargetFailure::MountedWriteErrorClassesInvalid(
+            report.errors.join("; "),
+        ))
+    }
+}
+
 impl TargetFailure {
     fn class(&self) -> &'static str {
         match self {
             Self::Parse(err) => parse_error_class(err),
             Self::RepairCorpusInvalid(_) => "RepairCorpusInvalid",
+            Self::MountedWriteErrorClassesInvalid(_) => "MountedWriteErrorClassesInvalid",
             Self::Utf8(_) => "Utf8Error",
         }
     }
@@ -680,7 +705,9 @@ impl TargetFailure {
     fn detail(&self) -> String {
         match self {
             Self::Parse(err) => err.to_string(),
-            Self::RepairCorpusInvalid(detail) => detail.clone(),
+            Self::RepairCorpusInvalid(detail) | Self::MountedWriteErrorClassesInvalid(detail) => {
+                detail.clone()
+            }
             Self::Utf8(err) => err.to_string(),
         }
     }
@@ -816,6 +843,23 @@ mod tests {
                 && result.quarantine_status == "none"
                 && !result.reproduction_command.is_empty()
         }));
+        assert_eq!(
+            report
+                .target_summary
+                .get("mounted_write_error_classes_catalog"),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn malformed_mounted_write_error_catalog_bytes_use_owned_class() {
+        let execution = execute_target("mounted_write_error_classes_catalog", br#"{"entries":["#);
+        assert_eq!(execution.actual_class, "MountedWriteErrorClassesInvalid");
+        assert!(
+            execution
+                .error_detail
+                .contains("mounted write error classes JSON decode failed")
+        );
     }
 
     #[test]
