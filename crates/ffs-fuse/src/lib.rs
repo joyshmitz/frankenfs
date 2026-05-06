@@ -11386,6 +11386,71 @@ mod tests {
     }
 
     #[test]
+    fn fuse_boundary_emergency_backpressure_sheds_metadata_mutations_without_backend_scope() {
+        use asupersync::SystemPressure;
+        use ffs_core::DegradationFsm;
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let pressure = Arc::new(SystemPressure::with_headroom(0.02));
+        let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
+        fsm.tick();
+        let gate = BackpressureGate::new(fsm);
+        let fuse = FrankenFuse::with_backpressure(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+            gate,
+        );
+
+        let create = fuse.create_for_fuzzing(2, b"pressure-create", 0o644, 1000, 1000);
+        assert!(
+            matches!(create, Err(errno) if errno == libc::EBUSY),
+            "create under emergency backpressure should return EBUSY, got {create:?}"
+        );
+
+        let attrs = SetAttrRequest {
+            mode: Some(0o600),
+            uid: None,
+            gid: None,
+            size: Some(128),
+            atime: None,
+            mtime: None,
+        };
+        let setattr = fuse.setattr_for_fuzzing(11, &attrs);
+        assert!(
+            matches!(setattr, Err(errno) if errno == libc::EBUSY),
+            "setattr under emergency backpressure should return EBUSY, got {setattr:?}"
+        );
+
+        let setxattr =
+            fuse.dispatch_setxattr(11, "user.pressure", b"blocked", XATTR_FLAG_CREATE, 0);
+        assert!(
+            matches!(setxattr, Err(MutationDispatchError::Errno(errno)) if errno == libc::EBUSY),
+            "setxattr under emergency backpressure should return EBUSY, got {setxattr:?}"
+        );
+
+        let recorded_calls = match calls.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        assert!(
+            recorded_calls.is_empty(),
+            "shed metadata mutations must not begin backend scopes or mutate FsOps: {recorded_calls:?}"
+        );
+
+        let metrics = fuse.metrics().snapshot();
+        assert_eq!(
+            metrics.requests_shed, 3,
+            "each rejected metadata mutation should increment the FUSE shed counter"
+        );
+    }
+
+    #[test]
     fn dispatch_setxattr_rejects_invalid_requests_before_backend_mutation() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let options = MountOptions {

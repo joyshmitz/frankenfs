@@ -37,7 +37,7 @@ or a bead/artifact owner.
 | E1 | docs/reports/MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md:320; crates/ffs-fuse/src/lib.rs | FIEMAP short-buffer panic risk | `dispatch_ioctl_fiemap_rejects_short_input_and_output_buffers` covers every 0..31 byte FIEMAP input header and every 0..31 output size, asserting `EINVAL` before FsOps dispatch | security-audit | existing | deferred | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | bd-ocpq7; crates/ffs-fuse/src/lib.rs::dispatch_ioctl_fiemap_rejects_short_input_and_output_buffers | covered by ffs-fuse unit boundary test | n/a |
 | E2 | docs/reports/MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md:67; crates/ffs-fuse/src/lib.rs | setattr privilege escalation at FUSE boundary | Mounted chmod/truncate/utimes and DefaultPermissions EACCES coverage exist; uid/gid chown privilege proof remains separate | mounted-e2e | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | bd-rchk0.61 | open setattr uid/gid permission follow-up | n/a |
 | E3 | scripts/e2e/ffs_fuse_production.sh; scripts/e2e/scenario_catalog.json | Empty-filesystem mount coverage | Critical mounted matrix and empty-file operations exist; empty-image/root mount scenario remains separate | mounted-e2e | deferred | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | bd-rchk0.62 | open empty-filesystem mount follow-up | n/a |
-| E4 | fuzz/fuzz_targets/fuzz_block_mem_io_engine.rs; crates/ffs-fuse/src/lib.rs | Backpressure boundary at mounted FUSE layer | ffs-fuse adapter backpressure tests and core degradation gates exist; mounted-boundary artifact remains separate | mounted-e2e | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | needs-follow-up | bd-rchk0.63 | open mounted backpressure follow-up | n/a |
+| E4 | fuzz/fuzz_targets/fuzz_block_mem_io_engine.rs; crates/ffs-fuse/src/lib.rs | Backpressure boundary at mounted FUSE layer | `fuse_boundary_emergency_backpressure_sheds_metadata_mutations_without_backend_scope` pins create/setattr/setxattr `EBUSY`, no backend dispatch, and shed counters | mounted-e2e | existing | deferred | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | bd-rchk0.63; crates/ffs-fuse/src/lib.rs::fuse_boundary_emergency_backpressure_sheds_metadata_mutations_without_backend_scope | covered by FUSE boundary backpressure test | n/a |
 | E5 | docs/design-multi-host-repair.md; crates/ffs-repair/src/lib.rs | Multi-host repair ownership protocol | Current read-only scrub does not require ownership; write-side shared-storage repair remains future scope | docs-non-goal | deferred | deferred | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | explicit-non-goal | docs/design-multi-host-repair.md | scoped non-goal for this inventory | Multi-host write-side repair is outside this fuzz/conformance inventory; readiness stays blocked by repair ownership follow-up work. |
 
 ## A. Fuzz target corpora — saturation status
@@ -151,9 +151,10 @@ session observations:
   permission proof that is not covered by chmod/truncate/utimes tests.
 - E3: Empty-filesystem mount test (no corresponding harness exists).
   `bd-rchk0.62` now owns the empty-image/root mounted scenario.
-- E4: Backpressure boundary test — adapter-level and core backpressure
-  tests exist, but mounted-boundary artifacting remains separate.
-  `bd-rchk0.63` now owns that proof.
+- E4: Backpressure boundary test is now covered by
+  `crates/ffs-fuse/src/lib.rs::fuse_boundary_emergency_backpressure_sheds_metadata_mutations_without_backend_scope`,
+  which pins metadata mutation `EBUSY`, no backend dispatch, and shed
+  counter behavior under emergency pressure.
 - E5: Multi-host repair ownership protocol (3rd trust boundary,
   unimplemented per line 67 of same report).
 
