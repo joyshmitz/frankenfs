@@ -14,6 +14,7 @@ brotli = "8.0"
 crc32c = "0.6.8"
 libc = "0.2.185"
 libfuzzer-sys = "0.4"
+serde_json = "1.0.149"
 zstd = "0.13"
 
 [dependencies.ffs-block]
@@ -63,6 +64,9 @@ path = "../crates/ffs-types"
 
 [dependencies.ffs-extent]
 path = "../crates/ffs-extent"
+
+[dependencies.ffs-harness]
+path = "../crates/ffs-harness"
 
 [workspace]
 members = ["."]
@@ -318,4 +322,9 @@ doc = false
 [[bin]]
 name = "fuzz_btrfs_raid_profile"
 path = "fuzz_targets/fuzz_btrfs_raid_profile.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_swarm_workload_harness"
+path = "fuzz_targets/fuzz_swarm_workload_harness.rs"
 doc = false
