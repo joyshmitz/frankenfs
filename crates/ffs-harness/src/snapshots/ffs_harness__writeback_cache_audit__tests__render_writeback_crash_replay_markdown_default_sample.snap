@@ -1,0 +1,47 @@
+---
+source: crates/ffs-harness/src/writeback_cache_audit.rs
+expression: markdown
+---
+# Writeback-Cache Crash/Replay Oracle
+
+- schema_version: 1
+- gate_version: bd-rchk0.2.3-crash-replay-v1
+- bead_id: bd-rchk0.2.3
+- scenario_id: writeback_crash_replay_default_sample
+- matrix_id: writeback_cache_crash_replay_matrix_v1
+- decision: accept
+- epoch_id: epoch-writeback-crash-0001
+- epoch_state: fresh
+- reproduction_command: `ffs-harness validate-writeback-crash-replay --oracle oracle.json`
+
+## Required Crash Points
+
+- cp01_before_first_write
+- cp02_after_first_write_before_flush
+- cp03_after_flush_before_fsync
+- cp04_after_fsync_before_metadata
+- cp05_after_metadata_before_fsyncdir
+- cp06_after_fsyncdir_before_unmount
+- cp07_after_repeated_write_before_fsync
+- cp08_after_repeated_write_fsync
+- cp09_after_cancellation_before_writeback
+- cp10_after_clean_unmount_before_reopen
+- cp11_after_reopen_before_repair_refresh
+- cp12_after_repair_refresh
+
+## Failure Modes
+
+- default_off_or_not_opted_in
+- raw_fuser_option_missing
+- missing_operation_trace
+- missing_crash_point
+- survivor_set_mismatch
+- flush_misclassified_as_durable
+- missing_fsync_boundary
+- missing_fsyncdir_boundary
+- metadata_after_data_violation
+- unmount_reopen_missing
+- cancellation_not_classified
+- stale_epoch_state
+- unsupported_combination_not_rejected
+- replay_status_mismatch

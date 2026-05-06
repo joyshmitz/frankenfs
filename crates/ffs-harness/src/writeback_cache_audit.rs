@@ -2766,4 +2766,21 @@ mod tests {
         let markdown = render_writeback_ordering_markdown(&report);
         insta::assert_snapshot!(markdown);
     }
+
+    /// bd-rchk0.83 - Golden-artifact pin for the writeback crash/replay
+    /// oracle markdown emitter. The sibling crash/replay tests cover
+    /// validation logic; this snapshot catches heading, metadata, crash-point
+    /// ordering, and failure-mode formatting drift before proof-bundle or
+    /// release-gate dashboard consumers see it.
+    #[test]
+    fn render_writeback_crash_replay_markdown_default_sample() {
+        let report = build_writeback_crash_replay_report(
+            &happy_crash_replay_oracle(),
+            "writeback_crash_replay_default_sample",
+            "ffs-harness validate-writeback-crash-replay --oracle oracle.json",
+        )
+        .expect("happy_crash_replay_oracle() must build a valid report");
+        let markdown = render_writeback_crash_replay_markdown(&report);
+        insta::assert_snapshot!(markdown);
+    }
 }
