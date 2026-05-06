@@ -4198,6 +4198,7 @@ pub fn replay_tree_log(
 mod tests {
     use super::*;
     use ffs_ondisk::{BtrfsStripe, BtrfsSuperblock};
+    use proptest::prelude::*;
     use std::collections::{BTreeMap, HashMap};
     use std::fmt::Write as _;
     use std::sync::{Arc, Mutex};
@@ -10313,6 +10314,13 @@ mod tests {
         }
     }
 
+    fn inode_entries_from_generations(generations: &BTreeMap<u64, u64>) -> Vec<BtrfsLeafEntry> {
+        generations
+            .iter()
+            .map(|(&objectid, &generation)| make_inode_entry(objectid, generation))
+            .collect()
+    }
+
     const REPRESENTATIVE_SUBVOLUME_SNAPSHOT_ENUMERATION_GOLDEN: &str = concat!(
         "subvolumes\n",
         "  id=256 parent=5 name=src gen=10 ro=false bytenr=0x1000 level=0\n",
@@ -10502,13 +10510,12 @@ mod tests {
     }
 
     /// Property: diff(snapshot, snapshot) is always empty for any snapshot
-    /// shape. ffs-btrfs has 181 unit tests but no property-based coverage
-    /// of snapshot_diff_by_generation; pin the self-diff invariant here
-    /// so a regression that flagged identical inode sets as Added or
-    /// Modified would surface immediately.
+    /// shape. Keep this fixed-seed regression sweep alongside the proptest
+    /// coverage below so a regression that flagged identical inode sets as
+    /// Added or Modified surfaces immediately with a deterministic case.
     ///
     /// Implementation: deterministic LCG-driven sweep over (inode_count,
-    /// generation_distribution) shapes — no proptest dependency required.
+    /// generation_distribution) shapes.
     #[test]
     fn snapshot_diff_self_diff_is_always_empty() {
         // Linear congruential generator (Numerical Recipes constants) for
@@ -10576,6 +10583,75 @@ mod tests {
                     .all(|d| d.change_type == SnapshotChangeType::Deleted),
                 "every diff entry must be Deleted when newer is empty"
             );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn snapshot_diff_self_diff_proptest_is_empty(
+            generations in proptest::collection::btree_map(256_u64..4096, any::<u64>(), 0..32),
+        ) {
+            let entries = inode_entries_from_generations(&generations);
+            prop_assert!(snapshot_diff_by_generation(&entries, &entries).is_empty());
+        }
+
+        #[test]
+        fn snapshot_diff_empty_snapshot_proptest_reports_added_and_deleted(
+            generations in proptest::collection::btree_map(256_u64..4096, any::<u64>(), 0..32),
+        ) {
+            let entries = inode_entries_from_generations(&generations);
+            let expected_inodes: Vec<u64> = generations.keys().copied().collect();
+
+            let added = snapshot_diff_by_generation(&[], &entries);
+            let added_inodes: Vec<u64> = added.iter().map(|diff| diff.inode).collect();
+            prop_assert_eq!(added_inodes.as_slice(), expected_inodes.as_slice());
+            prop_assert!(
+                added
+                    .iter()
+                    .all(|diff| diff.change_type == SnapshotChangeType::Added)
+            );
+
+            let deleted = snapshot_diff_by_generation(&entries, &[]);
+            let deleted_inodes: Vec<u64> = deleted.iter().map(|diff| diff.inode).collect();
+            prop_assert_eq!(deleted_inodes.as_slice(), expected_inodes.as_slice());
+            prop_assert!(
+                deleted
+                    .iter()
+                    .all(|diff| diff.change_type == SnapshotChangeType::Deleted)
+            );
+        }
+
+        #[test]
+        fn snapshot_diff_same_inode_set_only_reports_generation_increases(
+            generations in proptest::collection::btree_map(
+                256_u64..4096,
+                (0_u64..10_000, 0_u64..3),
+                0..32,
+            ),
+        ) {
+            let older: Vec<BtrfsLeafEntry> = generations
+                .iter()
+                .map(|(&objectid, &(old_generation, _delta))| {
+                    make_inode_entry(objectid, old_generation)
+                })
+                .collect();
+            let newer: Vec<BtrfsLeafEntry> = generations
+                .iter()
+                .map(|(&objectid, &(old_generation, delta))| {
+                    make_inode_entry(objectid, old_generation + delta)
+                })
+                .collect();
+            let expected: Vec<SnapshotDiffEntry> = generations
+                .iter()
+                .filter_map(|(&objectid, &(_old_generation, delta))| {
+                    (delta > 0).then_some(SnapshotDiffEntry {
+                        inode: objectid,
+                        change_type: SnapshotChangeType::Modified,
+                    })
+                })
+                .collect();
+
+            prop_assert_eq!(snapshot_diff_by_generation(&older, &newer), expected);
         }
     }
 

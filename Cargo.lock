@@ -716,6 +716,7 @@ dependencies = [
  "ffs-mvcc",
  "ffs-ondisk",
  "ffs-types",
+ "proptest",
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
