@@ -2475,4 +2475,80 @@ mod tests {
             "the btrfs csum-type range must be contiguous 0..=3"
         );
     }
+
+    /// bd-63e4e — Kernel-conformance pin for the ext4 + btrfs
+    /// superblock layout constants. Each value determines where on
+    /// disk the parser looks for the superblock and what byte-level
+    /// magic it must find. Drift in any value would silently fail
+    /// every mount of every image — yet each constant has NO test
+    /// pinning it to a canonical kernel value.
+    ///
+    /// Pairs with bd-jbilz (EXT4_SUPER_MAGIC + ext4 state flags),
+    /// bd-xhswi (BTRFS_CSUM_TYPE_*), bd-pvbgz (btrfs struct sizes),
+    /// bd-6uu7j (chunk_type flags) — those pin scalar / struct
+    /// constants; this pins the **layout offsets** that determine
+    /// the byte address of every superblock and checksum field.
+    #[test]
+    fn ext4_btrfs_layout_constants_match_kernel_header() {
+        // ext4 layout per fs/ext4/ext4.h:
+        //   #define EXT4_MIN_BLOCK_SIZE  1024
+        //   the ext4 superblock starts 1024 bytes from device start
+        //   regardless of block size, sized at sizeof(struct
+        //   ext4_super_block) = 1024 bytes.
+        assert_eq!(
+            EXT4_SUPERBLOCK_OFFSET, 1024,
+            "EXT4_SUPERBLOCK_OFFSET must equal kernel value 1024"
+        );
+        assert_eq!(
+            EXT4_SUPERBLOCK_SIZE, 1024,
+            "EXT4_SUPERBLOCK_SIZE must equal sizeof(struct ext4_super_block) = 1024"
+        );
+        assert_eq!(
+            EXT4_SECTOR_SIZE, 512,
+            "EXT4_SECTOR_SIZE must equal kernel logical sector size 512"
+        );
+        // Kernel: u32 s_checksum is at offset 0x3FC (1020 decimal),
+        // the LAST 4 bytes of the 1024-byte superblock.
+        assert_eq!(
+            EXT4_SB_CHECKSUM_OFFSET, 0x3FC,
+            "EXT4_SB_CHECKSUM_OFFSET must equal kernel offset 0x3FC"
+        );
+        assert_eq!(
+            EXT4_SB_CHECKSUM_OFFSET,
+            EXT4_SUPERBLOCK_SIZE - 4,
+            "EXT4_SB_CHECKSUM_OFFSET must be the last 4 bytes of the superblock"
+        );
+
+        // btrfs layout per fs/btrfs/disk-io.h:
+        //   #define BTRFS_SUPER_INFO_OFFSET    SZ_64K
+        //   #define BTRFS_SUPER_INFO_SIZE      4096
+        //   #define BTRFS_MAGIC                0x4D5F53665248425FULL
+        assert_eq!(
+            BTRFS_SUPER_INFO_OFFSET,
+            64 * 1024,
+            "BTRFS_SUPER_INFO_OFFSET must equal kernel value SZ_64K (65536)"
+        );
+        assert_eq!(
+            BTRFS_SUPER_INFO_SIZE, 4096,
+            "BTRFS_SUPER_INFO_SIZE must equal sizeof(struct btrfs_super_block) = 4096"
+        );
+        assert_eq!(
+            BTRFS_MAGIC, 0x4D5F_5366_5248_425F,
+            "BTRFS_MAGIC must equal kernel value 0x4D5F53665248425F"
+        );
+        // Byte decomposition: BTRFS_MAGIC stored little-endian
+        // gives the ASCII byte sequence "_BHRfS_M" — pin both the
+        // bytes and the round-trip so a swapped-endian regression
+        // fails immediately rather than at first mount.
+        let magic_bytes: [u8; 8] = BTRFS_MAGIC.to_le_bytes();
+        assert_eq!(
+            &magic_bytes, b"_BHRfS_M",
+            "BTRFS_MAGIC LE byte sequence must be \"_BHRfS_M\""
+        );
+        assert_eq!(
+            u64::from_le_bytes(*b"_BHRfS_M"),
+            BTRFS_MAGIC,
+            "round-trip: from_le_bytes(\"_BHRfS_M\") must reproduce BTRFS_MAGIC"
+        );
+    }
 }
