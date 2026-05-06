@@ -314,7 +314,7 @@ impl FsOps for FuzzFs {
         _parent: InodeNumber,
         _name: &OsStr,
     ) -> ffs_error::Result<InodeAttr> {
-        Err(FfsError::NotFound("lookup fuzz stub".to_owned()))
+        Err(FfsError::NotFound("lookup fuzz miss".to_owned()))
     }
 
     fn readdir(

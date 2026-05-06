@@ -220,7 +220,7 @@ impl FsOps for FuzzFs {
         _parent: InodeNumber,
         _name: &OsStr,
     ) -> ffs_error::Result<InodeAttr> {
-        Err(FfsError::NotFound("lookup fuzz stub".to_owned()))
+        Err(FfsError::NotFound("lookup fuzz miss".to_owned()))
     }
 
     fn readdir(
@@ -271,7 +271,7 @@ impl FsOps for FuzzFs {
         _scope: &mut RequestScope,
         _ino: InodeNumber,
     ) -> ffs_error::Result<Vec<u8>> {
-        Err(FfsError::Format("readlink fuzz stub".to_owned()))
+        Err(FfsError::Format("readlink fuzz rejection".to_owned()))
     }
 
     fn write(
