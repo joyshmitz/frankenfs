@@ -87,10 +87,12 @@ xfstests attempt should reuse the explicit `XFSTESTS_DIR`, `TEST_DIR`, and
 FrankenFS pass/fail signal was produced because xfstests stopped before running
 the selected cases.
 
-**Next required run:** after the package lock clears, install `xfslibs-dev` and
-`libaio-dev`, rerun `make -C third_party/xfstests-dev`, provide a non-destructive
-`local.config`/loop-image setup for `TEST_DEV` and `SCRATCH_DEV`, then rerun the
-wrapper with `XFSTESTS_DRY_RUN=0`.
+**Historical next required run at the time:** after the package lock cleared,
+install `xfslibs-dev` and `libaio-dev`, rerun
+`make -C third_party/xfstests-dev`, provide a non-destructive
+`local.config`/loop-image setup for `TEST_DEV` and `SCRATCH_DEV`, then rerun
+the wrapper with `XFSTESTS_DRY_RUN=0`. The current prerequisite state is
+superseded by the 2026-05-05 preflight pass above.
 
 ## Status Summary
 
@@ -205,11 +207,13 @@ currently expose through the FUSE interface.
   `FALLOC_FL_KEEP_SIZE` in both ext4 and btrfs code paths (see
   `ffs-core::ext4_fallocate` and `ffs-core::btrfs_validate_fallocate_mode`).
   Preallocated extents are properly marked as unwritten.
-- **Remaining blocker**: Requires `ltp/aio-stress` binary from compiled xfstests.
-  Cannot validate without building xfstests-dev and setting up the FUSE mount
-  test environment.
+- **Remaining blocker**: Requires a permissioned real xfstests execution with
+  the explicit `XFSTESTS_REAL_RUN_ACK` guard and artifacted FUSE test/scratch
+  setup. The current explicit-path preflight proves the helper/build
+  prerequisites are present; it does not produce runtime pass/fail evidence.
 - **Status**: Reclassified from `investigating` to `likely_pass` based on code
-  analysis. Needs runtime validation when xfstests build environment is available.
+  analysis. Needs runtime validation when the permissioned xfstests lane is
+  authorized.
 
 ## Infrastructure Notes
 
@@ -222,6 +226,11 @@ xfstests requires compilation from source. Key dependencies:
 - `libattr1-dev` and `libacl1-dev` (xattr/ACL support)
 - `autoconf`, `automake`, `libtool` (build system)
 - `fsstress` (built as part of xfstests)
+
+As of the 2026-05-05 explicit-path preflight, these prerequisites are present
+on the current host when `XFSTESTS_DIR=third_party/xfstests-dev`, `TEST_DIR`,
+and `SCRATCH_MNT` are provided explicitly. Fresh runtime evidence still requires
+the guarded real run.
 
 ### FrankenFS FUSE Mount Configuration
 
@@ -243,7 +252,7 @@ Completed 2026-03-18. All 8 known failures investigated (100%).
 |------|------------|----------|--------|-----------|
 | generic/030 | known_fail | Yes (high) | FUSE mmap + mremap support | Requires ffs-fuse writeback cache + mmap coherence |
 | generic/068 | wont_fix | No | — | FIFREEZE ioctl is kernel VFS, no FUSE path |
-| generic/112 | likely_pass | N/A | Runtime test | AIO + fallocate both supported; needs xfstests build |
+| generic/112 | likely_pass | N/A | Runtime test | AIO + fallocate both supported; needs permissioned real xfstests validation |
 | generic/231 | wont_fix | No | — | Quota subsystem is kernel-only |
 | ext4/001 | known_fail | Partial | Kernel/VFS FIEMAP investigation | FIEMAP marshaling is implemented, and ioctl probe coverage shows `EOPNOTSUPP` occurs before `ffs-fuse::ioctl` |
 | ext4/003 | known_fail | Yes (low) | Test infra | Set up SCRATCH_DEV loop device with bigalloc |
@@ -251,7 +260,7 @@ Completed 2026-03-18. All 8 known failures investigated (100%).
 | ext4/013 | wont_fix | No | — | Requires raw device access (debugfs -w) |
 
 **Actionable items for future work:**
-1. `bd-rchk3`: build xfstests-dev and validate generic/112 (likely_pass)
+1. `bd-rchk3.3`: run the permissioned xfstests lane and validate generic/112 (likely_pass)
 2. `bd-rchk3`: rerun the passable subset and update this document with dated results
 3. `bd-rchk4`: revisit ext4/001 only after identifying whether Linux forwards `FS_IOC_FIEMAP` to FUSE userspace at all
 4. `bd-rchk3`: set up SCRATCH_DEV loop device infrastructure (unblocks ext4/003)
@@ -259,8 +268,8 @@ Completed 2026-03-18. All 8 known failures investigated (100%).
 
 ### Next Steps
 
-1. `bd-rchk3`: install xfstests build dependencies and compile
-2. `bd-rchk3`: create proper TEST_DEV/SCRATCH_DEV loop device setup
-3. `bd-rchk3`: run passable subset (generic/001, generic/013, generic/035) to validate
-4. `bd-rchk3`: validate generic/112 (reclassified as likely_pass)
-5. `bd-rchk3`: update baseline with actual results
+1. `bd-rchk3.3`: provide explicit authorization for real xfstests execution with `XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices`
+2. `bd-rchk3.3`: refresh the explicit-path preflight immediately before execution
+3. `bd-rchk3.3`: run the curated subset with artifact-scoped `TEST_DIR`, `SCRATCH_MNT`, `RESULT_BASE`, stdout/stderr, raw xfstests logs, and cleanup status
+4. `bd-rchk3.4`: convert each product-actionable failure row into a narrow follow-up bead
+5. `bd-rchk3`: update this baseline with actual pass/fail/not-run counts and tracker links
