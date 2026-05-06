@@ -314,3 +314,8 @@ doc = false
 name = "fuzz_ext4_casefold"
 path = "fuzz_targets/fuzz_ext4_casefold.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_btrfs_raid_profile"
+path = "fuzz_targets/fuzz_btrfs_raid_profile.rs"
+doc = false
