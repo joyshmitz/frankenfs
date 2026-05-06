@@ -49,6 +49,10 @@ use ffs_harness::{
         DEFAULT_RECOVERY_MATRIX_PATH, fail_on_mounted_recovery_matrix_errors,
         load_mounted_recovery_matrix, validate_mounted_recovery_matrix,
     },
+    mounted_write_error_classes::{
+        DEFAULT_MOUNTED_WRITE_ERROR_CLASSES_PATH, fail_on_mounted_write_error_classes_errors,
+        parse_mounted_write_error_classes, validate_mounted_write_error_classes,
+    },
     mounted_write_matrix::{
         DEFAULT_MATRIX_PATH, fail_on_mounted_write_matrix_errors, load_mounted_write_matrix,
         validate_mounted_write_matrix,
@@ -225,27 +229,8 @@ fn run() -> Result<()> {
     let cmd = args.first().map(String::as_str);
 
     match cmd {
-        Some("parity") => {
-            let report = ParityReport::current();
-            println!("{}", serde_json::to_string_pretty(&report)?);
-            Ok(())
-        }
-        Some("check-fixtures") => {
-            let ext4 = Path::new("conformance/fixtures/ext4_superblock_sparse.json");
-            let btrfs = Path::new("conformance/fixtures/btrfs_superblock_sparse.json");
-            let ext4_sb = validate_ext4_fixture(ext4)?;
-            let btrfs_sb = validate_btrfs_fixture(btrfs)?;
-
-            println!(
-                "ext4: block_size={} volume={}",
-                ext4_sb.block_size, ext4_sb.volume_name
-            );
-            println!(
-                "btrfs: nodesize={} label={}",
-                btrfs_sb.nodesize, btrfs_sb.label
-            );
-            Ok(())
-        }
+        Some("parity") => parity_cmd(),
+        Some("check-fixtures") => check_fixtures_cmd(),
         Some("generate-fixture") => generate_fixture(&args[1..]),
         Some("run-crash-replay") => run_crash_replay(&args[1..]),
         Some("run-fsx-stress") => run_fsx_stress_cmd(&args[1..]),
@@ -309,6 +294,9 @@ fn run() -> Result<()> {
         }
         Some("validate-workload-corpus") => validate_workload_corpus_cmd(&args[1..]),
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
+        Some("validate-mounted-write-error-classes") => {
+            validate_mounted_write_error_classes_cmd(&args[1..])
+        }
         Some("validate-mounted-write-matrix") => validate_mounted_write_matrix_cmd(&args[1..]),
         Some("validate-mounted-recovery-matrix") => {
             validate_mounted_recovery_matrix_cmd(&args[1..])
@@ -322,6 +310,29 @@ fn run() -> Result<()> {
             bail!("unknown command: {other}")
         }
     }
+}
+
+fn parity_cmd() -> Result<()> {
+    let report = ParityReport::current();
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn check_fixtures_cmd() -> Result<()> {
+    let ext4 = Path::new("conformance/fixtures/ext4_superblock_sparse.json");
+    let btrfs = Path::new("conformance/fixtures/btrfs_superblock_sparse.json");
+    let ext4_sb = validate_ext4_fixture(ext4)?;
+    let btrfs_sb = validate_btrfs_fixture(btrfs)?;
+
+    println!(
+        "ext4: block_size={} volume={}",
+        ext4_sb.block_size, ext4_sb.volume_name
+    );
+    println!(
+        "btrfs: nodesize={} label={}",
+        btrfs_sb.nodesize, btrfs_sb.label
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4047,6 +4058,50 @@ fn validate_mounted_write_matrix_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn validate_mounted_write_error_classes_cmd(args: &[String]) -> Result<()> {
+    let mut catalog_path = DEFAULT_MOUNTED_WRITE_ERROR_CLASSES_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--catalog" => {
+                i += 1;
+                args.get(i)
+                    .context("--catalog requires a path")?
+                    .clone_into(&mut catalog_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--help" | "-h" => {
+                print_mounted_write_error_classes_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-mounted-write-error-classes argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let text = fs::read_to_string(&catalog_path)
+        .with_context(|| format!("failed to read mounted write error classes {catalog_path}"))?;
+    let catalog = parse_mounted_write_error_classes(&text)?;
+    let report = validate_mounted_write_error_classes(&catalog);
+    fail_on_mounted_write_error_classes_errors(&report)?;
+    let json = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{json}\n"))?;
+        println!(
+            "mounted write error classes report written: {} entries={} broad_fallbacks={}",
+            path, report.entry_count, report.broad_fallback_count
+        );
+    } else {
+        println!("{json}");
+    }
+    Ok(())
+}
+
 fn validate_mounted_recovery_matrix_cmd(args: &[String]) -> Result<()> {
     let mut matrix_path = DEFAULT_RECOVERY_MATRIX_PATH.to_owned();
     let mut out_path: Option<String> = None;
@@ -4427,6 +4482,7 @@ fn print_usage_commands() {
     print_writeback_cache_ordering_usage_summary();
     print_writeback_cache_crash_replay_usage_summary();
     print_workload_corpus_usage_summary();
+    println!("  ffs-harness validate-mounted-write-error-classes [--catalog FILE] [--out FILE]");
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
     println!("  ffs-harness validate-mounted-recovery-matrix [--matrix FILE] [--out FILE]");
 }
@@ -4505,6 +4561,9 @@ fn print_usage_examples() {
     print_writeback_cache_ordering_example();
     print_writeback_cache_crash_replay_example();
     print_workload_corpus_example();
+    println!(
+        "  ffs-harness validate-mounted-write-error-classes --out artifacts/e2e/mounted_write_error_classes.json"
+    );
     println!(
         "  ffs-harness validate-mounted-write-matrix --out artifacts/e2e/mounted_write_matrix.json"
     );
@@ -5094,6 +5153,14 @@ fn print_mounted_write_matrix_usage() {
     println!();
     println!("Options:");
     println!("  --matrix FILE                      Read matrix JSON from FILE");
+    println!("  --out FILE                         Write JSON validation report to FILE");
+}
+
+fn print_mounted_write_error_classes_usage() {
+    println!("Usage: ffs-harness validate-mounted-write-error-classes [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --catalog FILE                     Read mounted write error class JSON");
     println!("  --out FILE                         Write JSON validation report to FILE");
 }
 

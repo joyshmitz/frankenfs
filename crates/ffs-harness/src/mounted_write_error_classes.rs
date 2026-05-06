@@ -111,6 +111,11 @@ pub fn parse_mounted_write_error_classes(text: &str) -> Result<MountedWriteError
 pub fn validate_default_mounted_write_error_classes() -> Result<MountedWriteErrorReport> {
     let catalog = parse_mounted_write_error_classes(DEFAULT_MOUNTED_WRITE_ERROR_CLASSES_JSON)?;
     let report = validate_mounted_write_error_classes(&catalog);
+    fail_on_mounted_write_error_classes_errors(&report)?;
+    Ok(report)
+}
+
+pub fn fail_on_mounted_write_error_classes_errors(report: &MountedWriteErrorReport) -> Result<()> {
     if !report.valid {
         bail!(
             "mounted write error classes failed with {} error(s): {}",
@@ -118,7 +123,7 @@ pub fn validate_default_mounted_write_error_classes() -> Result<MountedWriteErro
             report.errors.join("; ")
         );
     }
-    Ok(report)
+    Ok(())
 }
 
 #[must_use]
