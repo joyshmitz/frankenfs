@@ -1,0 +1,68 @@
+---
+source: crates/ffs-harness/src/writeback_cache_audit.rs
+expression: markdown
+---
+# Writeback-Cache Audit Gate
+
+- schema_version: 1
+- gate_version: v1
+- bead_id: bd-rchk0.2.1.1
+- scenario_id: writeback_cache_audit_default_sample
+- decision: accept
+- reproduction_command: `ffs-harness validate-writeback-cache-audit --gate gate.json`
+
+## Invariants
+
+- I1 Snapshot Visibility Boundary: epoch_barrier_artifact must be present, fresh, and passing before rw opt-in
+- I2 Alias Order Preservation: operation_class must be in the audited mounted-write envelope
+- I3 Metadata-After-Data Dependency: rw repair-write serialization must be accepted and conflicting flags absent
+- I4 Sync Boundary Completeness: fsync evidence must be present, fresh, and passing
+- I5 Flush Non-Durability: mount mode must be rw with explicit opt-in; flush-only evidence is not sufficient
+- I6 Cross-Epoch Order: crash matrix evidence must be present, fresh, and passing
+
+## Failure Modes
+
+- missing_epoch_barrier_artifact
+- stale_epoch_barrier_artifact
+- rw_repair_serialization_unsupported
+- default_or_read_only_mount
+- unsupported_filesystem_or_operation
+- fuse_capability_unavailable
+- stale_crash_matrix_or_missing_fsync_evidence
+- conflicting_cli_flags
+- runtime_kill_switch_engaged
+- writeback_feature_downgraded
+- stale_gate_artifact
+- host_capability_mismatch
+- config_default_attempt
+
+## Artifact Fields
+
+- schema_version
+- gate_version
+- bead_id
+- mount_options.raw_options
+- mount_options.mode
+- runtime_guard.kill_switch_state
+- runtime_guard.feature_state
+- runtime_guard.config_source
+- runtime_guard.gate_artifact_hash
+- runtime_guard.gate_fresh
+- runtime_guard.gate_age_secs
+- runtime_guard.gate_max_age_secs
+- runtime_guard.host_capability_fingerprint
+- runtime_guard.lane_manifest_id
+- runtime_guard.lane_manifest_path
+- runtime_guard.lane_manifest_fresh
+- runtime_guard.lane_manifest_matches_host
+- runtime_guard.release_gate_consumer
+- repair_serialization_state
+- fuse_capability.probe_status
+- fuse_capability.kernel_supports_writeback_cache
+- fuse_capability.helper_binary_present
+- epoch_barrier_artifact.artifact_path
+- crash_matrix_artifact.artifact_path
+- fsync_evidence_artifact.artifact_path
+- filesystem_flavor
+- operation_class
+- explicit_opt_in

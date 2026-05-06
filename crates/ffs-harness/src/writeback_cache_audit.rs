@@ -2730,4 +2730,22 @@ mod tests {
         let result = fail_on_writeback_crash_replay_errors(&report);
         assert!(result.is_err());
     }
+
+    /// bd-v766a — Golden-artifact pin for the writeback-cache audit
+    /// markdown emitter. The 18+ sibling tests cover validation /
+    /// decision logic; this snapshot catches whitespace, heading-
+    /// level, ordering, and bullet-format drift in the markdown
+    /// bytes that silently breaks downstream proof-bundle / release-
+    /// gate dashboard parsers.
+    #[test]
+    fn render_writeback_cache_audit_markdown_default_sample() {
+        let report = build_writeback_cache_audit_report(
+            &happy_gate(),
+            "writeback_cache_audit_default_sample",
+            "ffs-harness validate-writeback-cache-audit --gate gate.json",
+        )
+        .expect("happy_gate() must build a valid report");
+        let markdown = render_writeback_cache_audit_markdown(&report);
+        insta::assert_snapshot!(markdown);
+    }
 }
