@@ -676,6 +676,30 @@ pub trait WalWriter: Send + Sync {
 /// - The group commit coordinator calls [`notify_durable`](Self::notify_durable)
 ///   after a successful fsync, or [`notify_failed`](Self::notify_failed) on error.
 /// - All waiters for the affected epoch (and earlier) are woken together.
+///
+/// # Concurrency invariants (bd-lebu5)
+///
+/// **Invariant 1 — notify outside the lock.** Both [`notify_durable`] and
+/// [`notify_failed`] acquire `state`, mutate, drop the guard at the inner
+/// block scope, THEN call `condvar.notify_all()`. Notifying *while*
+/// holding `state` would force every woken waiter to re-block on the
+/// same mutex on the very next instruction — a subtle perf regression
+/// (every `notify_all` would serialize through the mutex twice). Future
+/// refactors that hoist the `notify_all` inside the inner block must
+/// be rejected.
+///
+/// **Invariant 2 — predicate-loop on every wake.** [`await_epoch`] and
+/// [`await_epoch_timeout`] re-check the `durable_epoch` and `failed`
+/// predicates on EVERY condvar wake — both spurious wakes (allowed by
+/// the OS) and notify_all-induced wakes for unrelated lower epochs. A
+/// regression that drops the surrounding `loop { ... }` — converting
+/// the wait into single-shot — would silently let `notify_durable(2)`
+/// wake a waiter awaiting epoch 5; that waiter would then read
+/// `durable_epoch == 2`, return [`DurabilityOutcome::Durable`], and
+/// the calling fsync path would *trust* an unrelated lower epoch as
+/// durable. The
+/// `durability_notifier_lower_epoch_notification_does_not_wake_higher_epoch_waiter`
+/// regression test pins this contract.
 #[derive(Debug)]
 pub struct DurabilityNotifier {
     state: Mutex<DurabilityState>,
@@ -1817,6 +1841,59 @@ mod tests {
         for h in handles {
             assert_eq!(h.join().expect("no panic"), DurabilityOutcome::Durable);
         }
+    }
+
+    /// bd-lebu5 — Regression for DurabilityNotifier Invariant 2
+    /// (predicate-loop on every wake).
+    ///
+    /// `notify_durable` calls `condvar.notify_all`, which wakes EVERY
+    /// waiter regardless of the epoch they're awaiting. A waiter
+    /// awaiting epoch 5 must NOT exit when `notify_durable(2)` fires —
+    /// it must re-check `durable_epoch`, see that it's still < 5, and
+    /// re-wait. A regression that converts `await_epoch`'s `loop` into
+    /// a single-shot wait would silently let the lower-epoch
+    /// notification release the higher-epoch waiter, which would then
+    /// mis-trust an unrelated lower epoch as durable.
+    ///
+    /// The test:
+    ///   1. spawns a waiter for epoch 5
+    ///   2. fires `notify_durable(2)` — the waiter must remain blocked
+    ///      (we observe this by checking `is_finished()` after a brief
+    ///      settle)
+    ///   3. fires `notify_durable(7)` — the waiter MUST then unblock
+    ///      with `Durable`
+    #[test]
+    fn durability_notifier_lower_epoch_notification_does_not_wake_higher_epoch_waiter() {
+        let notifier = Arc::new(DurabilityNotifier::new());
+        let n2 = Arc::clone(&notifier);
+        let handle = std::thread::spawn(move || n2.await_epoch(5));
+
+        // Let the waiter park on the condvar.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        // Fire a lower-epoch notification. Predicate (5 <= durable_epoch=2)
+        // is FALSE, so the loop must re-wait.
+        notifier.notify_durable(2);
+
+        // Settle. If the loop is intact, the waiter stays parked.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(
+            !handle.is_finished(),
+            "waiter for epoch 5 must NOT exit on notify_durable(2) — \
+             a regression that dropped the predicate-loop would let the \
+             waiter return Durable while durable_epoch is only 2"
+        );
+
+        // Now fire a sufficient notification. Predicate becomes TRUE.
+        notifier.notify_durable(7);
+
+        let outcome = handle.join().expect("waiter joined");
+        assert_eq!(
+            outcome,
+            DurabilityOutcome::Durable,
+            "waiter must wake with Durable after notify_durable(7)"
+        );
+        assert_eq!(notifier.durable_epoch(), 7);
     }
 
     // -- Test WalWriter fixture for group commit tests --
