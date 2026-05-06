@@ -2698,7 +2698,10 @@ mod tests {
             .repair_generation
     }
 
-    fn policy_decision_stub(symbols_selected: u32, corruption_posterior: f64) -> OverheadDecision {
+    fn policy_decision_fixture(
+        symbols_selected: u32,
+        corruption_posterior: f64,
+    ) -> OverheadDecision {
         OverheadDecision {
             overhead_ratio: 0.05,
             corruption_posterior,
@@ -4070,7 +4073,7 @@ mod tests {
 
         pipeline
             .policy_decisions
-            .insert(0, policy_decision_stub(4, 0.01));
+            .insert(0, policy_decision_fixture(4, 0.01));
         pipeline
             .on_group_write(&cx, GroupNumber(0))
             .expect("adaptive low-risk write");
@@ -4085,7 +4088,7 @@ mod tests {
 
         pipeline
             .policy_decisions
-            .insert(0, policy_decision_stub(4, 0.2));
+            .insert(0, policy_decision_fixture(4, 0.2));
         pipeline
             .on_group_write(&cx, GroupNumber(0))
             .expect("adaptive high-risk write");
