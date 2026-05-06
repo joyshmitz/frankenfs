@@ -1990,6 +1990,21 @@ mod tests {
     }
 
     #[test]
+    fn render_proof_bundle_markdown_sample_bundle_snapshot() {
+        let sample = sample_bundle();
+        let mut report = validate_sample(&sample);
+        let bundle_root = sample.root.path().display().to_string();
+        report.manifest_path = report.manifest_path.replace(&bundle_root, "$BUNDLE");
+
+        let markdown = render_proof_bundle_markdown(&report);
+
+        assert!(markdown.contains("# FrankenFS Proof Bundle"));
+        assert!(markdown.contains("## Lanes"));
+        assert!(markdown.contains("## Swarm Evidence"));
+        insta::assert_snapshot!("render_proof_bundle_markdown_sample_bundle", markdown);
+    }
+
+    #[test]
     fn summary_separates_pass_skip_fail_and_error_outcomes() {
         let sample = sample_bundle();
         let report = validate_sample(&sample);

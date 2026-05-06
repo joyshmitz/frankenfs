@@ -1,0 +1,36 @@
+---
+source: crates/ffs-harness/src/proof_bundle.rs
+expression: markdown
+---
+# FrankenFS Proof Bundle
+
+- Bundle: `proof-bundle-sample`
+- Manifest: `$BUNDLE/manifest.json`
+- Valid: `true`
+- Totals: pass=4 fail=3 skip=3 error=3 lanes=13 scenarios=13 artifacts=14
+- Diagnostics: missing_lanes=0 duplicate_lanes=0 duplicate_scenarios=0 broken_links=0 hash_mismatches=0 redaction_errors=0 redaction_leaks=0 integrity_errors=0 errors=0 warnings=0
+- Artifact hash chain: observed=`fdd016b4cc0f7760f8f41fffe9949417743ce8b5a79141125bef259c77739cb3` expected=`fdd016b4cc0f7760f8f41fffe9949417743ce8b5a79141125bef259c77739cb3` artifacts=14 redaction_policy_version=`redaction-v1`
+- Reproduction: `cargo run -p ffs-harness -- validate-proof-bundle --bundle manifest.json`
+
+## Lanes
+| Lane | Outcome | Scenarios | Artifacts | Raw log | Summary |
+|---|---:|---:|---:|---|---|
+| `conformance` | `pass` | 1 | 1 | [logs/conformance.log](logs/conformance.log) | [summaries/conformance.md](summaries/conformance.md) |
+| `xfstests` | `fail` | 1 | 1 | [logs/xfstests.log](logs/xfstests.log) | [summaries/xfstests.md](summaries/xfstests.md) |
+| `fuse` | `skip` | 1 | 1 | [logs/fuse.log](logs/fuse.log) | [summaries/fuse.md](summaries/fuse.md) |
+| `differential_oracle` | `error` | 1 | 1 | [logs/differential_oracle.log](logs/differential_oracle.log) | [summaries/differential_oracle.md](summaries/differential_oracle.md) |
+| `repair_lab` | `pass` | 1 | 1 | [logs/repair_lab.log](logs/repair_lab.log) | [summaries/repair_lab.md](summaries/repair_lab.md) |
+| `crash_replay` | `fail` | 1 | 1 | [logs/crash_replay.log](logs/crash_replay.log) | [summaries/crash_replay.md](summaries/crash_replay.md) |
+| `performance` | `skip` | 1 | 1 | [logs/performance.log](logs/performance.log) | [summaries/performance.md](summaries/performance.md) |
+| `swarm_workload_harness` | `error` | 1 | 1 | [logs/swarm_workload_harness.log](logs/swarm_workload_harness.log) | [summaries/swarm_workload_harness.md](summaries/swarm_workload_harness.md) |
+| `swarm_tail_latency` | `pass` | 1 | 2 | [logs/swarm_tail_latency.log](logs/swarm_tail_latency.log) | [summaries/swarm_tail_latency.md](summaries/swarm_tail_latency.md) |
+| `writeback_cache` | `fail` | 1 | 1 | [logs/writeback_cache.log](logs/writeback_cache.log) | [summaries/writeback_cache.md](summaries/writeback_cache.md) |
+| `scrub_repair_status` | `skip` | 1 | 1 | [logs/scrub_repair_status.log](logs/scrub_repair_status.log) | [summaries/scrub_repair_status.md](summaries/scrub_repair_status.md) |
+| `known_deferrals` | `error` | 1 | 1 | [logs/known_deferrals.log](logs/known_deferrals.log) | [summaries/known_deferrals.md](summaries/known_deferrals.md) |
+| `release_gates` | `pass` | 1 | 1 | [logs/release_gates.log](logs/release_gates.log) | [summaries/release_gates.md](summaries/release_gates.md) |
+
+## Swarm Evidence
+| Lane | Outcome | Host class | Freshness | Release claim | Manifest hash | Validator report | P99 artifact | Raw log | Downgrade/skip rationale |
+|---|---:|---|---|---|---|---|---|---|---|
+| `swarm_workload_harness` | `error` | `developer_smoke` | `fresh` | `error` | `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` | `artifacts/swarm_workload_harness.json` | `n/a` | [logs/swarm_workload_harness.log](logs/swarm_workload_harness.log) | `swarm evidence errored and blocks release wording` |
+| `swarm_tail_latency` | `pass` | `permissioned_large_host` | `fresh` | `authoritative_large_host` | `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` | `artifacts/swarm_tail_latency.json` | `artifacts/swarm_tail_latency_p99_attribution.json` | [logs/swarm_tail_latency.log](logs/swarm_tail_latency.log) | `n/a` |
