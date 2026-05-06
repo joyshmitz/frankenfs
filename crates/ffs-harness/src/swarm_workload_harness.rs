@@ -27,7 +27,7 @@ const REQUIRED_WORKLOAD_CLASSES: [SwarmWorkloadClass; 5] = [
     SwarmWorkloadClass::CachePressure,
 ];
 
-const REQUIRED_LOG_FIELDS: [&str; 16] = [
+const REQUIRED_LOG_FIELDS: [&str; 18] = [
     "scenario_id",
     "host_fingerprint",
     "cpu_cores_logical",
@@ -40,8 +40,10 @@ const REQUIRED_LOG_FIELDS: [&str; 16] = [
     "rch_or_local_lane",
     "worker_isolation_notes",
     "workload_profile_id",
+    "workload_seeds",
     "queue_depth",
     "backpressure_state",
+    "cleanup_status",
     "release_claim_state",
     "reproduction_command",
 ];
@@ -177,7 +179,9 @@ pub struct SwarmWorkloadScenario {
     pub scenario_id: String,
     pub host: SwarmHostFingerprint,
     pub workload_profile_ids: Vec<String>,
+    pub workload_seeds: Vec<u64>,
     pub counters: SwarmQueueBackpressureCounters,
+    pub cleanup_status: SwarmCleanupStatus,
     pub classification: SwarmHarnessClassification,
     pub release_claim_state: SwarmHarnessReleaseClaimState,
     pub reproduction_command: String,
@@ -325,6 +329,29 @@ impl SwarmBackpressureState {
             Self::Healthy => "healthy",
             Self::Throttled => "throttled",
             Self::Critical => "critical",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmCleanupStatus {
+    NotStartedDryRun,
+    Clean,
+    PartialArtifactsPreserved,
+    Failed,
+    Unknown,
+}
+
+impl SwarmCleanupStatus {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NotStartedDryRun => "not_started_dry_run",
+            Self::Clean => "clean",
+            Self::PartialArtifactsPreserved => "partial_artifacts_preserved",
+            Self::Failed => "failed",
             Self::Unknown => "unknown",
         }
     }
@@ -792,6 +819,18 @@ fn validate_scenario_shape(
             scenario.scenario_id
         ));
     }
+    if scenario.workload_seeds.is_empty() {
+        errors.push(format!(
+            "scenario {} workload_seeds must not be empty",
+            scenario.scenario_id
+        ));
+    }
+    if matches!(scenario.cleanup_status, SwarmCleanupStatus::Unknown) {
+        errors.push(format!(
+            "scenario {} cleanup_status must not be unknown",
+            scenario.scenario_id
+        ));
+    }
     for workload_profile_id in &scenario.workload_profile_ids {
         if !profile_ids.contains(workload_profile_id) {
             errors.push(format!(
@@ -1041,6 +1080,34 @@ mod tests {
     }
 
     #[test]
+    fn missing_workload_seeds_are_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest.scenarios[0].workload_seeds.clear();
+        let report = validate_swarm_workload_harness_manifest(&manifest);
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("workload_seeds"))
+        );
+    }
+
+    #[test]
+    fn unknown_cleanup_status_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest.scenarios[0].cleanup_status = SwarmCleanupStatus::Unknown;
+        let report = validate_swarm_workload_harness_manifest(&manifest);
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("cleanup_status"))
+        );
+    }
+
+    #[test]
     fn mutating_command_plan_is_rejected() {
         let mut manifest = fixture_manifest();
         manifest.workload_profiles[0]
@@ -1148,6 +1215,7 @@ mod tests {
                 .iter()
                 .map(|workload_class| format!("{}_dry_run", workload_class.label()))
                 .collect(),
+            workload_seeds: vec![10_001, 10_002, 10_003, 10_004, 10_005],
             counters: SwarmQueueBackpressureCounters {
                 max_queue_depth: 4096,
                 average_queue_depth: 512.0,
@@ -1156,6 +1224,7 @@ mod tests {
                 rejected_writes: 0,
                 p99_latency_budget_us: 12_000.0,
             },
+            cleanup_status: SwarmCleanupStatus::NotStartedDryRun,
             classification: SwarmHarnessClassification::Pass,
             release_claim_state: SwarmHarnessReleaseClaimState::PlanReady,
             reproduction_command: format!(
@@ -1193,6 +1262,7 @@ mod tests {
                 worker_isolation_notes: "uses dry-run-only artifacts".to_owned(),
             },
             workload_profile_ids: vec!["metadata_storm_dry_run".to_owned()],
+            workload_seeds: vec![20_001],
             counters: SwarmQueueBackpressureCounters {
                 max_queue_depth: 128,
                 average_queue_depth: 4.0,
@@ -1201,6 +1271,7 @@ mod tests {
                 rejected_writes: 0,
                 p99_latency_budget_us: 25_000.0,
             },
+            cleanup_status: SwarmCleanupStatus::NotStartedDryRun,
             classification: SwarmHarnessClassification::CapabilitySkip,
             release_claim_state: SwarmHarnessReleaseClaimState::SmallHostSmoke,
             reproduction_command: format!(

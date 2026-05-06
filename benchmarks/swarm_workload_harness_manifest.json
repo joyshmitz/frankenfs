@@ -230,6 +230,13 @@
         "scrub_repair_overlap_dry_run",
         "cache_pressure_dry_run"
       ],
+      "workload_seeds": [
+        10001,
+        10002,
+        10003,
+        10004,
+        10005
+      ],
       "counters": {
         "max_queue_depth": 8192,
         "average_queue_depth": 768.0,
@@ -238,6 +245,7 @@
         "rejected_writes": 0,
         "p99_latency_budget_us": 12000.0
       },
+      "cleanup_status": "not_started_dry_run",
       "classification": "pass",
       "release_claim_state": "plan_ready",
       "reproduction_command": "cargo run -p ffs-harness -- validate-swarm-workload-harness --manifest benchmarks/swarm_workload_harness_manifest.json",
@@ -273,6 +281,9 @@
       "workload_profile_ids": [
         "metadata_storm_dry_run"
       ],
+      "workload_seeds": [
+        20001
+      ],
       "counters": {
         "max_queue_depth": 128,
         "average_queue_depth": 4.0,
@@ -281,6 +292,7 @@
         "rejected_writes": 0,
         "p99_latency_budget_us": 25000.0
       },
+      "cleanup_status": "not_started_dry_run",
       "classification": "capability_skip",
       "release_claim_state": "small_host_smoke",
       "reproduction_command": "cargo run -p ffs-harness -- validate-swarm-workload-harness --manifest benchmarks/swarm_workload_harness_manifest.json",
@@ -305,8 +317,10 @@
     "rch_or_local_lane",
     "worker_isolation_notes",
     "workload_profile_id",
+    "workload_seeds",
     "queue_depth",
     "backpressure_state",
+    "cleanup_status",
     "release_claim_state",
     "reproduction_command"
   ],
