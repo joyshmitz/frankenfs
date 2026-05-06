@@ -8717,23 +8717,45 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_ioctl_fiemap_rejects_truncated_header() {
-        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(
-            0,
-            Arc::new(Mutex::new(Vec::new())),
-        )));
+    fn dispatch_ioctl_fiemap_rejects_short_input_and_output_buffers() {
+        const FIEMAP_HEADER_SIZE_U32: u32 = 32;
 
-        // Header shorter than FIEMAP_HEADER_SIZE (32 bytes).
-        let short_header = vec![0_u8; 16];
-        let response = dispatch_ioctl_for_testing(
-            &fuse,
-            3,
-            0,
-            FS_IOC_FIEMAP,
-            &short_header,
-            u32::try_from(FIEMAP_HEADER_SIZE).expect("header size fits"),
-        );
-        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        for input_len in 0..FIEMAP_HEADER_SIZE {
+            let short_header = vec![0_u8; input_len];
+            let response = dispatch_ioctl_for_testing(
+                &fuse,
+                3,
+                0,
+                FS_IOC_FIEMAP,
+                &short_header,
+                FIEMAP_HEADER_SIZE_U32,
+            );
+            assert_eq!(
+                response,
+                IoctlResult::Error(libc::EINVAL),
+                "FIEMAP input length {input_len} must fail before FsOps dispatch"
+            );
+        }
+
+        let request = vec![0_u8; FIEMAP_HEADER_SIZE];
+        for out_size in 0..FIEMAP_HEADER_SIZE_U32 {
+            let response =
+                dispatch_ioctl_for_testing(&fuse, 3, 0, FS_IOC_FIEMAP, &request, out_size);
+            assert_eq!(
+                response,
+                IoctlResult::Error(libc::EINVAL),
+                "FIEMAP output size {out_size} must fail before FsOps dispatch"
+            );
+        }
+
+        let no_calls_recorded = match calls.lock() {
+            Ok(guard) => guard.is_empty(),
+            Err(poisoned) => poisoned.into_inner().is_empty(),
+        };
+        assert!(no_calls_recorded);
     }
 
     #[test]
