@@ -1,0 +1,46 @@
+---
+source: crates/ffs-harness/src/release_gate.rs
+expression: markdown
+---
+# FrankenFS Release Gate
+
+- Policy: `frankenfs_release_gate_policy_v1`
+- Bundle: `release-gate-proof`
+- Valid: `false`
+- Release ready: `false`
+- Diagnostics: findings=2 errors=0 warnings=0
+- Reproduction: `cargo run -p ffs-harness -- evaluate-release-gates --bundle artifacts/proof/bundle/manifest.json --policy tests/release-gates/release_gate_policy_v1.json --current-git-sha $(git rev-parse HEAD) --max-age-days 14`
+
+## Feature States
+| Feature | Previous | Target | Final | Upgrade allowed | Wording ID |
+|---|---:|---:|---:|---:|---|
+| `mount.rw.ext4` | `experimental` | `validated` | `validated` | `true` | `readme.mount.rw.ext4` |
+| `mount.rw.btrfs` | `experimental` | `validated` | `validated` | `true` | `readme.mount.rw.btrfs` |
+| `repair.rw.writeback` | `detection_only` | `opt_in_mutating` | `opt_in_mutating` | `true` | `readme.repair.rw.writeback` |
+| `writeback_cache` | `disabled` | `opt_in_mutating` | `opt_in_mutating` | `true` | `readme.writeback_cache` |
+| `background_scrub_mutation` | `detection_only` | `detection_only` | `detection_only` | `true` | `readme.background_scrub_mutation` |
+| `conformance.claims` | `experimental` | `validated` | `validated` | `true` | `feature_parity.conformance` |
+| `xfstests.baseline` | `disabled` | `experimental` | `hidden` | `false` | `feature_parity.xfstests` |
+| `performance.baseline` | `disabled` | `experimental` | `experimental` | `true` | `feature_parity.performance` |
+| `swarm.responsiveness` | `disabled` | `validated` | `validated` | `true` | `feature_parity.swarm_responsiveness` |
+| `fuzz.conformance` | `experimental` | `validated` | `validated` | `true` | `feature_parity.fuzz_conformance` |
+| `crash_replay.evidence` | `experimental` | `validated` | `validated` | `true` | `feature_parity.crash_replay` |
+
+## Generated Wording
+- `mount.rw.ext4` / `readme.mount.rw.ext4`: mount.rw.ext4 is validated by fresh release-gate evidence.
+- `mount.rw.btrfs` / `readme.mount.rw.btrfs`: mount.rw.btrfs is validated by fresh release-gate evidence.
+- `repair.rw.writeback` / `readme.repair.rw.writeback`: repair.rw.writeback is opt-in mutating and requires explicit operator intent plus fresh gate evidence.
+- `writeback_cache` / `readme.writeback_cache`: writeback_cache is opt-in mutating and requires explicit operator intent plus fresh gate evidence.
+- `background_scrub_mutation` / `readme.background_scrub_mutation`: background_scrub_mutation is detection-only; it may report findings but must not repair or mutate.
+- `conformance.claims` / `feature_parity.conformance`: conformance.claims is validated by fresh release-gate evidence.
+- `xfstests.baseline` / `feature_parity.xfstests`: xfstests.baseline is hidden from public readiness claims until required gate evidence exists.
+- `performance.baseline` / `feature_parity.performance`: performance.baseline is experimental and requires operator caution.
+- `swarm.responsiveness` / `feature_parity.swarm_responsiveness`: swarm.responsiveness is validated by fresh release-gate evidence.
+- `fuzz.conformance` / `feature_parity.fuzz_conformance`: fuzz.conformance is validated by fresh release-gate evidence.
+- `crash_replay.evidence` / `feature_parity.crash_replay`: crash_replay.evidence is validated by fresh release-gate evidence.
+
+## Findings
+| ID | Feature | Severity | Final | Reason | Remediation |
+|---|---|---:|---:|---|---|
+| `xfstests.baseline::missing_required_lane::1` | `xfstests.baseline` | `block` | `hidden` | required lane xfstests is missing | `bd-rchk3` |
+| `xfstests.baseline::kill_switch_missing-evidence::2` | `xfstests.baseline` | `block` | `hidden` | kill switch missing-evidence triggered by any_required_lane_missing: missing xfstests evidence hides baseline claims | `bd-rchk3` |

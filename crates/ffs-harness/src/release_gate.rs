@@ -1570,6 +1570,29 @@ mod tests {
     }
 
     #[test]
+    fn render_release_gate_markdown_canonical_missing_xfstests_snapshot() {
+        let policy = load_release_gate_policy(&canonical_policy_path()).expect("canonical policy");
+        let mut proof = passing_proof();
+        proof.lanes.retain(|lane| lane.lane_id != "xfstests");
+        proof.totals.lanes = proof.lanes.len();
+        proof.totals.pass = proof.lanes.len();
+
+        let report = evaluate_release_gates(&policy, &proof);
+        assert!(!report.valid);
+        assert!(!report.release_ready);
+        assert!(report.findings.iter().any(|finding| {
+            finding.feature_id == "xfstests.baseline"
+                && finding.remediation_id.as_deref() == Some("bd-rchk3")
+        }));
+
+        let markdown = render_release_gate_markdown(&report);
+        insta::assert_snapshot!(
+            "render_release_gate_markdown_canonical_missing_xfstests",
+            markdown
+        );
+    }
+
+    #[test]
     fn canonical_release_gate_policy_fails_closed_on_missing_swarm_p99() {
         let policy = load_release_gate_policy(&canonical_policy_path()).expect("canonical policy");
         let mut proof = passing_proof();
