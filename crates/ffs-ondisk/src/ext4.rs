@@ -10421,6 +10421,130 @@ mod tests {
         }
     }
 
+    /// bd-jbilz — Kernel-conformance pin for ext4 magic numbers and
+    /// superblock state flags from `fs/ext4/ext4.h`,
+    /// `fs/ext4/ext4_extents.h`, and `fs/ext4/mmp.h`.
+    ///
+    /// These constants drive every mount, parse, and recovery
+    /// decision. A regression would silently corrupt every ext4
+    /// image we touch: a swapped EXT4_EXTENT_MAGIC = 0xF30A would
+    /// fail to validate every extent tree; a swapped EXT4_MMP_MAGIC
+    /// would mis-classify every mount-lock state; a swapped
+    /// EXT4_VALID_FS / ERROR_FS / ORPHAN_FS bit would mis-flag every
+    /// fsck decision.
+    ///
+    /// Pairs with bd-k81lq (reserved inodes + revision/inode-size),
+    /// bd-bevt2 (40 feature flags), bd-tyeic (inode flags),
+    /// bd-343v3 (file types), bd-vnfhb (POSIX S_IS), bd-pvbgz
+    /// (btrfs struct sizes), bd-6uu7j (chunk_type flags),
+    /// bd-khzn4 (btrfs tree objectids), bd-f0q7n (btrfs item keys),
+    /// bd-xhswi (btrfs csum types).
+    #[test]
+    fn ext4_magic_numbers_and_state_flags_match_kernel_header() {
+        use ffs_types::EXT4_SUPER_MAGIC;
+
+        // Magic numbers per fs/ext4/ext4.h (EXT4_SUPER_MAGIC) and
+        // fs/ext4/ext4_extents.h (EXT4_EXT_MAGIC, exposed here as
+        // EXT4_EXTENT_MAGIC).
+        assert_eq!(
+            EXT4_SUPER_MAGIC, 0xEF53,
+            "EXT4_SUPER_MAGIC must equal kernel value 0xEF53"
+        );
+        assert_eq!(
+            EXT4_EXTENT_MAGIC, 0xF30A,
+            "EXT4_EXTENT_MAGIC must equal kernel value 0xF30A"
+        );
+
+        // MMP (multi-mount protection) magic + sequence sentinels per
+        // fs/ext4/mmp.h. EXT4_MMP_MAGIC = 'MMP\\0' little-endian.
+        assert_eq!(
+            EXT4_MMP_MAGIC, 0x004D_4D50,
+            "EXT4_MMP_MAGIC must equal kernel value 0x004D4D50 ('MMP\\0' LE)"
+        );
+        assert_eq!(
+            EXT4_MMP_SEQ_CLEAN, 0xFF4D_4D50,
+            "EXT4_MMP_SEQ_CLEAN must equal kernel value 0xFF4D4D50"
+        );
+        assert_eq!(
+            EXT4_MMP_SEQ_FSCK, 0xE24D_4D50,
+            "EXT4_MMP_SEQ_FSCK must equal kernel value 0xE24D4D50"
+        );
+        assert_eq!(
+            EXT4_MMP_SEQ_MAX, 0xE24D_4D4F,
+            "EXT4_MMP_SEQ_MAX must equal kernel value 0xE24D4D4F"
+        );
+
+        // Superblock s_state flags per fs/ext4/ext4.h.
+        assert_eq!(
+            EXT4_VALID_FS, 0x0001,
+            "EXT4_VALID_FS must equal kernel value 0x0001"
+        );
+        assert_eq!(
+            EXT4_ERROR_FS, 0x0002,
+            "EXT4_ERROR_FS must equal kernel value 0x0002"
+        );
+        assert_eq!(
+            EXT4_ORPHAN_FS, 0x0004,
+            "EXT4_ORPHAN_FS must equal kernel value 0x0004"
+        );
+
+        // Default mount-count limit per fs/ext4/ext4.h
+        // (EXT4_DFL_MAX_MNT_COUNT).
+        assert_eq!(
+            EXT4_DFL_MAX_MNT_COUNT, 20,
+            "EXT4_DFL_MAX_MNT_COUNT must equal kernel value 20"
+        );
+
+        // Structural invariants on the s_state bit set: each is a
+        // power-of-2 single-bit flag and no two share a bit.
+        let state_flags: &[(u16, &str)] = &[
+            (EXT4_VALID_FS, "EXT4_VALID_FS"),
+            (EXT4_ERROR_FS, "EXT4_ERROR_FS"),
+            (EXT4_ORPHAN_FS, "EXT4_ORPHAN_FS"),
+        ];
+        for (flag, name) in state_flags {
+            assert!(
+                flag.is_power_of_two(),
+                "{name} ({flag:#x}) must be a single power-of-two bit"
+            );
+        }
+        for (i, (a, name_a)) in state_flags.iter().enumerate() {
+            for (b, name_b) in &state_flags[i + 1..] {
+                assert_eq!(
+                    a & b,
+                    0,
+                    "state flags {name_a} ({a:#x}) and {name_b} ({b:#x}) must not share a bit"
+                );
+            }
+        }
+
+        // MMP_SEQ_CLEAN, _FSCK, _MAX are all in the high half of
+        // u32 (>= 0x8000_0000) so they cannot collide with any
+        // monotonically-increasing sequence counter that started at
+        // 0 — this is the kernel's invariant for distinguishing
+        // sentinels from live counters.
+        for (sentinel, name) in [
+            (EXT4_MMP_SEQ_CLEAN, "EXT4_MMP_SEQ_CLEAN"),
+            (EXT4_MMP_SEQ_FSCK, "EXT4_MMP_SEQ_FSCK"),
+            (EXT4_MMP_SEQ_MAX, "EXT4_MMP_SEQ_MAX"),
+        ] {
+            assert!(
+                sentinel >= 0x8000_0000,
+                "{name} ({sentinel:#x}) must be in the upper half of u32 \
+                 (kernel sentinel-vs-counter invariant)"
+            );
+        }
+        // MMP_SEQ_MAX is intentionally ONE LESS than _FSCK — the
+        // kernel rejects any sequence value > _MAX, and _FSCK is the
+        // first reserved sentinel above _MAX.
+        assert_eq!(
+            EXT4_MMP_SEQ_MAX + 1,
+            EXT4_MMP_SEQ_FSCK,
+            "EXT4_MMP_SEQ_MAX must be exactly one less than EXT4_MMP_SEQ_FSCK \
+             (kernel reserved-sentinel invariant)"
+        );
+    }
+
     /// bd-k81lq — Kernel-conformance pin for ext4 reserved-inode and
     /// revision-format constants. Each value is mirrored verbatim from
     /// the Linux kernel header `fs/ext4/ext4.h`. Mismatch would
