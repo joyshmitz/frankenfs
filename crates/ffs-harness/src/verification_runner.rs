@@ -24,9 +24,10 @@ use tracing::info;
 use crate::artifact_manifest::{
     ArtifactCategory, ArtifactEntry, ArtifactManifest, CleanupStatus, EnvironmentFingerprint,
     FilesystemFlavor, FuseCapabilityResult, GateVerdict, ManifestBuilder, OperationalErrorClass,
-    OperationalOutcomeClass, OperationalRunContext, OperationalScenarioRecord, ScenarioOutcome,
-    ScenarioResult, SkipReason, WorkerContext, is_valid_scenario_id, validate_manifest,
-    validate_operational_manifest,
+    OperationalOutcomeClass, OperationalRunContext, OperationalScenarioRecord,
+    READINESS_EVENT_ENVELOPE_VERSION, REDACTED_SENTINEL, ReadinessEventEnvelope,
+    ReadinessEventSeverity, ScenarioOutcome, ScenarioResult, SkipReason, WorkerContext,
+    is_valid_scenario_id, validate_manifest, validate_operational_manifest,
 };
 use crate::log_contract::e2e_marker;
 
@@ -155,8 +156,12 @@ pub struct OperationalScenarioInput {
     pub mount_options: Vec<String>,
     /// Scenario stdout path; generated if omitted.
     pub stdout_path: Option<String>,
+    /// SHA-256 checksum of the scenario stdout artifact.
+    pub stdout_sha256: String,
     /// Scenario stderr path; generated if omitted.
     pub stderr_path: Option<String>,
+    /// SHA-256 checksum of the scenario stderr artifact.
+    pub stderr_sha256: String,
     /// Evidence ledger paths produced or consumed by the scenario.
     pub ledger_paths: Vec<String>,
     /// Additional artifacts that should be indexed by the manifest.
@@ -420,99 +425,251 @@ pub fn build_manifest_from_parsed(params: &ManifestParams<'_>) -> ArtifactManife
 /// [`validate_operational_manifest`].
 #[must_use]
 pub fn build_operational_manifest(params: OperationalManifestParams<'_>) -> ArtifactManifest {
-    let run_stdout = operational_run_log_path(params.run_id, "stdout");
-    let run_stderr = operational_run_log_path(params.run_id, "stderr");
-    let mut builder = ManifestBuilder::new(params.run_id, params.gate_id, params.created_at)
-        .git_context(params.git_commit, params.git_branch, params.git_clean)
-        .environment(params.environment)
+    let OperationalManifestParams {
+        gate_id,
+        run_id,
+        created_at,
+        bead_id,
+        git_commit,
+        git_branch,
+        git_clean,
+        environment,
+        command_line,
+        worker_host,
+        worker_id,
+        fuse_capability,
+        scenarios,
+        duration_secs,
+    } = params;
+    let run_stdout = operational_run_log_path(run_id, "stdout");
+    let run_stderr = operational_run_log_path(run_id, "stderr");
+    let host_fingerprint = operational_host_fingerprint(&environment, worker_host);
+    let event_context = OperationalReadinessEventContext {
+        gate_id,
+        run_id,
+        created_at,
+        bead_id,
+        git_commit,
+        command_line: &command_line,
+        host_fingerprint: &host_fingerprint,
+        fuse_capability,
+    };
+    let mut builder = ManifestBuilder::new(run_id, gate_id, created_at)
+        .git_context(git_commit, git_branch, git_clean)
+        .environment(environment)
         .operational_context(OperationalRunContext {
-            command_line: redact_command_line(&params.command_line),
+            command_line: redact_command_line(&command_line),
             worker: WorkerContext {
-                host: params.worker_host.to_owned(),
-                worker_id: params.worker_id.map(str::to_owned),
+                host: worker_host.to_owned(),
+                worker_id: worker_id.map(str::to_owned),
             },
-            fuse_capability: params.fuse_capability,
+            fuse_capability,
             stdout_path: run_stdout.clone(),
             stderr_path: run_stderr.clone(),
         })
         .artifact(log_artifact_entry(&run_stdout, ArtifactCategory::RawLog))
         .artifact(log_artifact_entry(&run_stderr, ArtifactCategory::RawLog))
-        .duration_secs(params.duration_secs);
+        .duration_secs(duration_secs);
 
-    if let Some(bead_id) = params.bead_id {
+    if let Some(bead_id) = bead_id {
         builder = builder.bead_id(bead_id);
     }
 
-    for scenario in params.scenarios {
-        let classification = classify_operational_observation(
-            scenario.exit_status,
-            scenario.timed_out,
-            scenario.skip_reason,
-            scenario.cleanup_status,
-        );
-        let stdout_path = scenario.stdout_path.unwrap_or_else(|| {
-            operational_scenario_log_path(params.run_id, &scenario.scenario_id, "stdout")
-        });
-        let stderr_path = scenario.stderr_path.unwrap_or_else(|| {
-            operational_scenario_log_path(params.run_id, &scenario.scenario_id, "stderr")
-        });
-
-        let mut artifact_refs = vec![stdout_path.clone(), stderr_path.clone()];
-        for ledger_path in &scenario.ledger_paths {
-            artifact_refs.push(ledger_path.clone());
-        }
-        for artifact in &scenario.extra_artifacts {
-            artifact_refs.push(artifact.path.clone());
-        }
-
-        builder = builder
-            .scenario(
-                &scenario.scenario_id,
-                classification.actual_outcome,
-                scenario.detail.as_deref(),
-                scenario.duration_secs,
-            )
-            .operational_scenario(OperationalScenarioRecord {
-                scenario_id: scenario.scenario_id.clone(),
-                filesystem: scenario.filesystem,
-                image_hash: scenario.image_hash,
-                mount_options: scenario.mount_options,
-                expected_outcome: scenario.expected_outcome,
-                actual_outcome: classification.actual_outcome,
-                classification: classification.classification,
-                exit_status: scenario.exit_status,
-                stdout_path: stdout_path.clone(),
-                stderr_path: stderr_path.clone(),
-                ledger_paths: scenario.ledger_paths.clone(),
-                artifact_refs: artifact_refs.clone(),
-                cleanup_status: scenario.cleanup_status,
-                error_class: classification.error_class,
-                remediation_hint: classification.remediation_hint,
-                skip_reason: classification.skip_reason,
-            })
-            .artifact(log_artifact_entry(&stdout_path, ArtifactCategory::RawLog))
-            .artifact(log_artifact_entry(&stderr_path, ArtifactCategory::RawLog));
-
-        for ledger_path in scenario.ledger_paths {
-            builder = builder.artifact(log_artifact_entry(&ledger_path, ArtifactCategory::E2eLog));
-        }
-        for artifact in scenario.extra_artifacts {
-            builder = builder.artifact(ArtifactEntry {
-                path: artifact.path,
-                category: artifact.category,
-                content_type: artifact.content_type,
-                size_bytes: artifact.size_bytes,
-                sha256: artifact.sha256,
-                redacted: false,
-                metadata: BTreeMap::from([(
-                    "scenario_id".to_owned(),
-                    scenario.scenario_id.clone(),
-                )]),
-            });
-        }
+    for scenario in scenarios {
+        builder = add_operational_manifest_scenario(builder, event_context, scenario);
     }
 
     builder.build()
+}
+
+#[derive(Clone, Copy)]
+struct OperationalReadinessEventContext<'a> {
+    gate_id: &'a str,
+    run_id: &'a str,
+    created_at: &'a str,
+    bead_id: Option<&'a str>,
+    git_commit: &'a str,
+    command_line: &'a [String],
+    host_fingerprint: &'a str,
+    fuse_capability: FuseCapabilityResult,
+}
+
+fn add_operational_manifest_scenario(
+    mut builder: ManifestBuilder,
+    context: OperationalReadinessEventContext<'_>,
+    scenario: OperationalScenarioInput,
+) -> ManifestBuilder {
+    let classification = classify_operational_observation(
+        scenario.exit_status,
+        scenario.timed_out,
+        scenario.skip_reason,
+        scenario.cleanup_status,
+    );
+    let stdout_path = scenario.stdout_path.unwrap_or_else(|| {
+        operational_scenario_log_path(context.run_id, &scenario.scenario_id, "stdout")
+    });
+    let stderr_path = scenario.stderr_path.unwrap_or_else(|| {
+        operational_scenario_log_path(context.run_id, &scenario.scenario_id, "stderr")
+    });
+
+    let mut artifact_refs = vec![stdout_path.clone(), stderr_path.clone()];
+    artifact_refs.extend(scenario.ledger_paths.iter().cloned());
+    artifact_refs.extend(
+        scenario
+            .extra_artifacts
+            .iter()
+            .map(|artifact| artifact.path.clone()),
+    );
+
+    builder = builder
+        .scenario(
+            &scenario.scenario_id,
+            classification.actual_outcome,
+            scenario.detail.as_deref(),
+            scenario.duration_secs,
+        )
+        .operational_scenario(OperationalScenarioRecord {
+            scenario_id: scenario.scenario_id.clone(),
+            filesystem: scenario.filesystem,
+            image_hash: scenario.image_hash,
+            mount_options: scenario.mount_options,
+            expected_outcome: scenario.expected_outcome,
+            actual_outcome: classification.actual_outcome,
+            classification: classification.classification,
+            exit_status: scenario.exit_status,
+            stdout_path: stdout_path.clone(),
+            stderr_path: stderr_path.clone(),
+            ledger_paths: scenario.ledger_paths.clone(),
+            artifact_refs: artifact_refs.clone(),
+            cleanup_status: scenario.cleanup_status,
+            error_class: classification.error_class,
+            remediation_hint: classification.remediation_hint,
+            skip_reason: classification.skip_reason,
+        })
+        .readiness_event(operational_readiness_event(
+            context,
+            &scenario.scenario_id,
+            classification.classification,
+            &stdout_path,
+            &stderr_path,
+        ))
+        .artifact(log_artifact_entry_with_sha(
+            &stdout_path,
+            ArtifactCategory::RawLog,
+            &scenario.stdout_sha256,
+        ))
+        .artifact(log_artifact_entry_with_sha(
+            &stderr_path,
+            ArtifactCategory::RawLog,
+            &scenario.stderr_sha256,
+        ));
+
+    for ledger_path in scenario.ledger_paths {
+        builder = builder.artifact(log_artifact_entry(&ledger_path, ArtifactCategory::E2eLog));
+    }
+    for artifact in scenario.extra_artifacts {
+        builder = builder.artifact(ArtifactEntry {
+            path: artifact.path,
+            category: artifact.category,
+            content_type: artifact.content_type,
+            size_bytes: artifact.size_bytes,
+            sha256: artifact.sha256,
+            redacted: false,
+            metadata: BTreeMap::from([("scenario_id".to_owned(), scenario.scenario_id.clone())]),
+        });
+    }
+    builder
+}
+
+fn operational_readiness_event(
+    context: OperationalReadinessEventContext<'_>,
+    scenario_id: &str,
+    classification: OperationalOutcomeClass,
+    stdout_path: &str,
+    stderr_path: &str,
+) -> ReadinessEventEnvelope {
+    let report_id = format!("report_{}", sanitize_artifact_segment(context.run_id));
+
+    ReadinessEventEnvelope {
+        envelope_version: READINESS_EVENT_ENVELOPE_VERSION,
+        event_id: format!(
+            "event_{}_{}",
+            sanitize_artifact_segment(context.run_id),
+            scenario_id
+        ),
+        report_id: report_id.clone(),
+        run_id: context.run_id.to_owned(),
+        lane_id: context.gate_id.to_owned(),
+        scenario_id: Some(scenario_id.to_owned()),
+        aggregate_marker: None,
+        artifact_id: stdout_path.to_owned(),
+        parent_correlation_id: Some(report_id),
+        classification,
+        severity: readiness_event_severity(classification),
+        created_at: context.created_at.to_owned(),
+        git_commit: context.git_commit.to_owned(),
+        host_fingerprint: context.host_fingerprint.to_owned(),
+        capability_fingerprint: operational_capability_fingerprint(context.fuse_capability),
+        raw_log_refs: vec![stdout_path.to_owned(), stderr_path.to_owned()],
+        controlling_evidence: vec![stdout_path.to_owned()],
+        remediation_id: operational_remediation_id(context, scenario_id),
+        reproduction_command: operational_reproduction_command(context.command_line, scenario_id),
+    }
+}
+
+const fn readiness_event_severity(
+    classification: OperationalOutcomeClass,
+) -> ReadinessEventSeverity {
+    match classification {
+        OperationalOutcomeClass::Pass => ReadinessEventSeverity::Info,
+        OperationalOutcomeClass::Skip => ReadinessEventSeverity::Warning,
+        OperationalOutcomeClass::Fail | OperationalOutcomeClass::Error => {
+            ReadinessEventSeverity::Error
+        }
+    }
+}
+
+fn operational_host_fingerprint(environment: &EnvironmentFingerprint, worker_host: &str) -> String {
+    format!(
+        "{}|{}|{}cpu|{}GiB|{}",
+        worker_host,
+        environment.kernel,
+        environment.cpu_count,
+        environment.memory_gib,
+        environment.rustc_version
+    )
+}
+
+fn operational_capability_fingerprint(fuse_capability: FuseCapabilityResult) -> String {
+    let fuse = match fuse_capability {
+        FuseCapabilityResult::Available => "available",
+        FuseCapabilityResult::Unavailable => "unavailable",
+        FuseCapabilityResult::PermissionDenied => "permission_denied",
+        FuseCapabilityResult::DisabledByUser => "disabled_by_user",
+        FuseCapabilityResult::NotApplicable => "not_applicable",
+        FuseCapabilityResult::NotChecked => "not_checked",
+    };
+    format!("fuse={fuse}")
+}
+
+fn operational_remediation_id(
+    context: OperationalReadinessEventContext<'_>,
+    scenario_id: &str,
+) -> String {
+    let prefix = context.bead_id.unwrap_or(context.gate_id);
+    format!("{prefix}:{scenario_id}")
+}
+
+fn operational_reproduction_command(command_line: &[String], scenario_id: &str) -> String {
+    let command = command_line
+        .iter()
+        .find_map(|part| {
+            let trimmed = part.trim();
+            (!trimmed.is_empty() && !trimmed.contains(REDACTED_SENTINEL)).then_some(trimmed)
+        })
+        .unwrap_or("scripts/e2e/runner.sh");
+
+    format!("{command} --scenario {scenario_id}")
 }
 
 /// Classify the outcome of one script-level scenario observation.
@@ -1106,6 +1263,22 @@ fn log_artifact_entry(path: &str, category: ArtifactCategory) -> ArtifactEntry {
     }
 }
 
+fn log_artifact_entry_with_sha(
+    path: &str,
+    category: ArtifactCategory,
+    sha256: &str,
+) -> ArtifactEntry {
+    ArtifactEntry {
+        path: path.to_owned(),
+        category,
+        content_type: Some("text/plain".to_owned()),
+        size_bytes: 0,
+        sha256: Some(sha256.to_owned()),
+        redacted: false,
+        metadata: BTreeMap::new(),
+    }
+}
+
 fn is_sensitive_arg_name(arg: &str) -> bool {
     let lower = arg.trim_start_matches('-').to_ascii_lowercase();
     lower.contains("token")
@@ -1549,12 +1722,20 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
             image_hash: Some("sha256:test-image".to_owned()),
             mount_options: vec!["ro".to_owned()],
             stdout_path: None,
+            stdout_sha256: sample_sha256(&format!("{scenario_id}-stdout")),
             stderr_path: None,
+            stderr_sha256: sample_sha256(&format!("{scenario_id}-stderr")),
             ledger_paths: vec![],
             extra_artifacts: vec![],
             cleanup_status: CleanupStatus::Clean,
             skip_reason,
         }
+    }
+
+    fn sample_sha256(label: &str) -> String {
+        use sha2::{Digest, Sha256};
+
+        format!("sha256:{}", hex::encode(Sha256::digest(label.as_bytes())))
     }
 
     fn base_fuse_probe_input() -> FuseCapabilityProbeInput {
@@ -1942,6 +2123,13 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
                 .command_line,
             vec!["scripts/e2e/runner.sh", "--secret", "[REDACTED]"]
         );
+        assert_eq!(manifest.readiness_events.len(), 4);
+        assert!(
+            manifest
+                .readiness_events
+                .iter()
+                .all(|event| !event.reproduction_command.contains("[REDACTED]"))
+        );
 
         let pass = &manifest.operational_scenarios["runner_pass_smoke_case"];
         assert_eq!(pass.classification, OperationalOutcomeClass::Pass);
@@ -2004,6 +2192,11 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
 
         let errors = validate_operational_gate_contract(&manifest);
         assert!(errors.is_empty(), "validation errors: {errors:?}");
+        assert_eq!(manifest.readiness_events.len(), 1);
+        assert_eq!(
+            manifest.readiness_events[0].scenario_id.as_deref(),
+            Some("runner_partial_artifacts_fail")
+        );
         let scenario = &manifest.operational_scenarios["runner_partial_artifacts_fail"];
         assert_eq!(scenario.cleanup_status, CleanupStatus::PreservedArtifacts);
         assert!(
