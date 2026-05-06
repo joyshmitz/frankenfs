@@ -4240,6 +4240,98 @@ mod tests {
 
     // ── RAID profile identification ────────────────────────────────
 
+    /// bd-6uu7j — Kernel-conformance pin for btrfs chunk/block-group
+    /// flag bits from `include/uapi/linux/btrfs_tree.h`.
+    #[test]
+    fn btrfs_chunk_type_flags_match_kernel_header() {
+        let flags = [
+            (
+                "BTRFS_BLOCK_GROUP_DATA",
+                chunk_type_flags::BTRFS_BLOCK_GROUP_DATA,
+                0x0001_u64,
+            ),
+            (
+                "BTRFS_BLOCK_GROUP_SYSTEM",
+                chunk_type_flags::BTRFS_BLOCK_GROUP_SYSTEM,
+                0x0002,
+            ),
+            (
+                "BTRFS_BLOCK_GROUP_METADATA",
+                chunk_type_flags::BTRFS_BLOCK_GROUP_METADATA,
+                0x0004,
+            ),
+            (
+                "BTRFS_BLOCK_GROUP_RAID0",
+                chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0,
+                0x0008,
+            ),
+            (
+                "BTRFS_BLOCK_GROUP_RAID1",
+                chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1,
+                0x0010,
+            ),
+            (
+                "BTRFS_BLOCK_GROUP_DUP",
+                chunk_type_flags::BTRFS_BLOCK_GROUP_DUP,
+                0x0020,
+            ),
+            (
+                "BTRFS_BLOCK_GROUP_RAID10",
+                chunk_type_flags::BTRFS_BLOCK_GROUP_RAID10,
+                0x0040,
+            ),
+            (
+                "BTRFS_BLOCK_GROUP_RAID5",
+                chunk_type_flags::BTRFS_BLOCK_GROUP_RAID5,
+                0x0080,
+            ),
+            (
+                "BTRFS_BLOCK_GROUP_RAID6",
+                chunk_type_flags::BTRFS_BLOCK_GROUP_RAID6,
+                0x0100,
+            ),
+            (
+                "BTRFS_BLOCK_GROUP_RAID1C3",
+                chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1C3,
+                0x0200,
+            ),
+            (
+                "BTRFS_BLOCK_GROUP_RAID1C4",
+                chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1C4,
+                0x0400,
+            ),
+        ];
+
+        for &(name, actual, expected) in &flags {
+            assert_eq!(actual, expected, "{name} must match the kernel value");
+            assert!(
+                actual.is_power_of_two(),
+                "{name} must be a single power-of-two bit"
+            );
+        }
+
+        for (idx, &(left_name, left, _)) in flags.iter().enumerate() {
+            for &(right_name, right, _) in &flags[idx + 1..] {
+                assert_eq!(
+                    left & right,
+                    0,
+                    "{left_name} and {right_name} must not share bits"
+                );
+            }
+        }
+
+        let expected_raid_mask = chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0
+            | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1
+            | chunk_type_flags::BTRFS_BLOCK_GROUP_DUP
+            | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID10
+            | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID5
+            | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID6
+            | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1C3
+            | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1C4;
+        assert_eq!(chunk_type_flags::RAID_MASK, expected_raid_mask);
+        assert_eq!(chunk_type_flags::RAID_MASK, 0x07F8);
+    }
+
     #[test]
     fn raid_profile_single() {
         assert_eq!(
@@ -4303,6 +4395,14 @@ mod tests {
         assert_eq!(
             BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1C3),
             BtrfsRaidProfile::Raid1C3
+        );
+    }
+
+    #[test]
+    fn raid_profile_raid1c4() {
+        assert_eq!(
+            BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1C4),
+            BtrfsRaidProfile::Raid1C4
         );
     }
 
