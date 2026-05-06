@@ -13445,6 +13445,66 @@ mod tests {
             );
         }
 
+        // bd-834zk — Metamorphic relations for the on-disk *_extra
+        // timestamp bit-pack helpers. Each MR pins a specific
+        // algebraic law of the [nsec:30][epoch:2] u32 layout used by
+        // every inode timestamp read on ext4 v6+ filesystems. A
+        // regression that swapped the masks (epoch ⇔ nsec) would
+        // silently corrupt every timestamp without tripping any
+        // existing test.
+
+        /// MR1 — Bit-pack inverse: for any u32 x,
+        /// (extra_nsec(x) << 2) | extra_epoch(x) == x.
+        #[test]
+        fn ext4_proptest_extra_bit_pack_is_invertible(extra in any::<u32>()) {
+            let nsec = Ext4Inode::extra_nsec(extra);
+            let epoch = Ext4Inode::extra_epoch(extra);
+            prop_assert_eq!((nsec << 2) | epoch, extra);
+        }
+
+        /// MR2 — Epoch bound: extra_epoch(x) ≤ 3 for all u32 x
+        /// (the kernel reserves only 2 bits for epoch).
+        #[test]
+        fn ext4_proptest_extra_epoch_is_bounded(extra in any::<u32>()) {
+            let epoch = Ext4Inode::extra_epoch(extra);
+            prop_assert!(epoch <= 3);
+        }
+
+        /// MR3 — Nsec bound: extra_nsec(x) ≤ 0x3FFF_FFFF — only the
+        /// upper 30 bits of `extra` carry the nanosecond payload.
+        #[test]
+        fn ext4_proptest_extra_nsec_is_bounded(extra in any::<u32>()) {
+            let nsec = Ext4Inode::extra_nsec(extra);
+            prop_assert!(nsec <= 0x3FFF_FFFF);
+        }
+
+        /// MR4 — Disjoint fields: a value with only nsec bits set
+        /// must yield epoch == 0, and a value with only epoch bits
+        /// set must yield nsec == 0. A regression that swapped the
+        /// masks would fail this MR immediately.
+        #[test]
+        fn ext4_proptest_extra_nsec_and_epoch_are_disjoint(
+            nsec_payload in 0_u32..=0x3FFF_FFFF,
+            epoch_payload in 0_u32..=3,
+        ) {
+            let nsec_only = nsec_payload << 2;
+            prop_assert_eq!(Ext4Inode::extra_epoch(nsec_only), 0);
+            prop_assert_eq!(Ext4Inode::extra_nsec(nsec_only), nsec_payload);
+
+            let epoch_only = epoch_payload;
+            prop_assert_eq!(Ext4Inode::extra_nsec(epoch_only), 0);
+            prop_assert_eq!(Ext4Inode::extra_epoch(epoch_only), epoch_payload);
+        }
+
+        /// MR5 — Determinism: same input always gives same output.
+        /// Pairs with the bit-pack inverse to prove the helpers are
+        /// pure projections.
+        #[test]
+        fn ext4_proptest_extra_helpers_are_deterministic(extra in any::<u32>()) {
+            prop_assert_eq!(Ext4Inode::extra_nsec(extra), Ext4Inode::extra_nsec(extra));
+            prop_assert_eq!(Ext4Inode::extra_epoch(extra), Ext4Inode::extra_epoch(extra));
+        }
+
         /// bd-6rsow — Transitivity of `ext4_casefold_names_collide`
         /// across ASCII case variants.
         ///
