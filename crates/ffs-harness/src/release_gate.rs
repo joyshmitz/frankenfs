@@ -1023,6 +1023,7 @@ mod tests {
                 summary_path: format!("summaries/{lane}.md"),
                 scenario_count: 1,
                 artifact_count: 1,
+                metadata: BTreeMap::new(),
             })
             .collect::<Vec<_>>();
         let lane_count = lanes.len();
@@ -1054,6 +1055,7 @@ mod tests {
             redaction_leaks: Vec::new(),
             integrity_errors: Vec::new(),
             lanes,
+            swarm_evidence: Vec::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
             reproduction_command: "validate-proof-bundle --bundle manifest.json".to_owned(),
@@ -1502,6 +1504,7 @@ mod tests {
             "conformance.claims",
             "xfstests.baseline",
             "performance.baseline",
+            "swarm.responsiveness",
             "fuzz.conformance",
             "crash_replay.evidence",
         ] {
@@ -1521,6 +1524,8 @@ mod tests {
             "repair_lab",
             "crash_replay",
             "performance",
+            "swarm_workload_harness",
+            "swarm_tail_latency",
             "writeback_cache",
             "scrub_repair_status",
             "known_deferrals",
@@ -1565,6 +1570,33 @@ mod tests {
     }
 
     #[test]
+    fn canonical_release_gate_policy_fails_closed_on_missing_swarm_p99() {
+        let policy = load_release_gate_policy(&canonical_policy_path()).expect("canonical policy");
+        let mut proof = passing_proof();
+        proof
+            .lanes
+            .retain(|lane| lane.lane_id != "swarm_tail_latency");
+        proof.totals.lanes = proof.lanes.len();
+        proof.totals.pass = proof.lanes.len();
+
+        let report = evaluate_release_gates(&policy, &proof);
+
+        assert!(!report.valid);
+        let swarm_report = report
+            .feature_reports
+            .iter()
+            .find(|feature| feature.feature_id == "swarm.responsiveness")
+            .expect("swarm responsiveness feature report");
+        assert_eq!(swarm_report.final_state, FeatureState::Hidden);
+        assert!(report.findings.iter().any(|finding| {
+            finding.feature_id == "swarm.responsiveness"
+                && finding.finding_id.contains("missing_required_lane")
+                && finding.controlling_lane.as_deref() == Some("swarm_tail_latency")
+                && finding.remediation_id.as_deref() == Some("bd-rchk0.53.5")
+        }));
+    }
+
+    #[test]
     fn markdown_renders_feature_states_and_findings() {
         let mut proof = passing_proof();
         proof.totals.pass = 8;
@@ -1601,10 +1633,7 @@ mod tests {
         proof.totals.pass = 8;
         let report = evaluate_release_gates(&sample_policy(), &proof);
         let markdown = render_release_gate_markdown(&report);
-        insta::assert_snapshot!(
-            "render_release_gate_markdown_failing_threshold",
-            markdown
-        );
+        insta::assert_snapshot!("render_release_gate_markdown_failing_threshold", markdown);
     }
 
     fn canonical_policy_path() -> std::path::PathBuf {

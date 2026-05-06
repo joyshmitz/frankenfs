@@ -87,6 +87,8 @@ lanes = [
     "repair_lab",
     "crash_replay",
     "performance",
+    "swarm_workload_harness",
+    "swarm_tail_latency",
     "writeback_cache",
     "scrub_repair_status",
     "known_deferrals",
@@ -100,6 +102,7 @@ for index, lane in enumerate(lanes):
     summary = pathlib.Path("summaries") / f"{lane}.md"
     gate_input = pathlib.Path("inputs") / f"{lane}.json"
     artifact = pathlib.Path("artifacts") / f"{lane}.json"
+    p99_artifact = pathlib.Path("artifacts") / f"{lane}_p99_attribution.json"
     redacted = index % 2 == 0
     artifact_payload = {"lane": lane, "artifact": "primary"}
     if redacted:
@@ -115,6 +118,56 @@ for index, lane in enumerate(lanes):
         path.write_text(text, encoding="utf-8")
 
     digest = hashlib.sha256((bundle_dir / artifact).read_bytes()).hexdigest()
+    artifacts = [
+        {
+            "path": artifact.as_posix(),
+            "sha256": digest,
+            "redacted": redacted,
+            "role": "swarm_validator_report"
+            if lane in {"swarm_workload_harness", "swarm_tail_latency"}
+            else "primary_evidence",
+        }
+    ]
+    metadata = {}
+    if lane in {"swarm_workload_harness", "swarm_tail_latency"}:
+        status = statuses[index % len(statuses)]
+        metadata = {
+            "freshness": "fresh",
+            "manifest_hash": "a" * 64,
+            "validator_report": artifact.as_posix(),
+        }
+        if status == "pass":
+            metadata["host_class"] = "permissioned_large_host"
+            metadata["release_claim"] = "authoritative_large_host"
+        elif status == "skip":
+            metadata["host_class"] = "developer_smoke"
+            metadata["release_claim"] = "small_host_smoke"
+            metadata["downgrade_reason"] = (
+                "small host smoke cannot support release wording"
+            )
+        elif status == "fail":
+            metadata["host_class"] = "developer_smoke"
+            metadata["release_claim"] = "failed"
+            metadata["downgrade_reason"] = "swarm evidence failed release checks"
+        else:
+            metadata["host_class"] = "developer_smoke"
+            metadata["release_claim"] = "error"
+            metadata["downgrade_reason"] = "swarm evidence errored during collection"
+    if lane == "swarm_tail_latency":
+        p99_payload = {"lane": lane, "artifact": "p99_attribution"}
+        p99_path = bundle_dir / p99_artifact
+        p99_path.parent.mkdir(parents=True, exist_ok=True)
+        p99_path.write_text(json.dumps(p99_payload, sort_keys=True) + "\n", encoding="utf-8")
+        p99_digest = hashlib.sha256(p99_path.read_bytes()).hexdigest()
+        metadata["p99_attribution_artifact"] = p99_artifact.as_posix()
+        artifacts.append(
+            {
+                "path": p99_artifact.as_posix(),
+                "sha256": p99_digest,
+                "redacted": False,
+                "role": "p99_attribution_ledger",
+            }
+        )
     records.append(
         {
             "lane_id": lane,
@@ -123,14 +176,8 @@ for index, lane in enumerate(lanes):
             "summary_path": summary.as_posix(),
             "scenario_ids": [f"{lane}_proof_bundle_primary"],
             "gate_inputs": [gate_input.as_posix()],
-            "artifacts": [
-                {
-                    "path": artifact.as_posix(),
-                    "sha256": digest,
-                    "redacted": redacted,
-                    "role": "primary_evidence",
-                }
-            ],
+            "artifacts": artifacts,
+            "metadata": metadata,
         }
     )
 
@@ -226,6 +273,8 @@ required_lanes = {
     "repair_lab",
     "crash_replay",
     "performance",
+    "swarm_workload_harness",
+    "swarm_tail_latency",
     "writeback_cache",
     "scrub_repair_status",
     "known_deferrals",
@@ -241,10 +290,17 @@ if not report.get("artifact_hash_chain"):
 if report["artifact_hash_chain"]["redaction_policy_version"] != "redaction-v1":
     raise SystemExit("redaction policy version was not preserved in hash-chain report")
 artifact_rows = report.get("artifact_reports", [])
-if len(artifact_rows) != len(required_lanes):
+if len(artifact_rows) != len(required_lanes) + 1:
     raise SystemExit(f"unexpected artifact report count: {len(artifact_rows)}")
 if not all(row.get("sha256") and row.get("path") for row in artifact_rows):
     raise SystemExit("artifact report rows did not preserve path and hash")
+if not any(row.get("role") == "p99_attribution_ledger" for row in artifact_rows):
+    raise SystemExit("p99 attribution ledger artifact was not preserved")
+swarm_rows = report.get("swarm_evidence", [])
+if len(swarm_rows) != 2:
+    raise SystemExit(f"unexpected swarm evidence rows: {len(swarm_rows)}")
+if not all(row.get("host_class") and row.get("manifest_hash") for row in swarm_rows):
+    raise SystemExit("swarm evidence did not preserve host class and manifest hash")
 for lane in required_lanes:
     if f"logs/{lane}.log" not in summary:
         raise SystemExit(f"missing raw log link for {lane}")
@@ -254,6 +310,8 @@ if "validate-proof-bundle" not in summary:
     raise SystemExit("summary did not preserve reproduction command")
 if "Artifact hash chain" not in summary:
     raise SystemExit("summary did not preserve hash-chain diagnostics")
+if "Swarm Evidence" not in summary or "p99_attribution" not in summary:
+    raise SystemExit("summary did not preserve swarm evidence diagnostics")
 PY
 then
     scenario_result "proof_bundle_summary_links" "PASS" "summary contains totals and raw log links"
@@ -274,7 +332,7 @@ data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
 data["lanes"][0]["artifacts"][0]["sha256"] = "0" * 64
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+if cargo run --quiet -p ffs-harness -- validate-proof-bundle \
     --bundle "$BAD_HASH_MANIFEST" \
     --current-git-sha "$GIT_SHA" \
     --max-age-days 10000 >"$BAD_HASH_RAW" 2>&1; then
@@ -297,7 +355,7 @@ manifest_path, out_path = sys.argv[1:]
 data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+if cargo run --quiet -p ffs-harness -- validate-proof-bundle \
     --bundle "$BAD_STALE_MANIFEST" \
     --current-git-sha "stale-sha-for-e2e" \
     --max-age-days 10000 >"$BAD_STALE_RAW" 2>&1; then
@@ -321,7 +379,7 @@ data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
 data["lanes"][1]["artifacts"][0]["path"] = "artifacts/does_not_exist.json"
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+if cargo run --quiet -p ffs-harness -- validate-proof-bundle \
     --bundle "$BAD_LINK_MANIFEST" \
     --current-git-sha "$GIT_SHA" \
     --max-age-days 10000 >"$BAD_LINK_RAW" 2>&1; then
@@ -345,7 +403,7 @@ data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
 data["integrity"]["artifact_hash_chain_sha256"] = "f" * 64
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+if cargo run --quiet -p ffs-harness -- validate-proof-bundle \
     --bundle "$BAD_CHAIN_MANIFEST" \
     --current-git-sha "$GIT_SHA" \
     --max-age-days 10000 >"$BAD_CHAIN_RAW" 2>&1; then
@@ -374,7 +432,7 @@ leaky_summary = pathlib.Path("summaries") / "conformance_leaky.md"
 data["lanes"][0]["summary_path"] = leaky_summary.as_posix()
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+if cargo run --quiet -p ffs-harness -- validate-proof-bundle \
     --bundle "$BAD_REDACTION_MANIFEST" \
     --current-git-sha "$GIT_SHA" \
     --max-age-days 10000 >"$BAD_REDACTION_RAW" 2>&1; then
@@ -404,7 +462,7 @@ data["lanes"][0]["artifacts"][0]["sha256"] = hashlib.sha256(artifact_abs.read_by
 data["lanes"][0]["artifacts"][0]["redacted"] = True
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+if cargo run --quiet -p ffs-harness -- validate-proof-bundle \
     --bundle "$BAD_PLACEHOLDER_MANIFEST" \
     --current-git-sha "$GIT_SHA" \
     --max-age-days 10000 >"$BAD_PLACEHOLDER_RAW" 2>&1; then

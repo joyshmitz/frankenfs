@@ -18,7 +18,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const PROOF_BUNDLE_SCHEMA_VERSION: u32 = 1;
-pub const REQUIRED_PROOF_BUNDLE_LANES: [&str; 11] = [
+pub const REQUIRED_PROOF_BUNDLE_LANES: [&str; 13] = [
     "conformance",
     "xfstests",
     "fuse",
@@ -26,11 +26,18 @@ pub const REQUIRED_PROOF_BUNDLE_LANES: [&str; 11] = [
     "repair_lab",
     "crash_replay",
     "performance",
+    "swarm_workload_harness",
+    "swarm_tail_latency",
     "writeback_cache",
     "scrub_repair_status",
     "known_deferrals",
     "release_gates",
 ];
+
+const SWARM_WORKLOAD_HARNESS_LANE: &str = "swarm_workload_harness";
+const SWARM_TAIL_LATENCY_LANE: &str = "swarm_tail_latency";
+const SWARM_VALIDATOR_REPORT_ROLE: &str = "swarm_validator_report";
+const SWARM_P99_ATTRIBUTION_ROLE: &str = "p99_attribution_ledger";
 
 const PRESERVED_REDACTION_FIELDS: [&str; 5] = [
     "reproduction_command",
@@ -83,6 +90,8 @@ pub struct ProofBundleLane {
     pub scenario_ids: Vec<String>,
     pub gate_inputs: Vec<String>,
     pub artifacts: Vec<ProofBundleArtifact>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -156,6 +165,7 @@ pub struct ProofBundleValidationReport {
     pub redaction_leaks: Vec<ProofBundleRedactionLeak>,
     pub integrity_errors: Vec<String>,
     pub lanes: Vec<ProofBundleLaneReport>,
+    pub swarm_evidence: Vec<ProofBundleSwarmEvidenceReport>,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
     pub reproduction_command: String,
@@ -233,6 +243,24 @@ pub struct ProofBundleLaneReport {
     pub summary_path: String,
     pub scenario_count: usize,
     pub artifact_count: usize,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofBundleSwarmEvidenceReport {
+    pub lane_id: String,
+    pub status: ProofBundleOutcome,
+    pub raw_log_path: String,
+    pub host_class: String,
+    pub manifest_hash: String,
+    pub validator_report: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p99_attribution_artifact: Option<String>,
+    pub freshness: String,
+    pub release_claim: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downgrade_reason: Option<String>,
 }
 
 #[must_use]
@@ -369,6 +397,39 @@ pub fn render_proof_bundle_markdown(report: &ProofBundleValidationReport) -> Str
         )
         .ok();
     }
+    if !report.swarm_evidence.is_empty() {
+        writeln!(&mut out).ok();
+        writeln!(&mut out, "## Swarm Evidence").ok();
+        writeln!(
+            &mut out,
+            "| Lane | Outcome | Host class | Freshness | Release claim | Manifest hash | Validator report | P99 artifact | Raw log | Downgrade/skip rationale |"
+        )
+        .ok();
+        writeln!(&mut out, "|---|---:|---|---|---|---|---|---|---|---|").ok();
+        for evidence in &report.swarm_evidence {
+            let p99_artifact = evidence
+                .p99_attribution_artifact
+                .as_deref()
+                .unwrap_or("n/a");
+            let downgrade_reason = evidence.downgrade_reason.as_deref().unwrap_or("n/a");
+            writeln!(
+                &mut out,
+                "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | [{}]({}) | `{}` |",
+                evidence.lane_id,
+                evidence.status.label(),
+                escape_markdown_table_cell(&evidence.host_class),
+                escape_markdown_table_cell(&evidence.freshness),
+                escape_markdown_table_cell(&evidence.release_claim),
+                evidence.manifest_hash,
+                escape_markdown_table_cell(&evidence.validator_report),
+                escape_markdown_table_cell(p99_artifact),
+                evidence.raw_log_path,
+                evidence.raw_log_path,
+                escape_markdown_table_cell(downgrade_reason)
+            )
+            .ok();
+        }
+    }
     if !report.errors.is_empty() {
         writeln!(&mut out).ok();
         writeln!(&mut out, "## Errors").ok();
@@ -424,6 +485,7 @@ struct ProofBundleReportBuilder {
     redaction_leaks: Vec<ProofBundleRedactionLeak>,
     integrity_errors: Vec<String>,
     lanes: Vec<ProofBundleLaneReport>,
+    swarm_evidence: Vec<ProofBundleSwarmEvidenceReport>,
     errors: Vec<String>,
     warnings: Vec<String>,
 }
@@ -446,6 +508,7 @@ impl ProofBundleReportBuilder {
             redaction_leaks: Vec::new(),
             integrity_errors: Vec::new(),
             lanes: Vec::new(),
+            swarm_evidence: Vec::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
         }
@@ -611,6 +674,8 @@ impl ProofBundleReportBuilder {
             self.validate_artifact(bundle_root, &lane.lane_id, artifact);
         }
 
+        self.validate_swarm_lane_contract(lane);
+
         self.lanes.push(ProofBundleLaneReport {
             lane_id: lane.lane_id.clone(),
             status: lane.status,
@@ -618,6 +683,7 @@ impl ProofBundleReportBuilder {
             summary_path: lane.summary_path.clone(),
             scenario_count: lane.scenario_ids.len(),
             artifact_count: lane.artifacts.len(),
+            metadata: lane.metadata.clone(),
         });
     }
 
@@ -628,6 +694,153 @@ impl ProofBundleReportBuilder {
             ProofBundleOutcome::Skip => self.totals.skip += 1,
             ProofBundleOutcome::Error => self.totals.error += 1,
         }
+    }
+
+    fn validate_swarm_lane_contract(&mut self, lane: &ProofBundleLane) {
+        match lane.lane_id.as_str() {
+            SWARM_WORKLOAD_HARNESS_LANE => {
+                self.validate_swarm_common(lane);
+                self.validate_swarm_artifact_reference(
+                    lane,
+                    "validator_report",
+                    SWARM_VALIDATOR_REPORT_ROLE,
+                );
+                self.swarm_evidence.push(swarm_evidence_report(lane, None));
+            }
+            SWARM_TAIL_LATENCY_LANE => {
+                self.validate_swarm_common(lane);
+                self.validate_swarm_artifact_reference(
+                    lane,
+                    "validator_report",
+                    SWARM_VALIDATOR_REPORT_ROLE,
+                );
+                let p99_artifact = self.validate_swarm_artifact_reference(
+                    lane,
+                    "p99_attribution_artifact",
+                    SWARM_P99_ATTRIBUTION_ROLE,
+                );
+                self.swarm_evidence
+                    .push(swarm_evidence_report(lane, p99_artifact));
+            }
+            _ => {}
+        }
+    }
+
+    fn validate_swarm_common(&mut self, lane: &ProofBundleLane) {
+        let host_class = self.required_swarm_metadata(lane, "host_class");
+        let manifest_hash = self.required_swarm_metadata(lane, "manifest_hash");
+        let freshness = self.required_swarm_metadata(lane, "freshness");
+        let release_claim = self.required_swarm_metadata(lane, "release_claim");
+        let downgrade_reason = lane.metadata.get("downgrade_reason").map(String::as_str);
+
+        if let Some(manifest_hash) = manifest_hash
+            && !is_valid_sha256_hex(manifest_hash)
+        {
+            self.errors.push(format!(
+                "swarm lane {} manifest_hash must be SHA-256 hex",
+                lane.lane_id
+            ));
+        }
+
+        if let Some(freshness) = freshness
+            && freshness != "fresh"
+        {
+            self.errors.push(format!(
+                "stale swarm artifact lane={} freshness={freshness}",
+                lane.lane_id
+            ));
+        }
+
+        let Some(host_class) = host_class else {
+            return;
+        };
+        let Some(release_claim) = release_claim else {
+            return;
+        };
+
+        match lane.status {
+            ProofBundleOutcome::Pass => {
+                if release_claim != "authoritative_large_host" {
+                    self.errors.push(format!(
+                        "swarm lane {} pass requires release_claim=authoritative_large_host",
+                        lane.lane_id
+                    ));
+                }
+                if !is_large_host_class(host_class) {
+                    self.errors.push(format!(
+                        "swarm lane {} authoritative pass requires large host_class, observed {host_class}",
+                        lane.lane_id
+                    ));
+                }
+            }
+            ProofBundleOutcome::Skip => {
+                if !is_small_host_smoke_claim(release_claim) {
+                    self.errors.push(format!(
+                        "swarm lane {} skip must use small-host smoke release_claim, observed {release_claim}",
+                        lane.lane_id
+                    ));
+                }
+                if !is_nonempty_metadata(downgrade_reason) {
+                    self.errors.push(format!(
+                        "swarm lane {} skip requires downgrade_reason",
+                        lane.lane_id
+                    ));
+                }
+            }
+            ProofBundleOutcome::Fail | ProofBundleOutcome::Error => {
+                if !matches!(release_claim, "blocked" | "failed" | "error") {
+                    self.errors.push(format!(
+                        "swarm lane {} {} requires blocked/failed/error release_claim, observed {release_claim}",
+                        lane.lane_id,
+                        lane.status.label()
+                    ));
+                }
+                if !is_nonempty_metadata(downgrade_reason) {
+                    self.errors.push(format!(
+                        "swarm lane {} {} requires downgrade_reason",
+                        lane.lane_id,
+                        lane.status.label()
+                    ));
+                }
+            }
+        }
+    }
+
+    fn required_swarm_metadata<'a>(
+        &mut self,
+        lane: &'a ProofBundleLane,
+        key: &str,
+    ) -> Option<&'a str> {
+        match lane.metadata.get(key).map(String::as_str) {
+            Some(value) if !value.trim().is_empty() => Some(value),
+            _ => {
+                self.errors.push(format!(
+                    "swarm lane {} metadata.{key} missing",
+                    lane.lane_id
+                ));
+                None
+            }
+        }
+    }
+
+    fn validate_swarm_artifact_reference(
+        &mut self,
+        lane: &ProofBundleLane,
+        metadata_key: &str,
+        expected_role: &str,
+    ) -> Option<String> {
+        let path = self.required_swarm_metadata(lane, metadata_key)?;
+        let found = lane
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.path == path && artifact.role == expected_role);
+        if !found {
+            self.errors.push(format!(
+                "swarm lane {} metadata.{metadata_key}={path} must reference artifact role {expected_role}",
+                lane.lane_id
+            ));
+        }
+        Some(path.to_owned())
     }
 
     fn validate_artifact(
@@ -939,6 +1152,7 @@ impl ProofBundleReportBuilder {
             redaction_leaks: self.redaction_leaks,
             integrity_errors: self.integrity_errors,
             lanes: self.lanes,
+            swarm_evidence: self.swarm_evidence,
             errors: self.errors,
             warnings: self.warnings,
             reproduction_command: manifest.redaction.reproduction_command.clone(),
@@ -950,6 +1164,55 @@ fn validate_nonempty(field: &str, value: &str, errors: &mut Vec<String>) {
     if value.trim().is_empty() {
         errors.push(format!("{field} must not be empty"));
     }
+}
+
+fn swarm_evidence_report(
+    lane: &ProofBundleLane,
+    p99_attribution_artifact: Option<String>,
+) -> ProofBundleSwarmEvidenceReport {
+    ProofBundleSwarmEvidenceReport {
+        lane_id: lane.lane_id.clone(),
+        status: lane.status,
+        raw_log_path: lane.raw_log_path.clone(),
+        host_class: lane.metadata.get("host_class").cloned().unwrap_or_default(),
+        manifest_hash: lane
+            .metadata
+            .get("manifest_hash")
+            .cloned()
+            .unwrap_or_default(),
+        validator_report: lane
+            .metadata
+            .get("validator_report")
+            .cloned()
+            .unwrap_or_default(),
+        p99_attribution_artifact,
+        freshness: lane.metadata.get("freshness").cloned().unwrap_or_default(),
+        release_claim: lane
+            .metadata
+            .get("release_claim")
+            .cloned()
+            .unwrap_or_default(),
+        downgrade_reason: lane
+            .metadata
+            .get("downgrade_reason")
+            .filter(|reason| !reason.trim().is_empty())
+            .cloned(),
+    }
+}
+
+fn is_large_host_class(host_class: &str) -> bool {
+    matches!(host_class, "large_host" | "permissioned_large_host")
+}
+
+fn is_small_host_smoke_claim(release_claim: &str) -> bool {
+    matches!(
+        release_claim,
+        "small_host_smoke" | "capability_downgraded_smoke"
+    )
+}
+
+fn is_nonempty_metadata(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !value.trim().is_empty())
 }
 
 fn validate_relative_path(raw: &str) -> Result<()> {
@@ -1122,6 +1385,7 @@ mod tests {
             let summary_path = format!("summaries/{lane_id}.md");
             let input_path = format!("inputs/{lane_id}.json");
             let artifact_path = format!("artifacts/{lane_id}.json");
+            let p99_artifact_path = format!("artifacts/{lane_id}_p99_attribution.json");
 
             write_file(root.path(), &raw_log_path, &format!("{lane_id} raw log\n"));
             write_file(root.path(), &summary_path, &format!("# {lane_id}\n"));
@@ -1144,6 +1408,84 @@ mod tests {
                 2 => ProofBundleOutcome::Skip,
                 _ => ProofBundleOutcome::Error,
             };
+            let mut artifacts = vec![ProofBundleArtifact {
+                path: artifact_path.clone(),
+                sha256: artifact_hash,
+                redacted: index % 2 == 0,
+                role: if matches!(
+                    *lane_id,
+                    SWARM_WORKLOAD_HARNESS_LANE | SWARM_TAIL_LATENCY_LANE
+                ) {
+                    SWARM_VALIDATOR_REPORT_ROLE
+                } else {
+                    "primary_evidence"
+                }
+                .to_owned(),
+            }];
+            let mut metadata = BTreeMap::new();
+            if matches!(
+                *lane_id,
+                SWARM_WORKLOAD_HARNESS_LANE | SWARM_TAIL_LATENCY_LANE
+            ) {
+                metadata.insert("manifest_hash".to_owned(), "a".repeat(64));
+                metadata.insert("validator_report".to_owned(), artifact_path.clone());
+                metadata.insert("freshness".to_owned(), "fresh".to_owned());
+                match status {
+                    ProofBundleOutcome::Pass => {
+                        metadata.insert(
+                            "host_class".to_owned(),
+                            "permissioned_large_host".to_owned(),
+                        );
+                        metadata.insert(
+                            "release_claim".to_owned(),
+                            "authoritative_large_host".to_owned(),
+                        );
+                    }
+                    ProofBundleOutcome::Skip => {
+                        metadata.insert("host_class".to_owned(), "developer_smoke".to_owned());
+                        metadata.insert("release_claim".to_owned(), "small_host_smoke".to_owned());
+                        metadata.insert(
+                            "downgrade_reason".to_owned(),
+                            "small host smoke cannot support release wording".to_owned(),
+                        );
+                    }
+                    ProofBundleOutcome::Fail => {
+                        metadata.insert("host_class".to_owned(), "developer_smoke".to_owned());
+                        metadata.insert("release_claim".to_owned(), "failed".to_owned());
+                        metadata.insert(
+                            "downgrade_reason".to_owned(),
+                            "swarm evidence failed and blocks release wording".to_owned(),
+                        );
+                    }
+                    ProofBundleOutcome::Error => {
+                        metadata.insert("host_class".to_owned(), "developer_smoke".to_owned());
+                        metadata.insert("release_claim".to_owned(), "error".to_owned());
+                        metadata.insert(
+                            "downgrade_reason".to_owned(),
+                            "swarm evidence errored and blocks release wording".to_owned(),
+                        );
+                    }
+                }
+            }
+            if *lane_id == SWARM_TAIL_LATENCY_LANE {
+                write_file(
+                    root.path(),
+                    &p99_artifact_path,
+                    &format!("{{\"p99_attribution\":\"{lane_id}\"}}\n"),
+                );
+                let p99_artifact_hash =
+                    sha256_file_hex(&root.path().join(&p99_artifact_path)).expect("artifact hash");
+                metadata.insert(
+                    "p99_attribution_artifact".to_owned(),
+                    p99_artifact_path.clone(),
+                );
+                artifacts.push(ProofBundleArtifact {
+                    path: p99_artifact_path,
+                    sha256: p99_artifact_hash,
+                    redacted: false,
+                    role: SWARM_P99_ATTRIBUTION_ROLE.to_owned(),
+                });
+            }
             lanes.push(ProofBundleLane {
                 lane_id: (*lane_id).to_owned(),
                 status,
@@ -1151,12 +1493,8 @@ mod tests {
                 summary_path,
                 scenario_ids: vec![format!("{lane_id}_scenario_primary")],
                 gate_inputs: vec![input_path],
-                artifacts: vec![ProofBundleArtifact {
-                    path: artifact_path,
-                    sha256: artifact_hash,
-                    redacted: index % 2 == 0,
-                    role: "primary_evidence".to_owned(),
-                }],
+                artifacts,
+                metadata,
             });
         }
 
@@ -1216,16 +1554,55 @@ mod tests {
         )
     }
 
+    fn swarm_lane_mut<'a>(
+        manifest: &'a mut ProofBundleManifest,
+        lane_id: &str,
+    ) -> &'a mut ProofBundleLane {
+        manifest
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.lane_id == lane_id)
+            .expect("swarm lane")
+    }
+
+    fn set_swarm_lane_for_large_host(manifest: &mut ProofBundleManifest, lane_id: &str) {
+        let lane = swarm_lane_mut(manifest, lane_id);
+        lane.status = ProofBundleOutcome::Pass;
+        lane.metadata.insert(
+            "host_class".to_owned(),
+            "permissioned_large_host".to_owned(),
+        );
+        lane.metadata.insert(
+            "release_claim".to_owned(),
+            "authoritative_large_host".to_owned(),
+        );
+        lane.metadata.remove("downgrade_reason");
+    }
+
+    fn set_swarm_lane_for_small_host_smoke(manifest: &mut ProofBundleManifest, lane_id: &str) {
+        let lane = swarm_lane_mut(manifest, lane_id);
+        lane.status = ProofBundleOutcome::Skip;
+        lane.metadata
+            .insert("host_class".to_owned(), "developer_smoke".to_owned());
+        lane.metadata
+            .insert("release_claim".to_owned(), "small_host_smoke".to_owned());
+        lane.metadata.insert(
+            "downgrade_reason".to_owned(),
+            "developer smoke host cannot support release wording".to_owned(),
+        );
+    }
+
     #[test]
     fn valid_sample_bundle_passes() {
         let sample = sample_bundle();
         let report = validate_sample(&sample);
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.totals.lanes, REQUIRED_PROOF_BUNDLE_LANES.len());
-        assert_eq!(report.totals.pass, 3);
+        assert_eq!(report.totals.pass, 4);
         assert_eq!(report.totals.fail, 3);
         assert_eq!(report.totals.skip, 3);
-        assert_eq!(report.totals.error, 2);
+        assert_eq!(report.totals.error, 3);
+        assert_eq!(report.swarm_evidence.len(), 2);
     }
 
     #[test]
@@ -1239,6 +1616,8 @@ mod tests {
             "repair_lab",
             "crash_replay",
             "performance",
+            "swarm_workload_harness",
+            "swarm_tail_latency",
             "writeback_cache",
             "scrub_repair_status",
             "known_deferrals",
@@ -1405,7 +1784,7 @@ mod tests {
         let report = validate_sample(&sample);
         assert_eq!(
             report.artifact_reports.len(),
-            REQUIRED_PROOF_BUNDLE_LANES.len()
+            manifest_artifact_count(&sample.manifest)
         );
         let conformance = report
             .artifact_reports
@@ -1415,6 +1794,124 @@ mod tests {
         assert_eq!(conformance.path, "artifacts/conformance.json");
         assert_eq!(conformance.sha256.len(), 64);
         assert_eq!(conformance.role, "primary_evidence");
+    }
+
+    #[test]
+    fn accepted_large_host_swarm_evidence_is_preserved() {
+        let mut sample = sample_bundle();
+        set_swarm_lane_for_large_host(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
+        set_swarm_lane_for_large_host(&mut sample.manifest, SWARM_TAIL_LATENCY_LANE);
+        sample.manifest.integrity = Some(integrity_for(&sample.manifest));
+
+        let report = validate_sample(&sample);
+
+        assert!(report.valid, "{:?}", report.errors);
+        let workload = report
+            .swarm_evidence
+            .iter()
+            .find(|evidence| evidence.lane_id == SWARM_WORKLOAD_HARNESS_LANE)
+            .expect("workload evidence");
+        assert_eq!(workload.status, ProofBundleOutcome::Pass);
+        assert_eq!(workload.host_class, "permissioned_large_host");
+        assert_eq!(workload.release_claim, "authoritative_large_host");
+        assert_eq!(workload.freshness, "fresh");
+        assert_eq!(workload.manifest_hash.len(), 64);
+
+        let tail_latency = report
+            .swarm_evidence
+            .iter()
+            .find(|evidence| evidence.lane_id == SWARM_TAIL_LATENCY_LANE)
+            .expect("tail latency evidence");
+        assert_eq!(
+            tail_latency.p99_attribution_artifact.as_deref(),
+            Some("artifacts/swarm_tail_latency_p99_attribution.json")
+        );
+    }
+
+    #[test]
+    fn accepted_small_host_swarm_smoke_is_downgraded() {
+        let mut sample = sample_bundle();
+        set_swarm_lane_for_small_host_smoke(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
+        set_swarm_lane_for_small_host_smoke(&mut sample.manifest, SWARM_TAIL_LATENCY_LANE);
+        sample.manifest.integrity = Some(integrity_for(&sample.manifest));
+
+        let report = validate_sample(&sample);
+
+        assert!(report.valid, "{:?}", report.errors);
+        assert!(report.swarm_evidence.iter().all(|evidence| {
+            evidence.status == ProofBundleOutcome::Skip
+                && evidence.host_class == "developer_smoke"
+                && evidence.release_claim == "small_host_smoke"
+                && evidence.downgrade_reason.is_some()
+        }));
+    }
+
+    #[test]
+    fn stale_swarm_artifact_is_rejected() {
+        let mut sample = sample_bundle();
+        let lane = swarm_lane_mut(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
+        lane.metadata
+            .insert("freshness".to_owned(), "stale".to_owned());
+
+        let report = validate_sample(&sample);
+
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("stale swarm artifact"))
+        );
+    }
+
+    #[test]
+    fn missing_p99_ledger_is_rejected() {
+        let mut sample = sample_bundle();
+        let lane = swarm_lane_mut(&mut sample.manifest, SWARM_TAIL_LATENCY_LANE);
+        lane.artifacts
+            .retain(|artifact| artifact.role != SWARM_P99_ATTRIBUTION_ROLE);
+        sample.manifest.integrity = Some(integrity_for(&sample.manifest));
+
+        let report = validate_sample(&sample);
+
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("p99_attribution_artifact") && error.contains(SWARM_P99_ATTRIBUTION_ROLE)
+        }));
+    }
+
+    #[test]
+    fn swarm_host_class_mismatch_is_rejected() {
+        let mut sample = sample_bundle();
+        set_swarm_lane_for_large_host(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
+        let lane = swarm_lane_mut(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
+        lane.metadata
+            .insert("host_class".to_owned(), "developer_smoke".to_owned());
+        sample.manifest.integrity = Some(integrity_for(&sample.manifest));
+
+        let report = validate_sample(&sample);
+
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("authoritative pass requires large host_class"))
+        );
+    }
+
+    #[test]
+    fn missing_swarm_raw_log_is_rejected() {
+        let mut sample = sample_bundle();
+        let lane = swarm_lane_mut(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
+        lane.raw_log_path = "logs/missing-swarm-workload.log".to_owned();
+
+        let report = validate_sample(&sample);
+
+        assert!(!report.valid);
+        assert!(report.broken_links.iter().any(
+            |link| link.lane_id == SWARM_WORKLOAD_HARNESS_LANE && link.field == "raw_log_path"
+        ));
     }
 
     #[test]
@@ -1480,11 +1977,26 @@ mod tests {
         let sample = sample_bundle();
         let report = validate_sample(&sample);
         let summary = render_proof_bundle_markdown(&report);
-        assert!(summary.contains("Totals: pass=3 fail=3 skip=3 error=2"));
+        assert!(summary.contains("Totals: pass=4 fail=3 skip=3 error=3"));
         assert!(summary.contains("[logs/conformance.log](logs/conformance.log)"));
         assert!(summary.contains("scrub_repair_status"));
         assert!(summary.contains("known_deferrals"));
         assert!(summary.contains("writeback_cache"));
+        assert!(summary.contains("Swarm Evidence"));
+        assert!(summary.contains("swarm_workload_harness"));
+        assert!(summary.contains("swarm_tail_latency"));
+        assert!(summary.contains("authoritative_large_host"));
         assert!(summary.contains("Artifact hash chain"));
+    }
+
+    #[test]
+    fn summary_separates_pass_skip_fail_and_error_outcomes() {
+        let sample = sample_bundle();
+        let report = validate_sample(&sample);
+        let summary = render_proof_bundle_markdown(&report);
+
+        for label in ["`pass`", "`skip`", "`fail`", "`error`"] {
+            assert!(summary.contains(label), "summary missing {label}");
+        }
     }
 }

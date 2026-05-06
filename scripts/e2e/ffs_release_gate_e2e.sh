@@ -124,6 +124,8 @@ lanes = [
     "repair_lab",
     "crash_replay",
     "performance",
+    "swarm_workload_harness",
+    "swarm_tail_latency",
     "writeback_cache",
     "scrub_repair_status",
     "known_deferrals",
@@ -136,6 +138,7 @@ for lane in lanes:
     summary = pathlib.Path("summaries") / f"{lane}.md"
     gate_input = pathlib.Path("inputs") / f"{lane}.json"
     artifact = pathlib.Path("artifacts") / f"{lane}.json"
+    p99_artifact = pathlib.Path("artifacts") / f"{lane}_p99_attribution.json"
     payloads = [
         (raw_log, f"lane={lane}\nstatus=pass\n"),
         (summary, f"# {lane}\n\nRelease gate sample summary.\n"),
@@ -147,6 +150,40 @@ for lane in lanes:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     digest = hashlib.sha256((bundle_dir / artifact).read_bytes()).hexdigest()
+    artifacts = [
+        {
+            "path": artifact.as_posix(),
+            "sha256": digest,
+            "redacted": False,
+            "role": "swarm_validator_report"
+            if lane in {"swarm_workload_harness", "swarm_tail_latency"}
+            else "release_gate_evidence",
+        }
+    ]
+    metadata = {}
+    if lane in {"swarm_workload_harness", "swarm_tail_latency"}:
+        metadata = {
+            "freshness": "fresh",
+            "host_class": "permissioned_large_host",
+            "manifest_hash": "b" * 64,
+            "release_claim": "authoritative_large_host",
+            "validator_report": artifact.as_posix(),
+        }
+    if lane == "swarm_tail_latency":
+        p99_payload = {"lane": lane, "artifact": "p99_attribution"}
+        p99_path = bundle_dir / p99_artifact
+        p99_path.parent.mkdir(parents=True, exist_ok=True)
+        p99_path.write_text(json.dumps(p99_payload, sort_keys=True) + "\n", encoding="utf-8")
+        p99_digest = hashlib.sha256(p99_path.read_bytes()).hexdigest()
+        metadata["p99_attribution_artifact"] = p99_artifact.as_posix()
+        artifacts.append(
+            {
+                "path": p99_artifact.as_posix(),
+                "sha256": p99_digest,
+                "redacted": False,
+                "role": "p99_attribution_ledger",
+            }
+        )
     records.append(
         {
             "lane_id": lane,
@@ -155,14 +192,8 @@ for lane in lanes:
             "summary_path": summary.as_posix(),
             "scenario_ids": [f"{lane}_release_gate_primary"],
             "gate_inputs": [gate_input.as_posix()],
-            "artifacts": [
-                {
-                    "path": artifact.as_posix(),
-                    "sha256": digest,
-                    "redacted": False,
-                    "role": "release_gate_evidence",
-                }
-            ],
+            "artifacts": artifacts,
+            "metadata": metadata,
         }
     )
 
@@ -230,6 +261,18 @@ def required_lane_for_feature(feature_id: str, lane: str) -> dict[str, object]:
         )
     if feature_id == "writeback_cache" and lane == "performance":
         return required_lane(lane, risk_class="noisy_performance", failed_state="experimental")
+    if feature_id == "swarm.responsiveness" and lane == "swarm_workload_harness":
+        return required_lane(
+            lane,
+            risk_class="host_capability_skip",
+            failed_state="experimental",
+        )
+    if feature_id == "swarm.responsiveness" and lane == "swarm_tail_latency":
+        return required_lane(
+            lane,
+            risk_class="noisy_performance",
+            failed_state="experimental",
+        )
     return required_lane(lane)
 
 def feature(feature_id: str, docs_id: str, previous: str, target: str, feature_lanes: list[str]) -> dict[str, object]:
@@ -287,6 +330,7 @@ policy = {
         feature("mount.rw.ext4", "readme.mount.rw.ext4", "experimental", "validated", ["fuse", "release_gates", "conformance"]),
         feature("repair.rw.writeback", "readme.repair.rw.writeback", "disabled", "opt_in_mutating", ["repair_lab", "release_gates", "crash_replay"]),
         feature("writeback_cache", "readme.writeback_cache", "disabled", "opt_in_mutating", ["writeback_cache", "release_gates", "performance"]),
+        feature("swarm.responsiveness", "feature_parity.swarm_responsiveness", "disabled", "validated", ["swarm_workload_harness", "swarm_tail_latency", "release_gates"]),
         feature("background_scrub_mutation", "readme.background_scrub_mutation", "detection_only", "detection_only", ["repair_lab", "release_gates"]),
     ],
 }
@@ -332,6 +376,7 @@ expected = {
     "mount.rw.ext4": "validated",
     "repair.rw.writeback": "opt_in_mutating",
     "writeback_cache": "opt_in_mutating",
+    "swarm.responsiveness": "validated",
     "background_scrub_mutation": "detection_only",
 }
 if states != expected:
@@ -419,7 +464,7 @@ data = json.loads(pathlib.Path(policy_path).read_text(encoding="utf-8"))
 for feature in data["features"]:
     for threshold in feature["thresholds"]:
         if threshold["metric"] == "pass_lanes":
-            threshold["value"] = 10
+            threshold["value"] = 99
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 if cargo run --quiet -p ffs-harness -- evaluate-release-gates \
