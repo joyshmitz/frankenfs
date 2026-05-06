@@ -1804,6 +1804,29 @@ mod tests {
     }
 
     #[test]
+    fn render_operational_readiness_markdown_mixed_manifest_snapshot() {
+        let fixture = ReadinessFixture::new();
+        let manifest = sample_operational_manifest("abc123");
+        fixture.write_manifest("operational.json", &manifest);
+
+        let mut report = fixture.report(Some("abc123"));
+        let fixture_root = fixture.dir.path().display().to_string();
+        report.source_root = "$FIXTURE".to_owned();
+        for row in &mut report.scenarios {
+            row.source_path = row.source_path.replace(&fixture_root, "$FIXTURE");
+        }
+        let markdown = render_operational_readiness_markdown(&report);
+
+        assert!(markdown.contains("# FrankenFS Operational Readiness"));
+        assert!(markdown.contains("## Workstreams"));
+        assert!(markdown.contains("## Scenarios"));
+        insta::assert_snapshot!(
+            "render_operational_readiness_markdown_mixed_manifest",
+            markdown
+        );
+    }
+
+    #[test]
     fn missing_readiness_event_fails_report_contract() {
         let fixture = ReadinessFixture::new();
         let mut manifest = sample_operational_manifest("abc123");
