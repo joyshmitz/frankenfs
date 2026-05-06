@@ -309,3 +309,8 @@ doc = false
 name = "fuzz_ext4_stamp_verify_roundtrip"
 path = "fuzz_targets/fuzz_ext4_stamp_verify_roundtrip.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_ext4_casefold"
+path = "fuzz_targets/fuzz_ext4_casefold.rs"
+doc = false
