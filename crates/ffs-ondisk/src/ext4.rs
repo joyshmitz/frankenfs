@@ -12941,6 +12941,87 @@ mod tests {
             prop_assert_eq!(ext.is_unwritten(), raw_len > EXT_INIT_MAX_LEN);
         }
 
+        // bd-j0zo3 — Metamorphic relations for Ext4Extent::actual_len
+        // and the unwritten-extent split-bit encoding. Each MR pins a
+        // specific algebraic law of the kernel's
+        // [actual_len][unwritten_bit] u16 layout.
+
+        /// MR1 — actual_len boundary: raw_len == EXT_INIT_MAX_LEN
+        /// MUST yield is_unwritten=false AND actual_len=0x8000 (the
+        /// max-written extent length). Off-by-one here silently
+        /// mis-classifies every max-length written extent.
+        #[test]
+        fn ext4_proptest_extent_actual_len_boundary_is_written(_dummy in any::<u8>()) {
+            let ext = Ext4Extent {
+                logical_block: 0,
+                raw_len: EXT_INIT_MAX_LEN,
+                physical_start: 0,
+            };
+            prop_assert!(!ext.is_unwritten());
+            prop_assert_eq!(ext.actual_len(), EXT_INIT_MAX_LEN);
+        }
+
+        /// MR2 — Unwritten range: for raw_len in (EXT_INIT_MAX_LEN+1)..=u16::MAX,
+        /// actual_len == raw_len - EXT_INIT_MAX_LEN AND is_unwritten == true.
+        #[test]
+        fn ext4_proptest_extent_actual_len_unwritten_range(
+            offset in 1_u16..=(u16::MAX - EXT_INIT_MAX_LEN),
+        ) {
+            let raw_len = EXT_INIT_MAX_LEN + offset;
+            let ext = Ext4Extent { logical_block: 0, raw_len, physical_start: 0 };
+            prop_assert!(ext.is_unwritten());
+            prop_assert_eq!(ext.actual_len(), offset);
+        }
+
+        /// MR3 — Written range: for raw_len in 0..=EXT_INIT_MAX_LEN,
+        /// actual_len == raw_len AND is_unwritten == false.
+        #[test]
+        fn ext4_proptest_extent_actual_len_written_range(
+            raw_len in 0_u16..=EXT_INIT_MAX_LEN,
+        ) {
+            let ext = Ext4Extent { logical_block: 0, raw_len, physical_start: 0 };
+            prop_assert!(!ext.is_unwritten());
+            prop_assert_eq!(ext.actual_len(), raw_len);
+        }
+
+        /// MR4 — Encode round-trip: synthesizing raw_len from a
+        /// (actual, unwritten) pair and re-decoding it recovers the
+        /// original pair. Pins the split-bit encoding bijection.
+        #[test]
+        fn ext4_proptest_extent_actual_len_encode_roundtrip(
+            actual in 1_u16..=EXT_INIT_MAX_LEN,
+            unwritten in any::<bool>(),
+        ) {
+            let raw_len = if unwritten {
+                actual + EXT_INIT_MAX_LEN
+            } else {
+                actual
+            };
+            // EXT_INIT_MAX_LEN = 0x8000, so the unwritten-with-max-actual
+            // case raw_len = 0x8000 + 0x8000 overflows u16. Skip it —
+            // the kernel never produces that combination because an
+            // unwritten extent strictly requires raw_len > EXT_INIT_MAX_LEN
+            // and the actual_len for unwritten is bounded by 0x7FFF.
+            prop_assume!(!(unwritten && actual == EXT_INIT_MAX_LEN));
+            let ext = Ext4Extent { logical_block: 0, raw_len, physical_start: 0 };
+            prop_assert_eq!(ext.actual_len(), actual);
+            prop_assert_eq!(ext.is_unwritten(), unwritten);
+        }
+
+        /// MR5 — actual_len bound: actual_len <= EXT_INIT_MAX_LEN
+        /// for ALL u16 raw_len inputs. A regression that returned
+        /// raw_len directly for the unwritten branch would break
+        /// this on raw_len > 0xFFFF... wait, it wouldn't because
+        /// u16 caps at 0xFFFF. But returning raw_len without
+        /// subtracting EXT_INIT_MAX_LEN for the unwritten branch
+        /// (e.g. an off-by-one in the if/else) would yield up to
+        /// 0xFFFF which exceeds the bound, breaking the MR.
+        #[test]
+        fn ext4_proptest_extent_actual_len_is_bounded(raw_len in any::<u16>()) {
+            let ext = Ext4Extent { logical_block: 0, raw_len, physical_start: 0 };
+            prop_assert!(ext.actual_len() <= EXT_INIT_MAX_LEN);
+        }
+
         // ── ext4_chksum incremental chaining ─────────────────────────
 
         /// Feeding data in two chunks equals one-shot.
