@@ -2,7 +2,7 @@
 # promote_crash.sh - Promote a fuzz crash artifact to a regression test
 #
 # Workflow:
-#   1. Minimize the crash input using `cargo fuzz tmin`
+#   1. Minimize the crash input using `cargo fuzz tmin` when explicitly allowed
 #   2. Copy the minimized input to the regression corpus
 #   3. Generate a regression test skeleton with metadata tags
 #
@@ -20,8 +20,20 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 REPO_ROOT="$(pwd)"
+MINIMIZE_ACK_VALUE="cargo-fuzz-minimization-may-run-locally"
 
 log() { echo "[promote] $*" >&2; }
+
+require_minimize_ack() {
+    if [[ "${FFS_ALLOW_LOCAL_CARGO_FUZZ_MINIMIZE:-}" == "$MINIMIZE_ACK_VALUE" ]]; then
+        return 0
+    fi
+
+    log "ERROR: refusing cargo fuzz tmin without explicit local minimization acknowledgement."
+    log "Set FFS_ALLOW_LOCAL_CARGO_FUZZ_MINIMIZE=${MINIMIZE_ACK_VALUE} to allow this CPU-heavy local operation."
+    log "Use --skip-minimize to promote the original crash input without running cargo fuzz."
+    exit 3
+}
 
 if [[ $# -lt 2 ]]; then
     echo "Usage: $0 <target> <crash_file> [--skip-minimize]" >&2
@@ -31,6 +43,11 @@ fi
 TARGET="$1"
 CRASH_FILE="$2"
 SKIP_MINIMIZE="${3:-}"
+
+if [[ -n "$SKIP_MINIMIZE" && "$SKIP_MINIMIZE" != "--skip-minimize" ]]; then
+    echo "Usage: $0 <target> <crash_file> [--skip-minimize]" >&2
+    exit 2
+fi
 
 if [[ ! -f "$CRASH_FILE" ]]; then
     log "ERROR: crash file not found: $CRASH_FILE"
@@ -46,6 +63,7 @@ SEED_NAME="regression_${TARGET}_${TIMESTAMP}_${INPUT_SIZE}bytes"
 MINIMIZED_FILE="$CRASH_FILE"
 MINIMIZED="false"
 if [[ "$SKIP_MINIMIZE" != "--skip-minimize" ]]; then
+    require_minimize_ack
     log "Minimizing crash input..."
     MIN_OUTPUT="${CRASH_FILE}.minimized"
     if cargo fuzz tmin "$TARGET" --fuzz-dir fuzz -- "$CRASH_FILE" 2>/dev/null; then

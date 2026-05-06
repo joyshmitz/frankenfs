@@ -28,6 +28,9 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_crash_promotion}"
+export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+MINIMIZE_ACK_VALUE="cargo-fuzz-minimization-may-run-locally"
 mapfile -t FUZZ_TARGETS < <(
     find fuzz/fuzz_targets -maxdepth 1 -name '*.rs' -printf '%f\n' \
         | sed 's/\.rs$//' \
@@ -107,10 +110,19 @@ fi
 #######################################
 e2e_step "Scenario 4: Minimize script"
 
-if [[ -x "fuzz/scripts/minimize_corpus.sh" ]] && grep -q "cargo fuzz cmin" "fuzz/scripts/minimize_corpus.sh"; then
-    scenario_result "promo_minimize_script" "PASS" "minimize_corpus.sh exists with cargo fuzz cmin"
+MINIMIZE_STDOUT="$E2E_LOG_DIR/minimize_guard.stdout"
+MINIMIZE_STDERR="$E2E_LOG_DIR/minimize_guard.stderr"
+if [[ -s "fuzz/scripts/minimize_corpus.sh" ]] \
+    && [[ -x "fuzz/scripts/minimize_corpus.sh" ]] \
+    && grep -q "cargo fuzz cmin" "fuzz/scripts/minimize_corpus.sh" \
+    && grep -q "FFS_ALLOW_LOCAL_CARGO_FUZZ_MINIMIZE" "fuzz/scripts/minimize_corpus.sh" \
+    && ! fuzz/scripts/minimize_corpus.sh fuzz_ext4_metadata >"$MINIMIZE_STDOUT" 2>"$MINIMIZE_STDERR" \
+    && grep -q "refusing cargo fuzz cmin" "$MINIMIZE_STDERR" \
+    && FFS_ALLOW_LOCAL_CARGO_FUZZ_MINIMIZE= fuzz/scripts/minimize_corpus.sh --dry-run fuzz_ext4_metadata >"$MINIMIZE_STDOUT" 2>"$MINIMIZE_STDERR" \
+    && grep -q "cargo\\ fuzz\\ cmin" "$MINIMIZE_STDOUT"; then
+    scenario_result "promo_minimize_script" "PASS" "minimize_corpus.sh exists and fails closed without ${MINIMIZE_ACK_VALUE}"
 else
-    scenario_result "promo_minimize_script" "FAIL" "minimize script missing or incomplete"
+    scenario_result "promo_minimize_script" "FAIL" "minimize script missing, incomplete, or not fail-closed"
 fi
 
 #######################################
@@ -118,10 +130,19 @@ fi
 #######################################
 e2e_step "Scenario 5: Promote script"
 
-if [[ -x "fuzz/scripts/promote_crash.sh" ]] && grep -q "Fuzz target" "fuzz/scripts/promote_crash.sh" && grep -q "Minimized" "fuzz/scripts/promote_crash.sh"; then
-    scenario_result "promo_promote_script" "PASS" "promote_crash.sh exists with metadata tagging"
+PROMOTE_CRASH="$E2E_LOG_DIR/promote_guard_crash"
+PROMOTE_STDOUT="$E2E_LOG_DIR/promote_guard.stdout"
+PROMOTE_STDERR="$E2E_LOG_DIR/promote_guard.stderr"
+printf 'frankenfs guarded crash input\n' >"$PROMOTE_CRASH"
+if [[ -x "fuzz/scripts/promote_crash.sh" ]] \
+    && grep -q "Fuzz target" "fuzz/scripts/promote_crash.sh" \
+    && grep -q "Minimized" "fuzz/scripts/promote_crash.sh" \
+    && grep -q "FFS_ALLOW_LOCAL_CARGO_FUZZ_MINIMIZE" "fuzz/scripts/promote_crash.sh" \
+    && ! fuzz/scripts/promote_crash.sh fuzz_ext4_metadata "$PROMOTE_CRASH" >"$PROMOTE_STDOUT" 2>"$PROMOTE_STDERR" \
+    && grep -q "refusing cargo fuzz tmin" "$PROMOTE_STDERR"; then
+    scenario_result "promo_promote_script" "PASS" "promote_crash.sh exists with metadata tagging and fail-closed minimization"
 else
-    scenario_result "promo_promote_script" "FAIL" "promote script missing or incomplete"
+    scenario_result "promo_promote_script" "FAIL" "promote script missing, incomplete, or not fail-closed"
 fi
 
 #######################################
@@ -187,8 +208,21 @@ fi
 #######################################
 e2e_step "Scenario 9: Unit tests pass"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-harness --lib -- crash_promotion 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/crash_promotion_unit_tests.log"
+RCH_TEST_TIMEOUT="${FFS_CRASH_PROMOTION_RCH_TIMEOUT:-90s}"
+RCH_TEST_STATUS=0
+timeout "$RCH_TEST_TIMEOUT" env RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- \
+    cargo test -p ffs-harness --lib -- crash_promotion 2>&1 | tee "$TEST_LOG" \
+    || RCH_TEST_STATUS=$?
+
+if [[ $RCH_TEST_STATUS -eq 124 ]] \
+    && grep -q "Remote command finished: exit=0" "$TEST_LOG" \
+    && grep -q "test result: ok" "$TEST_LOG"; then
+    e2e_log "RCH artifact retrieval timed out after worker-side test success; accepting remote exit=0 evidence"
+    RCH_TEST_STATUS=0
+fi
+
+if [[ $RCH_TEST_STATUS -eq 0 ]]; then
     TESTS_RUN=$(grep -c "test crash_promotion::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 10 ]]; then
         scenario_result "promo_unit_tests_pass" "PASS" "Tests passed (${TESTS_RUN} tests)"
@@ -196,9 +230,8 @@ if cargo test -p ffs-harness --lib -- crash_promotion 2>"$TEST_LOG" | tee -a "$T
         scenario_result "promo_unit_tests_pass" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 10)"
     fi
 else
-    scenario_result "promo_unit_tests_pass" "FAIL" "Crash promotion tests failed"
+    scenario_result "promo_unit_tests_pass" "FAIL" "Crash promotion tests failed or RCH timed out before worker-side success"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Summary
