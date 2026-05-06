@@ -1436,14 +1436,51 @@ met the lane contract, `fail` is product or policy failure evidence, `skip` is
 an explicit capability/scope deferral, and `error` is harness or evidence
 production failure. Required lanes are `conformance`, `xfstests`, `fuse`,
 `differential_oracle`, `repair_lab`, `crash_replay`, `performance`,
-`writeback_cache`, `scrub_repair_status`, `known_deferrals`, and
-`release_gates`.
+`writeback_cache`, `scrub_repair_status`, `known_deferrals`,
+`release_gates`, `swarm_workload_harness`, and `swarm_tail_latency`.
+
+#### Swarm Responsiveness Evidence
+
+The `swarm.responsiveness` release claim is gated by two proof-bundle lanes:
+`swarm_workload_harness` and `swarm_tail_latency`. They connect the
+NUMA-aware workload harness and the p99 attribution ledger to the release-gate
+policy so operator docs cannot promote local smoke evidence into large-host
+readiness.
+
+The safe local checks are:
+
+```bash
+./scripts/e2e/ffs_swarm_workload_harness_e2e.sh
+./scripts/e2e/ffs_swarm_tail_latency_e2e.sh
+cargo run -p ffs-harness -- validate-swarm-workload-harness \
+  --manifest benchmarks/swarm_workload_harness_manifest.json
+cargo run -p ffs-harness -- validate-swarm-tail-latency \
+  --ledger benchmarks/swarm_tail_latency_ledger.json
+```
+
+The proof-bundle lane metadata must include `host_class`, `manifest_hash`,
+`freshness`, `release_claim`, and `validator_report`. The
+`swarm_tail_latency` lane must also preserve an artifact with role
+`p99_attribution_ledger`. Both lanes must preserve raw logs and artifact paths
+so the release gate can distinguish product performance evidence from host,
+harness, or permission limits.
+
+Host classes are intentionally strict. `host_class=large_host` or
+`host_class=permissioned_large_host` with
+`release_claim=authoritative_large_host` is the only lane state that may
+strengthen `swarm.responsiveness`. `release_claim=small_host_smoke` and
+`release_claim=capability_downgraded_smoke` are downgrade evidence only; they
+cannot upgrade `swarm.responsiveness`. Stale, missing, unsupported, or
+small-host-only swarm evidence must leave the public claim hidden, disabled,
+experimental, or blocked until a fresh permissioned large-host run is
+available.
 
 The canonical release-gate policy lives at
 `tests/release-gates/release_gate_policy_v1.json`. It maps mount/write,
 automatic repair, writeback-cache, scrub/repair, conformance, xfstests,
-performance, fuzz/conformance, and crash/replay claims to required proof-bundle
-lanes, thresholds, kill switches, remediation beads, or explicit non-goals.
+performance, swarm responsiveness, fuzz/conformance, and crash/replay claims
+to required proof-bundle lanes, thresholds, kill switches, remediation beads,
+or explicit non-goals.
 
 ### Readiness Gates
 
@@ -1460,6 +1497,7 @@ lanes, thresholds, kill switches, remediation beads, or explicit non-goals.
 | `writeback_cache` | kernel FUSE writeback-cache mode can be enabled | Default mounts still keep `writeback_cache` off. `bd-rchk0.2.1.1` freezes the negative-option proof, `bd-8pz7h` adds the dirty-page/fsync ordering oracle, `bd-rchk0.2.2` wires the explicit CLI/FUSE opt-in, `bd-4nobd` adds runtime kill-switch, stale-gate, config-default, feature-downgrade, and host-manifest refusal, and `bd-rchk0.2.3` adds the 12-point crash/replay artifact gate plus mounted ext4 opt-in regression. `--writeback-cache` requires `--rw`, an audit gate, an ordering oracle, fresh runtime-guard evidence, a crash/replay oracle, a matching host/lane manifest, and a disarmed `FFS_WRITEBACK_CACHE_KILL_SWITCH` before the kernel option is forwarded. | `bd-rchk0.2.1`, `bd-rchk0.2.1.1`, `bd-8pz7h`, `bd-rchk0.2.2`, `bd-4nobd`, `bd-rchk0.2.3` |
 | `errors.evidence` | mounted failures are actionable rather than opaque | Every failure path reports `operation_id`, `scenario_id`, `outcome`, `error_class`, remediation hint where applicable, raw logs, and cleanup status | `bd-rchk0.3.4`, `bd-rchk0.4.3` |
 | `performance.baseline` | performance claims are current for representative workloads | Dated throughput/latency artifacts with host/runtime metadata, manifest validation, delta closeout, follow-up ownership, and explicit downgraded wording for mounted latency regressions or no-reference rows; no readiness wording may imply performance tuning is complete beyond the supported evidence tier | `bd-rchk5`, `bd-rchk5.1`, `bd-rchk5.2`, `bd-rchk5.3`, `bd-rchk5.4`, `bd-rchk5.5`, `bd-rchk5.6`, `bd-rchk5.7`, `bd-rchk5.8` |
+| `swarm.responsiveness` | agent-swarm workloads have authoritative large-host responsiveness evidence | `validate-swarm-workload-harness`, `validate-swarm-tail-latency`, `ffs_swarm_workload_harness_e2e.sh`, `ffs_swarm_tail_latency_e2e.sh`, and the proof-bundle `swarm_workload_harness` / `swarm_tail_latency` lanes must all preserve fresh `authoritative_large_host` evidence from a permissioned large-host run. Local `small_host_smoke` and `capability_downgraded_smoke` lanes are explicit downgrades and cannot upgrade public wording. | `bd-rchk0.53.3`, `bd-rchk0.53.4`, `bd-rchk0.53.5`, `bd-rchk0.53.6`, `bd-rchk0.53.7` |
 | `operational.soak_canary` | mounted and repair behavior remains stable over repeated realistic use | `validate-soak-canary-campaigns` defines bounded smoke/nightly/stress/canary profiles, heartbeat logs, resource caps, flake follow-up rules, and proof-bundle/release-gate consumers before long campaigns can upgrade readiness wording | `bd-rchk0.5.9`, `bd-t21em` |
 
 ### Writeback-Cache Operator Evidence
@@ -1590,6 +1628,7 @@ See [COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1
 - **Nightly Rust required.** Edition 2024 features require the nightly toolchain.
 - **Runtime is still early-stage.** Full tracked parity means the current V1 matrix is implemented and tested; it does not mean operational hardening, performance tuning, or future-scope features are finished. Mount/write paths should still be treated as experimental in operational environments.
 - **Kernel FUSE writeback-cache mode is gated in V1.x.** Default mounts do not enable it. The explicit `--writeback-cache` path requires `--rw`, an accepted audit gate, an accepted ordering oracle, fresh runtime-guard evidence, an accepted crash/replay oracle, a matching host/lane manifest, and a disarmed `FFS_WRITEBACK_CACHE_KILL_SWITCH` before `ffs-cli` forwards the FUSE option. `flush` is a non-durability lifecycle hook; `fsync` / `fsyncdir` are the explicit durability boundaries. See the writeback-cache operator evidence checklist above for the validator commands, unit-test groups, E2E scenario ids, crash/replay artifact fields, and remaining deferral beads.
+- **Swarm responsiveness claims require permissioned large-host evidence.** Local swarm workload and tail-latency smoke lanes are useful downgrade artifacts, but they cannot upgrade `swarm.responsiveness`; only fresh `authoritative_large_host` proof-bundle lanes from `large_host` or `permissioned_large_host` runs may strengthen that public claim.
 - **Default CLI mount path does not enable optional backpressure/per-core scheduling hooks.** `ffs-cli mount` currently uses the standard `ffs-fuse` mount path without wiring `BackpressureGate` controls.
 - **Mount background scrub is detection-only by default, with explicit automatic repair available.** `ffs mount` starts `ffs-repair::ScrubDaemon` automatically for default read-only mounts, owns cancellation through the mount lifecycle, and joins the worker on shutdown. Read-write mounts keep the daemon disabled by default; `--background-scrub` can opt into detection-only monitoring, `--no-background-scrub` disables the read-only default, and `--background-scrub-ledger` records evidence JSONL. `--background-repair --background-scrub-ledger <jsonl>` enables real block recovery and repair-symbol refresh after checking writable backing-image access. Read-write repair uses the mounted MVCC request-scope authority so recovered source blocks share the same serializer as client writes.
 - **External dependencies.** Workspace dependencies currently use crates.io releases (`asupersync = 0.2.5`, `ftui = 0.2.1`); local path overrides can be supplied with Cargo `[patch]` during sibling-repo development.

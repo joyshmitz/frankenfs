@@ -204,6 +204,16 @@ cargo run -p ffs-harness -- validate-swarm-workload-harness \
 
 The manifest is a dry-run proof contract, not a real workload execution grant. It must include a host fingerprint, CPU/RAM/NUMA visibility, storage class, FUSE capability, kernel, RCH/local lane, worker isolation notes, exact command plan, resource caps, queue/backpressure counters, cleanup policy, expected artifacts, raw logs, and release-claim state. Local hosts or lanes without enough CPU, RAM, or NUMA visibility must use `capability_skip` or `small_host_smoke`; they cannot produce a 64-core/256GB pass claim.
 
+The local runner emits `small_host_smoke` or blocked/downgraded artifacts only.
+To produce evidence that can strengthen the public `swarm.responsiveness`
+claim, use a permissioned large-host runner and preserve a validated
+`swarm_workload_harness` proof-bundle lane with `host_class`,
+`manifest_hash`, `freshness`, `release_claim`, `validator_report`, raw logs,
+and artifact paths. `release_claim=authoritative_large_host` is the only
+workload-harness release-claim state that may upgrade public wording; stale,
+missing, unsupported, `small_host_smoke`, or `capability_downgraded_smoke`
+evidence remains downgrade/blocker evidence.
+
 ## Swarm Tail-Latency Ledger Contract
 
 The 64-core/256GB swarm tail-latency decomposition ledger lives in:
@@ -220,6 +230,13 @@ cargo run -p ffs-harness -- validate-swarm-tail-latency \
 ```
 
 The ledger decomposes p99 latency into queueing, service, I/O, retries, synchronization, allocator, repair backlog, cache pressure, WAL fsync, and FUSE wrapper components. Rows must carry host fingerprint, core/RAM profile, queue depth, backpressure state, reference state, release-claim state, reproduction command, raw logs, and artifact paths. Missing references, incomplete host fingerprints, or missing component attribution force experimental or missing-reference wording; they cannot produce measured large-host claims.
+
+The tail-latency proof-bundle lane is `swarm_tail_latency`. It must carry the
+same host-class and release-claim metadata as the workload lane, plus an
+artifact with role `p99_attribution_ledger` that points at the validated p99
+decomposition ledger. The release gate for `swarm.responsiveness` stays hidden
+or disabled when the p99 ledger is stale, missing, unsupported, small-host-only,
+or disconnected from the proof bundle.
 
 ## Repair Confidence Lab Contract
 

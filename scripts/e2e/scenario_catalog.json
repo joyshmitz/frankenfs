@@ -1724,6 +1724,12 @@
           "category": "error",
           "status": "active",
           "evidence": "scenario_result \"swarm_workload_mutating_command_fail_closed\" \"PASS\""
+        },
+        {
+          "id": "swarm_workload_runbook_wording_guard",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"swarm_workload_runbook_wording_guard\" \"PASS\""
         }
       ]
     },

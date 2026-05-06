@@ -450,6 +450,7 @@ MUTATED_NUMA_JSON="${E2E_LOG_DIR}/swarm_workload_bad_numa.json"
 MUTATED_NUMA_RAW="${E2E_LOG_DIR}/swarm_workload_bad_numa.raw"
 MUTATED_COMMAND_JSON="${E2E_LOG_DIR}/swarm_workload_bad_command.json"
 MUTATED_COMMAND_RAW="${E2E_LOG_DIR}/swarm_workload_bad_command.raw"
+DOC_GUARD_RAW="${E2E_LOG_DIR}/swarm_workload_runbook_wording_guard.raw"
 UNIT_LOG="${E2E_LOG_DIR}/unit_tests.log"
 
 e2e_step "Scenario 1: module and CLI are wired"
@@ -593,6 +594,79 @@ if [[ $MUTATED_COMMAND_STATUS -ne 0 ]] && grep -q "mutates_host_filesystems" "$M
     scenario_result "swarm_workload_mutating_command_fail_closed" "PASS" "mutating host command plan rejected"
 else
     scenario_result "swarm_workload_mutating_command_fail_closed" "FAIL" "mutating host command plan was not rejected"
+fi
+
+e2e_step "Scenario 11: runbook wording preserves downgrade and claim boundaries"
+CURRENT_SCENARIO_ID="swarm_workload_runbook_wording_guard"
+set +e
+python3 - "$REPO_ROOT/README.md" "$REPO_ROOT/scripts/e2e/README.md" >"$DOC_GUARD_RAW" 2>&1 <<'PY'
+import pathlib
+import sys
+
+docs = {path: pathlib.Path(path).read_text(encoding="utf-8") for path in sys.argv[1:]}
+combined = "\n".join(docs.values())
+combined_normalized = " ".join(combined.split())
+required_markers = [
+    "`swarm.responsiveness`",
+    "`swarm_workload_harness`",
+    "`swarm_tail_latency`",
+    "validate-swarm-workload-harness",
+    "validate-swarm-tail-latency",
+    "./scripts/e2e/ffs_swarm_workload_harness_e2e.sh",
+    "./scripts/e2e/ffs_swarm_tail_latency_e2e.sh",
+    "`host_class`",
+    "`manifest_hash`",
+    "`freshness`",
+    "`release_claim`",
+    "`validator_report`",
+    "`p99_attribution_ledger`",
+    "`release_claim=authoritative_large_host`",
+    "`release_claim=small_host_smoke`",
+    "`release_claim=capability_downgraded_smoke`",
+    "cannot upgrade `swarm.responsiveness`",
+]
+missing = [marker for marker in required_markers if marker not in combined]
+required_phrases = [
+    "Stale, missing, unsupported, or small-host-only swarm evidence",
+]
+missing.extend(
+    phrase for phrase in required_phrases if phrase not in combined_normalized
+)
+forbidden_phrases = [
+    "small-host smoke can upgrade",
+    "small host smoke can upgrade",
+    "local smoke can upgrade",
+    "small-host smoke is authoritative",
+    "small host smoke is authoritative",
+    "stale swarm evidence can strengthen",
+    "stale swarm evidence may strengthen",
+    "unsupported large-host evidence can strengthen",
+    "unsupported large-host evidence may strengthen",
+]
+lower_combined = combined.lower()
+forbidden = [phrase for phrase in forbidden_phrases if phrase in lower_combined]
+for path, body in docs.items():
+    if "`swarm.responsiveness`" not in body:
+        missing.append(f"{path}:`swarm.responsiveness`")
+if missing or forbidden:
+    if missing:
+        print("missing required swarm runbook markers:")
+        for marker in missing:
+            print(f"- {marker}")
+    if forbidden:
+        print("forbidden swarm overclaim wording:")
+        for phrase in forbidden:
+            print(f"- {phrase}")
+    raise SystemExit(1)
+print("swarm runbook wording guard passed")
+PY
+DOC_GUARD_STATUS=$?
+set -e
+record_command "swarm_workload_runbook_wording_guard" "$DOC_GUARD_STATUS" "python3 README.md scripts/e2e/README.md swarm wording guard" "$DOC_GUARD_RAW" "$DOC_GUARD_RAW"
+if [[ $DOC_GUARD_STATUS -eq 0 ]]; then
+    scenario_result "swarm_workload_runbook_wording_guard" "PASS" "runbook wording preserves downgrade and large-host claim boundaries"
+else
+    scenario_result "swarm_workload_runbook_wording_guard" "FAIL" "runbook wording guard failed; see ${DOC_GUARD_RAW}"
 fi
 
 if [[ "$FAIL_COUNT" -ne 0 ]]; then
