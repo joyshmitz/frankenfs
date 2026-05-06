@@ -1819,15 +1819,15 @@ mod tests {
         }
     }
 
-    // -- Mock WalWriter for group commit tests --
+    // -- Test WalWriter fixture for group commit tests --
 
-    struct MockWriter {
+    struct TestWalWriter {
         entries_written: Mutex<Vec<WalEntry>>,
         sync_results: Mutex<Vec<Result<(), std::io::Error>>>,
         write_fail: Mutex<bool>,
     }
 
-    impl MockWriter {
+    impl TestWalWriter {
         fn new() -> Self {
             Self {
                 entries_written: Mutex::new(Vec::new()),
@@ -1849,10 +1849,12 @@ mod tests {
         }
     }
 
-    impl WalWriter for MockWriter {
+    impl WalWriter for TestWalWriter {
         fn write_entries(&self, entries: &[WalEntry]) -> Result<(), FfsError> {
             if *self.write_fail.lock().unwrap() {
-                return Err(FfsError::Io(std::io::Error::other("mock write failure")));
+                return Err(FfsError::Io(std::io::Error::other(
+                    "injected write failure",
+                )));
             }
             self.entries_written
                 .lock()
@@ -1900,7 +1902,7 @@ mod tests {
     #[test]
     fn group_commit_flushes_epoch_entries() {
         let (epoch_mgr, notifier) = make_group_commit_setup();
-        let writer = MockWriter::new();
+        let writer = TestWalWriter::new();
         let coord = GroupCommitCoordinator::new(
             Arc::clone(&epoch_mgr),
             Arc::clone(&notifier),
@@ -1924,7 +1926,7 @@ mod tests {
     #[test]
     fn group_commit_partitions_by_epoch() {
         let (epoch_mgr, notifier) = make_group_commit_setup();
-        let writer = MockWriter::new();
+        let writer = TestWalWriter::new();
         let coord = GroupCommitCoordinator::new(
             Arc::clone(&epoch_mgr),
             Arc::clone(&notifier),
@@ -1946,7 +1948,7 @@ mod tests {
     #[test]
     fn group_commit_flushes_up_to_epoch() {
         let (epoch_mgr, notifier) = make_group_commit_setup();
-        let writer = MockWriter::new();
+        let writer = TestWalWriter::new();
         let coord = GroupCommitCoordinator::new(
             Arc::clone(&epoch_mgr),
             Arc::clone(&notifier),
@@ -1968,7 +1970,7 @@ mod tests {
     #[test]
     fn group_commit_empty_epoch_is_ok() {
         let (epoch_mgr, notifier) = make_group_commit_setup();
-        let writer = MockWriter::new();
+        let writer = TestWalWriter::new();
         let coord = GroupCommitCoordinator::new(
             Arc::clone(&epoch_mgr),
             Arc::clone(&notifier),
@@ -1987,7 +1989,7 @@ mod tests {
     #[test]
     fn group_commit_write_failure_notifies_waiters() {
         let (epoch_mgr, notifier) = make_group_commit_setup();
-        let writer = MockWriter::new();
+        let writer = TestWalWriter::new();
         writer.set_write_fail(true);
         let coord = GroupCommitCoordinator::new(
             Arc::clone(&epoch_mgr),
@@ -2007,7 +2009,7 @@ mod tests {
     #[test]
     fn group_commit_sync_retries_then_succeeds() {
         let (epoch_mgr, notifier) = make_group_commit_setup();
-        let writer = MockWriter::with_sync_results(vec![
+        let writer = TestWalWriter::with_sync_results(vec![
             Err(std::io::Error::other("retry 1")),
             Err(std::io::Error::other("retry 2")),
             Ok(()),
@@ -2028,7 +2030,7 @@ mod tests {
     #[test]
     fn group_commit_sync_exhaustion_notifies_failure() {
         let (epoch_mgr, notifier) = make_group_commit_setup();
-        let writer = MockWriter::with_sync_results(vec![
+        let writer = TestWalWriter::with_sync_results(vec![
             Err(std::io::Error::other("fail 1")),
             Err(std::io::Error::other("fail 2")),
         ]);
@@ -2048,7 +2050,7 @@ mod tests {
     #[test]
     fn group_commit_wakes_concurrent_waiters() {
         let (epoch_mgr, notifier) = make_group_commit_setup();
-        let writer = MockWriter::new();
+        let writer = TestWalWriter::new();
         let coord = Arc::new(GroupCommitCoordinator::new(
             Arc::clone(&epoch_mgr),
             Arc::clone(&notifier),
@@ -2079,7 +2081,7 @@ mod tests {
     #[test]
     fn group_commit_sequential_epochs() {
         let (epoch_mgr, notifier) = make_group_commit_setup();
-        let writer = MockWriter::new();
+        let writer = TestWalWriter::new();
         let coord = GroupCommitCoordinator::new(
             Arc::clone(&epoch_mgr),
             Arc::clone(&notifier),
@@ -2109,7 +2111,7 @@ mod tests {
         };
         let epoch_mgr = Arc::new(EpochManager::new(epoch_cfg));
         let notifier = Arc::new(DurabilityNotifier::new());
-        let writer = MockWriter::new();
+        let writer = TestWalWriter::new();
         let coord = GroupCommitCoordinator::new(
             Arc::clone(&epoch_mgr),
             Arc::clone(&notifier),
@@ -2245,7 +2247,7 @@ mod tests {
         // Simulate: epoch 1 entries are ready, epoch 2 entries are not yet
         // complete. Flush only epoch 1 (partial flush due to "timeout").
         let (epoch_mgr, notifier) = make_group_commit_setup();
-        let writer = MockWriter::new();
+        let writer = TestWalWriter::new();
         let coord = GroupCommitCoordinator::new(
             Arc::clone(&epoch_mgr),
             Arc::clone(&notifier),
@@ -2338,7 +2340,7 @@ mod tests {
         };
         let epoch_mgr = Arc::new(EpochManager::new(epoch_cfg));
         let notifier = Arc::new(DurabilityNotifier::new());
-        let writer = MockWriter::new();
+        let writer = TestWalWriter::new();
         let coord = GroupCommitCoordinator::new(
             Arc::clone(&epoch_mgr),
             Arc::clone(&notifier),
