@@ -1,0 +1,30 @@
+---
+source: crates/ffs-harness/src/operator_recovery_drill.rs
+expression: markdown
+---
+# Operator Recovery Drill Summary
+
+- Drill: `test_operator_recovery_drill`
+- Bead: `bd-rchk0.5.8`
+- Valid: `true`
+- Proof bundle lane: `operator_recovery_drill`
+- Scenarios: `4`
+- Mutation allowed/refused: `1` / `1`
+
+## Outcome Coverage
+- `detection_only`: `1`
+- `dry_run_success`: `1`
+- `mutating_repair_verified`: `1`
+- `unsafe_refused`: `1`
+
+## Phase Coverage
+- `detect`: `1`
+- `dry_run`: `1`
+- `mutate`: `1`
+- `refuse`: `1`
+
+## Drill Decisions
+- `OPERATOR_RECOVERY_DRILL|scenario_id=operator_detect_only_metadata_mismatch|outcome=detection_only|phase=detect|drill_decision=detection_only|mutation_allowed=false|confidence_threshold=detection_only_gate|confidence_score=0.0000|residual_risk=1.0000|command_count=2|exact_commands=ffs scrub /tmp/frankenfs-drill/detect.img --json;;ffs evidence /tmp/frankenfs-drill/detect-ledger.jsonl --preset repair-failures --json|image_hashes=original=sha256:detectoriginal0000000000000000000000000000000000000000000000000001,pre=sha256:detectpre00000000000000000000000000000000000000000000000000000001,post=none|pre_image_hash=sha256:detectpre00000000000000000000000000000000000000000000000000000001|post_image_hash=none|corruption_manifest=artifacts/operator-recovery/detect/manifest.json|repair_plan=plan_detect_metadata_mismatch|operator_warnings=2|post_repair_verification=not_run|rollback_or_refusal_outcome=detect_only_not_mutated|cleanup_status=not_required|proof_bundle_lane=operator_recovery_drill|refusal_reason=detection_only|reproduction_command=cargo run -p ffs-harness -- validate-operator-recovery-drill --spec docs/operator-recovery-drill.json --select operator_detect_only_metadata_mismatch`
+- `OPERATOR_RECOVERY_DRILL|scenario_id=operator_dry_run_single_block_recoverable|outcome=dry_run_success|phase=dry_run|drill_decision=dry_run_ready|mutation_allowed=false|confidence_threshold=dry_run_gate|confidence_score=0.9800|residual_risk=0.0200|command_count=2|exact_commands=ffs scrub /tmp/frankenfs-drill/dry-run.img --json;;ffs repair /tmp/frankenfs-drill/dry-run.img --dry-run --json|image_hashes=original=sha256:dryrunoriginal00000000000000000000000000000000000000000000000001,pre=sha256:dryrunpre000000000000000000000000000000000000000000000000000001,post=none|pre_image_hash=sha256:dryrunpre000000000000000000000000000000000000000000000000000001|post_image_hash=none|corruption_manifest=artifacts/operator-recovery/dry-run/manifest.json|repair_plan=plan_dry_run_single_block|operator_warnings=2|post_repair_verification=dry_run_verified|rollback_or_refusal_outcome=dry_run_not_mutated|cleanup_status=complete|proof_bundle_lane=operator_recovery_drill|refusal_reason=dry_run_only|reproduction_command=cargo run -p ffs-harness -- validate-operator-recovery-drill --spec docs/operator-recovery-drill.json --select operator_dry_run_single_block_recoverable`
+- `OPERATOR_RECOVERY_DRILL|scenario_id=operator_mutate_verified_single_block|outcome=mutating_repair_verified|phase=mutate|drill_decision=mutate_allowed|mutation_allowed=true|confidence_threshold=mutation_safety_gate|confidence_score=0.9950|residual_risk=0.0050|command_count=3|exact_commands=ffs repair /tmp/frankenfs-drill/mutate.img --dry-run --json;;ffs repair /tmp/frankenfs-drill/mutate.img --apply --ledger /tmp/frankenfs-drill/mutate-ledger.jsonl --json;;ffs scrub /tmp/frankenfs-drill/mutate.img --json|image_hashes=original=sha256:mutateoriginal00000000000000000000000000000000000000000000000001,pre=sha256:mutatepre000000000000000000000000000000000000000000000000000001,post=sha256:mutatepost00000000000000000000000000000000000000000000000000001|pre_image_hash=sha256:mutatepre000000000000000000000000000000000000000000000000000001|post_image_hash=sha256:mutatepost00000000000000000000000000000000000000000000000000001|corruption_manifest=artifacts/operator-recovery/mutate/manifest.json|repair_plan=plan_mutate_single_block|operator_warnings=2|post_repair_verification=passed|rollback_or_refusal_outcome=rollback_checkpoint_retained_after_verified_mutation|cleanup_status=complete|proof_bundle_lane=operator_recovery_drill|refusal_reason=none|reproduction_command=cargo run -p ffs-harness -- validate-operator-recovery-drill --spec docs/operator-recovery-drill.json --select operator_mutate_verified_single_block`
+- `OPERATOR_RECOVERY_DRILL|scenario_id=operator_refuse_low_confidence_multi_block|outcome=unsafe_refused|phase=refuse|drill_decision=preflight_failed_refused|mutation_allowed=false|confidence_threshold=mutation_safety_gate|confidence_score=0.6100|residual_risk=0.2400|command_count=2|exact_commands=ffs scrub /tmp/frankenfs-drill/refuse.img --json;;ffs repair /tmp/frankenfs-drill/refuse.img --apply --json|image_hashes=original=sha256:refuseoriginal00000000000000000000000000000000000000000000000001,pre=sha256:refusepre000000000000000000000000000000000000000000000000000001,post=none|pre_image_hash=sha256:refusepre000000000000000000000000000000000000000000000000000001|post_image_hash=none|corruption_manifest=artifacts/operator-recovery/refuse/manifest.json|repair_plan=plan_refuse_multi_block|operator_warnings=2|post_repair_verification=refused|rollback_or_refusal_outcome=refused_before_mutation|cleanup_status=refused_before_mutation|proof_bundle_lane=operator_recovery_drill|refusal_reason=blocking_preflight_failed|reproduction_command=cargo run -p ffs-harness -- validate-operator-recovery-drill --spec docs/operator-recovery-drill.json --select operator_refuse_low_confidence_multi_block`

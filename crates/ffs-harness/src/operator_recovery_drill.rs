@@ -1401,4 +1401,17 @@ mod tests {
         let decision = evaluate_mutation_preconditions(&gate);
         assert!(matches!(decision, MutationPreconditionDecision::Allow));
     }
+
+    /// bd-z57pf — Golden-artifact pin for the operator recovery
+    /// drill markdown emitter. The 18+ sibling tests cover validation
+    /// logic; this snapshot catches whitespace, heading-level,
+    /// ordering, and bullet-format drift in the markdown bytes that
+    /// silently breaks downstream proof-bundle / release-gate
+    /// dashboard parsers.
+    #[test]
+    fn render_operator_recovery_drill_markdown_default_sample() {
+        let report = report_for(checked_in_spec());
+        let markdown = render_operator_recovery_drill_markdown(&report);
+        insta::assert_snapshot!(markdown);
+    }
 }
