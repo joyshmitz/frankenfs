@@ -10,9 +10,10 @@
 //! answer), remediation hint, redaction policy, and a linked follow-up bead
 //! for every unresolved broad fallback.
 
+use crate::mounted_write_matrix::MountedWriteMatrix;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const MOUNTED_WRITE_ERROR_CLASSES_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_MOUNTED_WRITE_ERROR_CLASSES_PATH: &str =
@@ -110,7 +111,10 @@ pub fn parse_mounted_write_error_classes(text: &str) -> Result<MountedWriteError
 
 pub fn validate_default_mounted_write_error_classes() -> Result<MountedWriteErrorReport> {
     let catalog = parse_mounted_write_error_classes(DEFAULT_MOUNTED_WRITE_ERROR_CLASSES_JSON)?;
-    let report = validate_mounted_write_error_classes(&catalog);
+    let matrix = crate::mounted_write_matrix::parse_mounted_write_matrix(include_str!(
+        "../../../tests/workload-matrix/mounted_write_workload_matrix.json"
+    ))?;
+    let report = validate_mounted_write_error_classes_with_matrix(&catalog, &matrix);
     fail_on_mounted_write_error_classes_errors(&report)?;
     Ok(report)
 }
@@ -159,6 +163,17 @@ pub fn validate_mounted_write_error_classes(
         valid: errors.is_empty(),
         errors,
     }
+}
+
+#[must_use]
+pub fn validate_mounted_write_error_classes_with_matrix(
+    catalog: &MountedWriteErrorClasses,
+    matrix: &MountedWriteMatrix,
+) -> MountedWriteErrorReport {
+    let mut report = validate_mounted_write_error_classes(catalog);
+    validate_matrix_references(catalog, matrix, &mut report.errors);
+    report.valid = report.errors.is_empty();
+    report
 }
 
 fn validate_top_level(catalog: &MountedWriteErrorClasses, errors: &mut Vec<String>) {
@@ -383,13 +398,78 @@ fn validate_class_coverage(seen: &BTreeSet<String>, errors: &mut Vec<String>) {
     }
 }
 
+fn validate_matrix_references(
+    catalog: &MountedWriteErrorClasses,
+    matrix: &MountedWriteMatrix,
+    errors: &mut Vec<String>,
+) {
+    let operations_by_scenario = matrix_operation_index(matrix);
+    for entry in &catalog.entries {
+        if is_synthetic_matrix_reference_escape(entry) {
+            continue;
+        }
+        let Some(operations) = operations_by_scenario.get(&entry.scenario_id) else {
+            errors.push(format!(
+                "entry `{}` references unknown mounted write matrix scenario_id `{}`",
+                entry.entry_id, entry.scenario_id
+            ));
+            continue;
+        };
+        if !operations.contains(&entry.operation_id) {
+            errors.push(format!(
+                "entry `{}` operation_id `{}` is not declared by mounted write matrix scenario `{}`; known operations: {}",
+                entry.entry_id,
+                entry.operation_id,
+                entry.scenario_id,
+                operations.iter().cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
+}
+
+fn matrix_operation_index(matrix: &MountedWriteMatrix) -> BTreeMap<String, BTreeSet<String>> {
+    let mut operations_by_scenario = BTreeMap::new();
+    for scenario in &matrix.scenarios {
+        let mut operations = BTreeSet::new();
+        operations.extend(scenario.workload.operation_sequence.iter().cloned());
+        operations.extend(scenario.workload.unsupported_operations.iter().cloned());
+        operations_by_scenario.insert(scenario.scenario_id.clone(), operations);
+    }
+    for scenario in &matrix.namespace_scenarios {
+        let mut operations = BTreeSet::new();
+        operations.insert(scenario.namespace_operation_kind.clone());
+        operations_by_scenario.insert(scenario.scenario_id.clone(), operations);
+    }
+    for scenario in &matrix.multi_handle_scenarios {
+        let mut operations = BTreeSet::new();
+        operations.insert(scenario.kind.clone());
+        operations.extend(scenario.operation_trace.iter().map(|op| op.op.clone()));
+        operations_by_scenario.insert(scenario.scenario_id.clone(), operations);
+    }
+    operations_by_scenario
+}
+
+fn is_synthetic_matrix_reference_escape(entry: &MountedWriteErrorEntry) -> bool {
+    entry.entry_id.starts_with("mwerr_synthetic_")
+        && entry.scenario_id.starts_with("synthetic_")
+        && entry.operation_id.starts_with("synthetic_")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mounted_write_matrix::{MountedWriteMatrix, parse_mounted_write_matrix};
 
     fn fixture_catalog() -> MountedWriteErrorClasses {
         parse_mounted_write_error_classes(DEFAULT_MOUNTED_WRITE_ERROR_CLASSES_JSON)
             .expect("default mounted write error classes parses")
+    }
+
+    fn fixture_matrix() -> MountedWriteMatrix {
+        parse_mounted_write_matrix(include_str!(
+            "../../../tests/workload-matrix/mounted_write_workload_matrix.json"
+        ))
+        .expect("default mounted write matrix parses")
     }
 
     fn synthetic_broad_fallback_entry(
@@ -418,6 +498,86 @@ mod tests {
                 "missing class {class}"
             );
         }
+    }
+
+    #[test]
+    fn default_catalog_references_workload_matrix_rows() {
+        let catalog = fixture_catalog();
+        let matrix = fixture_matrix();
+        let report = validate_mounted_write_error_classes_with_matrix(&catalog, &matrix);
+        assert!(
+            report.valid,
+            "default catalog must reference mounted write matrix rows: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn matrix_cross_check_rejects_orphan_scenario_ids() {
+        let mut catalog = fixture_catalog();
+        catalog.entries[0].scenario_id = "mounted_write_missing_scenario".to_owned();
+        let matrix = fixture_matrix();
+        let report = validate_mounted_write_error_classes_with_matrix(&catalog, &matrix);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("unknown mounted write matrix scenario_id")
+                && err.contains("mounted_write_missing_scenario")
+        }));
+    }
+
+    #[test]
+    fn matrix_cross_check_rejects_orphan_operation_ids() {
+        let mut catalog = fixture_catalog();
+        catalog.entries[0].operation_id = "missing_matrix_operation".to_owned();
+        let matrix = fixture_matrix();
+        let report = validate_mounted_write_error_classes_with_matrix(&catalog, &matrix);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("operation_id `missing_matrix_operation`")
+                && err.contains("is not declared by mounted write matrix scenario")
+        }));
+    }
+
+    #[test]
+    fn matrix_cross_check_rejects_accidental_stale_catalog_rows() {
+        let mut catalog = fixture_catalog();
+        let entry = catalog
+            .entries
+            .iter_mut()
+            .find(|entry| entry.entry_id == "mwerr_unsupported_overlong_xattr_name")
+            .expect("overlong xattr fixture exists");
+        entry.scenario_id = "mounted_write_ext4_xattr_modes".to_owned();
+        let matrix = fixture_matrix();
+        let report = validate_mounted_write_error_classes_with_matrix(&catalog, &matrix);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("mwerr_unsupported_overlong_xattr_name")
+                && err.contains("operation_id `xattr_set_overlong`")
+        }));
+    }
+
+    #[test]
+    fn documented_synthetic_validator_rows_can_escape_matrix_cross_check() {
+        let mut catalog = fixture_catalog();
+        catalog.entries.push(MountedWriteErrorEntry {
+            entry_id: "mwerr_synthetic_validator_only".to_owned(),
+            scenario_id: "synthetic_matrix_gap".to_owned(),
+            operation_id: "synthetic_operation_gap".to_owned(),
+            error_class: "broad_fallback".to_owned(),
+            raw_errno: "EIO".to_owned(),
+            remediation_hint: "synthetic validator-only row".to_owned(),
+            redaction_policy: "redact_paths".to_owned(),
+            artifact_paths: vec!["artifacts/mounted-write/synthetic.json".to_owned()],
+            broad_fallback_justification: "synthetic validator branch".to_owned(),
+            follow_up_bead: "bd-synthetic".to_owned(),
+        });
+        let matrix = fixture_matrix();
+        let report = validate_mounted_write_error_classes_with_matrix(&catalog, &matrix);
+        assert!(
+            !report.errors.iter().any(|err| {
+                err.contains("mwerr_synthetic_validator_only")
+                    && err.contains("mounted write matrix")
+            }),
+            "synthetic validator-only rows should bypass matrix references: {:?}",
+            report.errors
+        );
     }
 
     #[test]

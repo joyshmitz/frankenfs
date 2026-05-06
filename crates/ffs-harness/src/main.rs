@@ -51,7 +51,7 @@ use ffs_harness::{
     },
     mounted_write_error_classes::{
         DEFAULT_MOUNTED_WRITE_ERROR_CLASSES_PATH, fail_on_mounted_write_error_classes_errors,
-        parse_mounted_write_error_classes, validate_mounted_write_error_classes,
+        parse_mounted_write_error_classes, validate_mounted_write_error_classes_with_matrix,
     },
     mounted_write_matrix::{
         DEFAULT_MATRIX_PATH, fail_on_mounted_write_matrix_errors, load_mounted_write_matrix,
@@ -4060,6 +4060,7 @@ fn validate_mounted_write_matrix_cmd(args: &[String]) -> Result<()> {
 
 fn validate_mounted_write_error_classes_cmd(args: &[String]) -> Result<()> {
     let mut catalog_path = DEFAULT_MOUNTED_WRITE_ERROR_CLASSES_PATH.to_owned();
+    let mut matrix_path = DEFAULT_MATRIX_PATH.to_owned();
     let mut out_path: Option<String> = None;
     let mut i = 0;
 
@@ -4070,6 +4071,12 @@ fn validate_mounted_write_error_classes_cmd(args: &[String]) -> Result<()> {
                 args.get(i)
                     .context("--catalog requires a path")?
                     .clone_into(&mut catalog_path);
+            }
+            "--matrix" => {
+                i += 1;
+                args.get(i)
+                    .context("--matrix requires a path")?
+                    .clone_into(&mut matrix_path);
             }
             "--out" => {
                 i += 1;
@@ -4087,7 +4094,10 @@ fn validate_mounted_write_error_classes_cmd(args: &[String]) -> Result<()> {
     let text = fs::read_to_string(&catalog_path)
         .with_context(|| format!("failed to read mounted write error classes {catalog_path}"))?;
     let catalog = parse_mounted_write_error_classes(&text)?;
-    let report = validate_mounted_write_error_classes(&catalog);
+    let matrix = load_mounted_write_matrix(Path::new(&matrix_path))?;
+    let matrix_report = validate_mounted_write_matrix(&matrix);
+    fail_on_mounted_write_matrix_errors(&matrix_report)?;
+    let report = validate_mounted_write_error_classes_with_matrix(&catalog, &matrix);
     fail_on_mounted_write_error_classes_errors(&report)?;
     let json = serde_json::to_string_pretty(&report)?;
     if let Some(path) = out_path {
@@ -4482,7 +4492,9 @@ fn print_usage_commands() {
     print_writeback_cache_ordering_usage_summary();
     print_writeback_cache_crash_replay_usage_summary();
     print_workload_corpus_usage_summary();
-    println!("  ffs-harness validate-mounted-write-error-classes [--catalog FILE] [--out FILE]");
+    println!(
+        "  ffs-harness validate-mounted-write-error-classes [--catalog FILE] [--matrix FILE] [--out FILE]"
+    );
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
     println!("  ffs-harness validate-mounted-recovery-matrix [--matrix FILE] [--out FILE]");
 }
@@ -5161,6 +5173,7 @@ fn print_mounted_write_error_classes_usage() {
     println!();
     println!("Options:");
     println!("  --catalog FILE                     Read mounted write error class JSON");
+    println!("  --matrix FILE                      Read mounted write matrix JSON");
     println!("  --out FILE                         Write JSON validation report to FILE");
 }
 

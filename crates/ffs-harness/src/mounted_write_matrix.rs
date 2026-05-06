@@ -152,9 +152,10 @@ const ALLOWED_SCENARIO_PROOF_CLASSES: [&str; 5] = [
     "host_skip",
 ];
 
-const ALLOWED_ERROR_CLASSES: [&str; 6] = [
+const ALLOWED_ERROR_CLASSES: [&str; 7] = [
     "none",
     "EACCES",
+    "ENAMETOOLONG",
     "EOPNOTSUPP",
     "EPERM",
     "EROFS",
@@ -1503,7 +1504,7 @@ mod tests {
     #[test]
     fn default_matrix_validates_required_write_workload_contract() {
         let report = validate_default_mounted_write_matrix().expect("default matrix validates");
-        assert_eq!(report.scenario_count, 13);
+        assert_eq!(report.scenario_count, 14);
         assert_eq!(report.filesystems, vec!["btrfs", "ext4"]);
         assert!(
             report
@@ -1550,6 +1551,11 @@ mod tests {
             );
         }
         assert!(report.expected_error_classes.contains(&"EROFS".to_owned()));
+        assert!(
+            report
+                .expected_error_classes
+                .contains(&"ENAMETOOLONG".to_owned())
+        );
         assert!(
             report
                 .expected_error_classes

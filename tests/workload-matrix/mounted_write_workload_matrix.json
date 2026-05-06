@@ -465,6 +465,52 @@
       }
     },
     {
+      "scenario_id": "mounted_write_ext4_xattr_set_get_overlong",
+      "filesystem": "ext4",
+      "image_setup": "fresh ext4 image with user_xattr enabled and an overlong user xattr name probe",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["user_xattr", "extent"],
+      "workload": {
+        "operation_sequence": ["create"],
+        "write_sizes": [4096],
+        "fsync_pattern": "none",
+        "concurrency": 1,
+        "unsupported_operations": ["xattr_set_overlong"],
+        "no_partial_mutation": true
+      },
+      "proof": {
+        "scenario_class": "no_partial_mutation",
+        "image_fixture_hash": "sha256:70d0f43cf41ef7039ff79893de40d4f4ba8fa4c29a37b39a9cf5b2b047f9e049",
+        "expected_survivor_set": {
+          "present_paths": ["/data.bin"],
+          "absent_paths": [],
+          "xattr_state": []
+        },
+        "expected_error_class": "ENAMETOOLONG",
+        "required_cleanup": "preserve_artifacts_on_failure",
+        "reopen": {
+          "kind": "image_reopen",
+          "expected_state": "image reopen confirms the overlong xattr name was rejected without creating an xattr value"
+        },
+        "artifact_requirements": [
+          "scenario_id",
+          "image_fixture_hash",
+          "operation_trace_path",
+          "expected_survivor_set",
+          "expected_error_class",
+          "reopen_state",
+          "cleanup_status"
+        ],
+        "remediation_id": "bd-rchk0.3.4"
+      },
+      "expected_outcome": {
+        "outcome_class": "unsupported_rejected",
+        "detail": "overlong xattr names reject deterministically and leave no xattr mutation behind",
+        "no_partial_mutation": true,
+        "follow_up_bead": "bd-rchk0.3.4"
+      }
+    },
+    {
       "scenario_id": "mounted_write_btrfs_supported_fallocate_modes",
       "filesystem": "btrfs",
       "image_setup": "fresh single-device btrfs image with writable regular file extent state",

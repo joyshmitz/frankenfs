@@ -23,8 +23,8 @@
     },
     {
       "entry_id": "mwerr_host_capability_skip_no_dev_fuse",
-      "scenario_id": "mounted_write_ext4_small_fsync_each",
-      "operation_id": "open_mount",
+      "scenario_id": "mounted_write_ext4_host_capability_skip",
+      "operation_id": "host_capability_skip",
       "error_class": "host_capability_skip",
       "raw_errno": "ENOTCONN",
       "remediation_hint": "load the FUSE kernel module (modprobe fuse) or rerun with FFS_MOUNTED_WRITE_EXECUTE=0 to capture a structured skip",
@@ -38,7 +38,7 @@
     {
       "entry_id": "mwerr_default_permissions_eacces_root_owned_dir",
       "scenario_id": "mounted_write_btrfs_root_owned_default_permissions_reject",
-      "operation_id": "create_root_owned_probe",
+      "operation_id": "root_owned_write_eacces",
       "error_class": "default_permissions_eacces",
       "raw_errno": "EACCES",
       "remediation_hint": "rerun the matrix as the directory owner or use a fixture image without DefaultPermissions",
@@ -79,8 +79,8 @@
     },
     {
       "entry_id": "mwerr_repair_serialization_blocked_rw",
-      "scenario_id": "mounted_write_btrfs_rw_repair_attempt",
-      "operation_id": "rw_background_repair",
+      "scenario_id": "mounted_write_btrfs_rw_repair_rejection",
+      "operation_id": "rw_repair_rejected_before_serialization",
       "error_class": "repair_serialization_blocked",
       "raw_errno": "EBUSY",
       "remediation_hint": "rw background repair requires the serialization gate; retry once bd-rchk0.1 closes",
@@ -108,7 +108,7 @@
     {
       "entry_id": "mwerr_stale_snapshot_refused_after_reopen",
       "scenario_id": "mounted_write_ext4_sparse_and_xattr",
-      "operation_id": "fsync_after_stale_snapshot",
+      "operation_id": "fsync",
       "error_class": "stale_snapshot_refused",
       "raw_errno": "ESTALE",
       "remediation_hint": "remount with a fresh snapshot before retrying; stale snapshots cannot accept new writes",
