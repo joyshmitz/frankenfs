@@ -31,6 +31,12 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_mount_runtime_gate}"
+
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *,CARGO_TARGET_DIR,*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -49,6 +55,14 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+run_rch_cargo_test() {
+    local log_path="$1"
+    shift
+
+    e2e_log "RCH cargo command: cargo $*"
+    env RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" "${RCH_BIN:-rch}" exec -- cargo "$@" 2>&1 | tee "$log_path"
+}
+
 e2e_init "ffs_mount_runtime_gate"
 
 CLI_SRC="crates/ffs-cli/src/main.rs"
@@ -59,8 +73,8 @@ CORE_SRC="crates/ffs-core/src/lib.rs"
 #######################################
 e2e_step "Scenario 1: CLI mount unit tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-cli -- mount 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_TEMP_DIR/cli_mount_unit_tests.log"
+if run_rch_cargo_test "$TEST_LOG" test -p ffs-cli -- mount; then
     TESTS_RUN=$(grep -c "test tests::mount" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 10 ]]; then
         scenario_result "cli_mount_unit_tests" "PASS" "CLI mount tests passed (${TESTS_RUN} tests)"
@@ -70,15 +84,15 @@ if cargo test -p ffs-cli -- mount 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
 else
     scenario_result "cli_mount_unit_tests" "FAIL" "CLI mount tests failed"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 2: ffs-fuse unit tests pass
 #######################################
 e2e_step "Scenario 2: ffs-fuse unit tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-fuse --lib 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_TEMP_DIR/fuse_unit_tests.log"
+if run_rch_cargo_test "$TEST_LOG" test -p ffs-fuse --lib; then
     TESTS_RUN=$(grep -c "test .*::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 100 ]]; then
         scenario_result "fuse_unit_tests" "PASS" "ffs-fuse tests passed (${TESTS_RUN} tests)"
@@ -88,15 +102,15 @@ if cargo test -p ffs-fuse --lib 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
 else
     scenario_result "fuse_unit_tests" "FAIL" "ffs-fuse tests failed"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 3: Degradation/backpressure tests
 #######################################
 e2e_step "Scenario 3: Degradation and backpressure tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-core --lib -- degradation backpressure 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_TEMP_DIR/degradation_backpressure_tests.log"
+if run_rch_cargo_test "$TEST_LOG" test -p ffs-core --lib -- degradation backpressure; then
     TESTS_RUN=$(grep -c "test .*::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 20 ]]; then
         scenario_result "degradation_backpressure_tests" "PASS" "Tests passed (${TESTS_RUN} tests)"
@@ -106,7 +120,7 @@ if cargo test -p ffs-core --lib -- degradation backpressure 2>"$TEST_LOG" | tee 
 else
     scenario_result "degradation_backpressure_tests" "FAIL" "Degradation tests failed"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 4: Mode boundary enforcement
@@ -120,8 +134,8 @@ for guard in "require_native_mode" "require_repair_write_access" "require_versio
     fi
 done
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-core --lib -- mode_violation 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_TEMP_DIR/mode_boundary_enforcement.log"
+if run_rch_cargo_test "$TEST_LOG" test -p ffs-core --lib -- mode_violation; then
     if [[ $GUARDS_FOUND -eq 4 ]]; then
         scenario_result "mode_boundary_enforcement" "PASS" "All 4 guards present and tests pass"
     else
@@ -130,7 +144,7 @@ if cargo test -p ffs-core --lib -- mode_violation 2>"$TEST_LOG" | tee -a "$TEST_
 else
     scenario_result "mode_boundary_enforcement" "FAIL" "Mode violation tests failed"
 fi
-rm -f "$TEST_LOG"
+e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 5: Mode selection structured logging
