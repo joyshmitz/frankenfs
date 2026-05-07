@@ -6,7 +6,7 @@
 //! file. It produces machine-readable feature states and generated public
 //! wording so README / FEATURE_PARITY claims cannot outrun gate evidence.
 
-use crate::proof_bundle::{ProofBundleOutcome, ProofBundleValidationReport};
+use crate::proof_bundle::{ProofBundleLaneReport, ProofBundleOutcome, ProofBundleValidationReport};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -716,10 +716,10 @@ fn evaluate_feature(
     policy: &ReleaseGatePolicy,
     proof: &ProofBundleValidationReport,
 ) -> FeatureEvaluation {
-    let lane_reports: BTreeMap<&str, ProofBundleOutcome> = proof
+    let lane_reports: BTreeMap<&str, &ProofBundleLaneReport> = proof
         .lanes
         .iter()
-        .map(|lane| (lane.lane_id.as_str(), lane.status))
+        .map(|lane| (lane.lane_id.as_str(), lane))
         .collect();
     let mut final_state = feature.target_state;
     let mut facts = GateFacts::default();
@@ -758,7 +758,9 @@ fn evaluate_feature(
     }
 
     for lane in &feature.required_lanes {
-        let observed_lane = lane_reports.get(lane.lane_id.as_str()).copied();
+        let observed_lane = lane_reports
+            .get(lane.lane_id.as_str())
+            .map(|lane_report| lane_report.status);
         let capability_skip_state = if lane.allow_capability_skip {
             lane.skipped_state
         } else {
@@ -811,16 +813,19 @@ fn evaluate_feature(
                     .insert(KillSwitchTrigger::AnyRequiredLaneFailed);
                 let proposed = lane.failed_state;
                 let remediation = lane_remediation(lane, feature);
+                let context =
+                    lane_metadata_context(lane_reports.get(lane.lane_id.as_str()).copied());
                 let mut input = FindingInput::new(
                     ReleaseGateFindingSeverity::Block,
                     proposed,
                     lane.risk_class.failure_reason_id(observed),
                     format!(
-                        "required lane {} observed {} expected {}; risk_class={}",
+                        "required lane {} observed {} expected {}; risk_class={}{}",
                         lane.lane_id,
                         observed.label(),
                         lane.expected_outcome.label(),
-                        lane.risk_class.label()
+                        lane.risk_class.label(),
+                        context
                     ),
                 );
                 input.controlling_lane = Some(lane.lane_id.clone());
@@ -927,6 +932,31 @@ fn push_finding(
         docs_wording_id: feature.docs_wording_id.clone(),
         reproduction_command: policy.reproduction_command.clone(),
     });
+}
+
+fn lane_metadata_context(lane: Option<&ProofBundleLaneReport>) -> String {
+    let Some(lane) = lane else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    for key in [
+        "scenario_id",
+        "run_id",
+        "release_claim_state",
+        "host_classification",
+        "cleanup_status",
+    ] {
+        if let Some(value) = lane.metadata.get(key)
+            && !value.trim().is_empty()
+        {
+            parts.push(format!("{key}={value}"));
+        }
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("; {}", parts.join(" "))
+    }
 }
 
 #[must_use]
@@ -1056,6 +1086,7 @@ mod tests {
             integrity_errors: Vec::new(),
             lanes,
             swarm_evidence: Vec::new(),
+            adaptive_runtime_evidence: Vec::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
             reproduction_command: "validate-proof-bundle --bundle manifest.json".to_owned(),
@@ -1526,6 +1557,7 @@ mod tests {
             "performance",
             "swarm_workload_harness",
             "swarm_tail_latency",
+            "adaptive_runtime",
             "writeback_cache",
             "scrub_repair_status",
             "known_deferrals",
@@ -1616,6 +1648,81 @@ mod tests {
                 && finding.finding_id.contains("missing_required_lane")
                 && finding.controlling_lane.as_deref() == Some("swarm_tail_latency")
                 && finding.remediation_id.as_deref() == Some("bd-rchk0.53.5")
+        }));
+    }
+
+    #[test]
+    fn canonical_release_gate_policy_fails_closed_on_missing_adaptive_runtime() {
+        let policy = load_release_gate_policy(&canonical_policy_path()).expect("canonical policy");
+        let mut proof = passing_proof();
+        proof
+            .lanes
+            .retain(|lane| lane.lane_id != "adaptive_runtime");
+        proof.totals.lanes = proof.lanes.len();
+        proof.totals.pass = proof.lanes.len();
+
+        let report = evaluate_release_gates(&policy, &proof);
+
+        assert!(!report.valid);
+        let swarm_report = report
+            .feature_reports
+            .iter()
+            .find(|feature| feature.feature_id == "swarm.responsiveness")
+            .expect("swarm responsiveness feature report");
+        assert_eq!(swarm_report.final_state, FeatureState::Hidden);
+        assert!(report.findings.iter().any(|finding| {
+            finding.feature_id == "swarm.responsiveness"
+                && finding.finding_id.contains("missing_required_lane")
+                && finding.controlling_lane.as_deref() == Some("adaptive_runtime")
+                && finding.remediation_id.as_deref() == Some("bd-jv6pj.6")
+        }));
+    }
+
+    #[test]
+    fn canonical_release_gate_policy_names_rejected_adaptive_runtime_run() {
+        let policy = load_release_gate_policy(&canonical_policy_path()).expect("canonical policy");
+        let mut proof = passing_proof();
+        let lane = proof
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.lane_id == "adaptive_runtime")
+            .expect("adaptive runtime lane");
+        lane.status = ProofBundleOutcome::Skip;
+        lane.metadata.insert(
+            "scenario_id".to_owned(),
+            "adaptive_runtime_local_smoke".to_owned(),
+        );
+        lane.metadata.insert(
+            "run_id".to_owned(),
+            "adaptive-runtime-run-local-smoke".to_owned(),
+        );
+        lane.metadata.insert(
+            "release_claim_state".to_owned(),
+            "small_host_smoke".to_owned(),
+        );
+        lane.metadata.insert(
+            "host_classification".to_owned(),
+            "below_large_host_floor".to_owned(),
+        );
+        lane.metadata
+            .insert("cleanup_status".to_owned(), "clean".to_owned());
+        set_lane_status(&mut proof, "adaptive_runtime", ProofBundleOutcome::Skip);
+
+        let report = evaluate_release_gates(&policy, &proof);
+
+        assert!(!report.valid);
+        assert!(report.findings.iter().any(|finding| {
+            finding.feature_id == "swarm.responsiveness"
+                && finding.controlling_lane.as_deref() == Some("adaptive_runtime")
+                && finding
+                    .transition_reason
+                    .contains("scenario_id=adaptive_runtime_local_smoke")
+                && finding
+                    .transition_reason
+                    .contains("run_id=adaptive-runtime-run-local-smoke")
+                && finding
+                    .transition_reason
+                    .contains("release_claim_state=small_host_smoke")
         }));
     }
 

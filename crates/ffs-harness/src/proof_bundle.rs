@@ -7,6 +7,9 @@
 //! redaction policy needed to inspect a readiness claim without a live build
 //! tree.
 
+use crate::adaptive_runtime_manifest::{
+    AdaptiveRuntimeReleaseClaimState, AdaptiveRuntimeRunnerClassification,
+};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -18,7 +21,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const PROOF_BUNDLE_SCHEMA_VERSION: u32 = 1;
-pub const REQUIRED_PROOF_BUNDLE_LANES: [&str; 13] = [
+pub const REQUIRED_PROOF_BUNDLE_LANES: [&str; 14] = [
     "conformance",
     "xfstests",
     "fuse",
@@ -32,12 +35,16 @@ pub const REQUIRED_PROOF_BUNDLE_LANES: [&str; 13] = [
     "scrub_repair_status",
     "known_deferrals",
     "release_gates",
+    "adaptive_runtime",
 ];
 
 const SWARM_WORKLOAD_HARNESS_LANE: &str = "swarm_workload_harness";
 const SWARM_TAIL_LATENCY_LANE: &str = "swarm_tail_latency";
 const SWARM_VALIDATOR_REPORT_ROLE: &str = "swarm_validator_report";
 const SWARM_P99_ATTRIBUTION_ROLE: &str = "p99_attribution_ledger";
+const ADAPTIVE_RUNTIME_LANE: &str = "adaptive_runtime";
+const ADAPTIVE_RUNTIME_VALIDATOR_REPORT_ROLE: &str = "adaptive_runtime_validator_report";
+const ADAPTIVE_RUNTIME_RUNNER_REPORT_ROLE: &str = "adaptive_runtime_runner_report";
 
 const PRESERVED_REDACTION_FIELDS: [&str; 5] = [
     "reproduction_command",
@@ -166,6 +173,7 @@ pub struct ProofBundleValidationReport {
     pub integrity_errors: Vec<String>,
     pub lanes: Vec<ProofBundleLaneReport>,
     pub swarm_evidence: Vec<ProofBundleSwarmEvidenceReport>,
+    pub adaptive_runtime_evidence: Vec<ProofBundleAdaptiveRuntimeEvidenceReport>,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
     pub reproduction_command: String,
@@ -259,6 +267,23 @@ pub struct ProofBundleSwarmEvidenceReport {
     pub p99_attribution_artifact: Option<String>,
     pub freshness: String,
     pub release_claim: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downgrade_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofBundleAdaptiveRuntimeEvidenceReport {
+    pub lane_id: String,
+    pub status: ProofBundleOutcome,
+    pub raw_log_path: String,
+    pub scenario_id: String,
+    pub run_id: String,
+    pub release_claim_state: String,
+    pub freshness: String,
+    pub host_classification: String,
+    pub cleanup_status: String,
+    pub validator_report: String,
+    pub runner_report: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downgrade_reason: Option<String>,
 }
@@ -430,6 +455,41 @@ pub fn render_proof_bundle_markdown(report: &ProofBundleValidationReport) -> Str
             .ok();
         }
     }
+    if !report.adaptive_runtime_evidence.is_empty() {
+        writeln!(&mut out).ok();
+        writeln!(&mut out, "## Adaptive Runtime Evidence").ok();
+        writeln!(
+            &mut out,
+            "| Lane | Outcome | Scenario | Run | Freshness | Release claim | Host class | Cleanup | Validator report | Runner report | Raw log | Downgrade/skip rationale |"
+        )
+        .ok();
+        writeln!(
+            &mut out,
+            "|---|---:|---|---|---|---|---|---|---|---|---|---|"
+        )
+        .ok();
+        for evidence in &report.adaptive_runtime_evidence {
+            let downgrade_reason = evidence.downgrade_reason.as_deref().unwrap_or("n/a");
+            writeln!(
+                &mut out,
+                "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | [{}]({}) | `{}` |",
+                evidence.lane_id,
+                evidence.status.label(),
+                escape_markdown_table_cell(&evidence.scenario_id),
+                escape_markdown_table_cell(&evidence.run_id),
+                escape_markdown_table_cell(&evidence.freshness),
+                escape_markdown_table_cell(&evidence.release_claim_state),
+                escape_markdown_table_cell(&evidence.host_classification),
+                escape_markdown_table_cell(&evidence.cleanup_status),
+                escape_markdown_table_cell(&evidence.validator_report),
+                escape_markdown_table_cell(&evidence.runner_report),
+                evidence.raw_log_path,
+                evidence.raw_log_path,
+                escape_markdown_table_cell(downgrade_reason)
+            )
+            .ok();
+        }
+    }
     if !report.errors.is_empty() {
         writeln!(&mut out).ok();
         writeln!(&mut out, "## Errors").ok();
@@ -486,6 +546,7 @@ struct ProofBundleReportBuilder {
     integrity_errors: Vec<String>,
     lanes: Vec<ProofBundleLaneReport>,
     swarm_evidence: Vec<ProofBundleSwarmEvidenceReport>,
+    adaptive_runtime_evidence: Vec<ProofBundleAdaptiveRuntimeEvidenceReport>,
     errors: Vec<String>,
     warnings: Vec<String>,
 }
@@ -509,6 +570,7 @@ impl ProofBundleReportBuilder {
             integrity_errors: Vec::new(),
             lanes: Vec::new(),
             swarm_evidence: Vec::new(),
+            adaptive_runtime_evidence: Vec::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
         }
@@ -688,6 +750,7 @@ impl ProofBundleReportBuilder {
         }
 
         self.validate_swarm_lane_contract(lane);
+        self.validate_adaptive_runtime_lane_contract(lane);
 
         self.lanes.push(ProofBundleLaneReport {
             lane_id: lane.lane_id.clone(),
@@ -737,6 +800,85 @@ impl ProofBundleReportBuilder {
             }
             _ => {}
         }
+    }
+
+    fn validate_adaptive_runtime_lane_contract(&mut self, lane: &ProofBundleLane) {
+        if lane.lane_id != ADAPTIVE_RUNTIME_LANE {
+            return;
+        }
+
+        let scenario_id = self.required_adaptive_runtime_metadata(lane, "scenario_id");
+        let run_id = self.required_adaptive_runtime_metadata(lane, "run_id");
+        let freshness = self.required_adaptive_runtime_metadata(lane, "freshness");
+        let release_claim_state =
+            self.required_adaptive_runtime_metadata(lane, "release_claim_state");
+        let host_classification =
+            self.required_adaptive_runtime_metadata(lane, "host_classification");
+        let cleanup_status = self.required_adaptive_runtime_metadata(lane, "cleanup_status");
+        let downgrade_reason = lane.metadata.get("downgrade_reason").map(String::as_str);
+        let validator_report = self.validate_adaptive_runtime_artifact_reference(
+            lane,
+            "validator_report",
+            ADAPTIVE_RUNTIME_VALIDATOR_REPORT_ROLE,
+        );
+        let runner_report = self.validate_adaptive_runtime_artifact_reference(
+            lane,
+            "runner_report",
+            ADAPTIVE_RUNTIME_RUNNER_REPORT_ROLE,
+        );
+        let context = adaptive_runtime_lane_context(lane, scenario_id, run_id);
+
+        if let Some(freshness) = freshness
+            && freshness != "fresh"
+        {
+            self.errors.push(format!(
+                "stale adaptive runtime artifact {context} freshness={freshness}"
+            ));
+        }
+
+        if lane.status != ProofBundleOutcome::Pass {
+            self.errors.push(format!(
+                "adaptive runtime lane {context} observed {} expected pass",
+                lane.status.label()
+            ));
+        }
+
+        if let Some(release_claim_state) = release_claim_state
+            && release_claim_state != AdaptiveRuntimeReleaseClaimState::AcceptedLargeHost.label()
+        {
+            self.errors.push(format!(
+                "adaptive runtime lane {context} release_claim_state={release_claim_state} rejected; expected accepted_large_host"
+            ));
+        }
+
+        if let Some(host_classification) = host_classification
+            && host_classification != AdaptiveRuntimeRunnerClassification::AcceptedLargeHost.label()
+        {
+            self.errors.push(format!(
+                "adaptive runtime lane {context} host_classification={host_classification} rejected; expected accepted_large_host"
+            ));
+        }
+
+        if let Some(cleanup_status) = cleanup_status
+            && cleanup_status != "clean"
+        {
+            self.errors.push(format!(
+                "adaptive runtime lane {context} cleanup_status={cleanup_status} rejected; expected clean"
+            ));
+        }
+
+        if lane.status != ProofBundleOutcome::Pass && !is_nonempty_metadata(downgrade_reason) {
+            self.errors.push(format!(
+                "adaptive runtime lane {context} non-pass evidence requires downgrade_reason"
+            ));
+        }
+
+        self.adaptive_runtime_evidence
+            .push(adaptive_runtime_evidence_report(
+                lane,
+                validator_report,
+                runner_report,
+            ));
     }
 
     fn validate_swarm_common(&mut self, lane: &ProofBundleLane) {
@@ -836,6 +978,23 @@ impl ProofBundleReportBuilder {
         }
     }
 
+    fn required_adaptive_runtime_metadata<'a>(
+        &mut self,
+        lane: &'a ProofBundleLane,
+        key: &str,
+    ) -> Option<&'a str> {
+        match lane.metadata.get(key).map(String::as_str) {
+            Some(value) if !value.trim().is_empty() => Some(value),
+            _ => {
+                self.errors.push(format!(
+                    "adaptive runtime lane {} metadata.{key} missing",
+                    lane.lane_id
+                ));
+                None
+            }
+        }
+    }
+
     fn validate_swarm_artifact_reference(
         &mut self,
         lane: &ProofBundleLane,
@@ -850,6 +1009,26 @@ impl ProofBundleReportBuilder {
         if !found {
             self.errors.push(format!(
                 "swarm lane {} metadata.{metadata_key}={path} must reference artifact role {expected_role}",
+                lane.lane_id
+            ));
+        }
+        Some(path.to_owned())
+    }
+
+    fn validate_adaptive_runtime_artifact_reference(
+        &mut self,
+        lane: &ProofBundleLane,
+        metadata_key: &str,
+        expected_role: &str,
+    ) -> Option<String> {
+        let path = self.required_adaptive_runtime_metadata(lane, metadata_key)?;
+        let found = lane
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.path == path && artifact.role == expected_role);
+        if !found {
+            self.errors.push(format!(
+                "adaptive runtime lane {} metadata.{metadata_key}={path} must reference artifact role {expected_role}",
                 lane.lane_id
             ));
         }
@@ -1166,11 +1345,62 @@ impl ProofBundleReportBuilder {
             integrity_errors: self.integrity_errors,
             lanes: self.lanes,
             swarm_evidence: self.swarm_evidence,
+            adaptive_runtime_evidence: self.adaptive_runtime_evidence,
             errors: self.errors,
             warnings: self.warnings,
             reproduction_command: manifest.redaction.reproduction_command.clone(),
         }
     }
+}
+
+fn adaptive_runtime_evidence_report(
+    lane: &ProofBundleLane,
+    validator_report: Option<String>,
+    runner_report: Option<String>,
+) -> ProofBundleAdaptiveRuntimeEvidenceReport {
+    ProofBundleAdaptiveRuntimeEvidenceReport {
+        lane_id: lane.lane_id.clone(),
+        status: lane.status,
+        raw_log_path: lane.raw_log_path.clone(),
+        scenario_id: lane
+            .metadata
+            .get("scenario_id")
+            .cloned()
+            .unwrap_or_default(),
+        run_id: lane.metadata.get("run_id").cloned().unwrap_or_default(),
+        release_claim_state: lane
+            .metadata
+            .get("release_claim_state")
+            .cloned()
+            .unwrap_or_default(),
+        freshness: lane.metadata.get("freshness").cloned().unwrap_or_default(),
+        host_classification: lane
+            .metadata
+            .get("host_classification")
+            .cloned()
+            .unwrap_or_default(),
+        cleanup_status: lane
+            .metadata
+            .get("cleanup_status")
+            .cloned()
+            .unwrap_or_default(),
+        validator_report: validator_report.unwrap_or_default(),
+        runner_report: runner_report.unwrap_or_default(),
+        downgrade_reason: lane.metadata.get("downgrade_reason").cloned(),
+    }
+}
+
+fn adaptive_runtime_lane_context(
+    lane: &ProofBundleLane,
+    scenario_id: Option<&str>,
+    run_id: Option<&str>,
+) -> String {
+    format!(
+        "lane={} scenario_id={} run_id={}",
+        lane.lane_id,
+        scenario_id.unwrap_or("<missing>"),
+        run_id.unwrap_or("<missing>")
+    )
 }
 
 fn validate_nonempty(field: &str, value: &str, errors: &mut Vec<String>) {
@@ -1413,6 +1643,7 @@ mod tests {
             let input_path = format!("inputs/{lane_id}.json");
             let artifact_path = format!("artifacts/{lane_id}.json");
             let p99_artifact_path = format!("artifacts/{lane_id}_p99_attribution.json");
+            let runner_artifact_path = format!("artifacts/{lane_id}_runner.json");
 
             write_file(root.path(), &raw_log_path, &format!("{lane_id} raw log\n"));
             write_file(root.path(), &summary_path, &format!("# {lane_id}\n"));
@@ -1429,17 +1660,23 @@ mod tests {
 
             let artifact_hash =
                 sha256_file_hex(&root.path().join(&artifact_path)).expect("artifact hash");
-            let status = match index % 4 {
-                0 => ProofBundleOutcome::Pass,
-                1 => ProofBundleOutcome::Fail,
-                2 => ProofBundleOutcome::Skip,
-                _ => ProofBundleOutcome::Error,
+            let status = if *lane_id == ADAPTIVE_RUNTIME_LANE {
+                ProofBundleOutcome::Pass
+            } else {
+                match index % 4 {
+                    0 => ProofBundleOutcome::Pass,
+                    1 => ProofBundleOutcome::Fail,
+                    2 => ProofBundleOutcome::Skip,
+                    _ => ProofBundleOutcome::Error,
+                }
             };
             let mut artifacts = vec![ProofBundleArtifact {
                 path: artifact_path.clone(),
                 sha256: artifact_hash,
                 redacted: index % 2 == 0,
-                role: if matches!(
+                role: if *lane_id == ADAPTIVE_RUNTIME_LANE {
+                    ADAPTIVE_RUNTIME_VALIDATOR_REPORT_ROLE
+                } else if matches!(
                     *lane_id,
                     SWARM_WORKLOAD_HARNESS_LANE | SWARM_TAIL_LATENCY_LANE
                 ) {
@@ -1511,6 +1748,42 @@ mod tests {
                     sha256: p99_artifact_hash,
                     redacted: false,
                     role: SWARM_P99_ATTRIBUTION_ROLE.to_owned(),
+                });
+            }
+            if *lane_id == ADAPTIVE_RUNTIME_LANE {
+                write_file(
+                    root.path(),
+                    &runner_artifact_path,
+                    &format!("{{\"runner\":\"{lane_id}\"}}\n"),
+                );
+                let runner_artifact_hash =
+                    sha256_file_hex(&root.path().join(&runner_artifact_path))
+                        .expect("runner artifact hash");
+                metadata.insert(
+                    "scenario_id".to_owned(),
+                    "adaptive_runtime_accepted_large_host".to_owned(),
+                );
+                metadata.insert(
+                    "run_id".to_owned(),
+                    "adaptive-runtime-run-20260507T000000Z".to_owned(),
+                );
+                metadata.insert("freshness".to_owned(), "fresh".to_owned());
+                metadata.insert(
+                    "release_claim_state".to_owned(),
+                    "accepted_large_host".to_owned(),
+                );
+                metadata.insert(
+                    "host_classification".to_owned(),
+                    "accepted_large_host".to_owned(),
+                );
+                metadata.insert("cleanup_status".to_owned(), "clean".to_owned());
+                metadata.insert("validator_report".to_owned(), artifact_path.clone());
+                metadata.insert("runner_report".to_owned(), runner_artifact_path.clone());
+                artifacts.push(ProofBundleArtifact {
+                    path: runner_artifact_path,
+                    sha256: runner_artifact_hash,
+                    redacted: false,
+                    role: ADAPTIVE_RUNTIME_RUNNER_REPORT_ROLE.to_owned(),
                 });
             }
             lanes.push(ProofBundleLane {
@@ -1619,17 +1892,26 @@ mod tests {
         );
     }
 
+    fn adaptive_runtime_lane_mut(manifest: &mut ProofBundleManifest) -> &mut ProofBundleLane {
+        manifest
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.lane_id == ADAPTIVE_RUNTIME_LANE)
+            .expect("adaptive runtime lane")
+    }
+
     #[test]
     fn valid_sample_bundle_passes() {
         let sample = sample_bundle();
         let report = validate_sample(&sample);
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.totals.lanes, REQUIRED_PROOF_BUNDLE_LANES.len());
-        assert_eq!(report.totals.pass, 4);
+        assert_eq!(report.totals.pass, 5);
         assert_eq!(report.totals.fail, 3);
         assert_eq!(report.totals.skip, 3);
         assert_eq!(report.totals.error, 3);
         assert_eq!(report.swarm_evidence.len(), 2);
+        assert_eq!(report.adaptive_runtime_evidence.len(), 1);
     }
 
     #[test]
@@ -1649,6 +1931,7 @@ mod tests {
             "scrub_repair_status",
             "known_deferrals",
             "release_gates",
+            "adaptive_runtime",
         ] {
             assert!(
                 lanes.iter().any(|lane| lane == required),
@@ -1875,6 +2158,122 @@ mod tests {
     }
 
     #[test]
+    fn accepted_adaptive_runtime_evidence_is_preserved() {
+        let sample = sample_bundle();
+        let report = validate_sample(&sample);
+
+        assert!(report.valid, "{:?}", report.errors);
+        let evidence = report
+            .adaptive_runtime_evidence
+            .iter()
+            .find(|evidence| evidence.lane_id == ADAPTIVE_RUNTIME_LANE)
+            .expect("adaptive runtime evidence");
+        assert_eq!(evidence.status, ProofBundleOutcome::Pass);
+        assert_eq!(evidence.scenario_id, "adaptive_runtime_accepted_large_host");
+        assert_eq!(evidence.run_id, "adaptive-runtime-run-20260507T000000Z");
+        assert_eq!(evidence.release_claim_state, "accepted_large_host");
+        assert_eq!(evidence.host_classification, "accepted_large_host");
+        assert_eq!(evidence.cleanup_status, "clean");
+        assert_eq!(
+            evidence.runner_report,
+            "artifacts/adaptive_runtime_runner.json"
+        );
+    }
+
+    #[test]
+    fn stale_adaptive_runtime_manifest_is_rejected() {
+        let mut sample = sample_bundle();
+        let lane = adaptive_runtime_lane_mut(&mut sample.manifest);
+        lane.metadata
+            .insert("freshness".to_owned(), "stale".to_owned());
+
+        let report = validate_sample(&sample);
+
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("stale adaptive runtime artifact")
+                && error.contains("scenario_id=adaptive_runtime_accepted_large_host")
+                && error.contains("run_id=adaptive-runtime-run-20260507T000000Z")
+        }));
+    }
+
+    #[test]
+    fn small_host_adaptive_runtime_evidence_fails_closed() {
+        let mut sample = sample_bundle();
+        let lane = adaptive_runtime_lane_mut(&mut sample.manifest);
+        lane.status = ProofBundleOutcome::Skip;
+        lane.metadata.insert(
+            "release_claim_state".to_owned(),
+            "small_host_smoke".to_owned(),
+        );
+        lane.metadata.insert(
+            "host_classification".to_owned(),
+            "below_large_host_floor".to_owned(),
+        );
+        lane.metadata
+            .insert("downgrade_reason".to_owned(), "local smoke only".to_owned());
+
+        let report = validate_sample(&sample);
+
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("release_claim_state=small_host_smoke rejected")
+                && error.contains("adaptive-runtime-run-20260507T000000Z")
+        }));
+    }
+
+    #[test]
+    fn capability_downgraded_adaptive_runtime_evidence_fails_closed() {
+        let mut sample = sample_bundle();
+        let lane = adaptive_runtime_lane_mut(&mut sample.manifest);
+        lane.status = ProofBundleOutcome::Skip;
+        lane.metadata.insert(
+            "release_claim_state".to_owned(),
+            "capability_downgraded_smoke".to_owned(),
+        );
+        lane.metadata.insert(
+            "host_classification".to_owned(),
+            "below_large_host_floor".to_owned(),
+        );
+        lane.metadata.insert(
+            "downgrade_reason".to_owned(),
+            "FUSE capability was unavailable".to_owned(),
+        );
+
+        let report = validate_sample(&sample);
+
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("release_claim_state=capability_downgraded_smoke rejected")
+        }));
+    }
+
+    #[test]
+    fn failed_cleanup_adaptive_runtime_evidence_fails_closed() {
+        let mut sample = sample_bundle();
+        let lane = adaptive_runtime_lane_mut(&mut sample.manifest);
+        lane.status = ProofBundleOutcome::Fail;
+        lane.metadata
+            .insert("cleanup_status".to_owned(), "failed".to_owned());
+        lane.metadata.insert(
+            "release_claim_state".to_owned(),
+            "failed_cleanup".to_owned(),
+        );
+        lane.metadata.insert(
+            "downgrade_reason".to_owned(),
+            "scratch mount cleanup failed".to_owned(),
+        );
+
+        let report = validate_sample(&sample);
+
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("cleanup_status=failed rejected")
+                && error.contains("scenario_id=adaptive_runtime_accepted_large_host")
+        }));
+    }
+
+    #[test]
     fn accepted_small_host_swarm_smoke_is_downgraded() {
         let mut sample = sample_bundle();
         set_swarm_lane_for_small_host_smoke(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
@@ -2023,7 +2422,7 @@ mod tests {
         let sample = sample_bundle();
         let report = validate_sample(&sample);
         let summary = render_proof_bundle_markdown(&report);
-        assert!(summary.contains("Totals: pass=4 fail=3 skip=3 error=3"));
+        assert!(summary.contains("Totals: pass=5 fail=3 skip=3 error=3"));
         assert!(summary.contains("[logs/conformance.log](logs/conformance.log)"));
         assert!(summary.contains("scrub_repair_status"));
         assert!(summary.contains("known_deferrals"));
@@ -2032,6 +2431,8 @@ mod tests {
         assert!(summary.contains("swarm_workload_harness"));
         assert!(summary.contains("swarm_tail_latency"));
         assert!(summary.contains("authoritative_large_host"));
+        assert!(summary.contains("Adaptive Runtime Evidence"));
+        assert!(summary.contains("adaptive-runtime-run-20260507T000000Z"));
         assert!(summary.contains("Artifact hash chain"));
     }
 
@@ -2047,6 +2448,7 @@ mod tests {
         assert!(markdown.contains("# FrankenFS Proof Bundle"));
         assert!(markdown.contains("## Lanes"));
         assert!(markdown.contains("## Swarm Evidence"));
+        assert!(markdown.contains("## Adaptive Runtime Evidence"));
         insta::assert_snapshot!("render_proof_bundle_markdown_sample_bundle", markdown);
     }
 

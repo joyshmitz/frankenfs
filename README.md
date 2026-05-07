@@ -1437,31 +1437,35 @@ an explicit capability/scope deferral, and `error` is harness or evidence
 production failure. Required lanes are `conformance`, `xfstests`, `fuse`,
 `differential_oracle`, `repair_lab`, `crash_replay`, `performance`,
 `writeback_cache`, `scrub_repair_status`, `known_deferrals`,
-`release_gates`, `swarm_workload_harness`, and `swarm_tail_latency`.
+`release_gates`, `swarm_workload_harness`, `swarm_tail_latency`, and
+`adaptive_runtime`.
 
 #### Swarm Responsiveness Evidence
 
-The `swarm.responsiveness` release claim is gated by two proof-bundle lanes:
-`swarm_workload_harness` and `swarm_tail_latency`. They connect the
-NUMA-aware workload harness and the p99 attribution ledger to the release-gate
-policy so operator docs cannot promote local smoke evidence into large-host
-readiness.
+The `swarm.responsiveness` release claim is gated by three proof-bundle lanes:
+`swarm_workload_harness`, `swarm_tail_latency`, and `adaptive_runtime`. They
+connect the NUMA-aware workload harness, p99 attribution ledger, and adaptive
+runtime opt-in evidence to the release-gate policy so operator docs cannot
+promote local smoke evidence into large-host readiness.
 
 The safe local checks are:
 
 ```bash
 ./scripts/e2e/ffs_swarm_workload_harness_e2e.sh
 ./scripts/e2e/ffs_swarm_tail_latency_e2e.sh
+./scripts/e2e/ffs_adaptive_runtime_runner_e2e.sh
 cargo run -p ffs-harness -- validate-swarm-workload-harness \
   --manifest benchmarks/swarm_workload_harness_manifest.json
 cargo run -p ffs-harness -- validate-swarm-tail-latency \
   --ledger benchmarks/swarm_tail_latency_ledger.json
+cargo run -p ffs-harness -- validate-adaptive-runtime-manifest \
+  --manifest docs/adaptive-runtime-evidence-manifest.json
 ```
 
 The proof-bundle lane metadata must include `host_class`, `manifest_hash`,
 `freshness`, `release_claim`, and `validator_report`. The
 `swarm_tail_latency` lane must also preserve an artifact with role
-`p99_attribution_ledger`. Both lanes must preserve raw logs and artifact paths
+`p99_attribution_ledger`. All three lanes must preserve raw logs and artifact paths
 so the release gate can distinguish product performance evidence from host,
 harness, or permission limits.
 
@@ -1474,6 +1478,18 @@ cannot upgrade `swarm.responsiveness`. Stale, missing, unsupported, or
 small-host-only swarm evidence must leave the public claim hidden, disabled,
 experimental, or blocked until a fresh permissioned large-host run is
 available.
+
+#### Adaptive Runtime Evidence
+
+The optional adaptive mount runtime remains default-off. Proof bundles must
+carry an `adaptive_runtime` lane before docs or release gates can present
+adaptive backpressure or per-core scheduling as supported. That lane must
+preserve `scenario_id`, `run_id`, `freshness`, `release_claim_state`,
+`host_classification`, `cleanup_status`, an adaptive runtime validator report,
+and the adaptive runtime runner report. Only fresh `accepted_large_host`
+evidence with clean cleanup can pass the lane. `small_host_smoke`,
+`capability_downgraded_smoke`, `failed_cleanup`, missing, or stale adaptive
+runtime evidence is fail-closed release-gate input, not readiness evidence.
 
 The canonical release-gate policy lives at
 `tests/release-gates/release_gate_policy_v1.json`. It maps mount/write,
@@ -1497,7 +1513,7 @@ or explicit non-goals.
 | `writeback_cache` | kernel FUSE writeback-cache mode can be enabled | Default mounts still keep `writeback_cache` off. `bd-rchk0.2.1.1` freezes the negative-option proof, `bd-8pz7h` adds the dirty-page/fsync ordering oracle, `bd-rchk0.2.2` wires the explicit CLI/FUSE opt-in, `bd-4nobd` adds runtime kill-switch, stale-gate, config-default, feature-downgrade, and host-manifest refusal, and `bd-rchk0.2.3` adds the 12-point crash/replay artifact gate plus mounted ext4 opt-in regression. `--writeback-cache` requires `--rw`, an audit gate, an ordering oracle, fresh runtime-guard evidence, a crash/replay oracle, a matching host/lane manifest, and a disarmed `FFS_WRITEBACK_CACHE_KILL_SWITCH` before the kernel option is forwarded. | `bd-rchk0.2.1`, `bd-rchk0.2.1.1`, `bd-8pz7h`, `bd-rchk0.2.2`, `bd-4nobd`, `bd-rchk0.2.3` |
 | `errors.evidence` | mounted failures are actionable rather than opaque | Every failure path reports `operation_id`, `scenario_id`, `outcome`, `error_class`, remediation hint where applicable, raw logs, and cleanup status | `bd-rchk0.3.4`, `bd-rchk0.4.3` |
 | `performance.baseline` | performance claims are current for representative workloads | Dated throughput/latency artifacts with host/runtime metadata, manifest validation, delta closeout, follow-up ownership, and explicit downgraded wording for mounted latency regressions or no-reference rows; no readiness wording may imply performance tuning is complete beyond the supported evidence tier | `bd-rchk5`, `bd-rchk5.1`, `bd-rchk5.2`, `bd-rchk5.3`, `bd-rchk5.4`, `bd-rchk5.5`, `bd-rchk5.6`, `bd-rchk5.7`, `bd-rchk5.8` |
-| `swarm.responsiveness` | agent-swarm workloads have authoritative large-host responsiveness evidence | `validate-swarm-workload-harness`, `validate-swarm-tail-latency`, `ffs_swarm_workload_harness_e2e.sh`, `ffs_swarm_tail_latency_e2e.sh`, and the proof-bundle `swarm_workload_harness` / `swarm_tail_latency` lanes must all preserve fresh `authoritative_large_host` evidence from a permissioned large-host run. Local `small_host_smoke` and `capability_downgraded_smoke` lanes are explicit downgrades and cannot upgrade public wording. | `bd-rchk0.53.3`, `bd-rchk0.53.4`, `bd-rchk0.53.5`, `bd-rchk0.53.6`, `bd-rchk0.53.7` |
+| `swarm.responsiveness` | agent-swarm workloads have authoritative large-host responsiveness evidence | `validate-swarm-workload-harness`, `validate-swarm-tail-latency`, `validate-adaptive-runtime-manifest`, `ffs_swarm_workload_harness_e2e.sh`, `ffs_swarm_tail_latency_e2e.sh`, `ffs_adaptive_runtime_runner_e2e.sh`, and the proof-bundle `swarm_workload_harness` / `swarm_tail_latency` / `adaptive_runtime` lanes must all preserve fresh authoritative evidence from a permissioned large-host run. Local `small_host_smoke` and `capability_downgraded_smoke` lanes are explicit downgrades and cannot upgrade public wording. | `bd-rchk0.53.3`, `bd-rchk0.53.4`, `bd-rchk0.53.5`, `bd-rchk0.53.6`, `bd-rchk0.53.7`, `bd-jv6pj.6` |
 | `operational.soak_canary` | mounted and repair behavior remains stable over repeated realistic use | `validate-soak-canary-campaigns` defines bounded smoke/nightly/stress/canary profiles, heartbeat logs, resource caps, flake follow-up rules, and proof-bundle/release-gate consumers before long campaigns can upgrade readiness wording | `bd-rchk0.5.9`, `bd-t21em` |
 
 ### Writeback-Cache Operator Evidence

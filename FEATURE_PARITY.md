@@ -36,6 +36,13 @@
 > (`tests/release-gates/release_gate_policy_v1.json`) is the machine-readable
 > map from those public claim classes to proof-bundle lanes, thresholds, kill
 > switches, remediation beads, or explicit non-goals.
+>
+> **Adaptive runtime boundary:** optional backpressure/per-core mount runtime
+> remains default-off and does not strengthen `swarm.responsiveness` or any
+> public readiness wording from local dry-run evidence. Any upgrade requires a
+> fresh proof-bundle `adaptive_runtime` lane with `accepted_large_host` evidence,
+> clean cleanup, and the permissioned runner/validator artifacts linked by
+> `bd-jv6pj.6`.
 
 ## 2. Tracked Capability Matrix
 

@@ -560,6 +560,15 @@
           "skipped_state": "experimental"
         },
         {
+          "allow_capability_skip": false,
+          "expected_outcome": "pass",
+          "failed_state": "disabled",
+          "lane_id": "adaptive_runtime",
+          "missing_state": "hidden",
+          "remediation_id": "bd-jv6pj.6",
+          "risk_class": "host_capability_skip"
+        },
+        {
           "allow_capability_skip": true,
           "expected_outcome": "pass",
           "failed_state": "disabled",
