@@ -1,0 +1,25 @@
+---
+source: crates/ffs-harness/src/xfstests.rs
+expression: markdown
+---
+# xfstests failure triage `triage-fixture`
+
+- baseline: `xfstests-baseline-test`
+- subset version: `xfstests-curated-v1`
+- live bead creation enabled: `false`
+
+## Proposed Product Beads
+
+| Placeholder | Tests | Boundary | Duplicate key | Command |
+|---|---|---|---|---|
+| dry-run-xfstests-product-failure-0001 | ext4/001 | ffs-ext4 | `ffs-ext4:failed:flag-mismatch` | `XFSTESTS_MODE=run XFSTESTS_FILTER=ext4 XFSTESTS_DRY_RUN=0 ./scripts/e2e/ffs_xfstests_e2e.sh` |
+
+## Excluded Rows
+
+| Test | Status | Classification | Reason |
+|---|---|---|---|
+| generic/002 | not_run | product_actionable | not-run rows require remediation or rerun first |
+
+## Dry-Run br Commands
+
+- `DRY_RUN br create --title 'xfstests ext4/001 product failure in ffs-ext4' --type bug --priority 1 --labels 'xfstests,conformance,product-bug,ext4' --description 'xfstests=ext4/001 expected=./check ext4/001 should satisfy Linux xfstests row ext4/001 for the ext4 compatibility surface actual=flag mismatch validation=XFSTESTS_MODE=run XFSTESTS_FILTER=ext4 XFSTESTS_DRY_RUN=0 ./scripts/e2e/ffs_xfstests_e2e.sh raw_hash=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef duplicate_key=ffs-ext4:failed:flag-mismatch' --depends-on 'bd-rchk3.4,xfstests-baseline-test' --no-db --json`

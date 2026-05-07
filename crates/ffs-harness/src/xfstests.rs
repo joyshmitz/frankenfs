@@ -2566,6 +2566,30 @@ mod tests {
         }
     }
 
+    fn canonicalize_baseline_case_hashes(manifest: &mut XfstestsBaselineManifest) {
+        const CANONICAL_RAW_LOG_HASH: &str =
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for case in &mut manifest.cases {
+            case.raw_log_hash = CANONICAL_RAW_LOG_HASH.to_owned();
+        }
+    }
+
+    fn canonicalize_failure_triage_hashes(report: &mut XfstestsFailureTriageReport) {
+        const CANONICAL_RAW_LOG_HASH: &str =
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for bead in &mut report.proposed_beads {
+            bead.raw_log_hash = CANONICAL_RAW_LOG_HASH.to_owned();
+        }
+        for row in &mut report.excluded_rows {
+            row.raw_log_hash = CANONICAL_RAW_LOG_HASH.to_owned();
+        }
+        report.proposed_br_commands = report
+            .proposed_beads
+            .iter()
+            .map(XfstestsProposedFailureBead::proposed_br_command)
+            .collect();
+    }
+
     fn manifest_with_cases(
         raw_path: &std::path::Path,
         cases: Vec<XfstestsBaselineCase>,
@@ -3486,17 +3510,18 @@ generic/001  2s ... pass\n";
     }
 
     #[test]
-    fn baseline_manifest_renders_markdown_summary_without_counting_not_run_as_pass() {
+    fn render_xfstests_baseline_markdown_not_run_snapshot() {
         let tmp = tempdir().expect("tempdir");
         let raw = tmp.path().join("check.log");
         fs::write(&raw, "generic/001 not run\n").expect("write raw log");
-        let manifest = manifest_with_cases(
+        let mut manifest = manifest_with_cases(
             &raw,
             vec![
                 baseline_case("generic/001", XfstestsBaselineRowStatus::NotRun),
                 baseline_case("generic/002", XfstestsBaselineRowStatus::Interrupted),
             ],
         );
+        canonicalize_baseline_case_hashes(&mut manifest);
 
         let markdown = render_xfstests_baseline_markdown(&manifest);
 
@@ -3504,6 +3529,10 @@ generic/001  2s ... pass\n";
         assert!(markdown.contains("- interrupted: 1"));
         assert!(!markdown.contains("- passed: 2"));
         assert!(markdown.contains("XFSTESTS_MODE=run"));
+        insta::assert_snapshot!(
+            "render_xfstests_baseline_markdown_not_run_snapshot",
+            markdown
+        );
     }
 
     #[test]
@@ -4006,19 +4035,27 @@ generic/001  2s ... pass\n";
     }
 
     #[test]
-    fn failure_triage_renders_markdown_without_live_creation() -> Result<()> {
+    fn render_xfstests_failure_triage_markdown_dry_run_snapshot() -> Result<()> {
         let tmp = tempdir()?;
         let raw = tmp.path().join("check.log");
-        fs::write(&raw, "ext4/001 failed\n")?;
+        fs::write(&raw, "ext4/001 failed\ngeneric/002 not run\n")?;
         let mut product = baseline_case("ext4/001", XfstestsBaselineRowStatus::Failed);
         product.not_run_reason = Some("flag mismatch".to_owned());
-        let manifest = manifest_with_cases(&raw, vec![product]);
-        let report = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
+        product.command = "./check ext4/001".to_owned();
+        let manifest = manifest_with_cases(
+            &raw,
+            vec![
+                product,
+                baseline_case("generic/002", XfstestsBaselineRowStatus::NotRun),
+            ],
+        );
+        let mut report = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
             triage_id: "triage-fixture",
             baseline_manifest_path: tmp.path().join("baseline_manifest.json").as_path(),
             baseline_manifest: &manifest,
             reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh",
         })?;
+        canonicalize_failure_triage_hashes(&mut report);
 
         let markdown = render_xfstests_failure_triage_markdown(&report);
 
@@ -4026,6 +4063,12 @@ generic/001  2s ... pass\n";
         assert!(markdown.contains("ext4/001"));
         assert!(markdown.contains("ffs-ext4"));
         assert!(markdown.contains("DRY_RUN br create"));
+        assert!(markdown.contains("generic/002"));
+        assert!(markdown.contains("not-run rows require remediation or rerun first"));
+        insta::assert_snapshot!(
+            "render_xfstests_failure_triage_markdown_dry_run_snapshot",
+            markdown
+        );
         Ok(())
     }
 }
