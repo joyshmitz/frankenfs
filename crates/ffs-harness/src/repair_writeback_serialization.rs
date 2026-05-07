@@ -2035,6 +2035,26 @@ mod tests {
     }
 
     #[test]
+    fn render_repair_writeback_serialization_markdown_checked_in_contract_snapshot() {
+        let contract = sample_contract();
+        let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(
+            report.contract_id,
+            "bd-rchk0.1.1-repair-writeback-serialization-v1"
+        );
+        assert_eq!(report.bead_id, "bd-rchk0.1.1");
+        assert_eq!(report.identity_guard_count, REQUIRED_IDENTITY_GUARDS.len());
+        assert!(report.risk_report.fail_closed_is_lower_loss);
+
+        let markdown = render_repair_writeback_serialization_markdown(&report);
+        insta::assert_snapshot!(
+            "render_repair_writeback_serialization_markdown_checked_in_contract",
+            markdown
+        );
+    }
+
+    #[test]
     fn model_rejects_repair_writeback_during_client_write() {
         let contract = sample_contract();
         let transition = evaluate_transition(

@@ -1,0 +1,53 @@
+---
+source: crates/ffs-harness/src/repair_writeback_serialization.rs
+expression: markdown
+---
+# Repair Writeback Serialization Contract
+
+- Contract: `bd-rchk0.1.1-repair-writeback-serialization-v1`
+- Bead: `bd-rchk0.1.1`
+- Valid: `true`
+- Counts: states=10 transitions=12 rejection_cases=7 identity_guards=7 scenarios=8 schedules=12
+- Risk decision: `fail_closed_until_unified_serializer` chosen_loss=25 rejected_loss=605 lower_loss=true
+- Reproduce: `cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --out artifacts/repair-writeback/dry-run/contract_report.json --artifact-out artifacts/repair-writeback/dry-run/artifact_manifest.json --summary-out artifacts/repair-writeback/dry-run/contract_summary.md`
+
+## Required Transition Checks
+- `client_write_in_flight` + `repair_writeback_requested` -> `repair_writeback_blocked_rw` allowed=false mutation=false error_class=`rw_repair_serialization_missing`
+- `client_write_in_flight` + `flush_observed` -> `client_write_in_flight` allowed=false mutation=false error_class=`flush_non_durable`
+- `repair_lease_held` + `repair_symbol_stale` -> `repair_writeback_blocked_rw` allowed=false mutation=false error_class=`stale_repair_symbol`
+- `repair_lease_held` + `fsync_boundary_missing` -> `repair_writeback_blocked_rw` allowed=false mutation=false error_class=`dirty_cache_not_fsynced`
+- `repair_writeback_staged` + `writeback_failed` -> `writeback_failure` allowed=true mutation=false error_class=`writeback_failure_no_refresh`
+- `repair_writeback_staged` + `repair_cancelled` -> `cleanup_complete` allowed=true mutation=false error_class=`cancelled_repair_cleanup`
+
+## Identity Guards
+- `epoch_generation_monotonic` kind=`epoch` field=`epoch_id` fixture=`aba_old_epoch_reused_after_reopen` refusal=`snapshot_epoch_mismatch` persisted=true aba_rejected=true
+- `lease_generation_monotonic` kind=`lease` field=`lease_generation` fixture=`aba_old_lease_id_reacquired_with_new_generation` refusal=`stale_lease_generation` persisted=true aba_rejected=true
+- `snapshot_id_mismatch_rejected` kind=`snapshot` field=`snapshot_id` fixture=`aba_snapshot_id_reused_after_unmount_reopen` refusal=`snapshot_id_mismatch` persisted=true aba_rejected=true
+- `repair_symbol_generation_monotonic` kind=`repair_symbol` field=`repair_symbol_generation` fixture=`aba_symbol_generation_matches_value_but_not_epoch` refusal=`stale_repair_symbol` persisted=true aba_rejected=true
+- `block_range_epoch_guard` kind=`block_range` field=`block_range` fixture=`aba_block_range_same_address_new_epoch` refusal=`block_range_epoch_mismatch` persisted=true aba_rejected=true
+- `retry_generation_advances_after_abort` kind=`retry` field=`epoch_id` fixture=`aba_retry_after_abort_reuses_old_plan_identity` refusal=`retry_generation_stale` persisted=false aba_rejected=true
+- `halfway_failure_preserves_generation` kind=`repair_symbol` field=`repair_symbol_generation` fixture=`aba_halfway_failure_reuses_failed_symbol_generation` refusal=`writeback_failure_no_refresh` persisted=true aba_rejected=true
+
+## Scenarios
+- `repair_writeback_rw_fail_closed` outcome=`rejected` error_class=`rw_repair_serialization_missing` final_state=`repair_writeback_blocked_rw` no_lost_write=true repro_preserved=true
+- `repair_writeback_mvcc_snapshot_boundary` outcome=`accepted` error_class=`none` final_state=`repair_planning` no_lost_write=true repro_preserved=true
+- `repair_writeback_flush_non_durable` outcome=`rejected` error_class=`flush_non_durable` final_state=`client_write_in_flight` no_lost_write=true repro_preserved=true
+- `repair_writeback_fsync_boundary_required` outcome=`rejected` error_class=`dirty_cache_not_fsynced` final_state=`repair_writeback_blocked_rw` no_lost_write=true repro_preserved=true
+- `repair_writeback_lease_required` outcome=`rejected` error_class=`lease_expired_or_missing` final_state=`cleanup_complete` no_lost_write=true repro_preserved=true
+- `repair_writeback_stale_symbol_rejected` outcome=`rejected` error_class=`stale_repair_symbol` final_state=`repair_writeback_blocked_rw` no_lost_write=true repro_preserved=true
+- `repair_writeback_cancellation_cleanup` outcome=`accepted` error_class=`cancelled_repair_cleanup` final_state=`cleanup_complete` no_lost_write=true repro_preserved=true
+- `repair_writeback_halfway_failure` outcome=`error` error_class=`writeback_failure_no_refresh` final_state=`writeback_failure` no_lost_write=true repro_preserved=true
+
+## Race Schedules
+- `rw-repair-race-repair-before-write` coverage=`repair_before_write` classification=`accepted` seed=9001 explored=96 pruned=64 liveness=`within_deadline` cleanup=`preserved_trace_and_ledger`
+- `rw-repair-race-write-before-repair` coverage=`write_before_repair` classification=`rejected` seed=9002 explored=128 pruned=87 liveness=`within_deadline` cleanup=`no_mutation_after_stale_candidate`
+- `rw-repair-race-overlapping-writes` coverage=`overlapping_writes` classification=`rejected` seed=9003 explored=192 pruned=121 liveness=`within_deadline` cleanup=`overlap_rejection_preserved`
+- `rw-repair-race-disjoint-writes` coverage=`disjoint_writes` classification=`accepted` seed=9004 explored=72 pruned=48 liveness=`within_deadline` cleanup=`disjoint_survivors_verified`
+- `rw-repair-race-fsync-during-repair` coverage=`fsync_during_repair` classification=`rejected` seed=9005 explored=224 pruned=150 liveness=`within_deadline` cleanup=`fsync_survivor_preserved`
+- `rw-repair-race-cancel-decode` coverage=`cancellation_during_decode` classification=`accepted` seed=9006 explored=64 pruned=41 liveness=`within_deadline` cleanup=`decoder_buffers_released_no_source_mutation`
+- `rw-repair-race-cancel-writeback` coverage=`cancellation_during_writeback` classification=`rejected` seed=9007 explored=88 pruned=57 liveness=`within_deadline` cleanup=`staged_write_discarded_symbols_not_refreshed`
+- `rw-repair-race-symbol-refresh-client-write` coverage=`symbol_refresh_races_client_write` classification=`rejected` seed=9008 explored=256 pruned=173 liveness=`within_deadline` cleanup=`symbol_refresh_suppressed`
+- `rw-repair-race-unmount-pending-repair` coverage=`unmount_pending_repair` classification=`rejected` seed=9009 explored=144 pruned=95 liveness=`within_deadline` cleanup=`unmount_cleanup_joined_pending_repair`
+- `rw-repair-race-reopen-after-failed-repair` coverage=`reopen_after_failed_repair` classification=`accepted` seed=9010 explored=112 pruned=73 liveness=`within_deadline` cleanup=`failed_repair_visible_after_reopen`
+- `rw-repair-race-retry-after-abort` coverage=`retry_after_abort` classification=`accepted` seed=9011 explored=168 pruned=109 liveness=`within_deadline` cleanup=`retry_ledger_preserved`
+- `rw-repair-race-unsupported-epoch-rewind` coverage=`unsupported_nested_repair_epoch_rewind` classification=`unsupported_interleaving` seed=9012 explored=32 pruned=31 liveness=`within_deadline` cleanup=`unsupported_interleaving_preserved_for_follow_up`
