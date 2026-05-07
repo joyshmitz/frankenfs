@@ -2,6 +2,7 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use ffs_harness::load_sparse_fixture;
+use ffs_btrfs::{BtrfsDirItem, BtrfsInodeRef};
 use ffs_ondisk::{
     chunk_type_flags, dx_hash, ext4_casefold_key, parse_dev_item, parse_dir_block, parse_dx_root,
     parse_extent_tree, parse_internal_items, parse_leaf_items, parse_sys_chunk_array,
@@ -684,6 +685,66 @@ fn bench_btrfs_verify_tree_block_checksum(c: &mut Criterion) {
     });
 }
 
+/// bd-coyy0 — parse_root_item runs on every subvolume enumeration
+/// (read every entry of the root tree). Bench against the 239-byte
+/// legacy minimum payload (uuid-era fields zeroed, generation_v2
+/// disagrees → extension fields default to zero) which matches the
+/// most common production root_item layout.
+fn bench_btrfs_parse_root_item(c: &mut Criterion) {
+    let mut payload = vec![0_u8; 239];
+    // bytenr at offset 176 must be non-zero per parser invariant.
+    payload[176..184].copy_from_slice(&0x1234_5678_9ABC_DEF0_u64.to_le_bytes());
+    payload[238] = 0; // level=0
+
+    c.bench_function("btrfs_parse_root_item", |b| {
+        b.iter(|| {
+            ffs_btrfs::parse_root_item(black_box(&payload)).expect("legacy root_item parses");
+        });
+    });
+}
+
+/// bd-coyy0 — parse_inode_refs runs on every inode_ref walk
+/// (hardlink resolution, subvolume nav). Bench a single
+/// 10-byte-header + 16-byte-name entry — the typical hardlink-target
+/// shape.
+fn bench_btrfs_parse_inode_refs(c: &mut Criterion) {
+    let entry = BtrfsInodeRef {
+        index: 0x1234_5678,
+        name: b"hardlink-target1".to_vec(),
+    };
+    let payload = entry
+        .try_to_bytes()
+        .expect("typical inode_ref encodes within u16");
+
+    c.bench_function("btrfs_parse_inode_refs", |b| {
+        b.iter(|| {
+            ffs_btrfs::parse_inode_refs(black_box(&payload)).expect("inode_ref parses");
+        });
+    });
+}
+
+/// bd-coyy0 — parse_dir_items runs on every directory readdir.
+/// Bench a single 30-byte-header + 16-byte-name entry — the typical
+/// directory entry shape.
+fn bench_btrfs_parse_dir_items(c: &mut Criterion) {
+    let entry = BtrfsDirItem {
+        child_objectid: 0x1000,
+        child_key_type: 1, // INODE_ITEM
+        child_key_offset: 0,
+        file_type: 1, // BTRFS_FT_REG_FILE
+        name: b"regular_file_xy.".to_vec(),
+    };
+    let payload = entry
+        .try_to_bytes()
+        .expect("typical dir_item encodes within u16");
+
+    c.bench_function("btrfs_parse_dir_items", |b| {
+        b.iter(|| {
+            ffs_btrfs::parse_dir_items(black_box(&payload)).expect("dir_item parses");
+        });
+    });
+}
+
 criterion_group!(
     ondisk,
     bench_ext4_inode_parse,
@@ -718,5 +779,8 @@ criterion_group!(
     bench_ext4_extent_actual_len_unwritten,
     bench_btrfs_verify_superblock_checksum,
     bench_btrfs_verify_tree_block_checksum,
+    bench_btrfs_parse_root_item,
+    bench_btrfs_parse_inode_refs,
+    bench_btrfs_parse_dir_items,
 );
 criterion_main!(ondisk);
