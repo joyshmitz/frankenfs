@@ -972,6 +972,71 @@ mod tests {
         assert_eq!(encoded.len(), 16);
     }
 
+    /// bd-yv5jm — byte-layout pin for `encode_header`. The OQ7
+    /// constant tests pin each individual scalar (WAL_MAGIC,
+    /// WAL_VERSION, CHECKSUM_TYPE_CRC32C, HEADER_SIZE) and the
+    /// `oq7_header_size_is_16` test pins the total length, but no
+    /// test pins the BYTE-LEVEL OFFSETS where each field is
+    /// serialized. Layout per the encoder/decoder pair:
+    ///   magic         @ offset 0..4   (u32 LE)
+    ///   version       @ offset 4..6   (u16 LE)
+    ///   checksum_type @ offset 6..8   (u16 LE)
+    ///   reserved      @ offset 8..16  (zeros)
+    ///
+    /// A regression that swapped any two field offsets would
+    /// round-trip via encode/decode if both sides drifted
+    /// symmetrically but break wire compatibility with any
+    /// external tool reading the WAL. Stamps a header with
+    /// distinct magic/version/checksum_type values (different
+    /// from defaults) and asserts each field appears at its
+    /// canonical offset.
+    #[test]
+    fn wal_header_encode_byte_layout() {
+        // Distinct non-default values so an offset swap surfaces
+        // as a mismatch.
+        let header = WalHeader {
+            magic: 0xAABB_CCDD,
+            version: 0x1234,
+            checksum_type: 0x5678,
+        };
+        let encoded = encode_header(&header);
+        assert_eq!(encoded.len(), HEADER_SIZE);
+
+        // magic @ 0..4
+        assert_eq!(
+            &encoded[0..4],
+            &0xAABB_CCDD_u32.to_le_bytes(),
+            "magic must be at offset 0..4"
+        );
+        // version @ 4..6
+        assert_eq!(
+            &encoded[4..6],
+            &0x1234_u16.to_le_bytes(),
+            "version must be at offset 4..6"
+        );
+        // checksum_type @ 6..8
+        assert_eq!(
+            &encoded[6..8],
+            &0x5678_u16.to_le_bytes(),
+            "checksum_type must be at offset 6..8"
+        );
+        // reserved @ 8..16 — must be zeroed
+        assert_eq!(
+            &encoded[8..16],
+            &[0_u8; 8],
+            "reserved bytes 8..16 must be zero"
+        );
+
+        // The default header round-trips (canonical input + canonical
+        // decoder agreement). encode_header returns [u8; HEADER_SIZE]
+        // so the slice covers the whole array.
+        let default_encoded = encode_header(&WalHeader::default());
+        let default_decoded = decode_header(&default_encoded).expect("default decodes");
+        assert_eq!(default_decoded.magic, WAL_MAGIC);
+        assert_eq!(default_decoded.version, WAL_VERSION);
+        assert_eq!(default_decoded.checksum_type, CHECKSUM_TYPE_CRC32C);
+    }
+
     /// OQ7 validation: minimum commit record is 29 bytes (D4 canonical minimum).
     #[test]
     fn oq7_min_commit_record_size() {
