@@ -226,4 +226,82 @@ mod tests {
             .expect("u64::MAX is non-zero");
         assert_eq!(total, u64::MAX);
     }
+
+    // bd-vn9q4: metamorphic relations for the two btrfs scalar parsers.
+    // Fixed-input tests cover endianness and offsets at named values; these
+    // proptests sweep arbitrary inputs to catch regressions where the parser
+    // reads from a near-but-wrong window or stops respecting append-invariance.
+    proptest::proptest! {
+        // MR-1 round-trip / determinism: stamp(v) → parse → v, for any non-zero u64.
+        #[test]
+        fn root_item_bytenr_round_trip(bytenr in 1_u64..=u64::MAX) {
+            let payload = root_item_payload(bytenr);
+            let parsed = parse_btrfs_root_item_bytenr(&payload).expect("non-zero must parse");
+            proptest::prop_assert_eq!(parsed, bytenr);
+        }
+
+        // MR-2 field-locality: bytes outside [176..184] are not read.
+        // Build payload with valid bytenr, then overwrite the surrounding
+        // 176 bytes with arbitrary noise — parsed result must not change.
+        #[test]
+        fn root_item_bytenr_ignores_noise_outside_window(
+            bytenr in 1_u64..=u64::MAX,
+            prefix in proptest::collection::vec(proptest::prelude::any::<u8>(), 176),
+        ) {
+            let mut payload = root_item_payload(bytenr);
+            payload[..176].copy_from_slice(&prefix);
+            let parsed = parse_btrfs_root_item_bytenr(&payload).expect("bytenr unchanged");
+            proptest::prop_assert_eq!(parsed, bytenr);
+        }
+
+        // MR-3 append-invariance: appending arbitrary bytes after the minimum
+        // 184-byte payload must not change the parsed bytenr.
+        #[test]
+        fn root_item_bytenr_append_invariant(
+            bytenr in 1_u64..=u64::MAX,
+            suffix in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..256),
+        ) {
+            let mut payload = root_item_payload(bytenr);
+            payload.extend_from_slice(&suffix);
+            let parsed = parse_btrfs_root_item_bytenr(&payload).expect("oversized must parse");
+            proptest::prop_assert_eq!(parsed, bytenr);
+        }
+
+        // MR-1 round-trip / determinism for block-group total_bytes.
+        #[test]
+        fn block_group_total_bytes_round_trip(total in 1_u64..=u64::MAX) {
+            let payload = block_group_payload(total);
+            let parsed = parse_btrfs_block_group_total_bytes(&payload)
+                .expect("non-zero must parse");
+            proptest::prop_assert_eq!(parsed, total);
+        }
+
+        // MR-2 field-locality: bytes outside [8..16] are not read.
+        // The first 8 bytes hold used_bytes — overwrite with noise and ensure
+        // total_bytes parsing is unaffected.
+        #[test]
+        fn block_group_total_bytes_ignores_noise_outside_window(
+            total in 1_u64..=u64::MAX,
+            used in proptest::prelude::any::<u64>(),
+        ) {
+            let mut payload = block_group_payload(total);
+            payload[0..8].copy_from_slice(&used.to_le_bytes());
+            let parsed = parse_btrfs_block_group_total_bytes(&payload)
+                .expect("total_bytes unchanged");
+            proptest::prop_assert_eq!(parsed, total);
+        }
+
+        // MR-3 append-invariance for block-group payload.
+        #[test]
+        fn block_group_total_bytes_append_invariant(
+            total in 1_u64..=u64::MAX,
+            suffix in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..256),
+        ) {
+            let mut payload = block_group_payload(total);
+            payload.extend_from_slice(&suffix);
+            let parsed = parse_btrfs_block_group_total_bytes(&payload)
+                .expect("oversized must parse");
+            proptest::prop_assert_eq!(parsed, total);
+        }
+    }
 }
