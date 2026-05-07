@@ -45,14 +45,8 @@ impl<'a> ByteCursor<'a> {
     }
 }
 
-fn fail() -> ! {
-    std::process::abort();
-}
-
 fn require(condition: bool) {
-    if !condition {
-        fail();
-    }
+    assert!(condition, "AlignedVec fuzz model invariant violated");
 }
 
 fn normalized_alignment(requested: usize) -> usize {
@@ -116,8 +110,20 @@ fn mutate_slice(cursor: &mut ByteCursor<'_>, current: &mut AlignedVec, model: &m
     let remaining = model.len().saturating_sub(start);
     let len = usize::from(cursor.next_u8()) % remaining.saturating_add(1);
     let fill = cursor.next_u8();
-    current.as_mut_slice()[start..start + len].fill(fill);
-    model[start..start + len].fill(fill);
+    let Some(end) = start.checked_add(len) else {
+        require(false);
+        return;
+    };
+    let Some(current_slice) = current.as_mut_slice().get_mut(start..end) else {
+        require(false);
+        return;
+    };
+    let Some(model_slice) = model.get_mut(start..end) else {
+        require(false);
+        return;
+    };
+    current_slice.fill(fill);
+    model_slice.fill(fill);
 }
 
 fn clone_roundtrip(current: &AlignedVec, model: &[u8], alignment: usize) -> AlignedVec {
