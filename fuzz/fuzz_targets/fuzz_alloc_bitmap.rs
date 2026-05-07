@@ -147,29 +147,34 @@ fn model_largest_free_run(bitmap: &[u8], count: u32) -> u32 {
 fn assert_query_determinism(bitmap: &[u8], idx: u32, count: u32, start: u32, len: u32) {
     let get_first = bitmap_get(bitmap, idx);
     let get_second = bitmap_get(bitmap, idx);
-    if get_first != get_second {
-        std::process::abort();
-    }
+    assert_eq!(
+        get_first, get_second,
+        "bitmap_get must be deterministic for the same bitmap/index"
+    );
     let count_first = bitmap_count_free(bitmap, count);
     let count_second = bitmap_count_free(bitmap, count);
-    if count_first != count_second {
-        std::process::abort();
-    }
+    assert_eq!(
+        count_first, count_second,
+        "bitmap_count_free must be deterministic for the same bitmap/count"
+    );
     let largest_first = bitmap_largest_free_run(bitmap, count);
     let largest_second = bitmap_largest_free_run(bitmap, count);
-    if largest_first != largest_second {
-        std::process::abort();
-    }
+    assert_eq!(
+        largest_first, largest_second,
+        "bitmap_largest_free_run must be deterministic for the same bitmap/count"
+    );
     let free_first = bitmap_find_free(bitmap, count, start);
     let free_second = bitmap_find_free(bitmap, count, start);
-    if free_first != free_second {
-        std::process::abort();
-    }
+    assert_eq!(
+        free_first, free_second,
+        "bitmap_find_free must be deterministic for the same bitmap/count/start"
+    );
     let contiguous_first = bitmap_find_contiguous(bitmap, count, len, start);
     let contiguous_second = bitmap_find_contiguous(bitmap, count, len, start);
-    if contiguous_first != contiguous_second {
-        std::process::abort();
-    }
+    assert_eq!(
+        contiguous_first, contiguous_second,
+        "bitmap_find_contiguous must be deterministic for the same bitmap/count/len/start"
+    );
 }
 
 fn assert_set_clear_matches_model(bitmap: &[u8], idx: u32) {
@@ -177,25 +182,23 @@ fn assert_set_clear_matches_model(bitmap: &[u8], idx: u32) {
     let mut expected = bitmap.to_vec();
     bitmap_set(&mut actual, idx);
     model_set(&mut expected, idx);
-    if actual != expected {
-        std::process::abort();
-    }
+    assert_eq!(
+        actual, expected,
+        "bitmap_set must match the reference bitmap model"
+    );
     let after_set = actual.clone();
     bitmap_set(&mut actual, idx);
-    if actual != after_set {
-        std::process::abort();
-    }
+    assert_eq!(actual, after_set, "bitmap_set must be idempotent");
 
     bitmap_clear(&mut actual, idx);
     model_clear(&mut expected, idx);
-    if actual != expected {
-        std::process::abort();
-    }
+    assert_eq!(
+        actual, expected,
+        "bitmap_clear must match the reference bitmap model"
+    );
     let after_clear = actual.clone();
     bitmap_clear(&mut actual, idx);
-    if actual != after_clear {
-        std::process::abort();
-    }
+    assert_eq!(actual, after_clear, "bitmap_clear must be idempotent");
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -212,47 +215,61 @@ fuzz_target!(|data: &[u8]| {
 
     let actual_get = bitmap_get(&bitmap, idx);
     let expected_get = model_get(&bitmap, idx);
-    if actual_get != expected_get {
-        std::process::abort();
-    }
+    assert_eq!(
+        actual_get, expected_get,
+        "bitmap_get must match the reference bitmap model"
+    );
 
     let actual_count_free = bitmap_count_free(&bitmap, count);
     let expected_count_free = model_count_free(&bitmap, count);
-    if actual_count_free != expected_count_free {
-        std::process::abort();
-    }
+    assert_eq!(
+        actual_count_free, expected_count_free,
+        "bitmap_count_free must match the reference bitmap model"
+    );
 
     let actual_largest_free_run = bitmap_largest_free_run(&bitmap, count);
     let expected_largest_free_run = model_largest_free_run(&bitmap, count);
-    if actual_largest_free_run != expected_largest_free_run {
-        std::process::abort();
-    }
+    assert_eq!(
+        actual_largest_free_run, expected_largest_free_run,
+        "bitmap_largest_free_run must match the reference bitmap model"
+    );
 
     let actual_find_free = bitmap_find_free(&bitmap, count, start);
     let expected_find_free = model_find_free(&bitmap, count, start);
-    if actual_find_free != expected_find_free {
-        std::process::abort();
-    }
+    assert_eq!(
+        actual_find_free, expected_find_free,
+        "bitmap_find_free must match the reference bitmap model"
+    );
 
     let actual_find_contiguous = bitmap_find_contiguous(&bitmap, count, len, start);
     let expected_find_contiguous = model_find_contiguous(&bitmap, count, len, start);
-    if actual_find_contiguous != expected_find_contiguous {
-        std::process::abort();
-    }
+    assert_eq!(
+        actual_find_contiguous, expected_find_contiguous,
+        "bitmap_find_contiguous must match the reference bitmap model"
+    );
 
     if let Some(pos) = actual_find_free {
-        if pos >= count || bitmap_get(&bitmap, pos) {
-            std::process::abort();
-        }
+        assert!(
+            pos < count,
+            "bitmap_find_free must return a position inside the queried count"
+        );
+        assert!(
+            !bitmap_get(&bitmap, pos),
+            "bitmap_find_free must return a free bit"
+        );
     }
 
     if let Some(pos) = actual_find_contiguous {
         if len == 0 {
-            if pos != 0 {
-                std::process::abort();
-            }
-        } else if !run_is_free(&bitmap, pos, count, len) {
-            std::process::abort();
+            assert_eq!(
+                pos, 0,
+                "bitmap_find_contiguous with zero length must return position 0"
+            );
+        } else {
+            assert!(
+                run_is_free(&bitmap, pos, count, len),
+                "bitmap_find_contiguous must return a free run of the requested length"
+            );
         }
     }
 
