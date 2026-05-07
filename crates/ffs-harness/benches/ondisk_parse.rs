@@ -808,6 +808,36 @@ fn bench_btrfs_inode_item_to_bytes(c: &mut Criterion) {
     });
 }
 
+/// bd-zuqtr — parse_extent_data runs on every btrfs file read /
+/// mmap / readdir-with-stat path through ffs_core::OpenFs (12+
+/// call sites). Bench against a 53-byte Regular payload with
+/// BTRFS_FILE_EXTENT_REG type, BTRFS_COMPRESS_NONE compression,
+/// disk_bytenr=0 sparse hole — the simplest path that exercises
+/// the full 21-byte fixed header + 32-byte Regular address-field
+/// arithmetic without engaging the source-slice validator.
+/// Correctness is fuzzed by fuzz_btrfs_tree_items + bd-3niu3
+/// proptest round-trip MR.
+fn bench_btrfs_parse_extent_data_regular(c: &mut Criterion) {
+    use ffs_btrfs::{BTRFS_COMPRESS_NONE, BTRFS_FILE_EXTENT_REG, BtrfsExtentData};
+    let extent = BtrfsExtentData::Regular {
+        generation: 0x1234,
+        ram_bytes: 0x10_0000, // 1 MiB
+        extent_type: BTRFS_FILE_EXTENT_REG,
+        compression: BTRFS_COMPRESS_NONE,
+        disk_bytenr: 0, // sparse hole — bypasses source-slice check
+        disk_num_bytes: 0x10_0000,
+        extent_offset: 0,
+        num_bytes: 0x10_0000,
+    };
+    let payload = extent.to_bytes();
+
+    c.bench_function("btrfs_parse_extent_data_regular", |b| {
+        b.iter(|| {
+            ffs_btrfs::parse_extent_data(black_box(&payload)).expect("extent_data parses");
+        });
+    });
+}
+
 /// bd-m9661 — parse_xattr_items runs on every btrfs getxattr /
 /// listxattr / llistxattr call through ffs_core::OpenFs. Bench
 /// against a 30-byte-header + 17-byte-name + 17-byte-value
@@ -906,6 +936,7 @@ criterion_group!(
     bench_btrfs_parse_inode_item,
     bench_btrfs_inode_item_to_bytes,
     bench_btrfs_parse_xattr_items,
+    bench_btrfs_parse_extent_data_regular,
     bench_ext4_chksum_4kb,
 );
 criterion_main!(ondisk);

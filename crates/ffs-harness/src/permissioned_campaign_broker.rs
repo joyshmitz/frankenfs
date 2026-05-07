@@ -23,6 +23,8 @@ pub const DEFAULT_PERMISSIONED_CAMPAIGN_BROKER_MANIFEST: &str =
 pub const DEFAULT_PERMISSIONED_CAMPAIGN_PREFLIGHT_MAX_AGE_DAYS: u32 = 14;
 pub const PERMISSIONED_CAMPAIGN_HANDOFF_NOTICE: &str =
     "authorization handoff material only; not executed evidence and not a product pass/fail claim";
+pub const XFSTESTS_REAL_RUN_ACK_ENV: &str = "XFSTESTS_REAL_RUN_ACK";
+pub const XFSTESTS_REAL_RUN_ACK_VALUE: &str = "xfstests-may-mutate-test-and-scratch-devices";
 
 const ALLOWED_DESTRUCTIVE_OPERATIONS: [&str; 9] = [
     "mount_test_device",
@@ -378,6 +380,30 @@ pub struct PermissionedCampaignHandoffCommand {
     pub transcript_path_template: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedXfstestsBrokerAdapterInput {
+    pub campaign_id: String,
+    pub generated_at: String,
+    pub target_beads: Vec<String>,
+    pub selected_subset_id: String,
+    pub xfstests_dir: String,
+    pub test_dir: String,
+    pub scratch_mnt: String,
+    pub result_base: String,
+    pub preflight_id: String,
+    pub preflight_artifact_path: String,
+    pub preflight_observed_at_epoch_days: u32,
+    pub preflight_max_age_days: u32,
+    pub not_run_classification: PermissionedXfstestsNotRunClassification,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionedXfstestsNotRunClassification {
+    EnvironmentBlockerOnly,
+    CountsAsPassingProductSignal,
+}
+
 pub fn load_permissioned_campaign_broker_manifest(
     path: &Path,
 ) -> Result<PermissionedCampaignBrokerManifest> {
@@ -632,6 +658,154 @@ pub fn generate_permissioned_campaign_handoff_packet(
     })
 }
 
+pub fn build_xfstests_broker_manifest(
+    input: &PermissionedXfstestsBrokerAdapterInput,
+) -> Result<PermissionedCampaignBrokerManifest> {
+    validate_xfstests_adapter_input(input)?;
+    Ok(PermissionedCampaignBrokerManifest {
+        schema_version: PERMISSIONED_CAMPAIGN_BROKER_SCHEMA_VERSION,
+        campaign_id: input.campaign_id.clone(),
+        lane_kind: PermissionedCampaignLaneKind::XfstestsRealBaseline,
+        target_beads: input.target_beads.clone(),
+        generated_at: input.generated_at.clone(),
+        required_ack: PermissionedCampaignAck {
+            env_var: XFSTESTS_REAL_RUN_ACK_ENV.to_owned(),
+            exact_value: XFSTESTS_REAL_RUN_ACK_VALUE.to_owned(),
+            operator_prompt:
+                "Approve real xfstests execution against scoped TEST_DIR and SCRATCH_MNT"
+                    .to_owned(),
+        },
+        required_runner_env: vec![
+            PermissionedCampaignRunnerEnv {
+                env_var: "XFSTESTS_DIR".to_owned(),
+                purpose: "xfstests source tree with built helper binaries".to_owned(),
+                expected_shape: input.xfstests_dir.clone(),
+            },
+            PermissionedCampaignRunnerEnv {
+                env_var: "TEST_DIR".to_owned(),
+                purpose: "explicit scoped xfstests test mount root".to_owned(),
+                expected_shape: input.test_dir.clone(),
+            },
+            PermissionedCampaignRunnerEnv {
+                env_var: "SCRATCH_MNT".to_owned(),
+                purpose: "explicit scoped xfstests scratch mount root".to_owned(),
+                expected_shape: input.scratch_mnt.clone(),
+            },
+            PermissionedCampaignRunnerEnv {
+                env_var: "RESULT_BASE".to_owned(),
+                purpose: "artifact root for xfstests raw logs and summaries".to_owned(),
+                expected_shape: input.result_base.clone(),
+            },
+        ],
+        host_capability_facts: vec![
+            PermissionedCampaignHostFact {
+                fact_id: "xfstests_helpers".to_owned(),
+                observed_value: "present".to_owned(),
+                required_value: "present".to_owned(),
+                proof_path: input.preflight_artifact_path.clone(),
+            },
+            PermissionedCampaignHostFact {
+                fact_id: "explicit_test_and_scratch_paths".to_owned(),
+                observed_value: "provided".to_owned(),
+                required_value: "provided".to_owned(),
+                proof_path: input.preflight_artifact_path.clone(),
+            },
+        ],
+        safe_path_roots: vec![
+            PermissionedCampaignPathRoot {
+                root_id: "test_dir".to_owned(),
+                path: input.test_dir.clone(),
+                purpose: PermissionedCampaignPathPurpose::TestData,
+            },
+            PermissionedCampaignPathRoot {
+                root_id: "scratch_mnt".to_owned(),
+                path: input.scratch_mnt.clone(),
+                purpose: PermissionedCampaignPathPurpose::Scratch,
+            },
+            PermissionedCampaignPathRoot {
+                root_id: "result_base".to_owned(),
+                path: input.result_base.clone(),
+                purpose: PermissionedCampaignPathPurpose::ArtifactRoot,
+            },
+        ],
+        destructive_operations: vec![
+            "mount_test_device".to_owned(),
+            "mount_scratch_device".to_owned(),
+            "mutate_test_device".to_owned(),
+            "mutate_scratch_device".to_owned(),
+        ],
+        expected_artifact_paths: xfstests_expected_artifact_paths(&input.result_base),
+        cleanup_policy: PermissionedCampaignCleanupPolicy {
+            policy_id: "xfstests_preserve_partial_artifacts".to_owned(),
+            expected_status: PermissionedCampaignCleanupStatus::PreservedArtifacts,
+            partial_artifact_policy:
+                "preserve raw logs, command transcript, stdout, stderr, and parsed not-run rows"
+                    .to_owned(),
+        },
+        claim_boundary: PermissionedCampaignClaimBoundary {
+            packet_status: PermissionedCampaignPacketStatus::ReadyForOperatorApproval,
+            product_evidence_claim: PermissionedCampaignProductEvidenceClaim::None,
+            required_executed_evidence: vec![
+                "raw xfstests logs".to_owned(),
+                "pass/fail/not-run summary".to_owned(),
+                "failure-to-bead extraction report".to_owned(),
+            ],
+            claim_text:
+                "operator approval material only; not-run rows are blockers, never passing product behavior"
+                    .to_owned(),
+        },
+        preflight_references: vec![PermissionedCampaignPreflightReference {
+            preflight_id: input.preflight_id.clone(),
+            artifact_path: input.preflight_artifact_path.clone(),
+            observed_at_epoch_days: input.preflight_observed_at_epoch_days,
+            max_age_days: input.preflight_max_age_days,
+            summary: format!(
+                "{} selected subset ready for explicit-path permission review",
+                input.selected_subset_id
+            ),
+        }],
+        operator_risks: vec![
+            "xfstests may mutate the scoped TEST_DIR and SCRATCH_MNT devices".to_owned(),
+            "partial runs must preserve raw logs before any cleanup".to_owned(),
+            "not-run rows must remain blocker evidence and cannot be counted as passing behavior"
+                .to_owned(),
+        ],
+        exact_commands: vec![
+            PermissionedCampaignCommand {
+                command_id: "xfstests_preflight".to_owned(),
+                exact_command: format!(
+                    "XFSTESTS_DIR={} TEST_DIR={} SCRATCH_MNT={} RESULT_BASE={} scripts/e2e/ffs_xfstests_e2e.sh --dry-run",
+                    shell_single_quote(&input.xfstests_dir),
+                    shell_single_quote(&input.test_dir),
+                    shell_single_quote(&input.scratch_mnt),
+                    shell_single_quote(&input.result_base)
+                ),
+                command_role: PermissionedCampaignCommandRole::Preflight,
+            },
+            PermissionedCampaignCommand {
+                command_id: "xfstests_permissioned_run".to_owned(),
+                exact_command: format!(
+                    "{XFSTESTS_REAL_RUN_ACK_ENV}={XFSTESTS_REAL_RUN_ACK_VALUE} XFSTESTS_DIR={} TEST_DIR={} SCRATCH_MNT={} RESULT_BASE={} scripts/e2e/ffs_xfstests_e2e.sh",
+                    shell_single_quote(&input.xfstests_dir),
+                    shell_single_quote(&input.test_dir),
+                    shell_single_quote(&input.scratch_mnt),
+                    shell_single_quote(&input.result_base)
+                ),
+                command_role: PermissionedCampaignCommandRole::PermissionedRun,
+            },
+        ],
+    })
+}
+
+pub fn generate_xfstests_handoff_packet(
+    input: &PermissionedXfstestsBrokerAdapterInput,
+    validation_config: &PermissionedCampaignBrokerValidationConfig,
+    generation: PermissionedCampaignHandoffGeneration,
+) -> Result<PermissionedCampaignHandoffPacket> {
+    let manifest = build_xfstests_broker_manifest(input)?;
+    generate_permissioned_campaign_handoff_packet(&manifest, validation_config, generation)
+}
+
 #[must_use]
 pub fn render_permissioned_campaign_handoff_markdown(
     packet: &PermissionedCampaignHandoffPacket,
@@ -777,6 +951,76 @@ pub fn render_permissioned_campaign_handoff_markdown(
     }
 
     out
+}
+
+fn validate_xfstests_adapter_input(input: &PermissionedXfstestsBrokerAdapterInput) -> Result<()> {
+    validate_adapter_non_empty("campaign_id", &input.campaign_id)?;
+    validate_adapter_non_empty("generated_at", &input.generated_at)?;
+    validate_adapter_non_empty("selected_subset_id", &input.selected_subset_id)?;
+    validate_adapter_non_empty("preflight_id", &input.preflight_id)?;
+    if input.target_beads.is_empty() {
+        bail!("target_beads must include bd-rchk3.3 or an equivalent xfstests bead");
+    }
+    for (index, bead) in input.target_beads.iter().enumerate() {
+        if !bead.starts_with("bd-") {
+            bail!("target_beads[{index}] must start with bd-");
+        }
+    }
+    validate_adapter_safe_path("xfstests_dir", &input.xfstests_dir)?;
+    validate_adapter_safe_path("test_dir", &input.test_dir)?;
+    validate_adapter_safe_path("scratch_mnt", &input.scratch_mnt)?;
+    validate_adapter_safe_path("result_base", &input.result_base)?;
+    validate_adapter_safe_path("preflight_artifact_path", &input.preflight_artifact_path)?;
+    if input.preflight_max_age_days == 0 {
+        bail!("preflight_max_age_days must be positive");
+    }
+    if input.not_run_classification
+        == PermissionedXfstestsNotRunClassification::CountsAsPassingProductSignal
+    {
+        bail!("xfstests not-run rows must be blocker evidence, not passing product signal");
+    }
+    Ok(())
+}
+
+fn validate_adapter_non_empty(field: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("{field} must not be empty");
+    }
+    Ok(())
+}
+
+fn validate_adapter_safe_path(field: &str, value: &str) -> Result<()> {
+    validate_adapter_non_empty(field, value)?;
+    if !is_safe_relative_path(value) {
+        bail!("{field} must be a safe relative artifact-scoped path");
+    }
+    Ok(())
+}
+
+fn xfstests_expected_artifact_paths(result_base: &str) -> Vec<String> {
+    [
+        "report.json",
+        "stdout.log",
+        "stderr.log",
+        "raw-results",
+        "failure_to_beads.json",
+    ]
+    .into_iter()
+    .map(|suffix| format!("{result_base}/{suffix}"))
+    .collect()
+}
+
+fn shell_single_quote(value: &str) -> String {
+    let mut quoted = String::from("'");
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 fn validate_top_level(
@@ -1600,6 +1844,90 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn xfstests_adapter_renders_ready_handoff_packet() -> Result<()> {
+        let manifest = build_xfstests_broker_manifest(&xfstests_adapter_input())?;
+        let report = validate_permissioned_campaign_broker_manifest(&manifest, &config());
+        assert!(report.valid, "{:?}", report.issues);
+        assert_eq!(manifest.required_ack.env_var, XFSTESTS_REAL_RUN_ACK_ENV);
+        assert_eq!(
+            manifest.required_ack.exact_value,
+            XFSTESTS_REAL_RUN_ACK_VALUE
+        );
+        assert!(
+            manifest
+                .expected_artifact_paths
+                .iter()
+                .any(|path| path == "artifacts/xfstests/real-run/failure_to_beads.json")
+        );
+
+        let packet =
+            generate_xfstests_handoff_packet(&xfstests_adapter_input(), &config(), generation())?;
+        assert_eq!(packet.product_evidence_claim, "none");
+        assert!(packet.claim_text.contains("not-run rows are blockers"));
+        assert!(
+            packet
+                .exact_commands
+                .iter()
+                .any(|command| command.command_id == "xfstests_permissioned_run"
+                    && command.exact_command.contains(XFSTESTS_REAL_RUN_ACK_VALUE))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn xfstests_adapter_rejects_missing_explicit_paths() {
+        let clear_required_paths: [fn(&mut PermissionedXfstestsBrokerAdapterInput); 3] = [
+            |input: &mut PermissionedXfstestsBrokerAdapterInput| input.test_dir.clear(),
+            |input: &mut PermissionedXfstestsBrokerAdapterInput| input.scratch_mnt.clear(),
+            |input: &mut PermissionedXfstestsBrokerAdapterInput| input.result_base.clear(),
+        ];
+        for clear_required_path in clear_required_paths {
+            let mut input = xfstests_adapter_input();
+            clear_required_path(&mut input);
+            assert!(build_xfstests_broker_manifest(&input).is_err());
+        }
+    }
+
+    #[test]
+    fn xfstests_adapter_quotes_handoff_command_paths() -> Result<()> {
+        let mut input = xfstests_adapter_input();
+        input.test_dir = "artifacts/xfstests/test dir".to_owned();
+        input.scratch_mnt = "artifacts/xfstests/scratch'space".to_owned();
+        let manifest = build_xfstests_broker_manifest(&input)?;
+        let permissioned_run = manifest
+            .exact_commands
+            .iter()
+            .find(|command| command.command_id == "xfstests_permissioned_run")
+            .context("permissioned run command")?;
+        assert!(
+            permissioned_run
+                .exact_command
+                .contains("TEST_DIR='artifacts/xfstests/test dir'")
+        );
+        assert!(
+            permissioned_run
+                .exact_command
+                .contains("SCRATCH_MNT='artifacts/xfstests/scratch'\\''space'")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn xfstests_adapter_rejects_stale_preflight() {
+        let mut input = xfstests_adapter_input();
+        input.preflight_observed_at_epoch_days = reference_epoch_days() - 30;
+        assert!(generate_xfstests_handoff_packet(&input, &config(), generation()).is_err());
+    }
+
+    #[test]
+    fn xfstests_adapter_rejects_not_run_as_pass_classification() {
+        let mut input = xfstests_adapter_input();
+        input.not_run_classification =
+            PermissionedXfstestsNotRunClassification::CountsAsPassingProductSignal;
+        assert!(build_xfstests_broker_manifest(&input).is_err());
+    }
+
     fn assert_valid(manifest: &PermissionedCampaignBrokerManifest) {
         let report = validate_permissioned_campaign_broker_manifest(manifest, &config());
         assert!(report.valid, "{:?}", report.issues);
@@ -1633,6 +1961,25 @@ mod tests {
             generated_at: REFERENCE_TIMESTAMP.to_owned(),
             generated_by: "FrostyRobin".to_owned(),
             git_sha: "abcdef123456".to_owned(),
+        }
+    }
+
+    fn xfstests_adapter_input() -> PermissionedXfstestsBrokerAdapterInput {
+        PermissionedXfstestsBrokerAdapterInput {
+            campaign_id: "bd-rchk3.3-xfstests-real-20260507".to_owned(),
+            generated_at: REFERENCE_TIMESTAMP.to_owned(),
+            target_beads: vec!["bd-rchk3.3".to_owned(), "bd-rchk3".to_owned()],
+            selected_subset_id: "supported-smoke-subset-20260505".to_owned(),
+            xfstests_dir: "third_party/xfstests-dev".to_owned(),
+            test_dir: "artifacts/xfstests/test-dir".to_owned(),
+            scratch_mnt: "artifacts/xfstests/scratch".to_owned(),
+            result_base: "artifacts/xfstests/real-run".to_owned(),
+            preflight_id: "xfstests-explicit-path-preflight".to_owned(),
+            preflight_artifact_path: "artifacts/xfstests/preflight/report.json".to_owned(),
+            preflight_observed_at_epoch_days: reference_epoch_days(),
+            preflight_max_age_days: DEFAULT_PERMISSIONED_CAMPAIGN_PREFLIGHT_MAX_AGE_DAYS,
+            not_run_classification:
+                PermissionedXfstestsNotRunClassification::EnvironmentBlockerOnly,
         }
     }
 
