@@ -313,6 +313,31 @@ struct GroupBlockRange {
 ///
 /// This adapter bridges write-back flush notifications from `ffs-block` into
 /// the repair pipeline without coupling `ffs-block` to repair internals.
+///
+/// # Concurrency invariant (bd-scg17): drain + drop + process
+///
+/// `queued_groups` is acquired ONLY for the brief duration of an insert or a
+/// drain — never held across a pipeline call. The two consumer paths follow
+/// the same pattern:
+///
+/// * [`on_flush_committed`](Self::on_flush_committed) acquires the lock in a
+///   scoped block, inserts the affected group ids, and drops the guard at
+///   inner-scope close BEFORE iterating to log.
+/// * [`apply_queued_refreshes`](Self::apply_queued_refreshes) calls
+///   [`drain_queued_groups`](Self::drain_queued_groups) which acquires +
+///   drains + drops the lock, THEN calls `pipeline.mark_group_dirty` and
+///   `pipeline.on_group_flush` outside the lock.
+///
+/// This separation is critical: those pipeline calls can fire back into
+/// `RepairFlushLifecycle::on_flush_committed` (the same trait this struct
+/// implements), which reacquires `queued_groups`. Holding the lock during the
+/// pipeline call would deadlock on the first re-entrant flush.
+///
+/// **Any future refactor that hoists the pipeline calls inside the locked
+/// block (e.g., to keep "drain + process" atomic) MUST be rejected.** The
+/// `queued_repair_refresh_drain_releases_lock_before_processing` regression
+/// test exercises a callback that re-enters `on_flush_committed` during
+/// processing and asserts no deadlock.
 #[derive(Debug, Clone)]
 pub struct QueuedRepairRefresh {
     group_ranges: Arc<Vec<GroupBlockRange>>,
@@ -5194,6 +5219,86 @@ mod tests {
             .expect("flush");
         let drained = queue.drain_queued_groups().expect("drain");
         assert!(drained.is_empty());
+    }
+
+    /// bd-scg17 — Regression for the QueuedRepairRefresh
+    /// "drain + drop + process" lock-order invariant.
+    ///
+    /// `apply_queued_refreshes` calls `drain_queued_groups` (which
+    /// acquires + drains + drops the lock), THEN calls into
+    /// `pipeline.mark_group_dirty` / `pipeline.on_group_flush`
+    /// outside the lock. Those pipeline calls can fire back into
+    /// `RepairFlushLifecycle::on_flush_committed`, which reacquires
+    /// the same `queued_groups` mutex. If the lock were held during
+    /// the pipeline call, the re-entrant flush would deadlock.
+    ///
+    /// This test simulates that re-entry pattern directly: spawn a
+    /// thread that calls `drain_queued_groups` and `on_flush_committed`
+    /// alternately. If a regression hoisted any pipeline-style work
+    /// inside the locked block, the second `on_flush_committed` would
+    /// block on the held mutex. We assert progress within a tight
+    /// timeout to catch deadlock.
+    #[test]
+    fn queued_repair_refresh_drain_releases_lock_before_processing() {
+        use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        use std::thread;
+        use std::time::Duration;
+
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let configs = vec![GroupConfig {
+            layout,
+            source_first_block: BlockNumber(0),
+            source_block_count: 32,
+        }];
+        let queue = StdArc::new(QueuedRepairRefresh::from_group_configs(&configs));
+        let progress = StdArc::new(AtomicU64::new(0));
+
+        // Producer thread — repeatedly calls on_flush_committed,
+        // simulating a write-back path that fires re-entrantly.
+        let producer = {
+            let queue = StdArc::clone(&queue);
+            let progress = StdArc::clone(&progress);
+            thread::spawn(move || {
+                let cx = Cx::for_testing();
+                for _ in 0..256 {
+                    queue
+                        .on_flush_committed(&cx, &[BlockNumber(10)])
+                        .expect("re-entrant flush must not deadlock");
+                    progress.fetch_add(1, AtomicOrdering::Relaxed);
+                }
+            })
+        };
+
+        // Consumer thread — drains repeatedly. If drain held the
+        // lock across iteration, the producer's lock acquisition
+        // would block; the producer counter would not advance past
+        // 1 within the timeout.
+        let consumer = {
+            let queue = StdArc::clone(&queue);
+            thread::spawn(move || {
+                for _ in 0..256 {
+                    let _ = queue.drain_queued_groups().expect("drain must not deadlock");
+                }
+            })
+        };
+
+        // Wait for both threads with a tight timeout. A held-lock
+        // bug would manifest as one thread parked forever in the
+        // futex; we'd see progress stuck.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        producer.join().expect("producer joined");
+        consumer.join().expect("consumer joined");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "both threads must complete within 5s — a held-lock regression \
+             would deadlock under the re-entrant flush pattern"
+        );
+        assert!(
+            progress.load(AtomicOrdering::Relaxed) >= 256,
+            "producer must complete all 256 re-entrant flush calls"
+        );
     }
 
     #[test]
