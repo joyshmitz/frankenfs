@@ -348,3 +348,8 @@ doc = false
 name = "fuzz_swarm_workload_harness"
 path = "fuzz_targets/fuzz_swarm_workload_harness.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_btrfs_parse_inode_refs"
+path = "fuzz_targets/fuzz_btrfs_parse_inode_refs.rs"
+doc = false
