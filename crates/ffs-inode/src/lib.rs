@@ -2654,6 +2654,33 @@ mod tests {
             prop_assert_eq!(decoded_nsec, nsec, "nanoseconds not preserved");
         }
 
+        /// bd-3u9j5 — cross-crate round-trip MR: ffs_inode encodes
+        /// (secs, nsec) into a u32; ffs_ondisk decodes via
+        /// Ext4Inode::extra_nsec / extra_epoch. Both sides must
+        /// agree on every input. Existing proptests check the
+        /// encoder against arithmetic-extracted values; this MR
+        /// goes through the canonical decoder so a regression that
+        /// drifted the encoder shift AND a compensating change to
+        /// the decoder gets caught.
+        #[test]
+        fn proptest_encode_decode_cross_crate_round_trip(
+            secs in 0_u64..=0x3_FFFF_FFFF_u64,
+            nsec in 0_u32..1_000_000_000,
+        ) {
+            let extra = encode_extra_timestamp(secs, nsec);
+            let decoded_nsec = Ext4Inode::extra_nsec(extra);
+            let decoded_epoch = Ext4Inode::extra_epoch(extra);
+            let expected_epoch = ((secs >> 32) & 0x3) as u32;
+            prop_assert_eq!(
+                decoded_nsec, nsec,
+                "ffs_inode encoder ↔ ffs_ondisk Ext4Inode::extra_nsec must agree on nsec"
+            );
+            prop_assert_eq!(
+                decoded_epoch, expected_epoch,
+                "ffs_inode encoder ↔ ffs_ondisk Ext4Inode::extra_epoch must agree on epoch bits"
+            );
+        }
+
         /// touch_atime only modifies atime fields, not mtime/ctime.
         #[test]
         fn proptest_touch_atime_isolation(
