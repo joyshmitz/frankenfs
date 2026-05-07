@@ -5,11 +5,11 @@ use ffs_block::ByteDevice;
 use ffs_core::{OpenFs, OpenOptions};
 use ffs_error::{FfsError, Result};
 use ffs_mvcc::persist::WalRecoveryReport;
-use ffs_mvcc::wal::{self, WalCommit, WalHeader, WalWrite, HEADER_SIZE as WAL_HEADER_SIZE};
+use ffs_mvcc::wal::{self, HEADER_SIZE as WAL_HEADER_SIZE, WalCommit, WalHeader, WalWrite};
 use ffs_mvcc::wal_replay::{ReplayOutcome as WalReplayOutcome, TailPolicy};
 use ffs_ondisk::EXT4_VALID_FS;
 use ffs_types::{
-    crc32c, BlockNumber, ByteOffset, CommitSeq, TxnId, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPER_MAGIC,
+    BlockNumber, ByteOffset, CommitSeq, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, TxnId, crc32c,
 };
 use libfuzzer_sys::fuzz_target;
 use std::path::{Path, PathBuf};
@@ -233,6 +233,11 @@ fn make_commit(
     }
 }
 
+fn corrupt_header_bytes(cursor: &mut ByteCursor<'_>) -> Vec<u8> {
+    let short_len = usize::from((cursor.next_u8() % 12) + 1);
+    vec![cursor.next_u8(); short_len]
+}
+
 fn base_wal_bytes(seed: SeedCase, cursor: &mut ByteCursor<'_>) -> Option<Vec<u8>> {
     if matches!(seed, SeedCase::NoWalPath) {
         return None;
@@ -241,8 +246,7 @@ fn base_wal_bytes(seed: SeedCase, cursor: &mut ByteCursor<'_>) -> Option<Vec<u8>
         return Some(Vec::new());
     }
     if matches!(seed, SeedCase::CorruptHeader) {
-        let short_len = usize::from((cursor.next_u8() % 12) + 1);
-        return Some(vec![cursor.next_u8(); short_len]);
+        return Some(corrupt_header_bytes(cursor));
     }
 
     let len_a = usize::from((cursor.next_u8() % 24) + 1);
@@ -275,7 +279,7 @@ fn base_wal_bytes(seed: SeedCase, cursor: &mut ByteCursor<'_>) -> Option<Vec<u8>
             bytes.extend_from_slice(&wal::encode_commit(&c1).ok()?);
             bytes.extend_from_slice(&wal::encode_commit(&c2).ok()?);
         }
-        SeedCase::CorruptHeader => unreachable!(),
+        SeedCase::CorruptHeader => return Some(corrupt_header_bytes(cursor)),
     }
 
     Some(bytes)
