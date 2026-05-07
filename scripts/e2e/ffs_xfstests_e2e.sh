@@ -1826,7 +1826,6 @@ dry_run = int(sys.argv[6])
 
 selected = [line.strip() for line in selected_file.read_text(encoding="utf-8").splitlines() if line.strip()]
 status = {tid: "not_run" for tid in selected}
-seen = set()
 rank = {"not_run": 1, "planned": 1, "skipped": 2, "passed": 3, "failed": 4}
 
 def line_mentions_test_id(line: str, test_id: str) -> bool:
@@ -1848,13 +1847,7 @@ if check_log.exists():
             elif re.search(r"\b(pass|passed|ok|success)\b", low):
                 candidate = "passed"
             if candidate and rank[candidate] >= rank[status[tid]]:
-                seen.add(tid)
                 status[tid] = candidate
-
-if check_rc == 0 and dry_run == 0:
-    for tid, current in status.items():
-        if current == "not_run" and tid not in seen:
-            status[tid] = "passed"
 
 tests = [{"id": tid, "status": status[tid]} for tid in selected]
 counts = {"passed": 0, "failed": 0, "skipped": 0, "not_run": 0, "planned": 0}

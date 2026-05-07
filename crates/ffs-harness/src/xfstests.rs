@@ -1590,14 +1590,6 @@ pub fn parse_check_output(
         }
     }
 
-    if check_rc == 0 && !dry_run {
-        for case in &mut cases {
-            if case.status == XfstestsStatus::NotRun && case.output_snippet.is_none() {
-                case.status = XfstestsStatus::Passed;
-            }
-        }
-    }
-
     summarize_run("check-log", check_rc, dry_run, cases)
 }
 
@@ -2666,11 +2658,14 @@ generic/030  skipped: needs root\n";
     }
 
     #[test]
-    fn parse_check_output_promotes_not_run_to_passed_on_clean_non_dry_run() {
-        let selected = vec!["generic/001".to_owned()];
-        let run = parse_check_output(&selected, "", 0, false);
+    fn parse_check_output_preserves_unmentioned_rows_on_clean_non_dry_run() {
+        let selected = vec!["generic/001".to_owned(), "generic/002".to_owned()];
+        let run = parse_check_output(&selected, "generic/001  1s ... pass\n", 0, false);
+
         assert_eq!(run.tests[0].status, XfstestsStatus::Passed);
+        assert_eq!(run.tests[1].status, XfstestsStatus::NotRun);
         assert_eq!(run.passed, 1);
+        assert_eq!(run.not_run, 1);
     }
 
     #[test]
