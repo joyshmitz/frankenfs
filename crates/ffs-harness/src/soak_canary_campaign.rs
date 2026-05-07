@@ -698,8 +698,9 @@ fn find_known_quarantine<'a>(
     workload_id: &str,
     signature: &str,
 ) -> Option<&'a KnownFlakeQuarantine> {
+    // Flake signatures are public classifier labels, not secrets.
     policy.known_flake_quarantines.iter().find(|quarantine| {
-        quarantine.workload_id == workload_id && quarantine.signature == signature
+        quarantine.workload_id == workload_id && quarantine.signature.as_str().eq(signature)
     })
 }
 
