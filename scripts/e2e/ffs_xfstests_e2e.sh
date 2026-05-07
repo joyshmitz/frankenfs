@@ -1398,7 +1398,7 @@ write_safe_dry_run_artifacts() {
         printf '  %s planned\n' "${SELECTED_TESTS[@]}"
     } >"$CHECK_LOG"
     {
-        echo "safe dry-run stdout placeholder"
+        echo "safe dry-run stdout marker"
         echo "planned command: ./check -n ${SELECTED_TESTS[*]}"
     } >"$ARTIFACT_DIR/stdout.log"
     : >"$ARTIFACT_DIR/stderr.log"
@@ -2033,7 +2033,7 @@ if [[ "$EFFECTIVE_MODE" == "plan" ]]; then
         printf '  %s planned\n' "${SELECTED_TESTS[@]}"
     } >"$CHECK_LOG"
     {
-        echo "plan mode stdout placeholder"
+        echo "plan mode stdout marker"
         echo "planned command: ./check -n ${SELECTED_TESTS[*]}"
     } >"$ARTIFACT_DIR/stdout.log"
     : >"$ARTIFACT_DIR/stderr.log"
