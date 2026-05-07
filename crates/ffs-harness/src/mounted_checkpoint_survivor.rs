@@ -246,7 +246,7 @@ fn validate_scenario_hashes(scenario: &MountedCheckpointScenario, errors: &mut V
         ));
     }
     let needs_post_hash = scenario.kind != "process_termination_pre_fsync"
-        || scenario.recovery_classification == "expected_survivor_set";
+        || is_expected_survivor_set_classification(&scenario.recovery_classification);
     if needs_post_hash && !is_valid_sha256(&scenario.post_operation_image_hash) {
         errors.push(format!(
             "scenario `{}` post_operation_image_hash must be sha256:<64-hex> for this lifecycle",
@@ -383,7 +383,7 @@ fn validate_kind_specific_invariants(
                 scenario.scenario_id
             ));
         }
-        if scenario.recovery_classification != "expected_survivor_set" {
+        if !is_expected_survivor_set_classification(&scenario.recovery_classification) {
             errors.push(format!(
                 "scenario `{}` clean_unmount must classify as expected_survivor_set",
                 scenario.scenario_id
@@ -391,7 +391,7 @@ fn validate_kind_specific_invariants(
         }
     }
     if scenario.process_control == "kill_minus_nine_refused"
-        && scenario.recovery_classification == "expected_survivor_set"
+        && is_expected_survivor_set_classification(&scenario.recovery_classification)
     {
         errors.push(format!(
             "scenario `{}` kill_minus_nine_refused cannot also claim expected_survivor_set; record the refusal classification instead",
@@ -427,6 +427,10 @@ fn is_valid_sha256(value: &str) -> bool {
     suffix.len() == 64 && suffix.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
+fn is_expected_survivor_set_classification(value: &str) -> bool {
+    matches!(value, "expected_survivor_set")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +438,15 @@ mod tests {
     fn fixture_matrix() -> MountedCheckpointSurvivorMatrix {
         parse_mounted_checkpoint_survivor(DEFAULT_MOUNTED_CHECKPOINT_SURVIVOR_JSON)
             .expect("default mounted checkpoint survivor matrix parses")
+    }
+
+    #[test]
+    fn default_matrix_report_snapshot() {
+        let report = validate_default_mounted_checkpoint_survivor()
+            .expect("default mounted checkpoint survivor validates");
+        let json = serde_json::to_string_pretty(&report)
+            .expect("default mounted checkpoint survivor report serializes");
+        insta::assert_snapshot!("default_matrix_report_snapshot", json);
     }
 
     #[test]

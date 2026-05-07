@@ -1,0 +1,20 @@
+---
+source: crates/ffs-harness/src/mounted_checkpoint_survivor.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "matrix_id": "frankenfs_mounted_checkpoint_survivor_v1",
+  "bead_id": "bd-zm0wr",
+  "scenario_count": 6,
+  "kinds_seen": [
+    "clean_unmount",
+    "forced_unmount",
+    "fsyncdir_boundary",
+    "process_termination_post_fsync",
+    "process_termination_pre_fsync",
+    "reopen_after_write"
+  ],
+  "valid": true,
+  "errors": []
+}
