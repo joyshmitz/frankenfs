@@ -1043,6 +1043,60 @@ mod tests {
         assert_eq!(MIN_COMMIT_RECORD_SIZE, 29);
     }
 
+    /// bd-sihy5 - byte-layout pin for `encode_commit`. Round-trip tests
+    /// prove encoder/decoder agreement, but a symmetric drift in both sides
+    /// could still move fields away from the documented WAL wire offsets.
+    #[test]
+    fn wal_commit_encode_byte_layout() {
+        let commit = WalCommit {
+            commit_seq: CommitSeq(0x0102_0304_0506_0708),
+            txn_id: TxnId(0x1112_1314_1516_1718),
+            writes: vec![
+                WalWrite {
+                    block: BlockNumber(0x2122_2324_2526_2728),
+                    data: vec![0x31, 0x32, 0x33],
+                },
+                WalWrite {
+                    block: BlockNumber(0x4142_4344_4546_4748),
+                    data: vec![0x51, 0x52],
+                },
+            ],
+        };
+        let encoded = encode_commit(&commit).expect("encode commit");
+        assert_eq!(encoded.len(), 58);
+
+        // record_len @ 0..4, excluding the 4-byte length field.
+        assert_eq!(&encoded[0..4], &54_u32.to_le_bytes());
+        // record_type @ 4.
+        assert_eq!(encoded[4], RECORD_TYPE_COMMIT);
+        // commit_seq @ 5..13.
+        assert_eq!(&encoded[5..13], &0x0102_0304_0506_0708_u64.to_le_bytes());
+        // txn_id @ 13..21.
+        assert_eq!(&encoded[13..21], &0x1112_1314_1516_1718_u64.to_le_bytes());
+        // num_writes @ 21..25.
+        assert_eq!(&encoded[21..25], &2_u32.to_le_bytes());
+
+        // write[0]: block @ 25..33, data_len @ 33..37, data @ 37..40.
+        assert_eq!(&encoded[25..33], &0x2122_2324_2526_2728_u64.to_le_bytes());
+        assert_eq!(&encoded[33..37], &3_u32.to_le_bytes());
+        assert_eq!(&encoded[37..40], &[0x31, 0x32, 0x33]);
+
+        // write[1]: block @ 40..48, data_len @ 48..52, data @ 52..54.
+        assert_eq!(&encoded[40..48], &0x4142_4344_4546_4748_u64.to_le_bytes());
+        assert_eq!(&encoded[48..52], &2_u32.to_le_bytes());
+        assert_eq!(&encoded[52..54], &[0x51, 0x52]);
+
+        // record_crc @ 54..58 over the body bytes @ 4..54.
+        let stored_crc = u32::from_le_bytes([encoded[54], encoded[55], encoded[56], encoded[57]]);
+        let computed_crc = crc32c::crc32c(&encoded[4..54]);
+        assert_eq!(stored_crc, computed_crc);
+
+        match decode_commit(&encoded) {
+            DecodeResult::Commit(decoded) => assert_eq!(decoded, commit),
+            other => panic!("expected Commit, got {other:?}"),
+        }
+    }
+
     /// OQ7 validation: record type for COMMIT is 1.
     #[test]
     fn oq7_record_type_commit_is_one() {
