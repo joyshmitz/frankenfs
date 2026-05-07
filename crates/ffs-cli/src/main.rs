@@ -838,6 +838,9 @@ enum Command {
         /// Show only the last N records.
         #[arg(long)]
         tail: Option<usize>,
+        /// Filter ledger records to one block group.
+        #[arg(long = "block-group")]
+        block_group: Option<u32>,
         /// Preset query:
         /// replay-anomalies, repair-failures, pressure-transitions, contention,
         /// metrics, cache, mvcc, repair-live.
@@ -1862,6 +1865,7 @@ fn run() -> Result<()> {
             json,
             event_type,
             tail,
+            block_group,
             preset,
             summary,
         } => cmd_evidence::evidence_cmd(
@@ -1870,6 +1874,7 @@ fn run() -> Result<()> {
             event_type.as_deref(),
             tail,
             preset.as_deref(),
+            block_group,
             summary,
         ),
         Command::Mkfs {
@@ -9310,7 +9315,7 @@ mod tests {
             "{\"timestamp_ns\":3,\"event_type\":\"repair_failed\",\"block_group\":3}\n",
         );
         with_temp_image_path(ledger.as_bytes(), |path| {
-            let records = load_evidence_records(&path, Some("repair_failed"), None, None)
+            let records = load_evidence_records(&path, Some("repair_failed"), None, None, None)
                 .expect("filtered evidence read should succeed");
             assert_eq!(records.len(), 2);
             assert!(
@@ -9332,7 +9337,7 @@ mod tests {
             "{\"timestamp_ns\":4,\"event_type\":\"repair_failed\",\"block_group\":4}\n",
         );
         with_temp_image_path(ledger.as_bytes(), |path| {
-            let records = load_evidence_records(&path, Some("repair_failed"), Some(2), None)
+            let records = load_evidence_records(&path, Some("repair_failed"), Some(2), None, None)
                 .expect("tailed evidence read should succeed");
             assert_eq!(records.len(), 2);
             assert_eq!(records[0].timestamp_ns, 3);
@@ -9343,13 +9348,50 @@ mod tests {
     }
 
     #[test]
+    fn load_evidence_records_filters_by_block_group() {
+        let ledger = concat!(
+            "{\"timestamp_ns\":1,\"event_type\":\"repair_failed\",\"block_group\":1}\n",
+            "{\"timestamp_ns\":2,\"event_type\":\"repair_succeeded\",\"block_group\":7}\n",
+            "{\"timestamp_ns\":3,\"event_type\":\"repair_failed\",\"block_group\":7}\n",
+            "{\"timestamp_ns\":4,\"event_type\":\"repair_failed\",\"block_group\":9}\n",
+        );
+        with_temp_image_path(ledger.as_bytes(), |path| {
+            let records = load_evidence_records(&path, Some("repair_failed"), None, None, Some(7))
+                .expect("block-group evidence filter should succeed");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].timestamp_ns, 3);
+            assert_eq!(records[0].event_type, EvidenceEventType::RepairFailed);
+            assert_eq!(records[0].block_group, 7);
+        });
+    }
+
+    #[test]
+    fn load_evidence_records_tail_applies_after_block_group_filter() {
+        let ledger = concat!(
+            "{\"timestamp_ns\":1,\"event_type\":\"repair_failed\",\"block_group\":7}\n",
+            "{\"timestamp_ns\":2,\"event_type\":\"repair_failed\",\"block_group\":9}\n",
+            "{\"timestamp_ns\":3,\"event_type\":\"repair_failed\",\"block_group\":7}\n",
+            "{\"timestamp_ns\":4,\"event_type\":\"repair_failed\",\"block_group\":7}\n",
+        );
+        with_temp_image_path(ledger.as_bytes(), |path| {
+            let records =
+                load_evidence_records(&path, Some("repair_failed"), Some(2), None, Some(7))
+                    .expect("tail should apply after block-group filtering");
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].timestamp_ns, 3);
+            assert_eq!(records[1].timestamp_ns, 4);
+            assert!(records.iter().all(|record| record.block_group == 7));
+        });
+    }
+
+    #[test]
     fn load_evidence_records_tail_zero_returns_empty() {
         let ledger = concat!(
             "{\"timestamp_ns\":1,\"event_type\":\"repair_failed\",\"block_group\":1}\n",
             "{\"timestamp_ns\":2,\"event_type\":\"repair_failed\",\"block_group\":2}\n",
         );
         with_temp_image_path(ledger.as_bytes(), |path| {
-            let records = load_evidence_records(&path, Some("repair_failed"), Some(0), None)
+            let records = load_evidence_records(&path, Some("repair_failed"), Some(0), None, None)
                 .expect("tail=0 evidence read should succeed");
             assert!(
                 records.is_empty(),
@@ -9370,7 +9412,7 @@ mod tests {
         );
 
         with_temp_image_path(&ledger, |path| {
-            let records = load_evidence_records(&path, Some("repair_failed"), None, None)
+            let records = load_evidence_records(&path, Some("repair_failed"), None, None, None)
                 .expect("evidence read should tolerate non-utf8 torn lines");
             assert_eq!(records.len(), 2);
             assert_eq!(records[0].timestamp_ns, 1);
@@ -9389,7 +9431,7 @@ mod tests {
         );
         with_temp_image_path(ledger.as_bytes(), |path| {
             // replay-anomalies preset: wal_recovery + txn_aborted + serialization_conflict
-            let records = load_evidence_records(&path, None, None, Some("replay-anomalies"))
+            let records = load_evidence_records(&path, None, None, Some("replay-anomalies"), None)
                 .expect("preset filter should work");
             assert_eq!(records.len(), 3);
             assert_eq!(records[0].event_type, EvidenceEventType::WalRecovery);
@@ -9412,7 +9454,7 @@ mod tests {
             "{\"timestamp_ns\":6,\"event_type\":\"repair_succeeded\",\"block_group\":1}\n",
         );
         with_temp_image_path(ledger.as_bytes(), |path| {
-            let records = load_evidence_records(&path, None, None, Some("repair-failures"))
+            let records = load_evidence_records(&path, None, None, Some("repair-failures"), None)
                 .expect("repair-failures preset should work");
             assert_eq!(records.len(), 5);
             // wal_recovery should be excluded
@@ -9434,8 +9476,9 @@ mod tests {
             "{\"timestamp_ns\":5,\"event_type\":\"repair_failed\",\"block_group\":2}\n",
         );
         with_temp_image_path(ledger.as_bytes(), |path| {
-            let records = load_evidence_records(&path, None, None, Some("pressure-transitions"))
-                .expect("pressure-transitions preset should work");
+            let records =
+                load_evidence_records(&path, None, None, Some("pressure-transitions"), None)
+                    .expect("pressure-transitions preset should work");
             assert_eq!(records.len(), 4);
             // repair_failed should be excluded
             assert!(
@@ -9457,7 +9500,7 @@ mod tests {
             "{\"timestamp_ns\":6,\"event_type\":\"merge_rejected\",\"block_group\":1}\n",
         );
         with_temp_image_path(ledger.as_bytes(), |path| {
-            let records = load_evidence_records(&path, None, None, Some("contention"))
+            let records = load_evidence_records(&path, None, None, Some("contention"), None)
                 .expect("contention preset should work");
             assert_eq!(records.len(), 5);
             assert!(
@@ -9484,8 +9527,9 @@ mod tests {
             "{\"timestamp_ns\":6,\"event_type\":\"durability_policy_changed\",\"block_group\":0}\n",
         );
         with_temp_image_path(ledger.as_bytes(), |path| {
-            let records = load_evidence_records(&path, None, Some(2), Some("repair-failures"))
-                .expect("preset+tail evidence read should succeed");
+            let records =
+                load_evidence_records(&path, None, Some(2), Some("repair-failures"), None)
+                    .expect("preset+tail evidence read should succeed");
             assert_eq!(records.len(), 2);
             assert_eq!(records[0].timestamp_ns, 3);
             assert_eq!(records[1].timestamp_ns, 5);
@@ -9550,7 +9594,7 @@ mod tests {
 
         for (preset, ledger, expected_types, expected_timestamps) in cases {
             with_temp_image_path(ledger.as_bytes(), |path| {
-                let records = load_evidence_records(&path, None, Some(2), Some(preset))
+                let records = load_evidence_records(&path, None, Some(2), Some(preset), None)
                     .expect("preset+tail evidence read should succeed");
                 assert_eq!(records.len(), 2, "preset {preset}");
                 assert_eq!(
@@ -9902,6 +9946,7 @@ mod tests {
                     None,
                     None,
                     Some("metrics"),
+                    None,
                     true,
                 )
                 .expect_err("metrics preset should reject --summary");
@@ -9937,6 +9982,7 @@ mod tests {
                     None,
                     Some(5),
                     Some("metrics"),
+                    None,
                     false,
                 )
                 .expect_err("metrics preset should reject --tail");
@@ -9944,6 +9990,41 @@ mod tests {
                     err.to_string()
                         .contains("--tail is only supported for ledger-backed evidence presets")
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn evidence_metrics_preset_rejects_block_group_filter() {
+        let bundle = serde_json::json!({
+            "metrics": {
+                "requests_total": 1,
+                "requests_ok": 1,
+                "requests_err": 0,
+                "bytes_read": 64,
+                "requests_throttled": 0,
+                "requests_shed": 0
+            }
+        });
+
+        with_temp_image_path(
+            serde_json::to_string_pretty(&bundle)
+                .expect("serialize bundle")
+                .as_bytes(),
+            |path| {
+                let err = crate::cmd_evidence::evidence_cmd(
+                    &path,
+                    false,
+                    None,
+                    None,
+                    Some("metrics"),
+                    Some(7),
+                    false,
+                )
+                .expect_err("metrics preset should reject --block-group");
+                assert!(err.to_string().contains(
+                    "--block-group is only supported for ledger-backed evidence presets"
+                ));
             },
         );
     }
@@ -9967,7 +10048,7 @@ mod tests {
         );
         with_temp_image_path(ledger.as_bytes(), |path| {
             let records =
-                load_evidence_records(&path, None, None, None).expect("load should succeed");
+                load_evidence_records(&path, None, None, None, None).expect("load should succeed");
             let summary = crate::cmd_evidence::build_summary_for_test(&records, None);
             assert_eq!(summary.total_records, 6);
             assert_eq!(summary.time_span_ns, Some((100, 600)));
@@ -10019,7 +10100,7 @@ mod tests {
         );
         with_temp_image_path(ledger.as_bytes(), |path| {
             let records =
-                load_evidence_records(&path, None, None, Some("contention")).expect("load");
+                load_evidence_records(&path, None, None, Some("contention"), None).expect("load");
             let summary = crate::cmd_evidence::build_summary_for_test(&records, Some("contention"));
             let contention = summary
                 .contention_summary
@@ -10055,7 +10136,7 @@ mod tests {
         let ledger = "{\"timestamp_ns\":100,\"event_type\":\"repair_failed\",\"block_group\":1}\n";
         with_temp_image_path(ledger.as_bytes(), |path| {
             let records =
-                load_evidence_records(&path, None, None, None).expect("load should succeed");
+                load_evidence_records(&path, None, None, None, None).expect("load should succeed");
             let summary =
                 crate::cmd_evidence::build_summary_for_test(&records, Some("repair-failures"));
             let json_val = serde_json::to_value(&summary).expect("serialize summary");
@@ -10082,7 +10163,7 @@ mod tests {
         );
         with_temp_image_path(ledger.as_bytes(), |path| {
             let records =
-                load_evidence_records(&path, None, None, None).expect("load should succeed");
+                load_evidence_records(&path, None, None, None, None).expect("load should succeed");
             let summary =
                 crate::cmd_evidence::build_summary_for_test(&records, Some("repair-failures"));
             assert_eq!(summary.block_groups_seen, vec![3, 7]);
@@ -12571,6 +12652,8 @@ mod tests {
             "repair_succeeded",
             "--tail",
             "25",
+            "--block-group",
+            "7",
             "/tmp/evidence.jsonl",
         ])
         .expect("evidence command should parse");
@@ -12581,6 +12664,7 @@ mod tests {
                 json,
                 event_type,
                 tail,
+                block_group,
                 preset,
                 summary,
             } => {
@@ -12588,6 +12672,7 @@ mod tests {
                 assert!(json);
                 assert_eq!(event_type.as_deref(), Some("repair_succeeded"));
                 assert_eq!(tail, Some(25));
+                assert_eq!(block_group, Some(7));
                 assert_eq!(preset, None);
                 assert!(!summary);
             }
@@ -12609,6 +12694,7 @@ mod tests {
                 json,
                 event_type,
                 tail,
+                block_group,
                 preset,
                 summary,
             } => {
@@ -12616,6 +12702,7 @@ mod tests {
                 assert!(!json);
                 assert_eq!(event_type, None);
                 assert_eq!(tail, None);
+                assert_eq!(block_group, None);
                 assert_eq!(preset, None);
                 assert!(!summary);
             }
@@ -12644,6 +12731,7 @@ mod tests {
                 json,
                 event_type,
                 tail,
+                block_group,
                 preset,
                 summary,
             } => {
@@ -12651,6 +12739,7 @@ mod tests {
                 assert!(!json);
                 assert_eq!(event_type, None);
                 assert_eq!(tail, None);
+                assert_eq!(block_group, None);
                 assert_eq!(preset.as_deref(), Some("replay-anomalies"));
                 assert!(summary);
             }

@@ -991,6 +991,7 @@ fn validate_evidence_args(
     preset: Option<&str>,
     event_type_filter: Option<&str>,
     tail: Option<usize>,
+    block_group_filter: Option<u32>,
     summary: bool,
 ) -> Result<Option<PresetMode>> {
     let preset_kind = if let Some(preset_name) = preset {
@@ -1020,6 +1021,9 @@ fn validate_evidence_args(
     if matches!(preset_kind, Some(PresetMode::Metrics)) {
         if tail.is_some() {
             bail!("--tail is only supported for ledger-backed evidence presets");
+        }
+        if block_group_filter.is_some() {
+            bail!("--block-group is only supported for ledger-backed evidence presets");
         }
         if summary {
             bail!("--summary is only supported for ledger-backed evidence presets");
@@ -1117,6 +1121,7 @@ pub fn evidence_cmd(
     event_type_filter: Option<&str>,
     tail: Option<usize>,
     preset: Option<&str>,
+    block_group_filter: Option<u32>,
     summary: bool,
 ) -> Result<()> {
     let command_span = info_span!(
@@ -1128,13 +1133,15 @@ pub fn evidence_cmd(
         event_type_filter = event_type_filter.unwrap_or(""),
         tail = tail.unwrap_or(0),
         preset = preset.unwrap_or(""),
+        block_group_filter = block_group_filter.unwrap_or(0),
         summary = summary,
     );
     let _command_guard = command_span.enter();
     let started = Instant::now();
     info!(target: "ffs::cli::evidence", "evidence_start");
 
-    let preset_kind = validate_evidence_args(preset, event_type_filter, tail, summary)?;
+    let preset_kind =
+        validate_evidence_args(preset, event_type_filter, tail, block_group_filter, summary)?;
     if matches!(preset_kind, Some(PresetMode::Metrics)) {
         let preset_name =
             preset.ok_or_else(|| anyhow::anyhow!("metrics preset kind requires preset name"))?;
@@ -1143,7 +1150,7 @@ pub fn evidence_cmd(
         return Ok(());
     }
 
-    let records = load_evidence_records(path, event_type_filter, tail, preset)?;
+    let records = load_evidence_records(path, event_type_filter, tail, preset, block_group_filter)?;
     emit_ledger_output(&records, json, preset, summary)?;
     log_ledger_completion(started, &records, preset, summary);
     Ok(())
@@ -1156,6 +1163,7 @@ pub fn load_evidence_records(
     event_type_filter: Option<&str>,
     tail: Option<usize>,
     preset: Option<&str>,
+    block_group_filter: Option<u32>,
 ) -> Result<Vec<EvidenceRecord>> {
     let preset_types = preset.and_then(preset_event_types);
 
@@ -1200,6 +1208,12 @@ pub fn load_evidence_records(
         // Apply preset multi-type filter.
         if let Some(types) = preset_types {
             if !types.contains(&record.event_type) {
+                continue;
+            }
+        }
+
+        if let Some(block_group) = block_group_filter {
+            if record.block_group != block_group {
                 continue;
             }
         }
