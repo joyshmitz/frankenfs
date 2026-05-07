@@ -161,6 +161,15 @@ regressions = []
 new_passes = []
 unchanged = []
 total_compared = 0
+current_failures = []
+
+for test_id, actual in current_status.items():
+    if actual == "failed":
+        current_failures.append({
+            "test_id": test_id,
+            "baseline": baseline_status.get(test_id),
+            "current": actual,
+        })
 
 for test_id, expected in baseline_status.items():
     actual = current_status.get(test_id)
@@ -197,7 +206,7 @@ unexpected_regressions = [r for r in regressions if not r["allowlisted"]]
 child_run_failed = child_exit_code != 0
 if unexpected_regressions:
     verdict = "fail"
-elif strict and (regressions or child_run_failed):
+elif strict and (current_failures or regressions or child_run_failed):
     verdict = "fail"
 else:
     verdict = "pass"
@@ -210,10 +219,12 @@ report = {
     "regression_count": len(regressions),
     "unexpected_regression_count": len(unexpected_regressions),
     "new_pass_count": len(new_passes),
+    "current_failure_count": len(current_failures),
     "child_exit_code": child_exit_code,
     "child_run_failed": child_run_failed,
     "regressions": regressions,
     "new_passes": new_passes,
+    "current_failures": current_failures,
 }
 
 report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -226,9 +237,12 @@ print(f"Compared: {total_compared} tests", file=sys.stderr)
 print(f"Unchanged: {len(unchanged)}", file=sys.stderr)
 print(f"New passes: {len(new_passes)}", file=sys.stderr)
 print(f"Regressions: {len(regressions)} ({len(unexpected_regressions)} unexpected)", file=sys.stderr)
+print(f"Current failures: {len(current_failures)}", file=sys.stderr)
 print(f"Child exit code: {child_exit_code}", file=sys.stderr)
 if strict and child_run_failed:
     print("Strict mode treats the xfstests child failure as blocking.", file=sys.stderr)
+if strict and current_failures:
+    print("Strict mode treats current failed rows as blocking.", file=sys.stderr)
 
 if new_passes:
     print(f"\n  New passes (update baseline!):", file=sys.stderr)
@@ -242,6 +256,13 @@ if regressions:
         status = r.get("allowlist_status")
         status_note = f" allowlist_status={status}" if status else ""
         print(f"    {r['test_id']}: {r['baseline']} -> {r['current']}{tag}{status_note}", file=sys.stderr)
+
+if current_failures:
+    print(f"\n  Current failures:", file=sys.stderr)
+    for failure in current_failures:
+        baseline = failure.get("baseline")
+        baseline_note = f" baseline={baseline}" if baseline is not None else " baseline=<missing>"
+        print(f"    {failure['test_id']}: current={failure['current']}{baseline_note}", file=sys.stderr)
 
 print(f"\nReport: {report_path}", file=sys.stderr)
 sys.exit(0 if verdict == "pass" else 1)
