@@ -1075,6 +1075,13 @@ mod tests {
     }
 
     #[test]
+    fn summary_table_canonical_snapshot() {
+        let taxonomy = Taxonomy::canonical();
+        let table = taxonomy.summary_table();
+        insta::assert_snapshot!("summary_table_canonical", table);
+    }
+
+    #[test]
     fn taxonomy_version_is_set() {
         let taxonomy = Taxonomy::canonical();
         assert_eq!(taxonomy.version, 1);

@@ -1,0 +1,66 @@
+---
+source: crates/ffs-harness/src/benchmark_taxonomy.rs
+expression: table
+---
+| Operation ID | Family | Metric | Crate | Warn% | Fail% | Noise% |
+|---|---|---|---|---|---|---|
+| `block_cache_arc_compile_like` | Block Cache (ARC/S3-FIFO workloads) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `block_cache_arc_concurrent_hot_read_64threads` | Block Cache (ARC/S3-FIFO workloads) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `block_cache_arc_database_like` | Block Cache (ARC/S3-FIFO workloads) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `block_cache_arc_mixed_seq70_hot30` | Block Cache (ARC/S3-FIFO workloads) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `block_cache_arc_sequential_scan` | Block Cache (ARC/S3-FIFO workloads) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `block_cache_arc_zipf_distribution` | Block Cache (ARC/S3-FIFO workloads) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `block_cache_s3fifo_compile_like` | Block Cache (ARC/S3-FIFO workloads) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `block_cache_s3fifo_concurrent_hot_read_64threads` | Block Cache (ARC/S3-FIFO workloads) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `block_cache_s3fifo_database_like` | Block Cache (ARC/S3-FIFO workloads) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `block_cache_s3fifo_mixed_seq70_hot30` | Block Cache (ARC/S3-FIFO workloads) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `block_cache_s3fifo_sequential_scan` | Block Cache (ARC/S3-FIFO workloads) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `block_cache_s3fifo_zipf_distribution` | Block Cache (ARC/S3-FIFO workloads) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `block_cache_sharded_arc_concurrent_hot_read_64threads` | Block Cache (ARC/S3-FIFO workloads) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `block_cache_sharded_s3fifo_concurrent_hot_read_64threads` | Block Cache (ARC/S3-FIFO workloads) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `cli_metadata_parse_conformance` | Metadata Ops (CLI/harness) | Latency | `ffs-harness` | 10 | 20 | 5 |
+| `degraded_backpressure_contention_4threads` | Degraded Mode (backpressure/corruption) | Throughput | `ffs-fuse` | 30 | 60 | 15 |
+| `degraded_fsm_tick_latency` | Degraded Mode (backpressure/corruption) | Latency | `ffs-core` | 30 | 60 | 15 |
+| `degraded_throughput_critical_mixed` | Degraded Mode (backpressure/corruption) | Throughput | `ffs-fuse` | 30 | 60 | 15 |
+| `degraded_throughput_critical_read` | Degraded Mode (backpressure/corruption) | Throughput | `ffs-fuse` | 30 | 60 | 15 |
+| `degraded_throughput_critical_write` | Degraded Mode (backpressure/corruption) | Throughput | `ffs-fuse` | 30 | 60 | 15 |
+| `degraded_throughput_warning_mixed` | Degraded Mode (backpressure/corruption) | Throughput | `ffs-fuse` | 30 | 60 | 15 |
+| `degraded_throughput_warning_read` | Degraded Mode (backpressure/corruption) | Throughput | `ffs-fuse` | 30 | 60 | 15 |
+| `degraded_throughput_warning_write` | Degraded Mode (backpressure/corruption) | Throughput | `ffs-fuse` | 30 | 60 | 15 |
+| `extent_resolve_depth0_cached` | Parser (on-disk structure parsing) | Latency | `ffs-extent` | 8 | 15 | 3 |
+| `extent_resolve_depth1_repeated` | Parser (on-disk structure parsing) | Latency | `ffs-extent` | 8 | 15 | 3 |
+| `extent_resolve_depth1_uncached` | Parser (on-disk structure parsing) | Latency | `ffs-extent` | 8 | 15 | 3 |
+| `extent_resolve_range_50blocks` | Parser (on-disk structure parsing) | Latency | `ffs-extent` | 8 | 15 | 3 |
+| `fixture_validation` | Metadata Ops (CLI/harness) | Latency | `ffs-harness` | 10 | 20 | 5 |
+| `fsync_batch_100` | Write Path (seq/random/fsync) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `fsync_single_write` | Write Path (seq/random/fsync) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `metadata_parity_cli` | Metadata Ops (CLI/harness) | Latency | `ffs-harness` | 10 | 20 | 5 |
+| `metadata_parity_harness` | Metadata Ops (CLI/harness) | Latency | `ffs-harness` | 10 | 20 | 5 |
+| `mount_cold` | Mount (FUSE lifecycle) | Latency | `ffs-fuse` | 25 | 50 | 10 |
+| `mount_recovery` | Mount (FUSE lifecycle) | Latency | `ffs-fuse` | 25 | 50 | 10 |
+| `mount_runtime_backpressure_degraded` | Degraded Mode (backpressure/corruption) | Latency | `ffs-fuse` | 30 | 60 | 15 |
+| `mount_runtime_backpressure_emergency` | Degraded Mode (backpressure/corruption) | Latency | `ffs-fuse` | 30 | 60 | 15 |
+| `mount_runtime_backpressure_normal` | Degraded Mode (backpressure/corruption) | Latency | `ffs-fuse` | 30 | 60 | 15 |
+| `mount_runtime_metrics_record_throughput` | Mount (FUSE lifecycle) | Latency | `ffs-fuse` | 25 | 50 | 10 |
+| `mount_runtime_per_core_aggregate_metrics` | Mount (FUSE lifecycle) | Latency | `ffs-fuse` | 25 | 50 | 10 |
+| `mount_runtime_per_core_route_inode` | Mount (FUSE lifecycle) | Latency | `ffs-fuse` | 25 | 50 | 10 |
+| `mount_runtime_per_core_route_lookup` | Mount (FUSE lifecycle) | Latency | `ffs-fuse` | 25 | 50 | 10 |
+| `mount_runtime_per_core_should_steal` | Mount (FUSE lifecycle) | Latency | `ffs-fuse` | 25 | 50 | 10 |
+| `mount_warm` | Mount (FUSE lifecycle) | Latency | `ffs-fuse` | 25 | 50 | 10 |
+| `mvcc_commit_fcw` | Concurrency (Bw-tree/WAL/MVCC) | Latency | `ffs-mvcc` | 20 | 40 | 8 |
+| `mvcc_commit_ssi_5reads` | Concurrency (Bw-tree/WAL/MVCC) | Latency | `ffs-mvcc` | 20 | 40 | 8 |
+| `mvcc_contention_2writers` | Concurrency (Bw-tree/WAL/MVCC) | Latency | `ffs-mvcc` | 20 | 40 | 8 |
+| `mvcc_contention_4writers` | Concurrency (Bw-tree/WAL/MVCC) | Latency | `ffs-mvcc` | 20 | 40 | 8 |
+| `mvcc_contention_8writers` | Concurrency (Bw-tree/WAL/MVCC) | Latency | `ffs-mvcc` | 20 | 40 | 8 |
+| `raptorq_decode_group_16blocks` | Repair (scrub/RaptorQ) | Latency | `ffs-repair` | 10 | 20 | 5 |
+| `raptorq_encode_group_16blocks` | Repair (scrub/RaptorQ) | Latency | `ffs-repair` | 10 | 20 | 5 |
+| `read_metadata_inspect_ext4_reference` | Metadata Ops (CLI/harness) | Latency | `ffs-harness` | 10 | 20 | 5 |
+| `read_metadata_scrub_ext4_reference` | Metadata Ops (CLI/harness) | Latency | `ffs-harness` | 10 | 20 | 5 |
+| `repair_symbol_refresh_staleness_latency` | Repair (scrub/RaptorQ) | Latency | `ffs-repair` | 10 | 20 | 5 |
+| `scrub_clean_256blocks` | Repair (scrub/RaptorQ) | Latency | `ffs-repair` | 10 | 20 | 5 |
+| `scrub_corrupted_256blocks` | Repair (scrub/RaptorQ) | Latency | `ffs-repair` | 10 | 20 | 5 |
+| `wal_commit_4k_sync` | Concurrency (Bw-tree/WAL/MVCC) | Latency | `ffs-mvcc` | 20 | 40 | 8 |
+| `wal_write_amplification_16block` | Concurrency (Bw-tree/WAL/MVCC) | Latency | `ffs-mvcc` | 20 | 40 | 8 |
+| `wal_write_amplification_1block` | Concurrency (Bw-tree/WAL/MVCC) | Latency | `ffs-mvcc` | 20 | 40 | 8 |
+| `write_random_4k` | Write Path (seq/random/fsync) | Latency | `ffs-block` | 12 | 25 | 5 |
+| `write_seq_4k` | Write Path (seq/random/fsync) | Latency | `ffs-block` | 12 | 25 | 5 |
