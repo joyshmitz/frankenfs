@@ -808,6 +808,36 @@ fn bench_btrfs_inode_item_to_bytes(c: &mut Criterion) {
     });
 }
 
+/// bd-m9661 — parse_xattr_items runs on every btrfs getxattr /
+/// listxattr / llistxattr call through ffs_core::OpenFs. Bench
+/// against a 30-byte-header + 17-byte-name + 17-byte-value
+/// payload (typical "user.realname"="this-is-some-data" shape)
+/// so the perf gate tracks regressions on the parser's
+/// cur+=value_end recurrence and the data_len@+25 / name_len@+27
+/// offset arithmetic. Correctness is fuzzed by bd-fhznm
+/// proptest_xattr_items_payload_round_trip.
+fn bench_btrfs_parse_xattr_items(c: &mut Criterion) {
+    // Mirror the on-disk header used by parse_xattr_items:
+    // location key (17) + transid (8) + data_len u16 LE @25 +
+    // name_len u16 LE @27 + type (1) = 30 bytes.
+    let name: &[u8] = b"user.realname____";
+    let value: &[u8] = b"this-is-some-data";
+    let mut payload = Vec::with_capacity(30 + name.len() + value.len());
+    payload.extend_from_slice(&[0_u8; 17]);
+    payload.extend_from_slice(&[0_u8; 8]);
+    payload.extend_from_slice(&u16::try_from(value.len()).expect("value < u16").to_le_bytes());
+    payload.extend_from_slice(&u16::try_from(name.len()).expect("name < u16").to_le_bytes());
+    payload.push(0); // type byte
+    payload.extend_from_slice(name);
+    payload.extend_from_slice(value);
+
+    c.bench_function("btrfs_parse_xattr_items", |b| {
+        b.iter(|| {
+            ffs_btrfs::parse_xattr_items(black_box(&payload)).expect("xattr_items parses");
+        });
+    });
+}
+
 /// bd-tgkxl — ext4_chksum is the CRC32c-based checksum function
 /// called by every ext4 checksum operation: verify_block_bitmap_*,
 /// verify_inode_bitmap_*, verify_group_desc_*, verify_inode_*,
@@ -871,6 +901,7 @@ criterion_group!(
     bench_btrfs_parse_dir_items,
     bench_btrfs_parse_inode_item,
     bench_btrfs_inode_item_to_bytes,
+    bench_btrfs_parse_xattr_items,
     bench_ext4_chksum_4kb,
 );
 criterion_main!(ondisk);
