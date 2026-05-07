@@ -934,9 +934,16 @@ fn render_counts(out: &mut String, title: &str, counts: &BTreeMap<String, usize>
 
 fn validate_hash(field: &str, value: &str, errors: &mut Vec<String>) {
     validate_nonempty(field, value, errors);
-    if !value.starts_with("sha256:") {
-        errors.push(format!("{field} must use sha256: prefix"));
+    if !is_sha256_digest(value) {
+        errors.push(format!("{field} must be sha256:<64-hex>"));
     }
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64 && hex.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 fn validate_nonempty(field: &str, value: &str, errors: &mut Vec<String>) {
@@ -1057,10 +1064,13 @@ pub fn evaluate_mutation_preconditions(
             "regenerate proof artifacts against the current schema before mutating",
         );
     }
-    if gate.planned_image_hash.is_empty() || gate.current_image_hash.is_empty() {
+    if !is_sha256_digest(&gate.planned_image_hash)
+        || !is_sha256_digest(&gate.current_image_hash)
+        || !is_sha256_digest(&gate.operator_confirmation_hash)
+    {
         return refuse(
-            "image_hash_unknown",
-            "re-hash the image and rebuild the dry-run plan",
+            "image_hash_malformed",
+            "re-hash the image and rebuild the dry-run plan with sha256:<64-hex> digests",
         );
     }
     if gate.current_image_hash != gate.planned_image_hash {
@@ -1143,6 +1153,39 @@ mod tests {
         assert!(report.missing_required_outcomes.is_empty());
         assert!(report.missing_required_log_fields.is_empty());
         assert!(report.missing_required_consumers.is_empty());
+    }
+
+    #[test]
+    fn malformed_image_hash_payloads_are_rejected() {
+        let mut spec = checked_in_spec();
+        let scenario = spec
+            .scenarios
+            .iter_mut()
+            .find(|scenario| {
+                scenario.expected_outcome == OperatorRecoveryOutcome::MutatingRepairVerified
+            })
+            .expect("fixture includes mutating scenario");
+        scenario.image_hashes.original_image_hash = "sha256:not-a-real-digest".to_owned();
+        scenario.image_hashes.pre_repair_hash =
+            "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz".to_owned();
+        scenario.image_hashes.post_repair_hash = Some("sha256:short".to_owned());
+        scenario.corruption_manifest.sha256 = "sha256:also-not-hex".to_owned();
+
+        let report = report_for(spec);
+
+        assert!(!report.valid);
+        for expected in [
+            "image_hashes.original_image_hash must be sha256:<64-hex>",
+            "image_hashes.pre_repair_hash must be sha256:<64-hex>",
+            "image_hashes.post_repair_hash must be sha256:<64-hex>",
+            "corruption_manifest.sha256 must be sha256:<64-hex>",
+        ] {
+            assert!(
+                report.errors.iter().any(|error| error.contains(expected)),
+                "expected {expected} error, got {:#?}",
+                report.errors
+            );
+        }
     }
 
     #[test]
@@ -1334,7 +1377,17 @@ mod tests {
         let mut gate = happy_gate();
         gate.current_image_hash = String::new();
         let decision = evaluate_mutation_preconditions(&gate);
-        assert_eq!(refusal_reason(&decision), Some("image_hash_unknown"));
+        assert_eq!(refusal_reason(&decision), Some("image_hash_malformed"));
+    }
+
+    #[test]
+    fn malformed_image_hash_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.planned_image_hash = "sha256:not-a-real-digest".to_owned();
+        gate.current_image_hash = gate.planned_image_hash.clone();
+        gate.operator_confirmation_hash = gate.planned_image_hash.clone();
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("image_hash_malformed"));
     }
 
     #[test]
@@ -1357,7 +1410,7 @@ mod tests {
     fn operator_confirmation_mismatch_refuses_mutation() {
         let mut gate = happy_gate();
         gate.operator_confirmation_hash =
-            "sha256:abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc".to_owned();
+            "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_owned();
         let decision = evaluate_mutation_preconditions(&gate);
         assert_eq!(
             refusal_reason(&decision),

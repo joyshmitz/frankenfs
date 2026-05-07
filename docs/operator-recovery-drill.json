@@ -57,13 +57,13 @@
         }
       ],
       "image_hashes": {
-        "original_image_hash": "sha256:detectoriginal0000000000000000000000000000000000000000000000000001",
-        "pre_repair_hash": "sha256:detectpre00000000000000000000000000000000000000000000000000000001"
+        "original_image_hash": "sha256:3b0bd90bbcc5f3a9e799bea1558910225cee446376da9bc3b2ea8182a51c2ed4",
+        "pre_repair_hash": "sha256:3002caf9d3aee340bacdeaa3d9718b6a6f3220b97953144c8c553e4187a7d635"
       },
       "corruption_manifest": {
         "manifest_id": "manifest_detect_metadata_mismatch",
         "path": "artifacts/operator-recovery/detect/manifest.json",
-        "sha256": "sha256:detectmanifest00000000000000000000000000000000000000000000000001",
+        "sha256": "sha256:268fd9569f0ccc80ba5ebca01428236b62ce6b0c87c9ab53c1760bc76acb144e",
         "corruption_class": "metadata_digest_mismatch"
       },
       "confidence_threshold": {
@@ -182,13 +182,13 @@
         }
       ],
       "image_hashes": {
-        "original_image_hash": "sha256:dryrunoriginal00000000000000000000000000000000000000000000000001",
-        "pre_repair_hash": "sha256:dryrunpre000000000000000000000000000000000000000000000000000001"
+        "original_image_hash": "sha256:fdabc50bba82ae00787a59f9c5cbadf84244f9f78c2c78586aeafc753a518aaf",
+        "pre_repair_hash": "sha256:66069d22c56d4bcfabb3f173a5f1b77d981f7119972a2e0ff87fd12307e6483c"
       },
       "corruption_manifest": {
         "manifest_id": "manifest_dry_run_single_block",
         "path": "artifacts/operator-recovery/dry-run/manifest.json",
-        "sha256": "sha256:dryrunmanifest0000000000000000000000000000000000000000000000001",
+        "sha256": "sha256:70438f2078675f7cb4269cf066c98aea34287de9edab9089f0642efcefb450f2",
         "corruption_class": "single_block_erasure"
       },
       "confidence_threshold": {
@@ -320,14 +320,14 @@
         }
       ],
       "image_hashes": {
-        "original_image_hash": "sha256:mutateoriginal00000000000000000000000000000000000000000000000001",
-        "pre_repair_hash": "sha256:mutatepre000000000000000000000000000000000000000000000000000001",
-        "post_repair_hash": "sha256:mutatepost00000000000000000000000000000000000000000000000000001"
+        "original_image_hash": "sha256:35a6f20aecd65ce57847f420b52e10f4deee7eb595cd5663e17830cea9801a85",
+        "pre_repair_hash": "sha256:f8ca3a993150cb4e070f337b79dd17efb5febd7f585041234f5dfe97e1ab98ee",
+        "post_repair_hash": "sha256:ee9ff03753298af01a26a8880cccd446c76d5d2c5781854f7359794e24147e7a"
       },
       "corruption_manifest": {
         "manifest_id": "manifest_mutate_single_block",
         "path": "artifacts/operator-recovery/mutate/manifest.json",
-        "sha256": "sha256:mutatemanifest0000000000000000000000000000000000000000000000001",
+        "sha256": "sha256:973b1bd36fbeba9b4e543fcf4cc0c618f5eaed4a34873ed8d51d4b130f3b2406",
         "corruption_class": "single_block_erasure"
       },
       "confidence_threshold": {
@@ -446,13 +446,13 @@
         }
       ],
       "image_hashes": {
-        "original_image_hash": "sha256:refuseoriginal00000000000000000000000000000000000000000000000001",
-        "pre_repair_hash": "sha256:refusepre000000000000000000000000000000000000000000000000000001"
+        "original_image_hash": "sha256:963618c4a916b48f2f6297d95bc17e6c2243251d5d7e7f10d3a2c7f73ac6af1c",
+        "pre_repair_hash": "sha256:41440cfc437661dff90c62d6501ac0d82dbd3dffec7416bafd2eccd9df443938"
       },
       "corruption_manifest": {
         "manifest_id": "manifest_refuse_multi_block",
         "path": "artifacts/operator-recovery/refuse/manifest.json",
-        "sha256": "sha256:refusemanifest0000000000000000000000000000000000000000000000001",
+        "sha256": "sha256:fdfc198a33da6897ef1d527d7edfa1f6a8d810228a4724d1b77d37934961c227",
         "corruption_class": "multi_block_uncalibrated_erasure"
       },
       "confidence_threshold": {
