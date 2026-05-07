@@ -7,7 +7,7 @@
 //! envelope consumed by the planner beads that follow `bd-rchk0.98.1`.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const READINESS_ACTION_AUTOPILOT_SCHEMA_VERSION: u32 = 1;
 pub const READINESS_ACTION_FIXTURE_VALIDATOR_VERSION: u32 = 1;
@@ -171,6 +171,36 @@ pub struct ReadinessActionFixtureValidationReport {
     pub safety_classes_seen: Vec<ReadinessActionSafetyClass>,
     pub evidence_tiers_seen: Vec<ReadinessEvidenceTier>,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessActionPlanningInput {
+    pub report_id: String,
+    pub generated_at: String,
+    pub source_reports: Vec<ReadinessActionAutopilotReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_tracker_issues: Vec<ReadinessActionTrackerIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessActionTrackerIssue {
+    pub issue_id: String,
+    pub title: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessActionPlanningResult {
+    pub report: ReadinessActionAutopilotReport,
+    pub suppressed_duplicates: Vec<ReadinessActionSuppressedDuplicate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessActionSuppressedDuplicate {
+    pub action_id: String,
+    pub controlling_bead: String,
+    pub duplicate_issue_id: String,
+    pub duplicate_issue_title: String,
 }
 
 #[must_use]
@@ -352,6 +382,69 @@ pub fn default_readiness_action_autopilot_fixture_set() -> ReadinessActionAutopi
 }
 
 #[must_use]
+pub fn plan_readiness_actions(
+    input: &ReadinessActionPlanningInput,
+) -> ReadinessActionPlanningResult {
+    let active_tracker_index = ActiveTrackerIndex::new(&input.active_tracker_issues);
+    let mut source_inputs = BTreeMap::new();
+    let mut ranked_recommendations = Vec::new();
+    let mut suppressed_duplicates = Vec::new();
+
+    for report in &input.source_reports {
+        merge_source_inputs(&mut source_inputs, &report.source_inputs);
+        let input_diagnostics = input_state_diagnostics(&report.source_inputs);
+        let report_penalty = report_input_penalty(&report.source_inputs);
+
+        for recommendation in &report.recommendations {
+            if let Some(duplicate) = active_tracker_index.duplicate_for(recommendation) {
+                suppressed_duplicates.push(ReadinessActionSuppressedDuplicate {
+                    action_id: recommendation.action_id.clone(),
+                    controlling_bead: recommendation.controlling_bead.clone(),
+                    duplicate_issue_id: duplicate.issue_id.clone(),
+                    duplicate_issue_title: duplicate.title.clone(),
+                });
+                continue;
+            }
+
+            let mut recommendation = recommendation.clone();
+            append_missing_input_diagnostics(&mut recommendation, &input_diagnostics);
+            ranked_recommendations.push(ScoredReadinessAction {
+                rank: ReadinessActionRank::for_recommendation(&recommendation, report_penalty),
+                recommendation,
+            });
+        }
+    }
+
+    ranked_recommendations.sort_by(|left, right| left.rank.cmp(&right.rank));
+    suppressed_duplicates.sort_by(|left, right| {
+        (
+            left.controlling_bead.as_str(),
+            left.action_id.as_str(),
+            left.duplicate_issue_id.as_str(),
+        )
+            .cmp(&(
+                right.controlling_bead.as_str(),
+                right.action_id.as_str(),
+                right.duplicate_issue_id.as_str(),
+            ))
+    });
+
+    ReadinessActionPlanningResult {
+        report: ReadinessActionAutopilotReport {
+            schema_version: READINESS_ACTION_AUTOPILOT_SCHEMA_VERSION,
+            report_id: input.report_id.clone(),
+            generated_at: input.generated_at.clone(),
+            source_inputs: source_inputs.into_values().collect(),
+            recommendations: ranked_recommendations
+                .into_iter()
+                .map(|scored| scored.recommendation)
+                .collect(),
+        },
+        suppressed_duplicates,
+    }
+}
+
+#[must_use]
 pub fn validate_readiness_action_fixture_set(
     fixture_set: &ReadinessActionAutopilotFixtureSet,
 ) -> ReadinessActionFixtureValidationReport {
@@ -411,6 +504,282 @@ pub fn validate_readiness_action_fixture_set(
         safety_classes_seen: safety_classes_seen.into_iter().collect(),
         evidence_tiers_seen: evidence_tiers_seen.into_iter().collect(),
         errors,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveTrackerIndex<'a> {
+    issues: Vec<&'a ReadinessActionTrackerIssue>,
+    normalized_titles: BTreeMap<String, &'a ReadinessActionTrackerIssue>,
+}
+
+impl<'a> ActiveTrackerIndex<'a> {
+    fn new(issues: &'a [ReadinessActionTrackerIssue]) -> Self {
+        let mut active_issues = Vec::new();
+        let mut normalized_titles = BTreeMap::new();
+
+        for issue in issues {
+            if !is_active_tracker_status(&issue.status) {
+                continue;
+            }
+            active_issues.push(issue);
+            normalized_titles.insert(normalized_title(&issue.title), issue);
+        }
+
+        Self {
+            issues: active_issues,
+            normalized_titles,
+        }
+    }
+
+    fn duplicate_for(
+        &self,
+        recommendation: &ReadinessActionRecommendation,
+    ) -> Option<&'a ReadinessActionTrackerIssue> {
+        if let Some(issue) = self
+            .issues
+            .iter()
+            .copied()
+            .find(|issue| issue.issue_id == recommendation.controlling_bead)
+        {
+            return Some(issue);
+        }
+        self.normalized_titles
+            .get(&normalized_title(&recommendation.title))
+            .copied()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScoredReadinessAction {
+    rank: ReadinessActionRank,
+    recommendation: ReadinessActionRecommendation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ReadinessActionRank {
+    safety_rank: u8,
+    input_penalty: u8,
+    public_claim_rank: u8,
+    evidence_rank: u8,
+    ack_rank: u8,
+    controlling_bead: String,
+    action_id: String,
+    title: String,
+}
+
+impl ReadinessActionRank {
+    fn for_recommendation(
+        recommendation: &ReadinessActionRecommendation,
+        input_penalty: u8,
+    ) -> Self {
+        Self {
+            safety_rank: safety_rank(recommendation.safety_class),
+            input_penalty,
+            public_claim_rank: public_claim_rank(recommendation.public_claim_effect),
+            evidence_rank: evidence_rank(recommendation.evidence_tier),
+            ack_rank: u8::from(recommendation.ack_required),
+            controlling_bead: recommendation.controlling_bead.clone(),
+            action_id: recommendation.action_id.clone(),
+            title: recommendation.title.clone(),
+        }
+    }
+}
+
+fn merge_source_inputs(
+    source_inputs: &mut BTreeMap<String, ReadinessActionInput>,
+    new_inputs: &[ReadinessActionInput],
+) {
+    for input in new_inputs {
+        let key = source_input_key(input);
+        source_inputs
+            .entry(key)
+            .and_modify(|existing| {
+                if input_state_penalty(input.state) > input_state_penalty(existing.state) {
+                    *existing = input.clone();
+                }
+            })
+            .or_insert_with(|| input.clone());
+    }
+}
+
+fn input_state_diagnostics(inputs: &[ReadinessActionInput]) -> Vec<ReadinessActionDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for input in inputs {
+        if !input.required || is_ready_input_state(input.state) {
+            continue;
+        }
+        diagnostics.push(ReadinessActionDiagnostic {
+            diagnostic_id: format!(
+                "planner-input-{}-{}",
+                input.input_id,
+                input_state_label(input.state)
+            ),
+            severity: input_state_severity(input.state),
+            source_kind: input.kind,
+            source_path: Some(input.path.clone()),
+            message: format!(
+                "Required {} input {} is {}.",
+                input_kind_label(input.kind),
+                input.input_id,
+                input_state_label(input.state)
+            ),
+            remediation: input_state_remediation(input.state).to_owned(),
+            stale_age_days: None,
+            freshness_ttl_days: None,
+        });
+    }
+    diagnostics.sort_by(|left, right| left.diagnostic_id.cmp(&right.diagnostic_id));
+    diagnostics
+}
+
+fn append_missing_input_diagnostics(
+    recommendation: &mut ReadinessActionRecommendation,
+    input_diagnostics: &[ReadinessActionDiagnostic],
+) {
+    let mut existing_ids: BTreeSet<String> = recommendation
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.diagnostic_id.clone())
+        .collect();
+
+    for diagnostic in input_diagnostics {
+        if existing_ids.insert(diagnostic.diagnostic_id.clone()) {
+            recommendation.diagnostics.push(diagnostic.clone());
+        }
+    }
+    recommendation
+        .diagnostics
+        .sort_by(|left, right| left.diagnostic_id.cmp(&right.diagnostic_id));
+}
+
+fn report_input_penalty(inputs: &[ReadinessActionInput]) -> u8 {
+    inputs
+        .iter()
+        .filter(|input| input.required)
+        .map(|input| input_state_penalty(input.state))
+        .max()
+        .unwrap_or(0)
+}
+
+fn source_input_key(input: &ReadinessActionInput) -> String {
+    format!(
+        "{}:{}:{}",
+        input_kind_label(input.kind),
+        input.input_id,
+        input.path
+    )
+}
+
+fn normalized_title(title: &str) -> String {
+    title
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_active_tracker_status(status: &str) -> bool {
+    status.eq_ignore_ascii_case("open") || status.eq_ignore_ascii_case("in_progress")
+}
+
+const fn is_ready_input_state(state: ReadinessActionInputState) -> bool {
+    matches!(
+        state,
+        ReadinessActionInputState::Present | ReadinessActionInputState::NotApplicable
+    )
+}
+
+const fn is_not_applicable_input_state(state: ReadinessActionInputState) -> bool {
+    matches!(state, ReadinessActionInputState::NotApplicable)
+}
+
+const fn input_state_penalty(state: ReadinessActionInputState) -> u8 {
+    match state {
+        ReadinessActionInputState::Present | ReadinessActionInputState::NotApplicable => 0,
+        ReadinessActionInputState::Stale => 1,
+        ReadinessActionInputState::Missing => 2,
+        ReadinessActionInputState::PermissionRequired => 3,
+        ReadinessActionInputState::Contradictory => 4,
+    }
+}
+
+const fn safety_rank(safety_class: ReadinessActionSafetyClass) -> u8 {
+    match safety_class {
+        ReadinessActionSafetyClass::LocalSafe => 0,
+        ReadinessActionSafetyClass::Permissioned => 2,
+        ReadinessActionSafetyClass::Destructive => 3,
+        ReadinessActionSafetyClass::Impossible => 4,
+    }
+}
+
+const fn public_claim_rank(public_claim_effect: PublicClaimEffect) -> u8 {
+    match public_claim_effect {
+        PublicClaimEffect::DowngradeRequired => 0,
+        PublicClaimEffect::BlockUpgrade => 1,
+        PublicClaimEffect::NoChange => 2,
+        PublicClaimEffect::UpgradeEligible => 3,
+    }
+}
+
+const fn evidence_rank(evidence_tier: ReadinessEvidenceTier) -> u8 {
+    match evidence_tier {
+        ReadinessEvidenceTier::Authoritative => 0,
+        ReadinessEvidenceTier::OperationalReadiness => 1,
+        ReadinessEvidenceTier::ProofBundle => 2,
+        ReadinessEvidenceTier::Smoke => 3,
+        ReadinessEvidenceTier::TrackerOnly => 4,
+    }
+}
+
+const fn input_state_severity(
+    state: ReadinessActionInputState,
+) -> ReadinessActionDiagnosticSeverity {
+    match state {
+        ReadinessActionInputState::Present | ReadinessActionInputState::NotApplicable => {
+            ReadinessActionDiagnosticSeverity::Info
+        }
+        ReadinessActionInputState::Stale | ReadinessActionInputState::PermissionRequired => {
+            ReadinessActionDiagnosticSeverity::Warning
+        }
+        ReadinessActionInputState::Missing | ReadinessActionInputState::Contradictory => {
+            ReadinessActionDiagnosticSeverity::Error
+        }
+    }
+}
+
+const fn input_kind_label(kind: ReadinessActionInputKind) -> &'static str {
+    match kind {
+        ReadinessActionInputKind::BeadsJsonl => "beads_jsonl",
+        ReadinessActionInputKind::ReleaseGatePolicy => "release_gate_policy",
+        ReadinessActionInputKind::ProofBundleReport => "proof_bundle_report",
+        ReadinessActionInputKind::OperationalReadinessReport => "operational_readiness_report",
+        ReadinessActionInputKind::HostCapabilityArtifact => "host_capability_artifact",
+    }
+}
+
+const fn input_state_label(state: ReadinessActionInputState) -> &'static str {
+    match state {
+        ReadinessActionInputState::Present => "present",
+        ReadinessActionInputState::Missing => "missing",
+        ReadinessActionInputState::Stale => "stale",
+        ReadinessActionInputState::Contradictory => "contradictory",
+        ReadinessActionInputState::PermissionRequired => "permission_required",
+        ReadinessActionInputState::NotApplicable => "not_applicable",
+    }
+}
+
+const fn input_state_remediation(state: ReadinessActionInputState) -> &'static str {
+    match state {
+        ReadinessActionInputState::Present | ReadinessActionInputState::NotApplicable => {
+            "no remediation needed"
+        }
+        ReadinessActionInputState::Missing => "provide the missing artifact before acting",
+        ReadinessActionInputState::Stale => "refresh the stale artifact before acting",
+        ReadinessActionInputState::Contradictory => "resolve contradictory evidence before acting",
+        ReadinessActionInputState::PermissionRequired => {
+            "obtain explicit operator authorization before acting"
+        }
     }
 }
 
@@ -516,7 +885,7 @@ fn validate_inputs(
                 input.input_id
             ));
         }
-        if input.required && input.state == ReadinessActionInputState::NotApplicable {
+        if input.required && is_not_applicable_input_state(input.state) {
             errors.push(format!(
                 "{fixture_label}: required input {} cannot be not_applicable",
                 input.input_id
@@ -773,6 +1142,104 @@ mod tests {
     }
 
     #[test]
+    fn planner_ranks_local_safe_work_before_permissioned_actions() {
+        let result = plan_readiness_actions(&planning_input(default_source_reports(), Vec::new()));
+        let action_ids: Vec<&str> = result
+            .report
+            .recommendations
+            .iter()
+            .map(|recommendation| recommendation.action_id.as_str())
+            .collect();
+
+        assert_eq!(
+            action_ids,
+            vec![
+                "define-readiness-action-schema",
+                "run-permissioned-xfstests-baseline",
+                "refresh-large-host-swarm-campaign",
+                "refuse-contradictory-readiness-upgrade",
+            ]
+        );
+        assert!(result.suppressed_duplicates.is_empty());
+    }
+
+    #[test]
+    fn planner_suppresses_actions_already_represented_by_active_beads() {
+        let result = plan_readiness_actions(&planning_input(
+            default_source_reports(),
+            vec![
+                active_issue(
+                    "bd-rchk3.3",
+                    "Execute the fresh xfstests baseline and publish artifacts",
+                ),
+                active_issue(
+                    "bd-rchk0.53.8",
+                    "Run authoritative swarm responsiveness campaign on permissioned large host",
+                ),
+            ],
+        ));
+        let action_ids: Vec<&str> = result
+            .report
+            .recommendations
+            .iter()
+            .map(|recommendation| recommendation.action_id.as_str())
+            .collect();
+        let suppressed: Vec<&str> = result
+            .suppressed_duplicates
+            .iter()
+            .map(|duplicate| duplicate.controlling_bead.as_str())
+            .collect();
+
+        assert_eq!(
+            action_ids,
+            vec![
+                "define-readiness-action-schema",
+                "refuse-contradictory-readiness-upgrade",
+            ]
+        );
+        assert_eq!(suppressed, vec!["bd-rchk0.53.8", "bd-rchk3.3"]);
+    }
+
+    #[test]
+    fn planner_adds_missing_input_diagnostics_to_recommendations() {
+        let result = plan_readiness_actions(&planning_input(default_source_reports(), Vec::new()));
+        let xfstests = result
+            .report
+            .recommendations
+            .iter()
+            .find(|recommendation| recommendation.action_id == "run-permissioned-xfstests-baseline")
+            .expect("xfstests recommendation");
+        let diagnostic_ids: Vec<&str> = xfstests
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.diagnostic_id.as_str())
+            .collect();
+
+        assert_eq!(
+            diagnostic_ids,
+            vec![
+                "planner-input-operational-readiness-report-missing",
+                "xfstests-real-run-ack-missing",
+            ]
+        );
+    }
+
+    #[test]
+    fn planner_output_is_stable_when_source_report_order_changes() {
+        let mut reversed_reports = default_source_reports();
+        reversed_reports.reverse();
+
+        let normal = plan_readiness_actions(&planning_input(default_source_reports(), Vec::new()));
+        let reversed = plan_readiness_actions(&planning_input(reversed_reports, Vec::new()));
+        let normal_json = serde_json::to_string_pretty(&normal).expect("serialize normal plan");
+        let reversed_json =
+            serde_json::to_string_pretty(&reversed).expect("serialize reversed plan");
+
+        assert_eq!(normal, reversed);
+        assert_eq!(normal_json, reversed_json);
+    }
+
+    #[test]
     fn validation_rejects_smoke_upgrade_claims() {
         let mut fixture_set = default_readiness_action_autopilot_fixture_set();
         let recommendation = &mut fixture_set.fixtures[0].report.recommendations[0];
@@ -787,5 +1254,33 @@ mod tests {
                 error.contains("cannot upgrade public claims from smoke evidence")
             })
         );
+    }
+
+    fn default_source_reports() -> Vec<ReadinessActionAutopilotReport> {
+        default_readiness_action_autopilot_fixture_set()
+            .fixtures
+            .into_iter()
+            .map(|fixture| fixture.report)
+            .collect()
+    }
+
+    fn planning_input(
+        source_reports: Vec<ReadinessActionAutopilotReport>,
+        active_tracker_issues: Vec<ReadinessActionTrackerIssue>,
+    ) -> ReadinessActionPlanningInput {
+        ReadinessActionPlanningInput {
+            report_id: "readiness_action_planner_test_report".to_owned(),
+            generated_at: "2026-05-07T00:00:00Z".to_owned(),
+            source_reports,
+            active_tracker_issues,
+        }
+    }
+
+    fn active_issue(issue_id: &str, title: &str) -> ReadinessActionTrackerIssue {
+        ReadinessActionTrackerIssue {
+            issue_id: issue_id.to_owned(),
+            title: title.to_owned(),
+            status: "open".to_owned(),
+        }
     }
 }
