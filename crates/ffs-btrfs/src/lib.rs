@@ -7235,9 +7235,7 @@ mod tests {
             let bytes = entry.try_to_bytes().expect("non-empty name encodes");
             let trunc = k.min(bytes.len() - 1);
             let truncated = &bytes[..bytes.len() - trunc];
-            let err = parse_inode_refs(truncated)
-                .err()
-                .expect("truncated payload must reject");
+            let err = parse_inode_refs(truncated).expect_err("truncated payload must reject");
             // Specific variant intentionally not asserted to avoid
             // over-coupling to the ParseError shape; rendering must
             // succeed (covers no-panic).
@@ -7473,9 +7471,7 @@ mod tests {
             let bytes = entry.try_to_bytes().expect("non-empty name encodes");
             let trunc = k.min(bytes.len() - 1);
             let truncated = &bytes[..bytes.len() - trunc];
-            let err = parse_dir_items(truncated)
-                .err()
-                .expect("truncated payload must reject");
+            let err = parse_dir_items(truncated).expect_err("truncated payload must reject");
             let _ = format!("{err:?}");
         }
     }
