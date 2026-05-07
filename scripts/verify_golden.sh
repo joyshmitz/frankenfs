@@ -33,16 +33,39 @@ cargo_exec() {
     rch exec -- cargo "$@"
 }
 
+write_json_checksums() {
+    local dir="$1"
+    local out="$2"
+    (
+        cd "$dir"
+        mapfile -t files < <(find . -maxdepth 1 -type f -name '*.json' -printf '%f\n' | sort)
+        if [[ ${#files[@]} -eq 0 ]]; then
+            echo "no JSON checksum inputs found in $dir" >&2
+            return 1
+        fi
+        sha256sum "${files[@]}" > "$out"
+    )
+}
+
+write_conformance_golden_checksums() {
+    (
+        cd conformance/golden
+        mapfile -t files < <(
+            find . -maxdepth 1 -type f \( -name '*.json' -o -name '*.txt' \) -printf '%f\n' | sort
+        )
+        if [[ ${#files[@]} -eq 0 ]]; then
+            echo "no conformance golden checksum inputs found" >&2
+            return 1
+        fi
+        sha256sum "${files[@]}" > checksums.sha256
+    )
+}
+
 if [ "${1:-}" = "--update" ]; then
     echo "Updating checksums..."
-    (cd conformance/fixtures && sha256sum *.json > checksums.sha256)
-    (cd conformance/golden && sha256sum *.json > checksums.sha256)
-    (
-        cd tests/fixtures/golden
-        find . -maxdepth 1 -type f -name '*.json' -printf '%f\n' \
-            | sort \
-            | xargs sha256sum > checksums.txt
-    )
+    write_json_checksums conformance/fixtures checksums.sha256
+    write_conformance_golden_checksums
+    write_json_checksums tests/fixtures/golden checksums.txt
     echo "Checksums updated. Review and commit."
     exit 0
 fi
