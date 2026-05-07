@@ -66,7 +66,7 @@ use std::collections::BTreeSet;
 use std::env::VarError;
 use std::fmt::Write;
 use std::fs::{File, OpenOptions as StdOpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -208,8 +208,122 @@ struct MountAdaptiveRuntimePlan {
     manifest_path: PathBuf,
     manifest_scenario_id: String,
     run_id: String,
+    release_claim_state: String,
     backpressure_policy_id: String,
+    artifact_paths: Vec<String>,
+    raw_stdout_path: String,
+    raw_stderr_path: String,
+    raw_log_paths: Vec<String>,
+    cleanup_status: String,
+    git_sha: String,
+    reproduction_command: String,
+    fsm: Arc<DegradationFsm>,
     gate: Arc<BackpressureGate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MountAdaptiveRuntimeSummaryConfig {
+    json_path: Option<PathBuf>,
+    markdown_path: Option<PathBuf>,
+}
+
+impl MountAdaptiveRuntimeSummaryConfig {
+    #[cfg(test)]
+    const fn disabled() -> Self {
+        Self {
+            json_path: None,
+            markdown_path: None,
+        }
+    }
+
+    fn from_cli(json_path: Option<PathBuf>, markdown_path: Option<PathBuf>) -> Self {
+        Self {
+            json_path,
+            markdown_path,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.json_path.is_some() || self.markdown_path.is_some()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MountAdaptiveRuntimeShutdownObservation {
+    metrics: ffs_fuse::MetricsSnapshot,
+    worker_count: u32,
+    per_core: Option<MountAdaptiveRuntimePerCoreObservation>,
+}
+
+#[derive(Debug, Clone)]
+struct MountAdaptiveRuntimePerCoreObservation {
+    total_cache_hits: u64,
+    total_cache_misses: u64,
+    imbalance_ratio: f64,
+    per_core_distribution: Vec<MountAdaptiveRuntimeCoreRequestSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct MountAdaptiveRuntimeCoreRequestSummary {
+    core_id: u32,
+    requests: u64,
+    cache_hits: u64,
+    cache_misses: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct MountAdaptiveRuntimeDegradationTransitionLedger {
+    current_level: String,
+    transition_count: u64,
+    transitions: Vec<MountAdaptiveRuntimeDegradationTransitionSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct MountAdaptiveRuntimeDegradationTransitionSummary {
+    from: String,
+    to: String,
+    headroom_milli: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct MountAdaptiveRuntimeShutdownSummary {
+    schema_version: u32,
+    adaptive_runtime_enabled: bool,
+    runtime_mode: String,
+    read_write: bool,
+    run_id: String,
+    scenario_id: String,
+    cli_scenario_id: String,
+    release_claim_state: String,
+    degradation_level_transitions: MountAdaptiveRuntimeDegradationTransitionLedger,
+    backpressure_policy_id: Option<String>,
+    requests_throttled: u64,
+    requests_shed: u64,
+    total_requests: u64,
+    cache_hits: Option<u64>,
+    cache_misses: Option<u64>,
+    per_core_request_distribution: Vec<MountAdaptiveRuntimeCoreRequestSummary>,
+    per_core_imbalance_ratio: Option<f64>,
+    worker_count: u32,
+    artifact_paths: Vec<String>,
+    raw_stdout_path: Option<String>,
+    raw_stderr_path: Option<String>,
+    raw_log_paths: Vec<String>,
+    cleanup_status: String,
+    git_sha: String,
+    reproduction_command: String,
+}
+
+#[derive(Clone, Copy)]
+struct MountAdaptiveRuntimeShutdownContext<'a> {
+    image_path: &'a Path,
+    mountpoint: &'a Path,
+    runtime: MountRuntimeConfig,
+    read_write: bool,
+    operation_id: &'a str,
+    cli_scenario_id: &'a str,
+    plan: Option<&'a MountAdaptiveRuntimePlan>,
+    summary_config: &'a MountAdaptiveRuntimeSummaryConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,6 +524,7 @@ struct MountCmdOptions {
     ext4_verify_journal_checksums: bool,
     runtime: MountRuntimeConfig,
     adaptive_runtime: MountAdaptiveRuntimeConfig,
+    adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig,
     background_scrub: MountBackgroundScrubConfig,
     writeback_cache: MountWritebackCacheConfig,
 }
@@ -484,6 +599,10 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "clap subcommands keep typed flag payloads inline for direct parsing"
+)]
 enum Command {
     /// Inspect a filesystem image (ext4 or btrfs).
     Inspect {
@@ -610,6 +729,16 @@ enum Command {
         /// Adaptive runtime evidence manifest accepted by `ffs-harness`.
         #[arg(long = "adaptive-runtime-manifest")]
         adaptive_runtime_manifest: Option<PathBuf>,
+        /// Write adaptive runtime shutdown evidence as machine JSON.
+        ///
+        /// When adaptive runtime is off, the summary still records
+        /// `adaptive_runtime_enabled=false` so proof bundles cannot mistake
+        /// absent evidence for accepted runtime controls.
+        #[arg(long = "adaptive-runtime-summary-json")]
+        adaptive_runtime_summary_json: Option<PathBuf>,
+        /// Write adaptive runtime shutdown evidence as concise Markdown.
+        #[arg(long = "adaptive-runtime-summary-md")]
+        adaptive_runtime_summary_md: Option<PathBuf>,
         /// Allow other users to access the mount.
         #[arg(long)]
         allow_other: bool,
@@ -1657,6 +1786,8 @@ fn run() -> Result<()> {
             managed_unmount_timeout_secs,
             adaptive_runtime,
             adaptive_runtime_manifest,
+            adaptive_runtime_summary_json,
+            adaptive_runtime_summary_md,
             allow_other,
             rw,
             writeback_cache,
@@ -1709,6 +1840,10 @@ fn run() -> Result<()> {
                     adaptive_runtime: MountAdaptiveRuntimeConfig::from_cli(
                         adaptive_runtime,
                         adaptive_runtime_manifest,
+                    ),
+                    adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::from_cli(
+                        adaptive_runtime_summary_json,
+                        adaptive_runtime_summary_md,
                     ),
                     background_scrub,
                     writeback_cache: MountWritebackCacheConfig::from_cli(
@@ -4633,6 +4768,306 @@ fn log_mount_adaptive_runtime_accepted(
     );
 }
 
+fn mount_runtime_reproduction_command(
+    image_path: &Path,
+    mountpoint: &Path,
+    runtime: MountRuntimeConfig,
+    read_write: bool,
+) -> String {
+    let rw_flag = if read_write { " --rw" } else { "" };
+    format!(
+        "ffs mount --runtime-mode {}{} {} {}",
+        runtime.mode.as_str(),
+        rw_flag,
+        image_path.display(),
+        mountpoint.display()
+    )
+}
+
+fn collect_mount_adaptive_runtime_artifact_paths(
+    plan: Option<&MountAdaptiveRuntimePlan>,
+    summary_config: &MountAdaptiveRuntimeSummaryConfig,
+) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    if let Some(plan) = plan {
+        paths.extend(plan.artifact_paths.iter().cloned());
+    }
+    if let Some(path) = summary_config.json_path.as_ref() {
+        paths.insert(path.display().to_string());
+    }
+    if let Some(path) = summary_config.markdown_path.as_ref() {
+        paths.insert(path.display().to_string());
+    }
+    paths.into_iter().collect()
+}
+
+fn build_mount_adaptive_runtime_degradation_ledger(
+    plan: Option<&MountAdaptiveRuntimePlan>,
+) -> MountAdaptiveRuntimeDegradationTransitionLedger {
+    plan.map_or_else(
+        || MountAdaptiveRuntimeDegradationTransitionLedger {
+            current_level: "not_applicable".to_owned(),
+            transition_count: 0,
+            transitions: Vec::new(),
+        },
+        |plan| MountAdaptiveRuntimeDegradationTransitionLedger {
+            current_level: plan.gate.level().label().to_owned(),
+            transition_count: plan.fsm.transition_count(),
+            transitions: Vec::new(),
+        },
+    )
+}
+
+fn build_mount_adaptive_runtime_shutdown_summary(
+    context: MountAdaptiveRuntimeShutdownContext<'_>,
+    observation: &MountAdaptiveRuntimeShutdownObservation,
+) -> MountAdaptiveRuntimeShutdownSummary {
+    let adaptive_runtime_enabled = context.plan.is_some();
+    let per_core = observation.per_core.as_ref();
+    MountAdaptiveRuntimeShutdownSummary {
+        schema_version: 1,
+        adaptive_runtime_enabled,
+        runtime_mode: context.runtime.mode.as_str().to_owned(),
+        read_write: context.read_write,
+        run_id: context.plan.map_or_else(
+            || context.operation_id.to_owned(),
+            |plan| plan.run_id.clone(),
+        ),
+        scenario_id: context.plan.map_or_else(
+            || context.cli_scenario_id.to_owned(),
+            |plan| plan.manifest_scenario_id.clone(),
+        ),
+        cli_scenario_id: context.cli_scenario_id.to_owned(),
+        release_claim_state: context.plan.map_or_else(
+            || "disabled".to_owned(),
+            |plan| plan.release_claim_state.clone(),
+        ),
+        degradation_level_transitions: build_mount_adaptive_runtime_degradation_ledger(
+            context.plan,
+        ),
+        backpressure_policy_id: context.plan.map(|plan| plan.backpressure_policy_id.clone()),
+        requests_throttled: observation.metrics.requests_throttled,
+        requests_shed: observation.metrics.requests_shed,
+        total_requests: observation.metrics.requests_total,
+        cache_hits: per_core.map(|metrics| metrics.total_cache_hits),
+        cache_misses: per_core.map(|metrics| metrics.total_cache_misses),
+        per_core_request_distribution: per_core
+            .map_or_else(Vec::new, |metrics| metrics.per_core_distribution.clone()),
+        per_core_imbalance_ratio: per_core.map(|metrics| metrics.imbalance_ratio),
+        worker_count: observation.worker_count,
+        artifact_paths: collect_mount_adaptive_runtime_artifact_paths(
+            context.plan,
+            context.summary_config,
+        ),
+        raw_stdout_path: context.plan.map(|plan| plan.raw_stdout_path.clone()),
+        raw_stderr_path: context.plan.map(|plan| plan.raw_stderr_path.clone()),
+        raw_log_paths: context
+            .plan
+            .map_or_else(Vec::new, |plan| plan.raw_log_paths.clone()),
+        cleanup_status: context.plan.map_or_else(
+            || "not_applicable".to_owned(),
+            |plan| plan.cleanup_status.clone(),
+        ),
+        git_sha: context
+            .plan
+            .map_or_else(|| "unknown".to_owned(), |plan| plan.git_sha.clone()),
+        reproduction_command: context.plan.map_or_else(
+            || {
+                mount_runtime_reproduction_command(
+                    context.image_path,
+                    context.mountpoint,
+                    context.runtime,
+                    context.read_write,
+                )
+            },
+            |plan| plan.reproduction_command.clone(),
+        ),
+    }
+}
+
+fn render_mount_adaptive_runtime_shutdown_markdown(
+    summary: &MountAdaptiveRuntimeShutdownSummary,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Adaptive Runtime Shutdown Evidence\n");
+    let _ = writeln!(
+        out,
+        "- Adaptive runtime enabled: `{}`",
+        summary.adaptive_runtime_enabled
+    );
+    let _ = writeln!(out, "- Runtime mode: `{}`", summary.runtime_mode);
+    let _ = writeln!(out, "- Run: `{}`", summary.run_id);
+    let _ = writeln!(out, "- Scenario: `{}`", summary.scenario_id);
+    let _ = writeln!(out, "- CLI scenario: `{}`", summary.cli_scenario_id);
+    let _ = writeln!(out, "- Release claim: `{}`", summary.release_claim_state);
+    let _ = writeln!(out, "- Git SHA: `{}`", summary.git_sha);
+    let _ = writeln!(out, "- Reproduction: `{}`", summary.reproduction_command);
+
+    out.push_str("\n## Backpressure\n\n");
+    let _ = writeln!(
+        out,
+        "- Policy: `{}`",
+        summary
+            .backpressure_policy_id
+            .as_deref()
+            .unwrap_or("not_applicable")
+    );
+    let _ = writeln!(
+        out,
+        "- Current degradation level: `{}`",
+        summary.degradation_level_transitions.current_level
+    );
+    let _ = writeln!(
+        out,
+        "- Degradation transitions observed: `{}`",
+        summary.degradation_level_transitions.transition_count
+    );
+    let _ = writeln!(
+        out,
+        "- Requests: total=`{}`, throttled=`{}`, shed=`{}`",
+        summary.total_requests, summary.requests_throttled, summary.requests_shed
+    );
+
+    out.push_str("\n## Per-Core\n\n");
+    let _ = writeln!(out, "- Worker count: `{}`", summary.worker_count);
+    match (summary.cache_hits, summary.cache_misses) {
+        (Some(hits), Some(misses)) => {
+            let _ = writeln!(out, "- Cache hits/misses: `{hits}` / `{misses}`");
+        }
+        _ => out.push_str("- Cache hits/misses: `not_available`\n"),
+    }
+    if let Some(ratio) = summary.per_core_imbalance_ratio {
+        let _ = writeln!(out, "- Imbalance ratio: `{ratio:.6}`");
+    } else {
+        out.push_str("- Imbalance ratio: `not_available`\n");
+    }
+    if summary.per_core_request_distribution.is_empty() {
+        out.push_str("- Request distribution: `not_available`\n");
+    } else {
+        let mut distribution = String::new();
+        for core in &summary.per_core_request_distribution {
+            if !distribution.is_empty() {
+                distribution.push_str(", ");
+            }
+            let _ = write!(
+                distribution,
+                "core{}={} (hits={}, misses={})",
+                core.core_id, core.requests, core.cache_hits, core.cache_misses
+            );
+        }
+        let _ = writeln!(out, "- Request distribution: `{distribution}`");
+    }
+
+    out.push_str("\n## Artifacts\n\n");
+    if summary.artifact_paths.is_empty() {
+        out.push_str("- Artifact paths: `none`\n");
+    } else {
+        let _ = writeln!(
+            out,
+            "- Artifact paths: `{}`",
+            summary.artifact_paths.join("`, `")
+        );
+    }
+    let _ = writeln!(
+        out,
+        "- Raw stdout: `{}`",
+        summary
+            .raw_stdout_path
+            .as_deref()
+            .unwrap_or("not_available")
+    );
+    let _ = writeln!(
+        out,
+        "- Raw stderr: `{}`",
+        summary
+            .raw_stderr_path
+            .as_deref()
+            .unwrap_or("not_available")
+    );
+    if summary.raw_log_paths.is_empty() {
+        out.push_str("- Raw logs: `none`\n");
+    } else {
+        let _ = writeln!(out, "- Raw logs: `{}`", summary.raw_log_paths.join("`, `"));
+    }
+    let _ = writeln!(out, "- Cleanup: `{}`", summary.cleanup_status);
+    out
+}
+
+fn write_mount_adaptive_runtime_shutdown_summary(
+    config: &MountAdaptiveRuntimeSummaryConfig,
+    summary: &MountAdaptiveRuntimeShutdownSummary,
+) -> Result<()> {
+    if let Some(path) = config.json_path.as_ref() {
+        let json =
+            serde_json::to_string_pretty(summary).context("serialize adaptive runtime summary")?;
+        write_mount_adaptive_runtime_summary_artifact(
+            path,
+            json.as_bytes(),
+            "adaptive runtime summary JSON",
+        )?;
+    }
+    if let Some(path) = config.markdown_path.as_ref() {
+        let markdown = render_mount_adaptive_runtime_shutdown_markdown(summary);
+        write_mount_adaptive_runtime_summary_artifact(
+            path,
+            markdown.as_bytes(),
+            "adaptive runtime summary Markdown",
+        )?;
+    }
+    Ok(())
+}
+
+fn write_mount_adaptive_runtime_summary_artifact(
+    path: &Path,
+    bytes: &[u8],
+    label: &str,
+) -> Result<()> {
+    let mut file = StdOpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "create {label} {}; refusing to overwrite existing evidence",
+                path.display()
+            )
+        })?;
+    file.write_all(bytes)
+        .with_context(|| format!("write {label} {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("sync {label} {}", path.display()))
+}
+
+fn emit_mount_adaptive_runtime_shutdown_summary(
+    context: MountAdaptiveRuntimeShutdownContext<'_>,
+    observation: &MountAdaptiveRuntimeShutdownObservation,
+) -> Result<()> {
+    if !context.summary_config.enabled() {
+        return Ok(());
+    }
+    let summary = build_mount_adaptive_runtime_shutdown_summary(context, observation);
+    write_mount_adaptive_runtime_shutdown_summary(context.summary_config, &summary)?;
+    info!(
+        target: "ffs::cli::mount",
+        operation_id = context.operation_id,
+        scenario_id = context.cli_scenario_id,
+        outcome = "adaptive_runtime_shutdown_summary_emitted",
+        adaptive_runtime_enabled = summary.adaptive_runtime_enabled,
+        json_path = %context
+            .summary_config
+            .json_path
+            .as_ref()
+            .map_or_else(|| "<none>".to_owned(), |path| path.display().to_string()),
+        markdown_path = %context
+            .summary_config
+            .markdown_path
+            .as_ref()
+            .map_or_else(|| "<none>".to_owned(), |path| path.display().to_string()),
+        "adaptive_runtime_shutdown_summary_emitted"
+    );
+    Ok(())
+}
+
 fn adaptive_runtime_rejection_class(
     report: &ffs_harness::adaptive_runtime_manifest::AdaptiveRuntimeEvidenceReport,
 ) -> &'static str {
@@ -4649,10 +5084,11 @@ fn adaptive_runtime_rejection_class(
     }
 }
 
-fn build_adaptive_runtime_backpressure_gate() -> Arc<BackpressureGate> {
+fn build_adaptive_runtime_backpressure_gate() -> (Arc<DegradationFsm>, Arc<BackpressureGate>) {
     let pressure = Arc::new(SystemPressure::new());
     let fsm = Arc::new(DegradationFsm::new(pressure, 1));
-    Arc::new(BackpressureGate::new(fsm))
+    let gate = Arc::new(BackpressureGate::new(Arc::clone(&fsm)));
+    (fsm, gate)
 }
 
 fn load_validated_mount_adaptive_runtime_manifest(
@@ -4799,12 +5235,22 @@ fn validate_mount_adaptive_runtime_request_with_config(
         bail!("access_mode_mismatch: {reason}");
     }
 
+    let (fsm, gate) = build_adaptive_runtime_backpressure_gate();
     let plan = MountAdaptiveRuntimePlan {
         manifest_path: manifest_path.to_path_buf(),
         manifest_scenario_id: manifest.scenario_id,
         run_id: manifest.run_id,
+        release_claim_state: manifest.release_claim_state.label().to_owned(),
         backpressure_policy_id: manifest.backpressure_policy_id,
-        gate: build_adaptive_runtime_backpressure_gate(),
+        artifact_paths: manifest.artifact_paths,
+        raw_stdout_path: manifest.raw_stdout_path,
+        raw_stderr_path: manifest.raw_stderr_path,
+        raw_log_paths: manifest.raw_log_paths,
+        cleanup_status: manifest.cleanup_status.label().to_owned(),
+        git_sha: manifest.git_sha,
+        reproduction_command: manifest.reproduction_command,
+        fsm,
+        gate,
     };
     log_mount_adaptive_runtime_accepted(operation_id, scenario_id, &plan);
     Ok(Some(plan))
@@ -4834,15 +5280,51 @@ fn mount_with_fuse(
 
 /// Parameters shared by managed and per-core mount paths.
 struct ManagedMountParams<'a> {
+    image_path: &'a Path,
     mountpoint: &'a Path,
+    runtime: MountRuntimeConfig,
     read_write: bool,
     allow_other: bool,
     auto_unmount: bool,
     writeback_cache: WritebackCacheMode,
     backpressure: Option<Arc<BackpressureGate>>,
+    adaptive_runtime_plan: Option<&'a MountAdaptiveRuntimePlan>,
+    adaptive_runtime_summary: &'a MountAdaptiveRuntimeSummaryConfig,
     unmount_timeout_secs: u64,
     operation_id: &'a str,
     scenario_id: &'a str,
+}
+
+fn worker_count_from_usize(worker_count: usize) -> u32 {
+    u32::try_from(worker_count).unwrap_or(u32::MAX)
+}
+
+fn build_mount_per_core_shutdown_observation(
+    metrics: ffs_fuse::MetricsSnapshot,
+    worker_count: u32,
+    aggregate: &ffs_fuse::per_core::AggregateMetrics,
+) -> MountAdaptiveRuntimeShutdownObservation {
+    let per_core_distribution = aggregate
+        .per_core
+        .iter()
+        .enumerate()
+        .map(|(core_id, core)| MountAdaptiveRuntimeCoreRequestSummary {
+            core_id: u32::try_from(core_id).unwrap_or(u32::MAX),
+            requests: core.requests,
+            cache_hits: core.cache_hits,
+            cache_misses: core.cache_misses,
+        })
+        .collect();
+    MountAdaptiveRuntimeShutdownObservation {
+        metrics,
+        worker_count,
+        per_core: Some(MountAdaptiveRuntimePerCoreObservation {
+            total_cache_hits: aggregate.total_cache_hits,
+            total_cache_misses: aggregate.total_cache_misses,
+            imbalance_ratio: aggregate.imbalance_ratio(),
+            per_core_distribution,
+        }),
+    }
 }
 
 fn mount_with_managed_fuse(open_fs: Arc<OpenFs>, params: &ManagedMountParams<'_>) -> Result<()> {
@@ -4889,6 +5371,23 @@ fn mount_with_managed_fuse(open_fs: Arc<OpenFs>, params: &ManagedMountParams<'_>
 
     let metrics = handle.wait();
     log_mount_shutdown_metrics(params.operation_id, params.scenario_id, &metrics);
+    emit_mount_adaptive_runtime_shutdown_summary(
+        MountAdaptiveRuntimeShutdownContext {
+            image_path: params.image_path,
+            mountpoint: params.mountpoint,
+            runtime: params.runtime,
+            read_write: params.read_write,
+            operation_id: params.operation_id,
+            cli_scenario_id: params.scenario_id,
+            plan: params.adaptive_runtime_plan,
+            summary_config: params.adaptive_runtime_summary,
+        },
+        &MountAdaptiveRuntimeShutdownObservation {
+            metrics,
+            worker_count: worker_count_from_usize(config.options.resolved_thread_count()),
+            per_core: None,
+        },
+    )?;
     Ok(())
 }
 
@@ -4970,6 +5469,21 @@ fn mount_with_per_core_fuse(open_fs: Arc<OpenFs>, params: &ManagedMountParams<'_
         "per_core_mount_shutdown_complete"
     );
 
+    let observation =
+        build_mount_per_core_shutdown_observation(metrics, dispatcher.num_cores(), &aggregate);
+    emit_mount_adaptive_runtime_shutdown_summary(
+        MountAdaptiveRuntimeShutdownContext {
+            image_path: params.image_path,
+            mountpoint: params.mountpoint,
+            runtime: params.runtime,
+            read_write: params.read_write,
+            operation_id: params.operation_id,
+            cli_scenario_id: params.scenario_id,
+            plan: params.adaptive_runtime_plan,
+            summary_config: params.adaptive_runtime_summary,
+        },
+        &observation,
+    )?;
     Ok(())
 }
 
@@ -5505,10 +6019,36 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
                 auto_unmount,
                 WritebackCacheMode::from_enabled(options.writeback_cache.enabled),
             )?;
+            emit_mount_adaptive_runtime_shutdown_summary(
+                MountAdaptiveRuntimeShutdownContext {
+                    image_path,
+                    mountpoint,
+                    runtime,
+                    read_write: options.read_write,
+                    operation_id: &operation_id,
+                    cli_scenario_id: scenario_id,
+                    plan: None,
+                    summary_config: &options.adaptive_runtime_summary,
+                },
+                &MountAdaptiveRuntimeShutdownObservation {
+                    metrics: ffs_fuse::MetricsSnapshot {
+                        requests_total: 0,
+                        requests_ok: 0,
+                        requests_err: 0,
+                        bytes_read: 0,
+                        requests_throttled: 0,
+                        requests_shed: 0,
+                    },
+                    worker_count: 0,
+                    per_core: None,
+                },
+            )?;
         }
         MountRuntimeMode::Managed | MountRuntimeMode::PerCore => {
             let params = ManagedMountParams {
+                image_path,
                 mountpoint,
+                runtime,
                 read_write: options.read_write,
                 allow_other: options.allow_other,
                 auto_unmount,
@@ -5516,6 +6056,8 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
                 backpressure: adaptive_runtime_plan
                     .as_ref()
                     .map(|plan| Arc::clone(&plan.gate)),
+                adaptive_runtime_plan: adaptive_runtime_plan.as_ref(),
+                adaptive_runtime_summary: &options.adaptive_runtime_summary,
                 unmount_timeout_secs: runtime.managed_unmount_timeout_secs(),
                 operation_id: &operation_id,
                 scenario_id,
@@ -6784,11 +7326,11 @@ mod tests {
         BtrfsMountSelection, Cli, Command, DumpCommand, Ext4DataErrPolicy, Ext4JournalReplayMode,
         FsckCommandOptions, FsckFlags, InfoCommandOptions, InfoSections, LogFormat,
         MAX_EXT4_INFO_GROUPS, MountAccessMode, MountAdaptiveRuntimeConfig,
-        MountBackgroundRepairMode, MountBackgroundScrubConfig, MountBackgroundScrubMode,
-        MountBackgroundScrubRequest, MountCmdOptions, MountMode, MountRuntimeConfig,
-        MountRuntimeMode, MountWritebackCacheConfig, RepairCommandOptions, RepairFlags,
-        WRITEBACK_CACHE_KILL_SWITCH_ENV, btrfs_chunk_type_flag_names, build_ext4_group_info,
-        build_fsck_output, build_info_output, build_mount_open_options,
+        MountAdaptiveRuntimeSummaryConfig, MountBackgroundRepairMode, MountBackgroundScrubConfig,
+        MountBackgroundScrubMode, MountBackgroundScrubRequest, MountCmdOptions, MountMode,
+        MountRuntimeConfig, MountRuntimeMode, MountWritebackCacheConfig, RepairCommandOptions,
+        RepairFlags, WRITEBACK_CACHE_KILL_SWITCH_ENV, btrfs_chunk_type_flag_names,
+        build_ext4_group_info, build_fsck_output, build_info_output, build_mount_open_options,
         choose_btrfs_scrub_block_size, ext4_appears_clean_state, ext4_mount_replay_mode,
         format_ratio_thousandths, log_mount_runtime_rejected, log_mount_runtime_selected,
         mount_cmd, mount_operation_id, open_filesystem_for_mount, parse_btrfs_mount_selection,
@@ -6857,6 +7399,7 @@ mod tests {
                 managed_unmount_timeout_secs: None,
             },
             adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
+            adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
             background_scrub: test_mount_background_scrub_disabled(),
             writeback_cache,
         }
@@ -7013,6 +7556,10 @@ mod tests {
             "--adaptive-runtime",
             "--adaptive-runtime-manifest",
             "manifest.json",
+            "--adaptive-runtime-summary-json",
+            "shutdown.json",
+            "--adaptive-runtime-summary-md",
+            "shutdown.md",
             "/tmp/fs.img",
             "/tmp/mnt",
         ])
@@ -7024,6 +7571,8 @@ mod tests {
                 rw,
                 adaptive_runtime,
                 adaptive_runtime_manifest,
+                adaptive_runtime_summary_json,
+                adaptive_runtime_summary_md,
                 ..
             } => {
                 assert_eq!(runtime_mode, MountRuntimeMode::PerCore);
@@ -7032,6 +7581,14 @@ mod tests {
                 assert_eq!(
                     adaptive_runtime_manifest,
                     Some(PathBuf::from("manifest.json"))
+                );
+                assert_eq!(
+                    adaptive_runtime_summary_json,
+                    Some(PathBuf::from("shutdown.json"))
+                );
+                assert_eq!(
+                    adaptive_runtime_summary_md,
+                    Some(PathBuf::from("shutdown.md"))
                 );
             }
             other => assert!(
@@ -7199,6 +7756,233 @@ mod tests {
                 ffs_core::BackpressureDecision::Proceed
             );
         });
+    }
+
+    #[test]
+    fn mount_adaptive_runtime_shutdown_summary_reports_per_core_backpressure_evidence() {
+        let manifest = adaptive_runtime_fixture(
+            AdaptiveRuntimeMode::PerCore,
+            true,
+            AdaptiveRuntimeReleaseClaimState::AcceptedLargeHost,
+            "2026-05-08T00:00:00Z",
+        );
+
+        with_adaptive_runtime_manifest_path(&manifest, |path| {
+            let plan = validate_mount_adaptive_runtime_request_with_config(
+                &MountAdaptiveRuntimeConfig::from_cli(true, Some(path)),
+                test_mount_runtime_config(MountRuntimeMode::PerCore),
+                true,
+                "mount-op",
+                "cli_mount_runtime_per_core_rw",
+                &adaptive_runtime_test_validation_config(),
+            )
+            .expect("accepted large-host evidence should validate")
+            .expect("accepted large-host evidence should build a runtime plan");
+            let summary_config = super::MountAdaptiveRuntimeSummaryConfig::from_cli(
+                Some(PathBuf::from("artifacts/out/shutdown.json")),
+                Some(PathBuf::from("artifacts/out/shutdown.md")),
+            );
+            let observation = super::MountAdaptiveRuntimeShutdownObservation {
+                metrics: ffs_fuse::MetricsSnapshot {
+                    requests_total: 13,
+                    requests_ok: 12,
+                    requests_err: 1,
+                    bytes_read: 4096,
+                    requests_throttled: 4,
+                    requests_shed: 1,
+                },
+                worker_count: 2,
+                per_core: Some(super::MountAdaptiveRuntimePerCoreObservation {
+                    total_cache_hits: 7,
+                    total_cache_misses: 6,
+                    imbalance_ratio: 1.6,
+                    per_core_distribution: vec![
+                        super::MountAdaptiveRuntimeCoreRequestSummary {
+                            core_id: 0,
+                            requests: 5,
+                            cache_hits: 4,
+                            cache_misses: 1,
+                        },
+                        super::MountAdaptiveRuntimeCoreRequestSummary {
+                            core_id: 1,
+                            requests: 8,
+                            cache_hits: 3,
+                            cache_misses: 5,
+                        },
+                    ],
+                }),
+            };
+
+            let summary = super::build_mount_adaptive_runtime_shutdown_summary(
+                super::MountAdaptiveRuntimeShutdownContext {
+                    image_path: Path::new("/tmp/fs.img"),
+                    mountpoint: Path::new("/tmp/mnt"),
+                    runtime: test_mount_runtime_config(MountRuntimeMode::PerCore),
+                    read_write: true,
+                    operation_id: "mount-op",
+                    cli_scenario_id: "cli_mount_runtime_per_core_rw",
+                    plan: Some(&plan),
+                    summary_config: &summary_config,
+                },
+                &observation,
+            );
+            let json = serde_json::to_value(&summary).expect("summary serializes");
+
+            assert!(summary.adaptive_runtime_enabled);
+            assert_eq!(summary.runtime_mode, "per-core");
+            assert_eq!(summary.scenario_id, "adaptive_runtime_accepted_large_host");
+            assert_eq!(summary.cli_scenario_id, "cli_mount_runtime_per_core_rw");
+            assert_eq!(summary.release_claim_state, "accepted_large_host");
+            assert_eq!(
+                summary.backpressure_policy_id.as_deref(),
+                Some("adaptive-runtime-default-v1")
+            );
+            assert_eq!(summary.total_requests, 13);
+            assert_eq!(summary.requests_throttled, 4);
+            assert_eq!(summary.requests_shed, 1);
+            assert_eq!(summary.cache_hits, Some(7));
+            assert_eq!(summary.cache_misses, Some(6));
+            assert_eq!(summary.worker_count, 2);
+            assert_eq!(
+                json["per_core_request_distribution"][1]["requests"],
+                serde_json::json!(8)
+            );
+            assert_eq!(
+                json["raw_log_paths"][0],
+                serde_json::json!("artifacts/adaptive-runtime/structured.jsonl")
+            );
+        });
+    }
+
+    #[test]
+    fn mount_adaptive_runtime_shutdown_markdown_is_stable() {
+        let summary = super::MountAdaptiveRuntimeShutdownSummary {
+            schema_version: 1,
+            adaptive_runtime_enabled: true,
+            runtime_mode: "per-core".to_owned(),
+            read_write: true,
+            run_id: "adaptive-runtime-run-20260507T000000Z".to_owned(),
+            scenario_id: "adaptive_runtime_accepted_large_host".to_owned(),
+            cli_scenario_id: "cli_mount_runtime_per_core_rw".to_owned(),
+            release_claim_state: "accepted_large_host".to_owned(),
+            degradation_level_transitions: super::MountAdaptiveRuntimeDegradationTransitionLedger {
+                current_level: "normal".to_owned(),
+                transition_count: 0,
+                transitions: Vec::new(),
+            },
+            backpressure_policy_id: Some("adaptive-runtime-default-v1".to_owned()),
+            requests_throttled: 4,
+            requests_shed: 1,
+            total_requests: 13,
+            cache_hits: Some(7),
+            cache_misses: Some(6),
+            per_core_request_distribution: vec![
+                super::MountAdaptiveRuntimeCoreRequestSummary {
+                    core_id: 0,
+                    requests: 5,
+                    cache_hits: 4,
+                    cache_misses: 1,
+                },
+                super::MountAdaptiveRuntimeCoreRequestSummary {
+                    core_id: 1,
+                    requests: 8,
+                    cache_hits: 3,
+                    cache_misses: 5,
+                },
+            ],
+            per_core_imbalance_ratio: Some(1.6),
+            worker_count: 2,
+            artifact_paths: vec![
+                "artifacts/adaptive-runtime/report.json".to_owned(),
+                "artifacts/adaptive-runtime/summary.md".to_owned(),
+            ],
+            raw_stdout_path: Some("artifacts/adaptive-runtime/stdout.log".to_owned()),
+            raw_stderr_path: Some("artifacts/adaptive-runtime/stderr.log".to_owned()),
+            raw_log_paths: vec!["artifacts/adaptive-runtime/structured.jsonl".to_owned()],
+            cleanup_status: "clean".to_owned(),
+            git_sha: "c87266f2".to_owned(),
+            reproduction_command: "cargo run -p ffs-harness -- validate-adaptive-runtime-manifest"
+                .to_owned(),
+        };
+
+        let markdown = super::render_mount_adaptive_runtime_shutdown_markdown(&summary);
+
+        assert_eq!(
+            markdown,
+            "# Adaptive Runtime Shutdown Evidence\n\n\
+- Adaptive runtime enabled: `true`\n\
+- Runtime mode: `per-core`\n\
+- Run: `adaptive-runtime-run-20260507T000000Z`\n\
+- Scenario: `adaptive_runtime_accepted_large_host`\n\
+- CLI scenario: `cli_mount_runtime_per_core_rw`\n\
+- Release claim: `accepted_large_host`\n\
+- Git SHA: `c87266f2`\n\
+- Reproduction: `cargo run -p ffs-harness -- validate-adaptive-runtime-manifest`\n\
+\n\
+## Backpressure\n\
+\n\
+- Policy: `adaptive-runtime-default-v1`\n\
+- Current degradation level: `normal`\n\
+- Degradation transitions observed: `0`\n\
+- Requests: total=`13`, throttled=`4`, shed=`1`\n\
+\n\
+## Per-Core\n\
+\n\
+- Worker count: `2`\n\
+- Cache hits/misses: `7` / `6`\n\
+- Imbalance ratio: `1.600000`\n\
+- Request distribution: `core0=5 (hits=4, misses=1), core1=8 (hits=3, misses=5)`\n\
+\n\
+## Artifacts\n\
+\n\
+- Artifact paths: `artifacts/adaptive-runtime/report.json`, `artifacts/adaptive-runtime/summary.md`\n\
+- Raw stdout: `artifacts/adaptive-runtime/stdout.log`\n\
+- Raw stderr: `artifacts/adaptive-runtime/stderr.log`\n\
+- Raw logs: `artifacts/adaptive-runtime/structured.jsonl`\n\
+- Cleanup: `clean`\n"
+        );
+    }
+
+    #[test]
+    fn mount_adaptive_runtime_shutdown_summary_reports_default_off_explicitly() {
+        let observation = super::MountAdaptiveRuntimeShutdownObservation {
+            metrics: ffs_fuse::MetricsSnapshot {
+                requests_total: 0,
+                requests_ok: 0,
+                requests_err: 0,
+                bytes_read: 0,
+                requests_throttled: 0,
+                requests_shed: 0,
+            },
+            worker_count: 0,
+            per_core: None,
+        };
+        let summary_config = super::MountAdaptiveRuntimeSummaryConfig::disabled();
+        let summary = super::build_mount_adaptive_runtime_shutdown_summary(
+            super::MountAdaptiveRuntimeShutdownContext {
+                image_path: Path::new("/tmp/fs.img"),
+                mountpoint: Path::new("/tmp/mnt"),
+                runtime: test_mount_runtime_config(MountRuntimeMode::Standard),
+                read_write: false,
+                operation_id: "mount-op",
+                cli_scenario_id: "cli_mount_runtime_standard_ro",
+                plan: None,
+                summary_config: &summary_config,
+            },
+            &observation,
+        );
+        let json = serde_json::to_value(&summary).expect("summary serializes");
+
+        assert!(!summary.adaptive_runtime_enabled);
+        assert_eq!(summary.release_claim_state, "disabled");
+        assert_eq!(
+            summary.degradation_level_transitions.current_level,
+            "not_applicable"
+        );
+        assert_eq!(summary.cache_hits, None);
+        assert_eq!(summary.per_core_request_distribution, Vec::new());
+        assert_eq!(json["adaptive_runtime_enabled"], serde_json::json!(false));
+        assert_eq!(json["backpressure_policy_id"], Value::Null);
     }
 
     #[test]
@@ -10068,6 +10852,7 @@ mod tests {
                             managed_unmount_timeout_secs: None,
                         },
                         adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
+                        adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
                         background_scrub: test_mount_background_scrub_disabled(),
                         writeback_cache: MountWritebackCacheConfig::disabled(),
                     },
@@ -10140,6 +10925,7 @@ mod tests {
                     managed_unmount_timeout_secs: Some(30),
                 },
                 adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
+                adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
                 background_scrub: test_mount_background_scrub_disabled(),
                 writeback_cache: MountWritebackCacheConfig::disabled(),
             },
@@ -10172,6 +10958,7 @@ mod tests {
                     managed_unmount_timeout_secs: None,
                 },
                 adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
+                adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
                 background_scrub: test_mount_background_scrub_disabled(),
                 writeback_cache: MountWritebackCacheConfig::disabled(),
             },
@@ -10233,6 +11020,7 @@ mod tests {
                 managed_unmount_timeout_secs: None,
             },
             adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
+            adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
             background_scrub: test_mount_background_scrub_disabled(),
             writeback_cache: MountWritebackCacheConfig::disabled(),
         });
@@ -10256,6 +11044,7 @@ mod tests {
                 managed_unmount_timeout_secs: None,
             },
             adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
+            adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
             background_scrub: test_mount_background_scrub_disabled(),
             writeback_cache: MountWritebackCacheConfig::disabled(),
         });
@@ -10283,6 +11072,7 @@ mod tests {
                 managed_unmount_timeout_secs: None,
             },
             adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
+            adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
             background_scrub: test_mount_background_scrub_disabled(),
             writeback_cache: MountWritebackCacheConfig::disabled(),
         });
@@ -10314,6 +11104,7 @@ mod tests {
                         managed_unmount_timeout_secs: None,
                     },
                     adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
+                    adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
                     background_scrub: test_mount_background_scrub_disabled(),
                     writeback_cache: MountWritebackCacheConfig::disabled(),
                 },
@@ -10356,6 +11147,7 @@ mod tests {
                         managed_unmount_timeout_secs: None,
                     },
                     adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
+                    adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
                     background_scrub: test_mount_background_scrub_disabled(),
                     writeback_cache: MountWritebackCacheConfig::disabled(),
                 },
@@ -10395,6 +11187,7 @@ mod tests {
                         managed_unmount_timeout_secs: None,
                     },
                     adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
+                    adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
                     background_scrub: test_mount_background_scrub_disabled(),
                     writeback_cache: MountWritebackCacheConfig::disabled(),
                 },
@@ -10453,6 +11246,7 @@ mod tests {
                         managed_unmount_timeout_secs: None,
                     },
                     adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
+                    adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
                     background_scrub: test_mount_background_scrub_disabled(),
                     writeback_cache: MountWritebackCacheConfig::disabled(),
                 },
