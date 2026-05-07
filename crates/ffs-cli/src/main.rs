@@ -16,7 +16,7 @@ use cmd_repair::{
 };
 
 use anyhow::{Context, Result, bail};
-use asupersync::Cx;
+use asupersync::{Cx, SystemPressure};
 use clap::{Parser, Subcommand, ValueEnum};
 use ffs_block::{BlockDevice, ByteBlockDevice, ByteDevice, FileByteDevice};
 use ffs_btrfs::{
@@ -24,12 +24,18 @@ use ffs_btrfs::{
     parse_inode_item, parse_root_item,
 };
 use ffs_core::{
-    BtrfsMountSelection, CrashRecoveryOutcome, Ext4DataErrPolicy, Ext4JournalReplayMode, FsFlavor,
-    FsOps, OpenFs, OpenOptions, RepairWritebackBlock, detect_filesystem_at_path,
+    BackpressureGate, BtrfsMountSelection, CrashRecoveryOutcome, DegradationFsm, Ext4DataErrPolicy,
+    Ext4JournalReplayMode, FsFlavor, FsOps, OpenFs, OpenOptions, RepairWritebackBlock,
+    detect_filesystem_at_path,
 };
 use ffs_fuse::{MountConfig, MountOptions, WritebackCacheMode, mount_managed};
 use ffs_harness::{
     ParityReport,
+    adaptive_runtime_manifest::{
+        AdaptiveRuntimeEvidenceValidationConfig, AdaptiveRuntimeMode,
+        fail_on_adaptive_runtime_evidence_errors, load_adaptive_runtime_evidence_manifest,
+        validate_adaptive_runtime_evidence_manifest_with_config,
+    },
     writeback_cache_audit::{
         build_writeback_cache_audit_report, build_writeback_crash_replay_report,
         build_writeback_ordering_report, fail_on_writeback_cache_audit_errors,
@@ -144,6 +150,14 @@ impl MountRuntimeMode {
             (Self::PerCore, true) => "cli_mount_runtime_per_core_rw",
         }
     }
+
+    const fn adaptive_runtime_mode(self) -> AdaptiveRuntimeMode {
+        match self {
+            Self::Standard => AdaptiveRuntimeMode::Standard,
+            Self::Managed => AdaptiveRuntimeMode::Managed,
+            Self::PerCore => AdaptiveRuntimeMode::PerCore,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +178,38 @@ impl MountRuntimeConfig {
         self.managed_unmount_timeout_secs
             .unwrap_or(DEFAULT_MANAGED_UNMOUNT_TIMEOUT_SECS)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MountAdaptiveRuntimeConfig {
+    enabled: bool,
+    manifest_path: Option<PathBuf>,
+}
+
+impl MountAdaptiveRuntimeConfig {
+    #[cfg(test)]
+    const fn disabled() -> Self {
+        Self {
+            enabled: false,
+            manifest_path: None,
+        }
+    }
+
+    fn from_cli(enabled: bool, manifest_path: Option<PathBuf>) -> Self {
+        Self {
+            enabled,
+            manifest_path,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct MountAdaptiveRuntimePlan {
+    manifest_path: PathBuf,
+    manifest_scenario_id: String,
+    run_id: String,
+    backpressure_policy_id: String,
+    gate: Arc<BackpressureGate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,6 +409,7 @@ struct MountCmdOptions {
     ext4_data_err_policy: Ext4DataErrPolicy,
     ext4_verify_journal_checksums: bool,
     runtime: MountRuntimeConfig,
+    adaptive_runtime: MountAdaptiveRuntimeConfig,
     background_scrub: MountBackgroundScrubConfig,
     writeback_cache: MountWritebackCacheConfig,
 }
@@ -554,6 +601,15 @@ enum Command {
         /// Invalid when used with `--runtime-mode standard`.
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         managed_unmount_timeout_secs: Option<u64>,
+        /// Enable adaptive managed/per-core runtime controls after evidence validation.
+        ///
+        /// Requires `--runtime-mode managed` or `--runtime-mode per-core` and
+        /// `--adaptive-runtime-manifest`.
+        #[arg(long = "adaptive-runtime")]
+        adaptive_runtime: bool,
+        /// Adaptive runtime evidence manifest accepted by `ffs-harness`.
+        #[arg(long = "adaptive-runtime-manifest")]
+        adaptive_runtime_manifest: Option<PathBuf>,
         /// Allow other users to access the mount.
         #[arg(long)]
         allow_other: bool,
@@ -1599,6 +1655,8 @@ fn run() -> Result<()> {
             mountpoint,
             runtime_mode,
             managed_unmount_timeout_secs,
+            adaptive_runtime,
+            adaptive_runtime_manifest,
             allow_other,
             rw,
             writeback_cache,
@@ -1648,6 +1706,10 @@ fn run() -> Result<()> {
                         mode: runtime_mode,
                         managed_unmount_timeout_secs,
                     },
+                    adaptive_runtime: MountAdaptiveRuntimeConfig::from_cli(
+                        adaptive_runtime,
+                        adaptive_runtime_manifest,
+                    ),
                     background_scrub,
                     writeback_cache: MountWritebackCacheConfig::from_cli(
                         writeback_cache,
@@ -4532,6 +4594,222 @@ fn validate_mount_writeback_cache_request(
     Ok(())
 }
 
+fn log_mount_adaptive_runtime_rejected(
+    operation_id: &str,
+    scenario_id: &str,
+    error_class: &str,
+    reason: &str,
+    manifest_path: Option<&Path>,
+) {
+    let manifest_path =
+        manifest_path.map_or_else(|| "<none>".to_owned(), |path| path.display().to_string());
+    warn!(
+        target: "ffs::cli::mount",
+        operation_id,
+        scenario_id,
+        outcome = "adaptive_runtime_rejected",
+        error_class,
+        reason,
+        manifest_path = %manifest_path,
+        "adaptive_runtime_rejected"
+    );
+}
+
+fn log_mount_adaptive_runtime_accepted(
+    operation_id: &str,
+    scenario_id: &str,
+    plan: &MountAdaptiveRuntimePlan,
+) {
+    info!(
+        target: "ffs::cli::mount",
+        operation_id,
+        scenario_id,
+        outcome = "adaptive_runtime_accepted",
+        manifest_path = %plan.manifest_path.display(),
+        manifest_scenario_id = %plan.manifest_scenario_id,
+        run_id = %plan.run_id,
+        backpressure_policy_id = %plan.backpressure_policy_id,
+        "adaptive_runtime_accepted"
+    );
+}
+
+fn adaptive_runtime_rejection_class(
+    report: &ffs_harness::adaptive_runtime_manifest::AdaptiveRuntimeEvidenceReport,
+) -> &'static str {
+    if report.issues.iter().any(|issue| issue.path == "expires_at") {
+        "stale_manifest"
+    } else if report.release_claim_state == "small_host_smoke" {
+        "small_host_smoke"
+    } else if report.release_claim_state == "capability_downgraded_smoke" {
+        "capability_downgraded_smoke"
+    } else if !report.valid {
+        "invalid_manifest"
+    } else {
+        "runtime_controls_not_accepted"
+    }
+}
+
+fn build_adaptive_runtime_backpressure_gate() -> Arc<BackpressureGate> {
+    let pressure = Arc::new(SystemPressure::new());
+    let fsm = Arc::new(DegradationFsm::new(pressure, 1));
+    Arc::new(BackpressureGate::new(fsm))
+}
+
+fn load_validated_mount_adaptive_runtime_manifest(
+    manifest_path: &Path,
+    operation_id: &str,
+    scenario_id: &str,
+    validation_config: &AdaptiveRuntimeEvidenceValidationConfig,
+) -> Result<ffs_harness::adaptive_runtime_manifest::AdaptiveRuntimeEvidenceManifest> {
+    let manifest = match load_adaptive_runtime_evidence_manifest(manifest_path) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            let reason = format!("{error:#}");
+            log_mount_adaptive_runtime_rejected(
+                operation_id,
+                scenario_id,
+                "manifest_invalid",
+                &reason,
+                Some(manifest_path),
+            );
+            return Err(error
+                .context("manifest_invalid: failed to load adaptive runtime evidence manifest"));
+        }
+    };
+
+    let report =
+        validate_adaptive_runtime_evidence_manifest_with_config(&manifest, validation_config);
+    if let Err(error) = fail_on_adaptive_runtime_evidence_errors(&report) {
+        let reason = format!("{error:#}");
+        let error_class = adaptive_runtime_rejection_class(&report);
+        log_mount_adaptive_runtime_rejected(
+            operation_id,
+            scenario_id,
+            error_class,
+            &reason,
+            Some(manifest_path),
+        );
+        return Err(error.context(format!(
+            "{error_class}: adaptive runtime evidence rejected CLI opt-in"
+        )));
+    }
+
+    Ok(manifest)
+}
+
+fn validate_mount_adaptive_runtime_request(
+    request: &MountAdaptiveRuntimeConfig,
+    runtime: MountRuntimeConfig,
+    read_write: bool,
+    operation_id: &str,
+    scenario_id: &str,
+) -> Result<Option<MountAdaptiveRuntimePlan>> {
+    validate_mount_adaptive_runtime_request_with_config(
+        request,
+        runtime,
+        read_write,
+        operation_id,
+        scenario_id,
+        &AdaptiveRuntimeEvidenceValidationConfig::with_current_reference(),
+    )
+}
+
+fn validate_mount_adaptive_runtime_request_with_config(
+    request: &MountAdaptiveRuntimeConfig,
+    runtime: MountRuntimeConfig,
+    read_write: bool,
+    operation_id: &str,
+    scenario_id: &str,
+    validation_config: &AdaptiveRuntimeEvidenceValidationConfig,
+) -> Result<Option<MountAdaptiveRuntimePlan>> {
+    if !request.enabled {
+        if request.manifest_path.is_some() {
+            let reason = "--adaptive-runtime-manifest requires --adaptive-runtime";
+            log_mount_adaptive_runtime_rejected(
+                operation_id,
+                scenario_id,
+                "manifest_without_opt_in",
+                reason,
+                request.manifest_path.as_deref(),
+            );
+            bail!("manifest_without_opt_in: {reason}");
+        }
+        return Ok(None);
+    }
+
+    if runtime.mode == MountRuntimeMode::Standard {
+        let reason = "--adaptive-runtime requires --runtime-mode managed or per-core";
+        log_mount_adaptive_runtime_rejected(
+            operation_id,
+            scenario_id,
+            "unsupported_runtime_mode",
+            reason,
+            request.manifest_path.as_deref(),
+        );
+        bail!("unsupported_runtime_mode: {reason}");
+    }
+
+    let manifest_path = request.manifest_path.as_deref().ok_or_else(|| {
+        let reason = "--adaptive-runtime requires --adaptive-runtime-manifest FILE";
+        log_mount_adaptive_runtime_rejected(
+            operation_id,
+            scenario_id,
+            "missing_manifest",
+            reason,
+            None,
+        );
+        anyhow::anyhow!("missing_manifest: {reason}")
+    })?;
+
+    let manifest = load_validated_mount_adaptive_runtime_manifest(
+        manifest_path,
+        operation_id,
+        scenario_id,
+        validation_config,
+    )?;
+
+    if manifest.runtime_mode != runtime.mode.adaptive_runtime_mode() {
+        let reason = format!(
+            "manifest runtime_mode={} does not match requested runtime_mode={}",
+            manifest.runtime_mode.label(),
+            runtime.mode.as_str()
+        );
+        log_mount_adaptive_runtime_rejected(
+            operation_id,
+            scenario_id,
+            "runtime_mode_mismatch",
+            &reason,
+            Some(manifest_path),
+        );
+        bail!("runtime_mode_mismatch: {reason}");
+    }
+
+    if manifest.read_write != read_write {
+        let reason = format!(
+            "manifest read_write={} does not match requested read_write={read_write}",
+            manifest.read_write
+        );
+        log_mount_adaptive_runtime_rejected(
+            operation_id,
+            scenario_id,
+            "access_mode_mismatch",
+            &reason,
+            Some(manifest_path),
+        );
+        bail!("access_mode_mismatch: {reason}");
+    }
+
+    let plan = MountAdaptiveRuntimePlan {
+        manifest_path: manifest_path.to_path_buf(),
+        manifest_scenario_id: manifest.scenario_id,
+        run_id: manifest.run_id,
+        backpressure_policy_id: manifest.backpressure_policy_id,
+        gate: build_adaptive_runtime_backpressure_gate(),
+    };
+    log_mount_adaptive_runtime_accepted(operation_id, scenario_id, &plan);
+    Ok(Some(plan))
+}
+
 fn mount_with_fuse(
     open_fs: Arc<OpenFs>,
     mountpoint: &Path,
@@ -4561,6 +4839,7 @@ struct ManagedMountParams<'a> {
     allow_other: bool,
     auto_unmount: bool,
     writeback_cache: WritebackCacheMode,
+    backpressure: Option<Arc<BackpressureGate>>,
     unmount_timeout_secs: u64,
     operation_id: &'a str,
     scenario_id: &'a str,
@@ -4576,7 +4855,7 @@ fn mount_with_managed_fuse(open_fs: Arc<OpenFs>, params: &ManagedMountParams<'_>
             ioctl_trace_path: None,
             worker_threads: 0,
         },
-        backpressure: None,
+        backpressure: params.backpressure.clone(),
         unmount_timeout: std::time::Duration::from_secs(params.unmount_timeout_secs),
     };
 
@@ -4641,7 +4920,7 @@ fn mount_with_per_core_fuse(open_fs: Arc<OpenFs>, params: &ManagedMountParams<'_
             ioctl_trace_path: None,
             worker_threads: dispatcher.num_cores() as usize,
         },
-        backpressure: None,
+        backpressure: params.backpressure.clone(),
         unmount_timeout: std::time::Duration::from_secs(params.unmount_timeout_secs),
     };
 
@@ -5111,6 +5390,7 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
         allow_other = options.allow_other,
         auto_unmount,
         read_write = options.read_write,
+        adaptive_runtime = options.adaptive_runtime.enabled,
         writeback_cache = options.writeback_cache.enabled,
         background_repair = options.background_scrub.repair_writes_enabled
     );
@@ -5147,6 +5427,14 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
         auto_unmount,
         options.read_write,
     );
+
+    let adaptive_runtime_plan = validate_mount_adaptive_runtime_request(
+        &options.adaptive_runtime,
+        runtime,
+        options.read_write,
+        &operation_id,
+        scenario_id,
+    )?;
 
     validate_mount_writeback_cache_request(
         image_path,
@@ -5225,6 +5513,9 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
                 allow_other: options.allow_other,
                 auto_unmount,
                 writeback_cache: WritebackCacheMode::from_enabled(options.writeback_cache.enabled),
+                backpressure: adaptive_runtime_plan
+                    .as_ref()
+                    .map(|plan| Arc::clone(&plan.gate)),
                 unmount_timeout_secs: runtime.managed_unmount_timeout_secs(),
                 operation_id: &operation_id,
                 scenario_id,
@@ -6492,10 +6783,10 @@ mod tests {
         BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem,
         BtrfsMountSelection, Cli, Command, DumpCommand, Ext4DataErrPolicy, Ext4JournalReplayMode,
         FsckCommandOptions, FsckFlags, InfoCommandOptions, InfoSections, LogFormat,
-        MAX_EXT4_INFO_GROUPS, MountAccessMode, MountBackgroundRepairMode,
-        MountBackgroundScrubConfig, MountBackgroundScrubMode, MountBackgroundScrubRequest,
-        MountCmdOptions, MountMode, MountRuntimeConfig, MountRuntimeMode,
-        MountWritebackCacheConfig, RepairCommandOptions, RepairFlags,
+        MAX_EXT4_INFO_GROUPS, MountAccessMode, MountAdaptiveRuntimeConfig,
+        MountBackgroundRepairMode, MountBackgroundScrubConfig, MountBackgroundScrubMode,
+        MountBackgroundScrubRequest, MountCmdOptions, MountMode, MountRuntimeConfig,
+        MountRuntimeMode, MountWritebackCacheConfig, RepairCommandOptions, RepairFlags,
         WRITEBACK_CACHE_KILL_SWITCH_ENV, btrfs_chunk_type_flag_names, build_ext4_group_info,
         build_fsck_output, build_info_output, build_mount_open_options,
         choose_btrfs_scrub_block_size, ext4_appears_clean_state, ext4_mount_replay_mode,
@@ -6503,6 +6794,7 @@ mod tests {
         mount_cmd, mount_operation_id, open_filesystem_for_mount, parse_btrfs_mount_selection,
         read_ext4_group_desc_from_path, read_ext4_inode_from_path, read_file_region,
         start_mount_background_scrub, summarize_repair_staleness, unavailable_repair_info,
+        validate_mount_adaptive_runtime_request_with_config,
         validate_mount_writeback_cache_request,
     };
     use crate::cmd_evidence::{
@@ -6519,6 +6811,15 @@ mod tests {
     };
     use clap::Parser;
     use ffs_block::CacheRuntimeMetricsSnapshot;
+    use ffs_harness::adaptive_runtime_manifest::{
+        AdaptiveRuntimeCleanupStatus, AdaptiveRuntimeDegradationThresholds,
+        AdaptiveRuntimeEvidenceManifest, AdaptiveRuntimeEvidenceValidationConfig,
+        AdaptiveRuntimeFuseCapabilityState, AdaptiveRuntimeFuseCapabilitySummary,
+        AdaptiveRuntimeHostFingerprint, AdaptiveRuntimeHostLane, AdaptiveRuntimeMode,
+        AdaptiveRuntimePerCoreConfig, AdaptiveRuntimeReleaseClaimState,
+        AdaptiveRuntimeResourceCaps,
+    };
+    use ffs_harness::artifact_manifest::parse_manifest_timestamp_epoch_days;
     use ffs_repair::evidence::{EvidenceEventType, EvidenceRecord};
     use ffs_repair::pipeline::RepairRuntimeMetricsSnapshot;
     use serde_json::Value;
@@ -6555,9 +6856,399 @@ mod tests {
                 mode: MountRuntimeMode::Standard,
                 managed_unmount_timeout_secs: None,
             },
+            adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
             background_scrub: test_mount_background_scrub_disabled(),
             writeback_cache,
         }
+    }
+
+    fn test_mount_runtime_config(mode: MountRuntimeMode) -> MountRuntimeConfig {
+        MountRuntimeConfig {
+            mode,
+            managed_unmount_timeout_secs: None,
+        }
+    }
+
+    fn adaptive_runtime_test_validation_config() -> AdaptiveRuntimeEvidenceValidationConfig {
+        AdaptiveRuntimeEvidenceValidationConfig {
+            reference_epoch_days: parse_manifest_timestamp_epoch_days("2026-05-07T12:00:00Z"),
+            current_git_sha: None,
+        }
+    }
+
+    fn adaptive_runtime_fixture(
+        runtime_mode: AdaptiveRuntimeMode,
+        read_write: bool,
+        release_claim_state: AdaptiveRuntimeReleaseClaimState,
+        expires_at: &str,
+    ) -> AdaptiveRuntimeEvidenceManifest {
+        let (lane, cpu_count, ram_bytes, numa_nodes, fuse_state) = match release_claim_state {
+            AdaptiveRuntimeReleaseClaimState::AcceptedLargeHost => (
+                AdaptiveRuntimeHostLane::PermissionedLargeHost,
+                96,
+                512_u64 * 1024 * 1024 * 1024,
+                2,
+                AdaptiveRuntimeFuseCapabilityState::Available,
+            ),
+            AdaptiveRuntimeReleaseClaimState::SmallHostSmoke => (
+                AdaptiveRuntimeHostLane::LocalSmoke,
+                8,
+                32_u64 * 1024 * 1024 * 1024,
+                1,
+                AdaptiveRuntimeFuseCapabilityState::Available,
+            ),
+            AdaptiveRuntimeReleaseClaimState::CapabilityDowngradedSmoke => (
+                AdaptiveRuntimeHostLane::CapabilityDowngraded,
+                96,
+                512_u64 * 1024 * 1024 * 1024,
+                2,
+                AdaptiveRuntimeFuseCapabilityState::PermissionDenied,
+            ),
+        };
+        let per_core_enabled = matches!(runtime_mode, AdaptiveRuntimeMode::PerCore);
+
+        AdaptiveRuntimeEvidenceManifest {
+            manifest_version: 1,
+            scenario_id: "adaptive_runtime_accepted_large_host".to_owned(),
+            run_id: "adaptive-runtime-run-20260507T000000Z".to_owned(),
+            runtime_mode,
+            read_write,
+            host_fingerprint: AdaptiveRuntimeHostFingerprint {
+                host_fingerprint: "permissioned-96c-512gb-2numa".to_owned(),
+                cpu_count,
+                ram_bytes,
+                numa_nodes,
+                kernel: "Linux 6.17.0-14-generic x86_64".to_owned(),
+                lane,
+            },
+            fuse_capability_summary: AdaptiveRuntimeFuseCapabilitySummary {
+                state: fuse_state,
+                detail: "/dev/fuse and fusermount3 probed for adaptive runtime".to_owned(),
+            },
+            backpressure_policy_id: "adaptive-runtime-default-v1".to_owned(),
+            degradation_thresholds: AdaptiveRuntimeDegradationThresholds {
+                throttle_dirty_ratio: 0.70,
+                shed_dirty_ratio: 0.85,
+                emergency_dirty_ratio: 0.95,
+            },
+            per_core_config: AdaptiveRuntimePerCoreConfig {
+                enabled: per_core_enabled,
+                worker_count: if per_core_enabled { 64 } else { 0 },
+                queue_policy: "metadata/write/repair queues isolated by runtime lane".to_owned(),
+                work_stealing: per_core_enabled,
+            },
+            resource_caps: AdaptiveRuntimeResourceCaps {
+                max_duration_secs: 900,
+                max_threads: 96,
+                max_memory_bytes: 128_u64 * 1024 * 1024 * 1024,
+                max_temp_bytes: 64_u64 * 1024 * 1024 * 1024,
+                max_queue_depth: 4096,
+            },
+            artifact_paths: vec![
+                "artifacts/adaptive-runtime/report.json".to_owned(),
+                "artifacts/adaptive-runtime/summary.md".to_owned(),
+            ],
+            raw_stdout_path: "artifacts/adaptive-runtime/stdout.log".to_owned(),
+            raw_stderr_path: "artifacts/adaptive-runtime/stderr.log".to_owned(),
+            raw_log_paths: vec!["artifacts/adaptive-runtime/structured.jsonl".to_owned()],
+            cleanup_status: AdaptiveRuntimeCleanupStatus::Clean,
+            controlling_ack_env: "FFS_ADAPTIVE_RUNTIME_REAL_RUN_ACK".to_owned(),
+            controlling_ack_value: "adaptive-runtime-may-mount-and-generate-load".to_owned(),
+            release_claim_state,
+            generated_at: "2026-05-07T00:00:00Z".to_owned(),
+            expires_at: expires_at.to_owned(),
+            git_sha: "c87266f2".to_owned(),
+            reproduction_command: "cargo run -p ffs-harness -- validate-adaptive-runtime-manifest"
+                .to_owned(),
+        }
+    }
+
+    fn with_adaptive_runtime_manifest_path<T>(
+        manifest: &AdaptiveRuntimeEvidenceManifest,
+        f: impl FnOnce(PathBuf) -> T,
+    ) -> T {
+        let json = serde_json::to_vec(manifest).expect("serialize adaptive runtime manifest");
+        with_temp_image_path(&json, f)
+    }
+
+    #[test]
+    fn adaptive_runtime_config_default_is_disabled() {
+        let plan = validate_mount_adaptive_runtime_request_with_config(
+            &MountAdaptiveRuntimeConfig::disabled(),
+            test_mount_runtime_config(MountRuntimeMode::Standard),
+            false,
+            "test-operation",
+            "cli_mount_runtime_standard_ro",
+            &adaptive_runtime_test_validation_config(),
+        )
+        .expect("disabled adaptive runtime should be a no-op");
+
+        assert!(plan.is_none());
+    }
+
+    #[test]
+    fn adaptive_runtime_manifest_without_opt_in_is_rejected() {
+        let err = validate_mount_adaptive_runtime_request_with_config(
+            &MountAdaptiveRuntimeConfig::from_cli(false, Some(PathBuf::from("manifest.json"))),
+            test_mount_runtime_config(MountRuntimeMode::Managed),
+            false,
+            "test-operation",
+            "cli_mount_runtime_managed_ro",
+            &adaptive_runtime_test_validation_config(),
+        )
+        .err()
+        .expect("manifest path without opt-in should reject");
+
+        assert!(format!("{err:#}").contains("manifest_without_opt_in"));
+    }
+
+    #[test]
+    fn cli_parses_mount_adaptive_runtime_flags() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "mount",
+            "--runtime-mode",
+            "per-core",
+            "--rw",
+            "--adaptive-runtime",
+            "--adaptive-runtime-manifest",
+            "manifest.json",
+            "/tmp/fs.img",
+            "/tmp/mnt",
+        ])
+        .expect("mount adaptive runtime flags should parse");
+
+        match cli.command {
+            Command::Mount {
+                runtime_mode,
+                rw,
+                adaptive_runtime,
+                adaptive_runtime_manifest,
+                ..
+            } => {
+                assert_eq!(runtime_mode, MountRuntimeMode::PerCore);
+                assert!(rw);
+                assert!(adaptive_runtime);
+                assert_eq!(
+                    adaptive_runtime_manifest,
+                    Some(PathBuf::from("manifest.json"))
+                );
+            }
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
+        }
+    }
+
+    #[test]
+    fn mount_adaptive_runtime_rejects_standard_mode() {
+        let err = validate_mount_adaptive_runtime_request_with_config(
+            &MountAdaptiveRuntimeConfig::from_cli(true, Some(PathBuf::from("manifest.json"))),
+            test_mount_runtime_config(MountRuntimeMode::Standard),
+            true,
+            "test-operation",
+            "cli_mount_runtime_standard_rw",
+            &adaptive_runtime_test_validation_config(),
+        )
+        .err()
+        .expect("standard runtime must reject adaptive controls");
+
+        assert!(format!("{err:#}").contains("unsupported_runtime_mode"));
+    }
+
+    #[test]
+    fn mount_adaptive_runtime_rejects_missing_manifest() {
+        let err = validate_mount_adaptive_runtime_request_with_config(
+            &MountAdaptiveRuntimeConfig::from_cli(true, None),
+            test_mount_runtime_config(MountRuntimeMode::PerCore),
+            true,
+            "test-operation",
+            "cli_mount_runtime_per_core_rw",
+            &adaptive_runtime_test_validation_config(),
+        )
+        .err()
+        .expect("adaptive runtime requires a manifest");
+
+        assert!(format!("{err:#}").contains("missing_manifest"));
+    }
+
+    #[test]
+    fn mount_adaptive_runtime_rejects_malformed_manifest() {
+        with_temp_image_path(b"{not-json", |path| {
+            let err = validate_mount_adaptive_runtime_request_with_config(
+                &MountAdaptiveRuntimeConfig::from_cli(true, Some(path)),
+                test_mount_runtime_config(MountRuntimeMode::PerCore),
+                true,
+                "test-operation",
+                "cli_mount_runtime_per_core_rw",
+                &adaptive_runtime_test_validation_config(),
+            )
+            .err()
+            .expect("malformed manifest should reject");
+
+            assert!(format!("{err:#}").contains("manifest_invalid"));
+        });
+    }
+
+    #[test]
+    fn mount_adaptive_runtime_rejects_stale_manifest() {
+        let manifest = adaptive_runtime_fixture(
+            AdaptiveRuntimeMode::PerCore,
+            true,
+            AdaptiveRuntimeReleaseClaimState::AcceptedLargeHost,
+            "2026-05-01T00:00:00Z",
+        );
+
+        with_adaptive_runtime_manifest_path(&manifest, |path| {
+            let err = validate_mount_adaptive_runtime_request_with_config(
+                &MountAdaptiveRuntimeConfig::from_cli(true, Some(path)),
+                test_mount_runtime_config(MountRuntimeMode::PerCore),
+                true,
+                "test-operation",
+                "cli_mount_runtime_per_core_rw",
+                &adaptive_runtime_test_validation_config(),
+            )
+            .err()
+            .expect("stale manifest should reject");
+
+            assert!(format!("{err:#}").contains("stale_manifest"));
+        });
+    }
+
+    #[test]
+    fn mount_adaptive_runtime_rejects_small_host_smoke_manifest() {
+        let manifest = adaptive_runtime_fixture(
+            AdaptiveRuntimeMode::PerCore,
+            true,
+            AdaptiveRuntimeReleaseClaimState::SmallHostSmoke,
+            "2026-05-08T00:00:00Z",
+        );
+
+        with_adaptive_runtime_manifest_path(&manifest, |path| {
+            let err = validate_mount_adaptive_runtime_request_with_config(
+                &MountAdaptiveRuntimeConfig::from_cli(true, Some(path)),
+                test_mount_runtime_config(MountRuntimeMode::PerCore),
+                true,
+                "test-operation",
+                "cli_mount_runtime_per_core_rw",
+                &adaptive_runtime_test_validation_config(),
+            )
+            .err()
+            .expect("small host smoke evidence should reject runtime controls");
+
+            assert!(format!("{err:#}").contains("small_host_smoke"));
+        });
+    }
+
+    #[test]
+    fn mount_adaptive_runtime_rejects_capability_downgraded_smoke_manifest() {
+        let manifest = adaptive_runtime_fixture(
+            AdaptiveRuntimeMode::PerCore,
+            true,
+            AdaptiveRuntimeReleaseClaimState::CapabilityDowngradedSmoke,
+            "2026-05-08T00:00:00Z",
+        );
+
+        with_adaptive_runtime_manifest_path(&manifest, |path| {
+            let err = validate_mount_adaptive_runtime_request_with_config(
+                &MountAdaptiveRuntimeConfig::from_cli(true, Some(path)),
+                test_mount_runtime_config(MountRuntimeMode::PerCore),
+                true,
+                "test-operation",
+                "cli_mount_runtime_per_core_rw",
+                &adaptive_runtime_test_validation_config(),
+            )
+            .err()
+            .expect("capability downgraded smoke evidence should reject runtime controls");
+
+            assert!(format!("{err:#}").contains("capability_downgraded_smoke"));
+        });
+    }
+
+    #[test]
+    fn mount_adaptive_runtime_accepts_large_host_manifest() {
+        let manifest = adaptive_runtime_fixture(
+            AdaptiveRuntimeMode::PerCore,
+            true,
+            AdaptiveRuntimeReleaseClaimState::AcceptedLargeHost,
+            "2026-05-08T00:00:00Z",
+        );
+
+        with_adaptive_runtime_manifest_path(&manifest, |path| {
+            let plan = validate_mount_adaptive_runtime_request_with_config(
+                &MountAdaptiveRuntimeConfig::from_cli(true, Some(path.clone())),
+                test_mount_runtime_config(MountRuntimeMode::PerCore),
+                true,
+                "test-operation",
+                "cli_mount_runtime_per_core_rw",
+                &adaptive_runtime_test_validation_config(),
+            )
+            .expect("accepted large-host evidence should validate")
+            .expect("accepted large-host evidence should build a runtime plan");
+
+            assert_eq!(plan.manifest_path, path);
+            assert_eq!(
+                plan.manifest_scenario_id,
+                "adaptive_runtime_accepted_large_host"
+            );
+            assert_eq!(plan.run_id, "adaptive-runtime-run-20260507T000000Z");
+            assert_eq!(plan.backpressure_policy_id, "adaptive-runtime-default-v1");
+            assert_eq!(
+                plan.gate.check(ffs_core::RequestOp::Read),
+                ffs_core::BackpressureDecision::Proceed
+            );
+        });
+    }
+
+    #[test]
+    fn mount_adaptive_runtime_rejects_runtime_mode_mismatch() {
+        let manifest = adaptive_runtime_fixture(
+            AdaptiveRuntimeMode::PerCore,
+            true,
+            AdaptiveRuntimeReleaseClaimState::AcceptedLargeHost,
+            "2026-05-08T00:00:00Z",
+        );
+
+        with_adaptive_runtime_manifest_path(&manifest, |path| {
+            let err = validate_mount_adaptive_runtime_request_with_config(
+                &MountAdaptiveRuntimeConfig::from_cli(true, Some(path)),
+                test_mount_runtime_config(MountRuntimeMode::Managed),
+                true,
+                "test-operation",
+                "cli_mount_runtime_managed_rw",
+                &adaptive_runtime_test_validation_config(),
+            )
+            .err()
+            .expect("manifest runtime mismatch should reject");
+
+            assert!(format!("{err:#}").contains("runtime_mode_mismatch"));
+        });
+    }
+
+    #[test]
+    fn mount_adaptive_runtime_rejects_read_write_mismatch() {
+        let manifest = adaptive_runtime_fixture(
+            AdaptiveRuntimeMode::PerCore,
+            true,
+            AdaptiveRuntimeReleaseClaimState::AcceptedLargeHost,
+            "2026-05-08T00:00:00Z",
+        );
+
+        with_adaptive_runtime_manifest_path(&manifest, |path| {
+            let err = validate_mount_adaptive_runtime_request_with_config(
+                &MountAdaptiveRuntimeConfig::from_cli(true, Some(path)),
+                test_mount_runtime_config(MountRuntimeMode::PerCore),
+                false,
+                "test-operation",
+                "cli_mount_runtime_per_core_ro",
+                &adaptive_runtime_test_validation_config(),
+            )
+            .err()
+            .expect("access mode mismatch should reject");
+
+            assert!(format!("{err:#}").contains("access_mode_mismatch"));
+        });
     }
 
     fn write_happy_writeback_artifacts(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
@@ -9376,6 +10067,7 @@ mod tests {
                             mode: MountRuntimeMode::Standard,
                             managed_unmount_timeout_secs: None,
                         },
+                        adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
                         background_scrub: test_mount_background_scrub_disabled(),
                         writeback_cache: MountWritebackCacheConfig::disabled(),
                     },
@@ -9447,6 +10139,7 @@ mod tests {
                     mode: MountRuntimeMode::Managed,
                     managed_unmount_timeout_secs: Some(30),
                 },
+                adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
                 background_scrub: test_mount_background_scrub_disabled(),
                 writeback_cache: MountWritebackCacheConfig::disabled(),
             },
@@ -9478,6 +10171,7 @@ mod tests {
                     mode: MountRuntimeMode::PerCore,
                     managed_unmount_timeout_secs: None,
                 },
+                adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
                 background_scrub: test_mount_background_scrub_disabled(),
                 writeback_cache: MountWritebackCacheConfig::disabled(),
             },
@@ -9538,6 +10232,7 @@ mod tests {
                 mode: MountRuntimeMode::Standard,
                 managed_unmount_timeout_secs: None,
             },
+            adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
             background_scrub: test_mount_background_scrub_disabled(),
             writeback_cache: MountWritebackCacheConfig::disabled(),
         });
@@ -9560,6 +10255,7 @@ mod tests {
                 mode: MountRuntimeMode::Standard,
                 managed_unmount_timeout_secs: None,
             },
+            adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
             background_scrub: test_mount_background_scrub_disabled(),
             writeback_cache: MountWritebackCacheConfig::disabled(),
         });
@@ -9586,6 +10282,7 @@ mod tests {
                 mode: MountRuntimeMode::Standard,
                 managed_unmount_timeout_secs: None,
             },
+            adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
             background_scrub: test_mount_background_scrub_disabled(),
             writeback_cache: MountWritebackCacheConfig::disabled(),
         });
@@ -9616,6 +10313,7 @@ mod tests {
                         mode: MountRuntimeMode::Standard,
                         managed_unmount_timeout_secs: None,
                     },
+                    adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
                     background_scrub: test_mount_background_scrub_disabled(),
                     writeback_cache: MountWritebackCacheConfig::disabled(),
                 },
@@ -9657,6 +10355,7 @@ mod tests {
                         mode: MountRuntimeMode::Standard,
                         managed_unmount_timeout_secs: None,
                     },
+                    adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
                     background_scrub: test_mount_background_scrub_disabled(),
                     writeback_cache: MountWritebackCacheConfig::disabled(),
                 },
@@ -9695,6 +10394,7 @@ mod tests {
                         mode: MountRuntimeMode::Standard,
                         managed_unmount_timeout_secs: None,
                     },
+                    adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
                     background_scrub: test_mount_background_scrub_disabled(),
                     writeback_cache: MountWritebackCacheConfig::disabled(),
                 },
@@ -9752,6 +10452,7 @@ mod tests {
                         mode: MountRuntimeMode::Standard,
                         managed_unmount_timeout_secs: None,
                     },
+                    adaptive_runtime: MountAdaptiveRuntimeConfig::disabled(),
                     background_scrub: test_mount_background_scrub_disabled(),
                     writeback_cache: MountWritebackCacheConfig::disabled(),
                 },
