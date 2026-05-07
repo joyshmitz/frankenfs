@@ -3761,6 +3761,31 @@ mod tests {
     }
 
     #[test]
+    fn render_artifact_schema_fixture_markdown_checked_in_fixtures_snapshot() {
+        let mut report = validate_artifact_schema_fixture_dir(
+            &artifact_schema_fixture_dir(),
+            "cargo test -p ffs-harness artifact_schema_fixture_suite",
+        );
+        assert!(report.valid, "fixture report errors: {report:#?}");
+        assert_eq!(report.positive_count, 1);
+        assert_eq!(report.negative_count, 1);
+        assert_eq!(report.fixture_count, 2);
+        assert!(report.fixtures.iter().any(|row| {
+            row.fixture_id == "positive_matrix" && row.observed_diagnostics.is_empty()
+        }));
+        assert!(report.fixtures.iter().any(|row| {
+            row.fixture_id == "negative_matrix" && !row.observed_diagnostics.is_empty()
+        }));
+
+        report.fixture_dir = "tests/artifact-schema-fixtures".to_owned();
+        let markdown = render_artifact_schema_fixture_markdown(&report);
+        insta::assert_snapshot!(
+            "render_artifact_schema_fixture_markdown_checked_in_fixtures",
+            markdown
+        );
+    }
+
+    #[test]
     fn artifact_schema_fixture_suite_covers_required_negative_diagnostics() {
         let report = validate_artifact_schema_fixture_dir(
             &artifact_schema_fixture_dir(),

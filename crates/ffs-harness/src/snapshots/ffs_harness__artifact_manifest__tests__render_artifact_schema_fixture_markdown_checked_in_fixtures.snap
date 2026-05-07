@@ -1,0 +1,18 @@
+---
+source: crates/ffs-harness/src/artifact_manifest.rs
+expression: markdown
+---
+# Artifact Schema Fixture Suite
+
+- Fixture directory: `tests/artifact-schema-fixtures`
+- Validator version: `1`
+- Result: `pass`
+- Fixtures: `2` positive=`1` negative=`1`
+- Reproduction command: `cargo test -p ffs-harness artifact_schema_fixture_suite`
+
+## Fixture Rows
+
+| Fixture | Expected | Observed | Valid | Diagnostics |
+|---|---:|---:|---:|---|
+| `negative_matrix` | `Reject` | `Reject` | `true` | ambiguous_skip_reason@$.manifest.operational_scenarios.artifact_schema_ambiguous_skip_case.classification, artifact_sha256_mismatch@$.manifest.artifacts[path=artifacts/shared/report.json].sha256, duplicate_scenario_id@$.manifest.readiness_events[event_id=artifact_schema_duplicate_scenario_case].scenario_id, invalid_classification@$.manifest.operational_scenarios.artifact_schema_invalid_classification_case.classification, missing_artifact@$.manifest.operational_scenarios.artifact_schema_missing_artifact_case.artifact_refs[artifacts/shared/missing.json], missing_cleanup_status@$.manifest.operational_scenarios.artifact_schema_missing_cleanup_case, missing_lane_id@$.manifest.readiness_events[event_id=negative_missing_lane_event].lane_id, missing_raw_log_path@$.manifest.readiness_events[event_id=negative_missing_raw_log_event].raw_log_refs, missing_remediation_id@$.manifest.readiness_events[event_id=negative_missing_remediation_event].remediation_id, missing_reproduction_command@$.manifest.readiness_events[event_id=negative_missing_reproduction_event].reproduction_command, missing_run_id@$.manifest.run_id, redacted_reproduction_command@$.manifest.readiness_events[event_id=negative_redacted_reproduction_event].reproduction_command, stale_schema_version@$.manifest.readiness_events[event_id=negative_stale_schema_event].envelope_version |
+| `positive_matrix` | `Accept` | `Accept` | `true` |  |
