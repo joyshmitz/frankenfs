@@ -15,23 +15,33 @@
 //! crate's parser directly so that drift between the two
 //! implementations gets exercised at libfuzzer scale.
 //!
-//!   MR-1 — Determinism: parse_inode_refs called twice on the same
+//!   MR-1 - Determinism: parse_inode_refs called twice on the same
 //!          input must return Result-equivalent output (parsed Vec
 //!          or Err formatted identically).
-//!   MR-2 — No-panic: arbitrary bytes must never panic the parser
+//!   MR-2 - No-panic: arbitrary bytes must never panic the parser
 //!          (any panic crashes the fuzzer).
-//!   MR-3 — Round-trip: every parsed entry, re-serialized via
+//!   MR-3 - Round-trip: every parsed entry, re-serialized via
 //!          BtrfsInodeRef::try_to_bytes and concatenated, must
 //!          re-parse to the same Vec<BtrfsInodeRef>.
-//!   MR-4 — Append-invariance: appending a partial-header tail
+//!   MR-4 - Append-invariance: appending a partial-header tail
 //!          (1..9 bytes) to a valid payload must reject with
 //!          InsufficientData (length-checking is the only thing
 //!          standing between this parser and a buffer over-read).
 
-use ffs_btrfs::{parse_inode_refs, BtrfsInodeRef};
+use ffs_btrfs::{BtrfsInodeRef, parse_inode_refs};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_NAME_BYTES: usize = 64;
+const INODE_REF_HEADER_BYTES: usize = 10;
+
+fn parse_must_reject(payload: &[u8], context: &str) {
+    let result = parse_inode_refs(payload);
+    assert!(result.is_err(), "{context} must reject");
+    if let Err(err) = result {
+        let rendered = format!("{err:?}");
+        assert!(!rendered.is_empty(), "{context} must render an error");
+    }
+}
 
 fuzz_target!(|data: &[u8]| {
     // MR-1, MR-2: pump arbitrary bytes through twice; result must
@@ -74,26 +84,47 @@ fuzz_target!(|data: &[u8]| {
                 .expect("re-parse of self-serialized output must succeed");
             assert_eq!(
                 reparsed, entries,
-                "MR-3: stamp(parse(x)) ↦ parse must be idempotent"
+                "MR-3: stamp(parse(x)) -> parse must be idempotent"
             );
         }
     }
+
+    let mut index_bytes = [0_u8; 8];
+    for (dst, src) in index_bytes.iter_mut().zip(data.iter().copied()) {
+        *dst = src;
+    }
+    let index = u64::from_le_bytes(index_bytes);
+    let len_bytes = [
+        data.get(8).copied().unwrap_or_default(),
+        data.get(9).copied().unwrap_or_default(),
+    ];
+    let name_len_choice = (usize::from(u16::from_le_bytes(len_bytes)) % MAX_NAME_BYTES) + 1;
+    let name_byte = data.get(10).copied().unwrap_or(b'x');
+
+    // Named malformed paths from bd-kbj23: short header, zero
+    // name_len, and declared name_len that overruns the remaining
+    // payload.
+    let mut zero_name = Vec::with_capacity(INODE_REF_HEADER_BYTES);
+    zero_name.extend_from_slice(&index.to_le_bytes());
+    zero_name.extend_from_slice(&0_u16.to_le_bytes());
+    for short_len in 1..INODE_REF_HEADER_BYTES {
+        parse_must_reject(&zero_name[..short_len], "short inode_ref header");
+    }
+    parse_must_reject(&zero_name, "zero-length inode_ref name");
+
+    let mut name_len_overflow = Vec::with_capacity(INODE_REF_HEADER_BYTES + 1);
+    name_len_overflow.extend_from_slice(&index.to_le_bytes());
+    name_len_overflow.extend_from_slice(&2_u16.to_le_bytes());
+    name_len_overflow.push(name_byte);
+    parse_must_reject(&name_len_overflow, "inode_ref name_len overflow");
 
     // MR-4 length-checking: build a synthetic single-entry payload
     // from the first ~16 bytes of fuzz input as (index, name_len,
     // partial_name) and assert the truncated-tail variants reject
     // with InsufficientData rather than buffer-over-reading.
-    if data.len() < 12 {
-        return;
-    }
-    let index = u64::from_le_bytes([
-        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-    ]);
-    let name_len_choice = (u16::from_le_bytes([data[8], data[9]]) as usize % MAX_NAME_BYTES) + 1;
-
     let entry = BtrfsInodeRef {
         index,
-        name: vec![data[10]; name_len_choice],
+        name: vec![name_byte; name_len_choice],
     };
     let valid = entry
         .try_to_bytes()
@@ -101,16 +132,10 @@ fuzz_target!(|data: &[u8]| {
     let parsed = parse_inode_refs(&valid).expect("valid single-entry must parse");
     assert_eq!(parsed, vec![entry.clone()]);
 
-    // Truncate by 1..9 bytes — any truncation inside the header or
+    // Truncate by 1..9 bytes; any truncation inside the header or
     // mid-name must reject, never panic.
-    for trunc in 1..valid.len().min(9) {
+    for trunc in 1..=valid.len().min(INODE_REF_HEADER_BYTES - 1) {
         let truncated = &valid[..valid.len() - trunc];
-        let err = parse_inode_refs(truncated)
-            .err()
-            .expect("truncated payload must reject");
-        // Stamp the error path is exercised; specific variant is
-        // intentionally not asserted to avoid coupling to private
-        // ParseError shape.
-        let _ = format!("{err:?}");
+        parse_must_reject(truncated, "truncated inode_ref payload");
     }
 });
