@@ -965,7 +965,7 @@ struct FuseInner {
     mountpoint: Option<PathBuf>,
     kernel_notifier: Mutex<Option<fuser::Notifier>>,
     ioctl_trace: Option<IoctlTraceProbe>,
-    backpressure: Option<BackpressureGate>,
+    backpressure: Option<Arc<BackpressureGate>>,
     access_predictor: AccessPredictor,
     readahead: ReadaheadManager,
     inode_locks: Arc<FuseInodeLocks>,
@@ -1565,7 +1565,7 @@ impl FrankenFuse {
         ops: Box<dyn FsOps>,
         options: &MountOptions,
         mountpoint: Option<&Path>,
-        backpressure: Option<BackpressureGate>,
+        backpressure: Option<Arc<BackpressureGate>>,
     ) -> Self {
         let thread_count = options.resolved_thread_count();
         if backpressure.is_some() {
@@ -1606,6 +1606,19 @@ impl FrankenFuse {
         Self::with_inner(ops, options, None, None)
     }
 
+    fn with_mount_config(
+        ops: Box<dyn FsOps>,
+        mountpoint: Option<&Path>,
+        config: &MountConfig,
+    ) -> Self {
+        Self::with_inner(
+            ops,
+            &config.options,
+            mountpoint,
+            config.backpressure.clone(),
+        )
+    }
+
     /// Create a FUSE adapter with an attached backpressure gate.
     #[must_use]
     pub fn with_backpressure(
@@ -1613,7 +1626,7 @@ impl FrankenFuse {
         options: &MountOptions,
         gate: BackpressureGate,
     ) -> Self {
-        Self::with_inner(ops, options, None, Some(gate))
+        Self::with_inner(ops, options, None, Some(Arc::new(gate)))
     }
 
     /// Get a reference to the shared metrics.
@@ -5100,6 +5113,11 @@ pub fn mount_background(
 pub struct MountConfig {
     /// Base mount options (RO, allow_other, threads, etc.).
     pub options: MountOptions,
+    /// Optional adaptive backpressure gate for managed mount runtimes.
+    ///
+    /// `None` preserves the default-off behavior: no request is throttled or
+    /// shed by the FUSE layer.
+    pub backpressure: Option<Arc<BackpressureGate>>,
     /// Grace period for in-flight requests during unmount.
     pub unmount_timeout: Duration,
 }
@@ -5108,6 +5126,7 @@ impl Default for MountConfig {
     fn default() -> Self {
         Self {
             options: MountOptions::default(),
+            backpressure: None,
             unmount_timeout: Duration::from_secs(30),
         }
     }
@@ -5276,12 +5295,13 @@ pub fn mount_managed(
         mountpoint = %mountpoint.display(),
         thread_count,
         read_only = config.options.read_only,
+        adaptive_backpressure = config.backpressure.is_some(),
         unmount_timeout_secs = config.unmount_timeout.as_secs(),
         "mounting FrankenFS"
     );
 
     let fuse_opts = build_mount_options(&config.options);
-    let fs = FrankenFuse::with_inner(ops, &config.options, Some(mountpoint), None);
+    let fs = FrankenFuse::with_mount_config(ops, Some(mountpoint), config);
     let metrics_ref = Arc::clone(&fs.inner.metrics);
     let notifier_owner = fs.shared_handle();
 
@@ -12152,6 +12172,7 @@ mod tests {
     fn mount_handle_wait_respects_unmount_timeout() {
         let config = MountConfig {
             options: MountOptions::default(),
+            backpressure: None,
             unmount_timeout: Duration::from_millis(60),
         };
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -12533,6 +12554,16 @@ mod tests {
 
     // ── should_shed backpressure tests ───────────────────────────────────
 
+    fn backpressure_gate_for_headroom(headroom: f32) -> Arc<BackpressureGate> {
+        use asupersync::SystemPressure;
+        use ffs_core::DegradationFsm;
+
+        let pressure = Arc::new(SystemPressure::with_headroom(headroom));
+        let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
+        fsm.tick();
+        Arc::new(BackpressureGate::new(fsm))
+    }
+
     #[test]
     fn should_shed_returns_false_without_backpressure_gate() {
         let fuse = FrankenFuse::new(Box::new(MinimalTestFs));
@@ -12541,6 +12572,43 @@ mod tests {
         assert!(!fuse.should_shed(RequestOp::Write));
         assert!(!fuse.should_shed(RequestOp::Create));
         assert!(!fuse.should_shed(RequestOp::Mkdir));
+    }
+
+    #[test]
+    fn mount_config_default_keeps_backpressure_disabled() {
+        let config = MountConfig::default();
+        assert!(config.backpressure.is_none());
+
+        let fuse = FrankenFuse::with_mount_config(Box::new(MinimalTestFs), None, &config);
+
+        assert!(!fuse.should_shed(RequestOp::Write));
+        assert!(!fuse.should_shed(RequestOp::Create));
+        let metrics = fuse.metrics().snapshot();
+        assert_eq!(metrics.requests_throttled, 0);
+        assert_eq!(metrics.requests_shed, 0);
+    }
+
+    #[test]
+    fn mount_config_backpressure_gate_reaches_should_shed_and_metrics() {
+        let cases = [
+            ("green", 0.95_f32, RequestOp::Write, false, 0, 0),
+            ("yellow", 0.75_f32, RequestOp::Write, false, 0, 0),
+            ("orange", 0.50_f32, RequestOp::Write, false, 1, 0),
+            ("red", 0.20_f32, RequestOp::Create, true, 0, 1),
+        ];
+
+        for (label, headroom, op, expected_shed, expected_throttled, expected_shed_count) in cases {
+            let config = MountConfig {
+                backpressure: Some(backpressure_gate_for_headroom(headroom)),
+                ..MountConfig::default()
+            };
+            let fuse = FrankenFuse::with_mount_config(Box::new(MinimalTestFs), None, &config);
+
+            assert_eq!(fuse.should_shed(op), expected_shed, "{label}");
+            let metrics = fuse.metrics().snapshot();
+            assert_eq!(metrics.requests_throttled, expected_throttled, "{label}");
+            assert_eq!(metrics.requests_shed, expected_shed_count, "{label}");
+        }
     }
 
     #[test]
