@@ -116,6 +116,13 @@ cd tests/fixtures/golden
 sha256sum -c checksums.txt
 ```
 
+For a fast repository-wide checksum and clean-checkout manifest guard without
+running the cargo-backed conformance tests:
+
+```bash
+./scripts/verify_golden.sh --checksums-only
+```
+
 ## Updating Goldens
 
 After intentional changes to the legacy `tests/fixtures/golden` inspect outputs:

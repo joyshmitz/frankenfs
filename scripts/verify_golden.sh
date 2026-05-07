@@ -4,6 +4,7 @@
 # Usage:
 #   scripts/verify_golden.sh           # verify all
 #   scripts/verify_golden.sh --update  # regenerate checksums after intentional changes
+#   scripts/verify_golden.sh --checksums-only
 #
 # Exit codes:
 #   0 — all golden outputs intact
@@ -28,9 +29,23 @@ fail() { echo -e "${RED}FAIL${NC} $1"; FAILED=1; }
 warn() { echo -e "${YELLOW}WARN${NC} $1"; }
 
 FAILED=0
+CHECKSUMS_ONLY=0
 
 cargo_exec() {
     rch exec -- cargo "$@"
+}
+
+usage() {
+    cat <<'EOF'
+Usage:
+  scripts/verify_golden.sh
+  scripts/verify_golden.sh --update
+  scripts/verify_golden.sh --checksums-only
+
+Options:
+  --update          Regenerate checksum manifests after intentional changes.
+  --checksums-only  Verify checksum manifests and git-tracked entries only.
+EOF
 }
 
 write_json_checksums() {
@@ -61,14 +76,65 @@ write_conformance_golden_checksums() {
     )
 }
 
-if [ "${1:-}" = "--update" ]; then
-    echo "Updating checksums..."
-    write_json_checksums conformance/fixtures checksums.sha256
-    write_conformance_golden_checksums
-    write_json_checksums tests/fixtures/golden checksums.txt
-    echo "Checksums updated. Review and commit."
-    exit 0
-fi
+verify_manifest_entries_tracked() {
+    local dir="$1"
+    local manifest="$2"
+    local label="$3"
+    local line digest file path
+    local untracked=0
+
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        digest="${line%% *}"
+        file="${line#*  }"
+        if [ "$file" = "$line" ]; then
+            file="${line#* }"
+        fi
+        file="${file#\*}"
+
+        if [ -z "$digest" ] || [ -z "$file" ] || [ "$file" = "$line" ]; then
+            fail "$label checksum manifest has malformed entry: $line"
+            untracked=1
+            continue
+        fi
+
+        if [[ "$file" = /* || "$file" = ".." || "$file" = ../* || "$file" = */../* || "$file" = */.. ]]; then
+            fail "$label checksum manifest references path outside its directory: $file"
+            untracked=1
+            continue
+        fi
+
+        path="$dir/$file"
+        if ! git ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+            fail "$label checksum manifest references untracked or ignored file: $file"
+            untracked=1
+        fi
+    done < "$dir/$manifest"
+
+    if [ "$untracked" -eq 0 ]; then
+        pass "$label checksum entries are tracked by git"
+    fi
+}
+
+case "${1:-}" in
+    "")
+        ;;
+    "--checksums-only")
+        CHECKSUMS_ONLY=1
+        ;;
+    "--update")
+        echo "Updating checksums..."
+        write_json_checksums conformance/fixtures checksums.sha256
+        write_conformance_golden_checksums
+        write_json_checksums tests/fixtures/golden checksums.txt
+        echo "Checksums updated. Review and commit."
+        exit 0
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
 
 echo "=== Golden Output Verification ==="
 echo ""
@@ -81,6 +147,7 @@ else
     fail "conformance/fixtures/ checksums MISMATCH"
     echo "  Run: scripts/verify_golden.sh --update  (after verifying changes are correct)"
 fi
+verify_manifest_entries_tracked conformance/fixtures checksums.sha256 "conformance/fixtures"
 
 # ── 2. Golden reference checksums ────────────────────────────────
 echo "--- Golden reference checksums ---"
@@ -90,6 +157,7 @@ else
     fail "conformance/golden/ checksums MISMATCH"
     echo "  Run: scripts/verify_golden.sh --update  (after verifying changes are correct)"
 fi
+verify_manifest_entries_tracked conformance/golden checksums.sha256 "conformance/golden"
 
 # ── 3. Legacy fixture checksums ───────────────────────────────────
 echo "--- Legacy fixture checksums ---"
@@ -98,6 +166,17 @@ if (cd tests/fixtures/golden && sha256sum -c checksums.txt --quiet 2>/dev/null);
 else
     fail "tests/fixtures/golden/ checksums MISMATCH"
     echo "  Run: scripts/verify_golden.sh --update  (after verifying changes are correct)"
+fi
+verify_manifest_entries_tracked tests/fixtures/golden checksums.txt "tests/fixtures/golden"
+
+if [ "$CHECKSUMS_ONLY" -eq 1 ]; then
+    echo ""
+    if [ "$FAILED" -eq 0 ]; then
+        echo -e "${GREEN}All checksum manifest checks passed.${NC}"
+        exit 0
+    fi
+    echo -e "${RED}Checksum manifest verification FAILED.${NC}"
+    exit 1
 fi
 
 # ── 4. Parity report consistency ─────────────────────────────────
