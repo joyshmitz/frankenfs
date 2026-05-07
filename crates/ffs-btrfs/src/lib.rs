@@ -7243,6 +7243,84 @@ mod tests {
         }
     }
 
+    /// bd-nzs5f — Kernel-conformance pin for the btrfs_inode_item
+    /// field offsets per fs/btrfs/btrfs_tree.h. Each field is stamped
+    /// with a UNIQUE non-zero magic at its canonical kernel offset,
+    /// then a single parse_inode_item call must round-trip every
+    /// field. A regression that drifted any single offset by ±4 bytes
+    /// (one field-width) would mis-route mode↔rdev or uid↔gid
+    /// silently. parse_inode_item_smoke / inode_item_round_trip
+    /// (which round-trip via to_bytes) cannot detect such drift if
+    /// to_bytes drifts the same way.
+    ///
+    /// Pairs with bd-xbqdw (parse_root_item kernel pin), bd-m6chz
+    /// (BTRFS_ITEM_* discriminants), bd-qyfph (BTRFS_FT_* values).
+    #[test]
+    fn parse_inode_item_kernel_offsets_match_btrfs_tree_h() {
+        let mut item = vec![0_u8; 160];
+
+        // Distinct non-zero magics so an offset drift produces a
+        // cross-field collision.
+        let generation = 0x1111_1111_1111_1111_u64;
+        let size = 0x2222_2222_2222_2222_u64;
+        let nbytes = 0x3333_3333_3333_3333_u64;
+        let nlink: u32 = 0x4444_4444;
+        let uid: u32 = 0x5555_5555;
+        let gid: u32 = 0x6666_6666;
+        let mode: u32 = 0o100_644; // valid regular-file mode
+        let rdev = 0x7777_7777_7777_7777_u64;
+        let atime_sec = 0x8888_8888_8888_8888_u64;
+        // nsec must be < 1_000_000_000 per parser invariant. Pick four
+        // distinct values inside [0, 1B) so a swap regression is caught.
+        let atime_nsec: u32 = 100_000_001;
+        let ctime_sec = 0xAAAA_AAAA_AAAA_AAAA_u64;
+        let ctime_nsec: u32 = 200_000_002;
+        let mtime_sec = 0xCCCC_CCCC_CCCC_CCCC_u64;
+        let mtime_nsec: u32 = 300_000_003;
+        let otime_sec = 0xEEEE_EEEE_EEEE_EEEE_u64;
+        let otime_nsec: u32 = 400_000_004;
+
+        // Stamp at kernel offsets. Skip transid (8..16), block_group
+        // (32..40), flags (64..72), sequence (72..80), reserved
+        // (80..112) — these are zeroed by to_bytes and not exposed
+        // on BtrfsInodeItem.
+        item[0..8].copy_from_slice(&generation.to_le_bytes());
+        item[16..24].copy_from_slice(&size.to_le_bytes());
+        item[24..32].copy_from_slice(&nbytes.to_le_bytes());
+        item[40..44].copy_from_slice(&nlink.to_le_bytes());
+        item[44..48].copy_from_slice(&uid.to_le_bytes());
+        item[48..52].copy_from_slice(&gid.to_le_bytes());
+        item[52..56].copy_from_slice(&mode.to_le_bytes());
+        item[56..64].copy_from_slice(&rdev.to_le_bytes());
+        item[112..120].copy_from_slice(&atime_sec.to_le_bytes());
+        item[120..124].copy_from_slice(&atime_nsec.to_le_bytes());
+        item[124..132].copy_from_slice(&ctime_sec.to_le_bytes());
+        item[132..136].copy_from_slice(&ctime_nsec.to_le_bytes());
+        item[136..144].copy_from_slice(&mtime_sec.to_le_bytes());
+        item[144..148].copy_from_slice(&mtime_nsec.to_le_bytes());
+        item[148..156].copy_from_slice(&otime_sec.to_le_bytes());
+        item[156..160].copy_from_slice(&otime_nsec.to_le_bytes());
+
+        let parsed = parse_inode_item(&item).expect("kernel-stamped inode_item must parse");
+
+        assert_eq!(parsed.generation, generation, "generation @ offset 0");
+        assert_eq!(parsed.size, size, "size @ offset 16");
+        assert_eq!(parsed.nbytes, nbytes, "nbytes @ offset 24");
+        assert_eq!(parsed.nlink, nlink, "nlink @ offset 40");
+        assert_eq!(parsed.uid, uid, "uid @ offset 44");
+        assert_eq!(parsed.gid, gid, "gid @ offset 48");
+        assert_eq!(parsed.mode, mode, "mode @ offset 52");
+        assert_eq!(parsed.rdev, rdev, "rdev @ offset 56");
+        assert_eq!(parsed.atime_sec, atime_sec, "atime_sec @ offset 112");
+        assert_eq!(parsed.atime_nsec, atime_nsec, "atime_nsec @ offset 120");
+        assert_eq!(parsed.ctime_sec, ctime_sec, "ctime_sec @ offset 124");
+        assert_eq!(parsed.ctime_nsec, ctime_nsec, "ctime_nsec @ offset 132");
+        assert_eq!(parsed.mtime_sec, mtime_sec, "mtime_sec @ offset 136");
+        assert_eq!(parsed.mtime_nsec, mtime_nsec, "mtime_nsec @ offset 144");
+        assert_eq!(parsed.otime_sec, otime_sec, "otime_sec @ offset 148");
+        assert_eq!(parsed.otime_nsec, otime_nsec, "otime_nsec @ offset 156");
+    }
+
     #[test]
     fn inode_item_round_trip() {
         let original = BtrfsInodeItem {
