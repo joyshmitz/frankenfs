@@ -1548,6 +1548,9 @@ except ValueError:
     print(f"invalid preflight created_at: {created_at}")
     sys.exit(1)
 age = (datetime.now(timezone.utc) - created).total_seconds()
+if age < 0:
+    print(f"future preflight created_at: {created_at}")
+    sys.exit(1)
 if age > max_age_secs:
     print(f"stale preflight manifest: age_secs={age:.0f} max_age_secs={max_age_secs}")
     sys.exit(1)
