@@ -742,6 +742,7 @@ dependencies = [
  "ffs-repair",
  "ffs-types",
  "libc",
+ "proptest",
  "serde",
  "serde_json",
  "tempfile",

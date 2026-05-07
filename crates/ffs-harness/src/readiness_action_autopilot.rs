@@ -408,6 +408,7 @@ pub fn plan_readiness_actions(
 
             let mut recommendation = recommendation.clone();
             append_missing_input_diagnostics(&mut recommendation, &input_diagnostics);
+            apply_fail_closed_guards(&mut recommendation, &report.source_inputs);
             ranked_recommendations.push(ScoredReadinessAction {
                 rank: ReadinessActionRank::for_recommendation(&recommendation, report_penalty),
                 recommendation,
@@ -653,6 +654,366 @@ fn append_missing_input_diagnostics(
         .sort_by(|left, right| left.diagnostic_id.cmp(&right.diagnostic_id));
 }
 
+fn apply_fail_closed_guards(
+    recommendation: &mut ReadinessActionRecommendation,
+    inputs: &[ReadinessActionInput],
+) {
+    apply_input_state_guards(recommendation, inputs);
+    for boundary in guard_boundaries(recommendation) {
+        apply_boundary_guard(recommendation, inputs, boundary);
+    }
+    apply_smoke_evidence_guard(recommendation);
+    enforce_ack_requirement(recommendation);
+    recommendation
+        .diagnostics
+        .sort_by(|left, right| left.diagnostic_id.cmp(&right.diagnostic_id));
+}
+
+fn apply_input_state_guards(
+    recommendation: &mut ReadinessActionRecommendation,
+    inputs: &[ReadinessActionInput],
+) {
+    for input in inputs {
+        if !input.required {
+            continue;
+        }
+
+        match input.state {
+            ReadinessActionInputState::Present | ReadinessActionInputState::NotApplicable => {}
+            ReadinessActionInputState::Stale => {
+                if is_upgrade_eligible(recommendation.public_claim_effect)
+                    || is_no_change_public_claim(recommendation.public_claim_effect)
+                {
+                    recommendation.public_claim_effect = PublicClaimEffect::DowngradeRequired;
+                }
+            }
+            ReadinessActionInputState::Missing => {
+                if is_upgrade_eligible(recommendation.public_claim_effect) {
+                    recommendation.public_claim_effect = PublicClaimEffect::BlockUpgrade;
+                }
+            }
+            ReadinessActionInputState::PermissionRequired => {
+                enforce_minimum_safety_class(
+                    recommendation,
+                    ReadinessActionSafetyClass::Permissioned,
+                );
+                if is_upgrade_eligible(recommendation.public_claim_effect) {
+                    recommendation.public_claim_effect = PublicClaimEffect::BlockUpgrade;
+                }
+            }
+            ReadinessActionInputState::Contradictory => {
+                recommendation.safety_class = ReadinessActionSafetyClass::Impossible;
+                recommendation.ack_required = false;
+                recommendation.public_claim_effect = PublicClaimEffect::BlockUpgrade;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ReadinessActionGuardBoundary {
+    XfstestsRealRun,
+    LargeHostSwarm,
+    WritebackCacheUpgrade,
+    MountedMutation,
+    RepairWriteback,
+}
+
+impl ReadinessActionGuardBoundary {
+    const fn required_safety_class(self) -> ReadinessActionSafetyClass {
+        match self {
+            Self::XfstestsRealRun | Self::LargeHostSwarm | Self::WritebackCacheUpgrade => {
+                ReadinessActionSafetyClass::Permissioned
+            }
+            Self::MountedMutation | Self::RepairWriteback => {
+                ReadinessActionSafetyClass::Destructive
+            }
+        }
+    }
+
+    const fn source_kind(self) -> ReadinessActionInputKind {
+        match self {
+            Self::XfstestsRealRun | Self::MountedMutation => {
+                ReadinessActionInputKind::OperationalReadinessReport
+            }
+            Self::LargeHostSwarm => ReadinessActionInputKind::HostCapabilityArtifact,
+            Self::WritebackCacheUpgrade | Self::RepairWriteback => {
+                ReadinessActionInputKind::ProofBundleReport
+            }
+        }
+    }
+
+    const fn diagnostic_stem(self) -> &'static str {
+        match self {
+            Self::XfstestsRealRun => "xfstests-real-run",
+            Self::LargeHostSwarm => "large-host-swarm",
+            Self::WritebackCacheUpgrade => "writeback-cache-upgrade",
+            Self::MountedMutation => "mounted-mutation",
+            Self::RepairWriteback => "repair-writeback",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::XfstestsRealRun => "xfstests real run",
+            Self::LargeHostSwarm => "large-host swarm campaign",
+            Self::WritebackCacheUpgrade => "writeback-cache upgrade",
+            Self::MountedMutation => "mounted mutation",
+            Self::RepairWriteback => "repair writeback",
+        }
+    }
+}
+
+fn guard_boundaries(
+    recommendation: &ReadinessActionRecommendation,
+) -> Vec<ReadinessActionGuardBoundary> {
+    let text = guard_search_text(recommendation);
+    let compact_text = normalized_title(&text);
+    let mut boundaries = Vec::new();
+
+    if text.contains("xfstests") || text.contains("xfstests_real_run_ack") {
+        boundaries.push(ReadinessActionGuardBoundary::XfstestsRealRun);
+    }
+    if text.contains("swarm") || compact_text.contains("largehost") {
+        boundaries.push(ReadinessActionGuardBoundary::LargeHostSwarm);
+    }
+    if compact_text.contains("writebackcache") {
+        boundaries.push(ReadinessActionGuardBoundary::WritebackCacheUpgrade);
+    }
+    if compact_text.contains("mountedmutation") || text.contains("scratch_mnt") {
+        boundaries.push(ReadinessActionGuardBoundary::MountedMutation);
+    }
+    if compact_text.contains("repairwriteback") {
+        boundaries.push(ReadinessActionGuardBoundary::RepairWriteback);
+    }
+
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    boundaries
+}
+
+fn guard_search_text(recommendation: &ReadinessActionRecommendation) -> String {
+    format!(
+        "{} {} {} {}",
+        recommendation.action_id,
+        recommendation.title,
+        recommendation.reproduction_command,
+        recommendation.rationale
+    )
+    .to_ascii_lowercase()
+}
+
+fn apply_boundary_guard(
+    recommendation: &mut ReadinessActionRecommendation,
+    inputs: &[ReadinessActionInput],
+    boundary: ReadinessActionGuardBoundary,
+) {
+    if enforce_minimum_safety_class(recommendation, boundary.required_safety_class()) {
+        push_guard_diagnostic(
+            recommendation,
+            &format!("planner-{}-safety-boundary", boundary.diagnostic_stem()),
+            ReadinessActionDiagnosticSeverity::Warning,
+            boundary.source_kind(),
+            first_input_path(inputs, boundary.source_kind()),
+            &format!(
+                "{} is permission-boundary work and cannot remain local-safe.",
+                boundary.label()
+            ),
+            "keep the action dry-run-only until explicit operator authorization is present",
+        );
+    }
+
+    if boundary_requires_authoritative_evidence(boundary)
+        && !is_authoritative_evidence_tier(recommendation.evidence_tier)
+        && is_upgrade_eligible(recommendation.public_claim_effect)
+    {
+        recommendation.public_claim_effect = PublicClaimEffect::BlockUpgrade;
+        push_guard_diagnostic(
+            recommendation,
+            &format!(
+                "planner-{}-authoritative-evidence-required",
+                boundary.diagnostic_stem()
+            ),
+            ReadinessActionDiagnosticSeverity::Error,
+            boundary.source_kind(),
+            first_input_path(inputs, boundary.source_kind()),
+            &format!(
+                "{} requires real authoritative evidence before upgrading public claims.",
+                boundary.label()
+            ),
+            "publish real-run artifacts before changing public readiness wording",
+        );
+    }
+
+    match boundary {
+        ReadinessActionGuardBoundary::XfstestsRealRun => {
+            apply_xfstests_real_run_guard(recommendation, inputs);
+        }
+        ReadinessActionGuardBoundary::LargeHostSwarm => {
+            apply_large_host_swarm_guard(recommendation, inputs);
+        }
+        ReadinessActionGuardBoundary::WritebackCacheUpgrade
+        | ReadinessActionGuardBoundary::MountedMutation
+        | ReadinessActionGuardBoundary::RepairWriteback => {}
+    }
+}
+
+const fn boundary_requires_authoritative_evidence(boundary: ReadinessActionGuardBoundary) -> bool {
+    matches!(
+        boundary,
+        ReadinessActionGuardBoundary::XfstestsRealRun
+            | ReadinessActionGuardBoundary::LargeHostSwarm
+            | ReadinessActionGuardBoundary::WritebackCacheUpgrade
+            | ReadinessActionGuardBoundary::MountedMutation
+            | ReadinessActionGuardBoundary::RepairWriteback
+    )
+}
+
+fn apply_xfstests_real_run_guard(
+    recommendation: &mut ReadinessActionRecommendation,
+    inputs: &[ReadinessActionInput],
+) {
+    if !has_present_input_kind(inputs, ReadinessActionInputKind::OperationalReadinessReport) {
+        recommendation.public_claim_effect = PublicClaimEffect::BlockUpgrade;
+        push_guard_diagnostic(
+            recommendation,
+            "planner-xfstests-real-run-evidence-missing",
+            ReadinessActionDiagnosticSeverity::Error,
+            ReadinessActionInputKind::OperationalReadinessReport,
+            first_input_path(inputs, ReadinessActionInputKind::OperationalReadinessReport),
+            "No current xfstests real-run report is present for this action.",
+            "capture pass/fail/not-run artifacts before upgrading xfstests readiness claims",
+        );
+    }
+
+    if !recommendation
+        .reproduction_command
+        .contains("XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices")
+    {
+        push_guard_diagnostic(
+            recommendation,
+            "planner-xfstests-real-run-ack-token-missing",
+            ReadinessActionDiagnosticSeverity::Error,
+            ReadinessActionInputKind::OperationalReadinessReport,
+            first_input_path(inputs, ReadinessActionInputKind::OperationalReadinessReport),
+            "The xfstests command is missing the explicit real-run acknowledgement token.",
+            "include the exact xfstests mutation acknowledgement before any real run",
+        );
+    }
+}
+
+fn apply_large_host_swarm_guard(
+    recommendation: &mut ReadinessActionRecommendation,
+    inputs: &[ReadinessActionInput],
+) {
+    if !has_present_input_kind(inputs, ReadinessActionInputKind::HostCapabilityArtifact) {
+        recommendation.public_claim_effect = PublicClaimEffect::DowngradeRequired;
+        push_guard_diagnostic(
+            recommendation,
+            "planner-large-host-capability-missing",
+            ReadinessActionDiagnosticSeverity::Error,
+            ReadinessActionInputKind::HostCapabilityArtifact,
+            first_input_path(inputs, ReadinessActionInputKind::HostCapabilityArtifact),
+            "No present large-host capability artifact backs this swarm action.",
+            "publish host capability proof before treating large-host evidence as authoritative",
+        );
+    }
+}
+
+fn apply_smoke_evidence_guard(recommendation: &mut ReadinessActionRecommendation) {
+    if is_smoke_evidence_tier(recommendation.evidence_tier)
+        && is_upgrade_eligible(recommendation.public_claim_effect)
+    {
+        recommendation.public_claim_effect = PublicClaimEffect::BlockUpgrade;
+        push_guard_diagnostic(
+            recommendation,
+            "planner-smoke-evidence-blocks-public-upgrade",
+            ReadinessActionDiagnosticSeverity::Error,
+            ReadinessActionInputKind::ProofBundleReport,
+            None,
+            "Smoke evidence cannot upgrade public readiness claims.",
+            "replace smoke evidence with real-run or authoritative artifacts before upgrading claims",
+        );
+    }
+}
+
+fn enforce_ack_requirement(recommendation: &mut ReadinessActionRecommendation) {
+    if !requires_ack(recommendation.safety_class) || recommendation.ack_required {
+        return;
+    }
+
+    recommendation.ack_required = true;
+    push_guard_diagnostic(
+        recommendation,
+        "planner-permission-boundary-ack-required",
+        ReadinessActionDiagnosticSeverity::Warning,
+        ReadinessActionInputKind::ReleaseGatePolicy,
+        None,
+        "Permissioned or destructive readiness actions require explicit acknowledgement.",
+        "keep the action blocked until explicit operator authorization is present",
+    );
+}
+
+fn enforce_minimum_safety_class(
+    recommendation: &mut ReadinessActionRecommendation,
+    minimum: ReadinessActionSafetyClass,
+) -> bool {
+    if safety_rank(recommendation.safety_class) >= safety_rank(minimum) {
+        return false;
+    }
+
+    recommendation.safety_class = minimum;
+    true
+}
+
+fn push_guard_diagnostic(
+    recommendation: &mut ReadinessActionRecommendation,
+    diagnostic_id: &str,
+    severity: ReadinessActionDiagnosticSeverity,
+    source_kind: ReadinessActionInputKind,
+    source_path: Option<String>,
+    message: &str,
+    remediation: &str,
+) {
+    if recommendation
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.diagnostic_id == diagnostic_id)
+    {
+        return;
+    }
+
+    recommendation.diagnostics.push(ReadinessActionDiagnostic {
+        diagnostic_id: diagnostic_id.to_owned(),
+        severity,
+        source_kind,
+        source_path,
+        message: message.to_owned(),
+        remediation: remediation.to_owned(),
+        stale_age_days: None,
+        freshness_ttl_days: None,
+    });
+}
+
+fn first_input_path(
+    inputs: &[ReadinessActionInput],
+    source_kind: ReadinessActionInputKind,
+) -> Option<String> {
+    inputs
+        .iter()
+        .find(|input| input.kind == source_kind)
+        .map(|input| input.path.clone())
+}
+
+fn has_present_input_kind(
+    inputs: &[ReadinessActionInput],
+    source_kind: ReadinessActionInputKind,
+) -> bool {
+    inputs
+        .iter()
+        .any(|input| input.kind == source_kind && is_present_input_state(input.state))
+}
+
 fn report_input_penalty(inputs: &[ReadinessActionInput]) -> u8 {
     inputs
         .iter()
@@ -692,6 +1053,26 @@ const fn is_ready_input_state(state: ReadinessActionInputState) -> bool {
 
 const fn is_not_applicable_input_state(state: ReadinessActionInputState) -> bool {
     matches!(state, ReadinessActionInputState::NotApplicable)
+}
+
+const fn is_present_input_state(state: ReadinessActionInputState) -> bool {
+    matches!(state, ReadinessActionInputState::Present)
+}
+
+const fn is_smoke_evidence_tier(evidence_tier: ReadinessEvidenceTier) -> bool {
+    matches!(evidence_tier, ReadinessEvidenceTier::Smoke)
+}
+
+const fn is_authoritative_evidence_tier(evidence_tier: ReadinessEvidenceTier) -> bool {
+    matches!(evidence_tier, ReadinessEvidenceTier::Authoritative)
+}
+
+const fn is_upgrade_eligible(public_claim_effect: PublicClaimEffect) -> bool {
+    matches!(public_claim_effect, PublicClaimEffect::UpgradeEligible)
+}
+
+const fn is_no_change_public_claim(public_claim_effect: PublicClaimEffect) -> bool {
+    matches!(public_claim_effect, PublicClaimEffect::NoChange)
 }
 
 const fn input_state_penalty(state: ReadinessActionInputState) -> u8 {
@@ -962,8 +1343,8 @@ fn validate_recommendation(
             recommendation.action_id, recommendation.safety_class
         ));
     }
-    if recommendation.evidence_tier == ReadinessEvidenceTier::Smoke
-        && recommendation.public_claim_effect == PublicClaimEffect::UpgradeEligible
+    if is_smoke_evidence_tier(recommendation.evidence_tier)
+        && is_upgrade_eligible(recommendation.public_claim_effect)
     {
         errors.push(format!(
             "{fixture_label}: action {} cannot upgrade public claims from smoke evidence",
@@ -1219,9 +1600,184 @@ mod tests {
             diagnostic_ids,
             vec![
                 "planner-input-operational-readiness-report-missing",
+                "planner-xfstests-real-run-evidence-missing",
                 "xfstests-real-run-ack-missing",
             ]
         );
+    }
+
+    #[test]
+    fn planner_downgrades_stale_evidence_public_claims() {
+        let mut recommendation = recommendation("upgrade-writeback-cache-claim");
+        recommendation.title = "Upgrade writeback-cache readiness claim".to_owned();
+        recommendation.evidence_tier = ReadinessEvidenceTier::ProofBundle;
+        recommendation.public_claim_effect = PublicClaimEffect::UpgradeEligible;
+        recommendation.reproduction_command =
+            "cargo test -p ffs-harness writeback_cache_readiness".to_owned();
+
+        let result = plan_readiness_actions(&planning_input(
+            vec![report(
+                vec![input(
+                    "stale-proof-bundle",
+                    ReadinessActionInputKind::ProofBundleReport,
+                    "artifacts/proof_bundles/writeback_cache.json",
+                    ReadinessActionInputState::Stale,
+                )],
+                vec![recommendation],
+            )],
+            Vec::new(),
+        ));
+        let planned = planned_action(&result, "upgrade-writeback-cache-claim");
+
+        assert_eq!(
+            planned.public_claim_effect,
+            PublicClaimEffect::DowngradeRequired
+        );
+        assert!(planned.ack_required);
+        assert_eq!(
+            planned.safety_class,
+            ReadinessActionSafetyClass::Permissioned
+        );
+        assert!(diagnostic_ids(planned).contains(&"planner-input-stale-proof-bundle-stale"));
+    }
+
+    #[test]
+    fn planner_blocks_missing_large_host_capability() {
+        let mut recommendation = recommendation("refresh-large-host-swarm-campaign");
+        recommendation.title = "Refresh large-host swarm responsiveness evidence".to_owned();
+        recommendation.evidence_tier = ReadinessEvidenceTier::Smoke;
+        recommendation.public_claim_effect = PublicClaimEffect::UpgradeEligible;
+        recommendation.reproduction_command =
+            "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 scripts/e2e/run_swarm_workload_campaign.sh"
+                .to_owned();
+
+        let result = plan_readiness_actions(&planning_input(
+            vec![report(
+                vec![input(
+                    "host-capability-manifest",
+                    ReadinessActionInputKind::HostCapabilityArtifact,
+                    "artifacts/hosts/large_host_capability.json",
+                    ReadinessActionInputState::Missing,
+                )],
+                vec![recommendation],
+            )],
+            Vec::new(),
+        ));
+        let planned = planned_action(&result, "refresh-large-host-swarm-campaign");
+
+        assert!(planned.ack_required);
+        assert_eq!(
+            planned.safety_class,
+            ReadinessActionSafetyClass::Permissioned
+        );
+        assert_eq!(
+            planned.public_claim_effect,
+            PublicClaimEffect::DowngradeRequired
+        );
+        let diagnostic_ids = diagnostic_ids(planned);
+        assert!(diagnostic_ids.contains(&"planner-input-host-capability-manifest-missing"));
+        assert!(diagnostic_ids.contains(&"planner-large-host-capability-missing"));
+    }
+
+    #[test]
+    fn planner_refuses_contradictory_artifacts() {
+        let mut recommendation = recommendation("upgrade-release-gate-claim");
+        recommendation.evidence_tier = ReadinessEvidenceTier::ProofBundle;
+        recommendation.public_claim_effect = PublicClaimEffect::UpgradeEligible;
+
+        let result = plan_readiness_actions(&planning_input(
+            vec![report(
+                vec![input(
+                    "release-gate-proof",
+                    ReadinessActionInputKind::ProofBundleReport,
+                    "artifacts/proof_bundles/release_gate.json",
+                    ReadinessActionInputState::Contradictory,
+                )],
+                vec![recommendation],
+            )],
+            Vec::new(),
+        ));
+        let planned = planned_action(&result, "upgrade-release-gate-claim");
+
+        assert!(!planned.ack_required);
+        assert_eq!(planned.safety_class, ReadinessActionSafetyClass::Impossible);
+        assert_eq!(planned.public_claim_effect, PublicClaimEffect::BlockUpgrade);
+        assert!(
+            diagnostic_ids(planned).contains(&"planner-input-release-gate-proof-contradictory")
+        );
+    }
+
+    #[test]
+    fn planner_marks_permissioned_and_destructive_boundaries_ack_required() {
+        let mut writeback = recommendation("upgrade-writeback-cache");
+        writeback.title = "Upgrade writeback-cache mode".to_owned();
+        writeback.reproduction_command = "cargo test -p ffs-harness writeback_cache".to_owned();
+
+        let mut mounted_mutation = recommendation("run-mounted-mutation");
+        mounted_mutation.title = "Run mounted mutation validation".to_owned();
+        mounted_mutation.reproduction_command =
+            "SCRATCH_MNT=/mnt/ffs-test scripts/e2e/run_mounted_mutation.sh".to_owned();
+
+        let mut repair_writeback = recommendation("publish-repair-writeback-claim");
+        repair_writeback.title = "Publish repair-writeback claim".to_owned();
+        repair_writeback.reproduction_command =
+            "cargo test -p ffs-harness repair_writeback".to_owned();
+
+        let result = plan_readiness_actions(&planning_input(
+            vec![report(
+                vec![input(
+                    "proof-bundle-report",
+                    ReadinessActionInputKind::ProofBundleReport,
+                    "artifacts/proof_bundles/writeback.json",
+                    ReadinessActionInputState::Present,
+                )],
+                vec![writeback, mounted_mutation, repair_writeback],
+            )],
+            Vec::new(),
+        ));
+        let writeback = planned_action(&result, "upgrade-writeback-cache");
+        let mounted_mutation = planned_action(&result, "run-mounted-mutation");
+        let repair_writeback = planned_action(&result, "publish-repair-writeback-claim");
+
+        assert!(writeback.ack_required);
+        assert_eq!(
+            writeback.safety_class,
+            ReadinessActionSafetyClass::Permissioned
+        );
+        assert!(mounted_mutation.ack_required);
+        assert_eq!(
+            mounted_mutation.safety_class,
+            ReadinessActionSafetyClass::Destructive
+        );
+        assert!(repair_writeback.ack_required);
+        assert_eq!(
+            repair_writeback.safety_class,
+            ReadinessActionSafetyClass::Destructive
+        );
+    }
+
+    #[test]
+    fn planner_blocks_public_claim_upgrade_from_smoke_evidence() {
+        let mut recommendation = recommendation("upgrade-smoke-readiness-claim");
+        recommendation.evidence_tier = ReadinessEvidenceTier::Smoke;
+        recommendation.public_claim_effect = PublicClaimEffect::UpgradeEligible;
+
+        let result = plan_readiness_actions(&planning_input(
+            vec![report(
+                vec![input(
+                    "proof-bundle-report",
+                    ReadinessActionInputKind::ProofBundleReport,
+                    "artifacts/proof_bundles/smoke.json",
+                    ReadinessActionInputState::Present,
+                )],
+                vec![recommendation],
+            )],
+            Vec::new(),
+        ));
+        let planned = planned_action(&result, "upgrade-smoke-readiness-claim");
+
+        assert_eq!(planned.public_claim_effect, PublicClaimEffect::BlockUpgrade);
+        assert!(diagnostic_ids(planned).contains(&"planner-smoke-evidence-blocks-public-upgrade"));
     }
 
     #[test]
@@ -1282,5 +1838,53 @@ mod tests {
             title: title.to_owned(),
             status: "open".to_owned(),
         }
+    }
+
+    fn report(
+        source_inputs: Vec<ReadinessActionInput>,
+        recommendations: Vec<ReadinessActionRecommendation>,
+    ) -> ReadinessActionAutopilotReport {
+        ReadinessActionAutopilotReport {
+            schema_version: READINESS_ACTION_AUTOPILOT_SCHEMA_VERSION,
+            report_id: "guard_test_report".to_owned(),
+            generated_at: "2026-05-07T00:00:00Z".to_owned(),
+            source_inputs,
+            recommendations,
+        }
+    }
+
+    fn recommendation(action_id: &str) -> ReadinessActionRecommendation {
+        ReadinessActionRecommendation {
+            action_id: action_id.to_owned(),
+            title: action_id.replace('-', " "),
+            safety_class: ReadinessActionSafetyClass::LocalSafe,
+            controlling_bead: "bd-rchk0.98.3".to_owned(),
+            evidence_tier: ReadinessEvidenceTier::TrackerOnly,
+            ack_required: false,
+            reproduction_command: "cargo test -p ffs-harness readiness_action_autopilot".to_owned(),
+            rationale: "Synthetic planner guard test action.".to_owned(),
+            public_claim_effect: PublicClaimEffect::NoChange,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn planned_action<'a>(
+        result: &'a ReadinessActionPlanningResult,
+        action_id: &str,
+    ) -> &'a ReadinessActionRecommendation {
+        result
+            .report
+            .recommendations
+            .iter()
+            .find(|recommendation| recommendation.action_id == action_id)
+            .expect("planned action")
+    }
+
+    fn diagnostic_ids(recommendation: &ReadinessActionRecommendation) -> Vec<&str> {
+        recommendation
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.diagnostic_id.as_str())
+            .collect()
     }
 }
