@@ -7840,6 +7840,113 @@ mod tests {
         assert_eq!(parsed[1].value, b"val2");
     }
 
+    // bd-fhznm — Property-based round-trip MR for parse_xattr_items.
+    //
+    // Existing fixture tests cover hand-crafted single-entry and
+    // two-entry payloads. They would not catch an off-by-one in the
+    // data_len@+25 / name_len@+27 offset arithmetic that mis-aligned
+    // the second-and-later entries: entry[0] would still parse
+    // because cur=0 is a fixed point. These proptests sweep
+    // 1..=12-entry payloads with random names (1..=128 bytes) and
+    // values (0..=256 bytes), encode in the on-disk format, and
+    // assert structural agreement with the parser. Determinism MR
+    // is included as a cheap check against any future use of
+    // hashing/iteration-order primitives in the parser path.
+    fn xattr_encode_one(out: &mut Vec<u8>, name: &[u8], value: &[u8]) {
+        // Mirror parse_xattr_items's 30-byte header: location key (17)
+        // + transid (8) + data_len u16 LE @25 + name_len u16 LE @27.
+        out.extend_from_slice(&[0_u8; 17]);
+        out.extend_from_slice(&[0_u8; 8]);
+        out.extend_from_slice(
+            &u16::try_from(value.len())
+                .expect("xattr value < u16::MAX in test")
+                .to_le_bytes(),
+        );
+        out.extend_from_slice(
+            &u16::try_from(name.len())
+                .expect("xattr name < u16::MAX in test")
+                .to_le_bytes(),
+        );
+        out.push(0); // type byte (unused by parser)
+        out.extend_from_slice(name);
+        out.extend_from_slice(value);
+    }
+
+    proptest::proptest! {
+        // MR-1 multi-entry round-trip: encode N random (name, value)
+        // pairs in the on-disk format → parse → assert vec length and
+        // per-entry equality.
+        #[test]
+        fn proptest_xattr_items_payload_round_trip(
+            entries in proptest::collection::vec(
+                (
+                    proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=128),
+                    proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=256),
+                ),
+                1..=12,
+            ),
+        ) {
+            let mut payload = Vec::new();
+            for (name, value) in &entries {
+                xattr_encode_one(&mut payload, name, value);
+            }
+            let parsed = parse_xattr_items(&payload).expect("encode → parse round-trip");
+            proptest::prop_assert_eq!(parsed.len(), entries.len());
+            for (i, parsed_item) in parsed.iter().enumerate() {
+                proptest::prop_assert_eq!(&parsed_item.name, &entries[i].0);
+                proptest::prop_assert_eq!(&parsed_item.value, &entries[i].1);
+            }
+        }
+
+        // MR-2 determinism: parse(payload) == parse(payload). Cheap
+        // check that the parser does not depend on any hidden state
+        // (allocator addresses, hash iteration order, time).
+        #[test]
+        fn proptest_xattr_items_determinism(
+            entries in proptest::collection::vec(
+                (
+                    proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=64),
+                    proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=128),
+                ),
+                1..=8,
+            ),
+        ) {
+            let mut payload = Vec::new();
+            for (name, value) in &entries {
+                xattr_encode_one(&mut payload, name, value);
+            }
+            let a = parse_xattr_items(&payload).expect("first parse");
+            let b = parse_xattr_items(&payload).expect("second parse");
+            proptest::prop_assert_eq!(a, b);
+        }
+
+        // MR-3 inner-truncation rejection: cutting any non-zero suffix
+        // from a valid multi-entry encoding must reject (Err) rather
+        // than panic or silently succeed with a short result. Sweeps
+        // 1..bytes.len() so the empty-input contract (Ok([])) is
+        // intentionally excluded.
+        #[test]
+        fn proptest_xattr_items_truncation_rejection(
+            name in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=64),
+            value in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=128),
+            k in 1_usize..50,
+        ) {
+            let mut payload = Vec::new();
+            xattr_encode_one(&mut payload, &name, &value);
+            let trunc = k.min(payload.len() - 1);
+            let truncated = &payload[..payload.len() - trunc];
+            // Specific error variant intentionally not asserted -- the
+            // parser legitimately produces InsufficientData or
+            // InvalidField depending on which field is truncated.
+            proptest::prop_assert!(
+                parse_xattr_items(truncated).is_err(),
+                "truncated payload must reject (cut last {} of {} bytes)",
+                trunc,
+                payload.len()
+            );
+        }
+    }
+
     // ── Extent allocator tests ──────────────────────────────────────────
 
     fn make_data_bg(_start: u64, size: u64) -> BtrfsBlockGroupItem {
