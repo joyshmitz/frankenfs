@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use ffs_btrfs::{BtrfsDirItem, BtrfsInodeRef};
+use ffs_btrfs::{BtrfsDirItem, BtrfsInodeItem, BtrfsInodeRef};
 use ffs_harness::load_sparse_fixture;
 use ffs_ondisk::{
     BtrfsHeader, BtrfsRaidProfile, BtrfsSuperblock, EXT_INIT_MAX_LEN, Ext4Extent, Ext4GroupDesc,
@@ -745,6 +745,69 @@ fn bench_btrfs_parse_dir_items(c: &mut Criterion) {
     });
 }
 
+/// bd-maryc — parse_inode_item runs on every btrfs inode read
+/// (open, stat, getattr, readdir-with-stat). Bench against a
+/// kernel-stamped 160-byte payload matching the production hot path.
+fn bench_btrfs_parse_inode_item(c: &mut Criterion) {
+    let item = BtrfsInodeItem {
+        generation: 0x1234,
+        size: 0x10_0000, // 1 MiB
+        nbytes: 0x10_0000,
+        nlink: 1,
+        uid: 1000,
+        gid: 1000,
+        mode: 0o100_644,
+        rdev: 0,
+        atime_sec: 1_700_000_000,
+        atime_nsec: 123_456_789,
+        ctime_sec: 1_700_000_001,
+        ctime_nsec: 234_567_890,
+        mtime_sec: 1_700_000_002,
+        mtime_nsec: 345_678_901,
+        otime_sec: 1_700_000_003,
+        otime_nsec: 456_789_012,
+    };
+    let payload = item.to_bytes();
+
+    c.bench_function("btrfs_parse_inode_item", |b| {
+        b.iter(|| {
+            ffs_btrfs::parse_inode_item(black_box(&payload)).expect("inode_item parses");
+        });
+    });
+}
+
+/// bd-maryc — BtrfsInodeItem::to_bytes runs on every btrfs inode
+/// write (commit, fsync, truncate path). Bench the encoder against
+/// the same hot-path inputs as the parse bench so perf comparator
+/// can track both sides of the encode/decode bijection.
+fn bench_btrfs_inode_item_to_bytes(c: &mut Criterion) {
+    let item = BtrfsInodeItem {
+        generation: 0x1234,
+        size: 0x10_0000,
+        nbytes: 0x10_0000,
+        nlink: 1,
+        uid: 1000,
+        gid: 1000,
+        mode: 0o100_644,
+        rdev: 0,
+        atime_sec: 1_700_000_000,
+        atime_nsec: 123_456_789,
+        ctime_sec: 1_700_000_001,
+        ctime_nsec: 234_567_890,
+        mtime_sec: 1_700_000_002,
+        mtime_nsec: 345_678_901,
+        otime_sec: 1_700_000_003,
+        otime_nsec: 456_789_012,
+    };
+
+    c.bench_function("btrfs_inode_item_to_bytes", |b| {
+        b.iter(|| {
+            let bytes = black_box(&item).to_bytes();
+            black_box(bytes);
+        });
+    });
+}
+
 criterion_group!(
     ondisk,
     bench_ext4_inode_parse,
@@ -782,5 +845,7 @@ criterion_group!(
     bench_btrfs_parse_root_item,
     bench_btrfs_parse_inode_refs,
     bench_btrfs_parse_dir_items,
+    bench_btrfs_parse_inode_item,
+    bench_btrfs_inode_item_to_bytes,
 );
 criterion_main!(ondisk);
