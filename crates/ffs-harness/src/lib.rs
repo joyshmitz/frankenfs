@@ -48,6 +48,7 @@ pub mod perf_regression;
 pub mod perf_triage;
 pub mod performance_baseline_manifest;
 pub mod performance_delta_closeout;
+pub mod permissioned_campaign_broker;
 pub mod proof_bundle;
 pub mod proof_overhead_budget;
 pub mod readiness_action_autopilot;
