@@ -8,7 +8,7 @@ use ffs_block::{BlockBuf, BlockDevice};
 use ffs_error::{FfsError, Result};
 use ffs_extent::{
     allocate_extent, allocate_unwritten_extent, collapse_range, insert_range,
-    map_logical_to_physical, mark_written, punch_hole, ExtentMapping,
+    map_logical_to_physical, mark_written, punch_hole, truncate_extents, ExtentMapping,
 };
 use ffs_ondisk::{Ext4DxRoot, Ext4ExtentHeader, Ext4ExtentIndex, Ext4Inode, ExtentTree};
 use ffs_types::{BlockNumber, GroupNumber, ParseError};
@@ -705,7 +705,7 @@ fn fuzz_stateful_extent_edits(data: &[u8]) {
 
     let op_limit = usize::from(cursor.next_u8() % (MAX_OPS as u8));
     for _ in 0..op_limit {
-        let op = cursor.next_u8() % 7;
+        let op = cursor.next_u8() % 8;
         let count = next_count(&mut cursor);
         let logical_start = next_logical_start(&mut cursor, count);
 
@@ -789,6 +789,25 @@ fn fuzz_stateful_extent_edits(data: &[u8]) {
                     count,
                     &pctx,
                 );
+            }
+            6 => {
+                // bd-dqsb1 — truncate_extents shrinks the tree by
+                // removing all mappings beyond new_logical_end and
+                // freeing the underlying physical blocks. Use the
+                // fuzz `logical_start` as the new end-of-file boundary.
+                let _ = truncate_extents(
+                    &cx,
+                    &dev,
+                    &mut root,
+                    &geo,
+                    &mut groups,
+                    logical_start,
+                    &pctx,
+                );
+                // Drop any interesting_ranges that now lie beyond
+                // the truncation boundary so post-op asserts don't
+                // probe a removed region.
+                interesting_ranges.retain(|&(start, _)| start < logical_start);
             }
             _ => assert_covering_mappings(&cx, &dev, &root, logical_start, u64::from(count)),
         }
