@@ -8566,6 +8566,99 @@ mod tests {
         );
     }
 
+    /// bd-yb4r0 — Kernel-conformance pin for `normalize_dx_major_hash`.
+    ///
+    /// Per fs/ext4/hash.c (`ext4fs_dirhash`, lines ~256-264), the major
+    /// hash returned by every htree directory lookup must satisfy two
+    /// invariants:
+    ///   1. Low bit is cleared. The low bit is reserved as a flag bit
+    ///      in htree collision-chain traversal (`dx_probe`).
+    ///   2. The value `EXT4_HTREE_EOF_32BIT << 1` (= 0xfffffffe) is
+    ///      reserved as the htree end-of-tree cursor sentinel. If the
+    ///      masked hash collides with the sentinel, the kernel bumps
+    ///      it down to `(EXT4_HTREE_EOF_32BIT - 1) << 1` = 0xfffffffc.
+    ///
+    /// A regression that removed either step would corrupt
+    /// collision-chain traversal — htree lookups would silently
+    /// return "no such entry" for valid filenames whose major hash
+    /// happened to land on the sentinel or whose collision chain
+    /// relied on the low-bit flag.
+    #[test]
+    fn ext4_dx_hash_major_hash_invariants_match_kernel() {
+        // (d) Named boundary values from the kernel formula.
+        // - Inputs whose top 31 bits land on the sentinel must bump down.
+        assert_eq!(
+            super::normalize_dx_major_hash(0xffff_fffe),
+            0xffff_fffc,
+            "0xfffffffe (== EOF<<1) must bump to 0xfffffffc per kernel rule"
+        );
+        assert_eq!(
+            super::normalize_dx_major_hash(0xffff_ffff),
+            0xffff_fffc,
+            "0xffffffff masks to 0xfffffffe (== EOF<<1) then bumps to 0xfffffffc"
+        );
+        // - Non-sentinel inputs just have the low bit cleared.
+        assert_eq!(super::normalize_dx_major_hash(0), 0);
+        assert_eq!(super::normalize_dx_major_hash(1), 0);
+        assert_eq!(
+            super::normalize_dx_major_hash(0xdead_beef),
+            0xdead_beee,
+            "non-sentinel input keeps high bits, only low bit cleared"
+        );
+        assert_eq!(
+            super::normalize_dx_major_hash(0xffff_fffd),
+            0xffff_fffc,
+            "0xfffffffd masks to 0xfffffffc (NOT the sentinel) — stays put"
+        );
+        assert_eq!(
+            super::normalize_dx_major_hash(0xffff_fffc),
+            0xffff_fffc,
+            "0xfffffffc is the post-bump value — already invariant"
+        );
+
+        // The sentinel-bump constant must equal (EXT4_HTREE_EOF_32BIT - 1) << 1.
+        let bump_target = (EXT4_HTREE_EOF_32BIT - 1) << 1;
+        assert_eq!(
+            bump_target, 0xffff_fffc,
+            "(EOF-1)<<1 must equal 0xfffffffc per kernel formula"
+        );
+    }
+
+    proptest::proptest! {
+        // (a) MR-1: low bit always cleared — the htree collision-chain flag
+        // bit is reserved by the kernel and must never appear in the major
+        // hash post-normalization.
+        #[test]
+        fn ext4_normalize_dx_major_hash_low_bit_always_clear(h in proptest::prelude::any::<u32>()) {
+            let normalized = super::normalize_dx_major_hash(h);
+            proptest::prop_assert_eq!(
+                normalized & 1,
+                0,
+                "kernel rule: major hash low bit must be reserved/clear"
+            );
+        }
+
+        // (b) MR-2: never collides with EOF sentinel.
+        #[test]
+        fn ext4_normalize_dx_major_hash_avoids_eof_sentinel(h in proptest::prelude::any::<u32>()) {
+            let normalized = super::normalize_dx_major_hash(h);
+            proptest::prop_assert_ne!(
+                normalized,
+                EXT4_HTREE_EOF_32BIT << 1,
+                "kernel rule: major hash must not collide with htree EOF cursor"
+            );
+        }
+
+        // (c) MR-3: idempotence — normalize is a projection onto the
+        // valid-major-hash subspace; reapplying it must be a no-op.
+        #[test]
+        fn ext4_normalize_dx_major_hash_idempotent(h in proptest::prelude::any::<u32>()) {
+            let once = super::normalize_dx_major_hash(h);
+            let twice = super::normalize_dx_major_hash(once);
+            proptest::prop_assert_eq!(once, twice);
+        }
+    }
+
     #[test]
     fn dx_hash_uses_ext4_default_seed_when_superblock_seed_is_zero() {
         let name = b"default-seed-check";
