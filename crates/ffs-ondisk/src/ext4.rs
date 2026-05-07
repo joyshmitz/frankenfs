@@ -10624,6 +10624,96 @@ mod tests {
         );
     }
 
+    /// bd-xt5ru — Kernel-conformance pin for the 7 DX hash version
+    /// constants from `fs/ext4/ext4.h` plus EXT4_HTREE_EOF_32BIT.
+    ///
+    /// Each value drives the hash-routing dispatch in `dx_hash` for
+    /// every htree directory lookup. A regression that swapped
+    /// DX_HASH_TEA (2) and DX_HASH_HALF_MD4 (1) would silently
+    /// mis-classify every htree directory and route lookups through
+    /// the wrong hash function — invisible until end users notice
+    /// broken lookups.
+    ///
+    /// Structural invariant: the unsigned variants are derived by
+    /// adding 3 to the signed variant — i.e., DX_HASH_LEGACY (0)
+    /// pairs with DX_HASH_LEGACY_UNSIGNED (3), DX_HASH_HALF_MD4 (1)
+    /// pairs with DX_HASH_HALF_MD4_UNSIGNED (4), DX_HASH_TEA (2)
+    /// pairs with DX_HASH_TEA_UNSIGNED (5). EXT4_HTREE_EOF_32BIT is
+    /// the htree end-of-tree sentinel for 32-bit hashes.
+    ///
+    /// Pairs with bd-bevt2 (40 feature flags), bd-jbilz (magic +
+    /// state flags), bd-glkri (BG flags), bd-tyeic (27 inode flags),
+    /// bd-k81lq (reserved inodes), bd-343v3 (file types).
+    #[test]
+    fn ext4_dx_hash_version_constants_match_kernel_header() {
+        // Canonical kernel values per fs/ext4/ext4.h.
+        assert_eq!(DX_HASH_LEGACY, 0, "DX_HASH_LEGACY must equal 0");
+        assert_eq!(DX_HASH_HALF_MD4, 1, "DX_HASH_HALF_MD4 must equal 1");
+        assert_eq!(DX_HASH_TEA, 2, "DX_HASH_TEA must equal 2");
+        assert_eq!(
+            DX_HASH_LEGACY_UNSIGNED, 3,
+            "DX_HASH_LEGACY_UNSIGNED must equal 3"
+        );
+        assert_eq!(
+            DX_HASH_HALF_MD4_UNSIGNED, 4,
+            "DX_HASH_HALF_MD4_UNSIGNED must equal 4"
+        );
+        assert_eq!(
+            DX_HASH_TEA_UNSIGNED, 5,
+            "DX_HASH_TEA_UNSIGNED must equal 5"
+        );
+        assert_eq!(_DX_HASH_SIPHASH, 6, "DX_HASH_SIPHASH must equal 6");
+
+        // Structural invariant: unsigned variant = signed variant + 3
+        // (the canonical kernel layout: signed values 0..=2,
+        // unsigned values 3..=5, SipHash 6).
+        assert_eq!(
+            DX_HASH_LEGACY_UNSIGNED - DX_HASH_LEGACY,
+            3,
+            "DX_HASH_LEGACY_UNSIGNED must be DX_HASH_LEGACY + 3"
+        );
+        assert_eq!(
+            DX_HASH_HALF_MD4_UNSIGNED - DX_HASH_HALF_MD4,
+            3,
+            "DX_HASH_HALF_MD4_UNSIGNED must be DX_HASH_HALF_MD4 + 3"
+        );
+        assert_eq!(
+            DX_HASH_TEA_UNSIGNED - DX_HASH_TEA,
+            3,
+            "DX_HASH_TEA_UNSIGNED must be DX_HASH_TEA + 3"
+        );
+
+        // Strict-monotonic ascending across the 7-element set.
+        let versions: [u8; 7] = [
+            DX_HASH_LEGACY,
+            DX_HASH_HALF_MD4,
+            DX_HASH_TEA,
+            DX_HASH_LEGACY_UNSIGNED,
+            DX_HASH_HALF_MD4_UNSIGNED,
+            DX_HASH_TEA_UNSIGNED,
+            _DX_HASH_SIPHASH,
+        ];
+        for window in versions.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "DX hash version constants must be strict-monotonic ascending"
+            );
+        }
+
+        // EXT4_HTREE_EOF_32BIT — kernel sentinel for 32-bit hash EOF.
+        // Per fs/ext4/ext4.h: #define EXT4_HTREE_EOF_32BIT  ((1UL  << (32 - 1)) - 1)
+        assert_eq!(
+            EXT4_HTREE_EOF_32BIT,
+            0x7FFF_FFFF,
+            "EXT4_HTREE_EOF_32BIT must equal (1<<31) - 1 = 0x7FFFFFFF"
+        );
+        assert_eq!(
+            EXT4_HTREE_EOF_32BIT,
+            (1_u32 << 31) - 1,
+            "EXT4_HTREE_EOF_32BIT must round-trip via the kernel formula"
+        );
+    }
+
     /// bd-k81lq — Kernel-conformance pin for ext4 reserved-inode and
     /// revision-format constants. Each value is mirrored verbatim from
     /// the Linux kernel header `fs/ext4/ext4.h`. Mismatch would
