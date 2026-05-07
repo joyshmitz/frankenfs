@@ -59,7 +59,13 @@ fuzz_target!(|data: &[u8]| {
                 "parse_inode_refs must be deterministic on Err"
             );
         }
-        _ => panic!("parse_inode_refs must be deterministic across Ok/Err"),
+        (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
+            assert_eq!(
+                result_a.is_ok(),
+                result_b.is_ok(),
+                "parse_inode_refs must be deterministic across Ok/Err"
+            );
+        }
     }
 
     // MR-3 round-trip: if we got a valid parse, re-serialize each
