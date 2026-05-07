@@ -442,6 +442,16 @@ pub fn validate_observed_proof_metrics(
     if parse_epoch_days(&observed.observed_at).is_none() {
         errors.push(format!("observed_at is invalid: {}", observed.observed_at));
     }
+    if let (Some(baseline_day), Some(observed_day)) = (
+        parse_epoch_days(&config.baseline_captured_at),
+        parse_epoch_days(&observed.observed_at),
+    ) && baseline_day > observed_day
+    {
+        errors.push(format!(
+            "baseline_captured_at {} is after observed_at {}",
+            config.baseline_captured_at, observed.observed_at
+        ));
+    }
     if observed.reproduction_command.trim().is_empty() {
         errors.push("reproduction_command is required".to_owned());
     }
@@ -1581,6 +1591,21 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("baseline budget-baseline-2026-05-01 is stale"))
         );
+    }
+
+    #[test]
+    fn future_baseline_capture_is_rejected() {
+        let mut config = budget_config();
+        config.baseline_captured_at = "2026-05-04T00:00:00Z".to_owned();
+        let report = evaluate_proof_overhead_budget(&config, &observed_metrics());
+
+        assert_eq!(report.baseline_age_days, 0);
+        assert_eq!(report.release_gate_verdict, BudgetDecision::Fail);
+        assert!(report.errors.iter().any(|error| {
+            error.contains(
+                "baseline_captured_at 2026-05-04T00:00:00Z is after observed_at 2026-05-03T00:00:00Z",
+            )
+        }));
     }
 
     #[test]
