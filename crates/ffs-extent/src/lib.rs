@@ -5552,4 +5552,75 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         // It must handle root split properly.
         punch_hole(&cx, &dev, &mut root, &geo, &mut groups, 2, 1, &pctx).unwrap();
     }
+
+    // bd-4fy6y: metamorphic relation — cached_map_logical_to_physical
+    // must return semantically identical results to map_logical_to_physical
+    // regardless of cache state. Existing tests cover individual cache
+    // hit/miss/invalidate scenarios but no proptest sweeps (start, count)
+    // ranges asserting result equivalence. A regression in the cache-hit
+    // fast path arithmetic (wrong physical_start, mishandled unwritten
+    // flag, off-by-one cross extent boundary) would silently corrupt
+    // every cached read but pass the existing fixed-input tests.
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config { cases: 32, ..proptest::test_runner::Config::default() })]
+
+        #[test]
+        fn cached_map_logical_to_physical_agrees_with_uncached(
+            extent_start in 0_u32..100,
+            extent_len in 1_u32..50,
+            query_start in 0_u32..150,
+            query_count in 1_u64..30,
+        ) {
+            let cx = test_cx();
+            let dev = MemBlockDevice::new(4096);
+            let geo = make_geometry();
+            let mut groups = make_groups(&geo);
+            let pctx = mock_pctx();
+            let mut root = empty_root();
+
+            // Allocate one extent so the tree has something to walk.
+            allocate_extent(
+                &cx, &dev, &mut root, &geo, &mut groups,
+                extent_start, extent_len, &AllocHint::default(), &pctx,
+            )
+            .expect("allocate test extent");
+
+            // Reference: uncached lookup.
+            let uncached = map_logical_to_physical(
+                &cx, &dev, &root, query_start, query_count,
+            )
+            .expect("uncached lookup");
+
+            // Variant 1: cached lookup with empty cache (forces miss path,
+            // then populates).
+            let cache_empty = ExtentCache::new();
+            let cached_miss = cached_map_logical_to_physical(
+                &cx, &dev, &root, query_start, query_count, &cache_empty, 0,
+            )
+            .expect("cached miss path");
+            proptest::prop_assert_eq!(
+                &cached_miss,
+                &uncached,
+                "MR-1: cached(miss) must equal uncached"
+            );
+
+            // Variant 2: cached lookup with prepopulated cache (forces hit
+            // path for count==1 within a known extent, miss otherwise).
+            let cache_warm = ExtentCache::new();
+            // Warm up by running a full-range query first.
+            let _ = cached_map_logical_to_physical(
+                &cx, &dev, &root, query_start, query_count, &cache_warm, 0,
+            );
+            // Re-query — may take fast path for count==1 single-block hits.
+            let cached_warm = cached_map_logical_to_physical(
+                &cx, &dev, &root, query_start, query_count, &cache_warm, 0,
+            )
+            .expect("cached warm path");
+            proptest::prop_assert_eq!(
+                &cached_warm,
+                &uncached,
+                "MR-2: cached(warm) must equal uncached"
+            );
+        }
+    }
 }
