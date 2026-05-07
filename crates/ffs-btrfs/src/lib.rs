@@ -7385,6 +7385,101 @@ mod tests {
         assert_eq!(parsed[1], entry_b);
     }
 
+    // bd-78fbx: metamorphic proptests for parse_dir_items.
+    // Existing tests cover three fixed-input dir_items. These
+    // proptests sweep arbitrary (objectid, key_type, key_offset,
+    // file_type, name) tuples plus N-entry concatenations to catch
+    // regressions in cursor-advance and variable-length boundary
+    // handling. Mirrors bd-pt9pk for parse_inode_refs.
+    proptest::proptest! {
+        // MR-1 single-entry round-trip.
+        #[test]
+        fn dir_item_proptest_single_round_trip(
+            child_objectid in proptest::prelude::any::<u64>(),
+            child_key_type in proptest::prelude::any::<u8>(),
+            child_key_offset in proptest::prelude::any::<u64>(),
+            file_type in proptest::prelude::any::<u8>(),
+            name in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=64),
+        ) {
+            let entry = BtrfsDirItem {
+                child_objectid,
+                child_key_type,
+                child_key_offset,
+                file_type,
+                name,
+            };
+            let bytes = entry.try_to_bytes().expect("non-empty name encodes");
+            let parsed = parse_dir_items(&bytes).expect("round-trip parse");
+            proptest::prop_assert_eq!(parsed, vec![entry]);
+        }
+
+        // MR-2 multi-entry concatenation: stamp(a)++stamp(b)++... ↦
+        // parse_dir_items ↦ [a, b, ...]. Catches cursor-advance bugs
+        // (e.g., reading past name_end into the next entry's location
+        // key fields).
+        #[test]
+        fn dir_item_proptest_multi_entry_concat(
+            entries in proptest::collection::vec(
+                (
+                    proptest::prelude::any::<u64>(),
+                    proptest::prelude::any::<u8>(),
+                    proptest::prelude::any::<u64>(),
+                    proptest::prelude::any::<u8>(),
+                    proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=32),
+                ),
+                2..=8,
+            ),
+        ) {
+            let originals: Vec<BtrfsDirItem> = entries
+                .into_iter()
+                .map(|(objid, ktype, koffset, ftype, name)| BtrfsDirItem {
+                    child_objectid: objid,
+                    child_key_type: ktype,
+                    child_key_offset: koffset,
+                    file_type: ftype,
+                    name,
+                })
+                .collect();
+
+            let mut bytes = Vec::new();
+            for entry in &originals {
+                let entry_bytes = entry.try_to_bytes().expect("non-empty name encodes");
+                bytes.extend_from_slice(&entry_bytes);
+            }
+
+            let parsed = parse_dir_items(&bytes).expect("multi-entry parse");
+            proptest::prop_assert_eq!(parsed, originals);
+        }
+
+        // MR-3 inner-truncation rejection: removing any non-zero
+        // suffix from a valid encoding must produce an error rather
+        // than a panic or buffer over-read.
+        #[test]
+        fn dir_item_proptest_truncation_rejection(
+            child_objectid in proptest::prelude::any::<u64>(),
+            child_key_type in proptest::prelude::any::<u8>(),
+            child_key_offset in proptest::prelude::any::<u64>(),
+            file_type in proptest::prelude::any::<u8>(),
+            name in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=32),
+            k in 1_usize..50,
+        ) {
+            let entry = BtrfsDirItem {
+                child_objectid,
+                child_key_type,
+                child_key_offset,
+                file_type,
+                name,
+            };
+            let bytes = entry.try_to_bytes().expect("non-empty name encodes");
+            let trunc = k.min(bytes.len() - 1);
+            let truncated = &bytes[..bytes.len() - trunc];
+            let err = parse_dir_items(truncated)
+                .err()
+                .expect("truncated payload must reject");
+            let _ = format!("{err:?}");
+        }
+    }
+
     #[test]
     fn extent_data_inline_round_trip() {
         let data = b"Hello, btrfs inline extent!".to_vec();
