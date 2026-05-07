@@ -6325,6 +6325,73 @@ mod tests {
         assert_eq!(COW_HEADER_SIZE, 32);
     }
 
+    /// bd-bg4on - byte-layout pin for native COW journal records.
+    #[test]
+    fn native_cow_record_encode_byte_layout() -> Result<()> {
+        let payload = [0xA1, 0xB2, 0xC3, 0xD4, 0xE5];
+        let write = encode_cow_record(
+            64,
+            &CowRecord::Write {
+                commit_seq: CommitSeq(0x0102_0304_0506_0708),
+                block: BlockNumber(0x1112_1314_1516_1718),
+                payload: &payload,
+            },
+        )?;
+
+        assert_eq!(write.len(), 64);
+        assert_eq!(&write[0..4], &COW_MAGIC.to_le_bytes());
+        assert_eq!(&write[4..6], &COW_VERSION.to_le_bytes());
+        assert_eq!(&write[6..8], &COW_RECORD_WRITE.to_le_bytes());
+        assert_eq!(&write[8..16], &0x0102_0304_0506_0708_u64.to_le_bytes());
+        assert_eq!(&write[16..24], &0x1112_1314_1516_1718_u64.to_le_bytes());
+        assert_eq!(&write[24..28], &5_u32.to_le_bytes());
+        assert_eq!(&write[28..32], &crc32c::crc32c(&payload).to_le_bytes());
+        assert_eq!(
+            &write[COW_HEADER_SIZE..COW_HEADER_SIZE + payload.len()],
+            &payload
+        );
+        assert!(is_all_zero(&write[COW_HEADER_SIZE + payload.len()..]));
+
+        match decode_cow_record(&write)? {
+            Some(DecodedCowRecord::Write {
+                commit_seq,
+                block,
+                payload,
+            }) => {
+                assert_eq!(commit_seq, 0x0102_0304_0506_0708);
+                assert_eq!(block, BlockNumber(0x1112_1314_1516_1718));
+                assert_eq!(payload, [0xA1, 0xB2, 0xC3, 0xD4, 0xE5]);
+            }
+            _ => return Err(FfsError::Format("expected write record".to_owned())),
+        }
+
+        let commit = encode_cow_record(
+            64,
+            &CowRecord::Commit {
+                commit_seq: CommitSeq(0x2122_2324_2526_2728),
+            },
+        )?;
+
+        assert_eq!(commit.len(), 64);
+        assert_eq!(&commit[0..4], &COW_MAGIC.to_le_bytes());
+        assert_eq!(&commit[4..6], &COW_VERSION.to_le_bytes());
+        assert_eq!(&commit[6..8], &COW_RECORD_COMMIT.to_le_bytes());
+        assert_eq!(&commit[8..16], &0x2122_2324_2526_2728_u64.to_le_bytes());
+        assert_eq!(&commit[16..24], &0_u64.to_le_bytes());
+        assert_eq!(&commit[24..28], &0_u32.to_le_bytes());
+        assert_eq!(&commit[28..32], &0_u32.to_le_bytes());
+        assert!(is_all_zero(&commit[COW_HEADER_SIZE..]));
+
+        match decode_cow_record(&commit)? {
+            Some(DecodedCowRecord::Commit { commit_seq }) => {
+                assert_eq!(commit_seq, 0x2122_2324_2526_2728);
+            }
+            _ => return Err(FfsError::Format("expected commit record".to_owned())),
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn journal_segment_debug_clone_copy_eq() {
         let seg = JournalSegment {
