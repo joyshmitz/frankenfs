@@ -1,0 +1,5 @@
+---
+source: crates/ffs-harness/src/perf_comparison.rs
+expression: line
+---
+[FAIL] op_fail: +29.9% (d=42.43 large, p=N/A) — envelope says Fail, marking Fail

@@ -1255,6 +1255,34 @@ mod tests {
         insta::assert_snapshot!("report_line_pass", line);
     }
 
+    /// bd-cjg3l — golden-output snapshot for the FAIL verdict branch of
+    /// `format_report_line`. The PASS-only snapshot at
+    /// `report_line_pass_snapshot` cannot detect a regression that
+    /// swapped the FAIL/WARN/INCONCLUSIVE tag dictionary, broke the
+    /// p<0.001 / p=N/A formatter, or misrouted the explanation
+    /// suffix on the regression code path. Reuses the deterministic
+    /// inputs from `comparator_insufficient_samples_inconclusive`
+    /// (baseline=[100.0, 101.0], current=[130.0, 131.0]) which yield
+    /// a stable +29.9% delta, t_test=None (insufficient samples →
+    /// p=N/A branch), and a Fail verdict via the envelope fallback.
+    #[test]
+    fn report_line_fail_snapshot() {
+        let comparator = RegressionComparator::new(ComparatorConfig::default());
+        let result = comparator.compare(
+            "op_fail",
+            &[100.0, 101.0],
+            &[130.0, 131.0],
+            &test_envelope(),
+        );
+        assert_eq!(
+            result.final_verdict,
+            ComparisonVerdict::Fail,
+            "fixture must reach the FAIL branch"
+        );
+        let line = format_report_line(&result);
+        insta::assert_snapshot!("report_line_fail", line);
+    }
+
     // ── Negative / invariant tests ───────────────────────────────────
 
     #[test]
