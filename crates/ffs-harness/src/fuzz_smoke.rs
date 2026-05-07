@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::Path;
+use std::path::{Component, Path};
 use std::time::{Duration, Instant};
 
 pub const FUZZ_SMOKE_SCHEMA_VERSION: u32 = 1;
@@ -433,9 +433,9 @@ fn validate_seeds(seeds: &[FuzzSmokeSeed], errors: &mut Vec<String>) {
         if seed.path.trim().is_empty() {
             errors.push(format!("fuzz-smoke seed `{}` missing path", seed.seed_id));
         }
-        if Path::new(&seed.path).is_absolute() {
+        if !is_workspace_relative_seed_path(&seed.path) {
             errors.push(format!(
-                "fuzz-smoke seed `{}` path must be workspace-relative",
+                "fuzz-smoke seed `{}` path must be workspace-relative without parent-directory segments",
                 seed.seed_id
             ));
         }
@@ -482,6 +482,14 @@ fn validate_seeds(seeds: &[FuzzSmokeSeed], errors: &mut Vec<String>) {
         validate_minimization(seed, errors);
         validate_quarantine(seed, errors);
     }
+}
+
+fn is_workspace_relative_seed_path(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn validate_resource_budget(seed: &FuzzSmokeSeed, errors: &mut Vec<String>) {
@@ -992,6 +1000,20 @@ mod tests {
             errors
                 .iter()
                 .any(|error| error.contains("unsupported target")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn parent_directory_seed_paths_are_rejected() {
+        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
+        manifest.seeds[0].path = "../outside-workspace.seed".to_owned();
+
+        let errors = validate_fuzz_smoke_manifest(&manifest);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("without parent-directory segments")),
             "{errors:?}"
         );
     }

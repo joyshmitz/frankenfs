@@ -353,3 +353,8 @@ doc = false
 name = "fuzz_btrfs_parse_inode_refs"
 path = "fuzz_targets/fuzz_btrfs_parse_inode_refs.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_fuzz_smoke_manifest"
+path = "fuzz_targets/fuzz_fuzz_smoke_manifest.rs"
+doc = false
