@@ -8,9 +8,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 pub const READINESS_ACTION_AUTOPILOT_SCHEMA_VERSION: u32 = 1;
 pub const READINESS_ACTION_FIXTURE_VALIDATOR_VERSION: u32 = 1;
+pub const READINESS_ACTION_DRY_RUN_REPORT_VERSION: u32 = 1;
 
 const REQUIRED_FIXTURE_CLASSIFICATIONS: [ReadinessFixtureClassification; 4] = [
     ReadinessFixtureClassification::LocalSafe,
@@ -203,6 +205,49 @@ pub struct ReadinessActionSuppressedDuplicate {
     pub duplicate_issue_title: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessActionDryRunReport {
+    pub schema_version: u32,
+    pub report_id: String,
+    pub generated_at: String,
+    pub dry_run: bool,
+    pub command_metadata: ReadinessActionDryRunMetadata,
+    pub planner_result: ReadinessActionPlanningResult,
+    pub scenarios: Vec<ReadinessActionDryRunScenario>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessActionDryRunMetadata {
+    pub invocation: String,
+    pub json_report_path: String,
+    pub markdown_report_path: String,
+    pub stdout_log_path: String,
+    pub stderr_log_path: String,
+    pub cleanup_status: String,
+    pub output_paths: Vec<ReadinessActionDryRunOutputPath>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessActionDryRunOutputPath {
+    pub kind: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessActionDryRunScenario {
+    pub scenario_id: String,
+    pub action_id: String,
+    pub title: String,
+    pub safety_class: ReadinessActionSafetyClass,
+    pub ack_required: bool,
+    pub evidence_tier: ReadinessEvidenceTier,
+    pub public_claim_effect: PublicClaimEffect,
+    pub controlling_bead: String,
+    pub reproduction_command: String,
+    pub diagnostic_count: usize,
+    pub dry_run_note: String,
+}
+
 #[must_use]
 pub fn default_readiness_action_autopilot_fixture_set() -> ReadinessActionAutopilotFixtureSet {
     ReadinessActionAutopilotFixtureSet {
@@ -382,6 +427,117 @@ pub fn default_readiness_action_autopilot_fixture_set() -> ReadinessActionAutopi
 }
 
 #[must_use]
+pub fn build_readiness_action_dry_run_report(
+    input: &ReadinessActionPlanningInput,
+    command_metadata: ReadinessActionDryRunMetadata,
+) -> ReadinessActionDryRunReport {
+    let planner_result = plan_readiness_actions(input);
+    let scenarios = planner_result
+        .report
+        .recommendations
+        .iter()
+        .map(readiness_action_dry_run_scenario)
+        .collect();
+
+    ReadinessActionDryRunReport {
+        schema_version: READINESS_ACTION_DRY_RUN_REPORT_VERSION,
+        report_id: input.report_id.clone(),
+        generated_at: input.generated_at.clone(),
+        dry_run: true,
+        command_metadata,
+        planner_result,
+        scenarios,
+    }
+}
+
+#[must_use]
+pub fn render_readiness_action_dry_run_markdown(report: &ReadinessActionDryRunReport) -> String {
+    let mut markdown = String::new();
+    markdown.push_str("# Readiness Action Dry-Run Report\n\n");
+    let _ = writeln!(markdown, "- Report: `{}`", report.report_id);
+    let _ = writeln!(markdown, "- Generated at: `{}`", report.generated_at);
+    let _ = writeln!(markdown, "- Dry run: `{}`", report.dry_run);
+    let _ = writeln!(
+        markdown,
+        "- Recommendations: `{}`",
+        report.planner_result.report.recommendations.len()
+    );
+    let _ = writeln!(
+        markdown,
+        "- Suppressed duplicates: `{}`",
+        report.planner_result.suppressed_duplicates.len()
+    );
+    let _ = writeln!(
+        markdown,
+        "- Cleanup status: `{}`",
+        report.command_metadata.cleanup_status
+    );
+
+    markdown.push_str("\n## Command Metadata\n\n");
+    let _ = writeln!(
+        markdown,
+        "- Invocation: `{}`",
+        report.command_metadata.invocation
+    );
+    let _ = writeln!(
+        markdown,
+        "- Stdout log: `{}`",
+        report.command_metadata.stdout_log_path
+    );
+    let _ = writeln!(
+        markdown,
+        "- Stderr log: `{}`",
+        report.command_metadata.stderr_log_path
+    );
+
+    markdown.push_str("\n## Output Paths\n\n");
+    markdown.push_str("| Kind | Path |\n|---|---|\n");
+    for path in &report.command_metadata.output_paths {
+        let _ = writeln!(
+            markdown,
+            "| {} | `{}` |",
+            markdown_table_cell(&path.kind),
+            markdown_table_cell(&path.path)
+        );
+    }
+
+    markdown.push_str("\n## Recommendations\n\n");
+    markdown.push_str(
+        "| Action | Safety | Ack | Claim | Evidence | Diagnostics | Reproduction Command |\n",
+    );
+    markdown.push_str("|---|---:|---:|---|---|---:|---|\n");
+    for scenario in &report.scenarios {
+        let _ = writeln!(
+            markdown,
+            "| {} | {:?} | {} | {:?} | {:?} | {} | `{}` |",
+            markdown_table_cell(&scenario.action_id),
+            scenario.safety_class,
+            scenario.ack_required,
+            scenario.public_claim_effect,
+            scenario.evidence_tier,
+            scenario.diagnostic_count,
+            markdown_table_cell(&scenario.reproduction_command)
+        );
+    }
+
+    if !report.planner_result.suppressed_duplicates.is_empty() {
+        markdown.push_str("\n## Suppressed Duplicates\n\n");
+        markdown.push_str("| Action | Controlling Bead | Duplicate Issue |\n|---|---|---|\n");
+        for duplicate in &report.planner_result.suppressed_duplicates {
+            let _ = writeln!(
+                markdown,
+                "| {} | {} | {} |",
+                markdown_table_cell(&duplicate.action_id),
+                markdown_table_cell(&duplicate.controlling_bead),
+                markdown_table_cell(&duplicate.duplicate_issue_id)
+            );
+        }
+    }
+
+    markdown
+}
+
+#[must_use]
 pub fn plan_readiness_actions(
     input: &ReadinessActionPlanningInput,
 ) -> ReadinessActionPlanningResult {
@@ -506,6 +662,28 @@ pub fn validate_readiness_action_fixture_set(
         evidence_tiers_seen: evidence_tiers_seen.into_iter().collect(),
         errors,
     }
+}
+
+fn readiness_action_dry_run_scenario(
+    recommendation: &ReadinessActionRecommendation,
+) -> ReadinessActionDryRunScenario {
+    ReadinessActionDryRunScenario {
+        scenario_id: format!("dry-run-{}", recommendation.action_id),
+        action_id: recommendation.action_id.clone(),
+        title: recommendation.title.clone(),
+        safety_class: recommendation.safety_class,
+        ack_required: recommendation.ack_required,
+        evidence_tier: recommendation.evidence_tier,
+        public_claim_effect: recommendation.public_claim_effect,
+        controlling_bead: recommendation.controlling_bead.clone(),
+        reproduction_command: recommendation.reproduction_command.clone(),
+        diagnostic_count: recommendation.diagnostics.len(),
+        dry_run_note: "planner report only; no reproduction command was executed".to_owned(),
+    }
+}
+
+fn markdown_table_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', " ")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1781,6 +1959,66 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_report_preserves_output_paths_and_scenarios() {
+        let report = build_readiness_action_dry_run_report(
+            &planning_input(default_source_reports(), Vec::new()),
+            dry_run_metadata(),
+        );
+
+        assert_eq!(
+            report.schema_version,
+            READINESS_ACTION_DRY_RUN_REPORT_VERSION
+        );
+        assert!(report.dry_run);
+        assert_eq!(report.command_metadata.cleanup_status, "not_required");
+
+        let output_kinds: Vec<&str> = report
+            .command_metadata
+            .output_paths
+            .iter()
+            .map(|path| path.kind.as_str())
+            .collect();
+        assert!(output_kinds.contains(&"json_report"));
+        assert!(output_kinds.contains(&"markdown_report"));
+        assert!(output_kinds.contains(&"stdout_log"));
+        assert!(output_kinds.contains(&"stderr_log"));
+
+        let action_ids: Vec<&str> = report
+            .scenarios
+            .iter()
+            .map(|scenario| scenario.action_id.as_str())
+            .collect();
+        assert!(action_ids.contains(&"define-readiness-action-schema"));
+        assert!(action_ids.contains(&"run-permissioned-xfstests-baseline"));
+        assert!(action_ids.contains(&"refresh-large-host-swarm-campaign"));
+        assert!(report.scenarios.iter().all(|scenario| {
+            scenario
+                .dry_run_note
+                .contains("no reproduction command was executed")
+        }));
+    }
+
+    #[test]
+    fn dry_run_markdown_lists_local_permissioned_and_stale_scenarios() {
+        let report = build_readiness_action_dry_run_report(
+            &planning_input(default_source_reports(), Vec::new()),
+            dry_run_metadata(),
+        );
+
+        let markdown = render_readiness_action_dry_run_markdown(&report);
+
+        assert!(markdown.contains("# Readiness Action Dry-Run Report"));
+        assert!(markdown.contains("define-readiness-action-schema"));
+        assert!(markdown.contains("run-permissioned-xfstests-baseline"));
+        assert!(markdown.contains("refresh-large-host-swarm-campaign"));
+        assert!(markdown.contains("LocalSafe"));
+        assert!(markdown.contains("Permissioned"));
+        assert!(markdown.contains("DowngradeRequired"));
+        assert!(markdown.contains("artifacts/readiness/actions/report.json"));
+        assert!(markdown.contains("artifacts/readiness/actions/stderr.log"));
+    }
+
+    #[test]
     fn planner_output_is_stable_when_source_report_order_changes() {
         let mut reversed_reports = default_source_reports();
         reversed_reports.reverse();
@@ -1886,5 +2124,34 @@ mod tests {
             .iter()
             .map(|diagnostic| diagnostic.diagnostic_id.as_str())
             .collect()
+    }
+
+    fn dry_run_metadata() -> ReadinessActionDryRunMetadata {
+        ReadinessActionDryRunMetadata {
+            invocation: "ffs-harness recommend-readiness-actions".to_owned(),
+            json_report_path: "artifacts/readiness/actions/report.json".to_owned(),
+            markdown_report_path: "artifacts/readiness/actions/report.md".to_owned(),
+            stdout_log_path: "artifacts/readiness/actions/stdout.log".to_owned(),
+            stderr_log_path: "artifacts/readiness/actions/stderr.log".to_owned(),
+            cleanup_status: "not_required".to_owned(),
+            output_paths: vec![
+                ReadinessActionDryRunOutputPath {
+                    kind: "json_report".to_owned(),
+                    path: "artifacts/readiness/actions/report.json".to_owned(),
+                },
+                ReadinessActionDryRunOutputPath {
+                    kind: "markdown_report".to_owned(),
+                    path: "artifacts/readiness/actions/report.md".to_owned(),
+                },
+                ReadinessActionDryRunOutputPath {
+                    kind: "stdout_log".to_owned(),
+                    path: "artifacts/readiness/actions/stdout.log".to_owned(),
+                },
+                ReadinessActionDryRunOutputPath {
+                    kind: "stderr_log".to_owned(),
+                    path: "artifacts/readiness/actions/stderr.log".to_owned(),
+                },
+            ],
+        }
     }
 }

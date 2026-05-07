@@ -93,6 +93,12 @@ use ffs_harness::{
         evaluate_proof_overhead_budget, fail_on_proof_overhead_budget_errors,
         load_observed_proof_metrics, load_proof_overhead_budget_config,
     },
+    readiness_action_autopilot::{
+        ReadinessActionDryRunMetadata, ReadinessActionDryRunOutputPath,
+        ReadinessActionDryRunReport, ReadinessActionPlanningInput,
+        build_readiness_action_dry_run_report, default_readiness_action_autopilot_fixture_set,
+        render_readiness_action_dry_run_markdown,
+    },
     release_gate::{
         evaluate_release_gates, fail_on_release_gate_errors, load_release_gate_policy,
         render_release_gate_markdown,
@@ -223,6 +229,18 @@ struct XfstestsFailureTriageConfig {
     reproduction_command: Option<String>,
 }
 
+#[derive(Debug)]
+struct RecommendReadinessActionsCmdArgs {
+    input_path: Option<String>,
+    out_json_path: String,
+    out_markdown_path: String,
+    stdout_log_path: String,
+    stderr_log_path: String,
+    report_id: Option<String>,
+    generated_at: Option<String>,
+    invocation: String,
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("error: {err:#}");
@@ -303,6 +321,7 @@ fn run() -> Result<()> {
             validate_metamorphic_workload_seed_catalog_cmd(&args[1..])
         }
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
+        Some("recommend-readiness-actions") => recommend_readiness_actions_cmd(&args[1..]),
         Some("validate-mounted-write-error-classes") => {
             validate_mounted_write_error_classes_cmd(&args[1..])
         }
@@ -836,6 +855,195 @@ fn operational_readiness_report_summary(
             .iter()
             .filter(|row| row.reproduction_command.is_some())
             .count(),
+    )
+}
+
+fn recommend_readiness_actions_cmd(args: &[String]) -> Result<()> {
+    let Some(config) = parse_recommend_readiness_actions_args(args)? else {
+        return Ok(());
+    };
+    let mut input = load_readiness_action_planning_input(&config)?;
+    if let Some(report_id) = &config.report_id {
+        input.report_id.clone_from(report_id);
+    }
+    if let Some(generated_at) = &config.generated_at {
+        input.generated_at.clone_from(generated_at);
+    }
+
+    let metadata = readiness_action_dry_run_metadata(&config);
+    let report = build_readiness_action_dry_run_report(&input, metadata);
+    let json = serde_json::to_string_pretty(&report)?;
+    let markdown = render_readiness_action_dry_run_markdown(&report);
+    let stdout_log = readiness_action_dry_run_stdout_log(&report);
+    let stderr_log = readiness_action_dry_run_stderr_log(&report);
+
+    write_text_file(Path::new(&config.out_json_path), &format!("{json}\n"))?;
+    write_text_file(
+        Path::new(&config.out_markdown_path),
+        &format!("{markdown}\n"),
+    )?;
+    write_text_file(Path::new(&config.stdout_log_path), &stdout_log)?;
+    write_text_file(Path::new(&config.stderr_log_path), &stderr_log)?;
+
+    println!("{}", readiness_action_dry_run_summary(&report));
+    Ok(())
+}
+
+fn parse_recommend_readiness_actions_args(
+    args: &[String],
+) -> Result<Option<RecommendReadinessActionsCmdArgs>> {
+    let mut input_path = None;
+    let mut out_json_path = None;
+    let mut out_markdown_path = None;
+    let mut stdout_log_path = None;
+    let mut stderr_log_path = None;
+    let mut report_id = None;
+    let mut generated_at = None;
+    let mut invocation = "ffs-harness recommend-readiness-actions".to_owned();
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--input" => {
+                input_path = Some(require_value(args, i, "--input")?.clone());
+                i += 1;
+            }
+            "--out-json" => {
+                out_json_path = Some(require_value(args, i, "--out-json")?.clone());
+                i += 1;
+            }
+            "--out-md" | "--out-markdown" => {
+                out_markdown_path = Some(require_value(args, i, args[i].as_str())?.clone());
+                i += 1;
+            }
+            "--stdout-log" => {
+                stdout_log_path = Some(require_value(args, i, "--stdout-log")?.clone());
+                i += 1;
+            }
+            "--stderr-log" => {
+                stderr_log_path = Some(require_value(args, i, "--stderr-log")?.clone());
+                i += 1;
+            }
+            "--report-id" => {
+                report_id = Some(require_value(args, i, "--report-id")?.clone());
+                i += 1;
+            }
+            "--generated-at" => {
+                generated_at = Some(require_value(args, i, "--generated-at")?.clone());
+                i += 1;
+            }
+            "--invocation" => {
+                invocation.clone_from(require_value(args, i, "--invocation")?);
+                i += 1;
+            }
+            "--help" | "-h" => {
+                print_recommend_readiness_actions_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown recommend-readiness-actions argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(RecommendReadinessActionsCmdArgs {
+        input_path,
+        out_json_path: out_json_path.context("--out-json is required")?,
+        out_markdown_path: out_markdown_path.context("--out-md is required")?,
+        stdout_log_path: stdout_log_path.context("--stdout-log is required")?,
+        stderr_log_path: stderr_log_path.context("--stderr-log is required")?,
+        report_id,
+        generated_at,
+        invocation,
+    }))
+}
+
+fn load_readiness_action_planning_input(
+    config: &RecommendReadinessActionsCmdArgs,
+) -> Result<ReadinessActionPlanningInput> {
+    if let Some(input_path) = &config.input_path {
+        let input = fs::read_to_string(input_path)
+            .with_context(|| format!("failed to read {input_path}"))?;
+        return serde_json::from_str(&input)
+            .with_context(|| format!("failed to parse readiness action input {input_path}"));
+    }
+
+    Ok(ReadinessActionPlanningInput {
+        report_id: "readiness_action_dry_run_report".to_owned(),
+        generated_at: "1970-01-01T00:00:00Z".to_owned(),
+        source_reports: default_readiness_action_autopilot_fixture_set()
+            .fixtures
+            .into_iter()
+            .map(|fixture| fixture.report)
+            .collect(),
+        active_tracker_issues: Vec::new(),
+    })
+}
+
+fn readiness_action_dry_run_metadata(
+    config: &RecommendReadinessActionsCmdArgs,
+) -> ReadinessActionDryRunMetadata {
+    ReadinessActionDryRunMetadata {
+        invocation: config.invocation.clone(),
+        json_report_path: config.out_json_path.clone(),
+        markdown_report_path: config.out_markdown_path.clone(),
+        stdout_log_path: config.stdout_log_path.clone(),
+        stderr_log_path: config.stderr_log_path.clone(),
+        cleanup_status: "not_required_dry_run".to_owned(),
+        output_paths: vec![
+            ReadinessActionDryRunOutputPath {
+                kind: "json_report".to_owned(),
+                path: config.out_json_path.clone(),
+            },
+            ReadinessActionDryRunOutputPath {
+                kind: "markdown_report".to_owned(),
+                path: config.out_markdown_path.clone(),
+            },
+            ReadinessActionDryRunOutputPath {
+                kind: "stdout_log".to_owned(),
+                path: config.stdout_log_path.clone(),
+            },
+            ReadinessActionDryRunOutputPath {
+                kind: "stderr_log".to_owned(),
+                path: config.stderr_log_path.clone(),
+            },
+        ],
+    }
+}
+
+fn readiness_action_dry_run_summary(report: &ReadinessActionDryRunReport) -> String {
+    format!(
+        "readiness action dry-run report written: json={} markdown={} stdout_log={} stderr_log={} recommendations={} scenarios={} suppressed_duplicates={} cleanup_status={}",
+        report.command_metadata.json_report_path,
+        report.command_metadata.markdown_report_path,
+        report.command_metadata.stdout_log_path,
+        report.command_metadata.stderr_log_path,
+        report.planner_result.report.recommendations.len(),
+        report.scenarios.len(),
+        report.planner_result.suppressed_duplicates.len(),
+        report.command_metadata.cleanup_status
+    )
+}
+
+fn readiness_action_dry_run_stdout_log(report: &ReadinessActionDryRunReport) -> String {
+    format!(
+        "readiness-action-dry-run\nreport_id={}\ndry_run={}\nrecommendations={}\nsuppressed_duplicates={}\nscenarios={}\njson_report_path={}\nmarkdown_report_path={}\nstdout_log_path={}\nstderr_log_path={}\ncleanup_status={}\n",
+        report.report_id,
+        report.dry_run,
+        report.planner_result.report.recommendations.len(),
+        report.planner_result.suppressed_duplicates.len(),
+        report.scenarios.len(),
+        report.command_metadata.json_report_path,
+        report.command_metadata.markdown_report_path,
+        report.command_metadata.stdout_log_path,
+        report.command_metadata.stderr_log_path,
+        report.command_metadata.cleanup_status
+    )
+}
+
+fn readiness_action_dry_run_stderr_log(report: &ReadinessActionDryRunReport) -> String {
+    format!(
+        "readiness-action-dry-run stderr\nno reproduction commands executed\npermissioned, destructive, and stale-evidence commands stayed dry-run only\ncleanup_status={}\n",
+        report.command_metadata.cleanup_status
     )
 }
 
@@ -4538,6 +4746,9 @@ fn print_usage_commands() {
         "  ffs-harness operational-readiness-report [--artifacts DIR] [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE]"
     );
     println!(
+        "  ffs-harness recommend-readiness-actions [--input FILE] --out-json FILE --out-md FILE --stdout-log FILE --stderr-log FILE [--report-id ID] [--generated-at TS] [--invocation CMD]"
+    );
+    println!(
         "  ffs-harness fuse-capability-probe [--out FILE] [--require-mount-probe] [--mount-probe-exit N] [--unmount-probe-exit N] [--user-disabled] [--default-permissions-eacces]"
     );
     println!("  ffs-harness validate-open-ended-inventory [--out FILE]");
@@ -4618,6 +4829,9 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness operational-readiness-report --artifacts artifacts/e2e --current-git-sha $(git rev-parse --short HEAD) --max-age-days 14 --format markdown --out artifacts/e2e/readiness.md"
+    );
+    println!(
+        "  ffs-harness recommend-readiness-actions --out-json artifacts/readiness/actions/report.json --out-md artifacts/readiness/actions/report.md --stdout-log artifacts/readiness/actions/stdout.log --stderr-log artifacts/readiness/actions/stderr.log"
     );
     println!("  ffs-harness fuse-capability-probe --out artifacts/e2e/run/fuse_capability.json");
     println!(
@@ -4954,6 +5168,20 @@ fn print_operational_readiness_report_usage() {
     );
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write report to FILE");
+}
+
+fn print_recommend_readiness_actions_usage() {
+    println!("Usage: ffs-harness recommend-readiness-actions [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --input FILE                       Read readiness action planning input JSON");
+    println!("  --out-json FILE                    Write dry-run JSON report");
+    println!("  --out-md FILE                      Write dry-run Markdown report");
+    println!("  --stdout-log FILE                  Write deterministic stdout log");
+    println!("  --stderr-log FILE                  Write deterministic stderr log");
+    println!("  --report-id ID                     Override report_id in the emitted report");
+    println!("  --generated-at TS                  Override generated_at in the emitted report");
+    println!("  --invocation CMD                   Preserve the exact command invocation");
 }
 
 fn print_open_ended_inventory_usage() {
@@ -5328,4 +5556,73 @@ fn print_mounted_recovery_matrix_usage() {
     println!("Options:");
     println!("  --matrix FILE                      Read mounted recovery matrix JSON from FILE");
     println!("  --out FILE                         Write JSON validation report to FILE");
+}
+
+#[cfg(test)]
+mod readiness_action_cli_tests {
+    use super::*;
+
+    #[test]
+    fn recommend_readiness_actions_cmd_writes_dry_run_report_pack() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let json_path = dir.path().join("readiness-actions.json");
+        let markdown_path = dir.path().join("readiness-actions.md");
+        let stdout_log_path = dir.path().join("stdout.log");
+        let stderr_log_path = dir.path().join("stderr.log");
+
+        let args = vec![
+            "--out-json".to_owned(),
+            json_path.display().to_string(),
+            "--out-md".to_owned(),
+            markdown_path.display().to_string(),
+            "--stdout-log".to_owned(),
+            stdout_log_path.display().to_string(),
+            "--stderr-log".to_owned(),
+            stderr_log_path.display().to_string(),
+            "--report-id".to_owned(),
+            "cli_dry_run_test".to_owned(),
+            "--generated-at".to_owned(),
+            "2026-05-07T00:00:00Z".to_owned(),
+            "--invocation".to_owned(),
+            "ffs-harness recommend-readiness-actions --dry-run-test".to_owned(),
+        ];
+
+        recommend_readiness_actions_cmd(&args).expect("dry-run command succeeds");
+
+        let json = std::fs::read_to_string(&json_path).expect("json report");
+        let report: ReadinessActionDryRunReport =
+            serde_json::from_str(&json).expect("parse json report");
+        assert!(report.dry_run);
+        assert_eq!(report.report_id, "cli_dry_run_test");
+        assert_eq!(report.generated_at, "2026-05-07T00:00:00Z");
+        assert_eq!(
+            report.command_metadata.cleanup_status,
+            "not_required_dry_run"
+        );
+
+        let action_ids: Vec<&str> = report
+            .scenarios
+            .iter()
+            .map(|scenario| scenario.action_id.as_str())
+            .collect();
+        assert!(action_ids.contains(&"define-readiness-action-schema"));
+        assert!(action_ids.contains(&"run-permissioned-xfstests-baseline"));
+        assert!(action_ids.contains(&"refresh-large-host-swarm-campaign"));
+
+        let markdown = std::fs::read_to_string(&markdown_path).expect("markdown report");
+        assert!(markdown.contains("# Readiness Action Dry-Run Report"));
+        assert!(markdown.contains("LocalSafe"));
+        assert!(markdown.contains("Permissioned"));
+        assert!(markdown.contains("DowngradeRequired"));
+
+        let stdout_log = std::fs::read_to_string(&stdout_log_path).expect("stdout log");
+        assert!(stdout_log.contains("readiness-action-dry-run"));
+        assert!(stdout_log.contains("recommendations=4"));
+        assert!(stdout_log.contains("scenarios=4"));
+        assert!(stdout_log.contains("cleanup_status=not_required_dry_run"));
+
+        let stderr_log = std::fs::read_to_string(&stderr_log_path).expect("stderr log");
+        assert!(stderr_log.contains("no reproduction commands executed"));
+        assert!(stderr_log.contains("stale-evidence commands stayed dry-run only"));
+    }
 }
