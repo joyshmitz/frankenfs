@@ -6534,6 +6534,89 @@ mod tests {
         assert_eq!(parsed[0].name, name);
     }
 
+    // bd-qwo4a — Kernel-conformance pin for parse_dir_items.
+    //
+    // struct btrfs_dir_item in fs/btrfs/btrfs_tree.h packs to:
+    //   location.objectid u64 @0..8
+    //   location.type      u8 @8
+    //   location.offset    u64 @9..17
+    //   transid            u64 @17..25 (discarded by parser)
+    //   data_len           u16 @25..27 (must be 0 for entries)
+    //   name_len           u16 @27..29 (must be non-zero)
+    //   type               u8 @29
+    // Total fixed header: 30 bytes; name bytes at @30..30+name_len.
+    //
+    // Stamp each addressable field with a unique non-zero magic
+    // so any single-field offset drift produces a cross-field
+    // collision. data_len stays 0 (invariant); transid carries a
+    // magic that would FAIL the data_len==0 check if data_len
+    // were misaligned to offset 17 — i.e. the test's success
+    // pins data_len at offset 25 too.
+    #[test]
+    fn parse_dir_items_kernel_offsets_match_btrfs_tree_h() {
+        let name = b"\x99\x99\x99\x99"; // 4-byte distinct magic for name bytes
+        let mut data = vec![0_u8; 30 + name.len()];
+
+        let objectid = 0x1111_1111_1111_1111_u64;
+        let key_type: u8 = 0xAB;
+        let key_offset = 0x3333_3333_3333_3333_u64;
+        let transid_magic = 0x4444_4444_4444_4444_u64;
+        let data_len: u16 = 0;
+        let name_len = u16::try_from(name.len()).expect("test name length fits u16");
+        let file_type: u8 = 0x77;
+
+        data[0..8].copy_from_slice(&objectid.to_le_bytes());
+        data[8] = key_type;
+        data[9..17].copy_from_slice(&key_offset.to_le_bytes());
+        data[17..25].copy_from_slice(&transid_magic.to_le_bytes());
+        data[25..27].copy_from_slice(&data_len.to_le_bytes());
+        data[27..29].copy_from_slice(&name_len.to_le_bytes());
+        data[29] = file_type;
+        data[30..30 + name.len()].copy_from_slice(name);
+
+        let parsed =
+            parse_dir_items(&data).expect("kernel-stamped dir_item must parse");
+        assert_eq!(parsed.len(), 1, "single-entry payload must parse to one item");
+
+        assert_eq!(
+            parsed[0].child_objectid, objectid,
+            "child_objectid must come from offset 0..8 per kernel layout"
+        );
+        assert_eq!(
+            parsed[0].child_key_type, key_type,
+            "child_key_type must come from offset 8 per kernel layout"
+        );
+        assert_eq!(
+            parsed[0].child_key_offset, key_offset,
+            "child_key_offset must come from offset 9..17 per kernel layout"
+        );
+        assert_eq!(
+            parsed[0].file_type, file_type,
+            "file_type must come from offset 29 per kernel layout"
+        );
+        assert_eq!(
+            parsed[0].name, name,
+            "name bytes must start at offset 30 with length name_len@27..29"
+        );
+
+        // Cross-check: a misalignment that read data_len from
+        // offset 17 (where transid lives) would see 0x4444 and
+        // reject with InvalidField{data_len}. The successful
+        // parse above proves data_len is read from offset 25.
+        // Make this explicit by mutating data_len@25 to a non-
+        // zero magic and asserting the parser rejects.
+        let mut bad = data.clone();
+        bad[25..27].copy_from_slice(&0x5555_u16.to_le_bytes());
+        let err = parse_dir_items(&bad).expect_err("non-zero data_len must reject");
+        match err {
+            ParseError::InvalidField { field, .. } => assert_eq!(
+                field, "dir_item.data_len",
+                "rejection must specifically blame data_len, proving offset 25 is read"
+            ),
+            other => panic!("expected InvalidField{{data_len}}, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_extent_data_regular_smoke() {
         let mut data = [0_u8; 53];
