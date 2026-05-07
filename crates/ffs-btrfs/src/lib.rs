@@ -6483,8 +6483,7 @@ mod tests {
         // the kernel's "stale-extension" rule.
         let mut stale = root.clone();
         stale[239..247].copy_from_slice(&(generation ^ 1).to_le_bytes());
-        let parsed_stale =
-            parse_root_item(&stale).expect("stale generation_v2 must still parse");
+        let parsed_stale = parse_root_item(&stale).expect("stale generation_v2 must still parse");
         assert_eq!(
             parsed_stale.uuid, [0_u8; 16],
             "stale generation_v2 must clear uuid"
