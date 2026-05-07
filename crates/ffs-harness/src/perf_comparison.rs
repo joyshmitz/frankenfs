@@ -1237,6 +1237,59 @@ mod tests {
         insta::assert_snapshot!("full_report_pass_only", report);
     }
 
+    /// bd-m8tc7 — golden-output snapshot for `format_full_report`
+    /// with all four ComparisonVerdict variants present. The
+    /// existing `full_report_pass_only_snapshot` covers the single
+    /// PASS path but the multi-result summary line ("Summary:
+    /// {pass} pass, {warn} warn, {fail} fail, {inconclusive}
+    /// inconclusive") with NON-zero counts in each category is
+    /// uncovered. A regression that swapped any two count labels
+    /// (e.g., "warn"→"warning"), reordered the summary categories,
+    /// or broke the multi-line layout would silently break
+    /// downstream report parsers but pass the four
+    /// `report_line_*_snapshot` tests (which only cover individual
+    /// lines). Reuses the deterministic fixtures from each verdict
+    /// branch's per-line snapshot.
+    #[test]
+    fn full_report_mixed_verdicts_snapshot() {
+        let comparator = RegressionComparator::new(ComparatorConfig::default());
+        let pass = comparator.compare(
+            "op_pass",
+            &[100.0, 100.0, 100.0, 100.0, 100.0],
+            &[100.0, 100.0, 100.0, 100.0, 100.0],
+            &test_envelope(),
+        );
+        assert_eq!(pass.final_verdict, ComparisonVerdict::Pass);
+        let warn = comparator.compare(
+            "op_warn",
+            &[
+                100.0, 100.5, 99.5, 100.2, 99.8, 100.1, 99.9, 100.3, 99.7, 100.0,
+            ],
+            &[
+                115.0, 115.5, 114.5, 115.2, 114.8, 115.1, 114.9, 115.3, 114.7, 115.0,
+            ],
+            &test_envelope(),
+        );
+        assert_eq!(warn.final_verdict, ComparisonVerdict::Warn);
+        let fail = comparator.compare(
+            "op_fail",
+            &[100.0, 101.0],
+            &[130.0, 131.0],
+            &test_envelope(),
+        );
+        assert_eq!(fail.final_verdict, ComparisonVerdict::Fail);
+        let inconclusive = comparator.compare(
+            "op_inconclusive",
+            &[100.0, 101.0],
+            &[107.0, 108.0],
+            &test_envelope(),
+        );
+        assert_eq!(inconclusive.final_verdict, ComparisonVerdict::Inconclusive);
+
+        let report = format_full_report(&[pass, warn, fail, inconclusive]);
+        insta::assert_snapshot!("full_report_mixed_verdicts", report);
+    }
+
     /// bd-by4bc — golden-output snapshot for a single `format_report_line`
     /// invocation. Independent of the full-report wrapper so future drift
     /// in the line shape (verdict tag dictionary, percent precision, effect
