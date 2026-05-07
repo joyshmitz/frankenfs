@@ -1,0 +1,5 @@
+---
+source: crates/ffs-harness/src/perf_comparison.rs
+expression: line
+---
+[WARN] op_warn: +15.0% (d=50.95 large, p<0.001) — WARN

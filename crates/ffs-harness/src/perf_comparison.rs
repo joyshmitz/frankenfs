@@ -1283,6 +1283,35 @@ mod tests {
         insta::assert_snapshot!("report_line_fail", line);
     }
 
+    /// bd-pwyiy — golden-output snapshot for the WARN verdict branch
+    /// of `format_report_line`. Pairs with `report_line_pass_snapshot`
+    /// and `report_line_fail_snapshot` to cover three of the four
+    /// ComparisonVerdict tag mappings (Inconclusive remains uncovered;
+    /// it requires a contrived no-effect-zone-with-tiny-sample input).
+    /// Reuses the deterministic 10-sample inputs from
+    /// `comparator_warn_zone_with_significance` which yield a stable
+    /// ~+15% delta with high t-test significance, exercising the
+    /// p<0.001 formatter branch (vs the p=N/A branch covered by the
+    /// PASS and FAIL snapshots).
+    #[test]
+    fn report_line_warn_snapshot() {
+        let comparator = RegressionComparator::new(ComparatorConfig::default());
+        let baseline = &[
+            100.0, 100.5, 99.5, 100.2, 99.8, 100.1, 99.9, 100.3, 99.7, 100.0,
+        ];
+        let current = &[
+            115.0, 115.5, 114.5, 115.2, 114.8, 115.1, 114.9, 115.3, 114.7, 115.0,
+        ];
+        let result = comparator.compare("op_warn", baseline, current, &test_envelope());
+        assert_eq!(
+            result.final_verdict,
+            ComparisonVerdict::Warn,
+            "fixture must reach the WARN branch"
+        );
+        let line = format_report_line(&result);
+        insta::assert_snapshot!("report_line_warn", line);
+    }
+
     // ── Negative / invariant tests ───────────────────────────────────
 
     #[test]
