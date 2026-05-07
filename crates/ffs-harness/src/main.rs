@@ -3,6 +3,12 @@
 use anyhow::{Context, Result, bail};
 use ffs_harness::{
     ParityReport,
+    adaptive_runtime_manifest::{
+        AdaptiveRuntimeEvidenceValidationConfig, DEFAULT_ADAPTIVE_RUNTIME_EVIDENCE_MANIFEST,
+        fail_on_adaptive_runtime_evidence_errors, load_adaptive_runtime_evidence_manifest,
+        render_adaptive_runtime_evidence_markdown,
+        validate_adaptive_runtime_evidence_manifest_with_config,
+    },
     adversarial_threat_model::{
         build_adversarial_threat_model_sample_artifact_manifest,
         fail_on_adversarial_threat_model_errors, load_adversarial_threat_model,
@@ -248,6 +254,16 @@ struct RecommendReadinessActionsCmdArgs {
     invocation: String,
 }
 
+#[derive(Debug)]
+struct AdaptiveRuntimeManifestCmdArgs {
+    manifest_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+    reference_timestamp: Option<String>,
+    current_git_sha: Option<String>,
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("error: {err:#}");
@@ -286,6 +302,9 @@ fn run() -> Result<()> {
         Some("validate-docs-status-drift") => validate_docs_status_drift_cmd(&args[1..]),
         Some("validate-fuzz-smoke") => validate_fuzz_smoke_cmd(&args[1..]),
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
+        Some("validate-adaptive-runtime-manifest") => {
+            validate_adaptive_runtime_manifest_cmd(&args[1..])
+        }
         Some("validate-proof-bundle") => validate_proof_bundle_cmd(&args[1..]),
         Some("evaluate-release-gates") => evaluate_release_gates_cmd(&args[1..]),
         Some("validate-performance-baseline-manifest") => {
@@ -1955,6 +1974,123 @@ fn parse_swarm_tail_latency_cmd_args(args: &[String]) -> Result<Option<SwarmTail
         out_path,
         summary_out_path,
         format,
+    }))
+}
+
+fn validate_adaptive_runtime_manifest_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_adaptive_runtime_manifest_cmd_args(args)? else {
+        return Ok(());
+    };
+    let manifest = load_adaptive_runtime_evidence_manifest(Path::new(&cmd_args.manifest_path))?;
+    let reference_epoch_days = match &cmd_args.reference_timestamp {
+        Some(timestamp) => Some(
+            parse_manifest_timestamp_epoch_days(timestamp)
+                .with_context(|| format!("invalid --reference-timestamp {timestamp}"))?,
+        ),
+        None => {
+            AdaptiveRuntimeEvidenceValidationConfig::with_current_reference().reference_epoch_days
+        }
+    };
+    let validation_config = AdaptiveRuntimeEvidenceValidationConfig {
+        reference_epoch_days,
+        current_git_sha: cmd_args.current_git_sha,
+    };
+    let report =
+        validate_adaptive_runtime_evidence_manifest_with_config(&manifest, &validation_config);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_adaptive_runtime_evidence_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "adaptive runtime manifest report written: {} valid={} accepted={}",
+            path, report.valid, report.runtime_controls_accepted
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_adaptive_runtime_evidence_markdown(&report)),
+        )?;
+        println!("adaptive runtime manifest summary written: {path}");
+    }
+
+    fail_on_adaptive_runtime_evidence_errors(&report)
+}
+
+fn parse_adaptive_runtime_manifest_cmd_args(
+    args: &[String],
+) -> Result<Option<AdaptiveRuntimeManifestCmdArgs>> {
+    let mut manifest_path = DEFAULT_ADAPTIVE_RUNTIME_EVIDENCE_MANIFEST.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut reference_timestamp: Option<String> = None;
+    let mut current_git_sha: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                args.get(i)
+                    .context("--manifest requires a path")?
+                    .clone_into(&mut manifest_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--reference-timestamp" => {
+                i += 1;
+                reference_timestamp = Some(
+                    args.get(i)
+                        .context("--reference-timestamp requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--current-git-sha" => {
+                i += 1;
+                current_git_sha = Some(
+                    args.get(i)
+                        .context("--current-git-sha requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_adaptive_runtime_manifest_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-adaptive-runtime-manifest argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(AdaptiveRuntimeManifestCmdArgs {
+        manifest_path,
+        out_path,
+        summary_out_path,
+        format,
+        reference_timestamp,
+        current_git_sha,
     }))
 }
 
@@ -4829,7 +4965,7 @@ fn print_usage() {
     print_usage_examples();
 }
 
-fn print_usage_commands() {
+fn print_usage_core_commands() {
     println!("  ffs-harness parity");
     println!("  ffs-harness check-fixtures");
     println!(
@@ -4887,6 +5023,9 @@ fn print_usage_commands() {
         "  ffs-harness validate-proof-overhead-budget --budget FILE --metrics FILE [--out FILE]"
     );
     println!(
+        "  ffs-harness validate-adaptive-runtime-manifest [--manifest FILE] [--current-git-sha SHA] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+    println!(
         "  ffs-harness validate-proof-bundle --bundle FILE [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
@@ -4904,6 +5043,10 @@ fn print_usage_commands() {
     println!(
         "  ffs-harness evaluate-release-gates --bundle FILE --policy FILE [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE] [--wording-out FILE]"
     );
+}
+
+fn print_usage_commands() {
+    print_usage_core_commands();
     print_performance_baseline_manifest_usage_summary();
     print_performance_delta_closeout_usage_summary();
     print_swarm_cache_controller_usage_summary();
@@ -4974,6 +5117,9 @@ fn print_usage_examples() {
     println!("  ffs-harness validate-fuzz-smoke --out artifacts/fuzz-smoke/fuzz_smoke_report.json");
     println!(
         "  ffs-harness validate-proof-overhead-budget --budget artifacts/proof/budget.json --metrics artifacts/proof/metrics.json --out artifacts/proof/budget_report.json"
+    );
+    println!(
+        "  ffs-harness validate-adaptive-runtime-manifest --manifest docs/adaptive-runtime-evidence-manifest.json --out artifacts/adaptive-runtime/report.json --summary-out artifacts/adaptive-runtime/report.md"
     );
     println!(
         "  ffs-harness validate-proof-bundle --bundle artifacts/proof/bundle/manifest.json --out artifacts/proof/bundle/report.json --summary-out artifacts/proof/bundle/summary.md"
@@ -5385,6 +5531,18 @@ fn print_proof_overhead_budget_usage() {
     println!("  --budget FILE                      Read proof overhead budget schema JSON");
     println!("  --metrics FILE                     Read observed proof workflow metrics JSON");
     println!("  --out FILE                         Write JSON release-gate report to FILE");
+}
+
+fn print_adaptive_runtime_manifest_usage() {
+    println!("Usage: ffs-harness validate-adaptive-runtime-manifest [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --manifest FILE                    Read adaptive runtime manifest JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write selected-format validation report");
+    println!("  --summary-out FILE                 Write Markdown inspection summary");
+    println!("  --reference-timestamp RFC3339      Freshness reference timestamp (default: now)");
+    println!("  --current-git-sha SHA              Strictly require manifest git_sha to match SHA");
 }
 
 fn print_proof_bundle_usage() {

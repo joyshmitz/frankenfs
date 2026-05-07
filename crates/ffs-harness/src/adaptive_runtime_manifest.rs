@@ -9,10 +9,12 @@
 //! control grant.
 
 use crate::artifact_manifest::parse_manifest_timestamp_epoch_days;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_ADAPTIVE_RUNTIME_EVIDENCE_MANIFEST: &str =
     "docs/adaptive-runtime-evidence-manifest.json";
@@ -202,6 +204,17 @@ impl AdaptiveRuntimeReleaseClaimState {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdaptiveRuntimeEvidenceValidationConfig {
     pub reference_epoch_days: Option<u32>,
+    pub current_git_sha: Option<String>,
+}
+
+impl AdaptiveRuntimeEvidenceValidationConfig {
+    #[must_use]
+    pub fn with_current_reference() -> Self {
+        Self {
+            reference_epoch_days: current_epoch_days(),
+            current_git_sha: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +275,7 @@ pub fn validate_adaptive_runtime_evidence_manifest_with_config(
 ) -> AdaptiveRuntimeEvidenceReport {
     let mut issues = Vec::new();
     validate_identity(manifest, &mut issues);
+    validate_git_sha(manifest, config, &mut issues);
     validate_timestamps(manifest, config, &mut issues);
     validate_host(manifest, &mut issues);
     validate_fuse(manifest, &mut issues);
@@ -314,6 +328,64 @@ pub fn validate_adaptive_runtime_evidence_manifest_with_config(
     }
 }
 
+#[must_use]
+pub fn render_adaptive_runtime_evidence_markdown(report: &AdaptiveRuntimeEvidenceReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Adaptive Runtime Evidence Manifest\n");
+    let _ = writeln!(out, "- Scenario: `{}`", report.scenario_id);
+    let _ = writeln!(out, "- Run: `{}`", report.run_id);
+    let _ = writeln!(out, "- Valid: `{}`", report.valid);
+    let _ = writeln!(
+        out,
+        "- Runtime controls accepted: `{}`",
+        report.runtime_controls_accepted
+    );
+    let _ = writeln!(out, "- Runtime mode: `{}`", report.runtime_mode);
+    let _ = writeln!(out, "- Release claim: `{}`", report.release_claim_state);
+    let _ = writeln!(out, "- Host lane: `{}`", report.host_lane);
+    let _ = writeln!(out, "- Host class: `{}`", report.host_classification);
+    let _ = writeln!(out, "- FUSE capability: `{}`", report.fuse_capability_state);
+    let _ = writeln!(out, "- Artifacts: `{}`", report.artifact_count);
+    let _ = writeln!(out, "- Raw logs: `{}`", report.raw_log_count);
+
+    if report.issues.is_empty() {
+        out.push_str("\n## Issues\n\nnone\n");
+    } else {
+        out.push_str("\n## Issues\n\n");
+        for issue in &report.issues {
+            let _ = writeln!(out, "- `{}`: {}", issue.path, issue.message);
+        }
+    }
+    out
+}
+
+pub fn fail_on_adaptive_runtime_evidence_errors(
+    report: &AdaptiveRuntimeEvidenceReport,
+) -> Result<()> {
+    if !report.valid {
+        bail!(
+            "adaptive runtime evidence manifest validation failed: errors={}",
+            report.errors.len()
+        );
+    }
+    if !report.runtime_controls_accepted {
+        bail!(
+            "adaptive runtime evidence is downgrade-only: release_claim_state={} host_classification={} fuse_capability_state={}",
+            report.release_claim_state,
+            report.host_classification,
+            report.fuse_capability_state
+        );
+    }
+    Ok(())
+}
+
+fn current_epoch_days() -> Option<u32> {
+    let unix_epoch_days = parse_manifest_timestamp_epoch_days("1970-01-01T00:00:00Z")?;
+    let elapsed_days = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() / 86_400;
+    let total_days = u64::from(unix_epoch_days).checked_add(elapsed_days)?;
+    u32::try_from(total_days).ok()
+}
+
 fn validate_identity(
     manifest: &AdaptiveRuntimeEvidenceManifest,
     issues: &mut Vec<AdaptiveRuntimeEvidenceIssue>,
@@ -343,6 +415,29 @@ fn validate_identity(
     }
     if manifest.reproduction_command.trim().is_empty() {
         push_issue(issues, "reproduction_command", "must not be empty");
+    }
+}
+
+fn validate_git_sha(
+    manifest: &AdaptiveRuntimeEvidenceManifest,
+    config: &AdaptiveRuntimeEvidenceValidationConfig,
+    issues: &mut Vec<AdaptiveRuntimeEvidenceIssue>,
+) {
+    if let Some(current_git_sha) = &config.current_git_sha {
+        let current_git_sha = current_git_sha.trim();
+        if current_git_sha.is_empty() {
+            push_issue(
+                issues,
+                "current_git_sha",
+                "strict git SHA must not be empty",
+            );
+        } else if manifest.git_sha.trim() != current_git_sha {
+            push_issue(
+                issues,
+                "git_sha",
+                "manifest git_sha does not match the strict current git SHA",
+            );
+        }
     }
 }
 
@@ -650,6 +745,42 @@ mod tests {
     }
 
     #[test]
+    fn render_adaptive_runtime_evidence_markdown_snapshot() {
+        let manifest = fixture_manifest();
+        let report = validate_adaptive_runtime_evidence_manifest(&manifest);
+        let markdown = render_adaptive_runtime_evidence_markdown(&report);
+
+        insta::assert_snapshot!("render_adaptive_runtime_evidence_markdown", markdown);
+    }
+
+    #[test]
+    fn strict_git_sha_mismatch_is_rejected() {
+        let manifest = fixture_manifest();
+        let config = AdaptiveRuntimeEvidenceValidationConfig {
+            reference_epoch_days: None,
+            current_git_sha: Some("different123".to_owned()),
+        };
+
+        let report = validate_adaptive_runtime_evidence_manifest_with_config(&manifest, &config);
+
+        assert!(!report.valid);
+        assert!(report.issues.iter().any(|issue| issue.path == "git_sha"));
+    }
+
+    #[test]
+    fn fail_on_rejects_downgrade_evidence() {
+        let mut manifest = fixture_manifest();
+        manifest.host_fingerprint.lane = AdaptiveRuntimeHostLane::LocalSmoke;
+        manifest.release_claim_state = AdaptiveRuntimeReleaseClaimState::SmallHostSmoke;
+
+        let report = validate_adaptive_runtime_evidence_manifest(&manifest);
+
+        assert!(report.valid);
+        assert!(!report.runtime_controls_accepted);
+        assert!(fail_on_adaptive_runtime_evidence_errors(&report).is_err());
+    }
+
+    #[test]
     fn small_host_smoke_is_valid_but_not_accepted() {
         let mut manifest = fixture_manifest();
         manifest.host_fingerprint.cpu_count = 16;
@@ -781,6 +912,7 @@ mod tests {
         let manifest = fixture_manifest();
         let config = AdaptiveRuntimeEvidenceValidationConfig {
             reference_epoch_days: parse_manifest_timestamp_epoch_days("2026-06-01T00:00:00Z"),
+            current_git_sha: None,
         };
 
         let report = validate_adaptive_runtime_evidence_manifest_with_config(&manifest, &config);

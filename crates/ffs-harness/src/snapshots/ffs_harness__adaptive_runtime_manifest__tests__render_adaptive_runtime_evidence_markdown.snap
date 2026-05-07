@@ -1,0 +1,21 @@
+---
+source: crates/ffs-harness/src/adaptive_runtime_manifest.rs
+expression: markdown
+---
+# Adaptive Runtime Evidence Manifest
+
+- Scenario: `adaptive_runtime_accepted_large_host`
+- Run: `adaptive-runtime-run-20260507T000000Z`
+- Valid: `true`
+- Runtime controls accepted: `true`
+- Runtime mode: `per_core`
+- Release claim: `accepted_large_host`
+- Host lane: `permissioned_large_host`
+- Host class: `large_host_floor_met`
+- FUSE capability: `available`
+- Artifacts: `3`
+- Raw logs: `2`
+
+## Issues
+
+none
