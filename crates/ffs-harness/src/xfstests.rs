@@ -404,6 +404,9 @@ const REQUIRED_XFSTESTS_ARTIFACTS: &[&str] = &[
     "check.log",
 ];
 
+const REQUIRED_XFSTESTS_BASELINE_OUTPUT_PATHS: &[&str] =
+    &["baseline_manifest_json", "baseline_report_md"];
+
 const KNOWN_XFSTESTS_COMMAND_PLAN_LANES: &[&str] = &[
     "dry_run_only",
     "fixture_only",
@@ -600,6 +603,14 @@ pub fn validate_xfstests_baseline_manifest(manifest: &XfstestsBaselineManifest) 
         &manifest.reproduction_command,
         &mut errors,
     );
+    for required_output in REQUIRED_XFSTESTS_BASELINE_OUTPUT_PATHS {
+        match manifest.output_paths.get(*required_output) {
+            Some(path) if !path.trim().is_empty() => {}
+            _ => errors.push(format!(
+                "xfstests baseline output_paths missing {required_output}"
+            )),
+        }
+    }
     if manifest.environment.age_secs > manifest.environment.max_age_secs
         || manifest.environment.freshness_verdict != "fresh"
     {
@@ -2582,6 +2593,19 @@ mod tests {
             .collect();
     }
 
+    fn baseline_output_paths() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            (
+                "baseline_manifest_json".to_owned(),
+                "baseline_manifest.json".to_owned(),
+            ),
+            (
+                "baseline_report_md".to_owned(),
+                "baseline_report.md".to_owned(),
+            ),
+        ])
+    }
+
     fn manifest_with_cases(
         raw_path: &std::path::Path,
         cases: Vec<XfstestsBaselineCase>,
@@ -2621,10 +2645,7 @@ mod tests {
             checkpoint_id: "checkpoint:001".to_owned(),
             resume_command: "XFSTESTS_MODE=run ./scripts/e2e/ffs_xfstests_e2e.sh".to_owned(),
             cleanup_status: "artifacts_preserved".to_owned(),
-            output_paths: BTreeMap::from([(
-                "baseline_manifest_json".to_owned(),
-                "baseline_manifest.json".to_owned(),
-            )]),
+            output_paths: baseline_output_paths(),
             reproduction_command: "XFSTESTS_MODE=run ./scripts/e2e/ffs_xfstests_e2e.sh".to_owned(),
             disposition_counts: disposition_counts(&cases),
             raw_artifacts,
@@ -3354,7 +3375,7 @@ generic/001  2s ... pass\n";
             resume_command: "XFSTESTS_MODE=run RESULT_BASE=fixture ./scripts/e2e/ffs_xfstests_e2e.sh",
             cleanup_status: "partial_artifacts_preserved",
             reproduction_command: "XFSTESTS_MODE=run ./scripts/e2e/ffs_xfstests_e2e.sh",
-            output_paths: BTreeMap::new(),
+            output_paths: baseline_output_paths(),
         })?;
 
         let errors = validate_xfstests_baseline_manifest(&manifest);
@@ -3421,7 +3442,7 @@ generic/001  2s ... pass\n";
             resume_command: "XFSTESTS_MODE=run RESULT_BASE=fixture ./scripts/e2e/ffs_xfstests_e2e.sh",
             cleanup_status: "plan_mode_no_xfstests_check_invoked",
             reproduction_command: "XFSTESTS_MODE=plan ./scripts/e2e/ffs_xfstests_e2e.sh",
-            output_paths: BTreeMap::new(),
+            output_paths: baseline_output_paths(),
         })?;
 
         assert_eq!(manifest.environment.freshness_verdict, "missing");
@@ -3569,6 +3590,44 @@ generic/001  2s ... pass\n";
                 .iter()
                 .any(|error| error.contains("cases must not be empty")),
             "expected empty cases error, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn baseline_manifest_rejects_missing_output_paths() {
+        let tmp = tempdir().expect("tempdir");
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "generic/001 pass\n").expect("write raw log");
+        let mut manifest = manifest_with_cases(
+            &raw,
+            vec![baseline_case(
+                "generic/001",
+                XfstestsBaselineRowStatus::Passed,
+            )],
+        );
+
+        manifest.output_paths.clear();
+        let errors = validate_xfstests_baseline_manifest(&manifest);
+        for expected in [
+            "output_paths missing baseline_manifest_json",
+            "output_paths missing baseline_report_md",
+        ] {
+            assert!(
+                errors.iter().any(|error| error.contains(expected)),
+                "expected {expected} error, got {errors:#?}"
+            );
+        }
+
+        manifest.output_paths = baseline_output_paths();
+        manifest
+            .output_paths
+            .insert("baseline_report_md".to_owned(), "   ".to_owned());
+        let errors = validate_xfstests_baseline_manifest(&manifest);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("output_paths missing baseline_report_md")),
+            "expected blank report path error, got {errors:#?}"
         );
     }
 
