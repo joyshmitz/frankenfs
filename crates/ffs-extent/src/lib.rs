@@ -5570,6 +5570,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             extent_len in 1_u32..50,
             query_start in 0_u32..150,
             query_count in 1_u64..30,
+            hit_offset in 0_u32..50,
         ) {
             let cx = test_cx();
             let dev = MemBlockDevice::new(4096);
@@ -5604,22 +5605,32 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
                 "MR-1: cached(miss) must equal uncached"
             );
 
-            // Variant 2: cached lookup with prepopulated cache (forces hit
-            // path for count==1 within a known extent, miss otherwise).
+            // Variant 2: prepopulate the cache with the allocated extent, then
+            // force the single-block fast path at a generated point inside it.
             let cache_warm = ExtentCache::new();
-            // Warm up by running a full-range query first.
             let _ = cached_map_logical_to_physical(
-                &cx, &dev, &root, query_start, query_count, &cache_warm, 0,
-            );
-            // Re-query — may take fast path for count==1 single-block hits.
-            let cached_warm = cached_map_logical_to_physical(
-                &cx, &dev, &root, query_start, query_count, &cache_warm, 0,
+                &cx,
+                &dev,
+                &root,
+                extent_start,
+                u64::from(extent_len),
+                &cache_warm,
+                7,
             )
             .expect("cached warm path");
+            let hit_logical = extent_start + (hit_offset % extent_len);
+            let uncached_hit = map_logical_to_physical(
+                &cx, &dev, &root, hit_logical, 1,
+            )
+            .expect("uncached single-block hit");
+            let cached_hit = cached_map_logical_to_physical(
+                &cx, &dev, &root, hit_logical, 1, &cache_warm, 7,
+            )
+            .expect("cached single-block hit");
             proptest::prop_assert_eq!(
-                &cached_warm,
-                &uncached,
-                "MR-2: cached(warm) must equal uncached"
+                &cached_hit,
+                &uncached_hit,
+                "MR-2: cached(warm single-block hit) must equal uncached"
             );
         }
     }
