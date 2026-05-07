@@ -613,25 +613,30 @@ pub trait FsOps: Send + Sync {
     /// List extended attribute names for an inode.
     ///
     /// Returns the full attribute names (including namespace prefix, e.g.
-    /// `"user.myattr"`, `"security.selinux"`). Returns an empty list if the
-    /// inode has no xattrs or the filesystem does not support them.
+    /// `"user.myattr"`, `"security.selinux"`). The default first validates
+    /// that the inode exists, then returns an empty list for filesystems that
+    /// do not model xattrs.
     fn listxattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<String>> {
-        let _ = (cx, ino);
+        let mut scope = RequestScope::empty();
+        self.getattr(cx, &mut scope, ino)?;
         Ok(Vec::new())
     }
 
     /// Get the value of an extended attribute by full name.
     ///
     /// The `name` parameter is the full attribute name including namespace
-    /// prefix (e.g. `"user.myattr"`). Returns `None` if the attribute does
-    /// not exist.
+    /// prefix (e.g. `"user.myattr"`). The default first validates that the
+    /// inode exists, then returns `None` for filesystems that do not model
+    /// xattrs.
     fn getxattr(
         &self,
         cx: &Cx,
         ino: InodeNumber,
         name: &str,
     ) -> ffs_error::Result<Option<Vec<u8>>> {
-        let _ = (cx, ino, name);
+        let _ = name;
+        let mut scope = RequestScope::empty();
+        self.getattr(cx, &mut scope, ino)?;
         Ok(None)
     }
 
@@ -1992,5 +1997,109 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
 
     fn flush_on_destroy(&self, cx: &Cx) -> ffs_error::Result<()> {
         self.as_ref().flush_on_destroy(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DefaultXattrFsOpsFixture;
+
+    impl FsOps for DefaultXattrFsOpsFixture {
+        fn getattr(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+        ) -> ffs_error::Result<InodeAttr> {
+            if ino != InodeNumber(1) {
+                return Err(FfsError::NotFound(format!("inode {ino}")));
+            }
+
+            Ok(InodeAttr {
+                ino,
+                size: 4096,
+                blocks: 8,
+                atime: SystemTime::UNIX_EPOCH,
+                mtime: SystemTime::UNIX_EPOCH,
+                ctime: SystemTime::UNIX_EPOCH,
+                crtime: SystemTime::UNIX_EPOCH,
+                kind: FileType::Directory,
+                perm: 0o755,
+                nlink: 2,
+                uid: 0,
+                gid: 0,
+                rdev: 0,
+                blksize: 4096,
+                generation: 1,
+            })
+        }
+
+        fn lookup(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _parent: InodeNumber,
+            name: &OsStr,
+        ) -> ffs_error::Result<InodeAttr> {
+            Err(FfsError::NotFound(name.to_string_lossy().into_owned()))
+        }
+
+        fn readdir(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+            _offset: u64,
+        ) -> ffs_error::Result<Vec<DirEntry>> {
+            Err(FfsError::UnsupportedFeature(
+                "readdir fixture path is not supported".to_owned(),
+            ))
+        }
+
+        fn read(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+            _offset: u64,
+            _size: u32,
+        ) -> ffs_error::Result<Vec<u8>> {
+            Err(FfsError::UnsupportedFeature(
+                "read fixture path is not supported".to_owned(),
+            ))
+        }
+
+        fn readlink(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+        ) -> ffs_error::Result<Vec<u8>> {
+            Err(FfsError::UnsupportedFeature(
+                "readlink fixture path is not supported".to_owned(),
+            ))
+        }
+    }
+
+    #[test]
+    fn listxattr_default_propagates_missing_inode() {
+        let fs = DefaultXattrFsOpsFixture;
+        let cx = Cx::for_testing();
+        let err = fs.listxattr(&cx, InodeNumber(99)).unwrap_err();
+
+        assert!(matches!(&err, FfsError::NotFound(_)));
+        assert_eq!(err.to_errno(), libc::ENOENT);
+    }
+
+    #[test]
+    fn getxattr_default_propagates_missing_inode() {
+        let fs = DefaultXattrFsOpsFixture;
+        let cx = Cx::for_testing();
+        let err = fs.getxattr(&cx, InodeNumber(99), "user.test").unwrap_err();
+
+        assert!(matches!(&err, FfsError::NotFound(_)));
+        assert_eq!(err.to_errno(), libc::ENOENT);
     }
 }
