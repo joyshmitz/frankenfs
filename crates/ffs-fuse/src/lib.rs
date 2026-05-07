@@ -957,6 +957,52 @@ impl ReadaheadManager {
 /// - `ops` delegates to `FsOps` which is `Send + Sync` by trait bound.
 /// - `metrics` uses atomic counters with cache-line padding.
 /// - `thread_count` is immutable after mount.
+///
+/// # Subsystem lock-ordering invariant (bd-omus6)
+///
+/// Four subsystem locks live inside this struct, each guarding
+/// independent state:
+///
+/// | Field              | Inner lock                          | Rank |
+/// |--------------------|-------------------------------------|------|
+/// | `kernel_notifier`  | `Mutex<Option<Notifier>>`           | leaf |
+/// | `access_predictor` | `AccessPredictor.state: Mutex`      | leaf |
+/// | `readahead`        | `ReadaheadManager.pending: Mutex`   | leaf |
+/// | `inode_locks`      | `FuseInodeLocks.table: Mutex`       | 0 (see bd-pfv55 doc on FuseInodeLocks for the per-inode `held` rank-1 sublock) |
+///
+/// Production callers comply by **never nesting two subsystem
+/// locks**: every method that touches one of these subsystems
+/// drains the value via clone or returns the guard immediately,
+/// so no caller holds two simultaneously. Specifically:
+///
+/// | Method                          | Touches            | Pattern                          |
+/// |---------------------------------|--------------------|----------------------------------|
+/// | `install_kernel_notifier`       | kernel_notifier    | leaf-only                        |
+/// | `kernel_notifier`               | kernel_notifier    | drain-clone-release              |
+/// | `notify_*` family               | (notifier clone)   | no FUSE-inner lock held          |
+/// | `AccessPredictor::fetch_size`   | access_predictor   | leaf-only, copy out pattern      |
+/// | `AccessPredictor::record_read`  | access_predictor   | leaf-only                        |
+/// | `AccessPredictor::invalidate_inode` | access_predictor | leaf-only                        |
+/// | `ReadaheadManager::insert/take` | readahead          | leaf-only                        |
+/// | `ReadaheadManager::invalidate_inode` | readahead       | leaf-only                        |
+/// | `FuseInodeLocks::acquire`       | inode_locks        | rank 0 → drop → rank 1 (sorted)  |
+/// | `FuseInodeLocks::try_acquire`   | inode_locks        | rank 0 → drop → rank 1 (sorted)  |
+/// | `FuseInodeGuard::Drop`          | inode_locks        | rank 0 → rank 1 (nested)         |
+///
+/// New methods on `FrankenFuse`/`FuseInner` MUST NOT acquire two
+/// subsystem locks simultaneously without first declaring a total
+/// rank between them and updating both this matrix and the
+/// individual struct-level docs. Holding (e.g.) `readahead.pending`
+/// while acquiring `inode_locks.table` would be an unranked
+/// nesting — refactor by draining the readahead value first, then
+/// acquiring the inode-locks separately. The same rule applies to
+/// background mount workers created via `fuser::spawn_mount2` and
+/// any future async runtime integration.
+///
+/// Each subsystem's internal lock-ordering invariants (notably the
+/// table → per-inode held nesting on `FuseInodeLocks`) are
+/// documented and regression-tested separately:
+/// `lock_ordering_under_concurrent_acquire_and_drop` (bd-pfv55).
 struct FuseInner {
     ops: Arc<dyn FsOps>,
     metrics: Arc<AtomicMetrics>,
