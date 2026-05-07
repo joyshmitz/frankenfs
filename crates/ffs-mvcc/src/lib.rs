@@ -2996,11 +2996,46 @@ impl MvccStore {
 /// This is decoupled from `MvccStore` so that FUSE request handlers can
 /// acquire/release snapshots without holding the version-store lock.
 /// Snapshot operations only contend on the registry's internal lock.
+///
+/// # Lock-ordering invariant (bd-7esyh)
+///
+/// `SnapshotRegistry` holds two `parking_lot::RwLock`es —
+/// `active: RwLock<BTreeMap<CommitSeq, u64>>` (lock-rank 0) and
+/// `oldest_registered_at: RwLock<Option<Instant>>` (lock-rank 1).
+/// The order is **`active` → `oldest_registered_at`**. All methods
+/// comply:
+///
+/// | Method            | active                | oldest_registered_at | Notes                              |
+/// |-------------------|-----------------------|----------------------|------------------------------------|
+/// | `register`        | W (held across)       | R then W (nested)    | nested under active is intentional |
+/// | `release`         | W → drop → -          | W (only after drop)  | active dropped before oldest taken |
+/// | `check_stalls`    | R (via `watermark`)   | R (drops first)      | oldest read+dropped, then active   |
+/// | `watermark`       | R                     | -                    | leaf                               |
+/// | `distinct_count`  | R                     | -                    | leaf                               |
+/// | `acquired_total` / `released_total` | -       | -                    | atomic-only                        |
+///
+/// **Any new method that acquires `oldest_registered_at` BEFORE
+/// `active` would deadlock against `register()` running
+/// concurrently.** Specifically, `register()` deliberately nests
+/// `oldest_registered_at.read()/.write()` inside `active.write()`
+/// to keep the watermark timestamp atomically consistent with the
+/// active set; an inverse path elsewhere would form an AB-BA cycle.
+///
+/// The `snapshot_registry_concurrent_register_release_check_stalls_no_hang`
+/// regression test exercises this contract under contention with a
+/// watchdog timeout.
 #[derive(Debug)]
 pub struct SnapshotRegistry {
+    /// Active snapshot ref counts. **Lock-rank 0** — must be acquired
+    /// before `oldest_registered_at`. `register` nests
+    /// `oldest_registered_at` reads/writes inside `active.write()`;
+    /// `release` always drops `active` before touching
+    /// `oldest_registered_at`.
     active: RwLock<BTreeMap<CommitSeq, u64>>,
     /// Timestamp of the oldest currently active snapshot registration.
-    /// Used for stall detection.
+    /// Used for stall detection. **Lock-rank 1** — must be acquired
+    /// AFTER `active` (or alone for read+drop pattern in
+    /// `check_stalls`). Never acquire `active` while holding this lock.
     oldest_registered_at: RwLock<Option<Instant>>,
     /// Duration threshold beyond which a stalled watermark is logged.
     stall_threshold_secs: u64,
@@ -9783,5 +9818,101 @@ mod tests {
         store.set_conflict_policy(ConflictPolicy::Adaptive);
         // During warmup, adaptive defaults to SafeMerge.
         assert_eq!(store.effective_policy(), ConflictPolicy::SafeMerge);
+    }
+
+    /// bd-7esyh — concurrent regression test for the SnapshotRegistry
+    /// lock-ordering invariant (active → oldest_registered_at). If a
+    /// future regression nested either lock under the other in the
+    /// inverse order, this test would deadlock against register()
+    /// running concurrently and trip the watchdog.
+    #[test]
+    fn snapshot_registry_concurrent_register_release_check_stalls_no_hang() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+
+        let registry = Arc::new(SnapshotRegistry::new());
+
+        const ITERATIONS: usize = 256;
+        const REGISTERERS: usize = 4;
+        const RELEASERS: usize = 2;
+        const CHECKERS: usize = 2;
+        const WATCHDOG_SECS: u64 = 5;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = Vec::new();
+
+        for tid in 0..REGISTERERS {
+            let registry = Arc::clone(&registry);
+            let stop = Arc::clone(&stop);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..ITERATIONS {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    // Use distinct CommitSeq per thread interleaved with
+                    // shared values so register/release contend on both
+                    // the BTreeMap insert path and the same-key
+                    // refcount-bump path.
+                    let seq = CommitSeq(((tid * 11 + i) % 17) as u64);
+                    let snap = Snapshot { high: seq };
+                    registry.register(snap);
+                }
+            }));
+        }
+
+        for tid in 0..RELEASERS {
+            let registry = Arc::clone(&registry);
+            let stop = Arc::clone(&stop);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..ITERATIONS {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let seq = CommitSeq(((tid * 13 + i) % 17) as u64);
+                    let snap = Snapshot { high: seq };
+                    let _ = registry.release(snap);
+                }
+            }));
+        }
+
+        for _ in 0..CHECKERS {
+            let registry = Arc::clone(&registry);
+            let stop = Arc::clone(&stop);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..ITERATIONS {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let _ = registry.check_stalls();
+                    let _ = registry.watermark();
+                    let _ = registry.distinct_count();
+                }
+            }));
+        }
+
+        let watchdog_handle = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(WATCHDOG_SECS);
+                while Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                stop.store(true, Ordering::Relaxed);
+            })
+        };
+
+        let start = Instant::now();
+        for handle in handles {
+            handle.join().expect("worker thread joins cleanly");
+        }
+        let elapsed = start.elapsed();
+        watchdog_handle
+            .join()
+            .expect("watchdog thread joins cleanly");
+
+        assert!(
+            elapsed < Duration::from_secs(WATCHDOG_SECS),
+            "concurrent register + release + check_stalls must not deadlock; elapsed={elapsed:?}"
+        );
     }
 }
