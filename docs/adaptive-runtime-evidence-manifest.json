@@ -1,0 +1,57 @@
+{
+  "artifact_paths": [
+    "artifacts/adaptive-runtime/accepted-large-host/report.json",
+    "artifacts/adaptive-runtime/accepted-large-host/summary.md",
+    "artifacts/adaptive-runtime/accepted-large-host/manifest.json"
+  ],
+  "backpressure_policy_id": "adaptive-runtime-default-v1",
+  "cleanup_status": "clean",
+  "controlling_ack_env": "FFS_ADAPTIVE_RUNTIME_REAL_RUN_ACK",
+  "controlling_ack_value": "adaptive-runtime-may-mount-and-generate-load",
+  "degradation_thresholds": {
+    "emergency_dirty_ratio": 0.95,
+    "shed_dirty_ratio": 0.85,
+    "throttle_dirty_ratio": 0.7
+  },
+  "expires_at": "2026-12-31T00:00:00Z",
+  "fuse_capability_summary": {
+    "detail": "/dev/fuse and fusermount3 available in permissioned lane",
+    "state": "available"
+  },
+  "generated_at": "2026-05-07T00:00:00Z",
+  "git_sha": "c87266f2",
+  "host_fingerprint": {
+    "cpu_count": 96,
+    "host_fingerprint": "permissioned-96c-512gb-2numa",
+    "kernel": "Linux 6.17.0-14-generic x86_64",
+    "lane": "permissioned_large_host",
+    "numa_nodes": 2,
+    "ram_bytes": 549755813888
+  },
+  "manifest_version": 1,
+  "per_core_config": {
+    "enabled": true,
+    "queue_policy": "metadata/write/repair queues are isolated per core group",
+    "work_stealing": true,
+    "worker_count": 64
+  },
+  "raw_log_paths": [
+    "artifacts/adaptive-runtime/accepted-large-host/structured.jsonl",
+    "artifacts/adaptive-runtime/accepted-large-host/mount.log"
+  ],
+  "raw_stderr_path": "artifacts/adaptive-runtime/accepted-large-host/stderr.log",
+  "raw_stdout_path": "artifacts/adaptive-runtime/accepted-large-host/stdout.log",
+  "read_write": true,
+  "release_claim_state": "accepted_large_host",
+  "reproduction_command": "cargo run -p ffs-harness -- validate-adaptive-runtime-manifest --manifest docs/adaptive-runtime-evidence-manifest.json",
+  "resource_caps": {
+    "max_duration_secs": 900,
+    "max_memory_bytes": 137438953472,
+    "max_queue_depth": 4096,
+    "max_temp_bytes": 68719476736,
+    "max_threads": 96
+  },
+  "run_id": "adaptive-runtime-run-20260507T000000Z",
+  "runtime_mode": "per_core",
+  "scenario_id": "adaptive_runtime_accepted_large_host"
+}

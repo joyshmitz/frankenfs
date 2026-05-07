@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod adaptive_runtime_manifest;
 pub mod adversarial_threat_model;
 pub mod ambition_evidence_matrix;
 pub mod artifact_manifest;
