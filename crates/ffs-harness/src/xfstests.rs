@@ -1998,7 +1998,7 @@ fn validate_failure_triage_excluded_row(
             excluded.test_id, excluded.status
         ));
     }
-    if !is_well_formed_sha256(&excluded.raw_log_hash) {
+    if !is_canonical_sha256(&excluded.raw_log_hash) {
         errors.push(format!(
             "xfstests failure triage excluded row {} has malformed raw_log_hash",
             excluded.test_id
@@ -2014,11 +2014,14 @@ fn validate_failure_triage_excluded_row(
     }
 }
 
-fn is_well_formed_sha256(value: &str) -> bool {
+fn is_canonical_sha256(value: &str) -> bool {
     let Some(hex) = value.strip_prefix("sha256:") else {
         return false;
     };
-    hex.len() == 64 && hex.chars().all(|ch| ch.is_ascii_hexdigit())
+    hex.len() == 64
+        && hex
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
 }
 
 fn hash_raw_artifact(path: &Path) -> Result<XfstestsRawArtifact> {
@@ -2063,7 +2066,7 @@ fn validate_raw_artifact(artifact: &XfstestsRawArtifact, errors: &mut Vec<String
             artifact.path
         ));
     }
-    if !artifact.sha256.starts_with("sha256:") || artifact.sha256.len() != "sha256:".len() + 64 {
+    if !is_canonical_sha256(&artifact.sha256) {
         errors.push(format!(
             "xfstests baseline raw artifact {} has malformed sha256",
             artifact.path
@@ -2139,7 +2142,7 @@ fn validate_baseline_case(case: &XfstestsBaselineCase, errors: &mut Vec<String>)
             case.test_id
         ));
     }
-    if !case.raw_log_hash.starts_with("sha256:") {
+    if !is_canonical_sha256(&case.raw_log_hash) {
         errors.push(format!(
             "xfstests baseline case {} has malformed raw_log_hash",
             case.test_id
@@ -2333,7 +2336,7 @@ fn validate_proposed_failure_bead(
             bead.proposed_id_placeholder
         ));
     }
-    if bead.raw_log_refs.is_empty() || !bead.raw_log_hash.starts_with("sha256:") {
+    if bead.raw_log_refs.is_empty() || !is_canonical_sha256(&bead.raw_log_hash) {
         errors.push(format!(
             "xfstests failure triage proposed bead {} missing raw log refs/hash",
             bead.proposed_id_placeholder
@@ -3684,6 +3687,45 @@ generic/001  2s ... pass\n";
             }),
             "expected raw_log_hash drift error, got {errors:#?}"
         );
+    }
+
+    #[test]
+    fn baseline_manifest_rejects_malformed_sha256_payloads() {
+        let tmp = tempdir().expect("tempdir");
+        let raw = tmp.path().join("check.log");
+        fs::write(&raw, "generic/001 failed\n").expect("write raw log");
+        let mut manifest = manifest_with_cases(
+            &raw,
+            vec![baseline_case(
+                "generic/001",
+                XfstestsBaselineRowStatus::Failed,
+            )],
+        );
+        manifest
+            .raw_artifacts
+            .first_mut()
+            .expect("single raw artifact")
+            .sha256 =
+            "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz".to_owned();
+        manifest
+            .cases
+            .first_mut()
+            .expect("single baseline case")
+            .raw_log_hash =
+            "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned();
+
+        let errors = validate_xfstests_baseline_manifest(&manifest);
+
+        for expected in [
+            "raw artifact",
+            "has malformed sha256",
+            "case generic/001 has malformed raw_log_hash",
+        ] {
+            assert!(
+                errors.iter().any(|error| error.contains(expected)),
+                "expected {expected} error, got {errors:#?}"
+            );
+        }
     }
 
     #[test]
