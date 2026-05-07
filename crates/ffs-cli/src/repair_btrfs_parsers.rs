@@ -303,5 +303,56 @@ mod tests {
                 .expect("oversized must parse");
             proptest::prop_assert_eq!(parsed, total);
         }
+
+        // bd-rkhx2 cross-crate round-trip: ffs_btrfs writes total_bytes via
+        // BtrfsBlockGroupItem::to_bytes, ffs_cli reads it via
+        // parse_btrfs_block_group_total_bytes. Both sides have internal
+        // round-trip tests, but no single test pins the writer-reader
+        // contract — drift on either side would corrupt every block-group
+        // recovery silently. Sweep arbitrary non-zero u64 to catch any
+        // offset/endianness regression on either side.
+        #[test]
+        fn btrfs_block_group_item_writer_to_parser_round_trip(
+            total in 1_u64..=u64::MAX,
+            used in proptest::prelude::any::<u64>(),
+            flags in proptest::prelude::any::<u64>(),
+        ) {
+            let written = ffs_btrfs::BtrfsBlockGroupItem {
+                total_bytes: total,
+                used_bytes: used,
+                flags,
+            }
+            .to_bytes();
+            proptest::prop_assert_eq!(written.len(), 24, "kernel-aligned 24-byte item");
+            let parsed = parse_btrfs_block_group_total_bytes(&written)
+                .expect("writer output must parse");
+            proptest::prop_assert_eq!(
+                parsed,
+                total,
+                "ffs_btrfs writer and ffs_cli parser must agree on total_bytes"
+            );
+        }
+    }
+
+    // bd-rkhx2 named cross-crate round-trip — pins the writer-reader contract
+    // for the canonical block-group sizes used in repair scenarios.
+    #[test]
+    fn btrfs_block_group_item_writer_to_parser_canonical_sizes() {
+        for total in [
+            8 * 1024 * 1024_u64,        // 8 MiB — minimum profile
+            256 * 1024 * 1024,          // 256 MiB
+            1024 * 1024 * 1024,         // 1 GiB — typical data BG size
+            16_u64 * 1024 * 1024 * 1024, // 16 GiB — large data BG
+        ] {
+            let bytes = ffs_btrfs::BtrfsBlockGroupItem {
+                total_bytes: total,
+                used_bytes: total / 2,
+                flags: 0x01, // BTRFS_BLOCK_GROUP_DATA
+            }
+            .to_bytes();
+            let parsed = parse_btrfs_block_group_total_bytes(&bytes)
+                .unwrap_or_else(|err| panic!("canonical size {total} must parse: {err}"));
+            assert_eq!(parsed, total, "round-trip for size {total}");
+        }
     }
 }
