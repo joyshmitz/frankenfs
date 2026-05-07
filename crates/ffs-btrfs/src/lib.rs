@@ -6400,6 +6400,101 @@ mod tests {
         assert_eq!(parsed.level, 0);
     }
 
+    /// bd-xbqdw — Kernel-conformance pin for the btrfs_root_item field
+    /// offsets per fs/btrfs/btrfs_tree.h. Each field is stamped with a
+    /// UNIQUE magic value at its canonical kernel offset, then a single
+    /// parse_root_item call must round-trip every field. A regression
+    /// that drifted any single offset by ±1 byte would produce a
+    /// distinct cross-field collision and fail this test, even though
+    /// parse_root_item_smoke (which only checks bytenr+level) would
+    /// still pass. The valid non-zero `level` exercises the u8 path;
+    /// the all-distinct UUID byte patterns guard against UUID vs
+    /// parent_uuid swap regressions.
+    ///
+    /// Pairs with bd-yb4r0 (ext4 dx_hash invariant pin), bd-bevt2
+    /// (ext4 feature flags), bd-xt5ru (ext4 dx_hash version
+    /// constants).
+    #[test]
+    fn parse_root_item_kernel_offsets_match_btrfs_tree_h() {
+        // 279 bytes covers the full UUID-era root_item per kernel header.
+        let mut root = vec![0_u8; 279];
+
+        // Each field gets a distinct non-zero magic so an offset
+        // drift produces a cross-field collision.
+        let generation = 0x1111_1111_1111_1111_u64;
+        let root_dirid = 0x2222_2222_2222_2222_u64;
+        let bytenr = 0x3333_3333_3333_3333_u64;
+        let flags = 0x4444_4444_4444_4444_u64;
+        let refs: u32 = 0x5555_5555;
+        let level: u8 = 4; // valid: <= BTRFS_MAX_TREE_LEVEL (8)
+        let generation_v2 = generation; // extended fields valid only when matches
+        let uuid = [0x77_u8; 16];
+        let parent_uuid = [0x88_u8; 16];
+
+        // Stamp at kernel offsets.
+        root[160..168].copy_from_slice(&generation.to_le_bytes());
+        root[168..176].copy_from_slice(&root_dirid.to_le_bytes());
+        root[176..184].copy_from_slice(&bytenr.to_le_bytes());
+        root[208..216].copy_from_slice(&flags.to_le_bytes());
+        root[216..220].copy_from_slice(&refs.to_le_bytes());
+        root[238] = level;
+        root[239..247].copy_from_slice(&generation_v2.to_le_bytes());
+        root[247..263].copy_from_slice(&uuid);
+        root[263..279].copy_from_slice(&parent_uuid);
+
+        let parsed = parse_root_item(&root).expect("kernel-stamped root_item must parse");
+
+        assert_eq!(
+            parsed.generation, generation,
+            "generation must come from offset 160 per kernel layout"
+        );
+        assert_eq!(
+            parsed.root_dirid, root_dirid,
+            "root_dirid must come from offset 168 per kernel layout"
+        );
+        assert_eq!(
+            parsed.bytenr, bytenr,
+            "bytenr must come from offset 176 per kernel layout"
+        );
+        assert_eq!(
+            parsed.flags, flags,
+            "flags must come from offset 208 per kernel layout"
+        );
+        assert_eq!(
+            parsed.refs,
+            u64::from(refs),
+            "refs must come from offset 216 (u32 zero-extended) per kernel layout"
+        );
+        assert_eq!(
+            parsed.level, level,
+            "level must come from offset 238 per kernel layout"
+        );
+        assert_eq!(
+            parsed.uuid, uuid,
+            "uuid must come from offset 247 per kernel layout (16 bytes)"
+        );
+        assert_eq!(
+            parsed.parent_uuid, parent_uuid,
+            "parent_uuid must come from offset 263 per kernel layout (16 bytes)"
+        );
+
+        // Negative MR: if generation_v2 disagrees with generation,
+        // extended fields (uuid, parent_uuid) must be cleared per
+        // the kernel's "stale-extension" rule.
+        let mut stale = root.clone();
+        stale[239..247].copy_from_slice(&(generation ^ 1).to_le_bytes());
+        let parsed_stale =
+            parse_root_item(&stale).expect("stale generation_v2 must still parse");
+        assert_eq!(
+            parsed_stale.uuid, [0_u8; 16],
+            "stale generation_v2 must clear uuid"
+        );
+        assert_eq!(
+            parsed_stale.parent_uuid, [0_u8; 16],
+            "stale generation_v2 must clear parent_uuid"
+        );
+    }
+
     #[test]
     fn parse_inode_item_smoke() {
         let mut inode = [0_u8; 160];
