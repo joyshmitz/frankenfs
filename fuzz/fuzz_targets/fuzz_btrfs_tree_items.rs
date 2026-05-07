@@ -1,11 +1,10 @@
 #![no_main]
 
 use ffs_btrfs::{
-    parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item, parse_root_ref,
-    parse_xattr_items, BtrfsDirItem, BtrfsExtentData, BtrfsInodeItem, BtrfsRootItem, BtrfsRootRef,
-    BtrfsXattrItem, BTRFS_COMPRESS_LZO, BTRFS_COMPRESS_NONE, BTRFS_COMPRESS_ZLIB,
-    BTRFS_COMPRESS_ZSTD, BTRFS_FILE_EXTENT_INLINE, BTRFS_FILE_EXTENT_PREALLOC,
-    BTRFS_FILE_EXTENT_REG,
+    BTRFS_COMPRESS_LZO, BTRFS_COMPRESS_NONE, BTRFS_COMPRESS_ZLIB, BTRFS_COMPRESS_ZSTD,
+    BTRFS_FILE_EXTENT_INLINE, BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG, BtrfsDirItem,
+    BtrfsExtentData, BtrfsInodeItem, BtrfsRootItem, BtrfsRootRef, BtrfsXattrItem, parse_dir_items,
+    parse_extent_data, parse_inode_item, parse_root_item, parse_root_ref, parse_xattr_items,
 };
 use ffs_types::ParseError;
 use libfuzzer_sys::fuzz_target;
@@ -170,37 +169,35 @@ fn build_xattr_item(cursor: &mut ByteCursor<'_>) -> BtrfsXattrItem {
 }
 
 fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
-    let Some(slot) = bytes.get_mut(offset..offset + 8) else {
-        std::process::abort();
-    };
+    let slot = bytes
+        .get_mut(offset..offset + 8)
+        .expect("write_u64 target range must fit synthesized payload");
     slot.copy_from_slice(&value.to_le_bytes());
 }
 
 fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
-    let Some(slot) = bytes.get_mut(offset..offset + 2) else {
-        std::process::abort();
-    };
+    let slot = bytes
+        .get_mut(offset..offset + 2)
+        .expect("write_u16 target range must fit synthesized payload");
     slot.copy_from_slice(&value.to_le_bytes());
 }
 
 fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
-    let Some(slot) = bytes.get_mut(offset..offset + 4) else {
-        std::process::abort();
-    };
+    let slot = bytes
+        .get_mut(offset..offset + 4)
+        .expect("write_u32 target range must fit synthesized payload");
     slot.copy_from_slice(&value.to_le_bytes());
 }
 
 fn write_array_16(bytes: &mut [u8], offset: usize, value: [u8; 16]) {
-    let Some(slot) = bytes.get_mut(offset..offset + 16) else {
-        std::process::abort();
-    };
+    let slot = bytes
+        .get_mut(offset..offset + 16)
+        .expect("write_array_16 target range must fit synthesized payload");
     slot.copy_from_slice(&value);
 }
 
 fn root_item_to_bytes(item: &BtrfsRootItem, include_uuid_fields: bool) -> Vec<u8> {
-    let Ok(refs) = u32::try_from(item.refs) else {
-        std::process::abort();
-    };
+    let refs = u32::try_from(item.refs).expect("generated ROOT_ITEM refs must fit u32");
 
     let len = if include_uuid_fields {
         ROOT_ITEM_PARENT_UUID_END
@@ -213,9 +210,9 @@ fn root_item_to_bytes(item: &BtrfsRootItem, include_uuid_fields: bool) -> Vec<u8
     write_u64(&mut bytes, ROOT_ITEM_BYTENR_OFFSET, item.bytenr);
     write_u64(&mut bytes, ROOT_ITEM_FLAGS_OFFSET, item.flags);
     write_u32(&mut bytes, ROOT_ITEM_REFS_OFFSET, refs);
-    let Some(level) = bytes.get_mut(ROOT_ITEM_LEVEL_OFFSET) else {
-        std::process::abort();
-    };
+    let level = bytes
+        .get_mut(ROOT_ITEM_LEVEL_OFFSET)
+        .expect("ROOT_ITEM level byte must fit synthesized payload");
     *level = item.level;
 
     if include_uuid_fields {
@@ -228,9 +225,8 @@ fn root_item_to_bytes(item: &BtrfsRootItem, include_uuid_fields: bool) -> Vec<u8
 }
 
 fn root_ref_to_bytes(item: &BtrfsRootRef) -> Vec<u8> {
-    let Ok(name_len) = u16::try_from(item.name.len()) else {
-        std::process::abort();
-    };
+    let name_len =
+        u16::try_from(item.name.len()).expect("generated ROOT_REF name length must fit u16");
 
     let mut bytes = Vec::with_capacity(18 + item.name.len());
     bytes.extend_from_slice(&item.dirid.to_le_bytes());
@@ -241,12 +237,10 @@ fn root_ref_to_bytes(item: &BtrfsRootRef) -> Vec<u8> {
 }
 
 fn xattr_item_to_bytes(item: &BtrfsXattrItem) -> Vec<u8> {
-    let Ok(name_len) = u16::try_from(item.name.len()) else {
-        std::process::abort();
-    };
-    let Ok(value_len) = u16::try_from(item.value.len()) else {
-        std::process::abort();
-    };
+    let name_len =
+        u16::try_from(item.name.len()).expect("generated XATTR_ITEM name length must fit u16");
+    let value_len =
+        u16::try_from(item.value.len()).expect("generated XATTR_ITEM value length must fit u16");
 
     let mut bytes = Vec::with_capacity(30 + item.name.len() + item.value.len());
     bytes.extend_from_slice(&[0_u8; 17]);
@@ -550,7 +544,7 @@ fn assert_extent_data_boundary_contracts(cursor: &mut ByteCursor<'_>) {
     let inline_len = usize::from(cursor.next_u8() % (MAX_STRUCTURED_BYTES + 1));
     let inline = BtrfsExtentData::Inline {
         generation: cursor.next_u64(),
-        ram_bytes: u64::try_from(inline_len).unwrap_or_else(|_| std::process::abort()),
+        ram_bytes: u64::try_from(inline_len).expect("inline extent length must fit u64"),
         compression: BTRFS_COMPRESS_NONE,
         data: cursor.take_vec(inline_len),
     };
@@ -561,7 +555,7 @@ fn assert_extent_data_boundary_contracts(cursor: &mut ByteCursor<'_>) {
         &mut inline_len_mismatch,
         8,
         u64::try_from(inline_len)
-            .unwrap_or_else(|_| std::process::abort())
+            .expect("inline extent length must fit u64")
             .saturating_add(1),
     );
     expect_invalid_field(
@@ -699,9 +693,8 @@ fn assert_extent_data_boundary_contracts(cursor: &mut ByteCursor<'_>) {
         num_bytes: 3072,
     };
     assert_eq!(
-        parse_extent_data(&valid_compressed.to_bytes()).unwrap_or_else(|_| {
-            std::process::abort();
-        }),
+        parse_extent_data(&valid_compressed.to_bytes())
+            .expect("valid compressed extent boundary payload must parse"),
         valid_compressed,
         "compressed extent should accept source slices ending exactly at ram_bytes"
     );
@@ -712,7 +705,8 @@ fn assert_structured_roundtrips(data: &[u8]) {
 
     let inode = build_inode_item(&mut cursor);
     let inode_bytes = inode.to_bytes();
-    let parsed_inode = parse_inode_item(&inode_bytes).unwrap_or_else(|_| std::process::abort());
+    let parsed_inode =
+        parse_inode_item(&inode_bytes).expect("generated INODE_ITEM payload must parse");
     assert_eq!(
         parsed_inode, inode,
         "BtrfsInodeItem::to_bytes must round-trip through parse_inode_item"
@@ -731,7 +725,7 @@ fn assert_structured_roundtrips(data: &[u8]) {
     let root_item = build_root_item(&mut cursor);
     let root_item_legacy_bytes = root_item_to_bytes(&root_item, false);
     let parsed_legacy_root_item =
-        parse_root_item(&root_item_legacy_bytes).unwrap_or_else(|_| std::process::abort());
+        parse_root_item(&root_item_legacy_bytes).expect("generated legacy ROOT_ITEM must parse");
     assert_eq!(
         parsed_legacy_root_item,
         BtrfsRootItem {
@@ -744,7 +738,7 @@ fn assert_structured_roundtrips(data: &[u8]) {
 
     let root_item_uuid_bytes = root_item_to_bytes(&root_item, true);
     let parsed_uuid_root_item =
-        parse_root_item(&root_item_uuid_bytes).unwrap_or_else(|_| std::process::abort());
+        parse_root_item(&root_item_uuid_bytes).expect("generated UUID-era ROOT_ITEM must parse");
     assert_eq!(
         parsed_uuid_root_item, root_item,
         "UUID-era ROOT_ITEM payload must parse all structured fields"
@@ -758,9 +752,9 @@ fn assert_structured_roundtrips(data: &[u8]) {
     );
 
     let mut bad_level = root_item_uuid_bytes.clone();
-    let Some(level) = bad_level.get_mut(ROOT_ITEM_LEVEL_OFFSET) else {
-        std::process::abort();
-    };
+    let level = bad_level
+        .get_mut(ROOT_ITEM_LEVEL_OFFSET)
+        .expect("ROOT_ITEM level byte must exist in UUID-era payload");
     *level = 8;
     assert!(
         parse_root_item(&bad_level).is_err(),
@@ -773,17 +767,16 @@ fn assert_structured_roundtrips(data: &[u8]) {
         parse_root_item(&partial_generation_v2).is_err(),
         "ROOT_ITEM parser must reject partial generation_v2 extension fields"
     );
-    let Some(partial_uuid) = root_item_uuid_bytes.get(..ROOT_ITEM_UUID_OFFSET + 1) else {
-        std::process::abort();
-    };
+    let partial_uuid = root_item_uuid_bytes
+        .get(..ROOT_ITEM_UUID_OFFSET + 1)
+        .expect("UUID-era ROOT_ITEM payload must include partial UUID slice");
     assert!(
         parse_root_item(partial_uuid).is_err(),
         "ROOT_ITEM parser must reject partial uuid extension fields"
     );
-    let Some(partial_parent_uuid) = root_item_uuid_bytes.get(..ROOT_ITEM_PARENT_UUID_OFFSET + 1)
-    else {
-        std::process::abort();
-    };
+    let partial_parent_uuid = root_item_uuid_bytes
+        .get(..ROOT_ITEM_PARENT_UUID_OFFSET + 1)
+        .expect("UUID-era ROOT_ITEM payload must include partial parent UUID slice");
     assert!(
         parse_root_item(partial_parent_uuid).is_err(),
         "ROOT_ITEM parser must reject partial parent_uuid extension fields"
@@ -791,15 +784,16 @@ fn assert_structured_roundtrips(data: &[u8]) {
 
     let root_ref = build_root_ref(&mut cursor);
     let root_ref_bytes = root_ref_to_bytes(&root_ref);
-    let parsed_root_ref = parse_root_ref(&root_ref_bytes).unwrap_or_else(|_| std::process::abort());
+    let parsed_root_ref =
+        parse_root_ref(&root_ref_bytes).expect("generated ROOT_REF payload must parse");
     assert_eq!(
         parsed_root_ref, root_ref,
         "structured ROOT_REF payload must parse exactly"
     );
     let mut empty_root_ref_name = root_ref_bytes.clone();
-    let Some(name_len_bytes) = empty_root_ref_name.get_mut(16..18) else {
-        std::process::abort();
-    };
+    let name_len_bytes = empty_root_ref_name
+        .get_mut(16..18)
+        .expect("ROOT_REF name length field must exist");
     name_len_bytes.copy_from_slice(&0_u16.to_le_bytes());
     assert!(
         parse_root_ref(&empty_root_ref_name).is_err(),
@@ -820,12 +814,12 @@ fn assert_structured_roundtrips(data: &[u8]) {
     let dir_second = build_dir_item(&mut cursor);
     let dir_first_bytes = dir_first
         .try_to_bytes()
-        .unwrap_or_else(|_| std::process::abort());
+        .expect("generated first DIR_ITEM payload must serialize");
     let dir_second_bytes = dir_second
         .try_to_bytes()
-        .unwrap_or_else(|_| std::process::abort());
+        .expect("generated second DIR_ITEM payload must serialize");
     let parsed_single_dir =
-        parse_dir_items(&dir_first_bytes).unwrap_or_else(|_| std::process::abort());
+        parse_dir_items(&dir_first_bytes).expect("generated single DIR_ITEM payload must parse");
     assert_eq!(
         parsed_single_dir,
         vec![dir_first.clone()],
@@ -833,7 +827,8 @@ fn assert_structured_roundtrips(data: &[u8]) {
     );
     let mut concatenated_dirs = dir_first_bytes.clone();
     concatenated_dirs.extend_from_slice(&dir_second_bytes);
-    let parsed_dirs = parse_dir_items(&concatenated_dirs).unwrap_or_else(|_| std::process::abort());
+    let parsed_dirs =
+        parse_dir_items(&concatenated_dirs).expect("concatenated DIR_ITEM payloads must parse");
     assert_eq!(
         parsed_dirs,
         vec![dir_first, dir_second],
@@ -850,8 +845,8 @@ fn assert_structured_roundtrips(data: &[u8]) {
     let xattr_second = build_xattr_item(&mut cursor);
     let xattr_first_bytes = xattr_item_to_bytes(&xattr_first);
     let xattr_second_bytes = xattr_item_to_bytes(&xattr_second);
-    let parsed_single_xattr =
-        parse_xattr_items(&xattr_first_bytes).unwrap_or_else(|_| std::process::abort());
+    let parsed_single_xattr = parse_xattr_items(&xattr_first_bytes)
+        .expect("generated single XATTR_ITEM payload must parse");
     assert_eq!(
         parsed_single_xattr,
         vec![xattr_first.clone()],
@@ -859,8 +854,8 @@ fn assert_structured_roundtrips(data: &[u8]) {
     );
     let mut concatenated_xattrs = xattr_first_bytes.clone();
     concatenated_xattrs.extend_from_slice(&xattr_second_bytes);
-    let parsed_xattrs =
-        parse_xattr_items(&concatenated_xattrs).unwrap_or_else(|_| std::process::abort());
+    let parsed_xattrs = parse_xattr_items(&concatenated_xattrs)
+        .expect("concatenated XATTR_ITEM payloads must parse");
     assert_eq!(
         parsed_xattrs,
         vec![xattr_first, xattr_second],
@@ -883,7 +878,7 @@ fn assert_structured_roundtrips(data: &[u8]) {
     ] {
         let extent_bytes = extent.to_bytes();
         let parsed_extent =
-            parse_extent_data(&extent_bytes).unwrap_or_else(|_| std::process::abort());
+            parse_extent_data(&extent_bytes).expect("generated EXTENT_DATA payload must parse");
         assert_eq!(
             parsed_extent, extent,
             "BtrfsExtentData::to_bytes must round-trip through parse_extent_data"
