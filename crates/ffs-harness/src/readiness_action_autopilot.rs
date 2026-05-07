@@ -2053,6 +2053,7 @@ mod tests {
 
         assert_eq!(normal, reversed);
         assert_eq!(normal_json, reversed_json);
+        insta::assert_snapshot!("readiness_action_planner_result_order_stable", normal_json);
     }
 
     #[test]
