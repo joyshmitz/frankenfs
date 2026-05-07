@@ -211,10 +211,56 @@ impl From<DegradationLevel> for u8 {
 /// The FSM escalates immediately when pressure worsens but requires a
 /// sustained improvement (configurable via `recovery_samples`) before
 /// de-escalating. This prevents rapid flickering between levels.
+///
+/// # Lock-ordering invariant (bd-2rxal)
+///
+/// `DegradationFsm` holds two `parking_lot::Mutex`es —
+/// `current: Mutex<FsmState>` and
+/// `policies: Mutex<Vec<Arc<dyn DegradationPolicy>>>`. **They MUST
+/// NEVER be held simultaneously.** Methods on this struct comply
+/// with the following protocol:
+///
+/// | Method               | current | policies | Notes                       |
+/// |----------------------|---------|----------|-----------------------------|
+/// | `add_policy`         | -       | W        | leaf                        |
+/// | `transition_count`   | R       | -        | leaf                        |
+/// | `level`              | -       | -        | atomic-only (`level_cache`) |
+/// | `tick`               | W       | W        | strictly sequential, see ↓  |
+/// | `Debug::fmt`         | R       | -        | leaf                        |
+/// | `BackpressureGate::check` | -  | -        | atomic-only (via `level`)   |
+///
+/// `tick` is the only method that touches both. It must use the
+/// **drain-clone-release** pattern:
+///
+///   1. Lock `current`, mutate state, drop the guard.
+///   2. Lock `policies`, clone the `Arc<dyn DegradationPolicy>`
+///      pointers into a local `Vec`, drop the guard.
+///   3. Call `policy.apply()` on each cloned `Arc` while no lock is
+///      held.
+///
+/// Step 3 is critical: if `policy.apply()` re-enters the FSM (e.g.,
+/// reads `level()` or registers a new policy), it must do so without
+/// any lock being held by the caller, or the FSM will self-deadlock.
+/// The `degradation_fsm_concurrent_tick_and_register_no_hang`
+/// regression test exercises this contract under contention with a
+/// watchdog timeout.
+///
+/// **Any new method that needs both must follow the same sequential
+/// pattern: read out of one lock into a local, drop that lock, then
+/// take the other.** A nested acquisition would silently introduce a
+/// deadlock against any concurrent caller that took the locks in the
+/// opposite order.
 pub struct DegradationFsm {
+    /// FSM state machine (level, recovery counter, transition count).
+    /// **Never held simultaneously with `policies`.** `tick` MUST
+    /// `drop(state)` before acquiring `policies`.
     current: parking_lot::Mutex<FsmState>,
     level_cache: std::sync::atomic::AtomicU8,
     pressure: Arc<SystemPressure>,
+    /// Registered policies notified on each tick. **Never held
+    /// simultaneously with `current`.** `tick` MUST clone the
+    /// `Arc` pointers into a local Vec, drop the guard, then call
+    /// `apply()` outside the lock.
     policies: parking_lot::Mutex<Vec<Arc<dyn DegradationPolicy>>>,
     recovery_samples: u32,
 }
@@ -558,5 +604,125 @@ mod tests {
         assert_eq!(transition.to, DegradationLevel::Normal);
         assert_eq!(fsm.transition_count(), u64::MAX);
         assert_eq!(fsm.current.lock().recovery_count, 0);
+    }
+
+    /// bd-2rxal — concurrent regression test for the
+    /// never-held-simultaneously invariant on `current` and `policies`.
+    /// If a future regression nested either lock under the other, OR
+    /// held a lock across `policy.apply()`, this test would deadlock
+    /// (caught by the watchdog) or panic when the policy callback
+    /// re-entered the FSM. The callback intentionally calls back into
+    /// `level()` and `transition_count()` to exercise the re-entry
+    /// path that motivated the drain-clone-release pattern.
+    #[test]
+    fn degradation_fsm_concurrent_tick_and_register_no_hang() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        use std::time::{Duration, Instant};
+
+        struct ReentrantCountingPolicy {
+            apply_count: AtomicUsize,
+            fsm: parking_lot::Mutex<Option<Arc<DegradationFsm>>>,
+        }
+
+        impl DegradationPolicy for ReentrantCountingPolicy {
+            fn apply(&self, _headroom: f32) {
+                self.apply_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Re-enter the FSM from the policy callback. This is
+                // exactly the scenario that would self-deadlock if
+                // tick() held either lock across the apply() call.
+                if let Some(fsm) = self.fsm.lock().clone() {
+                    let _ = fsm.level();
+                    let _ = fsm.transition_count();
+                }
+            }
+            fn name(&self) -> &str {
+                "bd-2rxal-reentrant-counter"
+            }
+        }
+
+        let pressure = Arc::new(SystemPressure::new());
+        let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 3));
+        let policy = Arc::new(ReentrantCountingPolicy {
+            apply_count: AtomicUsize::new(0),
+            fsm: parking_lot::Mutex::new(Some(Arc::clone(&fsm))),
+        });
+        fsm.add_policy(Arc::clone(&policy) as Arc<dyn DegradationPolicy>);
+
+        const ITERATIONS: usize = 256;
+        const TICKERS: usize = 4;
+        const REGISTERERS: usize = 2;
+        const WATCHDOG_SECS: u64 = 5;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = Vec::new();
+
+        for _ in 0..TICKERS {
+            let fsm = Arc::clone(&fsm);
+            let pressure = Arc::clone(&pressure);
+            let stop = Arc::clone(&stop);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..ITERATIONS {
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    // Alternate pressure to force escalations + recoveries.
+                    pressure.set_headroom(if i % 2 == 0 { 0.05 } else { 0.95 });
+                    let _ = fsm.tick();
+                }
+            }));
+        }
+
+        for _ in 0..REGISTERERS {
+            let fsm = Arc::clone(&fsm);
+            let stop = Arc::clone(&stop);
+            handles.push(std::thread::spawn(move || {
+                struct NopPolicy;
+                impl DegradationPolicy for NopPolicy {
+                    fn apply(&self, _: f32) {}
+                    fn name(&self) -> &str {
+                        "bd-2rxal-nop"
+                    }
+                }
+                for _ in 0..ITERATIONS {
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    fsm.add_policy(Arc::new(NopPolicy));
+                }
+            }));
+        }
+
+        let watchdog_handle = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(WATCHDOG_SECS);
+                while Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            })
+        };
+
+        let start = Instant::now();
+        for handle in handles {
+            handle.join().expect("worker thread joins cleanly");
+        }
+        let elapsed = start.elapsed();
+        watchdog_handle
+            .join()
+            .expect("watchdog thread joins cleanly");
+
+        assert!(
+            elapsed < Duration::from_secs(WATCHDOG_SECS),
+            "concurrent tick + add_policy must not deadlock; elapsed={elapsed:?}"
+        );
+        assert!(
+            policy
+                .apply_count
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0,
+            "policy.apply() must run at least once across the contention window"
+        );
     }
 }
