@@ -10907,6 +10907,67 @@ mod tests {
         }
     }
 
+    /// bd-k62ym — Kernel-conformance pin for the ext4 size/limit
+    /// constants EXT_INIT_MAX_LEN and EXT4_MAX_NAME_BYTES.
+    ///
+    /// EXT_INIT_MAX_LEN per `fs/ext4/ext4_extents.h`:
+    ///   `#define EXT_INIT_MAX_LEN  (1UL << 15)`  /* 32768 */
+    /// is the max length of a written (initialized) extent. Values
+    /// above this indicate unwritten/preallocated extents — the
+    /// single-bit boundary between init and uninit is the load-
+    /// bearing semantic. A regression that drifted by even one bit
+    /// would silently flip every long extent between written and
+    /// unwritten.
+    ///
+    /// EXT4_MAX_NAME_BYTES per `fs/ext4/ext4.h` (`EXT4_NAME_LEN`):
+    ///   `#define EXT4_NAME_LEN 255`
+    /// is the max directory-entry name length. A regression here
+    /// would silently truncate long filenames or accept too-long
+    /// ones (overflowing the 1-byte name_len field on disk).
+    ///
+    /// Pairs with bd-k81lq (reserved inodes + revision + inode-size),
+    /// bd-bevt2 (40 feature flags), bd-tyeic (inode flags), bd-343v3
+    /// (file types), bd-jbilz (magic+state).
+    #[test]
+    fn ext4_size_limit_constants_match_kernel_header() {
+        // EXT_INIT_MAX_LEN per fs/ext4/ext4_extents.h.
+        assert_eq!(
+            EXT_INIT_MAX_LEN,
+            1_u16 << 15,
+            "EXT_INIT_MAX_LEN must equal kernel formula (1UL << 15)"
+        );
+        assert_eq!(
+            EXT_INIT_MAX_LEN, 32768,
+            "EXT_INIT_MAX_LEN must equal kernel value 32768 (= 0x8000)"
+        );
+        assert_eq!(
+            EXT_INIT_MAX_LEN, 0x8000,
+            "EXT_INIT_MAX_LEN must equal kernel hex value 0x8000"
+        );
+        // The kernel uses bit 15 as the unwritten/preallocated flag.
+        // EXT_INIT_MAX_LEN MUST be a single power-of-two so the test
+        // raw_len > EXT_INIT_MAX_LEN is unambiguous.
+        const {
+            assert!(
+                EXT_INIT_MAX_LEN.is_power_of_two(),
+                "EXT_INIT_MAX_LEN must be a power of two so the unwritten flag bit is unambiguous"
+            );
+        }
+
+        // EXT4_MAX_NAME_BYTES per fs/ext4/ext4.h EXT4_NAME_LEN.
+        assert_eq!(
+            EXT4_MAX_NAME_BYTES, 255,
+            "EXT4_MAX_NAME_BYTES must equal kernel value 255 (== EXT4_NAME_LEN)"
+        );
+        // 255 is u8::MAX, which is what the kernel relies on so name_len
+        // can fit in a single byte on disk.
+        assert_eq!(
+            EXT4_MAX_NAME_BYTES,
+            usize::from(u8::MAX),
+            "EXT4_MAX_NAME_BYTES must equal u8::MAX so the on-disk name_len field is unambiguous"
+        );
+    }
+
     #[test]
     fn ext4_extent_is_unwritten_boundary() {
         let written = Ext4Extent {
