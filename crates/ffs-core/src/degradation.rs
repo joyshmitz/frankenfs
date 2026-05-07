@@ -619,6 +619,11 @@ mod tests {
         use std::sync::atomic::{AtomicBool, AtomicUsize};
         use std::time::{Duration, Instant};
 
+        const ITERATIONS: usize = 256;
+        const TICKERS: usize = 4;
+        const REGISTERERS: usize = 2;
+        const WATCHDOG_SECS: u64 = 5;
+
         struct ReentrantCountingPolicy {
             apply_count: AtomicUsize,
             fsm: parking_lot::Mutex<Option<Arc<DegradationFsm>>>,
@@ -631,12 +636,13 @@ mod tests {
                 // Re-enter the FSM from the policy callback. This is
                 // exactly the scenario that would self-deadlock if
                 // tick() held either lock across the apply() call.
-                if let Some(fsm) = self.fsm.lock().clone() {
+                let maybe_fsm = self.fsm.lock().clone();
+                if let Some(fsm) = maybe_fsm {
                     let _ = fsm.level();
                     let _ = fsm.transition_count();
                 }
             }
-            fn name(&self) -> &str {
+            fn name(&self) -> &'static str {
                 "bd-2rxal-reentrant-counter"
             }
         }
@@ -649,19 +655,15 @@ mod tests {
         });
         fsm.add_policy(Arc::clone(&policy) as Arc<dyn DegradationPolicy>);
 
-        const ITERATIONS: usize = 256;
-        const TICKERS: usize = 4;
-        const REGISTERERS: usize = 2;
-        const WATCHDOG_SECS: u64 = 5;
-
         let stop = Arc::new(AtomicBool::new(false));
-        let mut handles = Vec::new();
+        let mut ticker_handles = Vec::new();
+        let mut registerer_handles = Vec::new();
 
         for _ in 0..TICKERS {
             let fsm = Arc::clone(&fsm);
             let pressure = Arc::clone(&pressure);
             let stop = Arc::clone(&stop);
-            handles.push(std::thread::spawn(move || {
+            ticker_handles.push(std::thread::spawn(move || {
                 for i in 0..ITERATIONS {
                     if stop.load(std::sync::atomic::Ordering::Relaxed) {
                         return;
@@ -676,11 +678,11 @@ mod tests {
         for _ in 0..REGISTERERS {
             let fsm = Arc::clone(&fsm);
             let stop = Arc::clone(&stop);
-            handles.push(std::thread::spawn(move || {
+            registerer_handles.push(std::thread::spawn(move || {
                 struct NopPolicy;
                 impl DegradationPolicy for NopPolicy {
                     fn apply(&self, _: f32) {}
-                    fn name(&self) -> &str {
+                    fn name(&self) -> &'static str {
                         "bd-2rxal-nop"
                     }
                 }
@@ -705,8 +707,11 @@ mod tests {
         };
 
         let start = Instant::now();
-        for handle in handles {
-            handle.join().expect("worker thread joins cleanly");
+        for handle in ticker_handles {
+            handle.join().expect("ticker thread joins cleanly");
+        }
+        for handle in registerer_handles {
+            handle.join().expect("registerer thread joins cleanly");
         }
         let elapsed = start.elapsed();
         watchdog_handle

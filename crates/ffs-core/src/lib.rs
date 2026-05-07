@@ -7208,6 +7208,22 @@ impl Ext4FsOps {
         &self.image
     }
 
+    /// Read an allocated inode through the VFS bridge boundary.
+    fn read_live_inode(&self, ino: InodeNumber) -> Result<Ext4Inode, FfsError> {
+        self.reader
+            .sb
+            .locate_inode(ino)
+            .map_err(|e| parse_to_ffs_error(&e))?;
+        let inode = self
+            .reader
+            .read_inode(&self.image, ino)
+            .map_err(|e| parse_to_ffs_error(&e))?;
+        if inode.mode == 0 {
+            return Err(FfsError::NotFound(format!("inode {}", ino.0)));
+        }
+        Ok(inode)
+    }
+
     /// Read and convert an inode to `InodeAttr`.
     fn inode_to_attr(&self, ino: InodeNumber, inode: &Ext4Inode) -> InodeAttr {
         inode_to_attr(&self.reader.sb, ino, inode)
@@ -9037,10 +9053,7 @@ impl FsOps for Ext4FsOps {
         _scope: &mut RequestScope,
         ino: InodeNumber,
     ) -> ffs_error::Result<InodeAttr> {
-        let inode = self
-            .reader
-            .read_inode(&self.image, ino)
-            .map_err(|e| parse_to_ffs_error(&e))?;
+        let inode = self.read_live_inode(ino)?;
         Ok(self.inode_to_attr(ino, &inode))
     }
 
@@ -9051,10 +9064,7 @@ impl FsOps for Ext4FsOps {
         parent: InodeNumber,
         name: &OsStr,
     ) -> ffs_error::Result<InodeAttr> {
-        let parent_inode = self
-            .reader
-            .read_inode(&self.image, parent)
-            .map_err(|e| parse_to_ffs_error(&e))?;
+        let parent_inode = self.read_live_inode(parent)?;
 
         if !parent_inode.is_dir() {
             return Err(FfsError::NotDirectory);
@@ -9068,10 +9078,7 @@ impl FsOps for Ext4FsOps {
             .ok_or_else(|| FfsError::NotFound(name.to_string_lossy().into_owned()))?;
 
         let child_ino = InodeNumber(u64::from(entry.inode));
-        let child_inode = self
-            .reader
-            .read_inode(&self.image, child_ino)
-            .map_err(|e| parse_to_ffs_error(&e))?;
+        let child_inode = self.read_live_inode(child_ino)?;
         Ok(self.inode_to_attr(child_ino, &child_inode))
     }
 
@@ -9082,10 +9089,7 @@ impl FsOps for Ext4FsOps {
         ino: InodeNumber,
         offset: u64,
     ) -> ffs_error::Result<Vec<DirEntry>> {
-        let inode = self
-            .reader
-            .read_inode(&self.image, ino)
-            .map_err(|e| parse_to_ffs_error(&e))?;
+        let inode = self.read_live_inode(ino)?;
 
         if !inode.is_dir() {
             return Err(FfsError::NotDirectory);
@@ -9121,10 +9125,7 @@ impl FsOps for Ext4FsOps {
         offset: u64,
         size: u32,
     ) -> ffs_error::Result<Vec<u8>> {
-        let inode = self
-            .reader
-            .read_inode(&self.image, ino)
-            .map_err(|e| parse_to_ffs_error(&e))?;
+        let inode = self.read_live_inode(ino)?;
 
         if inode.is_dir() {
             return Err(FfsError::IsDirectory);
@@ -9145,10 +9146,7 @@ impl FsOps for Ext4FsOps {
         _scope: &mut RequestScope,
         ino: InodeNumber,
     ) -> ffs_error::Result<Vec<u8>> {
-        let inode = self
-            .reader
-            .read_inode(&self.image, ino)
-            .map_err(|e| parse_to_ffs_error(&e))?;
+        let inode = self.read_live_inode(ino)?;
 
         if !inode.is_symlink() {
             return Err(FfsError::Format("not a symlink".into()));
@@ -9160,10 +9158,7 @@ impl FsOps for Ext4FsOps {
     }
 
     fn listxattr(&self, _cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<String>> {
-        let inode = self
-            .reader
-            .read_inode(&self.image, ino)
-            .map_err(|e| parse_to_ffs_error(&e))?;
+        let inode = self.read_live_inode(ino)?;
         let xattrs = self
             .reader
             .list_xattrs(&self.image, &inode)
@@ -9177,10 +9172,7 @@ impl FsOps for Ext4FsOps {
         ino: InodeNumber,
         name: &str,
     ) -> ffs_error::Result<Option<Vec<u8>>> {
-        let inode = self
-            .reader
-            .read_inode(&self.image, ino)
-            .map_err(|e| parse_to_ffs_error(&e))?;
+        let inode = self.read_live_inode(ino)?;
         let xattrs = self
             .reader
             .list_xattrs(&self.image, &inode)
@@ -9189,6 +9181,42 @@ impl FsOps for Ext4FsOps {
             .into_iter()
             .find(|x| x.full_name() == name)
             .map(|x| x.value))
+    }
+
+    fn get_inode_state(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<u32> {
+        let _ = self.read_live_inode(ino)?;
+        Ok(0)
+    }
+
+    fn precache_extents(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<()> {
+        let inode = self.read_live_inode(ino)?;
+        if inode.flags & ffs_types::EXT4_EXTENTS_FL != 0 {
+            let _ = self
+                .reader
+                .collect_extents(&self.image, &inode)
+                .map_err(|e| parse_to_ffs_error(&e))?;
+        }
+        Ok(())
+    }
+
+    fn clear_extent_status_cache(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<()> {
+        let _ = self.read_live_inode(ino)?;
+        Ok(())
     }
 }
 
@@ -23840,6 +23868,53 @@ mod tests {
         assert_eq!(extents[0].logical_block, 0);
         assert_eq!(extents[0].physical_start, 15);
         assert_eq!(extents[0].actual_len(), 1);
+    }
+
+    #[test]
+    fn ext4_fsops_get_inode_state_validates_inode() {
+        let fs = Ext4FsOps::new(build_ext4_image_with_extents()).unwrap();
+        let cx = Cx::for_testing();
+        let mut scope = RequestScope::empty();
+
+        let state = fs
+            .get_inode_state(&cx, &mut scope, InodeNumber(11))
+            .unwrap();
+        assert_eq!(state, 0);
+
+        let err = fs
+            .get_inode_state(&cx, &mut RequestScope::empty(), InodeNumber(999))
+            .expect_err("bogus inode must not inherit the default zero state");
+        assert_ne!(err.to_errno(), 0);
+    }
+
+    #[test]
+    fn ext4_fsops_precache_extents_validates_inode_and_walks_tree() {
+        let fs = Ext4FsOps::new(build_ext4_image_with_extents()).unwrap();
+        let cx = Cx::for_testing();
+        let mut scope = RequestScope::empty();
+
+        fs.precache_extents(&cx, &mut scope, InodeNumber(12))
+            .unwrap();
+
+        let err = fs
+            .precache_extents(&cx, &mut RequestScope::empty(), InodeNumber(999))
+            .expect_err("bogus inode must not inherit the default precache no-op");
+        assert_ne!(err.to_errno(), 0);
+    }
+
+    #[test]
+    fn ext4_fsops_clear_extent_status_cache_validates_inode() {
+        let fs = Ext4FsOps::new(build_ext4_image_with_extents()).unwrap();
+        let cx = Cx::for_testing();
+        let mut scope = RequestScope::empty();
+
+        fs.clear_extent_status_cache(&cx, &mut scope, InodeNumber(11))
+            .unwrap();
+
+        let err = fs
+            .clear_extent_status_cache(&cx, &mut RequestScope::empty(), InodeNumber(999))
+            .expect_err("bogus inode must not inherit the default cache-clear no-op");
+        assert_ne!(err.to_errno(), 0);
     }
 
     #[test]
