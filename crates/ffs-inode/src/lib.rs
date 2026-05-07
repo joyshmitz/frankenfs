@@ -1139,6 +1139,83 @@ mod tests {
         assert_eq!(nsec, 999_999_999);
     }
 
+    /// bd-h88gv — Kernel-conformance pin for the epoch/nsec bit
+    /// layout of `encode_extra_timestamp` per `fs/ext4/ext4.h`:
+    ///   EXT4_EPOCH_BITS = 2
+    ///   EXT4_EPOCH_MASK = (1 << 2) - 1 = 0x3   (low 2 bits)
+    ///   EXT4_NSEC_MASK  = ~0x3                  (high 30 bits)
+    /// Bits 0..2 hold the upper 2 epoch bits of `secs` (extending
+    /// the 32-bit `s_*time` field to ~544 years past 1970); bits
+    /// 2..32 hold `nsec << 2`.
+    ///
+    /// A regression that swapped epoch/nsec bit positions, or used
+    /// a different shift amount, would silently corrupt every nsec
+    /// post-2106 but pass round-trip tests if both writer and
+    /// reader drifted symmetrically. This test pins the bit layout
+    /// independently of any reader.
+    ///
+    /// Pairs with bd-k81lq (reserved inodes), bd-bevt2 (40 feature
+    /// flags), bd-jbilz (magic+state), bd-k62ym (ext4 size limits).
+    #[test]
+    fn encode_extra_timestamp_kernel_bit_layout() {
+        // (a) Low 2 bits hold ONLY the epoch (upper bits of secs).
+        // For secs < (1 << 32), the epoch should be 0 → low 2 bits
+        // of the encoded value are 0 regardless of nsec.
+        for &nsec in &[0_u32, 1, 999_999_999, 500_000_000, 100, 12345] {
+            let extra = encode_extra_timestamp(0, nsec);
+            assert_eq!(
+                extra & 0x3,
+                0,
+                "secs<2^32 must produce epoch=0; got low bits {:#x} for nsec={}",
+                extra & 0x3,
+                nsec
+            );
+        }
+
+        // (b) Each upper-secs bit pattern must produce its canonical
+        // epoch value in the low 2 bits.
+        for (secs, expected_epoch) in [
+            (1_u64 << 32, 1_u32),         // upper bits = 0b01
+            (1_u64 << 33, 2_u32),         // upper bits = 0b10
+            ((1_u64 << 33) | (1 << 32), 3), // upper bits = 0b11
+        ] {
+            let extra = encode_extra_timestamp(secs, 0);
+            assert_eq!(
+                extra & 0x3,
+                expected_epoch,
+                "secs={secs:#x} must encode epoch={expected_epoch}; got {:#x}",
+                extra & 0x3
+            );
+        }
+
+        // (c) Non-overlap invariant: nsec must NOT touch the low 2
+        // bits, AND epoch must NOT touch bits 2..32. Test by
+        // combining a non-trivial nsec with a non-trivial epoch.
+        let extra = encode_extra_timestamp((1_u64 << 33) | (1 << 32), 999_999_999);
+        assert_eq!(extra & 0x3, 3, "epoch=3 (bits 0..2)");
+        assert_eq!(extra >> 2, 999_999_999, "nsec=999_999_999 (bits 2..32)");
+
+        // (d) Max-nsec boundary: 999_999_999 < 2^30 = 1_073_741_824
+        // so it fits in 30 bits without overflowing into bits 0..2.
+        const MAX_VALID_NSEC: u32 = 999_999_999;
+        const NSEC_FIELD_CAPACITY: u32 = 1 << 30;
+        const _: () = assert!(
+            MAX_VALID_NSEC < NSEC_FIELD_CAPACITY,
+            "max nsec must fit in the 30-bit field"
+        );
+
+        // (e) The mask invariants from the kernel header must hold
+        // arithmetically.
+        const EXT4_EPOCH_BITS: u32 = 2;
+        const EXT4_EPOCH_MASK: u32 = (1 << EXT4_EPOCH_BITS) - 1;
+        assert_eq!(EXT4_EPOCH_MASK, 0x3, "EXT4_EPOCH_MASK per kernel header");
+        assert_eq!(
+            !EXT4_EPOCH_MASK,
+            !0x3_u32,
+            "EXT4_NSEC_MASK is ~EXT4_EPOCH_MASK"
+        );
+    }
+
     #[test]
     fn locate_inode_out_of_range() {
         let geo = make_geometry();
