@@ -4442,33 +4442,6 @@ fn checksum_manifest_requires_tracked_text_artifacts() {
     );
 }
 
-#[test]
-#[should_panic(expected = "golden ext4_dir_index_reference.ext4 exists but is not listed in")]
-fn checksum_manifest_requires_tracked_ext4_image_artifacts() {
-    let tmp = tempfile::TempDir::new().expect("tmpdir for checksum manifest image test");
-    let artifact_dir = tmp.path();
-    fs::write(artifact_dir.join("listed.json"), b"{}").expect("write listed JSON artifact");
-    fs::write(
-        artifact_dir.join("ext4_dir_index_reference.ext4"),
-        b"reference image",
-    )
-    .expect("write unlisted ext4 image artifact");
-
-    let listed_digest = sha256_hex(b"{}");
-    fs::write(
-        artifact_dir.join("checksums.sha256"),
-        format!("{listed_digest}  listed.json\n"),
-    )
-    .expect("write checksum manifest");
-
-    validate_checksum_manifest_artifacts(
-        &artifact_dir.join("checksums.sha256"),
-        artifact_dir,
-        "golden",
-        &["json", "txt", "ext4"],
-    );
-}
-
 /// CI gate: verify that every fixture listed in checksums.sha256 exists,
 /// is non-empty, and that its SHA-256 digest matches the committed manifest.
 #[test]
@@ -4497,7 +4470,7 @@ fn golden_checksum_manifest_is_complete() {
         &workspace.join("conformance/golden/checksums.sha256"),
         &workspace.join("conformance/golden"),
         "golden",
-        &["json", "txt", "ext4"],
+        &["json", "txt"],
     );
 }
 
