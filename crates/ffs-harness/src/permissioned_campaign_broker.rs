@@ -17,9 +17,12 @@ use std::path::{Component, Path};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const PERMISSIONED_CAMPAIGN_BROKER_SCHEMA_VERSION: u32 = 1;
+pub const PERMISSIONED_CAMPAIGN_HANDOFF_PACKET_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_PERMISSIONED_CAMPAIGN_BROKER_MANIFEST: &str =
     "docs/permissioned-campaign-broker-manifest.json";
 pub const DEFAULT_PERMISSIONED_CAMPAIGN_PREFLIGHT_MAX_AGE_DAYS: u32 = 14;
+pub const PERMISSIONED_CAMPAIGN_HANDOFF_NOTICE: &str =
+    "authorization handoff material only; not executed evidence and not a product pass/fail claim";
 
 const ALLOWED_DESTRUCTIVE_OPERATIONS: [&str; 9] = [
     "mount_test_device",
@@ -320,6 +323,61 @@ pub struct PermissionedCampaignBrokerIssue {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignHandoffPacket {
+    pub packet_schema_version: u32,
+    pub packet_id: String,
+    pub campaign_id: String,
+    pub lane_kind: String,
+    pub generation: PermissionedCampaignHandoffGeneration,
+    pub authorization_notice: String,
+    pub packet_status: String,
+    pub product_evidence_claim: String,
+    pub claim_text: String,
+    pub required_executed_evidence: Vec<String>,
+    pub target_beads: Vec<String>,
+    pub required_ack: PermissionedCampaignHandoffAck,
+    pub runner_env: Vec<PermissionedCampaignRunnerEnvSummary>,
+    pub host_capability_facts: Vec<PermissionedCampaignHostFactSummary>,
+    pub safe_path_roots: Vec<PermissionedCampaignPathRootSummary>,
+    pub destructive_operations: Vec<String>,
+    pub expected_artifact_paths: Vec<String>,
+    pub cleanup_policy: PermissionedCampaignCleanupSummary,
+    pub preflight_references: Vec<PermissionedCampaignPreflightSummary>,
+    pub operator_risks: Vec<String>,
+    pub exact_commands: Vec<PermissionedCampaignHandoffCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignHandoffGeneration {
+    pub generated_at: String,
+    pub generated_by: String,
+    pub git_sha: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignHandoffAck {
+    pub env_var: String,
+    pub exact_value: String,
+    pub operator_prompt: String,
+    pub export_command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignCleanupSummary {
+    pub policy_id: String,
+    pub expected_status: String,
+    pub partial_artifact_policy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignHandoffCommand {
+    pub command_id: String,
+    pub command_role: String,
+    pub exact_command: String,
+    pub transcript_path_template: String,
+}
+
 pub fn load_permissioned_campaign_broker_manifest(
     path: &Path,
 ) -> Result<PermissionedCampaignBrokerManifest> {
@@ -523,6 +581,202 @@ pub fn fail_on_permissioned_campaign_broker_errors(
             report.issue_count
         )
     }
+}
+
+pub fn generate_permissioned_campaign_handoff_packet(
+    manifest: &PermissionedCampaignBrokerManifest,
+    config: &PermissionedCampaignBrokerValidationConfig,
+    generation: PermissionedCampaignHandoffGeneration,
+) -> Result<PermissionedCampaignHandoffPacket> {
+    let report = validate_permissioned_campaign_broker_manifest(manifest, config);
+    fail_on_permissioned_campaign_broker_errors(&report)?;
+
+    Ok(PermissionedCampaignHandoffPacket {
+        packet_schema_version: PERMISSIONED_CAMPAIGN_HANDOFF_PACKET_SCHEMA_VERSION,
+        packet_id: format!("{}-operator-handoff", manifest.campaign_id),
+        campaign_id: manifest.campaign_id.clone(),
+        lane_kind: manifest.lane_kind.label().to_owned(),
+        generation,
+        authorization_notice: PERMISSIONED_CAMPAIGN_HANDOFF_NOTICE.to_owned(),
+        packet_status: manifest.claim_boundary.packet_status.label().to_owned(),
+        product_evidence_claim: manifest
+            .claim_boundary
+            .product_evidence_claim
+            .label()
+            .to_owned(),
+        claim_text: manifest.claim_boundary.claim_text.clone(),
+        required_executed_evidence: manifest.claim_boundary.required_executed_evidence.clone(),
+        target_beads: manifest.target_beads.clone(),
+        required_ack: PermissionedCampaignHandoffAck {
+            env_var: manifest.required_ack.env_var.clone(),
+            exact_value: manifest.required_ack.exact_value.clone(),
+            operator_prompt: manifest.required_ack.operator_prompt.clone(),
+            export_command: format!(
+                "{}={}",
+                manifest.required_ack.env_var, manifest.required_ack.exact_value
+            ),
+        },
+        runner_env: runner_env_summary(manifest),
+        host_capability_facts: host_fact_summary(manifest),
+        safe_path_roots: path_root_summary(manifest),
+        destructive_operations: manifest.destructive_operations.clone(),
+        expected_artifact_paths: manifest.expected_artifact_paths.clone(),
+        cleanup_policy: PermissionedCampaignCleanupSummary {
+            policy_id: manifest.cleanup_policy.policy_id.clone(),
+            expected_status: manifest.cleanup_policy.expected_status.label().to_owned(),
+            partial_artifact_policy: manifest.cleanup_policy.partial_artifact_policy.clone(),
+        },
+        preflight_references: preflight_summary(manifest, config),
+        operator_risks: manifest.operator_risks.clone(),
+        exact_commands: handoff_command_summary(manifest),
+    })
+}
+
+#[must_use]
+pub fn render_permissioned_campaign_handoff_markdown(
+    packet: &PermissionedCampaignHandoffPacket,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Permissioned Campaign Handoff\n");
+    let _ = writeln!(out, "- Packet: `{}`", packet.packet_id);
+    let _ = writeln!(out, "- Campaign: `{}`", packet.campaign_id);
+    let _ = writeln!(out, "- Lane: `{}`", packet.lane_kind);
+    let _ = writeln!(
+        out,
+        "- Generated: `{}` by `{}` at `{}`",
+        packet.generation.generated_at, packet.generation.generated_by, packet.generation.git_sha
+    );
+    let _ = writeln!(
+        out,
+        "- Notice: {}",
+        markdown_cell(&packet.authorization_notice)
+    );
+    let _ = writeln!(out, "- Packet status: `{}`", packet.packet_status);
+    let _ = writeln!(
+        out,
+        "- Product evidence claim: `{}`",
+        packet.product_evidence_claim
+    );
+    let _ = writeln!(
+        out,
+        "- Claim boundary: {}",
+        markdown_cell(&packet.claim_text)
+    );
+
+    out.push_str("\n## Required ACK\n\n");
+    let _ = writeln!(out, "- Env var: `{}`", packet.required_ack.env_var);
+    let _ = writeln!(out, "- Exact value: `{}`", packet.required_ack.exact_value);
+    let _ = writeln!(out, "- Export: `{}`", packet.required_ack.export_command);
+    let _ = writeln!(
+        out,
+        "- Operator prompt: {}",
+        markdown_cell(&packet.required_ack.operator_prompt)
+    );
+
+    out.push_str("\n## Target Beads\n\n");
+    for bead in &packet.target_beads {
+        let _ = writeln!(out, "- `{bead}`");
+    }
+
+    out.push_str("\n## Required Executed Evidence After Approval\n\n");
+    for evidence in &packet.required_executed_evidence {
+        let _ = writeln!(out, "- {}", markdown_cell(evidence));
+    }
+
+    out.push_str("\n## Runner Environment\n\n");
+    out.push_str("| Env var | Purpose | Expected shape |\n");
+    out.push_str("|---|---|---|\n");
+    for entry in &packet.runner_env {
+        let _ = writeln!(
+            out,
+            "| `{}` | {} | {} |",
+            entry.env_var,
+            markdown_cell(&entry.purpose),
+            markdown_cell(&entry.expected_shape)
+        );
+    }
+
+    out.push_str("\n## Host Capability Requirements\n\n");
+    out.push_str("| Fact | Observed | Required | Proof |\n");
+    out.push_str("|---|---|---|---|\n");
+    for fact in &packet.host_capability_facts {
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | `{}` | `{}` |",
+            fact.fact_id, fact.observed_value, fact.required_value, fact.proof_path
+        );
+    }
+
+    out.push_str("\n## Path Effects\n\n");
+    out.push_str("| Root | Purpose | Path |\n");
+    out.push_str("|---|---|---|\n");
+    for root in &packet.safe_path_roots {
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | `{}` |",
+            root.root_id, root.purpose, root.path
+        );
+    }
+
+    out.push_str("\n## Destructive Operations Requiring Approval\n\n");
+    for operation in &packet.destructive_operations {
+        let _ = writeln!(out, "- `{operation}`");
+    }
+
+    out.push_str("\n## Expected Artifact Destinations\n\n");
+    for path in &packet.expected_artifact_paths {
+        let _ = writeln!(out, "- `{path}`");
+    }
+
+    out.push_str("\n## Cleanup Expectations\n\n");
+    let _ = writeln!(out, "- Policy: `{}`", packet.cleanup_policy.policy_id);
+    let _ = writeln!(
+        out,
+        "- Expected status: `{}`",
+        packet.cleanup_policy.expected_status
+    );
+    let _ = writeln!(
+        out,
+        "- Partial artifact policy: {}",
+        markdown_cell(&packet.cleanup_policy.partial_artifact_policy)
+    );
+
+    out.push_str("\n## Preflight References\n\n");
+    out.push_str("| Preflight | Age days | Max age days | Stale | Artifact | Summary |\n");
+    out.push_str("|---|---:|---:|---|---|---|\n");
+    for preflight in &packet.preflight_references {
+        let _ = writeln!(
+            out,
+            "| `{}` | {} | {} | `{}` | `{}` | {} |",
+            preflight.preflight_id,
+            preflight.age_days,
+            preflight.max_age_days,
+            preflight.stale,
+            preflight.artifact_path,
+            markdown_cell(&preflight.summary)
+        );
+    }
+
+    out.push_str("\n## Operator Risks\n\n");
+    for risk in &packet.operator_risks {
+        let _ = writeln!(out, "- {}", markdown_cell(risk));
+    }
+
+    out.push_str("\n## Command Transcript Template\n\n");
+    out.push_str("| Command | Role | Transcript path | Exact command |\n");
+    out.push_str("|---|---|---|---|\n");
+    for command in &packet.exact_commands {
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | `{}` | `{}` |",
+            command.command_id,
+            command.command_role,
+            command.transcript_path_template,
+            command.exact_command.replace('`', "'")
+        );
+    }
+
+    out
 }
 
 fn validate_top_level(
@@ -1053,6 +1307,40 @@ fn command_summary(
         .collect()
 }
 
+fn handoff_command_summary(
+    manifest: &PermissionedCampaignBrokerManifest,
+) -> Vec<PermissionedCampaignHandoffCommand> {
+    let campaign_component = sanitize_packet_component(&manifest.campaign_id);
+    manifest
+        .exact_commands
+        .iter()
+        .map(|command| {
+            let command_component = sanitize_packet_component(&command.command_id);
+            PermissionedCampaignHandoffCommand {
+                command_id: command.command_id.clone(),
+                command_role: command.command_role.label().to_owned(),
+                exact_command: command.exact_command.clone(),
+                transcript_path_template: format!(
+                    "artifacts/permissioned/{campaign_component}/commands/{command_component}.log"
+                ),
+            }
+        })
+        .collect()
+}
+
+fn sanitize_packet_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
 fn markdown_cell(value: &str) -> String {
     value.replace('|', "/")
 }
@@ -1215,6 +1503,103 @@ mod tests {
         assert!(fail_on_permissioned_campaign_broker_errors(&report).is_err());
     }
 
+    #[test]
+    fn xfstests_handoff_packet_matches_golden_fields() -> Result<()> {
+        let packet = generate_permissioned_campaign_handoff_packet(
+            &valid_xfstests_manifest(),
+            &config(),
+            generation(),
+        )?;
+        assert_eq!(packet.packet_schema_version, 1);
+        assert_eq!(
+            packet.required_ack.export_command,
+            "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices"
+        );
+        assert_eq!(packet.product_evidence_claim, "none");
+        assert_eq!(packet.packet_status, "ready_for_operator_approval");
+        assert!(
+            packet
+                .expected_artifact_paths
+                .iter()
+                .any(|path| path == "artifacts/xfstests/real-run/report.json")
+        );
+        assert!(packet.exact_commands.iter().any(|command| {
+            command.command_id == "xfstests_permissioned_run"
+                && command
+                    .transcript_path_template
+                    .ends_with("/xfstests_permissioned_run.log")
+        }));
+        let markdown = render_permissioned_campaign_handoff_markdown(&packet);
+        assert!(markdown.contains(PERMISSIONED_CAMPAIGN_HANDOFF_NOTICE));
+        assert!(markdown.contains("not executed evidence"));
+        assert!(markdown.contains("XFSTESTS_REAL_RUN_ACK"));
+        assert!(markdown.contains("Command Transcript Template"));
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_handoff_packet_matches_golden_fields() -> Result<()> {
+        let packet = generate_permissioned_campaign_handoff_packet(
+            &valid_swarm_manifest(),
+            &config(),
+            generation(),
+        )?;
+        assert_eq!(packet.lane_kind, "large_host_swarm_responsiveness");
+        assert!(
+            packet
+                .runner_env
+                .iter()
+                .any(|entry| entry.env_var == "FFS_SWARM_WORKLOAD_PERMISSIONED_RUNNER")
+        );
+        assert!(
+            packet
+                .host_capability_facts
+                .iter()
+                .any(|fact| fact.fact_id == "ram_gb" && fact.required_value == ">=256")
+        );
+        assert!(
+            packet
+                .destructive_operations
+                .iter()
+                .any(|operation| operation == "spawn_large_host_workers")
+        );
+        assert!(packet.exact_commands.iter().any(|command| {
+            command.command_id == "swarm_permissioned_run"
+                && command
+                    .exact_command
+                    .contains("FFS_SWARM_WORKLOAD_REAL_RUN_ACK")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_manifest_cannot_render_handoff_packet() {
+        let mut manifest = valid_xfstests_manifest();
+        manifest.safe_path_roots.push(path_root(
+            "repo_source",
+            "crates/ffs-harness",
+            PermissionedCampaignPathPurpose::RunnerWorkspace,
+        ));
+        assert!(
+            generate_permissioned_campaign_handoff_packet(&manifest, &config(), generation())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn handoff_markdown_is_deterministic() -> Result<()> {
+        let packet = generate_permissioned_campaign_handoff_packet(
+            &valid_swarm_manifest(),
+            &config(),
+            generation(),
+        )?;
+        assert_eq!(
+            render_permissioned_campaign_handoff_markdown(&packet),
+            render_permissioned_campaign_handoff_markdown(&packet)
+        );
+        Ok(())
+    }
+
     fn assert_valid(manifest: &PermissionedCampaignBrokerManifest) {
         let report = validate_permissioned_campaign_broker_manifest(manifest, &config());
         assert!(report.valid, "{:?}", report.issues);
@@ -1241,6 +1626,14 @@ mod tests {
         let parsed = parse_manifest_timestamp_epoch_days(REFERENCE_TIMESTAMP);
         assert!(parsed.is_some());
         parsed.unwrap_or(0)
+    }
+
+    fn generation() -> PermissionedCampaignHandoffGeneration {
+        PermissionedCampaignHandoffGeneration {
+            generated_at: REFERENCE_TIMESTAMP.to_owned(),
+            generated_by: "FrostyRobin".to_owned(),
+            git_sha: "abcdef123456".to_owned(),
+        }
     }
 
     fn valid_xfstests_manifest() -> PermissionedCampaignBrokerManifest {

@@ -102,8 +102,10 @@ use ffs_harness::{
     },
     permissioned_campaign_broker::{
         DEFAULT_PERMISSIONED_CAMPAIGN_BROKER_MANIFEST, PermissionedCampaignBrokerValidationConfig,
-        fail_on_permissioned_campaign_broker_errors, load_permissioned_campaign_broker_manifest,
+        PermissionedCampaignHandoffGeneration, fail_on_permissioned_campaign_broker_errors,
+        generate_permissioned_campaign_handoff_packet, load_permissioned_campaign_broker_manifest,
         render_permissioned_campaign_broker_markdown,
+        render_permissioned_campaign_handoff_markdown,
         validate_permissioned_campaign_broker_manifest,
     },
     proof_bundle::{
@@ -286,6 +288,18 @@ struct PermissionedCampaignBrokerCmdArgs {
 }
 
 #[derive(Debug)]
+struct PermissionedCampaignPacketCmdArgs {
+    manifest_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+    reference_timestamp: Option<String>,
+    generated_at: String,
+    generated_by: String,
+    git_sha: String,
+}
+
+#[derive(Debug)]
 struct AdaptiveRuntimeRunnerCmdArgs {
     mode: AdaptiveRuntimeRunnerMode,
     artifact_root: String,
@@ -314,9 +328,28 @@ fn main() {
     }
 }
 
+fn run_manifest_command(command: Option<&str>, args: &[String]) -> Option<Result<()>> {
+    match command {
+        Some("validate-adaptive-runtime-manifest") => {
+            Some(validate_adaptive_runtime_manifest_cmd(args))
+        }
+        Some("validate-permissioned-campaign-broker") => {
+            Some(validate_permissioned_campaign_broker_cmd(args))
+        }
+        Some("generate-permissioned-campaign-packet") => {
+            Some(generate_permissioned_campaign_packet_cmd(args))
+        }
+        _ => None,
+    }
+}
+
 fn run() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str);
+    let command_args = args.get(1..).unwrap_or(&[]);
+    if let Some(result) = run_manifest_command(cmd, command_args) {
+        return result;
+    }
 
     match cmd {
         Some("parity") => parity_cmd(),
@@ -346,12 +379,6 @@ fn run() -> Result<()> {
         Some("validate-fuzz-smoke") => validate_fuzz_smoke_cmd(&args[1..]),
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
         Some("adaptive-runtime-runner") => adaptive_runtime_runner_cmd(&args[1..]),
-        Some("validate-adaptive-runtime-manifest") => {
-            validate_adaptive_runtime_manifest_cmd(&args[1..])
-        }
-        Some("validate-permissioned-campaign-broker") => {
-            validate_permissioned_campaign_broker_cmd(&args[1..])
-        }
         Some("validate-proof-bundle") => validate_proof_bundle_cmd(&args[1..]),
         Some("evaluate-release-gates") => evaluate_release_gates_cmd(&args[1..]),
         Some("validate-performance-baseline-manifest") => {
@@ -2521,6 +2548,153 @@ fn parse_permissioned_campaign_broker_cmd_args(
         summary_out_path,
         format,
         reference_timestamp,
+    }))
+}
+
+fn generate_permissioned_campaign_packet_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_permissioned_campaign_packet_cmd_args(args)? else {
+        return Ok(());
+    };
+    let manifest = load_permissioned_campaign_broker_manifest(Path::new(&cmd_args.manifest_path))?;
+    let reference_epoch_days = match &cmd_args.reference_timestamp {
+        Some(timestamp) => parse_manifest_timestamp_epoch_days(timestamp)
+            .with_context(|| format!("invalid --reference-timestamp {timestamp}"))?,
+        None => {
+            PermissionedCampaignBrokerValidationConfig::with_current_reference()
+                .reference_epoch_days
+        }
+    };
+    let validation_config = PermissionedCampaignBrokerValidationConfig {
+        reference_epoch_days,
+    };
+    let generation = PermissionedCampaignHandoffGeneration {
+        generated_at: cmd_args.generated_at,
+        generated_by: cmd_args.generated_by,
+        git_sha: cmd_args.git_sha,
+    };
+    let packet =
+        generate_permissioned_campaign_handoff_packet(&manifest, &validation_config, generation)?;
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&packet)?,
+        ProofBundleFormat::Markdown => render_permissioned_campaign_handoff_markdown(&packet),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "permissioned campaign handoff packet written: {} packet_id={}",
+            path, packet.packet_id
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!(
+                "{}\n",
+                render_permissioned_campaign_handoff_markdown(&packet)
+            ),
+        )?;
+        println!("permissioned campaign handoff summary written: {path}");
+    }
+
+    Ok(())
+}
+
+fn parse_permissioned_campaign_packet_cmd_args(
+    args: &[String],
+) -> Result<Option<PermissionedCampaignPacketCmdArgs>> {
+    let mut manifest_path = DEFAULT_PERMISSIONED_CAMPAIGN_BROKER_MANIFEST.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut reference_timestamp: Option<String> = None;
+    let mut generated_at: Option<String> = None;
+    let mut generated_by: Option<String> = None;
+    let mut git_sha: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                args.get(i)
+                    .context("--manifest requires a path")?
+                    .clone_into(&mut manifest_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--reference-timestamp" => {
+                i += 1;
+                reference_timestamp = Some(
+                    args.get(i)
+                        .context("--reference-timestamp requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--generated-at" => {
+                i += 1;
+                generated_at = Some(
+                    args.get(i)
+                        .context("--generated-at requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--generated-by" => {
+                i += 1;
+                generated_by = Some(
+                    args.get(i)
+                        .context("--generated-by requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--git-sha" => {
+                i += 1;
+                git_sha = Some(
+                    args.get(i)
+                        .context("--git-sha requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_permissioned_campaign_packet_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown generate-permissioned-campaign-packet argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(PermissionedCampaignPacketCmdArgs {
+        manifest_path,
+        out_path,
+        summary_out_path,
+        format,
+        reference_timestamp,
+        generated_at: generated_at.unwrap_or_else(current_unix_timestamp_label),
+        generated_by: generated_by
+            .or_else(|| env::var("AGENT_NAME").ok())
+            .unwrap_or_else(|| "unknown-agent".to_owned()),
+        git_sha: git_sha
+            .or_else(|| env::var("GIT_SHA").ok())
+            .unwrap_or_else(|| "unknown".to_owned()),
     }))
 }
 
@@ -5462,6 +5636,9 @@ fn print_usage_core_commands() {
         "  ffs-harness validate-permissioned-campaign-broker [--manifest FILE] [--format json|markdown] [--out FILE] [--summary-out FILE] [--reference-timestamp TS]"
     );
     println!(
+        "  ffs-harness generate-permissioned-campaign-packet [--manifest FILE] [--format json|markdown] [--out FILE] [--summary-out FILE] [--generated-at TS] [--generated-by NAME] [--git-sha SHA]"
+    );
+    println!(
         "  ffs-harness validate-proof-bundle --bundle FILE [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
@@ -5561,6 +5738,7 @@ fn print_usage_examples() {
         "  ffs-harness validate-adaptive-runtime-manifest --manifest docs/adaptive-runtime-evidence-manifest.json --out artifacts/adaptive-runtime/report.json --summary-out artifacts/adaptive-runtime/report.md"
     );
     print_permissioned_campaign_broker_example();
+    print_permissioned_campaign_packet_example();
     println!(
         "  ffs-harness validate-proof-bundle --bundle artifacts/proof/bundle/manifest.json --out artifacts/proof/bundle/report.json --summary-out artifacts/proof/bundle/summary.md"
     );
@@ -5614,6 +5792,12 @@ fn print_usage_examples() {
 fn print_permissioned_campaign_broker_example() {
     println!(
         "  ffs-harness validate-permissioned-campaign-broker --manifest artifacts/permissioned/broker.json --out artifacts/permissioned/broker_report.json --summary-out artifacts/permissioned/broker_report.md"
+    );
+}
+
+fn print_permissioned_campaign_packet_example() {
+    println!(
+        "  ffs-harness generate-permissioned-campaign-packet --manifest artifacts/permissioned/broker.json --out artifacts/permissioned/handoff_packet.json --summary-out artifacts/permissioned/handoff_packet.md"
     );
 }
 
@@ -6002,6 +6186,22 @@ fn print_permissioned_campaign_broker_usage() {
     println!("  --out FILE                         Write selected-format validation report");
     println!("  --summary-out FILE                 Write Markdown inspection summary");
     println!("  --reference-timestamp RFC3339      Freshness reference timestamp (default: now)");
+}
+
+fn print_permissioned_campaign_packet_usage() {
+    println!("Usage: ffs-harness generate-permissioned-campaign-packet [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!(
+        "  --manifest FILE                    Read permissioned campaign broker manifest JSON"
+    );
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write selected-format handoff packet");
+    println!("  --summary-out FILE                 Write Markdown handoff packet");
+    println!("  --reference-timestamp RFC3339      Freshness reference timestamp (default: now)");
+    println!("  --generated-at TS                  Override packet generated_at");
+    println!("  --generated-by NAME                Override packet generator identity");
+    println!("  --git-sha SHA                      Override packet git_sha");
 }
 
 fn print_adaptive_runtime_runner_usage() {
