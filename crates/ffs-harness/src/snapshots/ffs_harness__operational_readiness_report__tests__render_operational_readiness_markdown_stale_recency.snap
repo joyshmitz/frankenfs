@@ -1,0 +1,43 @@
+---
+source: crates/ffs-harness/src/operational_readiness_report.rs
+expression: markdown
+---
+# FrankenFS Operational Readiness
+
+- Source root: `$FIXTURE`
+- Sources: 1 manifests, 1 legacy summaries, 0 ignored JSON files
+- Readiness events: 9
+- Readiness event envelope: version=1 lanes=fuse_lane,fuzz_smoke,mounted_scenario_matrix,performance,proof_bundle,release_gate,repair_policy,writeback_cache,xfstests
+- Correlation graph: event_nodes=9 parent_edges=9 orphan_parent_edges=0 aggregate_events=0
+- Totals: pass=2 fail=4 skip=2 error=2 product_failures=2 environment_blockers=4
+- Diagnostics: duplicate_scenarios=0 stale_git_shas=0 stale_artifacts=2 invalid_timestamps=0 missing_logs=0
+- Contract: failed=true missing_workstreams=0 violations=9
+
+## Stale Artifacts
+- `$FIXTURE/legacy_result.json` `legacy_fuse_gate` run `run-abc123` age=5d max=3d created_at=2026-05-01T12:00:00Z
+- `$FIXTURE/manifest.json` `operational_readiness` run `run-operational` age=5d max=3d created_at=2026-05-01T00:00:00Z
+
+## Workstreams
+- `fuse_lane`: pass=0 fail=1 skip=1 error=0 product_failures=0 environment_blockers=2
+- `fuzz_smoke`: pass=0 fail=0 skip=0 error=1 product_failures=0 environment_blockers=1
+- `mounted_scenario_matrix`: pass=1 fail=0 skip=0 error=0 product_failures=0 environment_blockers=0
+- `performance`: pass=0 fail=0 skip=0 error=1 product_failures=0 environment_blockers=1
+- `proof_bundle`: pass=0 fail=1 skip=0 error=0 product_failures=0 environment_blockers=0
+- `release_gate`: pass=0 fail=0 skip=1 error=0 product_failures=0 environment_blockers=0
+- `repair_policy`: pass=0 fail=1 skip=0 error=0 product_failures=1 environment_blockers=0
+- `writeback_cache`: pass=0 fail=1 skip=0 error=0 product_failures=1 environment_blockers=0
+- `xfstests`: pass=1 fail=0 skip=0 error=0 product_failures=0 environment_blockers=0
+
+## Scenarios
+| Workstream | Scenario | Outcome | Failure kind | Events | Source | Logs |
+|---|---|---:|---|---|---|---|
+| `fuse_lane` | `legacy_fuse_capability` | `Fail` | stale_artifact / environment_blocker |  | `$FIXTURE/legacy_result.json` | stdout `run.log`<br>artifact `run.log` |
+| `fuse_lane` | `fuse_capability_probe` | `Skip` | stale_artifact / fuse_permission_skip | event `event_fuse_capability_probe`<br>parent `report_run-operational`<br>artifact `fuse/capability.json` | `$FIXTURE/manifest.json` | stdout `fuse_capability_probe/stdout.log`<br>stderr `fuse_capability_probe/stderr.log`<br>artifact `fuse/capability.json` |
+| `fuzz_smoke` | `fuzz_repair_smoke` | `Error` | stale_artifact / worker_dependency_missing | event `event_fuzz_repair_smoke`<br>parent `report_run-operational`<br>artifact `fuzz/repair.json` | `$FIXTURE/manifest.json` | stdout `fuzz_repair_smoke/stdout.log`<br>stderr `fuzz_repair_smoke/stderr.log`<br>artifact `fuzz/repair.json` |
+| `mounted_scenario_matrix` | `mounted_ext4_rw` | `Pass` | stale_artifact /  | event `event_mounted_ext4_rw`<br>parent `report_run-operational`<br>artifact `mounted/ext4_rw.json` | `$FIXTURE/manifest.json` | stdout `mounted_ext4_rw/stdout.log`<br>stderr `mounted_ext4_rw/stderr.log`<br>artifact `mounted/ext4_rw.json` |
+| `performance` | `perf_baseline_run` | `Error` | stale_artifact / host_environment_failure | event `event_perf_baseline_run`<br>parent `report_run-operational`<br>artifact `perf/baseline.json` | `$FIXTURE/manifest.json` | stdout `perf_baseline_run/stdout.log`<br>stderr `perf_baseline_run/stderr.log`<br>artifact `perf/baseline.json` |
+| `proof_bundle` | `proof_bundle_stale` | `Fail` | stale_artifact / stale_tracker_tooling_failure | event `event_proof_bundle_stale`<br>parent `report_run-operational`<br>artifact `proof/bundle.json` | `$FIXTURE/manifest.json` | stdout `proof_bundle_stale/stdout.log`<br>stderr `proof_bundle_stale/stderr.log`<br>artifact `proof/bundle.json` |
+| `release_gate` | `release_gate_unsupported` | `Skip` | stale_artifact / unsupported_v1_scope | event `event_release_gate_unsupported`<br>parent `report_run-operational`<br>artifact `release/unsupported.json` | `$FIXTURE/manifest.json` | stdout `release_gate_unsupported/stdout.log`<br>stderr `release_gate_unsupported/stderr.log`<br>artifact `release/unsupported.json` |
+| `repair_policy` | `repair_policy_refusal` | `Fail` | stale_artifact / product_failure | event `event_repair_policy_refusal`<br>parent `report_run-operational`<br>artifact `repair/policy.json` | `$FIXTURE/manifest.json` | stdout `repair_policy_refusal/stdout.log`<br>stderr `repair_policy_refusal/stderr.log`<br>artifact `repair/policy.json` |
+| `writeback_cache` | `writeback_crash_matrix` | `Fail` | stale_artifact / product_failure | event `event_writeback_crash_matrix`<br>parent `report_run-operational`<br>artifact `writeback/crash.json` | `$FIXTURE/manifest.json` | stdout `writeback_crash_matrix/stdout.log`<br>stderr `writeback_crash_matrix/stderr.log`<br>artifact `writeback/crash.json` |
+| `xfstests` | `xfstests_generic_subset` | `Pass` | stale_artifact /  | event `event_xfstests_generic_subset`<br>parent `report_run-operational`<br>artifact `xfstests/results.json` | `$FIXTURE/manifest.json` | stdout `xfstests_generic_subset/stdout.log`<br>stderr `xfstests_generic_subset/stderr.log`<br>artifact `xfstests/results.json` |

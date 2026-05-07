@@ -1568,6 +1568,19 @@ mod tests {
     };
     use tempfile::TempDir;
 
+    fn normalize_report_source_paths(report: &mut OperationalReadinessReport, fixture_root: &str) {
+        report.source_root = "$FIXTURE".to_owned();
+        for row in &mut report.scenarios {
+            row.source_path = row.source_path.replace(fixture_root, "$FIXTURE");
+        }
+        for stale in &mut report.stale_artifacts {
+            stale.source_path = stale.source_path.replace(fixture_root, "$FIXTURE");
+        }
+        for invalid in &mut report.invalid_artifact_timestamps {
+            invalid.source_path = invalid.source_path.replace(fixture_root, "$FIXTURE");
+        }
+    }
+
     #[test]
     fn aggregates_mixed_operational_manifest_outcomes() {
         let fixture = ReadinessFixture::new();
@@ -1656,7 +1669,7 @@ mod tests {
         fixture.write_legacy("legacy_result.json", &legacy);
         fs::write(fixture.dir.path().join("run.log"), "legacy log").expect("write log");
 
-        let report = fixture.report_with_recency(Some("abc123"), 3, "2026-05-06T00:00:00Z");
+        let mut report = fixture.report_with_recency(Some("abc123"), 3, "2026-05-06T00:00:00Z");
 
         assert!(report.contract_failed);
         assert_eq!(report.stale_artifacts.len(), 2);
@@ -1681,9 +1694,15 @@ mod tests {
                 && row.artifact_age_days == Some(5)
                 && row.taxonomy_class == ReadinessTaxonomyClass::StaleArtifact
         }));
+        let fixture_root = fixture.dir.path().display().to_string();
+        normalize_report_source_paths(&mut report, &fixture_root);
         let markdown = render_operational_readiness_markdown(&report);
         assert!(markdown.contains("## Stale Artifacts"));
         assert!(markdown.contains("age=5d max=3d"));
+        insta::assert_snapshot!(
+            "render_operational_readiness_markdown_stale_recency",
+            markdown
+        );
     }
 
     #[test]
@@ -1726,7 +1745,7 @@ mod tests {
         fixture.write_legacy("legacy_result.json", &legacy);
         fs::write(fixture.dir.path().join("run.log"), "legacy log").expect("write log");
 
-        let report = fixture.report_with_recency(Some("abc123"), 3, "2026-05-06T00:00:00Z");
+        let mut report = fixture.report_with_recency(Some("abc123"), 3, "2026-05-06T00:00:00Z");
 
         assert!(report.contract_failed);
         assert!(report.stale_artifacts.is_empty());
@@ -1755,9 +1774,15 @@ mod tests {
             violation.remediation_id == "bd-7pw36:artifact-recency-timestamp"
                 && violation.violation.contains("after the recency reference")
         }));
+        let fixture_root = fixture.dir.path().display().to_string();
+        normalize_report_source_paths(&mut report, &fixture_root);
         let markdown = render_operational_readiness_markdown(&report);
         assert!(markdown.contains("## Invalid Artifact Timestamps"));
         assert!(markdown.contains("after the recency reference"));
+        insta::assert_snapshot!(
+            "render_operational_readiness_markdown_future_timestamp_refusal",
+            markdown
+        );
     }
 
     #[test]
@@ -1811,10 +1836,7 @@ mod tests {
 
         let mut report = fixture.report(Some("abc123"));
         let fixture_root = fixture.dir.path().display().to_string();
-        report.source_root = "$FIXTURE".to_owned();
-        for row in &mut report.scenarios {
-            row.source_path = row.source_path.replace(&fixture_root, "$FIXTURE");
-        }
+        normalize_report_source_paths(&mut report, &fixture_root);
         let markdown = render_operational_readiness_markdown(&report);
 
         assert!(markdown.contains("# FrankenFS Operational Readiness"));
