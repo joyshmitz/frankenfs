@@ -6,17 +6,17 @@ use crate::mounted_write_error_classes::{
     parse_mounted_write_error_classes, validate_mounted_write_error_classes,
 };
 use crate::repair_corpus::{parse_repair_corpus, validate_repair_corpus};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use ffs_ondisk::{
-    parse_dir_block, parse_extent_tree, parse_leaf_items, parse_sys_chunk_array, BtrfsSuperblock,
-    Ext4GroupDesc, Ext4Inode, Ext4Superblock,
+    BtrfsSuperblock, Ext4GroupDesc, Ext4Inode, Ext4Superblock, parse_dir_block, parse_extent_tree,
+    parse_leaf_items, parse_sys_chunk_array,
 };
 use ffs_types::ParseError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Component, Path};
 use std::time::{Duration, Instant};
 
@@ -979,9 +979,11 @@ mod tests {
     fn malformed_mounted_write_error_catalog_bytes_use_owned_class() {
         let execution = execute_target("mounted_write_error_classes_catalog", br#"{"entries":["#);
         assert_eq!(execution.actual_class, "MountedWriteErrorClassesInvalid");
-        assert!(execution
-            .error_detail
-            .contains("mounted write error classes JSON decode failed"));
+        assert!(
+            execution
+                .error_detail
+                .contains("mounted write error classes JSON decode failed")
+        );
     }
 
     #[test]
