@@ -1283,11 +1283,36 @@ mod tests {
         insta::assert_snapshot!("report_line_fail", line);
     }
 
+    /// bd-2hfj9 — golden-output snapshot for the INCONCLUSIVE verdict
+    /// branch of `format_report_line`. Completes the four-verdict
+    /// coverage trio (PASS/WARN/FAIL/INCONCLUSIVE). Inconclusive is
+    /// reached when sample counts are below MIN_SAMPLE_SIZE AND the
+    /// envelope verdict is Pass (delta in (noise_floor, warn_percent]).
+    /// Uses baseline=[100,101] / current=[107,108] (n=2, ~7% delta)
+    /// which yields a stable Inconclusive via the envelope fallback.
+    #[test]
+    fn report_line_inconclusive_snapshot() {
+        let comparator = RegressionComparator::new(ComparatorConfig::default());
+        let result = comparator.compare(
+            "op_inconclusive",
+            &[100.0, 101.0],
+            &[107.0, 108.0],
+            &test_envelope(),
+        );
+        assert_eq!(
+            result.final_verdict,
+            ComparisonVerdict::Inconclusive,
+            "fixture must reach the INCONCLUSIVE branch"
+        );
+        let line = format_report_line(&result);
+        insta::assert_snapshot!("report_line_inconclusive", line);
+    }
+
     /// bd-pwyiy — golden-output snapshot for the WARN verdict branch
     /// of `format_report_line`. Pairs with `report_line_pass_snapshot`
     /// and `report_line_fail_snapshot` to cover three of the four
-    /// ComparisonVerdict tag mappings (Inconclusive remains uncovered;
-    /// it requires a contrived no-effect-zone-with-tiny-sample input).
+    /// ComparisonVerdict tag mappings (Inconclusive covered by
+    /// bd-2hfj9 above).
     /// Reuses the deterministic 10-sample inputs from
     /// `comparator_warn_zone_with_significance` which yield a stable
     /// ~+15% delta with high t-test significance, exercising the

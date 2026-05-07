@@ -1,0 +1,5 @@
+---
+source: crates/ffs-harness/src/perf_comparison.rs
+expression: line
+---
+[INCONCLUSIVE] op_inconclusive: +7.0% (d=9.90 large, p=N/A) — envelope says Ok, marking Inconclusive
