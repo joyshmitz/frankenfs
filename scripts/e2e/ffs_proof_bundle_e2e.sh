@@ -204,7 +204,7 @@ def artifact_hash_chain_sha256(bundle_records: list[dict[str, object]]) -> str:
 manifest = {
     "schema_version": 1,
     "bundle_id": "bd-rchk0.5.4.1-proof-bundle",
-    "generated_at": "2030-01-01T00:00:00Z",
+    "generated_at": "2026-05-01T00:00:00Z",
     "git_sha": git_sha,
     "toolchain": "rust-nightly-2024",
     "kernel": "linux-proof-bundle-e2e",

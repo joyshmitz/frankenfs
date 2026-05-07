@@ -200,7 +200,7 @@ for lane in lanes:
 manifest = {
     "schema_version": 1,
     "bundle_id": "bd-rchk0.5.6.1-release-gate-bundle",
-    "generated_at": "2030-01-01T00:00:00Z",
+    "generated_at": "2026-05-01T00:00:00Z",
     "git_sha": git_sha,
     "toolchain": "rust-nightly-2024",
     "kernel": "linux-release-gate-e2e",
