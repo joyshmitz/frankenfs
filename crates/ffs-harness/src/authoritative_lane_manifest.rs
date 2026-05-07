@@ -161,6 +161,21 @@ fn check_probe_freshness(
             "configure a positive freshness_ttl_seconds; stale probes cannot pass authoritative gates",
         ));
     }
+    if manifest.probe_at_unix > manifest.now_unix {
+        return Some(if authoritative {
+            fail_closed(
+                manifest,
+                "future_capability_probe",
+                "rerun fuse-capability-probe; authoritative runs cannot trust a future-dated probe",
+            )
+        } else {
+            skip(
+                manifest,
+                "future_capability_probe",
+                "local run skipped — rerun fuse-capability-probe with a non-future timestamp",
+            )
+        });
+    }
     let elapsed = manifest.now_unix.saturating_sub(manifest.probe_at_unix);
     if elapsed > manifest.freshness_ttl_seconds {
         return Some(if authoritative {
@@ -385,12 +400,8 @@ mod tests {
         manifest.environment_kind = "local_developer".to_owned();
         manifest.mounted_logs_present = false;
         let decision = evaluate_authoritative_lane(&manifest);
-        match &decision {
-            AuthoritativeLaneDecision::Skip { reason, .. } => {
-                assert_eq!(reason, "local_developer_run");
-            }
-            other => panic!("expected Skip, got {other:?}"),
-        }
+        assert_eq!(reason(&decision), Some("local_developer_run"));
+        assert!(matches!(decision, AuthoritativeLaneDecision::Skip { .. }));
     }
 
     #[test]
@@ -400,12 +411,8 @@ mod tests {
         manifest.observed_scenario_count = 0;
         manifest.mounted_logs_present = false;
         let decision = evaluate_authoritative_lane(&manifest);
-        match &decision {
-            AuthoritativeLaneDecision::Skip { reason, .. } => {
-                assert_eq!(reason, "insufficient_scenario_coverage");
-            }
-            other => panic!("expected Skip, got {other:?}"),
-        }
+        assert_eq!(reason(&decision), Some("insufficient_scenario_coverage"));
+        assert!(matches!(decision, AuthoritativeLaneDecision::Skip { .. }));
     }
 
     #[test]
@@ -427,6 +434,28 @@ mod tests {
         manifest.now_unix = manifest.probe_at_unix + manifest.freshness_ttl_seconds + 1;
         let decision = evaluate_authoritative_lane(&manifest);
         assert_eq!(reason(&decision), Some("stale_capability_probe"));
+        assert!(matches!(decision, AuthoritativeLaneDecision::Skip { .. }));
+    }
+
+    #[test]
+    fn future_probe_fails_authoritative_run() {
+        let mut manifest = happy_manifest();
+        manifest.probe_at_unix = manifest.now_unix + 1;
+        let decision = evaluate_authoritative_lane(&manifest);
+        assert_eq!(reason(&decision), Some("future_capability_probe"));
+        assert!(matches!(
+            decision,
+            AuthoritativeLaneDecision::FailClosedAuthoritative { .. }
+        ));
+    }
+
+    #[test]
+    fn future_probe_skips_local_run() {
+        let mut manifest = happy_manifest();
+        manifest.environment_kind = "local_developer".to_owned();
+        manifest.probe_at_unix = manifest.now_unix + 1;
+        let decision = evaluate_authoritative_lane(&manifest);
+        assert_eq!(reason(&decision), Some("future_capability_probe"));
         assert!(matches!(decision, AuthoritativeLaneDecision::Skip { .. }));
     }
 
