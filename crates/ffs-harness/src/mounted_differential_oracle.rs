@@ -1853,15 +1853,20 @@ mod tests {
     }
 
     #[test]
-    fn markdown_renders_diff_counts_and_gate_blocks() {
+    fn render_mounted_differential_oracle_markdown_diff_gate_blocks_snapshot() {
         let mut report = valid_report();
         report.scenarios[1].classification = MountedDifferentialClassification::Diff;
         report.scenarios[1].allowlist_id = None;
         let validation = validate_mounted_differential_oracle_report(&report);
         let markdown = render_mounted_differential_oracle_markdown(&validation);
         assert!(markdown.contains("Mounted Differential Oracle Report"));
+        assert!(markdown.contains("bd-rchk0.5.2.1"));
         assert!(markdown.contains("`diff`: 1"));
         assert!(markdown.contains("Host Skip Classes"));
         assert!(markdown.contains("Release Gate Blocks"));
+        insta::assert_snapshot!(
+            "render_mounted_differential_oracle_markdown_diff_gate_blocks_snapshot",
+            markdown
+        );
     }
 }

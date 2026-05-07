@@ -1,0 +1,36 @@
+---
+source: crates/ffs-harness/src/mounted_differential_oracle.rs
+expression: markdown
+---
+# Mounted Differential Oracle Report
+
+- Bead: `bd-rchk0.5.2.1`
+- Valid: `false`
+- Scenarios: `10`
+- Allowlists: `1`
+
+## Classifications
+
+- `diff`: 1
+- `host_skip`: 7
+- `pass`: 1
+- `unsupported`: 1
+
+## Host Skip Classes
+
+- `btrfs_default_permissions_root_owned`
+- `fuse_missing`
+- `fuse_permission_denied`
+- `kernel_mount_permission_denied`
+- `mkfs_btrfs_missing`
+- `mkfs_ext4_missing`
+- `unsupported_scope`
+
+## Release Gate Blocks
+
+- mounted_diff_ext4_fiemap_transport_errno:fiemap_probe has unresolved kernel/FrankenFS disagreement
+
+## Errors
+
+- scenario mounted_diff_ext4_fiemap_transport_errno has unresolved diff without narrow allowlist
+- mounted differential report missing allowed_diff classification
