@@ -857,6 +857,7 @@ dependencies = [
  "anyhow",
  "asupersync",
  "blake3",
+ "crc32c",
  "criterion",
  "ffs-alloc",
  "ffs-block",

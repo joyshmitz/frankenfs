@@ -103,14 +103,8 @@ fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-fn fail() -> ! {
-    std::process::abort();
-}
-
 fn require(condition: bool) {
-    if !condition {
-        fail();
-    }
+    assert!(condition, "MemIoEngine fuzz model invariant violated");
 }
 
 fn checked_range(offset: u64, len: usize, capacity: usize) -> Option<std::ops::Range<usize>> {
@@ -130,7 +124,11 @@ fn expected_read(
 ) -> ExpectedCompletion {
     if let Some(range) = checked_range(offset, len, model.len()) {
         stats.record_read(len, true);
-        ExpectedCompletion::Read(model[range].to_vec())
+        let Some(bytes) = model.get(range) else {
+            require(false);
+            return ExpectedCompletion::Error;
+        };
+        ExpectedCompletion::Read(bytes.to_vec())
     } else {
         stats.record_read(len, false);
         ExpectedCompletion::Error
@@ -144,7 +142,11 @@ fn expected_write(
     stats: &mut ExpectedStats,
 ) -> ExpectedCompletion {
     if let Some(range) = checked_range(offset, payload.len(), model.len()) {
-        model[range].copy_from_slice(payload);
+        let Some(bytes) = model.get_mut(range) else {
+            require(false);
+            return ExpectedCompletion::Error;
+        };
+        bytes.copy_from_slice(payload);
         stats.record_write(payload.len(), true);
         ExpectedCompletion::Write
     } else {
@@ -203,7 +205,7 @@ fn check_completion(actual: &IoCompletion, expected: &ExpectedCompletion) {
         (IoCompletion::Write, ExpectedCompletion::Write)
         | (IoCompletion::Sync, ExpectedCompletion::Sync)
         | (IoCompletion::Error(_), ExpectedCompletion::Error) => {}
-        _ => fail(),
+        _ => require(false),
     }
 }
 
