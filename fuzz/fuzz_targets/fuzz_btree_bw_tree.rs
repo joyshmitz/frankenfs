@@ -84,20 +84,17 @@ impl PageModel {
     }
 }
 
-fn fail() -> ! {
-    std::process::abort();
-}
-
 fn require(condition: bool) {
-    if !condition {
-        fail();
-    }
+    assert!(condition, "Bw-tree fuzz model invariant violated");
 }
 
 fn page_id(index: usize) -> PageId {
     PageId(match u64::try_from(index) {
         Ok(value) => value,
-        Err(_) => fail(),
+        Err(_) => {
+            require(false);
+            u64::MAX
+        }
     })
 }
 
@@ -133,8 +130,12 @@ fn insert_page(table: &MappingTable, models: &mut [PageModel], cursor: &mut Byte
     let key = cursor.key();
     let value = cursor.value();
     require(table.insert(page_id(index), key, value).is_ok());
-    models[index].entries.insert(key, value);
-    models[index].chain_len = models[index].chain_len.saturating_add(1);
+    let Some(model) = models.get_mut(index) else {
+        require(false);
+        return;
+    };
+    model.entries.insert(key, value);
+    model.chain_len = model.chain_len.saturating_add(1);
 }
 
 fn delete_page(table: &MappingTable, models: &mut [PageModel], cursor: &mut ByteCursor<'_>) {
@@ -143,8 +144,12 @@ fn delete_page(table: &MappingTable, models: &mut [PageModel], cursor: &mut Byte
     };
     let key = cursor.key();
     require(table.delete(page_id(index), key).is_ok());
-    models[index].entries.remove(&key);
-    models[index].chain_len = models[index].chain_len.saturating_add(1);
+    let Some(model) = models.get_mut(index) else {
+        require(false);
+        return;
+    };
+    model.entries.remove(&key);
+    model.chain_len = model.chain_len.saturating_add(1);
 }
 
 fn split_page(table: &MappingTable, models: &mut [PageModel], cursor: &mut ByteCursor<'_>) {
@@ -162,15 +167,19 @@ fn split_page(table: &MappingTable, models: &mut [PageModel], cursor: &mut ByteC
             .append_split_delta(page_id(index), separator, sibling)
             .is_ok(),
     );
-    let removed: Vec<_> = models[index]
+    let Some(model) = models.get_mut(index) else {
+        require(false);
+        return;
+    };
+    let removed: Vec<_> = model
         .entries
         .range(separator..)
         .map(|(key, _)| *key)
         .collect();
     for key in removed {
-        models[index].entries.remove(&key);
+        model.entries.remove(&key);
     }
-    models[index].chain_len = models[index].chain_len.saturating_add(1);
+    model.chain_len = model.chain_len.saturating_add(1);
 }
 
 fn merge_page(table: &MappingTable, models: &mut [PageModel], cursor: &mut ByteCursor<'_>) {
@@ -183,7 +192,11 @@ fn merge_page(table: &MappingTable, models: &mut [PageModel], cursor: &mut ByteC
         page_id(usize::from(cursor.next_u8()) % models.len())
     };
     require(table.append_merge_delta(page_id(index), sibling).is_ok());
-    models[index].chain_len = models[index].chain_len.saturating_add(1);
+    let Some(model) = models.get_mut(index) else {
+        require(false);
+        return;
+    };
+    model.chain_len = model.chain_len.saturating_add(1);
 }
 
 fn consolidate_page(table: &MappingTable, models: &mut [PageModel], cursor: &mut ByteCursor<'_>) {
@@ -191,11 +204,15 @@ fn consolidate_page(table: &MappingTable, models: &mut [PageModel], cursor: &mut
         return;
     };
     let config = cursor.config();
-    let before = models[index].chain_len;
-    let entries_count = models[index].entries.len();
-    let result = match table.consolidate_page(page_id(index), &config) {
-        Ok(result) => result,
-        Err(_) => fail(),
+    let Some(model) = models.get_mut(index) else {
+        require(false);
+        return;
+    };
+    let before = model.chain_len;
+    let entries_count = model.entries.len();
+    let Ok(result) = table.consolidate_page(page_id(index), &config) else {
+        require(false);
+        return;
     };
     require(result.chain_len_before == before);
     if before <= 1 {
@@ -210,7 +227,7 @@ fn consolidate_page(table: &MappingTable, models: &mut [PageModel], cursor: &mut
         require(result.chain_len_after == 1);
         require(result.entries_count == entries_count);
         require(result.cas_attempts >= 1);
-        models[index].chain_len = 1;
+        model.chain_len = 1;
     }
 }
 
@@ -220,9 +237,9 @@ fn consolidate_all(table: &MappingTable, models: &mut [PageModel], cursor: &mut 
         .iter()
         .filter(|model| model.chain_len > config.chain_threshold)
         .count();
-    let actual = match table.consolidate_all(&config) {
-        Ok(count) => count,
-        Err(_) => fail(),
+    let Ok(actual) = table.consolidate_all(&config) else {
+        require(false);
+        return;
     };
     require(actual == expected);
     for model in models {
@@ -237,10 +254,14 @@ fn check_lookup(table: &MappingTable, models: &[PageModel], cursor: &mut ByteCur
         return;
     };
     let key = cursor.key();
-    let expected = models[index].entries.get(&key).copied();
-    let actual = match table.lookup(page_id(index), key) {
-        Ok(value) => value,
-        Err(_) => fail(),
+    let Some(model) = models.get(index) else {
+        require(false);
+        return;
+    };
+    let expected = model.entries.get(&key).copied();
+    let Ok(actual) = table.lookup(page_id(index), key) else {
+        require(false);
+        return;
     };
     require(actual == expected);
 }
@@ -272,15 +293,15 @@ fn verify_pages(table: &MappingTable, models: &[PageModel]) {
     require(models.len() <= MAX_VERIFY_PAGES);
     for (index, model) in models.iter().enumerate() {
         let id = page_id(index);
-        let state = match table.materialize_page(id) {
-            Ok(state) => state,
-            Err(_) => fail(),
+        let Ok(state) = table.materialize_page(id) else {
+            require(false);
+            return;
         };
         require(state == model.entries);
 
-        let snapshot = match table.get_page(id) {
-            Ok(snapshot) => snapshot,
-            Err(_) => fail(),
+        let Ok(snapshot) = table.get_page(id) else {
+            require(false);
+            return;
         };
         require(chain_length(&snapshot.head) == model.chain_len);
     }
