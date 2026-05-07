@@ -4,8 +4,8 @@ use asupersync::Cx;
 use ffs_block::{BlockBuf, BlockDevice};
 use ffs_error::{FfsError, Result};
 use ffs_journal::{
-    replay_jbd2, replay_jbd2_segments, Jbd2Superblock, Jbd2Writer, JournalRegion, JournalSegment,
-    ReplayOutcome,
+    Jbd2Superblock, Jbd2Writer, JournalRegion, JournalSegment, ReplayOutcome, replay_jbd2,
+    replay_jbd2_segments,
 };
 use ffs_types::BlockNumber;
 use libfuzzer_sys::fuzz_target;
@@ -223,16 +223,20 @@ fn structured_journal_blocks(
     first_txn.add_write(target_b, first_payload_b);
     first_txn.add_revoke(target_b);
     let first_seq = first_txn.sequence();
-    if writer.commit_transaction(&cx, &dev, &first_txn).is_err() {
-        std::process::abort();
-    }
+    let first_commit = writer.commit_transaction(&cx, &dev, &first_txn);
+    assert!(
+        first_commit.is_ok(),
+        "structured first JBD2 transaction commit must succeed"
+    );
 
     let mut second_txn = writer.begin_transaction();
     second_txn.add_write(target_a, second_payload_a.clone());
     let second_seq = second_txn.sequence();
-    if writer.commit_transaction(&cx, &dev, &second_txn).is_err() {
-        std::process::abort();
-    }
+    let second_commit = writer.commit_transaction(&cx, &dev, &second_txn);
+    assert!(
+        second_commit.is_ok(),
+        "structured second JBD2 transaction commit must succeed"
+    );
 
     let journal_len = usize::try_from(writer.head()).unwrap_or(usize::MAX);
     let snapshot = dev.snapshot();
@@ -347,7 +351,14 @@ fn assert_results_match(
                 "{context} should deterministically reject the same malformed journal"
             );
         }
-        _ => std::process::abort(),
+        (left, right) => {
+            let left_kind = if left.is_ok() { "Ok" } else { "Err" };
+            let right_kind = if right.is_ok() { "Ok" } else { "Err" };
+            assert_eq!(
+                left_kind, right_kind,
+                "{context} should deterministically agree on replay success or rejection"
+            );
+        }
     }
 }
 
@@ -359,9 +370,13 @@ fn assert_structured_writer_replay(data: &[u8]) {
 
     let direct = MemBlockDevice::from_journal_blocks(&journal);
     let direct_result = replay_jbd2(&cx, &direct, region);
+    assert!(
+        direct_result.is_ok(),
+        "structured JBD2 replay must accept the writer-produced journal"
+    );
     let outcome = match &direct_result {
         Ok(outcome) => outcome,
-        Err(_) => std::process::abort(),
+        Err(_) => return,
     };
 
     assert_eq!(outcome.committed_sequences, expected_sequences);
@@ -376,14 +391,26 @@ fn assert_structured_writer_replay(data: &[u8]) {
     assert_eq!(outcome.stats.orphaned_commit_blocks, 0);
     assert_replay_invariants(outcome);
 
-    let target_a_block = direct
-        .read_block(&cx, target_a)
-        .unwrap_or_else(|_| std::process::abort());
+    let target_a_result = direct.read_block(&cx, target_a);
+    assert!(
+        target_a_result.is_ok(),
+        "structured JBD2 replay target A read must succeed"
+    );
+    let target_a_block = match target_a_result {
+        Ok(block) => block,
+        Err(_) => return,
+    };
     assert_eq!(target_a_block.as_slice(), expected_a.as_slice());
 
-    let target_b_block = direct
-        .read_block(&cx, target_b)
-        .unwrap_or_else(|_| std::process::abort());
+    let target_b_result = direct.read_block(&cx, target_b);
+    assert!(
+        target_b_result.is_ok(),
+        "structured JBD2 replay target B read must succeed"
+    );
+    let target_b_block = match target_b_result {
+        Ok(block) => block,
+        Err(_) => return,
+    };
     assert!(
         target_b_block.as_slice().iter().all(|byte| *byte == 0),
         "revoked structured JBD2 write target must remain zeroed"
