@@ -25,6 +25,15 @@ pub const PERMISSIONED_CAMPAIGN_HANDOFF_NOTICE: &str =
     "authorization handoff material only; not executed evidence and not a product pass/fail claim";
 pub const XFSTESTS_REAL_RUN_ACK_ENV: &str = "XFSTESTS_REAL_RUN_ACK";
 pub const XFSTESTS_REAL_RUN_ACK_VALUE: &str = "xfstests-may-mutate-test-and-scratch-devices";
+pub const SWARM_ENABLE_PERMISSIONED_ENV: &str = "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD";
+pub const SWARM_ENABLE_PERMISSIONED_VALUE: &str = "1";
+pub const SWARM_REAL_RUN_ACK_ENV: &str = "FFS_SWARM_WORKLOAD_REAL_RUN_ACK";
+pub const SWARM_REAL_RUN_ACK_VALUE: &str = "swarm-workload-may-use-permissioned-large-host";
+pub const SWARM_PERMISSIONED_RUNNER_ENV: &str = "FFS_SWARM_WORKLOAD_PERMISSIONED_RUNNER";
+pub const SWARM_ARTIFACT_ROOT_ENV: &str = "FFS_SWARM_WORKLOAD_ARTIFACT_ROOT";
+pub const SWARM_MIN_LOGICAL_CPUS: u32 = 64;
+pub const SWARM_MIN_RAM_GIB: u32 = 256;
+pub const SWARM_MIN_NUMA_NODES: u32 = 2;
 
 const ALLOWED_DESTRUCTIVE_OPERATIONS: [&str; 9] = [
     "mount_test_device",
@@ -402,6 +411,61 @@ pub struct PermissionedXfstestsBrokerAdapterInput {
 pub enum PermissionedXfstestsNotRunClassification {
     EnvironmentBlockerOnly,
     CountsAsPassingProductSignal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedSwarmBrokerAdapterInput {
+    pub campaign_id: String,
+    pub generated_at: String,
+    pub target_beads: Vec<String>,
+    pub permissioned_runner: String,
+    pub runner_workspace: String,
+    pub artifact_root: String,
+    pub workload_manifest_path: String,
+    pub adaptive_runtime_manifest_path: String,
+    pub resource_caps_path: String,
+    pub p99_attribution_ledger_path: String,
+    pub proof_bundle_manifest_path: String,
+    pub proof_bundle_lane_paths: Vec<String>,
+    pub raw_log_path: String,
+    pub release_gate_policy_path: String,
+    pub release_gate_output_path: String,
+    pub host_capability_proof_path: String,
+    pub numa_capability_proof_path: String,
+    pub preflight_id: String,
+    pub preflight_artifact_path: String,
+    pub preflight_observed_at_epoch_days: u32,
+    pub preflight_max_age_days: u32,
+    pub logical_cpu_count: u32,
+    pub ram_gib: u32,
+    pub numa_node_count: u32,
+    pub numa_topology_visible: bool,
+    pub release_claim_classification: PermissionedSwarmReleaseClaimClassification,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionedSwarmReleaseClaimClassification {
+    AuthoritativeLargeHost,
+    SmallHostSmoke,
+    CapabilityDowngradedSmoke,
+}
+
+impl PermissionedSwarmReleaseClaimClassification {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::AuthoritativeLargeHost => "authoritative_large_host",
+            Self::SmallHostSmoke => "small_host_smoke",
+            Self::CapabilityDowngradedSmoke => "capability_downgraded_smoke",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PermissionedSwarmHostCapability {
+    ready_for_authoritative_run: bool,
+    blockers: Vec<String>,
 }
 
 pub fn load_permissioned_campaign_broker_manifest(
@@ -806,6 +870,148 @@ pub fn generate_xfstests_handoff_packet(
     generate_permissioned_campaign_handoff_packet(&manifest, validation_config, generation)
 }
 
+pub fn build_swarm_broker_manifest(
+    input: &PermissionedSwarmBrokerAdapterInput,
+) -> Result<PermissionedCampaignBrokerManifest> {
+    validate_swarm_adapter_input(input)?;
+    let capability = swarm_host_capability(input);
+    let claim_text = swarm_claim_text(&capability);
+    let preflight_summary = swarm_preflight_summary(&capability);
+
+    Ok(PermissionedCampaignBrokerManifest {
+        schema_version: PERMISSIONED_CAMPAIGN_BROKER_SCHEMA_VERSION,
+        campaign_id: input.campaign_id.clone(),
+        lane_kind: PermissionedCampaignLaneKind::LargeHostSwarmResponsiveness,
+        target_beads: input.target_beads.clone(),
+        generated_at: input.generated_at.clone(),
+        required_ack: PermissionedCampaignAck {
+            env_var: SWARM_REAL_RUN_ACK_ENV.to_owned(),
+            exact_value: SWARM_REAL_RUN_ACK_VALUE.to_owned(),
+            operator_prompt:
+                "Approve permissioned large-host swarm workload execution after host proof review"
+                    .to_owned(),
+        },
+        required_runner_env: vec![
+            PermissionedCampaignRunnerEnv {
+                env_var: SWARM_ENABLE_PERMISSIONED_ENV.to_owned(),
+                purpose: "default-off opt-in that allows the permissioned swarm runner gate"
+                    .to_owned(),
+                expected_shape: SWARM_ENABLE_PERMISSIONED_VALUE.to_owned(),
+            },
+            PermissionedCampaignRunnerEnv {
+                env_var: SWARM_PERMISSIONED_RUNNER_ENV.to_owned(),
+                purpose: "operator-provided runner that writes authoritative large-host artifacts"
+                    .to_owned(),
+                expected_shape: input.permissioned_runner.clone(),
+            },
+            PermissionedCampaignRunnerEnv {
+                env_var: SWARM_ARTIFACT_ROOT_ENV.to_owned(),
+                purpose:
+                    "artifact root for workload reports, p99 attribution, proof-bundle lanes, and logs"
+                        .to_owned(),
+                expected_shape: input.artifact_root.clone(),
+            },
+        ],
+        host_capability_facts: vec![
+            PermissionedCampaignHostFact {
+                fact_id: "logical_cpus".to_owned(),
+                observed_value: input.logical_cpu_count.to_string(),
+                required_value: format!(">={SWARM_MIN_LOGICAL_CPUS}"),
+                proof_path: input.host_capability_proof_path.clone(),
+            },
+            PermissionedCampaignHostFact {
+                fact_id: "ram_gib".to_owned(),
+                observed_value: input.ram_gib.to_string(),
+                required_value: format!(">={SWARM_MIN_RAM_GIB}"),
+                proof_path: input.host_capability_proof_path.clone(),
+            },
+            PermissionedCampaignHostFact {
+                fact_id: "numa_topology_visible".to_owned(),
+                observed_value: input.numa_topology_visible.to_string(),
+                required_value: "true".to_owned(),
+                proof_path: input.numa_capability_proof_path.clone(),
+            },
+            PermissionedCampaignHostFact {
+                fact_id: "numa_nodes".to_owned(),
+                observed_value: input.numa_node_count.to_string(),
+                required_value: format!(">={SWARM_MIN_NUMA_NODES}"),
+                proof_path: input.numa_capability_proof_path.clone(),
+            },
+            PermissionedCampaignHostFact {
+                fact_id: "release_claim_classification".to_owned(),
+                observed_value: input.release_claim_classification.label().to_owned(),
+                required_value: "authoritative_large_host".to_owned(),
+                proof_path: input.preflight_artifact_path.clone(),
+            },
+        ],
+        safe_path_roots: vec![
+            PermissionedCampaignPathRoot {
+                root_id: "runner_workspace".to_owned(),
+                path: input.runner_workspace.clone(),
+                purpose: PermissionedCampaignPathPurpose::RunnerWorkspace,
+            },
+            PermissionedCampaignPathRoot {
+                root_id: "swarm_artifacts".to_owned(),
+                path: input.artifact_root.clone(),
+                purpose: PermissionedCampaignPathPurpose::ArtifactRoot,
+            },
+        ],
+        destructive_operations: vec![
+            "generate_filesystem_load".to_owned(),
+            "spawn_large_host_workers".to_owned(),
+            "consume_large_temp_storage".to_owned(),
+            "kill_replay_worker".to_owned(),
+        ],
+        expected_artifact_paths: swarm_expected_artifact_paths(input),
+        cleanup_policy: PermissionedCampaignCleanupPolicy {
+            policy_id: "swarm_preserve_permissioned_artifacts".to_owned(),
+            expected_status: PermissionedCampaignCleanupStatus::PreservedArtifacts,
+            partial_artifact_policy:
+                "preserve resource caps, p99 attribution, proof-bundle lanes, raw logs, release-gate output, stdout, and stderr"
+                    .to_owned(),
+        },
+        claim_boundary: PermissionedCampaignClaimBoundary {
+            packet_status: PermissionedCampaignPacketStatus::ReadyForOperatorApproval,
+            product_evidence_claim: PermissionedCampaignProductEvidenceClaim::None,
+            required_executed_evidence: vec![
+                "swarm workload harness report with measured_authoritative permissioned_large_host row"
+                    .to_owned(),
+                "p99 attribution ledger for swarm_tail_latency".to_owned(),
+                "proof-bundle lanes: swarm_workload_harness, swarm_tail_latency, adaptive_runtime"
+                    .to_owned(),
+                "release-gate output preserving the swarm.responsiveness decision".to_owned(),
+                "raw command transcript, stdout, and stderr logs".to_owned(),
+            ],
+            claim_text,
+        },
+        preflight_references: vec![PermissionedCampaignPreflightReference {
+            preflight_id: input.preflight_id.clone(),
+            artifact_path: input.preflight_artifact_path.clone(),
+            observed_at_epoch_days: input.preflight_observed_at_epoch_days,
+            max_age_days: input.preflight_max_age_days,
+            summary: preflight_summary,
+        }],
+        operator_risks: vec![
+            "permissioned swarm execution may consume >=64 CPUs and large temporary storage"
+                .to_owned(),
+            "raw logs, p99 attribution, proof-bundle lanes, and release-gate output must be preserved before cleanup"
+                .to_owned(),
+            "small_host_smoke and capability_downgraded_smoke are blocker evidence and cannot upgrade swarm.responsiveness"
+                .to_owned(),
+        ],
+        exact_commands: swarm_exact_commands(input),
+    })
+}
+
+pub fn generate_swarm_handoff_packet(
+    input: &PermissionedSwarmBrokerAdapterInput,
+    validation_config: &PermissionedCampaignBrokerValidationConfig,
+    generation: PermissionedCampaignHandoffGeneration,
+) -> Result<PermissionedCampaignHandoffPacket> {
+    let manifest = build_swarm_broker_manifest(input)?;
+    generate_permissioned_campaign_handoff_packet(&manifest, validation_config, generation)
+}
+
 #[must_use]
 pub fn render_permissioned_campaign_handoff_markdown(
     packet: &PermissionedCampaignHandoffPacket,
@@ -982,6 +1188,67 @@ fn validate_xfstests_adapter_input(input: &PermissionedXfstestsBrokerAdapterInpu
     Ok(())
 }
 
+fn validate_swarm_adapter_input(input: &PermissionedSwarmBrokerAdapterInput) -> Result<()> {
+    validate_adapter_non_empty("campaign_id", &input.campaign_id)?;
+    validate_adapter_non_empty("generated_at", &input.generated_at)?;
+    validate_adapter_non_empty("preflight_id", &input.preflight_id)?;
+    if input.target_beads.is_empty() {
+        bail!("target_beads must include bd-rchk0.53.8 or an equivalent swarm bead");
+    }
+    for (index, bead) in input.target_beads.iter().enumerate() {
+        if !bead.starts_with("bd-") {
+            bail!("target_beads[{index}] must start with bd-");
+        }
+    }
+    validate_adapter_non_empty("permissioned_runner", &input.permissioned_runner)?;
+    validate_adapter_safe_path("runner_workspace", &input.runner_workspace)?;
+    validate_adapter_safe_path("artifact_root", &input.artifact_root)?;
+    validate_adapter_safe_path("workload_manifest_path", &input.workload_manifest_path)?;
+    validate_adapter_safe_path(
+        "adaptive_runtime_manifest_path",
+        &input.adaptive_runtime_manifest_path,
+    )?;
+    validate_adapter_safe_path("resource_caps_path", &input.resource_caps_path)?;
+    validate_adapter_safe_path(
+        "p99_attribution_ledger_path",
+        &input.p99_attribution_ledger_path,
+    )?;
+    validate_adapter_safe_path(
+        "proof_bundle_manifest_path",
+        &input.proof_bundle_manifest_path,
+    )?;
+    if input.proof_bundle_lane_paths.is_empty() {
+        bail!("proof_bundle_lane_paths must include the swarm proof-bundle lanes");
+    }
+    for (index, path) in input.proof_bundle_lane_paths.iter().enumerate() {
+        validate_adapter_safe_path(&format!("proof_bundle_lane_paths[{index}]"), path)?;
+    }
+    validate_adapter_safe_path("raw_log_path", &input.raw_log_path)?;
+    validate_adapter_safe_path("release_gate_policy_path", &input.release_gate_policy_path)?;
+    validate_adapter_safe_path("release_gate_output_path", &input.release_gate_output_path)?;
+    validate_adapter_safe_path(
+        "host_capability_proof_path",
+        &input.host_capability_proof_path,
+    )?;
+    validate_adapter_safe_path(
+        "numa_capability_proof_path",
+        &input.numa_capability_proof_path,
+    )?;
+    validate_adapter_safe_path("preflight_artifact_path", &input.preflight_artifact_path)?;
+    if input.preflight_max_age_days == 0 {
+        bail!("preflight_max_age_days must be positive");
+    }
+    if input.release_claim_classification
+        != PermissionedSwarmReleaseClaimClassification::AuthoritativeLargeHost
+    {
+        bail!(
+            "{} cannot be used as an authoritative swarm.responsiveness broker claim",
+            input.release_claim_classification.label()
+        );
+    }
+    Ok(())
+}
+
 fn validate_adapter_non_empty(field: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail!("{field} must not be empty");
@@ -1008,6 +1275,132 @@ fn xfstests_expected_artifact_paths(result_base: &str) -> Vec<String> {
     .into_iter()
     .map(|suffix| format!("{result_base}/{suffix}"))
     .collect()
+}
+
+fn swarm_host_capability(
+    input: &PermissionedSwarmBrokerAdapterInput,
+) -> PermissionedSwarmHostCapability {
+    let mut blockers = Vec::new();
+    if input.logical_cpu_count < SWARM_MIN_LOGICAL_CPUS {
+        blockers.push(format!(
+            "logical_cpus={} below required >={SWARM_MIN_LOGICAL_CPUS}",
+            input.logical_cpu_count
+        ));
+    }
+    if input.ram_gib < SWARM_MIN_RAM_GIB {
+        blockers.push(format!(
+            "ram_gib={} below required >={SWARM_MIN_RAM_GIB}",
+            input.ram_gib
+        ));
+    }
+    if !input.numa_topology_visible {
+        blockers.push("numa_topology_visible=false".to_owned());
+    }
+    if input.numa_node_count < SWARM_MIN_NUMA_NODES {
+        blockers.push(format!(
+            "numa_nodes={} below required >={SWARM_MIN_NUMA_NODES}",
+            input.numa_node_count
+        ));
+    }
+
+    PermissionedSwarmHostCapability {
+        ready_for_authoritative_run: blockers.is_empty(),
+        blockers,
+    }
+}
+
+fn swarm_claim_text(capability: &PermissionedSwarmHostCapability) -> String {
+    if capability.ready_for_authoritative_run {
+        "operator approval material only; cannot upgrade swarm.responsiveness until executed large-host evidence, p99 attribution, proof-bundle lanes, and release-gate output are recorded"
+            .to_owned()
+    } else {
+        format!(
+            "capability blocker: {}; cannot upgrade swarm.responsiveness from this broker packet",
+            capability.blockers.join("; ")
+        )
+    }
+}
+
+fn swarm_preflight_summary(capability: &PermissionedSwarmHostCapability) -> String {
+    if capability.ready_for_authoritative_run {
+        "large-host preflight satisfies CPU, RAM, and NUMA visibility floors; permissioned execution not started"
+            .to_owned()
+    } else {
+        format!(
+            "large-host preflight is blocked: {}; permissioned execution must not be treated as authoritative",
+            capability.blockers.join("; ")
+        )
+    }
+}
+
+fn swarm_expected_artifact_paths(input: &PermissionedSwarmBrokerAdapterInput) -> Vec<String> {
+    let mut paths = vec![
+        input.resource_caps_path.clone(),
+        input.p99_attribution_ledger_path.clone(),
+        input.proof_bundle_manifest_path.clone(),
+        input.raw_log_path.clone(),
+        input.release_gate_output_path.clone(),
+    ];
+    paths.extend(input.proof_bundle_lane_paths.iter().cloned());
+    paths
+}
+
+fn swarm_exact_commands(
+    input: &PermissionedSwarmBrokerAdapterInput,
+) -> Vec<PermissionedCampaignCommand> {
+    vec![
+        PermissionedCampaignCommand {
+            command_id: "swarm_workload_preflight".to_owned(),
+            exact_command: format!(
+                "cargo run -p ffs-harness -- validate-swarm-workload-harness --manifest {}",
+                shell_single_quote(&input.workload_manifest_path)
+            ),
+            command_role: PermissionedCampaignCommandRole::Preflight,
+        },
+        PermissionedCampaignCommand {
+            command_id: "swarm_tail_latency_preflight".to_owned(),
+            exact_command: format!(
+                "cargo run -p ffs-harness -- validate-swarm-tail-latency --ledger {}",
+                shell_single_quote(&input.p99_attribution_ledger_path)
+            ),
+            command_role: PermissionedCampaignCommandRole::Preflight,
+        },
+        PermissionedCampaignCommand {
+            command_id: "adaptive_runtime_preflight".to_owned(),
+            exact_command: format!(
+                "cargo run -p ffs-harness -- validate-adaptive-runtime-manifest --manifest {}",
+                shell_single_quote(&input.adaptive_runtime_manifest_path)
+            ),
+            command_role: PermissionedCampaignCommandRole::Preflight,
+        },
+        PermissionedCampaignCommand {
+            command_id: "proof_bundle_preflight".to_owned(),
+            exact_command: format!(
+                "cargo run -p ffs-harness -- validate-proof-bundle --bundle {}",
+                shell_single_quote(&input.proof_bundle_manifest_path)
+            ),
+            command_role: PermissionedCampaignCommandRole::Preflight,
+        },
+        PermissionedCampaignCommand {
+            command_id: "release_gate_preflight".to_owned(),
+            exact_command: format!(
+                "cargo run -p ffs-harness -- evaluate-release-gates --bundle {} --policy {} --out {}",
+                shell_single_quote(&input.proof_bundle_manifest_path),
+                shell_single_quote(&input.release_gate_policy_path),
+                shell_single_quote(&input.release_gate_output_path)
+            ),
+            command_role: PermissionedCampaignCommandRole::Preflight,
+        },
+        PermissionedCampaignCommand {
+            command_id: "swarm_permissioned_run".to_owned(),
+            exact_command: format!(
+                "{SWARM_ENABLE_PERMISSIONED_ENV}={SWARM_ENABLE_PERMISSIONED_VALUE} {SWARM_REAL_RUN_ACK_ENV}={SWARM_REAL_RUN_ACK_VALUE} {SWARM_PERMISSIONED_RUNNER_ENV}={} {SWARM_ARTIFACT_ROOT_ENV}={} scripts/e2e/ffs_swarm_workload_harness_e2e.sh",
+                shell_single_quote(&input.permissioned_runner),
+                shell_single_quote(&input.artifact_root)
+            ),
+            command_role: PermissionedCampaignCommandRole::PermissionedRun,
+        },
+    ]
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -1928,6 +2321,134 @@ mod tests {
         assert!(build_xfstests_broker_manifest(&input).is_err());
     }
 
+    #[test]
+    fn swarm_adapter_renders_ready_handoff_packet_for_capable_host() -> Result<()> {
+        let input = swarm_adapter_input();
+        let manifest = build_swarm_broker_manifest(&input)?;
+        let report = validate_permissioned_campaign_broker_manifest(&manifest, &config());
+        assert!(report.valid, "{:?}", report.issues);
+        assert_eq!(manifest.required_ack.env_var, SWARM_REAL_RUN_ACK_ENV);
+        assert_eq!(manifest.required_ack.exact_value, SWARM_REAL_RUN_ACK_VALUE);
+        assert!(manifest.required_runner_env.iter().any(|entry| {
+            entry.env_var == SWARM_ENABLE_PERMISSIONED_ENV
+                && entry.expected_shape == SWARM_ENABLE_PERMISSIONED_VALUE
+        }));
+        assert!(
+            manifest
+                .expected_artifact_paths
+                .iter()
+                .any(|path| path == "artifacts/swarm/large-host/p99_attribution.json")
+        );
+        assert!(
+            manifest
+                .expected_artifact_paths
+                .iter()
+                .any(|path| path == "artifacts/swarm/large-host/proof/swarm_tail_latency.json")
+        );
+        assert!(
+            manifest
+                .host_capability_facts
+                .iter()
+                .any(|fact| fact.fact_id == "logical_cpus" && fact.observed_value == "96")
+        );
+
+        let packet = generate_swarm_handoff_packet(&input, &config(), generation())?;
+        assert_eq!(packet.product_evidence_claim, "none");
+        assert_eq!(packet.packet_status, "ready_for_operator_approval");
+        assert!(
+            packet
+                .claim_text
+                .contains("cannot upgrade swarm.responsiveness")
+        );
+        assert!(
+            packet
+                .preflight_references
+                .iter()
+                .any(|reference| reference.summary.contains("satisfies CPU"))
+        );
+        assert!(packet.exact_commands.iter().any(|command| {
+            command.command_id == "swarm_permissioned_run"
+                && command
+                    .exact_command
+                    .contains(SWARM_ENABLE_PERMISSIONED_ENV)
+                && command
+                    .exact_command
+                    .contains(SWARM_PERMISSIONED_RUNNER_ENV)
+                && command.exact_command.contains(SWARM_REAL_RUN_ACK_VALUE)
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_adapter_renders_blocker_packet_for_insufficient_host_proof() -> Result<()> {
+        let mut input = swarm_adapter_input();
+        input.logical_cpu_count = 16;
+        input.ram_gib = 64;
+        input.numa_node_count = 0;
+        input.numa_topology_visible = false;
+
+        let packet = generate_swarm_handoff_packet(&input, &config(), generation())?;
+        assert_eq!(packet.product_evidence_claim, "none");
+        assert_eq!(packet.packet_status, "ready_for_operator_approval");
+        assert!(packet.claim_text.contains("capability blocker"));
+        assert!(packet.claim_text.contains("logical_cpus=16"));
+        assert!(
+            packet
+                .claim_text
+                .contains("cannot upgrade swarm.responsiveness")
+        );
+        assert!(packet.preflight_references[0].summary.contains("blocked"));
+        assert!(
+            packet
+                .host_capability_facts
+                .iter()
+                .any(|fact| fact.fact_id == "numa_topology_visible"
+                    && fact.observed_value == "false")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_adapter_rejects_small_host_smoke_as_authoritative() {
+        let mut input = swarm_adapter_input();
+        input.release_claim_classification =
+            PermissionedSwarmReleaseClaimClassification::SmallHostSmoke;
+        let err = build_swarm_broker_manifest(&input).expect_err("small-host smoke rejected");
+        assert!(err.to_string().contains("small_host_smoke"));
+        assert!(
+            err.to_string()
+                .contains("authoritative swarm.responsiveness")
+        );
+    }
+
+    #[test]
+    fn swarm_adapter_output_cannot_upgrade_swarm_responsiveness() -> Result<()> {
+        let input = swarm_adapter_input();
+        let manifest = build_swarm_broker_manifest(&input)?;
+        assert_eq!(
+            manifest.claim_boundary.product_evidence_claim,
+            PermissionedCampaignProductEvidenceClaim::None
+        );
+        assert_eq!(
+            manifest.claim_boundary.packet_status,
+            PermissionedCampaignPacketStatus::ReadyForOperatorApproval
+        );
+        assert!(
+            manifest
+                .claim_boundary
+                .claim_text
+                .contains("cannot upgrade swarm.responsiveness")
+        );
+
+        let packet = generate_swarm_handoff_packet(&input, &config(), generation())?;
+        let markdown = render_permissioned_campaign_handoff_markdown(&packet);
+        assert!(markdown.contains(PERMISSIONED_CAMPAIGN_HANDOFF_NOTICE));
+        assert!(markdown.contains("not executed evidence"));
+        assert!(markdown.contains("cannot upgrade swarm.responsiveness"));
+        assert!(!markdown.contains("packet_counts_as_pass_fail"));
+        Ok(())
+    }
+
     fn assert_valid(manifest: &PermissionedCampaignBrokerManifest) {
         let report = validate_permissioned_campaign_broker_manifest(manifest, &config());
         assert!(report.valid, "{:?}", report.issues);
@@ -1980,6 +2501,45 @@ mod tests {
             preflight_max_age_days: DEFAULT_PERMISSIONED_CAMPAIGN_PREFLIGHT_MAX_AGE_DAYS,
             not_run_classification:
                 PermissionedXfstestsNotRunClassification::EnvironmentBlockerOnly,
+        }
+    }
+
+    fn swarm_adapter_input() -> PermissionedSwarmBrokerAdapterInput {
+        PermissionedSwarmBrokerAdapterInput {
+            campaign_id: "bd-rchk0.53.8-large-host-swarm-20260507".to_owned(),
+            generated_at: REFERENCE_TIMESTAMP.to_owned(),
+            target_beads: vec!["bd-rchk0.53.8".to_owned(), "bd-rchk0.53".to_owned()],
+            permissioned_runner: "tools/permissioned/swarm-large-host-runner".to_owned(),
+            runner_workspace: "artifacts/swarm/workspace".to_owned(),
+            artifact_root: "artifacts/swarm/large-host".to_owned(),
+            workload_manifest_path: "benchmarks/swarm_workload_harness_manifest.json".to_owned(),
+            adaptive_runtime_manifest_path: "docs/adaptive-runtime-evidence-manifest.json"
+                .to_owned(),
+            resource_caps_path: "artifacts/swarm/large-host/resource_caps.json".to_owned(),
+            p99_attribution_ledger_path: "artifacts/swarm/large-host/p99_attribution.json"
+                .to_owned(),
+            proof_bundle_manifest_path: "artifacts/swarm/large-host/proof/bundle.json".to_owned(),
+            proof_bundle_lane_paths: vec![
+                "artifacts/swarm/large-host/proof/swarm_workload_harness.json".to_owned(),
+                "artifacts/swarm/large-host/proof/swarm_tail_latency.json".to_owned(),
+                "artifacts/swarm/large-host/proof/adaptive_runtime.json".to_owned(),
+            ],
+            raw_log_path: "artifacts/swarm/large-host/raw.log".to_owned(),
+            release_gate_policy_path: "artifacts/swarm/large-host/release_gate_policy.json"
+                .to_owned(),
+            release_gate_output_path: "artifacts/swarm/large-host/release_gate.json".to_owned(),
+            host_capability_proof_path: "artifacts/swarm/preflight/host.json".to_owned(),
+            numa_capability_proof_path: "artifacts/swarm/preflight/numa.json".to_owned(),
+            preflight_id: "swarm-large-host-capability-preflight".to_owned(),
+            preflight_artifact_path: "artifacts/swarm/preflight/report.json".to_owned(),
+            preflight_observed_at_epoch_days: reference_epoch_days(),
+            preflight_max_age_days: DEFAULT_PERMISSIONED_CAMPAIGN_PREFLIGHT_MAX_AGE_DAYS,
+            logical_cpu_count: 96,
+            ram_gib: 512,
+            numa_node_count: 2,
+            numa_topology_visible: true,
+            release_claim_classification:
+                PermissionedSwarmReleaseClaimClassification::AuthoritativeLargeHost,
         }
     }
 
