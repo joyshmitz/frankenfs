@@ -757,8 +757,10 @@ fn validate_calibration_budget(case: &RepairCalibrationCase, errors: &mut Vec<St
             case.corpus_id
         ));
     }
-    if case.expected_recoverability == CalibrationRecoverability::Recoverable
-        && budget.repair_symbols_available < budget.repair_symbols_required
+    if matches!(
+        case.expected_recoverability,
+        CalibrationRecoverability::Recoverable
+    ) && budget.repair_symbols_available < budget.repair_symbols_required
     {
         errors.push(format!(
             "calibration {} recoverable case must have enough symbols",
@@ -1028,7 +1030,10 @@ fn validate_candidate_plan(scenario: &RepairConfidenceScenario, errors: &mut Vec
             ));
         }
     }
-    if scenario.expected_outcome == RepairConfidenceOutcome::MutatingRepairVerified {
+    if matches!(
+        scenario.expected_outcome,
+        RepairConfidenceOutcome::MutatingRepairVerified
+    ) {
         validate_nonempty_vec("plan.changed_paths", &plan.changed_paths, errors);
         if plan.post_image_hash.as_deref() == Some(plan.pre_image_hash.as_str()) {
             errors.push(format!(
@@ -1404,6 +1409,23 @@ mod tests {
     }
 
     #[test]
+    fn render_repair_confidence_lab_markdown_checked_in_spec_snapshot() {
+        let spec = checked_in_spec();
+        let report = validate_repair_confidence_lab(&spec);
+        assert!(report.valid, "{:#?}", report.errors);
+        assert_eq!(report.scenario_count, 5);
+        assert_eq!(report.calibration_case_count, 9);
+        assert_eq!(report.mutation_allowed_count, 1);
+        assert_eq!(report.mutation_refused_count, 2);
+
+        let markdown = render_repair_confidence_lab_markdown(&report);
+        insta::assert_snapshot!(
+            "render_repair_confidence_lab_markdown_checked_in_spec",
+            markdown
+        );
+    }
+
+    #[test]
     fn calibration_corpus_covers_recovery_refusal_and_verification() {
         let spec = checked_in_spec();
         let report = validate_repair_confidence_lab(&spec);
@@ -1494,7 +1516,10 @@ mod tests {
             .scenarios
             .iter_mut()
             .find(|scenario| {
-                scenario.expected_outcome == RepairConfidenceOutcome::MutatingRepairVerified
+                matches!(
+                    scenario.expected_outcome,
+                    RepairConfidenceOutcome::MutatingRepairVerified
+                )
             })
             .expect("fixture includes mutating repair scenario");
         scenario.confidence_inputs.verification_passed = false;
@@ -1514,7 +1539,12 @@ mod tests {
         let scenario = spec
             .scenarios
             .iter_mut()
-            .find(|scenario| scenario.expected_outcome == RepairConfidenceOutcome::DryRunSuccess)
+            .find(|scenario| {
+                matches!(
+                    scenario.expected_outcome,
+                    RepairConfidenceOutcome::DryRunSuccess
+                )
+            })
             .expect("fixture includes dry-run scenario");
         scenario.candidate_repair_plan.mutation_requested = true;
         let report = report_for(spec);
