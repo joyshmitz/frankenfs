@@ -1570,7 +1570,7 @@ mod tests {
 
     #[test]
     fn validate_evidence_args_rejects_unknown_preset() {
-        let err = validate_evidence_args(Some("unknown-preset"), None, None, false)
+        let err = validate_evidence_args(Some("unknown-preset"), None, None, None, false)
             .expect_err("unknown preset should fail");
         let message = err.to_string();
         assert!(message.contains("unknown preset 'unknown-preset'"));
@@ -1584,6 +1584,7 @@ mod tests {
             Some(PRESET_REPAIR_FAILURES),
             Some("repair_failed"),
             None,
+            None,
             false,
         )
         .expect_err("preset and event type should be mutually exclusive");
@@ -1592,7 +1593,7 @@ mod tests {
 
     #[test]
     fn validate_evidence_args_rejects_tail_for_metrics_presets() {
-        let err = validate_evidence_args(Some(PRESET_METRICS), None, Some(5), false)
+        let err = validate_evidence_args(Some(PRESET_METRICS), None, Some(5), None, false)
             .expect_err("metrics presets should reject tail");
         assert!(
             err.to_string()
@@ -1602,7 +1603,7 @@ mod tests {
 
     #[test]
     fn validate_evidence_args_rejects_summary_for_metrics_presets() {
-        let err = validate_evidence_args(Some(PRESET_METRICS), None, None, true)
+        let err = validate_evidence_args(Some(PRESET_METRICS), None, None, None, true)
             .expect_err("metrics presets should reject summary");
         assert!(
             err.to_string()
@@ -1611,8 +1612,85 @@ mod tests {
     }
 
     #[test]
+    fn validate_evidence_args_rejects_block_group_for_metrics_presets() {
+        let err = validate_evidence_args(Some(PRESET_METRICS), None, None, Some(7), false)
+            .expect_err("metrics presets should reject block-group filters");
+        assert!(
+            err.to_string()
+                .contains("--block-group is only supported for ledger-backed evidence presets")
+        );
+    }
+
+    #[test]
+    fn validate_evidence_args_accepts_block_group_for_ledger_presets() {
+        let preset_kind =
+            validate_evidence_args(Some(PRESET_REPAIR_FAILURES), None, None, Some(7), false);
+        assert!(matches!(preset_kind, Ok(Some(PresetMode::Ledger))));
+    }
+
+    #[test]
+    fn validate_evidence_args_accepts_block_group_without_preset() {
+        let preset_kind = validate_evidence_args(None, None, None, Some(7), false);
+        assert!(matches!(preset_kind, Ok(None)));
+    }
+
+    #[test]
+    fn validate_evidence_args_rejects_block_group_for_all_metrics_presets() {
+        for preset in [
+            PRESET_METRICS,
+            PRESET_CACHE,
+            PRESET_MVCC,
+            PRESET_REPAIR_LIVE,
+        ] {
+            let err = validate_evidence_args(Some(preset), None, None, Some(7), false).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("--block-group is only supported for ledger-backed evidence presets"),
+                "preset {preset} should reject --block-group with the ledger-only message"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_evidence_args_accepts_block_group_for_all_ledger_presets() {
+        for preset in [
+            PRESET_REPLAY_ANOMALIES,
+            PRESET_REPAIR_FAILURES,
+            PRESET_PRESSURE_TRANSITIONS,
+            PRESET_CONTENTION,
+        ] {
+            assert!(
+                matches!(
+                    validate_evidence_args(Some(preset), None, None, Some(7), false),
+                    Ok(Some(PresetMode::Ledger))
+                ),
+                "ledger preset {preset} should accept --block-group"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_evidence_args_accepts_ledger_preset_with_tail_summary_and_block_group() {
+        let preset_kind =
+            validate_evidence_args(Some(PRESET_REPAIR_FAILURES), None, Some(3), Some(7), true);
+        assert!(matches!(preset_kind, Ok(Some(PresetMode::Ledger))));
+    }
+
+    #[test]
+    fn validate_evidence_args_accepts_raw_event_type_with_block_group() {
+        assert!(
+            matches!(
+                validate_evidence_args(None, Some("repair_failed"), Some(4), Some(7), true),
+                Ok(None)
+            ),
+            "raw event-type filters should compose with --block-group"
+        );
+    }
+
+    #[test]
     fn validate_evidence_args_accepts_ledger_preset_with_tail_and_summary() {
-        let preset_kind = validate_evidence_args(Some(PRESET_REPAIR_FAILURES), None, Some(3), true);
+        let preset_kind =
+            validate_evidence_args(Some(PRESET_REPAIR_FAILURES), None, Some(3), None, true);
         assert!(matches!(preset_kind, Ok(Some(PresetMode::Ledger))));
     }
 
@@ -1624,7 +1702,8 @@ mod tests {
             PRESET_MVCC,
             PRESET_REPAIR_LIVE,
         ] {
-            let tail_err = validate_evidence_args(Some(preset), None, Some(5), false).unwrap_err();
+            let tail_err =
+                validate_evidence_args(Some(preset), None, Some(5), None, false).unwrap_err();
             assert!(
                 tail_err
                     .to_string()
@@ -1632,7 +1711,8 @@ mod tests {
                 "preset {preset} should reject --tail with the ledger-only message"
             );
 
-            let summary_err = validate_evidence_args(Some(preset), None, None, true).unwrap_err();
+            let summary_err =
+                validate_evidence_args(Some(preset), None, None, None, true).unwrap_err();
             assert!(
                 summary_err
                     .to_string()
@@ -1652,7 +1732,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    validate_evidence_args(Some(preset), None, Some(3), true),
+                    validate_evidence_args(Some(preset), None, Some(3), None, true),
                     Ok(Some(PresetMode::Ledger))
                 ),
                 "ledger preset {preset} should classify as ledger-backed"
@@ -1670,7 +1750,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    validate_evidence_args(Some(preset), None, None, false),
+                    validate_evidence_args(Some(preset), None, None, None, false),
                     Ok(Some(PresetMode::Metrics))
                 ),
                 "metrics preset {preset} should classify as metrics-backed"
@@ -1682,7 +1762,7 @@ mod tests {
     fn validate_evidence_args_accepts_raw_event_type_filter_without_preset() {
         assert!(
             matches!(
-                validate_evidence_args(None, Some("repair_failed"), Some(4), true),
+                validate_evidence_args(None, Some("repair_failed"), Some(4), None, true),
                 Ok(None)
             ),
             "no-preset validation path should not classify as a preset mode"
