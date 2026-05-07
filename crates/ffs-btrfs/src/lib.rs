@@ -8087,8 +8087,84 @@ mod tests {
 
         let parsed = parse_xattr_items(&payload).expect("parse xattr");
         assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].name, name);
-        assert_eq!(parsed[0].value, value);
+    }
+
+    // bd-9rup3 — Kernel-conformance pin for parse_xattr_items.
+    //
+    // parse_xattr_items reuses the 30-byte struct btrfs_dir_item
+    // header (objectid 0..8, key_type 8, key_offset 9..17, transid
+    // 17..25, data_len 25..27, name_len 27..29, type 29) but reads
+    // ONLY data_len@25..27 and name_len@27..29 — the other fields
+    // are skipped past. bd-qwo4a pinned the SAME header offsets
+    // for parse_dir_items but parse_xattr_items has its own copy
+    // of the read_u16 calls — a regression that drifted these
+    // offsets in parse_xattr_items independently would silently
+    // corrupt every getxattr/listxattr through ffs_core::OpenFs
+    // (12+ call sites).
+    //
+    // Stamp the skipped fields with unique non-zero magic so any
+    // misalignment that read data_len from offset 17 (transid,
+    // 0x44_44 lo16) or any other wrong location would mis-read
+    // a multi-byte length and either overflow the buffer or
+    // produce a value that doesn't match the stamped magic
+    // bytes. Only data_len=5 + name_len=4 + 4-byte-name +
+    // 5-byte-value passes.
+    #[test]
+    fn parse_xattr_items_kernel_offsets_match_btrfs_tree_h() {
+        let name: [u8; 4] = [0xAA, 0xAA, 0xAA, 0xAA];
+        let value: [u8; 5] = [0xBB, 0xBB, 0xBB, 0xBB, 0xBB];
+        let mut data = vec![0_u8; 30 + name.len() + value.len()];
+
+        let objectid = 0x1111_1111_1111_1111_u64;
+        let key_type: u8 = 0xCC;
+        let key_offset = 0x3333_3333_3333_3333_u64;
+        let transid_magic = 0x4444_4444_4444_4444_u64;
+        let data_len: u16 = u16::try_from(value.len()).expect("value len fits u16");
+        let name_len: u16 = u16::try_from(name.len()).expect("name len fits u16");
+        let file_type: u8 = 0xDD;
+
+        // Stamp skipped fields — if data_len@25 or name_len@27 were
+        // misaligned, they would read from these magic-bearing
+        // bytes and the parser would either reject or produce
+        // wrong slices.
+        data[0..8].copy_from_slice(&objectid.to_le_bytes());
+        data[8] = key_type;
+        data[9..17].copy_from_slice(&key_offset.to_le_bytes());
+        data[17..25].copy_from_slice(&transid_magic.to_le_bytes());
+        // Stamp the read fields at their canonical offsets.
+        data[25..27].copy_from_slice(&data_len.to_le_bytes());
+        data[27..29].copy_from_slice(&name_len.to_le_bytes());
+        data[29] = file_type;
+        // name and value bytes follow the 30-byte header.
+        data[30..30 + name.len()].copy_from_slice(&name);
+        data[30 + name.len()..30 + name.len() + value.len()].copy_from_slice(&value);
+
+        let parsed = parse_xattr_items(&data)
+            .expect("kernel-stamped xattr_item must parse");
+        assert_eq!(parsed.len(), 1, "single-entry payload must parse to one item");
+        assert_eq!(
+            parsed[0].name, name,
+            "name bytes must come from offset 30..30+name_len@27..29"
+        );
+        assert_eq!(
+            parsed[0].value, value,
+            "value bytes must come from offset 30+name_len..30+name_len+data_len@25..27"
+        );
+
+        // Negative MR: zero out name_len@27..29 — parser must
+        // reject the empty-name invariant. Pins offset 27 (vs the
+        // SAME bytes ending up there from a misaligned read).
+        let mut bad = data.clone();
+        bad[27..29].copy_from_slice(&0_u16.to_le_bytes());
+        let err = parse_xattr_items(&bad)
+            .expect_err("zero name_len must reject");
+        match err {
+            ParseError::InvalidField { field, .. } => assert_eq!(
+                field, "xattr.name_len",
+                "rejection must specifically blame name_len, proving offset 27 is read"
+            ),
+            other => panic!("expected InvalidField{{name_len}}, got {other:?}"),
+        }
     }
 
     #[test]
