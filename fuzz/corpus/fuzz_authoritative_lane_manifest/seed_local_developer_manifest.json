@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "manifest_id": "seed-local-developer-lane",
+  "bead_id": "bd-nlok2",
+  "lane_id": "local-fuzz-seed",
+  "environment_kind": "local_developer",
+  "probe_version": "seed-probe-v1",
+  "probe_at_unix": 1000,
+  "now_unix": 1001,
+  "freshness_ttl_seconds": 3600,
+  "kernel": "linux-seed",
+  "fuse_kernel_version": "fuse-seed",
+  "helper_binary_version": "fuser-seed",
+  "expected_mount_options": ["ro"],
+  "observed_mount_options": ["ro"],
+  "required_matrix_id": "seed-matrix",
+  "required_scenario_count": 1,
+  "observed_scenario_count": 1,
+  "mounted_logs_present": true,
+  "remediation_hint": "refresh the authoritative lane manifest"
+}

@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "corpus_id": "seed-fuzz-smoke",
+  "bead_id": "bd-nlok2",
+  "corpus_version": "2026-05-07",
+  "default_timeout_ms": 1000,
+  "artifact_contract": [
+    "command_line",
+    "seed_ids",
+    "corpus_checksum",
+    "duration_ms",
+    "stdout_path",
+    "stderr_path",
+    "cleanup_status",
+    "report_json"
+  ],
+  "seeds": [
+    {
+      "seed_id": "seed-ext4-superblock-empty",
+      "path": "tests/fuzz_corpus/seed_empty",
+      "source": "bd-nlok2",
+      "provenance": "minimal valid manifest seed",
+      "target": "ext4_superblock",
+      "expected_class": "accepted",
+      "expected_error_contains": null,
+      "corpus_checksum": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "timeout_ms": 1000,
+      "resource_budget": {
+        "max_input_bytes": 1024,
+        "max_duration_ms": 1000,
+        "max_artifact_bytes": 4096
+      },
+      "minimization": {
+        "status": "not_applicable",
+        "replay_command": "",
+        "follow_up_bead": null
+      },
+      "quarantine": {
+        "status": "none",
+        "quarantine_id": null,
+        "owner": null,
+        "expires_at": null,
+        "owning_bead": null,
+        "rationale": null
+      }
+    }
+  ]
+}

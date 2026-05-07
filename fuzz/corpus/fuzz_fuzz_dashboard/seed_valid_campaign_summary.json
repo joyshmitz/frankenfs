@@ -1,0 +1,29 @@
+{
+  "campaign_id": "seed-campaign",
+  "commit_sha": "0000000000000000000000000000000000000000",
+  "timestamp": "2026-05-07T00:00:00Z",
+  "config": {
+    "duration_per_target": 60,
+    "jobs": 1,
+    "target_count": 1
+  },
+  "totals": {
+    "elapsed_seconds": 60,
+    "total_crashes": 0,
+    "total_coverage": 12,
+    "total_runs": 120
+  },
+  "targets": [
+    {
+      "target": "fuzz_ext4_metadata",
+      "status": "ok",
+      "exit_code": 0,
+      "coverage": 12,
+      "total_runs": 120,
+      "corpus_size": 1,
+      "crash_count": 0,
+      "new_inputs": 1,
+      "elapsed_seconds": 60
+    }
+  ]
+}
