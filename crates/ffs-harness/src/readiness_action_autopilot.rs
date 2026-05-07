@@ -320,7 +320,7 @@ pub fn default_readiness_action_autopilot_fixture_set() -> ReadinessActionAutopi
                         controlling_bead: "bd-rchk3.3".to_owned(),
                         evidence_tier: ReadinessEvidenceTier::OperationalReadiness,
                         ack_required: true,
-                        reproduction_command: "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/run_xfstests_baseline.sh".to_owned(),
+                        reproduction_command: "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/ffs_xfstests_e2e.sh".to_owned(),
                         rationale: "The current queue contains xfstests work that cannot run without explicit mutation authorization.".to_owned(),
                         public_claim_effect: PublicClaimEffect::BlockUpgrade,
                         diagnostics: vec![diagnostic(
@@ -362,7 +362,7 @@ pub fn default_readiness_action_autopilot_fixture_set() -> ReadinessActionAutopi
                         controlling_bead: "bd-rchk0.53.8".to_owned(),
                         evidence_tier: ReadinessEvidenceTier::Authoritative,
                         ack_required: true,
-                        reproduction_command: "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host scripts/e2e/run_swarm_workload_campaign.sh".to_owned(),
+                        reproduction_command: "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host scripts/e2e/ffs_swarm_workload_harness_e2e.sh".to_owned(),
                         rationale: "Large-host responsiveness claims require fresh authoritative host evidence.".to_owned(),
                         public_claim_effect: PublicClaimEffect::DowngradeRequired,
                         diagnostics: vec![ReadinessActionDiagnostic {
@@ -1785,6 +1785,53 @@ mod tests {
     }
 
     #[test]
+    fn default_permissioned_reproduction_commands_point_to_existing_repo_scripts() {
+        let fixture_set = default_readiness_action_autopilot_fixture_set();
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for (action_id, expected_script, stale_script, required_ack) in [
+            (
+                "run-permissioned-xfstests-baseline",
+                "scripts/e2e/ffs_xfstests_e2e.sh",
+                "scripts/e2e/run_xfstests_baseline.sh",
+                "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices",
+            ),
+            (
+                "refresh-large-host-swarm-campaign",
+                "scripts/e2e/ffs_swarm_workload_harness_e2e.sh",
+                "scripts/e2e/run_swarm_workload_campaign.sh",
+                "FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host",
+            ),
+        ] {
+            let recommendation = fixture_set
+                .fixtures
+                .iter()
+                .flat_map(|fixture| fixture.report.recommendations.iter())
+                .find(|recommendation| recommendation.action_id == action_id)
+                .expect("permissioned recommendation");
+
+            assert!(
+                recommendation
+                    .reproduction_command
+                    .contains(expected_script),
+                "{action_id} command must point at {expected_script}"
+            );
+            assert!(
+                !recommendation.reproduction_command.contains(stale_script),
+                "{action_id} command must not point at missing {stale_script}"
+            );
+            assert!(
+                recommendation.reproduction_command.contains(required_ack),
+                "{action_id} command must retain the explicit ack token"
+            );
+            assert!(
+                repo_root.join(expected_script).is_file(),
+                "{expected_script} must exist in this checkout"
+            );
+        }
+    }
+
+    #[test]
     fn planner_downgrades_stale_evidence_public_claims() {
         let mut recommendation = recommendation("upgrade-writeback-cache-claim");
         recommendation.title = "Upgrade writeback-cache readiness claim".to_owned();
@@ -1826,7 +1873,7 @@ mod tests {
         recommendation.evidence_tier = ReadinessEvidenceTier::Smoke;
         recommendation.public_claim_effect = PublicClaimEffect::UpgradeEligible;
         recommendation.reproduction_command =
-            "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 scripts/e2e/run_swarm_workload_campaign.sh"
+            "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 scripts/e2e/ffs_swarm_workload_harness_e2e.sh"
                 .to_owned();
 
         let result = plan_readiness_actions(&planning_input(

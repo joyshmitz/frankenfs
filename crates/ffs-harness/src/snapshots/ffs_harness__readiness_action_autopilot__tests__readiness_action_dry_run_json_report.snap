@@ -107,7 +107,7 @@ expression: json
           "controlling_bead": "bd-rchk3.3",
           "evidence_tier": "operational_readiness",
           "ack_required": true,
-          "reproduction_command": "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/run_xfstests_baseline.sh",
+          "reproduction_command": "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/ffs_xfstests_e2e.sh",
           "rationale": "The current queue contains xfstests work that cannot run without explicit mutation authorization.",
           "public_claim_effect": "block_upgrade",
           "diagnostics": [
@@ -144,7 +144,7 @@ expression: json
           "controlling_bead": "bd-rchk0.53.8",
           "evidence_tier": "authoritative",
           "ack_required": true,
-          "reproduction_command": "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host scripts/e2e/run_swarm_workload_campaign.sh",
+          "reproduction_command": "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host scripts/e2e/ffs_swarm_workload_harness_e2e.sh",
           "rationale": "Large-host responsiveness claims require fresh authoritative host evidence.",
           "public_claim_effect": "downgrade_required",
           "diagnostics": [
@@ -240,7 +240,7 @@ expression: json
       "evidence_tier": "operational_readiness",
       "public_claim_effect": "block_upgrade",
       "controlling_bead": "bd-rchk3.3",
-      "reproduction_command": "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/run_xfstests_baseline.sh",
+      "reproduction_command": "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/ffs_xfstests_e2e.sh",
       "diagnostic_count": 3,
       "dry_run_note": "planner report only; no reproduction command was executed"
     },
@@ -253,7 +253,7 @@ expression: json
       "evidence_tier": "authoritative",
       "public_claim_effect": "downgrade_required",
       "controlling_bead": "bd-rchk0.53.8",
-      "reproduction_command": "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host scripts/e2e/run_swarm_workload_campaign.sh",
+      "reproduction_command": "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host scripts/e2e/ffs_swarm_workload_harness_e2e.sh",
       "diagnostic_count": 4,
       "dry_run_note": "planner report only; no reproduction command was executed"
     },

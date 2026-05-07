@@ -31,6 +31,6 @@ expression: markdown
 | Action | Safety | Ack | Claim | Evidence | Diagnostics | Reproduction Command |
 |---|---:|---:|---|---|---:|---|
 | define-readiness-action-schema | LocalSafe | false | NoChange | TrackerOnly | 0 | `cargo test -p ffs-harness readiness_action_autopilot` |
-| run-permissioned-xfstests-baseline | Permissioned | true | BlockUpgrade | OperationalReadiness | 3 | `XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/run_xfstests_baseline.sh` |
-| refresh-large-host-swarm-campaign | Permissioned | true | DowngradeRequired | Authoritative | 4 | `FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host scripts/e2e/run_swarm_workload_campaign.sh` |
+| run-permissioned-xfstests-baseline | Permissioned | true | BlockUpgrade | OperationalReadiness | 3 | `XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/ffs_xfstests_e2e.sh` |
+| refresh-large-host-swarm-campaign | Permissioned | true | DowngradeRequired | Authoritative | 4 | `FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host scripts/e2e/ffs_swarm_workload_harness_e2e.sh` |
 | refuse-contradictory-readiness-upgrade | Impossible | false | BlockUpgrade | ProofBundle | 2 | `cargo test -p ffs-harness release_gate -- --nocapture` |
