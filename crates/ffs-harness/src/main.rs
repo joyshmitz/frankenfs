@@ -4,9 +4,14 @@ use anyhow::{Context, Result, bail};
 use ffs_harness::{
     ParityReport,
     adaptive_runtime_manifest::{
-        AdaptiveRuntimeEvidenceValidationConfig, DEFAULT_ADAPTIVE_RUNTIME_EVIDENCE_MANIFEST,
-        fail_on_adaptive_runtime_evidence_errors, load_adaptive_runtime_evidence_manifest,
-        render_adaptive_runtime_evidence_markdown,
+        AdaptiveRuntimeEvidenceValidationConfig, AdaptiveRuntimeRunnerCleanupStatus,
+        AdaptiveRuntimeRunnerConfig, AdaptiveRuntimeRunnerMode,
+        DEFAULT_ADAPTIVE_RUNTIME_EVIDENCE_MANIFEST, DEFAULT_ADAPTIVE_RUNTIME_REAL_RUN_ACK_ENV,
+        DEFAULT_ADAPTIVE_RUNTIME_REAL_RUN_ACK_VALUE, DEFAULT_ADAPTIVE_RUNTIME_RUNNER_ARTIFACT_ROOT,
+        build_adaptive_runtime_runner_artifacts, collect_adaptive_runtime_runner_host_facts,
+        default_adaptive_runtime_runner_path_plan, fail_on_adaptive_runtime_evidence_errors,
+        fail_on_adaptive_runtime_runner_errors, load_adaptive_runtime_evidence_manifest,
+        render_adaptive_runtime_evidence_markdown, render_adaptive_runtime_runner_markdown,
         validate_adaptive_runtime_evidence_manifest_with_config,
     },
     adversarial_threat_model::{
@@ -198,6 +203,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Default)]
 struct XfstestsReportConfig {
@@ -264,6 +270,28 @@ struct AdaptiveRuntimeManifestCmdArgs {
     current_git_sha: Option<String>,
 }
 
+#[derive(Debug)]
+struct AdaptiveRuntimeRunnerCmdArgs {
+    mode: AdaptiveRuntimeRunnerMode,
+    artifact_root: String,
+    out_path: String,
+    summary_out_path: String,
+    raw_stdout_path: Option<String>,
+    raw_stderr_path: Option<String>,
+    structured_log_path: Option<String>,
+    runner_manifest_path: Option<String>,
+    cleanup_report_path: Option<String>,
+    host_facts_path: Option<String>,
+    test_dir: Option<String>,
+    scratch_mnt: Option<String>,
+    ack_env: String,
+    ack_value: String,
+    generated_at: String,
+    git_sha: String,
+    reproduction_command: String,
+    cleanup_status: AdaptiveRuntimeRunnerCleanupStatus,
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("error: {err:#}");
@@ -302,6 +330,7 @@ fn run() -> Result<()> {
         Some("validate-docs-status-drift") => validate_docs_status_drift_cmd(&args[1..]),
         Some("validate-fuzz-smoke") => validate_fuzz_smoke_cmd(&args[1..]),
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
+        Some("adaptive-runtime-runner") => adaptive_runtime_runner_cmd(&args[1..]),
         Some("validate-adaptive-runtime-manifest") => {
             validate_adaptive_runtime_manifest_cmd(&args[1..])
         }
@@ -1975,6 +2004,282 @@ fn parse_swarm_tail_latency_cmd_args(args: &[String]) -> Result<Option<SwarmTail
         summary_out_path,
         format,
     }))
+}
+
+fn adaptive_runtime_runner_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_adaptive_runtime_runner_cmd_args(args)? else {
+        return Ok(());
+    };
+    let mut path_plan = default_adaptive_runtime_runner_path_plan(cmd_args.artifact_root.clone());
+    if let Some(path) = cmd_args.raw_stdout_path {
+        path_plan.raw_stdout_path = path;
+    }
+    if let Some(path) = cmd_args.raw_stderr_path {
+        path_plan.raw_stderr_path = path;
+    }
+    if let Some(path) = cmd_args.structured_log_path {
+        path_plan.structured_log_path = path;
+    }
+    if let Some(path) = cmd_args.runner_manifest_path {
+        path_plan.runner_manifest_path = path;
+    }
+    if let Some(path) = cmd_args.cleanup_report_path {
+        path_plan.cleanup_report_path = path;
+    }
+    if let Some(path) = cmd_args.host_facts_path {
+        path_plan.host_facts_path = path;
+    }
+    path_plan.test_dir = cmd_args.test_dir;
+    path_plan.scratch_mnt = cmd_args.scratch_mnt;
+
+    let observed_ack_value = env::var(&cmd_args.ack_env).ok();
+    let artifacts = build_adaptive_runtime_runner_artifacts(AdaptiveRuntimeRunnerConfig {
+        mode: cmd_args.mode,
+        path_plan,
+        ack_env: cmd_args.ack_env,
+        ack_value: cmd_args.ack_value,
+        observed_ack_value,
+        generated_at: cmd_args.generated_at,
+        git_sha: cmd_args.git_sha,
+        reproduction_command: cmd_args.reproduction_command,
+        host_facts: collect_adaptive_runtime_runner_host_facts(),
+        cleanup_status: cmd_args.cleanup_status,
+    });
+    let report = &artifacts.report;
+
+    write_text_file(
+        Path::new(&report.path_plan.runner_manifest_path),
+        &format!(
+            "{}\n",
+            serde_json::to_string_pretty(&artifacts.plan_manifest)?
+        ),
+    )?;
+    write_text_file(
+        Path::new(&report.path_plan.cleanup_report_path),
+        &format!(
+            "{}\n",
+            serde_json::to_string_pretty(&artifacts.cleanup_report)?
+        ),
+    )?;
+    write_text_file(
+        Path::new(&report.path_plan.host_facts_path),
+        &format!("{}\n", serde_json::to_string_pretty(&report.host_facts)?),
+    )?;
+    write_text_file(
+        Path::new(&report.path_plan.raw_stdout_path),
+        &artifacts.stdout_log,
+    )?;
+    write_text_file(
+        Path::new(&report.path_plan.raw_stderr_path),
+        &artifacts.stderr_log,
+    )?;
+    write_text_file(
+        Path::new(&report.path_plan.structured_log_path),
+        &artifacts.structured_log,
+    )?;
+    write_text_file(
+        Path::new(&cmd_args.out_path),
+        &format!("{}\n", serde_json::to_string_pretty(report)?),
+    )?;
+    write_text_file(
+        Path::new(&cmd_args.summary_out_path),
+        &format!("{}\n", render_adaptive_runtime_runner_markdown(report)),
+    )?;
+
+    println!(
+        "adaptive runtime runner report written: {} valid={} classification={} permissioned_real_allowed={} artifact_root={}",
+        cmd_args.out_path,
+        report.valid,
+        report.classification,
+        report.execution.permissioned_real_allowed,
+        report.path_plan.artifact_root
+    );
+
+    fail_on_adaptive_runtime_runner_errors(report)
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_adaptive_runtime_runner_cmd_args(
+    args: &[String],
+) -> Result<Option<AdaptiveRuntimeRunnerCmdArgs>> {
+    let mut mode = AdaptiveRuntimeRunnerMode::DryRun;
+    let mut artifact_root = DEFAULT_ADAPTIVE_RUNTIME_RUNNER_ARTIFACT_ROOT.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut raw_stdout_path = None;
+    let mut raw_stderr_path = None;
+    let mut structured_log_path = None;
+    let mut runner_manifest_path = None;
+    let mut cleanup_report_path = None;
+    let mut host_facts_path = None;
+    let mut test_dir = None;
+    let mut scratch_mnt = None;
+    let mut ack_env = DEFAULT_ADAPTIVE_RUNTIME_REAL_RUN_ACK_ENV.to_owned();
+    let mut ack_value = DEFAULT_ADAPTIVE_RUNTIME_REAL_RUN_ACK_VALUE.to_owned();
+    let mut generated_at: Option<String> = None;
+    let mut git_sha: Option<String> = None;
+    let mut reproduction_command = "cargo run -p ffs-harness -- adaptive-runtime-runner".to_owned();
+    let mut cleanup_status = AdaptiveRuntimeRunnerCleanupStatus::NotStartedDryRun;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--mode" => {
+                mode = parse_adaptive_runtime_runner_mode(require_value(args, i, "--mode")?)?;
+                i += 1;
+            }
+            "--artifact-root" => {
+                artifact_root.clone_from(require_value(args, i, "--artifact-root")?);
+                i += 1;
+            }
+            "--out" => {
+                out_path = Some(require_value(args, i, "--out")?.clone());
+                i += 1;
+            }
+            "--summary-out" => {
+                summary_out_path = Some(require_value(args, i, "--summary-out")?.clone());
+                i += 1;
+            }
+            "--stdout-log" => {
+                raw_stdout_path = Some(require_value(args, i, "--stdout-log")?.clone());
+                i += 1;
+            }
+            "--stderr-log" => {
+                raw_stderr_path = Some(require_value(args, i, "--stderr-log")?.clone());
+                i += 1;
+            }
+            "--structured-log" => {
+                structured_log_path = Some(require_value(args, i, "--structured-log")?.clone());
+                i += 1;
+            }
+            "--manifest-out" => {
+                runner_manifest_path = Some(require_value(args, i, "--manifest-out")?.clone());
+                i += 1;
+            }
+            "--cleanup-out" => {
+                cleanup_report_path = Some(require_value(args, i, "--cleanup-out")?.clone());
+                i += 1;
+            }
+            "--host-facts-out" => {
+                host_facts_path = Some(require_value(args, i, "--host-facts-out")?.clone());
+                i += 1;
+            }
+            "--test-dir" => {
+                test_dir = Some(require_value(args, i, "--test-dir")?.clone());
+                i += 1;
+            }
+            "--scratch-mnt" => {
+                scratch_mnt = Some(require_value(args, i, "--scratch-mnt")?.clone());
+                i += 1;
+            }
+            "--ack-env" => {
+                ack_env.clone_from(require_value(args, i, "--ack-env")?);
+                i += 1;
+            }
+            "--ack-value" => {
+                ack_value.clone_from(require_value(args, i, "--ack-value")?);
+                i += 1;
+            }
+            "--generated-at" => {
+                generated_at = Some(require_value(args, i, "--generated-at")?.clone());
+                i += 1;
+            }
+            "--git-sha" => {
+                git_sha = Some(require_value(args, i, "--git-sha")?.clone());
+                i += 1;
+            }
+            "--reproduction-command" => {
+                reproduction_command.clone_from(require_value(args, i, "--reproduction-command")?);
+                i += 1;
+            }
+            "--cleanup-status" => {
+                cleanup_status = parse_adaptive_runtime_runner_cleanup_status(require_value(
+                    args,
+                    i,
+                    "--cleanup-status",
+                )?)?;
+                i += 1;
+            }
+            "--help" | "-h" => {
+                print_adaptive_runtime_runner_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown adaptive-runtime-runner argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let out_path = out_path.unwrap_or_else(|| {
+        Path::new(&artifact_root)
+            .join("report.json")
+            .display()
+            .to_string()
+    });
+    let summary_out_path = summary_out_path.unwrap_or_else(|| {
+        Path::new(&artifact_root)
+            .join("report.md")
+            .display()
+            .to_string()
+    });
+    let generated_at = generated_at.unwrap_or_else(current_unix_timestamp_label);
+    let git_sha = git_sha
+        .or_else(|| env::var("GIT_SHA").ok())
+        .unwrap_or_else(|| "unknown".to_owned());
+
+    Ok(Some(AdaptiveRuntimeRunnerCmdArgs {
+        mode,
+        artifact_root,
+        out_path,
+        summary_out_path,
+        raw_stdout_path,
+        raw_stderr_path,
+        structured_log_path,
+        runner_manifest_path,
+        cleanup_report_path,
+        host_facts_path,
+        test_dir,
+        scratch_mnt,
+        ack_env,
+        ack_value,
+        generated_at,
+        git_sha,
+        reproduction_command,
+        cleanup_status,
+    }))
+}
+
+fn parse_adaptive_runtime_runner_mode(value: &str) -> Result<AdaptiveRuntimeRunnerMode> {
+    match value {
+        "dry-run" | "dry_run" => Ok(AdaptiveRuntimeRunnerMode::DryRun),
+        "capability-probe" | "capability_probe" => Ok(AdaptiveRuntimeRunnerMode::CapabilityProbe),
+        "permissioned-real" | "permissioned_real" => {
+            Ok(AdaptiveRuntimeRunnerMode::PermissionedReal)
+        }
+        other => bail!("invalid --mode value: {other}"),
+    }
+}
+
+fn parse_adaptive_runtime_runner_cleanup_status(
+    value: &str,
+) -> Result<AdaptiveRuntimeRunnerCleanupStatus> {
+    match value {
+        "not-started-dry-run" | "not_started_dry_run" => {
+            Ok(AdaptiveRuntimeRunnerCleanupStatus::NotStartedDryRun)
+        }
+        "clean" => Ok(AdaptiveRuntimeRunnerCleanupStatus::Clean),
+        "preserved-artifacts" | "preserved_artifacts" => {
+            Ok(AdaptiveRuntimeRunnerCleanupStatus::PreservedArtifacts)
+        }
+        "failed" => Ok(AdaptiveRuntimeRunnerCleanupStatus::Failed),
+        other => bail!("invalid --cleanup-status value: {other}"),
+    }
+}
+
+fn current_unix_timestamp_label() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    format!("unix:{secs}")
 }
 
 fn validate_adaptive_runtime_manifest_cmd(args: &[String]) -> Result<()> {
@@ -5023,6 +5328,9 @@ fn print_usage_core_commands() {
         "  ffs-harness validate-proof-overhead-budget --budget FILE --metrics FILE [--out FILE]"
     );
     println!(
+        "  ffs-harness adaptive-runtime-runner [--mode dry-run|capability-probe|permissioned-real] [--artifact-root DIR] [--out FILE] [--summary-out FILE] [--test-dir DIR] [--scratch-mnt DIR]"
+    );
+    println!(
         "  ffs-harness validate-adaptive-runtime-manifest [--manifest FILE] [--current-git-sha SHA] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
@@ -5117,6 +5425,9 @@ fn print_usage_examples() {
     println!("  ffs-harness validate-fuzz-smoke --out artifacts/fuzz-smoke/fuzz_smoke_report.json");
     println!(
         "  ffs-harness validate-proof-overhead-budget --budget artifacts/proof/budget.json --metrics artifacts/proof/metrics.json --out artifacts/proof/budget_report.json"
+    );
+    println!(
+        "  ffs-harness adaptive-runtime-runner --artifact-root artifacts/adaptive-runtime/dry-run --out artifacts/adaptive-runtime/dry-run/report.json --summary-out artifacts/adaptive-runtime/dry-run/report.md"
     );
     println!(
         "  ffs-harness validate-adaptive-runtime-manifest --manifest docs/adaptive-runtime-evidence-manifest.json --out artifacts/adaptive-runtime/report.json --summary-out artifacts/adaptive-runtime/report.md"
@@ -5543,6 +5854,37 @@ fn print_adaptive_runtime_manifest_usage() {
     println!("  --summary-out FILE                 Write Markdown inspection summary");
     println!("  --reference-timestamp RFC3339      Freshness reference timestamp (default: now)");
     println!("  --current-git-sha SHA              Strictly require manifest git_sha to match SHA");
+}
+
+fn print_adaptive_runtime_runner_usage() {
+    println!("Usage: ffs-harness adaptive-runtime-runner [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --mode dry-run|capability-probe|permissioned-real");
+    println!("                                      Runner mode (default: dry-run)");
+    println!("  --artifact-root DIR                Artifact-scoped output root");
+    println!("  --out FILE                         Write JSON runner report");
+    println!("  --summary-out FILE                 Write Markdown runner summary");
+    println!("  --stdout-log FILE                  Write captured stdout log");
+    println!("  --stderr-log FILE                  Write captured stderr log");
+    println!("  --structured-log FILE              Write structured JSONL log");
+    println!("  --manifest-out FILE                Write runner plan manifest");
+    println!("  --cleanup-out FILE                 Write cleanup report");
+    println!("  --host-facts-out FILE              Write host facts JSON");
+    println!("  --test-dir DIR                     Permissioned TEST_DIR-style path");
+    println!("  --scratch-mnt DIR                  Permissioned SCRATCH_MNT-style path");
+    println!(
+        "  --ack-env NAME                     ACK env var (default: FFS_ADAPTIVE_RUNTIME_REAL_RUN_ACK)"
+    );
+    println!(
+        "  --ack-value VALUE                  Required ACK token (default: adaptive-runtime-may-mount-and-generate-load)"
+    );
+    println!("  --generated-at TS                  Override generated_at in artifacts");
+    println!("  --git-sha SHA                      Git SHA captured in artifacts");
+    println!("  --reproduction-command CMD         Exact command to preserve in artifacts");
+    println!(
+        "  --cleanup-status STATUS            not-started-dry-run|clean|preserved-artifacts|failed"
+    );
 }
 
 fn print_proof_bundle_usage() {

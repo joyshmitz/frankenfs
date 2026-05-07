@@ -13,7 +13,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_ADAPTIVE_RUNTIME_EVIDENCE_MANIFEST: &str =
@@ -22,6 +23,12 @@ pub const ADAPTIVE_RUNTIME_EVIDENCE_MANIFEST_VERSION: u32 = 1;
 pub const ADAPTIVE_RUNTIME_MIN_CPU_COUNT: u32 = 64;
 pub const ADAPTIVE_RUNTIME_MIN_RAM_BYTES: u64 = 256 * 1024 * 1024 * 1024;
 pub const ADAPTIVE_RUNTIME_MIN_NUMA_NODES: u32 = 2;
+pub const ADAPTIVE_RUNTIME_RUNNER_CONTRACT_VERSION: u32 = 1;
+pub const DEFAULT_ADAPTIVE_RUNTIME_RUNNER_ARTIFACT_ROOT: &str =
+    "artifacts/adaptive-runtime/dry-run";
+pub const DEFAULT_ADAPTIVE_RUNTIME_REAL_RUN_ACK_ENV: &str = "FFS_ADAPTIVE_RUNTIME_REAL_RUN_ACK";
+pub const DEFAULT_ADAPTIVE_RUNTIME_REAL_RUN_ACK_VALUE: &str =
+    "adaptive-runtime-may-mount-and-generate-load";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdaptiveRuntimeEvidenceManifest {
@@ -241,6 +248,186 @@ pub struct AdaptiveRuntimeEvidenceReport {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdaptiveRuntimeRunnerMode {
+    DryRun,
+    CapabilityProbe,
+    PermissionedReal,
+}
+
+impl AdaptiveRuntimeRunnerMode {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DryRun => "dry_run",
+            Self::CapabilityProbe => "capability_probe",
+            Self::PermissionedReal => "permissioned_real",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdaptiveRuntimeRunnerClassification {
+    SmallHostSmoke,
+    CapabilityDowngradedSmoke,
+    AcceptedLargeHost,
+    FailedCleanup,
+}
+
+impl AdaptiveRuntimeRunnerClassification {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SmallHostSmoke => "small_host_smoke",
+            Self::CapabilityDowngradedSmoke => "capability_downgraded_smoke",
+            Self::AcceptedLargeHost => "accepted_large_host",
+            Self::FailedCleanup => "failed_cleanup",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdaptiveRuntimeRunnerCleanupStatus {
+    NotStartedDryRun,
+    Clean,
+    PreservedArtifacts,
+    Failed,
+}
+
+impl AdaptiveRuntimeRunnerCleanupStatus {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NotStartedDryRun => "not_started_dry_run",
+            Self::Clean => "clean",
+            Self::PreservedArtifacts => "preserved_artifacts",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdaptiveRuntimeRunnerPathPlan {
+    pub artifact_root: String,
+    pub raw_stdout_path: String,
+    pub raw_stderr_path: String,
+    pub structured_log_path: String,
+    pub runner_manifest_path: String,
+    pub cleanup_report_path: String,
+    pub host_facts_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scratch_mnt: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdaptiveRuntimeRunnerHostFacts {
+    pub host_fingerprint: String,
+    pub cpu_count: u32,
+    pub ram_bytes: u64,
+    pub numa_nodes: u32,
+    pub kernel: String,
+    pub fuse_capability_summary: AdaptiveRuntimeFuseCapabilitySummary,
+}
+
+impl AdaptiveRuntimeRunnerHostFacts {
+    #[must_use]
+    pub fn meets_large_host_floor(&self) -> bool {
+        self.cpu_count >= ADAPTIVE_RUNTIME_MIN_CPU_COUNT
+            && self.ram_bytes >= ADAPTIVE_RUNTIME_MIN_RAM_BYTES
+            && self.numa_nodes >= ADAPTIVE_RUNTIME_MIN_NUMA_NODES
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdaptiveRuntimeRunnerConfig {
+    pub mode: AdaptiveRuntimeRunnerMode,
+    pub path_plan: AdaptiveRuntimeRunnerPathPlan,
+    pub ack_env: String,
+    pub ack_value: String,
+    pub observed_ack_value: Option<String>,
+    pub generated_at: String,
+    pub git_sha: String,
+    pub reproduction_command: String,
+    pub host_facts: AdaptiveRuntimeRunnerHostFacts,
+    pub cleanup_status: AdaptiveRuntimeRunnerCleanupStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdaptiveRuntimeRunnerPlanManifest {
+    pub contract_version: u32,
+    pub mode: String,
+    pub dry_run_default: bool,
+    pub side_effect_policy: String,
+    pub command_plan: String,
+    pub ack_env: String,
+    pub ack_value: String,
+    pub ack_present: bool,
+    pub ack_matches: bool,
+    pub path_plan: AdaptiveRuntimeRunnerPathPlan,
+    pub generated_at: String,
+    pub git_sha: String,
+    pub reproduction_command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdaptiveRuntimeRunnerCleanupReport {
+    pub contract_version: u32,
+    pub cleanup_status: String,
+    pub cleanup_performed: bool,
+    pub mutating_workload_started: bool,
+    pub preserved_artifacts: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdaptiveRuntimeRunnerAckState {
+    pub env: String,
+    pub value: String,
+    pub present: bool,
+    pub matches_expected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdaptiveRuntimeRunnerExecutionState {
+    pub dry_run_only: bool,
+    pub permissioned_real_allowed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdaptiveRuntimeRunnerReport {
+    pub contract_version: u32,
+    pub valid: bool,
+    pub mode: String,
+    pub classification: String,
+    pub execution: AdaptiveRuntimeRunnerExecutionState,
+    pub ack: AdaptiveRuntimeRunnerAckState,
+    pub path_plan: AdaptiveRuntimeRunnerPathPlan,
+    pub host_facts: AdaptiveRuntimeRunnerHostFacts,
+    pub cleanup_status: String,
+    pub artifact_paths: Vec<String>,
+    pub capability_downgrade_reasons: Vec<String>,
+    pub refusal_reasons: Vec<String>,
+    pub errors: Vec<String>,
+    pub generated_at: String,
+    pub git_sha: String,
+    pub reproduction_command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveRuntimeRunnerArtifacts {
+    pub report: AdaptiveRuntimeRunnerReport,
+    pub plan_manifest: AdaptiveRuntimeRunnerPlanManifest,
+    pub cleanup_report: AdaptiveRuntimeRunnerCleanupReport,
+    pub stdout_log: String,
+    pub stderr_log: String,
+    pub structured_log: String,
+}
+
 pub fn load_adaptive_runtime_evidence_manifest(
     path: &Path,
 ) -> Result<AdaptiveRuntimeEvidenceManifest> {
@@ -377,6 +564,560 @@ pub fn fail_on_adaptive_runtime_evidence_errors(
         );
     }
     Ok(())
+}
+
+#[must_use]
+pub fn default_adaptive_runtime_runner_path_plan(
+    artifact_root: impl Into<String>,
+) -> AdaptiveRuntimeRunnerPathPlan {
+    let artifact_root = artifact_root.into();
+    AdaptiveRuntimeRunnerPathPlan {
+        raw_stdout_path: join_artifact_path(&artifact_root, "stdout.log"),
+        raw_stderr_path: join_artifact_path(&artifact_root, "stderr.log"),
+        structured_log_path: join_artifact_path(&artifact_root, "structured.jsonl"),
+        runner_manifest_path: join_artifact_path(&artifact_root, "runner_manifest.json"),
+        cleanup_report_path: join_artifact_path(&artifact_root, "cleanup_report.json"),
+        host_facts_path: join_artifact_path(&artifact_root, "host_facts.json"),
+        artifact_root,
+        test_dir: None,
+        scratch_mnt: None,
+    }
+}
+
+#[must_use]
+pub fn collect_adaptive_runtime_runner_host_facts() -> AdaptiveRuntimeRunnerHostFacts {
+    let cpu_count = thread::available_parallelism()
+        .ok()
+        .and_then(|count| u32::try_from(count.get()).ok())
+        .filter(|count| *count > 0)
+        .unwrap_or(1);
+    let ram_bytes = read_meminfo_total_bytes().unwrap_or(1);
+    let numa_nodes = count_numa_nodes().unwrap_or(1).max(1);
+    let kernel = fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|value| value.trim().to_owned())
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let fuse_capability_summary = classify_host_fuse_capability();
+    let host_fingerprint = format!("cpu{cpu_count}-ram{ram_bytes}-numa{numa_nodes}-kernel{kernel}");
+
+    AdaptiveRuntimeRunnerHostFacts {
+        host_fingerprint,
+        cpu_count,
+        ram_bytes,
+        numa_nodes,
+        kernel,
+        fuse_capability_summary,
+    }
+}
+
+#[must_use]
+pub fn build_adaptive_runtime_runner_artifacts(
+    config: AdaptiveRuntimeRunnerConfig,
+) -> AdaptiveRuntimeRunnerArtifacts {
+    let report = build_adaptive_runtime_runner_report(config);
+    let plan_manifest = build_adaptive_runtime_runner_plan_manifest(&report);
+    let cleanup_report = build_adaptive_runtime_runner_cleanup_report(&report);
+    let stdout_log = render_adaptive_runtime_runner_stdout_log(&report);
+    let stderr_log = render_adaptive_runtime_runner_stderr_log(&report);
+    let structured_log = render_adaptive_runtime_runner_structured_log(&report);
+
+    AdaptiveRuntimeRunnerArtifacts {
+        report,
+        plan_manifest,
+        cleanup_report,
+        stdout_log,
+        stderr_log,
+        structured_log,
+    }
+}
+
+#[must_use]
+pub fn build_adaptive_runtime_runner_report(
+    config: AdaptiveRuntimeRunnerConfig,
+) -> AdaptiveRuntimeRunnerReport {
+    let ack_present = config
+        .observed_ack_value
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let ack_matches = config
+        .observed_ack_value
+        .as_deref()
+        .is_some_and(|value| value.trim() == config.ack_value);
+    let mut refusal_reasons = validate_runner_path_plan(&config);
+    let mut capability_downgrade_reasons = capability_downgrade_reasons(&config);
+
+    if matches!(config.mode, AdaptiveRuntimeRunnerMode::PermissionedReal) {
+        if !ack_present {
+            refusal_reasons.push(format!(
+                "{} is required for permissioned real adaptive runtime runs",
+                config.ack_env
+            ));
+        } else if !ack_matches {
+            refusal_reasons.push(format!(
+                "{} must equal {}",
+                config.ack_env, config.ack_value
+            ));
+        }
+    } else if matches!(config.mode, AdaptiveRuntimeRunnerMode::DryRun) {
+        capability_downgrade_reasons
+            .push("dry-run mode does not mount or generate adaptive runtime load".to_owned());
+    } else {
+        capability_downgrade_reasons
+            .push("capability-probe mode records host facts without mutating workloads".to_owned());
+    }
+
+    let cleanup_failed = matches!(
+        config.cleanup_status,
+        AdaptiveRuntimeRunnerCleanupStatus::Failed
+    );
+    let permissioned_real_allowed =
+        matches!(config.mode, AdaptiveRuntimeRunnerMode::PermissionedReal)
+            && ack_matches
+            && refusal_reasons.is_empty();
+    let large_host_accepted = permissioned_real_allowed
+        && config.host_facts.meets_large_host_floor()
+        && matches!(
+            config.host_facts.fuse_capability_summary.state,
+            AdaptiveRuntimeFuseCapabilityState::Available
+        );
+    let fuse_available = matches!(
+        config.host_facts.fuse_capability_summary.state,
+        AdaptiveRuntimeFuseCapabilityState::Available
+    );
+    let classification = if cleanup_failed {
+        AdaptiveRuntimeRunnerClassification::FailedCleanup
+    } else if large_host_accepted {
+        AdaptiveRuntimeRunnerClassification::AcceptedLargeHost
+    } else if matches!(config.mode, AdaptiveRuntimeRunnerMode::CapabilityProbe) || !fuse_available {
+        AdaptiveRuntimeRunnerClassification::CapabilityDowngradedSmoke
+    } else {
+        AdaptiveRuntimeRunnerClassification::SmallHostSmoke
+    };
+    let mut errors = refusal_reasons.clone();
+    if cleanup_failed {
+        errors.push("cleanup_status failed; artifacts require operator inspection".to_owned());
+    }
+    let valid = errors.is_empty();
+    let artifact_paths = vec![
+        config.path_plan.raw_stdout_path.clone(),
+        config.path_plan.raw_stderr_path.clone(),
+        config.path_plan.structured_log_path.clone(),
+        config.path_plan.runner_manifest_path.clone(),
+        config.path_plan.cleanup_report_path.clone(),
+        config.path_plan.host_facts_path.clone(),
+    ];
+
+    AdaptiveRuntimeRunnerReport {
+        contract_version: ADAPTIVE_RUNTIME_RUNNER_CONTRACT_VERSION,
+        valid,
+        mode: config.mode.label().to_owned(),
+        classification: classification.label().to_owned(),
+        execution: AdaptiveRuntimeRunnerExecutionState {
+            dry_run_only: !matches!(config.mode, AdaptiveRuntimeRunnerMode::PermissionedReal),
+            permissioned_real_allowed,
+        },
+        ack: AdaptiveRuntimeRunnerAckState {
+            env: config.ack_env,
+            value: config.ack_value,
+            present: ack_present,
+            matches_expected: ack_matches,
+        },
+        path_plan: config.path_plan,
+        host_facts: config.host_facts,
+        cleanup_status: config.cleanup_status.label().to_owned(),
+        artifact_paths,
+        capability_downgrade_reasons,
+        refusal_reasons,
+        errors,
+        generated_at: config.generated_at,
+        git_sha: config.git_sha,
+        reproduction_command: config.reproduction_command,
+    }
+}
+
+#[must_use]
+pub fn render_adaptive_runtime_runner_markdown(report: &AdaptiveRuntimeRunnerReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Adaptive Runtime Runner\n");
+    let _ = writeln!(out, "- Valid: `{}`", report.valid);
+    let _ = writeln!(out, "- Mode: `{}`", report.mode);
+    let _ = writeln!(out, "- Classification: `{}`", report.classification);
+    let _ = writeln!(
+        out,
+        "- Permissioned real allowed: `{}`",
+        report.execution.permissioned_real_allowed
+    );
+    let _ = writeln!(out, "- ACK env: `{}`", report.ack.env);
+    let _ = writeln!(out, "- ACK present: `{}`", report.ack.present);
+    let _ = writeln!(out, "- ACK matches: `{}`", report.ack.matches_expected);
+    let _ = writeln!(out, "- Cleanup: `{}`", report.cleanup_status);
+    let _ = writeln!(out, "- Artifact root: `{}`", report.path_plan.artifact_root);
+    let _ = writeln!(out, "- CPU count: `{}`", report.host_facts.cpu_count);
+    let _ = writeln!(out, "- RAM bytes: `{}`", report.host_facts.ram_bytes);
+    let _ = writeln!(out, "- NUMA nodes: `{}`", report.host_facts.numa_nodes);
+    let _ = writeln!(
+        out,
+        "- FUSE capability: `{}`",
+        report.host_facts.fuse_capability_summary.state.label()
+    );
+
+    out.push_str("\n## Capability Downgrades\n\n");
+    if report.capability_downgrade_reasons.is_empty() {
+        out.push_str("none\n");
+    } else {
+        for reason in &report.capability_downgrade_reasons {
+            let _ = writeln!(out, "- {reason}");
+        }
+    }
+
+    out.push_str("\n## Refusals\n\n");
+    if report.refusal_reasons.is_empty() {
+        out.push_str("none\n");
+    } else {
+        for reason in &report.refusal_reasons {
+            let _ = writeln!(out, "- {reason}");
+        }
+    }
+
+    out.push_str("\n## Artifacts\n\n");
+    for path in &report.artifact_paths {
+        let _ = writeln!(out, "- `{path}`");
+    }
+
+    out
+}
+
+pub fn fail_on_adaptive_runtime_runner_errors(report: &AdaptiveRuntimeRunnerReport) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    bail!(
+        "adaptive runtime runner refused: classification={} errors={}",
+        report.classification,
+        report.errors.len()
+    );
+}
+
+fn build_adaptive_runtime_runner_plan_manifest(
+    report: &AdaptiveRuntimeRunnerReport,
+) -> AdaptiveRuntimeRunnerPlanManifest {
+    let side_effect_policy = if report.execution.permissioned_real_allowed {
+        "permissioned_real_may_mount_and_generate_load_inside_artifact_scoped_paths"
+    } else {
+        "safe_probe_no_mount_no_workload_mutation"
+    };
+    let command_plan = if report.execution.permissioned_real_allowed {
+        "ffs mount --adaptive-runtime-enabled --adaptive-runtime-mode per-core"
+    } else {
+        "dry-run: collect host facts, capability state, logs, and refusal/downgrade reasons"
+    };
+
+    AdaptiveRuntimeRunnerPlanManifest {
+        contract_version: ADAPTIVE_RUNTIME_RUNNER_CONTRACT_VERSION,
+        mode: report.mode.clone(),
+        dry_run_default: report.execution.dry_run_only,
+        side_effect_policy: side_effect_policy.to_owned(),
+        command_plan: command_plan.to_owned(),
+        ack_env: report.ack.env.clone(),
+        ack_value: report.ack.value.clone(),
+        ack_present: report.ack.present,
+        ack_matches: report.ack.matches_expected,
+        path_plan: report.path_plan.clone(),
+        generated_at: report.generated_at.clone(),
+        git_sha: report.git_sha.clone(),
+        reproduction_command: report.reproduction_command.clone(),
+    }
+}
+
+fn build_adaptive_runtime_runner_cleanup_report(
+    report: &AdaptiveRuntimeRunnerReport,
+) -> AdaptiveRuntimeRunnerCleanupReport {
+    let mut notes = Vec::new();
+    if report.execution.permissioned_real_allowed {
+        notes.push(
+            "permissioned lane was authorized; cleanup status reflects runner result".to_owned(),
+        );
+    } else {
+        notes.push("no mount or adaptive workload was started".to_owned());
+    }
+    if !report.refusal_reasons.is_empty() {
+        notes.push("permissioned runner refused before side effects".to_owned());
+    }
+
+    AdaptiveRuntimeRunnerCleanupReport {
+        contract_version: ADAPTIVE_RUNTIME_RUNNER_CONTRACT_VERSION,
+        cleanup_status: report.cleanup_status.clone(),
+        cleanup_performed: report.execution.permissioned_real_allowed,
+        mutating_workload_started: report.execution.permissioned_real_allowed,
+        preserved_artifacts: report.artifact_paths.clone(),
+        notes,
+    }
+}
+
+fn render_adaptive_runtime_runner_stdout_log(report: &AdaptiveRuntimeRunnerReport) -> String {
+    format!(
+        "ADAPTIVE_RUNTIME_RUNNER|mode={}|classification={}|valid={}|permissioned_real_allowed={}|artifact_root={}\n",
+        report.mode,
+        report.classification,
+        report.valid,
+        report.execution.permissioned_real_allowed,
+        report.path_plan.artifact_root
+    )
+}
+
+fn render_adaptive_runtime_runner_stderr_log(report: &AdaptiveRuntimeRunnerReport) -> String {
+    if report.errors.is_empty() {
+        return "ADAPTIVE_RUNTIME_RUNNER_DIAGNOSTIC|level=info|message=no permissioned workload executed unless explicitly authorized\n".to_owned();
+    }
+
+    let mut out = String::new();
+    for error in &report.errors {
+        let _ = writeln!(
+            out,
+            "ADAPTIVE_RUNTIME_RUNNER_DIAGNOSTIC|level=error|message={}",
+            error.replace('\n', " ")
+        );
+    }
+    out
+}
+
+fn render_adaptive_runtime_runner_structured_log(report: &AdaptiveRuntimeRunnerReport) -> String {
+    let events = [
+        serde_json::json!({
+            "event": "adaptive_runtime_runner_start",
+            "mode": report.mode,
+            "artifact_root": report.path_plan.artifact_root,
+            "dry_run_only": report.execution.dry_run_only,
+        }),
+        serde_json::json!({
+            "event": "adaptive_runtime_runner_capability",
+            "cpu_count": report.host_facts.cpu_count,
+            "ram_bytes": report.host_facts.ram_bytes,
+            "numa_nodes": report.host_facts.numa_nodes,
+            "fuse_state": report.host_facts.fuse_capability_summary.state.label(),
+            "downgrade_reasons": report.capability_downgrade_reasons,
+        }),
+        serde_json::json!({
+            "event": "adaptive_runtime_runner_result",
+            "valid": report.valid,
+            "classification": report.classification,
+            "permissioned_real_allowed": report.execution.permissioned_real_allowed,
+            "refusal_reasons": report.refusal_reasons,
+            "cleanup_status": report.cleanup_status,
+        }),
+    ];
+    let mut out = String::new();
+    for event in events {
+        let _ = writeln!(out, "{event}");
+    }
+    out
+}
+
+fn validate_runner_path_plan(config: &AdaptiveRuntimeRunnerConfig) -> Vec<String> {
+    let mut reasons = Vec::new();
+    let root = config.path_plan.artifact_root.trim();
+    if !is_safe_artifact_root(root) {
+        reasons.push(format!(
+            "artifact_root must be an artifact-scoped path under artifacts/, /tmp/frankenfs-*, /data/tmp/frankenfs-*, or an absolute artifacts directory: {root}"
+        ));
+    }
+
+    validate_artifact_child_path(
+        root,
+        "raw_stdout_path",
+        &config.path_plan.raw_stdout_path,
+        &mut reasons,
+    );
+    validate_artifact_child_path(
+        root,
+        "raw_stderr_path",
+        &config.path_plan.raw_stderr_path,
+        &mut reasons,
+    );
+    validate_artifact_child_path(
+        root,
+        "structured_log_path",
+        &config.path_plan.structured_log_path,
+        &mut reasons,
+    );
+    validate_artifact_child_path(
+        root,
+        "runner_manifest_path",
+        &config.path_plan.runner_manifest_path,
+        &mut reasons,
+    );
+    validate_artifact_child_path(
+        root,
+        "cleanup_report_path",
+        &config.path_plan.cleanup_report_path,
+        &mut reasons,
+    );
+    validate_artifact_child_path(
+        root,
+        "host_facts_path",
+        &config.path_plan.host_facts_path,
+        &mut reasons,
+    );
+
+    if matches!(config.mode, AdaptiveRuntimeRunnerMode::PermissionedReal) {
+        validate_required_artifact_child_option(
+            root,
+            "test_dir",
+            config.path_plan.test_dir.as_ref(),
+            &mut reasons,
+        );
+        validate_required_artifact_child_option(
+            root,
+            "scratch_mnt",
+            config.path_plan.scratch_mnt.as_ref(),
+            &mut reasons,
+        );
+        if config.path_plan.test_dir == config.path_plan.scratch_mnt {
+            reasons.push("test_dir and scratch_mnt must be distinct".to_owned());
+        }
+    }
+
+    reasons
+}
+
+fn validate_required_artifact_child_option(
+    artifact_root: &str,
+    field: &str,
+    value: Option<&String>,
+    reasons: &mut Vec<String>,
+) {
+    match value {
+        Some(path) => validate_artifact_child_path(artifact_root, field, path, reasons),
+        None => reasons.push(format!("{field} is required for permissioned real mode")),
+    }
+}
+
+fn validate_artifact_child_path(
+    artifact_root: &str,
+    field: &str,
+    value: &str,
+    reasons: &mut Vec<String>,
+) {
+    let value = value.trim();
+    if value.is_empty() {
+        reasons.push(format!("{field} must not be empty"));
+        return;
+    }
+    let path = Path::new(value);
+    if is_root_or_parent_sensitive(path) || !path.starts_with(Path::new(artifact_root)) {
+        reasons.push(format!(
+            "{field} must live under artifact_root {artifact_root}: {value}"
+        ));
+    }
+}
+
+fn capability_downgrade_reasons(config: &AdaptiveRuntimeRunnerConfig) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if !config.host_facts.meets_large_host_floor() {
+        reasons.push(format!(
+            "host below large-host floor: cpu_count={} ram_bytes={} numa_nodes={}",
+            config.host_facts.cpu_count, config.host_facts.ram_bytes, config.host_facts.numa_nodes
+        ));
+    }
+    if !matches!(
+        config.host_facts.fuse_capability_summary.state,
+        AdaptiveRuntimeFuseCapabilityState::Available
+    ) {
+        reasons.push(format!(
+            "FUSE capability is {}: {}",
+            config.host_facts.fuse_capability_summary.state.label(),
+            config.host_facts.fuse_capability_summary.detail
+        ));
+    }
+    reasons
+}
+
+fn is_safe_artifact_root(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let path = Path::new(value);
+    if is_root_or_parent_sensitive(path) {
+        return false;
+    }
+    if path.is_absolute() {
+        value.starts_with("/tmp/frankenfs-")
+            || value.starts_with("/data/tmp/frankenfs-")
+            || value.contains("/artifacts/")
+    } else {
+        path.starts_with("artifacts")
+    }
+}
+
+fn is_root_or_parent_sensitive(path: &Path) -> bool {
+    path.as_os_str().is_empty()
+        || path == Path::new("/")
+        || path == Path::new(".")
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+}
+
+fn join_artifact_path(root: &str, leaf: &str) -> String {
+    Path::new(root).join(leaf).display().to_string()
+}
+
+fn read_meminfo_total_bytes() -> Option<u64> {
+    let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
+    let line = meminfo.lines().find(|line| line.starts_with("MemTotal:"))?;
+    let kib = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u64>().ok())?;
+    kib.checked_mul(1024)
+}
+
+fn count_numa_nodes() -> Option<u32> {
+    let entries = fs::read_dir("/sys/devices/system/node").ok()?;
+    let mut count = 0_u32;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some(suffix) = name.strip_prefix("node")
+            && suffix.parse::<u32>().is_ok()
+        {
+            count = count.saturating_add(1);
+        }
+    }
+    (count > 0).then_some(count)
+}
+
+fn classify_host_fuse_capability() -> AdaptiveRuntimeFuseCapabilitySummary {
+    if std::env::var("FFS_ADAPTIVE_RUNTIME_DISABLE_FUSE_PROBE").is_ok() {
+        return AdaptiveRuntimeFuseCapabilitySummary {
+            state: AdaptiveRuntimeFuseCapabilityState::DisabledByUser,
+            detail: "FFS_ADAPTIVE_RUNTIME_DISABLE_FUSE_PROBE is set".to_owned(),
+        };
+    }
+    let fuse_path = Path::new("/dev/fuse");
+    if !fuse_path.exists() {
+        return AdaptiveRuntimeFuseCapabilitySummary {
+            state: AdaptiveRuntimeFuseCapabilityState::Missing,
+            detail: "/dev/fuse is not present".to_owned(),
+        };
+    }
+    match fs::metadata(fuse_path) {
+        Ok(_) => AdaptiveRuntimeFuseCapabilitySummary {
+            state: AdaptiveRuntimeFuseCapabilityState::Available,
+            detail: "/dev/fuse metadata is visible; dry-run did not mount".to_owned(),
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            AdaptiveRuntimeFuseCapabilitySummary {
+                state: AdaptiveRuntimeFuseCapabilityState::PermissionDenied,
+                detail: "/dev/fuse exists but metadata was permission denied".to_owned(),
+            }
+        }
+        Err(err) => AdaptiveRuntimeFuseCapabilitySummary {
+            state: AdaptiveRuntimeFuseCapabilityState::Unknown,
+            detail: format!("/dev/fuse probe failed: {err}"),
+        },
+    }
 }
 
 fn current_epoch_days() -> Option<u32> {
@@ -945,6 +1686,149 @@ mod tests {
         );
     }
 
+    #[test]
+    fn adaptive_runtime_runner_dry_run_is_safe_default() {
+        let artifacts = build_adaptive_runtime_runner_artifacts(fixture_runner_config(
+            AdaptiveRuntimeRunnerMode::DryRun,
+        ));
+        let report = &artifacts.report;
+
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.mode, "dry_run");
+        assert_eq!(report.classification, "small_host_smoke");
+        assert!(report.execution.dry_run_only);
+        assert!(!report.execution.permissioned_real_allowed);
+        assert!(!report.ack.present);
+        assert_eq!(report.artifact_paths.len(), 6);
+        assert!(
+            report
+                .capability_downgrade_reasons
+                .iter()
+                .any(|reason| reason.contains("host below large-host floor"))
+        );
+        assert!(artifacts.stdout_log.contains("ADAPTIVE_RUNTIME_RUNNER"));
+        assert!(
+            artifacts
+                .structured_log
+                .contains("adaptive_runtime_runner_result")
+        );
+    }
+
+    #[test]
+    fn adaptive_runtime_runner_capability_probe_stays_downgraded() {
+        let artifacts = build_adaptive_runtime_runner_artifacts(fixture_runner_config(
+            AdaptiveRuntimeRunnerMode::CapabilityProbe,
+        ));
+        let report = &artifacts.report;
+
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.classification, "capability_downgraded_smoke");
+        assert!(
+            report
+                .capability_downgrade_reasons
+                .iter()
+                .any(|reason| reason.contains("capability-probe mode"))
+        );
+    }
+
+    #[test]
+    fn adaptive_runtime_runner_permissioned_mode_requires_ack() {
+        let mut config = fixture_runner_config(AdaptiveRuntimeRunnerMode::PermissionedReal);
+        config.path_plan.test_dir = Some("artifacts/adaptive-runtime/runner/test-dir".to_owned());
+        config.path_plan.scratch_mnt =
+            Some("artifacts/adaptive-runtime/runner/scratch-mnt".to_owned());
+
+        let report = build_adaptive_runtime_runner_report(config);
+
+        assert!(!report.valid);
+        assert!(!report.execution.permissioned_real_allowed);
+        assert!(
+            report
+                .refusal_reasons
+                .iter()
+                .any(|reason| { reason.contains("FFS_ADAPTIVE_RUNTIME_REAL_RUN_ACK is required") })
+        );
+        assert!(fail_on_adaptive_runtime_runner_errors(&report).is_err());
+    }
+
+    #[test]
+    fn adaptive_runtime_runner_permissioned_mode_rejects_unsafe_paths() {
+        let mut config = fixture_runner_config(AdaptiveRuntimeRunnerMode::PermissionedReal);
+        config.observed_ack_value = Some(DEFAULT_ADAPTIVE_RUNTIME_REAL_RUN_ACK_VALUE.to_owned());
+        config.path_plan.test_dir = Some("/".to_owned());
+        config.path_plan.scratch_mnt =
+            Some("artifacts/adaptive-runtime/runner/scratch-mnt".to_owned());
+
+        let report = build_adaptive_runtime_runner_report(config);
+
+        assert!(!report.valid);
+        assert!(!report.execution.permissioned_real_allowed);
+        assert!(
+            report
+                .refusal_reasons
+                .iter()
+                .any(|reason| reason.contains("test_dir must live under artifact_root"))
+        );
+    }
+
+    #[test]
+    fn adaptive_runtime_runner_allows_absolute_artifact_roots() {
+        let mut config = fixture_runner_config(AdaptiveRuntimeRunnerMode::DryRun);
+        config.path_plan = default_adaptive_runtime_runner_path_plan(
+            "/data/projects/frankenfs/artifacts/e2e/runner",
+        );
+
+        let report = build_adaptive_runtime_runner_report(config);
+
+        assert!(report.valid, "{:?}", report.errors);
+        assert!(
+            report
+                .path_plan
+                .raw_stdout_path
+                .starts_with("/data/projects/frankenfs/artifacts/e2e/runner")
+        );
+    }
+
+    #[test]
+    fn adaptive_runtime_runner_accepts_large_permissioned_host() {
+        let mut config = fixture_runner_config(AdaptiveRuntimeRunnerMode::PermissionedReal);
+        config.observed_ack_value = Some(DEFAULT_ADAPTIVE_RUNTIME_REAL_RUN_ACK_VALUE.to_owned());
+        config.path_plan.test_dir = Some("artifacts/adaptive-runtime/runner/test-dir".to_owned());
+        config.path_plan.scratch_mnt =
+            Some("artifacts/adaptive-runtime/runner/scratch-mnt".to_owned());
+        config.cleanup_status = AdaptiveRuntimeRunnerCleanupStatus::Clean;
+        config.host_facts.cpu_count = 96;
+        config.host_facts.ram_bytes = 512 * 1024 * 1024 * 1024;
+        config.host_facts.numa_nodes = 2;
+        config.host_facts.fuse_capability_summary.state =
+            AdaptiveRuntimeFuseCapabilityState::Available;
+
+        let report = build_adaptive_runtime_runner_report(config);
+
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.classification, "accepted_large_host");
+        assert!(report.execution.permissioned_real_allowed);
+        assert!(report.ack.present);
+        assert!(report.ack.matches_expected);
+    }
+
+    #[test]
+    fn adaptive_runtime_runner_failed_cleanup_classifies_and_fails() {
+        let mut config = fixture_runner_config(AdaptiveRuntimeRunnerMode::DryRun);
+        config.cleanup_status = AdaptiveRuntimeRunnerCleanupStatus::Failed;
+
+        let report = build_adaptive_runtime_runner_report(config);
+
+        assert!(!report.valid);
+        assert_eq!(report.classification, "failed_cleanup");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("cleanup_status failed"))
+        );
+    }
+
     fn assert_paths_present(report: &AdaptiveRuntimeEvidenceReport, paths: &[&str]) {
         assert!(!report.valid);
         for path in paths {
@@ -1015,6 +1899,35 @@ mod tests {
             reproduction_command: format!(
                 "cargo run -p ffs-harness -- validate-adaptive-runtime-manifest --manifest {DEFAULT_ADAPTIVE_RUNTIME_EVIDENCE_MANIFEST}"
             ),
+        }
+    }
+
+    fn fixture_runner_config(mode: AdaptiveRuntimeRunnerMode) -> AdaptiveRuntimeRunnerConfig {
+        AdaptiveRuntimeRunnerConfig {
+            mode,
+            path_plan: default_adaptive_runtime_runner_path_plan(
+                "artifacts/adaptive-runtime/runner",
+            ),
+            ack_env: DEFAULT_ADAPTIVE_RUNTIME_REAL_RUN_ACK_ENV.to_owned(),
+            ack_value: DEFAULT_ADAPTIVE_RUNTIME_REAL_RUN_ACK_VALUE.to_owned(),
+            observed_ack_value: None,
+            generated_at: "2026-05-07T00:00:00Z".to_owned(),
+            git_sha: "c87266f2".to_owned(),
+            reproduction_command:
+                "cargo run -p ffs-harness -- adaptive-runtime-runner --artifact-root artifacts/adaptive-runtime/runner"
+                    .to_owned(),
+            host_facts: AdaptiveRuntimeRunnerHostFacts {
+                host_fingerprint: "local-smoke-16c-64gb-1numa".to_owned(),
+                cpu_count: 16,
+                ram_bytes: 64 * 1024 * 1024 * 1024,
+                numa_nodes: 1,
+                kernel: "Linux 6.17.0-14-generic x86_64".to_owned(),
+                fuse_capability_summary: AdaptiveRuntimeFuseCapabilitySummary {
+                    state: AdaptiveRuntimeFuseCapabilityState::Available,
+                    detail: "fixture FUSE available".to_owned(),
+                },
+            },
+            cleanup_status: AdaptiveRuntimeRunnerCleanupStatus::NotStartedDryRun,
         }
     }
 
