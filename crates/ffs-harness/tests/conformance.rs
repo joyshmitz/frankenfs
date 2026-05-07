@@ -4354,6 +4354,7 @@ fn validate_checksum_manifest_artifacts(
     manifest_path: &Path,
     artifacts_dir: &Path,
     artifact_kind: &str,
+    tracked_extensions: &[&str],
 ) {
     let listed_files = parse_checksum_inventory(manifest_path);
     assert!(
@@ -4365,10 +4366,9 @@ fn validate_checksum_manifest_artifacts(
 
     for (filename, expected_digest) in &listed_files {
         assert!(
-            Path::new(filename)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("json")),
-            "{artifact_kind} checksum manifest should only track .json files: {filename}"
+            has_tracked_extension(Path::new(filename), tracked_extensions),
+            "{artifact_kind} checksum manifest should only track {} files: {filename}",
+            tracked_extension_message(tracked_extensions)
         );
         let path = artifacts_dir.join(filename);
         let data = fs::read(&path)
@@ -4384,20 +4384,62 @@ fn validate_checksum_manifest_artifacts(
         );
     }
 
-    let actual_jsons = fs::read_dir(artifacts_dir)
+    let actual_artifacts = fs::read_dir(artifacts_dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", artifacts_dir.display()))
         .filter_map(Result::ok)
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .filter(|e| has_tracked_extension(&e.path(), tracked_extensions))
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect::<Vec<_>>();
 
-    for json_file in &actual_jsons {
+    for artifact_file in &actual_artifacts {
         assert!(
-            listed_files.contains_key(json_file),
-            "{artifact_kind} {json_file} exists but is not listed in {}",
+            listed_files.contains_key(artifact_file),
+            "{artifact_kind} {artifact_file} exists but is not listed in {}",
             manifest_path.display()
         );
     }
+}
+
+fn has_tracked_extension(path: &Path, tracked_extensions: &[&str]) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            tracked_extensions
+                .iter()
+                .any(|tracked| ext.eq_ignore_ascii_case(tracked))
+        })
+}
+
+fn tracked_extension_message(tracked_extensions: &[&str]) -> String {
+    tracked_extensions
+        .iter()
+        .map(|extension| format!(".{extension}"))
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+
+#[test]
+#[should_panic(expected = "golden btrfs_item_payloads.txt exists but is not listed in")]
+fn checksum_manifest_requires_tracked_text_artifacts() {
+    let tmp = tempfile::TempDir::new().expect("tmpdir for checksum manifest negative test");
+    let artifact_dir = tmp.path();
+    fs::write(artifact_dir.join("listed.json"), b"{}").expect("write listed JSON artifact");
+    fs::write(artifact_dir.join("btrfs_item_payloads.txt"), b"payload")
+        .expect("write unlisted text artifact");
+
+    let listed_digest = sha256_hex(b"{}");
+    fs::write(
+        artifact_dir.join("checksums.sha256"),
+        format!("{listed_digest}  listed.json\n"),
+    )
+    .expect("write checksum manifest");
+
+    validate_checksum_manifest_artifacts(
+        &artifact_dir.join("checksums.sha256"),
+        artifact_dir,
+        "golden",
+        &["json", "txt"],
+    );
 }
 
 /// CI gate: verify that every fixture listed in checksums.sha256 exists,
@@ -4412,6 +4454,7 @@ fn fixture_checksum_manifest_is_complete() {
         &workspace.join("conformance/fixtures/checksums.sha256"),
         &workspace.join("conformance/fixtures"),
         "fixture",
+        &["json"],
     );
 }
 
@@ -4427,6 +4470,7 @@ fn golden_checksum_manifest_is_complete() {
         &workspace.join("conformance/golden/checksums.sha256"),
         &workspace.join("conformance/golden"),
         "golden",
+        &["json", "txt"],
     );
 }
 
