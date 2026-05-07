@@ -6,17 +6,17 @@ use crate::mounted_write_error_classes::{
     parse_mounted_write_error_classes, validate_mounted_write_error_classes,
 };
 use crate::repair_corpus::{parse_repair_corpus, validate_repair_corpus};
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use ffs_ondisk::{
-    BtrfsSuperblock, Ext4GroupDesc, Ext4Inode, Ext4Superblock, parse_dir_block, parse_extent_tree,
-    parse_leaf_items, parse_sys_chunk_array,
+    parse_dir_block, parse_extent_tree, parse_leaf_items, parse_sys_chunk_array, BtrfsSuperblock,
+    Ext4GroupDesc, Ext4Inode, Ext4Superblock,
 };
 use ffs_types::ParseError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Component, Path};
 use std::time::{Duration, Instant};
 
@@ -424,6 +424,7 @@ fn validate_seeds(seeds: &[FuzzSmokeSeed], errors: &mut Vec<String>) {
     }
 
     let mut ids = BTreeSet::new();
+    let mut targets = BTreeSet::new();
     for seed in seeds {
         if seed.seed_id.trim().is_empty() {
             errors.push("fuzz-smoke seed has empty seed_id".to_owned());
@@ -448,7 +449,9 @@ fn validate_seeds(seeds: &[FuzzSmokeSeed], errors: &mut Vec<String>) {
                 seed.seed_id
             ));
         }
-        if !ALLOWED_TARGETS.contains(&seed.target.as_str()) {
+        if ALLOWED_TARGETS.contains(&seed.target.as_str()) {
+            targets.insert(seed.target.as_str());
+        } else {
             errors.push(format!(
                 "fuzz-smoke seed `{}` uses unsupported target `{}`",
                 seed.seed_id, seed.target
@@ -481,6 +484,14 @@ fn validate_seeds(seeds: &[FuzzSmokeSeed], errors: &mut Vec<String>) {
         validate_resource_budget(seed, errors);
         validate_minimization(seed, errors);
         validate_quarantine(seed, errors);
+    }
+
+    for required_target in ALLOWED_TARGETS {
+        if !targets.contains(required_target) {
+            errors.push(format!(
+                "fuzz-smoke manifest missing seed for required target `{required_target}`"
+            ));
+        }
     }
 }
 
@@ -968,11 +979,9 @@ mod tests {
     fn malformed_mounted_write_error_catalog_bytes_use_owned_class() {
         let execution = execute_target("mounted_write_error_classes_catalog", br#"{"entries":["#);
         assert_eq!(execution.actual_class, "MountedWriteErrorClassesInvalid");
-        assert!(
-            execution
-                .error_detail
-                .contains("mounted write error classes JSON decode failed")
-        );
+        assert!(execution
+            .error_detail
+            .contains("mounted write error classes JSON decode failed"));
     }
 
     #[test]
@@ -1000,6 +1009,22 @@ mod tests {
             errors
                 .iter()
                 .any(|error| error.contains("unsupported target")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn missing_required_targets_are_rejected() {
+        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
+        let missing_target = "ext4_superblock".to_owned();
+        manifest.seeds.retain(|seed| seed.target != missing_target);
+
+        let errors = validate_fuzz_smoke_manifest(&manifest);
+        assert!(
+            errors.iter().any(|error| {
+                error.contains("missing seed for required target")
+                    && error.contains(&missing_target)
+            }),
             "{errors:?}"
         );
     }
