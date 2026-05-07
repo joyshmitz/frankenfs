@@ -50,6 +50,8 @@ const PERMISSIONED_CAMPAIGN_BROKER_REPORT_ROLE: &str = "permissioned_campaign_br
 const PERMISSIONED_CAMPAIGN_PACKET_STATUS_KEY: &str = "permissioned_campaign_packet_status";
 const PERMISSIONED_CAMPAIGN_PRODUCT_EVIDENCE_KEY: &str =
     "permissioned_campaign_product_evidence_claim";
+const PERMISSIONED_CAMPAIGN_READY_STATUS: &str = "ready_for_operator_approval";
+const PERMISSIONED_CAMPAIGN_NO_PRODUCT_EVIDENCE: &str = "none";
 
 const PRESERVED_REDACTION_FIELDS: [&str; 5] = [
     "reproduction_command",
@@ -1003,6 +1005,19 @@ impl ProofBundleReportBuilder {
             return;
         }
 
+        if contains_broker_artifact && packet_status.is_none() {
+            self.errors.push(format!(
+                "lane {} permissioned campaign broker artifact requires {PERMISSIONED_CAMPAIGN_PACKET_STATUS_KEY}={PERMISSIONED_CAMPAIGN_READY_STATUS}",
+                lane.lane_id
+            ));
+        }
+        if contains_broker_artifact && product_evidence_claim.is_none() {
+            self.errors.push(format!(
+                "lane {} permissioned campaign broker artifact requires {PERMISSIONED_CAMPAIGN_PRODUCT_EVIDENCE_KEY}={PERMISSIONED_CAMPAIGN_NO_PRODUCT_EVIDENCE}",
+                lane.lane_id
+            ));
+        }
+
         if lane.status == ProofBundleOutcome::Pass {
             self.errors.push(format!(
                 "lane {} contains permissioned campaign broker handoff material but is pass; broker packets are authorization handoff material only and cannot upgrade readiness claims",
@@ -1011,7 +1026,7 @@ impl ProofBundleReportBuilder {
         }
 
         if let Some(product_evidence_claim) = product_evidence_claim
-            && product_evidence_claim != "none"
+            && product_evidence_claim != PERMISSIONED_CAMPAIGN_NO_PRODUCT_EVIDENCE
         {
             self.errors.push(format!(
                 "lane {} permissioned campaign product_evidence_claim={product_evidence_claim} rejected; broker packets cannot count as product evidence",
@@ -1020,10 +1035,10 @@ impl ProofBundleReportBuilder {
         }
 
         if let Some(packet_status) = packet_status
-            && packet_status == "executed_evidence"
+            && packet_status != PERMISSIONED_CAMPAIGN_READY_STATUS
         {
             self.errors.push(format!(
-                "lane {} permissioned campaign packet_status=executed_evidence rejected; executed evidence must be raw run artifacts, not a broker packet",
+                "lane {} permissioned campaign packet_status={packet_status} rejected; broker packet metadata must remain {PERMISSIONED_CAMPAIGN_READY_STATUS}",
                 lane.lane_id
             ));
         }
@@ -2267,6 +2282,62 @@ mod tests {
         assert!(report.errors.iter().any(|error| {
             error.contains("lane xfstests")
                 && error.contains("broker packets are authorization handoff material only")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn permissioned_broker_packet_requires_explicit_boundary_metadata() -> Result<()> {
+        let mut sample = sample_bundle();
+        attach_permissioned_campaign_packet(&mut sample, "xfstests")?;
+        let lane = sample
+            .manifest
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.lane_id == "xfstests")
+            .context("xfstests lane")?;
+        lane.metadata
+            .remove(PERMISSIONED_CAMPAIGN_PACKET_STATUS_KEY);
+        lane.metadata
+            .remove(PERMISSIONED_CAMPAIGN_PRODUCT_EVIDENCE_KEY);
+        sample.manifest.integrity = Some(integrity_for(&sample.manifest));
+
+        let report = validate_sample(&sample);
+
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains(PERMISSIONED_CAMPAIGN_PACKET_STATUS_KEY)
+                && error.contains(PERMISSIONED_CAMPAIGN_READY_STATUS)
+        }));
+        assert!(report.errors.iter().any(|error| {
+            error.contains(PERMISSIONED_CAMPAIGN_PRODUCT_EVIDENCE_KEY)
+                && error.contains(PERMISSIONED_CAMPAIGN_NO_PRODUCT_EVIDENCE)
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn permissioned_broker_packet_rejects_non_ready_status_metadata() -> Result<()> {
+        let mut sample = sample_bundle();
+        attach_permissioned_campaign_packet(&mut sample, "xfstests")?;
+        let lane = sample
+            .manifest
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.lane_id == "xfstests")
+            .context("xfstests lane")?;
+        lane.metadata.insert(
+            PERMISSIONED_CAMPAIGN_PACKET_STATUS_KEY.to_owned(),
+            "executed_evidence".to_owned(),
+        );
+        sample.manifest.integrity = Some(integrity_for(&sample.manifest));
+
+        let report = validate_sample(&sample);
+
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("packet_status=executed_evidence")
+                && error.contains(PERMISSIONED_CAMPAIGN_READY_STATUS)
         }));
         Ok(())
     }
