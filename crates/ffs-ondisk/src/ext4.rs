@@ -8583,6 +8583,77 @@ mod tests {
     /// return "no such entry" for valid filenames whose major hash
     /// happened to land on the sentinel or whose collision chain
     /// relied on the low-bit flag.
+    /// bd-pxzsx — Kernel-conformance pin for `DX_HASH_DEFAULT_SEED`.
+    ///
+    /// Per Linux kernel `fs/ext4/hash.c`:
+    /// ```
+    /// static __u32 hash_seed_default[4] = {
+    ///     0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476
+    /// };
+    /// ```
+    /// These are the standard MD4/MD5 initial values from RFC 1320
+    /// (also the first 4 words of the SHA-1 IV). The seed is used by
+    /// `dx_hash_seed_state` whenever the ext4 superblock's
+    /// `hash_seed` field is all zeros — i.e., on every fresh ext4
+    /// filesystem until a custom seed is set. A regression that
+    /// swapped any element (or used a 32-bit-flipped variant) would
+    /// silently break every directory lookup on those filesystems
+    /// without affecting the dx_hash_matches_kernel_reference_vectors
+    /// test (which uses an explicit non-zero seed).
+    ///
+    /// Pairs with bd-xt5ru (DX hash version constants), bd-yb4r0
+    /// (normalize_dx_major_hash invariants).
+    #[test]
+    fn ext4_dx_hash_default_seed_matches_kernel() {
+        // Exact values per kernel header.
+        assert_eq!(
+            super::DX_HASH_DEFAULT_SEED[0],
+            0x6745_2301,
+            "DX_HASH_DEFAULT_SEED[0] must equal MD4 IV word A (0x67452301)"
+        );
+        assert_eq!(
+            super::DX_HASH_DEFAULT_SEED[1],
+            0xefcd_ab89,
+            "DX_HASH_DEFAULT_SEED[1] must equal MD4 IV word B (0xefcdab89)"
+        );
+        assert_eq!(
+            super::DX_HASH_DEFAULT_SEED[2],
+            0x98ba_dcfe,
+            "DX_HASH_DEFAULT_SEED[2] must equal MD4 IV word C (0x98badcfe)"
+        );
+        assert_eq!(
+            super::DX_HASH_DEFAULT_SEED[3],
+            0x1032_5476,
+            "DX_HASH_DEFAULT_SEED[3] must equal MD4 IV word D (0x10325476)"
+        );
+
+        // Structural invariant: the four seed words must be
+        // pairwise distinct (else any two-word swap would be a
+        // no-op and the regression test above wouldn't catch it).
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                assert_ne!(
+                    super::DX_HASH_DEFAULT_SEED[i],
+                    super::DX_HASH_DEFAULT_SEED[j],
+                    "DX_HASH_DEFAULT_SEED words must be pairwise distinct"
+                );
+            }
+        }
+
+        // Cross-check: word B is the bitwise complement of word D
+        // and word C is the bitwise complement of word A — this is
+        // a known property of the MD4/SHA-1 IV that catches single-
+        // bit drift in any individual word.
+        assert_eq!(
+            super::DX_HASH_DEFAULT_SEED[2], !super::DX_HASH_DEFAULT_SEED[0],
+            "MD4 IV: word C must be ~word A"
+        );
+        assert_eq!(
+            super::DX_HASH_DEFAULT_SEED[1], !super::DX_HASH_DEFAULT_SEED[3],
+            "MD4 IV: word B must be ~word D"
+        );
+    }
+
     #[test]
     fn ext4_dx_hash_major_hash_invariants_match_kernel() {
         // (d) Named boundary values from the kernel formula.
