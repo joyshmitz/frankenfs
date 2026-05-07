@@ -1,6 +1,6 @@
 #![no_main]
 
-use ffs_journal::{replay_fast_commit, FcDelRange, FcDentry, FcExtentRange, FcOperation};
+use ffs_journal::{FcDelRange, FcDentry, FcExtentRange, FcOperation, replay_fast_commit};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_INPUT_BYTES: usize = 4096;
@@ -187,6 +187,11 @@ fn assert_malformed_in_transaction_requires_fallback(data: &[u8]) {
 fn assert_arbitrary_replay_determinism(data: &[u8]) {
     let first = replay_fast_commit(data);
     let second = replay_fast_commit(data);
+    assert_eq!(
+        first.is_ok(),
+        second.is_ok(),
+        "fast-commit replay changed success/error classification for identical input"
+    );
 
     match (first, second) {
         (Ok(first), Ok(second)) => {
@@ -233,7 +238,7 @@ fn assert_arbitrary_replay_determinism(data: &[u8]) {
                 "fast-commit replay should deterministically reject the same malformed input"
             );
         }
-        _ => std::process::abort(),
+        (Ok(_), Err(_)) | (Err(_), Ok(_)) => {}
     };
 }
 
