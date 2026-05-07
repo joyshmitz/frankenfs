@@ -1,7 +1,7 @@
 #![no_main]
 
 use ffs_ondisk::Ext4ImageReader;
-use ffs_types::{BlockNumber, GroupNumber, InodeNumber, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPER_MAGIC};
+use ffs_types::{BlockNumber, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, GroupNumber, InodeNumber};
 use libfuzzer_sys::fuzz_target;
 
 const BLOCK_SIZE: usize = 4096;
@@ -353,9 +353,10 @@ fuzz_target!(|data: &[u8]| {
     let image = build_input(data);
     let first = run_reader_workflow(&image);
     let second = run_reader_workflow(&image);
-    if first != second {
-        std::process::abort();
-    }
+    assert_eq!(
+        first, second,
+        "ext4 image reader workflow should be deterministic for identical images"
+    );
     if input_selects_clean_image(data) {
         assert_clean_image_outcome(first.as_ref().expect("clean synthetic image must mount"));
     }
