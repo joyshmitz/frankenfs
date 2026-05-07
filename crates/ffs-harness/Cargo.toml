@@ -22,6 +22,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 asupersync = { workspace = true }
 blake3 = { workspace = true }
+crc32c = { workspace = true }
 criterion = { workspace = true }
 ffs-alloc = { workspace = true }
 ffs-block = { workspace = true }

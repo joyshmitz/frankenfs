@@ -5,8 +5,9 @@ use ffs_harness::load_sparse_fixture;
 use ffs_ondisk::{
     chunk_type_flags, dx_hash, ext4_casefold_key, parse_dev_item, parse_dir_block, parse_dx_root,
     parse_extent_tree, parse_internal_items, parse_leaf_items, parse_sys_chunk_array,
-    parse_xattr_block, BtrfsHeader, BtrfsRaidProfile, BtrfsSuperblock, Ext4Extent, Ext4GroupDesc,
-    Ext4Inode, EXT_INIT_MAX_LEN,
+    parse_xattr_block, verify_btrfs_superblock_checksum, verify_btrfs_tree_block_checksum,
+    BtrfsHeader, BtrfsRaidProfile, BtrfsSuperblock, Ext4Extent, Ext4GroupDesc, Ext4Inode,
+    EXT_INIT_MAX_LEN,
 };
 use std::hint::black_box;
 use std::path::Path;
@@ -641,6 +642,48 @@ fn bench_ext4_extent_actual_len_unwritten(c: &mut Criterion) {
     });
 }
 
+/// bd-tyzfe — verify_btrfs_superblock_checksum runs on every btrfs
+/// mount path. The hot path computes CRC32C over [0x20..4096] and
+/// compares against the bytes at [0..4]. A regression on this
+/// function bloats every mount. Stamp a valid superblock once and
+/// iterate verify in the bench loop.
+fn bench_btrfs_verify_superblock_checksum(c: &mut Criterion) {
+    const SUPERBLOCK_SIZE: usize = 4096;
+    const CSUM_TYPE_OFFSET: usize = 0xC4;
+    const COVERED_OFFSET: usize = 0x20;
+
+    let mut sb = vec![0_u8; SUPERBLOCK_SIZE];
+    sb[CSUM_TYPE_OFFSET..CSUM_TYPE_OFFSET + 2].copy_from_slice(&0_u16.to_le_bytes());
+    let computed = crc32c::crc32c(&sb[COVERED_OFFSET..]);
+    sb[0..4].copy_from_slice(&computed.to_le_bytes());
+
+    c.bench_function("btrfs_verify_superblock_checksum", |b| {
+        b.iter(|| {
+            verify_btrfs_superblock_checksum(black_box(&sb)).expect("stamped superblock verifies");
+        });
+    });
+}
+
+/// bd-tyzfe — verify_btrfs_tree_block_checksum runs on every btrfs
+/// tree block read (most frequent btrfs read-path call). Bench
+/// against a stamped 4 KiB tree block with csum_type=0 (CRC32C),
+/// matching production leaf-block size.
+fn bench_btrfs_verify_tree_block_checksum(c: &mut Criterion) {
+    const TREE_BLOCK_SIZE: usize = 4096;
+    const COVERED_OFFSET: usize = 0x20;
+
+    let mut tb = vec![0_u8; TREE_BLOCK_SIZE];
+    let computed = crc32c::crc32c(&tb[COVERED_OFFSET..]);
+    tb[0..4].copy_from_slice(&computed.to_le_bytes());
+
+    c.bench_function("btrfs_verify_tree_block_checksum", |b| {
+        b.iter(|| {
+            verify_btrfs_tree_block_checksum(black_box(&tb), 0)
+                .expect("stamped tree block verifies");
+        });
+    });
+}
+
 criterion_group!(
     ondisk,
     bench_ext4_inode_parse,
@@ -673,5 +716,7 @@ criterion_group!(
     bench_ext4_inode_all_timestamps,
     bench_ext4_extent_actual_len_written,
     bench_ext4_extent_actual_len_unwritten,
+    bench_btrfs_verify_superblock_checksum,
+    bench_btrfs_verify_tree_block_checksum,
 );
 criterion_main!(ondisk);
