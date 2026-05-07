@@ -714,8 +714,11 @@ fn bench_btrfs_parse_root_ref(c: &mut Criterion) {
     let mut payload = vec![0_u8; 18 + name.len()];
     payload[0..8].copy_from_slice(&0x1122_3344_5566_7788_u64.to_le_bytes()); // dirid
     payload[8..16].copy_from_slice(&0x1234_u64.to_le_bytes()); // sequence
-    payload[16..18]
-        .copy_from_slice(&u16::try_from(name.len()).expect("name fits u16").to_le_bytes());
+    payload[16..18].copy_from_slice(
+        &u16::try_from(name.len())
+            .expect("name fits u16")
+            .to_le_bytes(),
+    );
     payload[18..18 + name.len()].copy_from_slice(name);
 
     c.bench_function("btrfs_parse_root_ref", |b| {
