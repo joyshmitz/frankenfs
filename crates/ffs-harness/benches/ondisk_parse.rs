@@ -703,6 +703,28 @@ fn bench_btrfs_parse_root_item(c: &mut Criterion) {
     });
 }
 
+/// bd-8vrmt — parse_root_ref runs on every btrfs subvolume /
+/// snapshot enumeration through ffs_core::OpenFs::enumerate_subvolumes
+/// / enumerate_snapshots. Bench against an 18-byte header +
+/// 19-byte name (typical "snap_2026_05_07_001" snapshot name)
+/// = 37 bytes total. Pinned by bd-m9u35 (kernel-offset pin),
+/// bd-ay4aw (MR proptests).
+fn bench_btrfs_parse_root_ref(c: &mut Criterion) {
+    let name: &[u8] = b"snap_2026_05_07_001";
+    let mut payload = vec![0_u8; 18 + name.len()];
+    payload[0..8].copy_from_slice(&0x1122_3344_5566_7788_u64.to_le_bytes()); // dirid
+    payload[8..16].copy_from_slice(&0x1234_u64.to_le_bytes()); // sequence
+    payload[16..18]
+        .copy_from_slice(&u16::try_from(name.len()).expect("name fits u16").to_le_bytes());
+    payload[18..18 + name.len()].copy_from_slice(name);
+
+    c.bench_function("btrfs_parse_root_ref", |b| {
+        b.iter(|| {
+            ffs_btrfs::parse_root_ref(black_box(&payload)).expect("root_ref parses");
+        });
+    });
+}
+
 /// bd-coyy0 — parse_inode_refs runs on every inode_ref walk
 /// (hardlink resolution, subvolume nav). Bench a single
 /// 10-byte-header + 16-byte-name entry — the typical hardlink-target
@@ -931,6 +953,7 @@ criterion_group!(
     bench_btrfs_verify_superblock_checksum,
     bench_btrfs_verify_tree_block_checksum,
     bench_btrfs_parse_root_item,
+    bench_btrfs_parse_root_ref,
     bench_btrfs_parse_inode_refs,
     bench_btrfs_parse_dir_items,
     bench_btrfs_parse_inode_item,
