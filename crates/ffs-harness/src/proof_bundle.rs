@@ -561,17 +561,30 @@ impl ProofBundleReportBuilder {
 
         match parse_utc_timestamp_seconds(&manifest.generated_at) {
             Ok(generated_seconds) => {
-                if let Some(days) = max_age_days
-                    && timestamp_is_stale(generated_seconds, days)
-                {
-                    self.stale_timestamp = Some(StaleProofBundleTimestamp {
-                        generated_at: manifest.generated_at.clone(),
-                        max_age_days: days,
-                    });
-                    self.errors.push(format!(
-                        "stale generated_at {} older than {days} day(s)",
-                        manifest.generated_at
-                    ));
+                if let Some(days) = max_age_days {
+                    match classify_timestamp_recency(generated_seconds, days) {
+                        TimestampRecency::Fresh => {}
+                        TimestampRecency::Future => {
+                            self.stale_timestamp = Some(StaleProofBundleTimestamp {
+                                generated_at: manifest.generated_at.clone(),
+                                max_age_days: days,
+                            });
+                            self.errors.push(format!(
+                                "future generated_at {} is after the current timestamp",
+                                manifest.generated_at
+                            ));
+                        }
+                        TimestampRecency::Stale => {
+                            self.stale_timestamp = Some(StaleProofBundleTimestamp {
+                                generated_at: manifest.generated_at.clone(),
+                                max_age_days: days,
+                            });
+                            self.errors.push(format!(
+                                "stale generated_at {} older than {days} day(s)",
+                                manifest.generated_at
+                            ));
+                        }
+                    }
                 }
             }
             Err(error) => self
@@ -1337,15 +1350,29 @@ fn validate_timestamp_ranges(
     Ok(())
 }
 
-fn timestamp_is_stale(generated_seconds: i64, max_age_days: u64) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimestampRecency {
+    Fresh,
+    Future,
+    Stale,
+}
+
+fn classify_timestamp_recency(generated_seconds: i64, max_age_days: u64) -> TimestampRecency {
     let now_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_secs();
     let Ok(generated_seconds) = u64::try_from(generated_seconds) else {
-        return true;
+        return TimestampRecency::Stale;
     };
-    now_seconds.saturating_sub(generated_seconds) > max_age_days.saturating_mul(86_400)
+    if generated_seconds > now_seconds {
+        return TimestampRecency::Future;
+    }
+    if now_seconds - generated_seconds > max_age_days.saturating_mul(86_400) {
+        TimestampRecency::Stale
+    } else {
+        TimestampRecency::Fresh
+    }
 }
 
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
@@ -1501,7 +1528,7 @@ mod tests {
         let mut manifest = ProofBundleManifest {
             schema_version: PROOF_BUNDLE_SCHEMA_VERSION,
             bundle_id: "proof-bundle-sample".to_owned(),
-            generated_at: "2030-01-01T00:00:00Z".to_owned(),
+            generated_at: "2026-05-01T00:00:00Z".to_owned(),
             git_sha: "abcdef1".to_owned(),
             toolchain: "rustc 1.85.0-nightly".to_owned(),
             kernel: "Linux 6.10.0".to_owned(),
@@ -1680,6 +1707,25 @@ mod tests {
         );
         assert!(!report.valid);
         assert!(report.stale_timestamp.is_some());
+    }
+
+    #[test]
+    fn future_timestamp_is_rejected() {
+        let mut sample = sample_bundle();
+        sample.manifest.generated_at = "2999-01-01T00:00:00Z".to_owned();
+        let report = validate_proof_bundle_manifest(
+            &sample.manifest,
+            sample.root.path(),
+            &sample.root.path().join("manifest.json"),
+            Some("abcdef1"),
+            Some(1),
+        );
+        assert!(!report.valid);
+        assert!(report.stale_timestamp.is_some());
+        assert!(report.errors.iter().any(|error| {
+            error
+                .contains("future generated_at 2999-01-01T00:00:00Z is after the current timestamp")
+        }));
     }
 
     #[test]
