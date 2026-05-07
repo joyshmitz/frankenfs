@@ -1233,7 +1233,11 @@ The E2E tests can be run in CI by:
 
 Strict regression-gate runs require both current xfstests results and the
 baseline file. Non-strict runs still emit an advisory pass report when either
-input is missing.
+input is missing. When the regression gate launches `ffs_xfstests_e2e.sh`
+itself, it only consumes the results path reported by that child invocation;
+historical `artifacts/e2e/*/xfstests/results.json` files are not fallback
+evidence. In strict mode, a nonzero child exit code is blocking even if the
+child emitted partial or derived result artifacts.
 
 ## Adding New Tests
 

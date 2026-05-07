@@ -36,6 +36,7 @@ FFS_HARNESS_BIN="${FFS_HARNESS_BIN:-$REPO_ROOT/target/debug/ffs-harness}"
 ARTIFACT_DIR="$E2E_LOG_DIR/regression_gate"
 GATE_REPORT="$ARTIFACT_DIR/gate_report.json"
 mkdir -p "$ARTIFACT_DIR"
+XFSTESTS_CHILD_RC=0
 
 write_empty_comparison_report() {
     local verdict="$1"
@@ -80,20 +81,20 @@ elif [[ -n "$XFSTESTS_RESULTS_JSON" ]]; then
         "strict mode requires an existing XFSTESTS_RESULTS_JSON"
 else
     e2e_step "Running xfstests to generate results"
+    GENERATED_RESULTS_PATH_FILE="$ARTIFACT_DIR/generated_results_path.txt"
     # Run xfstests E2E, capturing its artifacts.
     XFSTESTS_ALLOWLIST_JSON="$XFSTESTS_ALLOWLIST_JSON" \
     XFSTESTS_BASELINE_JSON="$XFSTESTS_BASELINE_JSON" \
-        bash "$REPO_ROOT/scripts/e2e/ffs_xfstests_e2e.sh" || true
+    XFSTESTS_RESULTS_PATH_OUT="$GENERATED_RESULTS_PATH_FILE" \
+        bash "$REPO_ROOT/scripts/e2e/ffs_xfstests_e2e.sh" || XFSTESTS_CHILD_RC=$?
+    e2e_log "xfstests child exit code: $XFSTESTS_CHILD_RC"
 
-    # Find the most recent results file.
     RESULTS_JSON=""
-    for candidate in "$REPO_ROOT"/artifacts/e2e/*/xfstests/results.json; do
-        if [[ -f "$candidate" ]]; then
-            RESULTS_JSON="$candidate"
-        fi
-    done
+    if [[ -f "$GENERATED_RESULTS_PATH_FILE" ]]; then
+        RESULTS_JSON="$(<"$GENERATED_RESULTS_PATH_FILE")"
+    fi
 
-    if [[ -z "$RESULTS_JSON" ]]; then
+    if [[ -z "$RESULTS_JSON" || ! -f "$RESULTS_JSON" ]]; then
         e2e_log "No xfstests results found; handling as missing comparison input"
         finish_missing_input \
             "no results to compare" \
@@ -120,7 +121,7 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 GATE_RC=0
-python3 - "$RESULTS_JSON" "$XFSTESTS_BASELINE_JSON" "$XFSTESTS_ALLOWLIST_JSON" "$GATE_REPORT" "$XFSTESTS_STRICT" <<'PY' || GATE_RC=$?
+python3 - "$RESULTS_JSON" "$XFSTESTS_BASELINE_JSON" "$XFSTESTS_ALLOWLIST_JSON" "$GATE_REPORT" "$XFSTESTS_STRICT" "$XFSTESTS_CHILD_RC" <<'PY' || GATE_RC=$?
 import json
 import pathlib
 import sys
@@ -130,6 +131,7 @@ baseline_path = pathlib.Path(sys.argv[2])
 allowlist_path = pathlib.Path(sys.argv[3])
 report_path = pathlib.Path(sys.argv[4])
 strict = int(sys.argv[5])
+child_exit_code = int(sys.argv[6])
 
 results = json.loads(results_path.read_text(encoding="utf-8"))
 baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
@@ -192,9 +194,10 @@ for test_id, expected in baseline_status.items():
 
 # Determine verdict
 unexpected_regressions = [r for r in regressions if not r["allowlisted"]]
+child_run_failed = child_exit_code != 0
 if unexpected_regressions:
     verdict = "fail"
-elif strict and regressions:
+elif strict and (regressions or child_run_failed):
     verdict = "fail"
 else:
     verdict = "pass"
@@ -207,6 +210,8 @@ report = {
     "regression_count": len(regressions),
     "unexpected_regression_count": len(unexpected_regressions),
     "new_pass_count": len(new_passes),
+    "child_exit_code": child_exit_code,
+    "child_run_failed": child_run_failed,
     "regressions": regressions,
     "new_passes": new_passes,
 }
@@ -221,6 +226,9 @@ print(f"Compared: {total_compared} tests", file=sys.stderr)
 print(f"Unchanged: {len(unchanged)}", file=sys.stderr)
 print(f"New passes: {len(new_passes)}", file=sys.stderr)
 print(f"Regressions: {len(regressions)} ({len(unexpected_regressions)} unexpected)", file=sys.stderr)
+print(f"Child exit code: {child_exit_code}", file=sys.stderr)
+if strict and child_run_failed:
+    print("Strict mode treats the xfstests child failure as blocking.", file=sys.stderr)
 
 if new_passes:
     print(f"\n  New passes (update baseline!):", file=sys.stderr)
