@@ -8,10 +8,17 @@
 //! packet is only authorization material: it must not be treated as product
 //! pass/fail evidence.
 
+use crate::artifact_manifest::parse_manifest_timestamp_epoch_days;
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
+use std::fs;
 use std::path::{Component, Path};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const PERMISSIONED_CAMPAIGN_BROKER_SCHEMA_VERSION: u32 = 1;
+pub const DEFAULT_PERMISSIONED_CAMPAIGN_BROKER_MANIFEST: &str =
+    "docs/permissioned-campaign-broker-manifest.json";
 pub const DEFAULT_PERMISSIONED_CAMPAIGN_PREFLIGHT_MAX_AGE_DAYS: u32 = 14;
 
 const ALLOWED_DESTRUCTIVE_OPERATIONS: [&str; 9] = [
@@ -227,6 +234,21 @@ pub struct PermissionedCampaignBrokerValidationConfig {
     pub reference_epoch_days: u32,
 }
 
+impl Default for PermissionedCampaignBrokerValidationConfig {
+    fn default() -> Self {
+        Self::with_current_reference()
+    }
+}
+
+impl PermissionedCampaignBrokerValidationConfig {
+    #[must_use]
+    pub fn with_current_reference() -> Self {
+        Self {
+            reference_epoch_days: current_epoch_days().unwrap_or(0),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionedCampaignBrokerReport {
     pub schema_version: u32,
@@ -235,8 +257,60 @@ pub struct PermissionedCampaignBrokerReport {
     pub valid: bool,
     pub packet_status: String,
     pub product_evidence_claim: String,
+    pub claim_text: String,
+    pub required_executed_evidence: Vec<String>,
+    pub target_beads: Vec<String>,
+    pub ack_env: String,
+    pub ack_exact_value: String,
+    pub runner_env: Vec<PermissionedCampaignRunnerEnvSummary>,
+    pub host_facts: Vec<PermissionedCampaignHostFactSummary>,
+    pub safe_path_roots: Vec<PermissionedCampaignPathRootSummary>,
+    pub destructive_operations: Vec<String>,
+    pub expected_artifact_paths: Vec<String>,
+    pub preflight_references: Vec<PermissionedCampaignPreflightSummary>,
+    pub operator_risks: Vec<String>,
+    pub exact_commands: Vec<PermissionedCampaignCommandSummary>,
     pub issue_count: usize,
     pub issues: Vec<PermissionedCampaignBrokerIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignRunnerEnvSummary {
+    pub env_var: String,
+    pub purpose: String,
+    pub expected_shape: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignHostFactSummary {
+    pub fact_id: String,
+    pub observed_value: String,
+    pub required_value: String,
+    pub proof_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignPathRootSummary {
+    pub root_id: String,
+    pub path: String,
+    pub purpose: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignPreflightSummary {
+    pub preflight_id: String,
+    pub artifact_path: String,
+    pub age_days: u32,
+    pub max_age_days: u32,
+    pub stale: bool,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignCommandSummary {
+    pub command_id: String,
+    pub command_role: String,
+    pub exact_command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,6 +318,23 @@ pub struct PermissionedCampaignBrokerIssue {
     pub path: String,
     pub code: String,
     pub message: String,
+}
+
+pub fn load_permissioned_campaign_broker_manifest(
+    path: &Path,
+) -> Result<PermissionedCampaignBrokerManifest> {
+    let text = fs::read_to_string(path).with_context(|| {
+        format!(
+            "failed to read permissioned campaign broker manifest {}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&text).with_context(|| {
+        format!(
+            "invalid permissioned campaign broker manifest JSON {}",
+            path.display()
+        )
+    })
 }
 
 #[must_use]
@@ -276,8 +367,161 @@ pub fn validate_permissioned_campaign_broker_manifest(
             .product_evidence_claim
             .label()
             .to_owned(),
+        claim_text: manifest.claim_boundary.claim_text.clone(),
+        required_executed_evidence: manifest.claim_boundary.required_executed_evidence.clone(),
+        target_beads: manifest.target_beads.clone(),
+        ack_env: manifest.required_ack.env_var.clone(),
+        ack_exact_value: manifest.required_ack.exact_value.clone(),
+        runner_env: runner_env_summary(manifest),
+        host_facts: host_fact_summary(manifest),
+        safe_path_roots: path_root_summary(manifest),
+        destructive_operations: manifest.destructive_operations.clone(),
+        expected_artifact_paths: manifest.expected_artifact_paths.clone(),
+        preflight_references: preflight_summary(manifest, config),
+        operator_risks: manifest.operator_risks.clone(),
+        exact_commands: command_summary(manifest),
         issue_count: issues.len(),
         issues,
+    }
+}
+
+#[must_use]
+pub fn render_permissioned_campaign_broker_markdown(
+    report: &PermissionedCampaignBrokerReport,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Permissioned Campaign Broker\n");
+    let _ = writeln!(out, "- Campaign: `{}`", report.campaign_id);
+    let _ = writeln!(out, "- Lane: `{}`", report.lane_kind);
+    let _ = writeln!(out, "- Valid: `{}`", report.valid);
+    let _ = writeln!(out, "- Packet status: `{}`", report.packet_status);
+    let _ = writeln!(
+        out,
+        "- Product evidence claim: `{}`",
+        report.product_evidence_claim
+    );
+    let _ = writeln!(
+        out,
+        "- Claim boundary: {}",
+        markdown_cell(&report.claim_text)
+    );
+    let _ = writeln!(out, "- ACK env: `{}`", report.ack_env);
+    let _ = writeln!(out, "- ACK value: `{}`", report.ack_exact_value);
+
+    out.push_str("\n## Required Executed Evidence\n\n");
+    for evidence in &report.required_executed_evidence {
+        let _ = writeln!(out, "- {}", markdown_cell(evidence));
+    }
+
+    out.push_str("\n## Target Beads\n\n");
+    for bead in &report.target_beads {
+        let _ = writeln!(out, "- `{bead}`");
+    }
+
+    out.push_str("\n## Runner Environment\n\n");
+    out.push_str("| Env var | Purpose | Expected shape |\n");
+    out.push_str("|---|---|---|\n");
+    for entry in &report.runner_env {
+        let _ = writeln!(
+            out,
+            "| `{}` | {} | {} |",
+            entry.env_var,
+            markdown_cell(&entry.purpose),
+            markdown_cell(&entry.expected_shape)
+        );
+    }
+
+    out.push_str("\n## Host Facts\n\n");
+    out.push_str("| Fact | Observed | Required | Proof |\n");
+    out.push_str("|---|---|---|---|\n");
+    for fact in &report.host_facts {
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | `{}` | `{}` |",
+            fact.fact_id, fact.observed_value, fact.required_value, fact.proof_path
+        );
+    }
+
+    out.push_str("\n## Safe Path Roots\n\n");
+    out.push_str("| Root | Purpose | Path |\n");
+    out.push_str("|---|---|---|\n");
+    for root in &report.safe_path_roots {
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | `{}` |",
+            root.root_id, root.purpose, root.path
+        );
+    }
+
+    out.push_str("\n## Destructive Operations\n\n");
+    for operation in &report.destructive_operations {
+        let _ = writeln!(out, "- `{operation}`");
+    }
+
+    out.push_str("\n## Expected Artifacts\n\n");
+    for path in &report.expected_artifact_paths {
+        let _ = writeln!(out, "- `{path}`");
+    }
+
+    out.push_str("\n## Preflight References\n\n");
+    out.push_str("| Preflight | Age days | Max age days | Stale | Artifact |\n");
+    out.push_str("|---|---:|---:|---|---|\n");
+    for preflight in &report.preflight_references {
+        let _ = writeln!(
+            out,
+            "| `{}` | {} | {} | `{}` | `{}` |",
+            preflight.preflight_id,
+            preflight.age_days,
+            preflight.max_age_days,
+            preflight.stale,
+            preflight.artifact_path
+        );
+    }
+
+    out.push_str("\n## Operator Risks\n\n");
+    for risk in &report.operator_risks {
+        let _ = writeln!(out, "- {}", markdown_cell(risk));
+    }
+
+    out.push_str("\n## Exact Commands\n\n");
+    out.push_str("| Command | Role | Exact command |\n");
+    out.push_str("|---|---|---|\n");
+    for command in &report.exact_commands {
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | `{}` |",
+            command.command_id,
+            command.command_role,
+            command.exact_command.replace('`', "'")
+        );
+    }
+
+    if report.issues.is_empty() {
+        out.push_str("\n## Issues\n\nnone\n");
+    } else {
+        out.push_str("\n## Issues\n\n");
+        for issue in &report.issues {
+            let _ = writeln!(
+                out,
+                "- `{}` `{}`: {}",
+                issue.path, issue.code, issue.message
+            );
+        }
+    }
+
+    out
+}
+
+pub fn fail_on_permissioned_campaign_broker_errors(
+    report: &PermissionedCampaignBrokerReport,
+) -> Result<()> {
+    if report.valid {
+        Ok(())
+    } else {
+        bail!(
+            "permissioned campaign broker validation failed: issues={}",
+            report.issue_count
+        )
     }
 }
 
@@ -334,6 +578,14 @@ fn validate_ack(
         "required_ack.operator_prompt",
         &manifest.required_ack.operator_prompt,
     );
+    if ack_value_is_ambiguous(&manifest.required_ack.exact_value) {
+        push_issue(
+            issues,
+            "required_ack.exact_value",
+            "ambiguous_ack_value",
+            "ACK value must be a single exact token, not a wildcard, placeholder, or phrase",
+        );
+    }
 }
 
 fn validate_runner_env(
@@ -685,12 +937,124 @@ pub fn is_safe_relative_path(raw_path: &str) -> bool {
     }
     let path = Path::new(trimmed);
     !path.is_absolute()
+        && !is_repo_control_path(path)
         && path.components().all(|component| {
             !matches!(
                 component,
                 Component::ParentDir | Component::RootDir | Component::Prefix(_)
             )
         })
+}
+
+fn current_epoch_days() -> Option<u32> {
+    let unix_epoch_days = parse_manifest_timestamp_epoch_days("1970-01-01T00:00:00Z")?;
+    let elapsed_days = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() / 86_400;
+    let total_days = u64::from(unix_epoch_days).checked_add(elapsed_days)?;
+    u32::try_from(total_days).ok()
+}
+
+fn ack_value_is_ambiguous(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.split_whitespace().count() != 1
+        || trimmed.contains('*')
+        || trimmed.contains('?')
+        || trimmed.contains('<')
+        || trimmed.contains('>')
+        || trimmed.contains("${")
+}
+
+fn is_repo_control_path(path: &Path) -> bool {
+    let Some(Component::Normal(first)) = path.components().next() else {
+        return true;
+    };
+    matches!(
+        first.to_str(),
+        Some(".git" | ".beads" | "crates" | "src" | "target" | "Cargo.toml" | "Cargo.lock")
+    )
+}
+
+fn runner_env_summary(
+    manifest: &PermissionedCampaignBrokerManifest,
+) -> Vec<PermissionedCampaignRunnerEnvSummary> {
+    manifest
+        .required_runner_env
+        .iter()
+        .map(|entry| PermissionedCampaignRunnerEnvSummary {
+            env_var: entry.env_var.clone(),
+            purpose: entry.purpose.clone(),
+            expected_shape: entry.expected_shape.clone(),
+        })
+        .collect()
+}
+
+fn host_fact_summary(
+    manifest: &PermissionedCampaignBrokerManifest,
+) -> Vec<PermissionedCampaignHostFactSummary> {
+    manifest
+        .host_capability_facts
+        .iter()
+        .map(|fact| PermissionedCampaignHostFactSummary {
+            fact_id: fact.fact_id.clone(),
+            observed_value: fact.observed_value.clone(),
+            required_value: fact.required_value.clone(),
+            proof_path: fact.proof_path.clone(),
+        })
+        .collect()
+}
+
+fn path_root_summary(
+    manifest: &PermissionedCampaignBrokerManifest,
+) -> Vec<PermissionedCampaignPathRootSummary> {
+    manifest
+        .safe_path_roots
+        .iter()
+        .map(|root| PermissionedCampaignPathRootSummary {
+            root_id: root.root_id.clone(),
+            path: root.path.clone(),
+            purpose: root.purpose.label().to_owned(),
+        })
+        .collect()
+}
+
+fn preflight_summary(
+    manifest: &PermissionedCampaignBrokerManifest,
+    config: &PermissionedCampaignBrokerValidationConfig,
+) -> Vec<PermissionedCampaignPreflightSummary> {
+    manifest
+        .preflight_references
+        .iter()
+        .map(|reference| {
+            let age_days = config
+                .reference_epoch_days
+                .saturating_sub(reference.observed_at_epoch_days);
+            PermissionedCampaignPreflightSummary {
+                preflight_id: reference.preflight_id.clone(),
+                artifact_path: reference.artifact_path.clone(),
+                age_days,
+                max_age_days: reference.max_age_days,
+                stale: age_days > reference.max_age_days,
+                summary: reference.summary.clone(),
+            }
+        })
+        .collect()
+}
+
+fn command_summary(
+    manifest: &PermissionedCampaignBrokerManifest,
+) -> Vec<PermissionedCampaignCommandSummary> {
+    manifest
+        .exact_commands
+        .iter()
+        .map(|command| PermissionedCampaignCommandSummary {
+            command_id: command.command_id.clone(),
+            command_role: command.command_role.label().to_owned(),
+            exact_command: command.exact_command.clone(),
+        })
+        .collect()
+}
+
+fn markdown_cell(value: &str) -> String {
+    value.replace('|', "/")
 }
 
 fn path_under_safe_root(path: &str, roots: &[PermissionedCampaignPathRoot]) -> bool {
@@ -795,6 +1159,24 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_ack_value_is_rejected() {
+        let mut manifest = valid_xfstests_manifest();
+        manifest.required_ack.exact_value = "xfstests * maybe".to_owned();
+        assert_issue(&manifest, "ambiguous_ack_value");
+    }
+
+    #[test]
+    fn repo_control_path_is_rejected() {
+        let mut manifest = valid_xfstests_manifest();
+        manifest.safe_path_roots.push(path_root(
+            "repo_source",
+            "crates/ffs-harness",
+            PermissionedCampaignPathPurpose::RunnerWorkspace,
+        ));
+        assert_issue(&manifest, "unsafe_path");
+    }
+
+    #[test]
     fn broker_packets_cannot_claim_executed_product_evidence() {
         let mut manifest = valid_swarm_manifest();
         manifest.claim_boundary.packet_status = PermissionedCampaignPacketStatus::ExecutedEvidence;
@@ -813,6 +1195,24 @@ mod tests {
                 .iter()
                 .any(|issue| issue.code == "packet_cannot_count_as_product_evidence")
         );
+    }
+
+    #[test]
+    fn markdown_summary_includes_ack_and_ready_boundary() {
+        let report =
+            validate_permissioned_campaign_broker_manifest(&valid_xfstests_manifest(), &config());
+        let markdown = render_permissioned_campaign_broker_markdown(&report);
+        assert!(markdown.contains("XFSTESTS_REAL_RUN_ACK"));
+        assert!(markdown.contains("ready_for_operator_approval"));
+        assert!(markdown.contains("operator approval material"));
+    }
+
+    #[test]
+    fn invalid_report_fails_close_gate() {
+        let mut manifest = valid_swarm_manifest();
+        manifest.required_ack.exact_value.clear();
+        let report = validate_permissioned_campaign_broker_manifest(&manifest, &config());
+        assert!(fail_on_permissioned_campaign_broker_errors(&report).is_err());
     }
 
     fn assert_valid(manifest: &PermissionedCampaignBrokerManifest) {

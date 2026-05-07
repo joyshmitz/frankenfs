@@ -100,6 +100,12 @@ use ffs_harness::{
         load_performance_delta_closeout_config, render_performance_delta_closeout_markdown,
         run_performance_delta_closeout,
     },
+    permissioned_campaign_broker::{
+        DEFAULT_PERMISSIONED_CAMPAIGN_BROKER_MANIFEST, PermissionedCampaignBrokerValidationConfig,
+        fail_on_permissioned_campaign_broker_errors, load_permissioned_campaign_broker_manifest,
+        render_permissioned_campaign_broker_markdown,
+        validate_permissioned_campaign_broker_manifest,
+    },
     proof_bundle::{
         ProofBundleValidationConfig, fail_on_proof_bundle_errors, render_proof_bundle_markdown,
         validate_proof_bundle,
@@ -271,6 +277,15 @@ struct AdaptiveRuntimeManifestCmdArgs {
 }
 
 #[derive(Debug)]
+struct PermissionedCampaignBrokerCmdArgs {
+    manifest_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+    reference_timestamp: Option<String>,
+}
+
+#[derive(Debug)]
 struct AdaptiveRuntimeRunnerCmdArgs {
     mode: AdaptiveRuntimeRunnerMode,
     artifact_root: String,
@@ -333,6 +348,9 @@ fn run() -> Result<()> {
         Some("adaptive-runtime-runner") => adaptive_runtime_runner_cmd(&args[1..]),
         Some("validate-adaptive-runtime-manifest") => {
             validate_adaptive_runtime_manifest_cmd(&args[1..])
+        }
+        Some("validate-permissioned-campaign-broker") => {
+            validate_permissioned_campaign_broker_cmd(&args[1..])
         }
         Some("validate-proof-bundle") => validate_proof_bundle_cmd(&args[1..]),
         Some("evaluate-release-gates") => evaluate_release_gates_cmd(&args[1..]),
@@ -2396,6 +2414,113 @@ fn parse_adaptive_runtime_manifest_cmd_args(
         format,
         reference_timestamp,
         current_git_sha,
+    }))
+}
+
+fn validate_permissioned_campaign_broker_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_permissioned_campaign_broker_cmd_args(args)? else {
+        return Ok(());
+    };
+    let manifest = load_permissioned_campaign_broker_manifest(Path::new(&cmd_args.manifest_path))?;
+    let reference_epoch_days = match &cmd_args.reference_timestamp {
+        Some(timestamp) => parse_manifest_timestamp_epoch_days(timestamp)
+            .with_context(|| format!("invalid --reference-timestamp {timestamp}"))?,
+        None => {
+            PermissionedCampaignBrokerValidationConfig::with_current_reference()
+                .reference_epoch_days
+        }
+    };
+    let validation_config = PermissionedCampaignBrokerValidationConfig {
+        reference_epoch_days,
+    };
+    let report = validate_permissioned_campaign_broker_manifest(&manifest, &validation_config);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_permissioned_campaign_broker_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "permissioned campaign broker report written: {} valid={} issues={}",
+            path, report.valid, report.issue_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!(
+                "{}\n",
+                render_permissioned_campaign_broker_markdown(&report)
+            ),
+        )?;
+        println!("permissioned campaign broker summary written: {path}");
+    }
+
+    fail_on_permissioned_campaign_broker_errors(&report)
+}
+
+fn parse_permissioned_campaign_broker_cmd_args(
+    args: &[String],
+) -> Result<Option<PermissionedCampaignBrokerCmdArgs>> {
+    let mut manifest_path = DEFAULT_PERMISSIONED_CAMPAIGN_BROKER_MANIFEST.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut reference_timestamp: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                args.get(i)
+                    .context("--manifest requires a path")?
+                    .clone_into(&mut manifest_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--reference-timestamp" => {
+                i += 1;
+                reference_timestamp = Some(
+                    args.get(i)
+                        .context("--reference-timestamp requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_permissioned_campaign_broker_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-permissioned-campaign-broker argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(PermissionedCampaignBrokerCmdArgs {
+        manifest_path,
+        out_path,
+        summary_out_path,
+        format,
+        reference_timestamp,
     }))
 }
 
@@ -5334,6 +5459,9 @@ fn print_usage_core_commands() {
         "  ffs-harness validate-adaptive-runtime-manifest [--manifest FILE] [--current-git-sha SHA] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
+        "  ffs-harness validate-permissioned-campaign-broker [--manifest FILE] [--format json|markdown] [--out FILE] [--summary-out FILE] [--reference-timestamp TS]"
+    );
+    println!(
         "  ffs-harness validate-proof-bundle --bundle FILE [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
@@ -5432,6 +5560,7 @@ fn print_usage_examples() {
     println!(
         "  ffs-harness validate-adaptive-runtime-manifest --manifest docs/adaptive-runtime-evidence-manifest.json --out artifacts/adaptive-runtime/report.json --summary-out artifacts/adaptive-runtime/report.md"
     );
+    print_permissioned_campaign_broker_example();
     println!(
         "  ffs-harness validate-proof-bundle --bundle artifacts/proof/bundle/manifest.json --out artifacts/proof/bundle/report.json --summary-out artifacts/proof/bundle/summary.md"
     );
@@ -5479,6 +5608,12 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness validate-mounted-recovery-matrix --out artifacts/e2e/mounted_recovery_matrix.json"
+    );
+}
+
+fn print_permissioned_campaign_broker_example() {
+    println!(
+        "  ffs-harness validate-permissioned-campaign-broker --manifest artifacts/permissioned/broker.json --out artifacts/permissioned/broker_report.json --summary-out artifacts/permissioned/broker_report.md"
     );
 }
 
@@ -5854,6 +5989,19 @@ fn print_adaptive_runtime_manifest_usage() {
     println!("  --summary-out FILE                 Write Markdown inspection summary");
     println!("  --reference-timestamp RFC3339      Freshness reference timestamp (default: now)");
     println!("  --current-git-sha SHA              Strictly require manifest git_sha to match SHA");
+}
+
+fn print_permissioned_campaign_broker_usage() {
+    println!("Usage: ffs-harness validate-permissioned-campaign-broker [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!(
+        "  --manifest FILE                    Read permissioned campaign broker manifest JSON"
+    );
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write selected-format validation report");
+    println!("  --summary-out FILE                 Write Markdown inspection summary");
+    println!("  --reference-timestamp RFC3339      Freshness reference timestamp (default: now)");
 }
 
 fn print_adaptive_runtime_runner_usage() {
