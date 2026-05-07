@@ -133,11 +133,7 @@ fn expected_encode_extra_timestamp(secs: u64, nsec: u32) -> u32 {
 }
 
 fn choose_inode_size(cursor: &mut ByteCursor<'_>) -> usize {
-    if cursor.next_u8() & 1 == 0 {
-        128
-    } else {
-        256
-    }
+    if cursor.next_u8() & 1 == 0 { 128 } else { 256 }
 }
 
 fn choose_extra_isize(cursor: &mut ByteCursor<'_>, inode_size: usize) -> u16 {
@@ -276,17 +272,17 @@ fn build_synthetic_inode(
 
 fn verify_roundtrip(inode: &Ext4Inode, inode_size: usize) -> Ext4Inode {
     let raw = fuzz_serialize_inode(inode, inode_size);
-    let parsed = match Ext4Inode::parse_from_bytes(&raw) {
-        Ok(parsed) => parsed,
-        Err(_) => std::process::abort(),
-    };
-    if &parsed != inode {
-        std::process::abort();
-    }
+    let parsed = Ext4Inode::parse_from_bytes(&raw)
+        .expect("serialized synthetic inode must parse successfully");
+    assert!(
+        &parsed == inode,
+        "serialized inode must parse back to the same Ext4Inode"
+    );
     let raw_again = fuzz_serialize_inode(&parsed, inode_size);
-    if raw_again != raw {
-        std::process::abort();
-    }
+    assert_eq!(
+        raw_again, raw,
+        "inode serialize-parse-serialize cycle must be byte-stable"
+    );
     parsed
 }
 
@@ -393,9 +389,11 @@ fuzz_target!(|data: &[u8]| {
     let secs = cursor.next_u64();
     let nsec = cursor.next_u32();
     let encoded = encode_extra_timestamp(secs, nsec);
-    if encoded != expected_encode_extra_timestamp(secs, nsec) {
-        std::process::abort();
-    }
+    assert_eq!(
+        encoded,
+        expected_encode_extra_timestamp(secs, nsec),
+        "extra timestamp encoding must match the ext4 bit layout"
+    );
 
     match SeedMode::from_selector(cursor.next_u8()) {
         SeedMode::Raw => {
