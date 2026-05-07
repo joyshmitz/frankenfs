@@ -89,7 +89,7 @@ run_harness() {
     local stderr_path="$3"
     shift 3
     run_capture "$scenario_id" "$stdout_path" "$stderr_path" \
-        cargo run --quiet -p ffs-harness -- "$@"
+        "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- "$@"
 }
 
 write_detailed_result() {
