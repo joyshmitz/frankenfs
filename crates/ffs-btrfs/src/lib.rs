@@ -7092,6 +7092,65 @@ mod tests {
         );
     }
 
+    // bd-yjzhk — Canonical byte-layout snapshot for
+    // BtrfsExtentData::to_bytes Regular variant. Pins the
+    // encoder's exact output for a known fixture so any field-
+    // order or offset drift fails with a hex diff (rather than
+    // a silent round-trip with a similarly-broken parser, or a
+    // bench that ticks the same nanosecond cost). Pairs with
+    // bd-3niu3 (proptest round-trip MR), bd-zuqtr (Criterion
+    // bench), bd-2gb89 (BtrfsDirItem canonical bytes).
+    #[test]
+    fn extent_data_regular_to_bytes_canonical_byte_layout() {
+        let extent = BtrfsExtentData::Regular {
+            generation: 0x1122_3344_5566_7788,
+            ram_bytes: 0x0010_0000, // 1 MiB
+            extent_type: BTRFS_FILE_EXTENT_REG,
+            compression: BTRFS_COMPRESS_NONE,
+            disk_bytenr: 0xDEAD_BEEF_CAFE_BABE,
+            disk_num_bytes: 0x1234_5678_9ABC_DEF0,
+            extent_offset: 0,
+            num_bytes: 0x0010_0000,
+        };
+        let bytes = extent.to_bytes();
+
+        // Source-slice validator passes: extent_offset (0) +
+        // num_bytes (0x100000) = 0x100000 ≤ disk_num_bytes
+        // (0x1234567890ABCDEF0). Confirm by parsing back.
+        let parsed = parse_extent_data(&bytes).expect("canonical bytes parse");
+        assert_eq!(parsed, extent, "canonical bytes must round-trip");
+
+        // 53 fixed bytes — kernel-conformant struct btrfs_file_extent_item
+        // header (21) + Regular tail (32). No name/inline data
+        // bytes follow (Regular extents have no trailing payload).
+        let expected: [u8; 53] = [
+            // generation LE @0..8 = 0x1122_3344_5566_7788
+            0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+            // ram_bytes LE @8..16 = 0x0010_0000
+            0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // compression @16 = BTRFS_COMPRESS_NONE = 0
+            0x00,
+            // encryption @17 = 0 (always; encoder hard-codes)
+            0x00,
+            // other_encoding LE @18..20 = 0 (always)
+            0x00, 0x00,
+            // extent_type @20 = BTRFS_FILE_EXTENT_REG = 1
+            0x01,
+            // disk_bytenr LE @21..29 = 0xDEAD_BEEF_CAFE_BABE
+            0xBE, 0xBA, 0xFE, 0xCA, 0xEF, 0xBE, 0xAD, 0xDE,
+            // disk_num_bytes LE @29..37 = 0x1234_5678_9ABC_DEF0
+            0xF0, 0xDE, 0xBC, 0x9A, 0x78, 0x56, 0x34, 0x12,
+            // extent_offset LE @37..45 = 0
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // num_bytes LE @45..53 = 0x0010_0000
+            0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(
+            bytes, expected,
+            "BtrfsExtentData::to_bytes Regular canonical byte layout drifted"
+        );
+    }
+
     // bd-3niu3 — Property-based round-trip MR for parse_extent_data.
     //
     // BtrfsExtentData::to_bytes (lib.rs:486) and parse_extent_data
