@@ -2025,6 +2025,39 @@ mod tests {
         }
     }
 
+    /// bd-s1t7z: byte-level guard on the HEARTBEAT log line. Downstream parsers
+    /// (release_gate_evaluator, operator_proof_bundle) read this format
+    /// field-by-field; any reordering, separator change, or new/dropped field
+    /// would silently break them. The existing `.contains()` checks would not.
+    #[test]
+    fn render_heartbeat_summary_canonical_snapshot() {
+        let heartbeat = CampaignHeartbeat {
+            campaign_id: "soak-canary-2026-05-05-canonical".to_owned(),
+            profile_id: CampaignProfileId::Canary,
+            heartbeat_index: 42,
+            elapsed_seconds: 3600,
+            iteration: 17,
+            active_workloads: vec![
+                "soak_mount_cycle_ext4_ro".to_owned(),
+                "btrfs_repair_random_walk".to_owned(),
+            ],
+            stats: CampaignObservationStats {
+                passes: 128,
+                failures: 2,
+                skips: 3,
+                errors: 1,
+                flakes: 4,
+            },
+            resource_usage: CampaignResourceUsage {
+                cpu_percent: 73,
+                memory_mib: 1536,
+                artifact_mib: 64,
+            },
+        };
+        let summary = render_heartbeat_summary(&heartbeat);
+        insta::assert_snapshot!("render_heartbeat_summary_canonical", summary);
+    }
+
     #[test]
     fn long_profiles_document_rch_ci_and_manual_hosts() {
         let manifest = sample_manifest();

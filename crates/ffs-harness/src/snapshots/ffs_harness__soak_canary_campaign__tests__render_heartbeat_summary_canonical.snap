@@ -1,0 +1,5 @@
+---
+source: crates/ffs-harness/src/soak_canary_campaign.rs
+expression: summary
+---
+HEARTBEAT|campaign_id=soak-canary-2026-05-05-canonical|profile_id=canary|heartbeat_index=42|elapsed_seconds=3600|iteration=17|pass=128|fail=2|skip=3|error=1|flake=4|active_workloads=soak_mount_cycle_ext4_ro,btrfs_repair_random_walk|cpu_percent=73|memory_mib=1536|artifact_mib=64
