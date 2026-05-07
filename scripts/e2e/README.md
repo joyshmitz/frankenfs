@@ -1098,6 +1098,57 @@ paths, unknown privilege labels, unresolved helper placeholders, and destructive
 actions outside the `permissioned_real` lane are rejected before any xfstests
 coverage can be counted.
 
+The permissioned campaign broker E2E suite is also non-destructive. It prepares
+operator handoff packets for the real xfstests baseline and the large-host
+swarm responsiveness run, then proves those packets remain authorization
+material rather than executed evidence:
+
+```bash
+AGENT_NAME="${AGENT_NAME:-operator}" ./scripts/e2e/ffs_permissioned_campaign_broker_e2e.sh
+```
+
+The suite writes
+`artifacts/e2e/<timestamp>_ffs_permissioned_campaign_broker/permissioned_campaign_broker/`
+with these durable surfaces:
+
+- `manifests/xfstests_ready_manifest.json`
+- `manifests/swarm_ready_manifest.json`
+- `manifests/swarm_blocker_manifest.json`
+- `reports/*_report.json` and `reports/*_report.md`
+- `packets/*_handoff_packet.json` and `packets/*_handoff_packet.md`
+- `blockers/xfstests_missing_inputs.json`
+- `blockers/swarm_missing_inputs.json`
+- `command_transcript.tsv`
+- `non_execution_safety_report.json`
+
+Use the validator and packet generator directly when promoting a generated
+manifest into operator handoff material:
+
+```bash
+cargo run -p ffs-harness -- validate-permissioned-campaign-broker \
+  --manifest artifacts/e2e/<run>/permissioned_campaign_broker/manifests/xfstests_ready_manifest.json \
+  --out artifacts/e2e/<run>/permissioned_campaign_broker/reports/xfstests_ready_report.json \
+  --summary-out artifacts/e2e/<run>/permissioned_campaign_broker/reports/xfstests_ready_report.md
+
+cargo run -p ffs-harness -- generate-permissioned-campaign-packet \
+  --manifest artifacts/e2e/<run>/permissioned_campaign_broker/manifests/xfstests_ready_manifest.json \
+  --out artifacts/e2e/<run>/permissioned_campaign_broker/packets/xfstests_handoff_packet.json \
+  --summary-out artifacts/e2e/<run>/permissioned_campaign_broker/packets/xfstests_handoff_packet.md
+```
+
+The xfstests ACK boundary is exactly
+`XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices`; it must be
+paired with explicit `XFSTESTS_DIR`, `TEST_DIR`, `SCRATCH_MNT`, and
+`RESULT_BASE`. The swarm ACK boundary is exactly
+`FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1`,
+`FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host`,
+`FFS_SWARM_WORKLOAD_PERMISSIONED_RUNNER`, and
+`FFS_SWARM_WORKLOAD_ARTIFACT_ROOT`. Broker packets and blocker artifacts are
+not product pass/fail evidence. Proof bundles may carry them as
+`permissioned_campaign_handoff_packet` or `permissioned_campaign_broker_report`
+roles only when the lane stays non-pass and the metadata says
+`permissioned_campaign_product_evidence_claim=none`.
+
 ## Output
 
 Test artifacts are stored in `artifacts/e2e/<timestamp>/`:

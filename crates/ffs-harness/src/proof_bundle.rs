@@ -45,6 +45,11 @@ const SWARM_P99_ATTRIBUTION_ROLE: &str = "p99_attribution_ledger";
 const ADAPTIVE_RUNTIME_LANE: &str = "adaptive_runtime";
 const ADAPTIVE_RUNTIME_VALIDATOR_REPORT_ROLE: &str = "adaptive_runtime_validator_report";
 const ADAPTIVE_RUNTIME_RUNNER_REPORT_ROLE: &str = "adaptive_runtime_runner_report";
+const PERMISSIONED_CAMPAIGN_HANDOFF_ARTIFACT_ROLE: &str = "permissioned_campaign_handoff_packet";
+const PERMISSIONED_CAMPAIGN_BROKER_REPORT_ROLE: &str = "permissioned_campaign_broker_report";
+const PERMISSIONED_CAMPAIGN_PACKET_STATUS_KEY: &str = "permissioned_campaign_packet_status";
+const PERMISSIONED_CAMPAIGN_PRODUCT_EVIDENCE_KEY: &str =
+    "permissioned_campaign_product_evidence_claim";
 
 const PRESERVED_REDACTION_FIELDS: [&str; 5] = [
     "reproduction_command",
@@ -294,6 +299,19 @@ pub fn proof_bundle_required_lanes() -> Vec<String> {
         .iter()
         .map(|lane| (*lane).to_owned())
         .collect()
+}
+
+fn permissioned_campaign_metadata<'a>(
+    lane: &'a ProofBundleLane,
+    preferred_key: &str,
+    fallback_key: &str,
+) -> Option<&'a str> {
+    lane.metadata
+        .get(preferred_key)
+        .or_else(|| lane.metadata.get(fallback_key))
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn default_redaction_policy_version() -> String {
@@ -751,6 +769,7 @@ impl ProofBundleReportBuilder {
 
         self.validate_swarm_lane_contract(lane);
         self.validate_adaptive_runtime_lane_contract(lane);
+        self.validate_permissioned_campaign_broker_boundary(lane);
 
         self.lanes.push(ProofBundleLaneReport {
             lane_id: lane.lane_id.clone(),
@@ -958,6 +977,64 @@ impl ProofBundleReportBuilder {
                     ));
                 }
             }
+        }
+    }
+
+    fn validate_permissioned_campaign_broker_boundary(&mut self, lane: &ProofBundleLane) {
+        let contains_broker_artifact = lane.artifacts.iter().any(|artifact| {
+            matches!(
+                artifact.role.as_str(),
+                PERMISSIONED_CAMPAIGN_HANDOFF_ARTIFACT_ROLE
+                    | PERMISSIONED_CAMPAIGN_BROKER_REPORT_ROLE
+            )
+        });
+        let packet_status = permissioned_campaign_metadata(
+            lane,
+            PERMISSIONED_CAMPAIGN_PACKET_STATUS_KEY,
+            "packet_status",
+        );
+        let product_evidence_claim = permissioned_campaign_metadata(
+            lane,
+            PERMISSIONED_CAMPAIGN_PRODUCT_EVIDENCE_KEY,
+            "product_evidence_claim",
+        );
+        if !contains_broker_artifact && packet_status.is_none() && product_evidence_claim.is_none()
+        {
+            return;
+        }
+
+        if lane.status == ProofBundleOutcome::Pass {
+            self.errors.push(format!(
+                "lane {} contains permissioned campaign broker handoff material but is pass; broker packets are authorization handoff material only and cannot upgrade readiness claims",
+                lane.lane_id
+            ));
+        }
+
+        if let Some(product_evidence_claim) = product_evidence_claim
+            && product_evidence_claim != "none"
+        {
+            self.errors.push(format!(
+                "lane {} permissioned campaign product_evidence_claim={product_evidence_claim} rejected; broker packets cannot count as product evidence",
+                lane.lane_id
+            ));
+        }
+
+        if let Some(packet_status) = packet_status
+            && packet_status == "executed_evidence"
+        {
+            self.errors.push(format!(
+                "lane {} permissioned campaign packet_status=executed_evidence rejected; executed evidence must be raw run artifacts, not a broker packet",
+                lane.lane_id
+            ));
+        }
+
+        if let Some(release_claim) = lane.metadata.get("release_claim")
+            && release_claim == "authoritative_large_host"
+        {
+            self.errors.push(format!(
+                "lane {} release_claim=authoritative_large_host cannot be backed by a permissioned campaign broker packet",
+                lane.lane_id
+            ));
         }
     }
 
@@ -1900,6 +1977,38 @@ mod tests {
             .expect("adaptive runtime lane")
     }
 
+    fn attach_permissioned_campaign_packet(sample: &mut SampleBundle, lane_id: &str) -> Result<()> {
+        let packet_path = format!("artifacts/{lane_id}_permissioned_handoff_packet.json");
+        write_file(
+            sample.root.path(),
+            &packet_path,
+            "{\"authorization_notice\":\"not executed evidence\"}\n",
+        );
+        let packet_hash = sha256_file_hex(&sample.root.path().join(&packet_path))?;
+        let lane = sample
+            .manifest
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.lane_id == lane_id)
+            .context("proof lane")?;
+        lane.artifacts.push(ProofBundleArtifact {
+            path: packet_path,
+            sha256: packet_hash,
+            redacted: false,
+            role: PERMISSIONED_CAMPAIGN_HANDOFF_ARTIFACT_ROLE.to_owned(),
+        });
+        lane.metadata.insert(
+            PERMISSIONED_CAMPAIGN_PACKET_STATUS_KEY.to_owned(),
+            "ready_for_operator_approval".to_owned(),
+        );
+        lane.metadata.insert(
+            PERMISSIONED_CAMPAIGN_PRODUCT_EVIDENCE_KEY.to_owned(),
+            "none".to_owned(),
+        );
+        sample.manifest.integrity = Some(integrity_for(&sample.manifest));
+        Ok(())
+    }
+
     #[test]
     fn valid_sample_bundle_passes() {
         let sample = sample_bundle();
@@ -2123,6 +2232,59 @@ mod tests {
         assert_eq!(conformance.path, "artifacts/conformance.json");
         assert_eq!(conformance.sha256.len(), 64);
         assert_eq!(conformance.role, "primary_evidence");
+    }
+
+    #[test]
+    fn permissioned_broker_packet_is_allowed_as_blocker_context() -> Result<()> {
+        let mut sample = sample_bundle();
+        attach_permissioned_campaign_packet(&mut sample, "xfstests")?;
+
+        let report = validate_sample(&sample);
+
+        assert!(report.valid, "{:?}", report.errors);
+        assert!(report.artifact_reports.iter().any(|artifact| {
+            artifact.lane_id == "xfstests"
+                && artifact.role == PERMISSIONED_CAMPAIGN_HANDOFF_ARTIFACT_ROLE
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn xfstests_broker_packet_cannot_mark_lane_pass() -> Result<()> {
+        let mut sample = sample_bundle();
+        let lane = sample
+            .manifest
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.lane_id == "xfstests")
+            .context("xfstests lane")?;
+        lane.status = ProofBundleOutcome::Pass;
+        attach_permissioned_campaign_packet(&mut sample, "xfstests")?;
+
+        let report = validate_sample(&sample);
+
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("lane xfstests")
+                && error.contains("broker packets are authorization handoff material only")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_broker_packet_cannot_back_authoritative_release_claim() -> Result<()> {
+        let mut sample = sample_bundle();
+        set_swarm_lane_for_large_host(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
+        attach_permissioned_campaign_packet(&mut sample, SWARM_WORKLOAD_HARNESS_LANE)?;
+
+        let report = validate_sample(&sample);
+
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("release_claim=authoritative_large_host")
+                && error.contains("permissioned campaign broker packet")
+        }));
+        Ok(())
     }
 
     #[test]

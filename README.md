@@ -1440,6 +1440,56 @@ production failure. Required lanes are `conformance`, `xfstests`, `fuse`,
 `release_gates`, `swarm_workload_harness`, `swarm_tail_latency`, and
 `adaptive_runtime`.
 
+#### Permissioned Campaign Broker
+
+Broker packets are operator handoff material for evidence campaigns that need
+explicit permission. They make the pending `xfstests` and large-host swarm
+commands reproducible, but they are not executed evidence and cannot upgrade
+`xfstests.baseline` or `swarm.responsiveness` public readiness wording. The
+permissioned run beads stay open until raw run artifacts, proof-bundle lanes,
+and release-gate output exist.
+
+Use the dry-run E2E gate to generate example manifests, validator reports,
+handoff packets, blocker artifacts, and the non-execution safety report:
+
+```bash
+AGENT_NAME="${AGENT_NAME:-operator}" ./scripts/e2e/ffs_permissioned_campaign_broker_e2e.sh
+```
+
+Artifacts are written under
+`artifacts/e2e/<timestamp>_ffs_permissioned_campaign_broker/permissioned_campaign_broker/`.
+The important subdirectories are `manifests/`, `reports/`, `packets/`,
+`blockers/`, and `logs/`, plus `command_transcript.tsv` and
+`non_execution_safety_report.json`.
+
+To validate or render a broker manifest directly:
+
+```bash
+cargo run -p ffs-harness -- validate-permissioned-campaign-broker \
+  --manifest artifacts/e2e/<run>/permissioned_campaign_broker/manifests/xfstests_ready_manifest.json \
+  --out artifacts/e2e/<run>/permissioned_campaign_broker/reports/xfstests_ready_report.json \
+  --summary-out artifacts/e2e/<run>/permissioned_campaign_broker/reports/xfstests_ready_report.md
+
+cargo run -p ffs-harness -- generate-permissioned-campaign-packet \
+  --manifest artifacts/e2e/<run>/permissioned_campaign_broker/manifests/xfstests_ready_manifest.json \
+  --out artifacts/e2e/<run>/permissioned_campaign_broker/packets/xfstests_handoff_packet.json \
+  --summary-out artifacts/e2e/<run>/permissioned_campaign_broker/packets/xfstests_handoff_packet.md
+```
+
+The xfstests ACK boundary is exactly
+`XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices` with
+scoped `XFSTESTS_DIR`, `TEST_DIR`, `SCRATCH_MNT`, and `RESULT_BASE`. The swarm
+ACK boundary is exactly
+`FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1` plus
+`FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host`,
+`FFS_SWARM_WORKLOAD_PERMISSIONED_RUNNER`, and
+`FFS_SWARM_WORKLOAD_ARTIFACT_ROOT`. Proof bundles may include broker packets
+only with the artifact role `permissioned_campaign_handoff_packet` or
+`permissioned_campaign_broker_report` and metadata
+`permissioned_campaign_packet_status=ready_for_operator_approval` plus
+`permissioned_campaign_product_evidence_claim=none`; the validator rejects any
+lane that tries to treat those packets as `pass` evidence.
+
 #### Swarm Responsiveness Evidence
 
 The `swarm.responsiveness` release claim is gated by three proof-bundle lanes:
