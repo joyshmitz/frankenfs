@@ -12164,6 +12164,83 @@ mod tests {
         // Asserting the integer values here is sufficient.
     }
 
+    /// bd-3915j — Kernel-conformance pin for the ffs-btrfs copies
+    /// of BTRFS_BLOCK_GROUP_{DATA,SYSTEM,METADATA}.
+    ///
+    /// ffs-btrfs declares its own copies of these flag constants
+    /// at lib.rs:65-67 (parallel to ffs_ondisk::btrfs::chunk_type_flags::*).
+    /// Both copies are needed: ffs_ondisk for the chunk-type parser
+    /// layer (pinned by bd-6uu7j), ffs-btrfs for the higher-level
+    /// BlockGroupItem layer used by allocator hot paths and cross-impl
+    /// tests. Without this pin, a future contributor could change one
+    /// copy without the other and silently produce a divergent flag
+    /// dispatch (e.g. SYSTEM=4 in ffs-btrfs and SYSTEM=2 in ffs-ondisk
+    /// would mis-route every system block group lookup).
+    ///
+    /// Per fs/btrfs/btrfs_tree.h:
+    ///   #define BTRFS_BLOCK_GROUP_DATA      (1ULL << 0)
+    ///   #define BTRFS_BLOCK_GROUP_SYSTEM    (1ULL << 1)
+    ///   #define BTRFS_BLOCK_GROUP_METADATA  (1ULL << 2)
+    ///
+    /// Pin each value, the power-of-two-bit invariant, the pairwise-
+    /// disjoint invariant, AND cross-check equality with the
+    /// ffs_ondisk::btrfs::chunk_type_flags copies — closing the
+    /// cross-crate drift hole.
+    #[test]
+    fn ffs_btrfs_block_group_type_flags_match_kernel_and_ondisk() {
+        // 1. Pin each value to the kernel literal.
+        assert_eq!(
+            BTRFS_BLOCK_GROUP_DATA, 1,
+            "BTRFS_BLOCK_GROUP_DATA must equal (1ULL << 0)"
+        );
+        assert_eq!(
+            BTRFS_BLOCK_GROUP_SYSTEM, 2,
+            "BTRFS_BLOCK_GROUP_SYSTEM must equal (1ULL << 1)"
+        );
+        assert_eq!(
+            BTRFS_BLOCK_GROUP_METADATA, 4,
+            "BTRFS_BLOCK_GROUP_METADATA must equal (1ULL << 2)"
+        );
+
+        // 2. Each must be a single power-of-two bit (single-flag
+        // invariant — required for bitmask dispatch).
+        assert!(
+            BTRFS_BLOCK_GROUP_DATA.is_power_of_two(),
+            "BTRFS_BLOCK_GROUP_DATA must be a single bit"
+        );
+        assert!(
+            BTRFS_BLOCK_GROUP_SYSTEM.is_power_of_two(),
+            "BTRFS_BLOCK_GROUP_SYSTEM must be a single bit"
+        );
+        assert!(
+            BTRFS_BLOCK_GROUP_METADATA.is_power_of_two(),
+            "BTRFS_BLOCK_GROUP_METADATA must be a single bit"
+        );
+
+        // 3. Pairwise disjoint (no two flags share a bit).
+        assert_eq!(BTRFS_BLOCK_GROUP_DATA & BTRFS_BLOCK_GROUP_SYSTEM, 0);
+        assert_eq!(BTRFS_BLOCK_GROUP_DATA & BTRFS_BLOCK_GROUP_METADATA, 0);
+        assert_eq!(BTRFS_BLOCK_GROUP_SYSTEM & BTRFS_BLOCK_GROUP_METADATA, 0);
+
+        // 4. Cross-check with the ffs_ondisk parser-layer copies —
+        // the two crates must NEVER drift apart.
+        assert_eq!(
+            BTRFS_BLOCK_GROUP_DATA,
+            ffs_ondisk::btrfs::chunk_type_flags::BTRFS_BLOCK_GROUP_DATA,
+            "ffs_btrfs::BTRFS_BLOCK_GROUP_DATA must equal ffs_ondisk's copy"
+        );
+        assert_eq!(
+            BTRFS_BLOCK_GROUP_SYSTEM,
+            ffs_ondisk::btrfs::chunk_type_flags::BTRFS_BLOCK_GROUP_SYSTEM,
+            "ffs_btrfs::BTRFS_BLOCK_GROUP_SYSTEM must equal ffs_ondisk's copy"
+        );
+        assert_eq!(
+            BTRFS_BLOCK_GROUP_METADATA,
+            ffs_ondisk::btrfs::chunk_type_flags::BTRFS_BLOCK_GROUP_METADATA,
+            "ffs_btrfs::BTRFS_BLOCK_GROUP_METADATA must equal ffs_ondisk's copy"
+        );
+    }
+
     /// bd-cwfuf — Kernel-conformance pin for `BTRFS_MAX_LEVEL`.
     #[test]
     fn btrfs_max_tree_level_matches_kernel_level_count() {
