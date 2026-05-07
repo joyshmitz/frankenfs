@@ -694,6 +694,25 @@ mod tests {
     }
 
     #[test]
+    fn render_metamorphic_workload_seed_catalog_markdown_checked_in_catalog_snapshot() {
+        let catalog = fixture_catalog();
+        let report = validate_fixture(&catalog);
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.seed_count, 8);
+        assert_eq!(report.source_kind_count, 8);
+        assert_eq!(report.source_value_verified_count, 8);
+        assert_eq!(report.execution_mode_counts.get("analysis_only"), Some(&1));
+        assert_eq!(report.execution_mode_counts.get("dry_run"), Some(&6));
+        assert_eq!(report.execution_mode_counts.get("permissioned"), Some(&1));
+
+        let markdown = render_metamorphic_workload_seed_catalog_markdown(&report);
+        insta::assert_snapshot!(
+            "render_metamorphic_workload_seed_catalog_markdown_checked_in_catalog",
+            markdown
+        );
+    }
+
+    #[test]
     fn source_value_coverage_counts_valid_sources_independent_of_row_errors() {
         let mut catalog = fixture_catalog();
         catalog.seeds[0].invariant.clear();

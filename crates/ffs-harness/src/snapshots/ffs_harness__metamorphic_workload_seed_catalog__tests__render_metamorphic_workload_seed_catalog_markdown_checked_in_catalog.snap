@@ -1,0 +1,59 @@
+---
+source: crates/ffs-harness/src/metamorphic_workload_seed_catalog.rs
+expression: markdown
+---
+# Metamorphic Workload Seed Catalog
+
+- catalog: `frankenfs_metamorphic_workload_seed_catalog`
+- version: `2026-05-06.1`
+- bead: `bd-rchk0.79`
+- valid: `true`
+- seeds: `8`
+- source kinds: `8`
+- source values verified: `8`
+
+## Relation Coverage
+- `failure_classification_stable`: `1`
+- `operation_reorder_commutes`: `1`
+- `repair_monotonic`: `2`
+- `replay_deterministic`: `2`
+- `tail_latency_order_invariant`: `2`
+
+## Source Kind Coverage
+- `crash_replay_artifact`: `1`
+- `fault_injection_corpus`: `1`
+- `repair_confidence_lab`: `1`
+- `repair_writeback_serialization`: `1`
+- `soak_canary_campaign`: `1`
+- `swarm_tail_latency`: `1`
+- `swarm_workload_harness`: `1`
+- `workload_corpus`: `1`
+
+## Execution Mode Coverage
+- `analysis_only`: `1`
+- `dry_run`: `6`
+- `permissioned`: `1`
+
+## Proof Consumer Coverage
+- `crash_replay_lab`: `2`
+- `fault_injection_corpus`: `1`
+- `operational_readiness_report`: `2`
+- `proof_bundle`: `6`
+- `release_gate`: `5`
+- `repair_lab`: `3`
+- `soak_canary_campaigns`: `1`
+- `swarm_tail_latency`: `1`
+- `swarm_workload_harness`: `2`
+- `workload_corpus`: `1`
+
+## Coverage Matrix
+| Seed | Source | Pointer | Relation | Execution | Consumers | Invariant |
+|---|---|---|---|---|---|---|
+| `seed_workload_append_truncate_64001` | `workload_corpus` | `/scenarios/3/reproduction_command` | `replay_deterministic` | `dry_run` | `workload_corpus, crash_replay_lab, proof_bundle` | `Repeated crash-replay validation for the same append/truncate seed must produce the same survivor classification and log-replay outcome.` |
+| `seed_soak_mount_ext4_1001` | `soak_canary_campaign` | `/workloads/0/seeds/0` | `operation_reorder_commutes` | `dry_run` | `soak_canary_campaigns, release_gate, operational_readiness_report` | `Mount, probe, unmount, and reopen cycles with the same seed must preserve the final root metadata observation independent of heartbeat grouping.` |
+| `seed_swarm_metadata_storm_10001` | `swarm_workload_harness` | `/scenarios/0/workload_seeds/0` | `tail_latency_order_invariant` | `dry_run` | `swarm_workload_harness, proof_bundle, release_gate` | `Dry-run expansion must preserve the same workload seed ordering and attribution lanes before any large-host campaign is permitted.` |
+| `seed_swarm_tail_latency_7310001` | `swarm_tail_latency` | `/rows/0/workload_seed` | `tail_latency_order_invariant` | `permissioned` | `swarm_tail_latency, swarm_workload_harness, release_gate` | `Authoritative p99 attribution for the same workload seed must not upgrade downgrade/blocker evidence into public readiness without the large-host ack.` |
+| `seed_crash_replay_labruntime_42` | `crash_replay_artifact` | `/seed` | `replay_deterministic` | `dry_run` | `crash_replay_lab, proof_bundle, release_gate` | `LabRuntime replay for the recorded seed must keep the same operation trace, failure classification, and raw log identity.` |
+| `seed_repair_writeback_schedule_9001` | `repair_writeback_serialization` | `/race_schedule_manifest/schedules/0/seed` | `repair_monotonic` | `dry_run` | `repair_lab, proof_bundle, operational_readiness_report` | `Increasing available repair evidence for the same writeback schedule seed may improve acceptance, but must not hide duplicate targets or stale-symbol rejection.` |
+| `seed_fault_injection_case_1001` | `fault_injection_corpus` | `/cases/0/seed` | `failure_classification_stable` | `analysis_only` | `fault_injection_corpus, repair_lab, proof_bundle` | `The same injected fault seed must retain its error class and operator remediation classification across proof-bundle rebuilds.` |
+| `seed_repair_confidence_mutation_53001` | `repair_confidence_lab` | `/calibration_corpus/0/seed` | `repair_monotonic` | `dry_run` | `repair_lab, proof_bundle, release_gate` | `Repair confidence for the same mutation seed must preserve the threshold decision and never convert detection-only evidence into mutation permission.` |
