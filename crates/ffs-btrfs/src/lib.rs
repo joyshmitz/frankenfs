@@ -7092,6 +7092,108 @@ mod tests {
         );
     }
 
+    // bd-3niu3 — Property-based round-trip MR for parse_extent_data.
+    //
+    // BtrfsExtentData::to_bytes (lib.rs:486) and parse_extent_data
+    // (lib.rs:1085) handle struct btrfs_file_extent_item from
+    // fs/btrfs/btrfs_tree.h with two payload shapes:
+    //   Inline:  generation u64@0 + ram_bytes u64@8 + compression u8@16
+    //            + encryption u8@17 + other_encoding u16@18 + type u8@20
+    //            + inline data@21..
+    //   Regular: above fixed 21-byte header, then disk_bytenr u64@21
+    //            + disk_num_bytes u64@29 + extent_offset u64@37
+    //            + num_bytes u64@45 (53 bytes total, exact-length
+    //            contract — no trailing bytes).
+    //
+    // Existing tests cover hand-crafted single fixtures and the
+    // fuzz target at fuzz_btrfs_tree_items.rs:875 exercises encode →
+    // parse, but the unit-test suite has no proptest sweep — a
+    // regression in any field's offset arithmetic in either
+    // direction would surface only under cargo-fuzz workflows.
+    // Sweep arbitrary u64s through the simple cases (sparse holes
+    // for Regular, valid uncompressed inline for Inline) plus a
+    // valid-uncompressed-Regular case where source-slice arithmetic
+    // is exercised, asserting encode → parse equality.
+    proptest::proptest! {
+        // MR-1: sparse-hole Regular round-trip. compression=NONE,
+        // disk_bytenr=0 bypasses the source-slice validator so all
+        // four address fields can vary freely.
+        #[test]
+        fn proptest_extent_data_regular_sparse_round_trip(
+            generation in proptest::prelude::any::<u64>(),
+            ram_bytes in proptest::prelude::any::<u64>(),
+            extent_type in proptest::prop_oneof![
+                proptest::prelude::Just(BTRFS_FILE_EXTENT_REG),
+                proptest::prelude::Just(BTRFS_FILE_EXTENT_PREALLOC),
+            ],
+            disk_num_bytes in proptest::prelude::any::<u64>(),
+            extent_offset in proptest::prelude::any::<u64>(),
+            num_bytes in proptest::prelude::any::<u64>(),
+        ) {
+            let original = BtrfsExtentData::Regular {
+                generation,
+                ram_bytes,
+                extent_type,
+                compression: BTRFS_COMPRESS_NONE,
+                disk_bytenr: 0, // sparse — bypasses extent_offset+num_bytes check
+                disk_num_bytes,
+                extent_offset,
+                num_bytes,
+            };
+            let bytes = original.to_bytes();
+            proptest::prop_assert_eq!(bytes.len(), 53);
+            let parsed = parse_extent_data(&bytes)
+                .expect("sparse Regular extent must round-trip");
+            proptest::prop_assert_eq!(parsed, original);
+        }
+
+        // MR-2: uncompressed inline round-trip. For COMPRESS_NONE,
+        // ram_bytes must equal inline data length.
+        #[test]
+        fn proptest_extent_data_inline_uncompressed_round_trip(
+            generation in proptest::prelude::any::<u64>(),
+            data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=256),
+        ) {
+            let ram_bytes = u64::try_from(data.len()).expect("len fits u64");
+            let original = BtrfsExtentData::Inline {
+                generation,
+                ram_bytes,
+                compression: BTRFS_COMPRESS_NONE,
+                data,
+            };
+            let bytes = original.to_bytes();
+            let parsed = parse_extent_data(&bytes)
+                .expect("uncompressed Inline extent must round-trip");
+            proptest::prop_assert_eq!(parsed, original);
+        }
+
+        // MR-3: compressed inline round-trip. For non-NONE
+        // compression, ram_bytes is the decompressed size and is not
+        // constrained to equal data length.
+        #[test]
+        fn proptest_extent_data_inline_compressed_round_trip(
+            generation in proptest::prelude::any::<u64>(),
+            ram_bytes in proptest::prelude::any::<u64>(),
+            compression in proptest::prop_oneof![
+                proptest::prelude::Just(BTRFS_COMPRESS_ZLIB),
+                proptest::prelude::Just(BTRFS_COMPRESS_LZO),
+                proptest::prelude::Just(BTRFS_COMPRESS_ZSTD),
+            ],
+            data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=256),
+        ) {
+            let original = BtrfsExtentData::Inline {
+                generation,
+                ram_bytes,
+                compression,
+                data,
+            };
+            let bytes = original.to_bytes();
+            let parsed = parse_extent_data(&bytes)
+                .expect("compressed Inline extent must round-trip");
+            proptest::prop_assert_eq!(parsed, original);
+        }
+    }
+
     #[test]
     fn btrfs_item_payload_adversarial_samples_exercise_boundaries() {
         assert_root_item_adversarial_boundaries();
