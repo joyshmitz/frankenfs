@@ -339,9 +339,9 @@ mod tests {
     #[test]
     fn btrfs_block_group_item_writer_to_parser_canonical_sizes() {
         for total in [
-            8 * 1024 * 1024_u64,        // 8 MiB — minimum profile
-            256 * 1024 * 1024,          // 256 MiB
-            1024 * 1024 * 1024,         // 1 GiB — typical data BG size
+            8 * 1024 * 1024_u64,         // 8 MiB — minimum profile
+            256 * 1024 * 1024,           // 256 MiB
+            1024 * 1024 * 1024,          // 1 GiB — typical data BG size
             16_u64 * 1024 * 1024 * 1024, // 16 GiB — large data BG
         ] {
             let bytes = ffs_btrfs::BtrfsBlockGroupItem {

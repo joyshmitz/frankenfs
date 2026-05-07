@@ -10400,8 +10400,8 @@ write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
     /// caller and surface here.
     #[test]
     fn fault_injector_concurrent_inject_and_reset_no_hang() {
-        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         use std::thread;
         use std::time::{Duration, Instant};
 
@@ -10492,8 +10492,8 @@ write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
     /// + update_config + throttle_log + reset workers.
     #[test]
     fn throttle_injector_concurrent_apply_and_reset_no_hang() {
-        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         use std::thread;
         use std::time::{Duration, Instant};
 

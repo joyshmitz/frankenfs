@@ -1,14 +1,14 @@
 #![forbid(unsafe_code)]
 
-use criterion::{criterion_group, criterion_main, Criterion};
-use ffs_harness::load_sparse_fixture;
+use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_btrfs::{BtrfsDirItem, BtrfsInodeRef};
+use ffs_harness::load_sparse_fixture;
 use ffs_ondisk::{
-    chunk_type_flags, dx_hash, ext4_casefold_key, parse_dev_item, parse_dir_block, parse_dx_root,
-    parse_extent_tree, parse_internal_items, parse_leaf_items, parse_sys_chunk_array,
-    parse_xattr_block, verify_btrfs_superblock_checksum, verify_btrfs_tree_block_checksum,
-    BtrfsHeader, BtrfsRaidProfile, BtrfsSuperblock, Ext4Extent, Ext4GroupDesc, Ext4Inode,
-    EXT_INIT_MAX_LEN,
+    BtrfsHeader, BtrfsRaidProfile, BtrfsSuperblock, EXT_INIT_MAX_LEN, Ext4Extent, Ext4GroupDesc,
+    Ext4Inode, chunk_type_flags, dx_hash, ext4_casefold_key, parse_dev_item, parse_dir_block,
+    parse_dx_root, parse_extent_tree, parse_internal_items, parse_leaf_items,
+    parse_sys_chunk_array, parse_xattr_block, verify_btrfs_superblock_checksum,
+    verify_btrfs_tree_block_checksum,
 };
 use std::hint::black_box;
 use std::path::Path;

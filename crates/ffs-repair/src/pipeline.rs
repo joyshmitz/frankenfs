@@ -5279,7 +5279,9 @@ mod tests {
             let queue = StdArc::clone(&queue);
             thread::spawn(move || {
                 for _ in 0..256 {
-                    let _ = queue.drain_queued_groups().expect("drain must not deadlock");
+                    let _ = queue
+                        .drain_queued_groups()
+                        .expect("drain must not deadlock");
                 }
             })
         };

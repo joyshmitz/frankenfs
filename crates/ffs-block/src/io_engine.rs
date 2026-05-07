@@ -902,22 +902,24 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::thread;
 
-        let engine = Arc::new(MemIoEngine::new(64 * 1024));
-        let writers_done = Arc::new(AtomicU64::new(0));
         const WRITERS: usize = 4;
         const POLLERS: usize = 4;
         const WRITES_PER_THREAD: u64 = 256;
 
+        let engine = Arc::new(MemIoEngine::new(64 * 1024));
+        let writers_done = Arc::new(AtomicU64::new(0));
         let mut handles = Vec::new();
         for w in 0..WRITERS {
             let e = Arc::clone(&engine);
             let done = Arc::clone(&writers_done);
             handles.push(thread::spawn(move || {
+                let writer_byte = u8::try_from(w).expect("fixed writer count fits in u8");
+                let writer_offset_base = u64::try_from(w).expect("fixed writer count fits in u64");
                 for i in 0..WRITES_PER_THREAD {
-                    let offset = ((w * 1024) as u64 + i % 1024) % (64 * 1024 - 8);
+                    let offset = (writer_offset_base * 1024 + i % 1024) % (64 * 1024 - 8);
                     let _ = e.submit_batch(vec![IoOp::Write {
                         offset,
-                        data: vec![(w as u8); 8],
+                        data: vec![writer_byte; 8],
                     }]);
                 }
                 done.fetch_add(WRITES_PER_THREAD, Ordering::Relaxed);
@@ -941,7 +943,8 @@ mod tests {
             h.join().expect("no panic in worker thread");
         }
 
-        let expected_writes = u64::from(WRITERS as u32) * WRITES_PER_THREAD;
+        let expected_writes =
+            u64::try_from(WRITERS).expect("fixed writer count fits in u64") * WRITES_PER_THREAD;
         let final_stats = engine.stats();
         assert_eq!(
             writers_done.load(Ordering::Relaxed),

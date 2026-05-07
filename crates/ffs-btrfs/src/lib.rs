@@ -7269,16 +7269,12 @@ mod tests {
         let gid: u32 = 0x6666_6666;
         let mode: u32 = 0o100_644; // valid regular-file mode
         let rdev = 0x7777_7777_7777_7777_u64;
-        let atime_sec = 0x8888_8888_8888_8888_u64;
         // nsec must be < 1_000_000_000 per parser invariant. Pick four
         // distinct values inside [0, 1B) so a swap regression is caught.
-        let atime_nsec: u32 = 100_000_001;
-        let ctime_sec = 0xAAAA_AAAA_AAAA_AAAA_u64;
-        let ctime_nsec: u32 = 200_000_002;
-        let mtime_sec = 0xCCCC_CCCC_CCCC_CCCC_u64;
-        let mtime_nsec: u32 = 300_000_003;
-        let otime_sec = 0xEEEE_EEEE_EEEE_EEEE_u64;
-        let otime_nsec: u32 = 400_000_004;
+        let access_time = (0x8888_8888_8888_8888_u64, 100_000_001_u32);
+        let change_time = (0xAAAA_AAAA_AAAA_AAAA_u64, 200_000_002_u32);
+        let modification_time = (0xCCCC_CCCC_CCCC_CCCC_u64, 300_000_003_u32);
+        let creation_time = (0xEEEE_EEEE_EEEE_EEEE_u64, 400_000_004_u32);
 
         // Stamp at kernel offsets. Skip transid (8..16), block_group
         // (32..40), flags (64..72), sequence (72..80), reserved
@@ -7292,14 +7288,14 @@ mod tests {
         item[48..52].copy_from_slice(&gid.to_le_bytes());
         item[52..56].copy_from_slice(&mode.to_le_bytes());
         item[56..64].copy_from_slice(&rdev.to_le_bytes());
-        item[112..120].copy_from_slice(&atime_sec.to_le_bytes());
-        item[120..124].copy_from_slice(&atime_nsec.to_le_bytes());
-        item[124..132].copy_from_slice(&ctime_sec.to_le_bytes());
-        item[132..136].copy_from_slice(&ctime_nsec.to_le_bytes());
-        item[136..144].copy_from_slice(&mtime_sec.to_le_bytes());
-        item[144..148].copy_from_slice(&mtime_nsec.to_le_bytes());
-        item[148..156].copy_from_slice(&otime_sec.to_le_bytes());
-        item[156..160].copy_from_slice(&otime_nsec.to_le_bytes());
+        item[112..120].copy_from_slice(&access_time.0.to_le_bytes());
+        item[120..124].copy_from_slice(&access_time.1.to_le_bytes());
+        item[124..132].copy_from_slice(&change_time.0.to_le_bytes());
+        item[132..136].copy_from_slice(&change_time.1.to_le_bytes());
+        item[136..144].copy_from_slice(&modification_time.0.to_le_bytes());
+        item[144..148].copy_from_slice(&modification_time.1.to_le_bytes());
+        item[148..156].copy_from_slice(&creation_time.0.to_le_bytes());
+        item[156..160].copy_from_slice(&creation_time.1.to_le_bytes());
 
         let parsed = parse_inode_item(&item).expect("kernel-stamped inode_item must parse");
 
@@ -7311,14 +7307,23 @@ mod tests {
         assert_eq!(parsed.gid, gid, "gid @ offset 48");
         assert_eq!(parsed.mode, mode, "mode @ offset 52");
         assert_eq!(parsed.rdev, rdev, "rdev @ offset 56");
-        assert_eq!(parsed.atime_sec, atime_sec, "atime_sec @ offset 112");
-        assert_eq!(parsed.atime_nsec, atime_nsec, "atime_nsec @ offset 120");
-        assert_eq!(parsed.ctime_sec, ctime_sec, "ctime_sec @ offset 124");
-        assert_eq!(parsed.ctime_nsec, ctime_nsec, "ctime_nsec @ offset 132");
-        assert_eq!(parsed.mtime_sec, mtime_sec, "mtime_sec @ offset 136");
-        assert_eq!(parsed.mtime_nsec, mtime_nsec, "mtime_nsec @ offset 144");
-        assert_eq!(parsed.otime_sec, otime_sec, "otime_sec @ offset 148");
-        assert_eq!(parsed.otime_nsec, otime_nsec, "otime_nsec @ offset 156");
+        assert_eq!(parsed.atime_sec, access_time.0, "atime_sec @ offset 112");
+        assert_eq!(parsed.atime_nsec, access_time.1, "atime_nsec @ offset 120");
+        assert_eq!(parsed.ctime_sec, change_time.0, "ctime_sec @ offset 124");
+        assert_eq!(parsed.ctime_nsec, change_time.1, "ctime_nsec @ offset 132");
+        assert_eq!(
+            parsed.mtime_sec, modification_time.0,
+            "mtime_sec @ offset 136"
+        );
+        assert_eq!(
+            parsed.mtime_nsec, modification_time.1,
+            "mtime_nsec @ offset 144"
+        );
+        assert_eq!(parsed.otime_sec, creation_time.0, "otime_sec @ offset 148");
+        assert_eq!(
+            parsed.otime_nsec, creation_time.1,
+            "otime_nsec @ offset 156"
+        );
     }
 
     #[test]
@@ -11632,19 +11637,34 @@ mod tests {
     ///
     /// Pairs with bd-343v3 (ext4 EXT4_FT_*), bd-cwfuf (btrfs file-extent
     /// + compression types), bd-6uu7j (btrfs chunk_type_flags),
-    /// bd-khzn4 (btrfs tree objectids).
+    ///   bd-khzn4 (btrfs tree objectids).
     #[test]
     fn btrfs_ft_constants_match_kernel_header() {
         // Values per include/uapi/linux/fs.h DT_* (mirrored by
         // include/uapi/linux/btrfs_tree.h BTRFS_FT_*).
-        assert_eq!(BTRFS_FT_UNKNOWN, 0, "BTRFS_FT_UNKNOWN must equal kernel DT_UNKNOWN");
-        assert_eq!(BTRFS_FT_REG_FILE, 1, "BTRFS_FT_REG_FILE must equal kernel DT_REG");
+        assert_eq!(
+            BTRFS_FT_UNKNOWN, 0,
+            "BTRFS_FT_UNKNOWN must equal kernel DT_UNKNOWN"
+        );
+        assert_eq!(
+            BTRFS_FT_REG_FILE, 1,
+            "BTRFS_FT_REG_FILE must equal kernel DT_REG"
+        );
         assert_eq!(BTRFS_FT_DIR, 2, "BTRFS_FT_DIR must equal kernel DT_DIR");
-        assert_eq!(BTRFS_FT_CHRDEV, 3, "BTRFS_FT_CHRDEV must equal kernel DT_CHR");
-        assert_eq!(BTRFS_FT_BLKDEV, 4, "BTRFS_FT_BLKDEV must equal kernel DT_BLK");
+        assert_eq!(
+            BTRFS_FT_CHRDEV, 3,
+            "BTRFS_FT_CHRDEV must equal kernel DT_CHR"
+        );
+        assert_eq!(
+            BTRFS_FT_BLKDEV, 4,
+            "BTRFS_FT_BLKDEV must equal kernel DT_BLK"
+        );
         assert_eq!(BTRFS_FT_FIFO, 5, "BTRFS_FT_FIFO must equal kernel DT_FIFO");
         assert_eq!(BTRFS_FT_SOCK, 6, "BTRFS_FT_SOCK must equal kernel DT_SOCK");
-        assert_eq!(BTRFS_FT_SYMLINK, 7, "BTRFS_FT_SYMLINK must equal kernel DT_LNK");
+        assert_eq!(
+            BTRFS_FT_SYMLINK, 7,
+            "BTRFS_FT_SYMLINK must equal kernel DT_LNK"
+        );
 
         // Strict-monotonic ascending across the contiguous 0..=7 range.
         let values: [u8; 8] = [

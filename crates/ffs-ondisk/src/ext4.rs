@@ -10751,10 +10751,7 @@ mod tests {
             DX_HASH_HALF_MD4_UNSIGNED, 4,
             "DX_HASH_HALF_MD4_UNSIGNED must equal 4"
         );
-        assert_eq!(
-            DX_HASH_TEA_UNSIGNED, 5,
-            "DX_HASH_TEA_UNSIGNED must equal 5"
-        );
+        assert_eq!(DX_HASH_TEA_UNSIGNED, 5, "DX_HASH_TEA_UNSIGNED must equal 5");
         assert_eq!(_DX_HASH_SIPHASH, 6, "DX_HASH_SIPHASH must equal 6");
 
         // Structural invariant: unsigned variant = signed variant + 3
@@ -10796,8 +10793,7 @@ mod tests {
         // EXT4_HTREE_EOF_32BIT — kernel sentinel for 32-bit hash EOF.
         // Per fs/ext4/ext4.h: #define EXT4_HTREE_EOF_32BIT  ((1UL  << (32 - 1)) - 1)
         assert_eq!(
-            EXT4_HTREE_EOF_32BIT,
-            0x7FFF_FFFF,
+            EXT4_HTREE_EOF_32BIT, 0x7FFF_FFFF,
             "EXT4_HTREE_EOF_32BIT must equal (1<<31) - 1 = 0x7FFFFFFF"
         );
         assert_eq!(
