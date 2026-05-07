@@ -268,6 +268,12 @@ fn check_required_artifact_fields(
 fn check_freshness(
     manifest: &AuthoritativeEnvironmentManifest,
 ) -> Option<AuthoritativeEnvironmentDecision> {
+    if manifest.probe_at_unix > manifest.now_unix {
+        return Some(reject(
+            "future_probe_timestamp",
+            "rerun the host probe; future-dated manifests cannot upgrade authoritative claims",
+        ));
+    }
     let elapsed = manifest.now_unix.saturating_sub(manifest.probe_at_unix);
     if elapsed > manifest.freshness_ttl_seconds {
         return Some(reject(
@@ -606,6 +612,18 @@ mod tests {
         manifest.now_unix = manifest.probe_at_unix + manifest.freshness_ttl_seconds + 1;
         let decision = evaluate_authoritative_environment(&manifest, &manifest.clone());
         assert_eq!(reason(&decision), Some("stale_environment_manifest"));
+    }
+
+    #[test]
+    fn future_probe_timestamp_is_rejected() {
+        let mut manifest = happy_manifest();
+        manifest.probe_at_unix = manifest.now_unix + 1;
+        let decision = evaluate_authoritative_environment(&manifest, &manifest.clone());
+        assert_eq!(reason(&decision), Some("future_probe_timestamp"));
+        assert!(matches!(
+            decision,
+            AuthoritativeEnvironmentDecision::RejectMismatch { .. }
+        ));
     }
 
     #[test]

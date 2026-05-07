@@ -110,6 +110,9 @@ pub fn evaluate_mounted_lane_gate(gate: &MountedLaneGate) -> MountedLaneDecision
             &gate.diagnostic_log_path,
         );
     }
+    if gate.capability_probe.probe_at_unix > gate.capability_probe.now_unix {
+        return classify_future_probe(gate);
+    }
     let elapsed = gate
         .capability_probe
         .now_unix
@@ -136,6 +139,22 @@ pub fn evaluate_mounted_lane_gate(gate: &MountedLaneGate) -> MountedLaneDecision
     MountedLaneDecision::Pass {
         run_kind: gate.run_kind.clone(),
         capability: gate.capability_probe.status.clone(),
+    }
+}
+
+fn classify_future_probe(gate: &MountedLaneGate) -> MountedLaneDecision {
+    if gate.authoritative_lane_required {
+        fail(
+            "future_capability_probe",
+            "rerun fuse-capability-probe; authoritative runs cannot trust a future-dated probe",
+            &gate.diagnostic_log_path,
+        )
+    } else {
+        skip(
+            "future_capability_probe",
+            "local run skipped; rerun fuse-capability-probe with a non-future timestamp",
+            &gate.diagnostic_log_path,
+        )
     }
 }
 
@@ -344,6 +363,26 @@ mod tests {
         let decision = evaluate_mounted_lane_gate(&gate);
         assert!(matches!(decision, MountedLaneDecision::Skip { .. }));
         assert_eq!(reason(&decision), Some("stale_capability_probe"));
+    }
+
+    #[test]
+    fn future_probe_fails_authoritative_run() {
+        let mut gate = happy_gate();
+        gate.capability_probe.probe_at_unix = gate.capability_probe.now_unix + 1;
+        let decision = evaluate_mounted_lane_gate(&gate);
+        assert!(matches!(decision, MountedLaneDecision::Fail { .. }));
+        assert_eq!(reason(&decision), Some("future_capability_probe"));
+    }
+
+    #[test]
+    fn future_probe_skips_local_run() {
+        let mut gate = happy_gate();
+        gate.run_kind = "local_developer".to_owned();
+        gate.authoritative_lane_required = false;
+        gate.capability_probe.probe_at_unix = gate.capability_probe.now_unix + 1;
+        let decision = evaluate_mounted_lane_gate(&gate);
+        assert!(matches!(decision, MountedLaneDecision::Skip { .. }));
+        assert_eq!(reason(&decision), Some("future_capability_probe"));
     }
 
     #[test]

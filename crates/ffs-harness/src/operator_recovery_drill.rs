@@ -1036,6 +1036,12 @@ pub fn evaluate_mutation_preconditions(
             "rerun preflight checks before requesting mutation",
         );
     }
+    if gate.preflight_evaluated_at_unix > gate.now_unix {
+        return refuse(
+            "future_preflight",
+            "rerun preflight checks with a non-future evaluation timestamp before mutating",
+        );
+    }
     let elapsed = gate
         .now_unix
         .saturating_sub(gate.preflight_evaluated_at_unix);
@@ -1280,6 +1286,14 @@ mod tests {
         gate.now_unix = gate.preflight_evaluated_at_unix + gate.preflight_freshness_ttl_seconds + 1;
         let decision = evaluate_mutation_preconditions(&gate);
         assert_eq!(refusal_reason(&decision), Some("stale_preflight"));
+    }
+
+    #[test]
+    fn future_preflight_refuses_mutation() {
+        let mut gate = happy_gate();
+        gate.preflight_evaluated_at_unix = gate.now_unix + 1;
+        let decision = evaluate_mutation_preconditions(&gate);
+        assert_eq!(refusal_reason(&decision), Some("future_preflight"));
     }
 
     #[test]
