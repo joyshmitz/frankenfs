@@ -559,6 +559,7 @@ mod tests {
         assert!(source.contains("Commit at discovery: `abc1234`"));
         assert!(source.contains("Minimized: `true`"));
         assert!(source.contains("parse_superblock_region"));
+        insta::assert_snapshot!("generate_regression_test_source_includes_metadata", source);
     }
 
     #[test]

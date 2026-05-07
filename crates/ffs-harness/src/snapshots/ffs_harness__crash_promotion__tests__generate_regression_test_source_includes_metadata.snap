@@ -1,0 +1,27 @@
+---
+source: crates/ffs-harness/src/crash_promotion.rs
+expression: source
+---
+/// Regression test promoted from fuzz crash.
+///
+/// - Fuzz target: `fuzz_ext4_metadata`
+/// - Campaign: `20260312T120000Z`
+/// - Commit at discovery: `abc1234`
+/// - Promoted: `2026-03-12`
+/// - Minimized: `true`
+/// - Corpus seed: `regression_fuzz_ext4_metadata_20260312T120000Z_42bytes`
+#[test]
+fn regression_fuzz_ext4_metadata_20260312() {
+    let seed = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fuzz_corpus/regression_seed.bin")
+    ).expect("regression seed must exist");
+
+    // Feed to the same parser as the fuzz target — must not panic.
+    let _ = ffs_ondisk::Ext4Superblock::parse_superblock_region(&seed);
+    let _ = ffs_ondisk::Ext4Inode::parse_from_bytes(&seed);
+    let _ = ffs_ondisk::Ext4GroupDesc::parse_from_bytes(&seed, 32);
+    let _ = ffs_ondisk::Ext4GroupDesc::parse_from_bytes(&seed, 64);
+    let _ = ffs_ondisk::parse_dir_block(&seed, 4096);
+    let _ = ffs_ondisk::BtrfsSuperblock::parse_superblock_region(&seed);
+}
