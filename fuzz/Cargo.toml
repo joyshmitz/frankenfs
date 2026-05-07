@@ -340,6 +340,11 @@ path = "fuzz_targets/fuzz_ext4_extent_actual_len.rs"
 doc = false
 
 [[bin]]
+name = "fuzz_btrfs_verify_superblock_checksum"
+path = "fuzz_targets/fuzz_btrfs_verify_superblock_checksum.rs"
+doc = false
+
+[[bin]]
 name = "fuzz_swarm_workload_harness"
 path = "fuzz_targets/fuzz_swarm_workload_harness.rs"
 doc = false
