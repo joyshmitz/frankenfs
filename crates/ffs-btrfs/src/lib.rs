@@ -7704,6 +7704,59 @@ mod tests {
         assert_eq!(parsed.otime_nsec, 999_999_999);
     }
 
+    // bd-0rsx6: metamorphic relation — every field of BtrfsInodeItem
+    // must survive the to_bytes ↦ parse_inode_item round trip. The
+    // existing fixed-input tests would miss any regression where
+    // both writer and reader drifted the same way (e.g., off-by-4
+    // in both); a proptest sweep over arbitrary field values catches
+    // such symmetric drift because it would surface as a swap or
+    // truncation between distinctly-valued fields. nsec values are
+    // constrained to [0, 1_000_000_000) per the parser invariant.
+    proptest::proptest! {
+        #[test]
+        fn inode_item_proptest_round_trip(
+            generation in proptest::prelude::any::<u64>(),
+            size in proptest::prelude::any::<u64>(),
+            nbytes in proptest::prelude::any::<u64>(),
+            nlink in proptest::prelude::any::<u32>(),
+            uid in proptest::prelude::any::<u32>(),
+            gid in proptest::prelude::any::<u32>(),
+            mode in proptest::prelude::any::<u32>(),
+            rdev in proptest::prelude::any::<u64>(),
+            atime_sec in proptest::prelude::any::<u64>(),
+            atime_nsec in 0_u32..1_000_000_000,
+            ctime_sec in proptest::prelude::any::<u64>(),
+            ctime_nsec in 0_u32..1_000_000_000,
+            mtime_sec in proptest::prelude::any::<u64>(),
+            mtime_nsec in 0_u32..1_000_000_000,
+            otime_sec in proptest::prelude::any::<u64>(),
+            otime_nsec in 0_u32..1_000_000_000,
+        ) {
+            let original = BtrfsInodeItem {
+                generation,
+                size,
+                nbytes,
+                nlink,
+                uid,
+                gid,
+                mode,
+                rdev,
+                atime_sec,
+                atime_nsec,
+                ctime_sec,
+                ctime_nsec,
+                mtime_sec,
+                mtime_nsec,
+                otime_sec,
+                otime_nsec,
+            };
+            let bytes = original.to_bytes();
+            proptest::prop_assert_eq!(bytes.len(), 160, "kernel-aligned 160-byte item");
+            let parsed = parse_inode_item(&bytes).expect("round-trip parse");
+            proptest::prop_assert_eq!(parsed, original);
+        }
+    }
+
     #[test]
     fn extent_data_inline_empty() {
         let original = BtrfsExtentData::Inline {
