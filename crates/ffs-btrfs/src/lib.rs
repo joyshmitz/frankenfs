@@ -7172,6 +7172,79 @@ mod tests {
         ));
     }
 
+    // bd-pt9pk: metamorphic proptests for parse_inode_refs.
+    // The existing inode_ref_round_trip test covers ONE fixed input;
+    // these proptests sweep arbitrary (index, name) pairs plus
+    // multi-entry concatenations to catch any regression in the
+    // cursor-advance or variable-length boundary handling.
+    proptest::proptest! {
+        // MR-1 single-entry round-trip: for any (index, name length 1..=64),
+        // try_to_bytes(entry) ↦ parse_inode_refs ↦ [entry].
+        #[test]
+        fn inode_ref_proptest_single_round_trip(
+            index in proptest::prelude::any::<u64>(),
+            name in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=64),
+        ) {
+            let entry = BtrfsInodeRef { index, name };
+            let bytes = entry.try_to_bytes().expect("non-empty name encodes");
+            let parsed = parse_inode_refs(&bytes).expect("round-trip parse");
+            proptest::prop_assert_eq!(parsed, vec![entry]);
+        }
+
+        // MR-2 multi-entry concatenation: stamp(a)++stamp(b)++... ↦
+        // parse_inode_refs ↦ [a, b, ...]. Catches cursor-advance
+        // regressions (e.g., reading past name_end into the next
+        // entry's index field).
+        #[test]
+        fn inode_ref_proptest_multi_entry_concat(
+            entries in proptest::collection::vec(
+                (
+                    proptest::prelude::any::<u64>(),
+                    proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=32),
+                ),
+                2..=8,
+            ),
+        ) {
+            let originals: Vec<BtrfsInodeRef> = entries
+                .into_iter()
+                .map(|(index, name)| BtrfsInodeRef { index, name })
+                .collect();
+
+            let mut bytes = Vec::new();
+            for entry in &originals {
+                let entry_bytes = entry.try_to_bytes().expect("non-empty name encodes");
+                bytes.extend_from_slice(&entry_bytes);
+            }
+
+            let parsed = parse_inode_refs(&bytes).expect("multi-entry parse");
+            proptest::prop_assert_eq!(parsed, originals);
+        }
+
+        // MR-3 inner-truncation rejection: removing any non-zero
+        // suffix from a valid encoding must produce an error rather
+        // than a panic or buffer over-read. (k=full length means
+        // empty input which parse_inode_refs treats as Ok([]) — that
+        // is an intentional contract, so we sweep 1..len, not 1..=len.)
+        #[test]
+        fn inode_ref_proptest_truncation_rejection(
+            index in proptest::prelude::any::<u64>(),
+            name in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=32),
+            k in 1_usize..50,
+        ) {
+            let entry = BtrfsInodeRef { index, name };
+            let bytes = entry.try_to_bytes().expect("non-empty name encodes");
+            let trunc = k.min(bytes.len() - 1);
+            let truncated = &bytes[..bytes.len() - trunc];
+            let err = parse_inode_refs(truncated)
+                .err()
+                .expect("truncated payload must reject");
+            // Specific variant intentionally not asserted to avoid
+            // over-coupling to the ParseError shape; rendering must
+            // succeed (covers no-panic).
+            let _ = format!("{err:?}");
+        }
+    }
+
     #[test]
     fn inode_item_round_trip() {
         let original = BtrfsInodeItem {
