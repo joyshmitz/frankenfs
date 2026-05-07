@@ -13632,36 +13632,17 @@ CUSTOM("congestion_threshold=3")"#;
     /// drop → held.W per sorted inode), `try_acquire` (same plus
     /// short-circuit on contention), and the implicit `Drop` path
     /// (table.W → held.W → notify → maybe-evict). A watchdog thread
-    /// fails the test with a tagged panic if the workers do not finish
-    /// within 15s; any future AB-BA introduced by a refactor surfaces
-    /// as a clear failure rather than a silent stall.
+    /// fails the test with a tagged assertion if the workers do not
+    /// finish within 15s; any future AB-BA introduced by a refactor
+    /// surfaces as a clear failure rather than a silent stall.
     #[test]
     fn lock_ordering_under_concurrent_acquire_and_drop() {
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         use std::thread;
         use std::time::{Duration, Instant};
 
         let locks = Arc::new(FuseInodeLocks::default());
-
-        let done = Arc::new(AtomicBool::new(false));
         let deadline = Instant::now() + Duration::from_secs(15);
-
-        // Watchdog: prove no worker is stuck after the timeout elapses.
-        let watchdog_done = Arc::clone(&done);
-        let watchdog = thread::spawn(move || {
-            while Instant::now() < deadline {
-                if watchdog_done.load(AtomicOrdering::Acquire) {
-                    return;
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
-            panic!(
-                "bd-pfv55: FuseInodeLocks lock-ordering watchdog tripped — \
-                 acquire/try_acquire/drop workers did not finish within 15s, \
-                 indicating a likely AB-BA deadlock"
-            );
-        });
 
         // Worker A: full-blocking acquire/drop pipeline. Exercises
         // `acquire` (table → drop → held per sorted inode) and the
@@ -13703,11 +13684,19 @@ CUSTOM("congestion_threshold=3")"#;
             }
         });
 
+        while !(worker_a.is_finished() && worker_b.is_finished() && worker_c.is_finished()) {
+            assert!(
+                Instant::now() < deadline,
+                "bd-pfv55: FuseInodeLocks lock-ordering watchdog tripped — \
+                 acquire/try_acquire/drop workers did not finish within 15s, \
+                 indicating a likely AB-BA deadlock"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+
         worker_a.join().expect("worker A panicked");
         worker_b.join().expect("worker B panicked");
         worker_c.join().expect("worker C panicked");
-        done.store(true, AtomicOrdering::Release);
-        watchdog.join().expect("watchdog panicked");
 
         // Sanity: all guards dropped, table should be empty.
         assert_eq!(
