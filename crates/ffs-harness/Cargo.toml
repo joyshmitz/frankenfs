@@ -36,6 +36,7 @@ fuser = { workspace = true }
 insta = { workspace = true }
 libc = { workspace = true }
 lzokay-native = { workspace = true }
+proptest = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber.workspace = true
 zstd = { workspace = true }

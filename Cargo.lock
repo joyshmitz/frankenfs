@@ -876,6 +876,7 @@ dependencies = [
  "libc",
  "lzokay-native",
  "parking_lot",
+ "proptest",
  "serde",
  "serde_json",
  "sha2",

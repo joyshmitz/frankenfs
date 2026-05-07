@@ -190,6 +190,7 @@ fn skip(reason: &str, remediation: &str, log_path: &str) -> MountedLaneDecision 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn happy_gate() -> MountedLaneGate {
         MountedLaneGate {
@@ -219,6 +220,59 @@ mod tests {
                 Some(reason.as_str())
             }
             MountedLaneDecision::Pass { .. } => None,
+        }
+    }
+
+    fn severity(decision: &MountedLaneDecision) -> u8 {
+        match decision {
+            MountedLaneDecision::Pass { .. } => 0,
+            MountedLaneDecision::Skip { .. } => 1,
+            MountedLaneDecision::Fail { .. } => 2,
+        }
+    }
+
+    prop_compose! {
+        fn allowed_probe_status()(index in 0_usize..ALLOWED_PROBE_STATUSES.len()) -> String {
+            ALLOWED_PROBE_STATUSES[index].to_owned()
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn authoritative_escalation_never_weakens_decision(
+            status in allowed_probe_status(),
+            fuse_kernel_module_present in any::<bool>(),
+            helper_binary_present in any::<bool>(),
+            permissioned in any::<bool>(),
+            probe_at_unix in 0_u64..1_000_000,
+            elapsed_seconds in 0_u64..2_000,
+            max_probe_age_seconds in 1_u64..1_000,
+            missing_probe_id in any::<bool>(),
+        ) {
+            let mut local_gate = happy_gate();
+            local_gate.run_kind = "local_developer".to_owned();
+            local_gate.authoritative_lane_required = false;
+            local_gate.max_probe_age_seconds = max_probe_age_seconds;
+            local_gate.capability_probe.status = status;
+            local_gate.capability_probe.fuse_kernel_module_present = fuse_kernel_module_present;
+            local_gate.capability_probe.helper_binary_present = helper_binary_present;
+            local_gate.capability_probe.permissioned = permissioned;
+            local_gate.capability_probe.probe_at_unix = probe_at_unix;
+            local_gate.capability_probe.now_unix = probe_at_unix + elapsed_seconds;
+            if missing_probe_id {
+                local_gate.capability_probe.probe_id.clear();
+            }
+
+            let mut authoritative_gate = local_gate.clone();
+            authoritative_gate.run_kind = "rch_authoritative".to_owned();
+            authoritative_gate.authoritative_lane_required = true;
+
+            let local_decision = evaluate_mounted_lane_gate(&local_gate);
+            let authoritative_decision = evaluate_mounted_lane_gate(&authoritative_gate);
+            prop_assert!(
+                severity(&authoritative_decision) >= severity(&local_decision),
+                "authoritative decision weakened: local={local_decision:?} authoritative={authoritative_decision:?}"
+            );
         }
     }
 
