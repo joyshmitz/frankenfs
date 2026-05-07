@@ -155,19 +155,31 @@ fn normalize(payload: &[u8]) -> ParseOutcome {
     }
 }
 
+fn assert_contract_failure(message: String) {
+    assert!(message.is_empty(), "{message}");
+}
+
 fn assert_success_invariants(payload: &[u8], entries: &[(u64, Vec<u8>)]) {
-    let reparsed = fuzz_btrfs_parse_inode_ref_payload(payload).unwrap_or_else(|_| {
-        std::process::abort();
-    });
+    let reparsed = match fuzz_btrfs_parse_inode_ref_payload(payload) {
+        Ok(entries) => entries,
+        Err(err) => {
+            assert_contract_failure(format!("successful payload must reparse: {err}"));
+            return;
+        }
+    };
     assert_eq!(
         entries,
         reparsed.as_slice(),
         "parsed entries must be stable"
     );
 
-    let encoded = fuzz_btrfs_serialize_inode_ref_payload(entries).unwrap_or_else(|_| {
-        std::process::abort();
-    });
+    let encoded = match fuzz_btrfs_serialize_inode_ref_payload(entries) {
+        Ok(encoded) => encoded,
+        Err(err) => {
+            assert_contract_failure(format!("successful entries must serialize: {err}"));
+            return;
+        }
+    };
     assert_eq!(
         encoded, payload,
         "serialize(parse(payload)) must roundtrip exactly"
@@ -212,11 +224,15 @@ fuzz_target!(|data: &[u8]| {
         }
         (PayloadExpectation::Raw, ParseOutcome::Err(_)) => {}
         (PayloadExpectation::ValidRoundTrip, ParseOutcome::Err(err)) => {
-            panic!("{mode:?} generated a structurally valid inode_ref payload that failed: {err}");
+            assert_contract_failure(format!(
+                "{mode:?} generated a structurally valid inode_ref payload that failed: {err}"
+            ));
         }
         (PayloadExpectation::Reject, ParseOutcome::Err(_)) => {}
         (PayloadExpectation::Reject, ParseOutcome::Ok(entries)) => {
-            panic!("{mode:?} generated a malformed inode_ref payload that parsed as {entries:?}");
+            assert_contract_failure(format!(
+                "{mode:?} generated a malformed inode_ref payload that parsed as {entries:?}"
+            ));
         }
     }
 });
