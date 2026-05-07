@@ -1620,6 +1620,32 @@ mod tests {
     }
 
     #[test]
+    fn render_release_gate_markdown_canonical_missing_swarm_p99_snapshot() {
+        let policy = load_release_gate_policy(&canonical_policy_path()).expect("canonical policy");
+        let mut proof = passing_proof();
+        proof
+            .lanes
+            .retain(|lane| lane.lane_id != "swarm_tail_latency");
+        proof.totals.lanes = proof.lanes.len();
+        proof.totals.pass = proof.lanes.len();
+
+        let report = evaluate_release_gates(&policy, &proof);
+        assert!(!report.valid);
+        assert!(!report.release_ready);
+        assert!(report.findings.iter().any(|finding| {
+            finding.feature_id == "swarm.responsiveness"
+                && finding.controlling_lane.as_deref() == Some("swarm_tail_latency")
+                && finding.remediation_id.as_deref() == Some("bd-rchk0.53.5")
+        }));
+
+        let markdown = render_release_gate_markdown(&report);
+        insta::assert_snapshot!(
+            "render_release_gate_markdown_canonical_missing_swarm_p99",
+            markdown
+        );
+    }
+
+    #[test]
     fn markdown_renders_feature_states_and_findings() {
         let mut proof = passing_proof();
         proof.totals.pass = 8;
