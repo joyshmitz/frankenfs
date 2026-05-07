@@ -11417,6 +11417,64 @@ mod tests {
         );
     }
 
+    /// bd-qyfph — Kernel-conformance pin for the BTRFS_FT_* directory
+    /// file-type constants stored in `struct btrfs_dir_item.type` per
+    /// `include/uapi/linux/btrfs_tree.h`. These values mirror the kernel
+    /// `DT_*` constants from `include/uapi/linux/fs.h` (UNKNOWN=0,
+    /// REG=1, DIR=2, CHR=3, BLK=4, FIFO=5, SOCK=6, LNK=7).
+    ///
+    /// A regression that swapped any two values would silently
+    /// mis-classify every directory entry by file type but pass
+    /// functional tests that only round-trip through a single
+    /// `BtrfsDirItem` round-trip (e.g., dir_item_round_trip uses
+    /// REG_FILE only).
+    ///
+    /// Pairs with bd-343v3 (ext4 EXT4_FT_*), bd-cwfuf (btrfs file-extent
+    /// + compression types), bd-6uu7j (btrfs chunk_type_flags),
+    /// bd-khzn4 (btrfs tree objectids).
+    #[test]
+    fn btrfs_ft_constants_match_kernel_header() {
+        // Values per include/uapi/linux/fs.h DT_* (mirrored by
+        // include/uapi/linux/btrfs_tree.h BTRFS_FT_*).
+        assert_eq!(BTRFS_FT_UNKNOWN, 0, "BTRFS_FT_UNKNOWN must equal kernel DT_UNKNOWN");
+        assert_eq!(BTRFS_FT_REG_FILE, 1, "BTRFS_FT_REG_FILE must equal kernel DT_REG");
+        assert_eq!(BTRFS_FT_DIR, 2, "BTRFS_FT_DIR must equal kernel DT_DIR");
+        assert_eq!(BTRFS_FT_CHRDEV, 3, "BTRFS_FT_CHRDEV must equal kernel DT_CHR");
+        assert_eq!(BTRFS_FT_BLKDEV, 4, "BTRFS_FT_BLKDEV must equal kernel DT_BLK");
+        assert_eq!(BTRFS_FT_FIFO, 5, "BTRFS_FT_FIFO must equal kernel DT_FIFO");
+        assert_eq!(BTRFS_FT_SOCK, 6, "BTRFS_FT_SOCK must equal kernel DT_SOCK");
+        assert_eq!(BTRFS_FT_SYMLINK, 7, "BTRFS_FT_SYMLINK must equal kernel DT_LNK");
+
+        // Strict-monotonic ascending across the contiguous 0..=7 range.
+        let values: [u8; 8] = [
+            BTRFS_FT_UNKNOWN,
+            BTRFS_FT_REG_FILE,
+            BTRFS_FT_DIR,
+            BTRFS_FT_CHRDEV,
+            BTRFS_FT_BLKDEV,
+            BTRFS_FT_FIFO,
+            BTRFS_FT_SOCK,
+            BTRFS_FT_SYMLINK,
+        ];
+        for window in values.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "BTRFS_FT_* constants must be strict-monotonic ascending"
+            );
+        }
+        assert_eq!(
+            BTRFS_FT_SYMLINK - BTRFS_FT_UNKNOWN,
+            7,
+            "the BTRFS_FT_* range must be contiguous 0..=7"
+        );
+
+        // Cross-check with ext4 parity: each BTRFS_FT_* equals the
+        // corresponding ext4 EXT4_FT_* (verified separately at
+        // bd-343v3) — this strict equality is what lets the FUSE
+        // layer use a single `u8` discriminant across both backends.
+        // Asserting the integer values here is sufficient.
+    }
+
     /// bd-cwfuf — Kernel-conformance pin for `BTRFS_MAX_LEVEL`.
     #[test]
     fn btrfs_max_tree_level_matches_kernel_level_count() {
