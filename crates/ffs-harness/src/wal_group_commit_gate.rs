@@ -1524,6 +1524,27 @@ mod tests {
     }
 
     #[test]
+    fn render_wal_group_commit_gate_markdown_checked_in_manifest_snapshot() {
+        let manifest: WalGroupCommitGateManifest = serde_json::from_str(include_str!(
+            "../../../benchmarks/wal_group_commit_gate_manifest.json"
+        ))
+        .expect("checked-in WAL group-commit gate manifest parses");
+        let report = validate_wal_group_commit_gate_manifest(&manifest);
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.missing_reference_count, 1);
+        assert_eq!(
+            report.expected_loss_best_candidate_id,
+            "parallel_epoch_group_commit"
+        );
+
+        let markdown = render_wal_group_commit_gate_markdown(&report);
+        insta::assert_snapshot!(
+            "render_wal_group_commit_gate_markdown_checked_in_manifest",
+            markdown
+        );
+    }
+
+    #[test]
     fn missing_required_invariant_is_rejected() {
         let mut manifest = sample_manifest();
         manifest

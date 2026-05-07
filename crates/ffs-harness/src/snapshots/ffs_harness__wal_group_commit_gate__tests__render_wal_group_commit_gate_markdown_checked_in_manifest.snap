@@ -1,0 +1,36 @@
+---
+source: crates/ffs-harness/src/wal_group_commit_gate.rs
+expression: markdown
+---
+# WAL Group-Commit Gate
+
+- Gate: `bd-p2j3e.4-wal-group-commit-gate-v1`
+- Valid: `true`
+- Invariants: `7`
+- Replay proofs: `2`
+- Scenarios: `2`
+- Measurements: `6`
+- Missing-reference rows: `1`
+- Authoritative public claims: `1`
+
+## Fsync-Tail Classifications
+
+| Scenario | Candidate | Lane | Reference | p99 fsync | Throughput | Replay risk | Classification |
+|----------|-----------|------|-----------|-----------|------------|-------------|----------------|
+| `wal_append_256gb_authoritative` | `current_serial_wal` | `permissioned_large_host` | `true` | `4900.0us` | `18000.0` | `15.000ppm` | `fail` |
+| `wal_append_256gb_authoritative` | `parallel_epoch_group_commit` | `permissioned_large_host` | `true` | `1850.0us` | `34000.0` | `15.000ppm` | `pass` |
+| `wal_append_256gb_authoritative` | `wide_batch_warn` | `permissioned_large_host` | `true` | `2650.0us` | `37000.0` | `15.000ppm` | `warn` |
+| `wal_append_256gb_authoritative` | `deep_batch_fail` | `permissioned_large_host` | `true` | `6500.0us` | `41000.0` | `15.000ppm` | `fail` |
+| `wal_append_256gb_authoritative` | `wide_batch_noisy` | `permissioned_large_host` | `true` | `2100.0us` | `35500.0` | `15.000ppm` | `noisy` |
+| `wal_smoke_missing_reference` | `parallel_epoch_group_commit` | `developer_smoke` | `false` | `2900.0us` | `12000.0` | `15.000ppm` | `missing_reference` |
+
+## Expected-Loss Controller
+
+- Selected: `parallel_epoch_group_commit`
+- Best by rule: `parallel_epoch_group_commit`
+
+| Candidate | Scenario | Batch | Loss | p99 | Throughput | Replay risk | Memory | Publish lag |
+|-----------|----------|-------|------|-----|------------|-------------|--------|-------------|
+| `current_serial_wal` | `wal_append_256gb_authoritative` | `1` | `8.221113` | `4900.0us` | `18000.0` | `5.000ppm` | `64.0MB` | `80.0us` |
+| `parallel_epoch_group_commit` | `wal_append_256gb_authoritative` | `32` | `0.085250` | `1850.0us` | `34000.0` | `15.000ppm` | `512.0MB` | `210.0us` |
+| `deep_batch_fail` | `wal_append_256gb_authoritative` | `256` | `0.348465` | `6500.0us` | `41000.0` | `1500.000ppm` | `1500.0MB` | `1900.0us` |
