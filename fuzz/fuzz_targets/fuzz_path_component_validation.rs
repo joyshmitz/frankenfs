@@ -8,7 +8,7 @@ use ffs_btrfs::{
 };
 use ffs_core::{DirEntry, FileType, InodeAttr, OpenFs, OpenOptions};
 use ffs_error::{FfsError, Result};
-use ffs_types::{BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, ByteOffset, InodeNumber, crc32c};
+use ffs_types::{crc32c, ByteOffset, InodeNumber, BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET};
 use libfuzzer_sys::fuzz_target;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -110,7 +110,7 @@ struct Inputs {
 }
 
 impl Inputs {
-    fn decode(data: &[u8]) -> Self {
+    fn from_fuzz_bytes(data: &[u8]) -> Self {
         let capped = &data[..data.len().min(MAX_INPUT_BYTES)];
         let mut segments = capped.splitn(7, |byte| *byte == b'\n');
 
@@ -219,14 +219,11 @@ fn unit_result(result: Result<()>) -> OpOutcome {
     }
 }
 
-fn fail() -> ! {
-    std::process::abort();
-}
-
 fn require(condition: bool) {
-    if !condition {
-        fail();
-    }
+    assert!(
+        condition,
+        "path component validation fuzz invariant violated"
+    );
 }
 
 fn bytes_outcome(bytes: &[u8]) -> OpOutcome {
@@ -383,7 +380,7 @@ fn classify_case(inputs: &Inputs) -> ValidationOutcome {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let inputs = Inputs::decode(data);
+    let inputs = Inputs::from_fuzz_bytes(data);
     let first = classify_case(&inputs);
     let second = classify_case(&inputs);
     assert_eq!(first, second, "identical input must classify identically");
