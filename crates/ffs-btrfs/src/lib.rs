@@ -11074,6 +11074,72 @@ mod tests {
         assert!(matches!(err, ParseError::InsufficientData { .. }));
     }
 
+    // bd-ay4aw: metamorphic proptests for parse_root_ref.
+    // Existing tests cover 3 fixed-input cases. parse_root_ref has
+    // STRICT length semantics: it rejects both data.len() < name_end
+    // AND data.len() > name_end (exact match required, unlike
+    // parse_inode_refs which allows multiple concatenated entries).
+    // These proptests sweep arbitrary (dirid, sequence, name) tuples
+    // plus append/truncate variants to lock the contract.
+    proptest::proptest! {
+        // MR-1 round-trip: stamp a valid root_ref payload and parse
+        // it back, asserting every field round-trips.
+        #[test]
+        fn parse_root_ref_proptest_round_trip(
+            dirid in proptest::prelude::any::<u64>(),
+            sequence in proptest::prelude::any::<u64>(),
+            name in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=64),
+        ) {
+            // Stamp payload: 8 dirid + 8 sequence + 2 name_len + name.
+            let mut bytes = Vec::with_capacity(18 + name.len());
+            bytes.extend_from_slice(&dirid.to_le_bytes());
+            bytes.extend_from_slice(&sequence.to_le_bytes());
+            let name_len = u16::try_from(name.len()).expect("name fits u16");
+            bytes.extend_from_slice(&name_len.to_le_bytes());
+            bytes.extend_from_slice(&name);
+
+            let parsed = parse_root_ref(&bytes).expect("valid stamp must parse");
+            proptest::prop_assert_eq!(parsed.dirid, dirid);
+            proptest::prop_assert_eq!(parsed.sequence, sequence);
+            proptest::prop_assert_eq!(parsed.name, name);
+        }
+
+        // MR-2 append-rejection: parse_root_ref requires exact
+        // length match. Appending arbitrary non-empty suffix must
+        // produce InvalidField "does not match payload length".
+        #[test]
+        fn parse_root_ref_proptest_append_rejection(
+            dirid in proptest::prelude::any::<u64>(),
+            name in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=32),
+            suffix in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=32),
+        ) {
+            let mut bytes = make_root_ref_data(dirid, &name);
+            bytes.extend_from_slice(&suffix);
+            let err = parse_root_ref(&bytes).err().expect("append must reject");
+            // Specific variant intentionally not asserted to avoid
+            // over-coupling; rendering must succeed (no-panic).
+            let _ = format!("{err:?}");
+        }
+
+        // MR-3 truncation-rejection: removing any non-zero suffix
+        // from a valid encoding must produce an error rather than
+        // a panic or buffer over-read.
+        #[test]
+        fn parse_root_ref_proptest_truncation_rejection(
+            dirid in proptest::prelude::any::<u64>(),
+            name in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=32),
+            k in 1_usize..50,
+        ) {
+            let bytes = make_root_ref_data(dirid, &name);
+            let trunc = k.min(bytes.len() - 1);
+            let truncated = &bytes[..bytes.len() - trunc];
+            let err = parse_root_ref(truncated)
+                .err()
+                .expect("truncated must reject");
+            let _ = format!("{err:?}");
+        }
+    }
+
     #[test]
     fn parse_root_ref_adversarial_samples_exercise_boundaries() {
         let empty_name = make_root_ref_data(256, b"");
