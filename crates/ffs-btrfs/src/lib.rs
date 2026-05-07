@@ -11305,6 +11305,68 @@ mod tests {
         assert_eq!(rref.name, b"test_subvol");
     }
 
+    // bd-m9u35 — Kernel-conformance pin for parse_root_ref.
+    //
+    // struct btrfs_root_ref in fs/btrfs/btrfs_tree.h packs to 18
+    // fixed bytes:
+    //   dirid    u64 @0..8
+    //   sequence u64 @8..16
+    //   name_len u16 @16..18
+    // plus name bytes at @18..18+name_len.
+    //
+    // make_root_ref_data sets sequence to 0, so existing
+    // parse_root_ref_valid would not catch a regression that read
+    // sequence from offset 4..12 instead of 8..16 — every other
+    // test covers dirid and name only. Stamp each addressable
+    // field with a unique non-zero magic so any single-field
+    // offset drift produces a cross-field collision.
+    #[test]
+    fn parse_root_ref_kernel_offsets_match_btrfs_tree_h() {
+        let name = b"\x99\x99\x99\x99\x99"; // 5-byte distinct magic
+        let mut data = vec![0_u8; 18 + name.len()];
+
+        let dirid = 0x1111_1111_1111_1111_u64;
+        let sequence = 0x2222_2222_2222_2222_u64;
+        let name_len = u16::try_from(name.len()).expect("test name fits u16");
+
+        data[0..8].copy_from_slice(&dirid.to_le_bytes());
+        data[8..16].copy_from_slice(&sequence.to_le_bytes());
+        data[16..18].copy_from_slice(&name_len.to_le_bytes());
+        data[18..18 + name.len()].copy_from_slice(name);
+
+        let parsed =
+            parse_root_ref(&data).expect("kernel-stamped root_ref must parse");
+
+        assert_eq!(
+            parsed.dirid, dirid,
+            "dirid must come from offset 0..8 per kernel layout"
+        );
+        assert_eq!(
+            parsed.sequence, sequence,
+            "sequence must come from offset 8..16 per kernel layout"
+        );
+        assert_eq!(
+            parsed.name, name,
+            "name bytes must start at offset 18 with length name_len@16..18"
+        );
+
+        // Negative MR: the parser rejects payloads where total
+        // length doesn't match 18 + name_len exactly. Append one
+        // byte and assert InvalidField{name_len} — pinning the
+        // exact-match contract independently of the offset
+        // assertions above.
+        let mut padded = data.clone();
+        padded.push(0x55);
+        let err = parse_root_ref(&padded).expect_err("trailing byte must reject");
+        match err {
+            ParseError::InvalidField { field, .. } => assert_eq!(
+                field, "root_ref.name_len",
+                "trailing-byte rejection must blame name_len contract"
+            ),
+            other => panic!("expected InvalidField{{name_len}}, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_root_ref_too_short() {
         let data = vec![0_u8; 10];
