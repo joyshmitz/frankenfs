@@ -414,14 +414,16 @@ mod tests {
         gate.capability_probe.status = "unavailable_unprivileged".to_owned();
         gate.capability_probe.permissioned = false;
         let decision = evaluate_mounted_lane_gate(&gate);
+        assert!(
+            matches!(decision, MountedLaneDecision::Fail { .. }),
+            "expected Fail decision"
+        );
         if let MountedLaneDecision::Fail {
             diagnostic_log_path,
             ..
         } = decision
         {
             assert_eq!(diagnostic_log_path, "artifacts/mounted-lane/diagnostic.log");
-        } else {
-            panic!("expected Fail decision");
         }
     }
 
@@ -433,6 +435,10 @@ mod tests {
         gate.capability_probe.status = "unavailable_no_helper".to_owned();
         gate.capability_probe.helper_binary_present = false;
         let decision = evaluate_mounted_lane_gate(&gate);
+        assert!(
+            matches!(decision, MountedLaneDecision::Skip { .. }),
+            "expected Skip decision"
+        );
         if let MountedLaneDecision::Skip {
             remediation_hint,
             diagnostic_log_path,
@@ -441,8 +447,6 @@ mod tests {
         {
             assert!(remediation_hint.contains("fuser") || remediation_hint.contains("FUSE"));
             assert_eq!(diagnostic_log_path, "artifacts/mounted-lane/diagnostic.log");
-        } else {
-            panic!("expected Skip decision");
         }
     }
 }
