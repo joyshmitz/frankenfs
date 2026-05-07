@@ -1175,8 +1175,8 @@ mod tests {
         // (b) Each upper-secs bit pattern must produce its canonical
         // epoch value in the low 2 bits.
         for (secs, expected_epoch) in [
-            (1_u64 << 32, 1_u32),         // upper bits = 0b01
-            (1_u64 << 33, 2_u32),         // upper bits = 0b10
+            (1_u64 << 32, 1_u32),           // upper bits = 0b01
+            (1_u64 << 33, 2_u32),           // upper bits = 0b10
             ((1_u64 << 33) | (1 << 32), 3), // upper bits = 0b11
         ] {
             let extra = encode_extra_timestamp(secs, 0);
@@ -1210,8 +1210,7 @@ mod tests {
         const EXT4_EPOCH_MASK: u32 = (1 << EXT4_EPOCH_BITS) - 1;
         assert_eq!(EXT4_EPOCH_MASK, 0x3, "EXT4_EPOCH_MASK per kernel header");
         assert_eq!(
-            !EXT4_EPOCH_MASK,
-            !0x3_u32,
+            !EXT4_EPOCH_MASK, !0x3_u32,
             "EXT4_NSEC_MASK is ~EXT4_EPOCH_MASK"
         );
     }

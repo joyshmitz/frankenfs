@@ -8645,11 +8645,13 @@ mod tests {
         // a known property of the MD4/SHA-1 IV that catches single-
         // bit drift in any individual word.
         assert_eq!(
-            super::DX_HASH_DEFAULT_SEED[2], !super::DX_HASH_DEFAULT_SEED[0],
+            super::DX_HASH_DEFAULT_SEED[2],
+            !super::DX_HASH_DEFAULT_SEED[0],
             "MD4 IV: word C must be ~word A"
         );
         assert_eq!(
-            super::DX_HASH_DEFAULT_SEED[1], !super::DX_HASH_DEFAULT_SEED[3],
+            super::DX_HASH_DEFAULT_SEED[1],
+            !super::DX_HASH_DEFAULT_SEED[3],
             "MD4 IV: word B must be ~word D"
         );
     }

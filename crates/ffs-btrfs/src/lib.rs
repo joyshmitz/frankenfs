@@ -6574,9 +6574,12 @@ mod tests {
         data[29] = file_type;
         data[30..30 + name.len()].copy_from_slice(name);
 
-        let parsed =
-            parse_dir_items(&data).expect("kernel-stamped dir_item must parse");
-        assert_eq!(parsed.len(), 1, "single-entry payload must parse to one item");
+        let parsed = parse_dir_items(&data).expect("kernel-stamped dir_item must parse");
+        assert_eq!(
+            parsed.len(),
+            1,
+            "single-entry payload must parse to one item"
+        );
 
         assert_eq!(
             parsed[0].child_objectid, objectid,
@@ -6608,13 +6611,10 @@ mod tests {
         let mut bad = data.clone();
         bad[25..27].copy_from_slice(&0x5555_u16.to_le_bytes());
         let err = parse_dir_items(&bad).expect_err("non-zero data_len must reject");
-        match err {
-            ParseError::InvalidField { field, .. } => assert_eq!(
-                field, "dir_item.data_len",
-                "rejection must specifically blame data_len, proving offset 25 is read"
-            ),
-            other => panic!("expected InvalidField{{data_len}}, got {other:?}"),
-        }
+        assert!(
+            matches!(err, ParseError::InvalidField { ref field, .. } if *field == "dir_item.data_len"),
+            "expected InvalidField{{data_len}}, got {err:?}"
+        );
     }
 
     #[test]
@@ -7487,20 +7487,15 @@ mod tests {
         // 30 fixed header bytes + 11 name bytes = 41 total.
         let expected: [u8; 41] = [
             // child_objectid LE @0..8 = 0x1122_3344_5566_7788
-            0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
-            // child_key_type @8 = 0xAB
-            0xAB,
-            // child_key_offset LE @9..17 = 0xDEAD_BEEF_CAFE_BABE
+            0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // child_key_type @8 = 0xAB
+            0xAB, // child_key_offset LE @9..17 = 0xDEAD_BEEF_CAFE_BABE
             0xBE, 0xBA, 0xFE, 0xCA, 0xEF, 0xBE, 0xAD, 0xDE,
             // transid @17..25 = 0 (encoder always zero)
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             // data_len LE @25..27 = 0 (DIR_ITEM has no trailing payload)
-            0x00, 0x00,
-            // name_len LE @27..29 = 11
-            0x0B, 0x00,
-            // file_type @29 = 1 (BTRFS_FT_REG_FILE)
-            0x01,
-            // name @30..41 = "snapfix.txt"
+            0x00, 0x00, // name_len LE @27..29 = 11
+            0x0B, 0x00, // file_type @29 = 1 (BTRFS_FT_REG_FILE)
+            0x01, // name @30..41 = "snapfix.txt"
             b's', b'n', b'a', b'p', b'f', b'i', b'x', b'.', b't', b'x', b't',
         ];
         assert_eq!(

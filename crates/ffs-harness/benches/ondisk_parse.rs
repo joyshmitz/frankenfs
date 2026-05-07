@@ -825,7 +825,11 @@ fn bench_btrfs_parse_xattr_items(c: &mut Criterion) {
     let mut payload = Vec::with_capacity(30 + name.len() + value.len());
     payload.extend_from_slice(&[0_u8; 17]);
     payload.extend_from_slice(&[0_u8; 8]);
-    payload.extend_from_slice(&u16::try_from(value.len()).expect("value < u16").to_le_bytes());
+    payload.extend_from_slice(
+        &u16::try_from(value.len())
+            .expect("value < u16")
+            .to_le_bytes(),
+    );
     payload.extend_from_slice(&u16::try_from(name.len()).expect("name < u16").to_le_bytes());
     payload.push(0); // type byte
     payload.extend_from_slice(name);
