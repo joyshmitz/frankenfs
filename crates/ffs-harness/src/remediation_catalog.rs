@@ -13,12 +13,14 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::path::Path;
 
 pub const REMEDIATION_CATALOG_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_REMEDIATION_CATALOG_PATH: &str =
     "tests/remediation-catalog/remediation_catalog.json";
 const DEFAULT_REMEDIATION_CATALOG_JSON: &str =
     include_str!("../../../tests/remediation-catalog/remediation_catalog.json");
+const REPO_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 const ALLOWED_PROOF_LANES: [&str; 9] = [
     "core_unit",
@@ -197,6 +199,11 @@ fn validate_remediation_entry(
     }
     validate_remediation_vocabulary(entry, outcome_classes, feature_states, errors);
     validate_remediation_required_text(entry, errors);
+    validate_reproduction_script_paths(
+        &format!("remediation `{}`", entry.id),
+        &entry.reproduction_command,
+        errors,
+    );
     validate_remediation_links(entry, errors);
     validate_remediation_safety_invariants(entry, errors);
 }
@@ -330,6 +337,29 @@ fn validate_outcome_class_coverage(seen: &BTreeSet<String>, errors: &mut Vec<Str
             ));
         }
     }
+}
+
+fn validate_reproduction_script_paths(owner: &str, command: &str, errors: &mut Vec<String>) {
+    for script_path in e2e_script_paths(command) {
+        if !Path::new(REPO_ROOT).join(script_path).is_file() {
+            errors.push(format!(
+                "{owner} reproduction_command references missing script `{script_path}`"
+            ));
+        }
+    }
+}
+
+fn e2e_script_paths(command: &str) -> impl Iterator<Item = &str> {
+    command.split_whitespace().filter_map(|raw| {
+        let token =
+            raw.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '`' | ';' | ',' | '(' | ')'));
+        let token = token.strip_prefix("./").unwrap_or(token);
+        (token.starts_with("scripts/e2e/")
+            && Path::new(token)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("sh")))
+        .then_some(token)
+    })
 }
 
 #[must_use]
@@ -567,6 +597,18 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing reproduction_command"))
         );
+    }
+
+    #[test]
+    fn missing_reproduction_script_is_rejected() {
+        let mut catalog = fixture_catalog();
+        catalog.entries[0].reproduction_command =
+            "scripts/e2e/ffs_missing_remediation_runner.sh".to_owned();
+        let report = validate_remediation_catalog(&catalog);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("references missing script")
+                && err.contains("ffs_missing_remediation_runner.sh")
+        }));
     }
 
     #[test]

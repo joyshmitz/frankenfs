@@ -15,6 +15,7 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::path::Path;
 
 pub const MOUNTED_REPAIR_MUTATION_BOUNDARY_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_MOUNTED_REPAIR_MUTATION_BOUNDARY_PATH: &str =
@@ -22,6 +23,7 @@ pub const DEFAULT_MOUNTED_REPAIR_MUTATION_BOUNDARY_PATH: &str =
 const DEFAULT_MOUNTED_REPAIR_MUTATION_BOUNDARY_JSON: &str = include_str!(
     "../../../tests/mounted-repair-mutation-boundary/mounted_repair_mutation_boundary.json"
 );
+const REPO_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 const ALLOWED_KINDS: [&str; 6] = [
     "default_ro_detection_only",
@@ -337,6 +339,11 @@ fn validate_scenario_envelope(scenario: &MutationBoundaryScenario, errors: &mut 
             scenario.scenario_id
         ));
     }
+    validate_reproduction_script_paths(
+        &format!("scenario `{}`", scenario.scenario_id),
+        &scenario.reproduction_command,
+        errors,
+    );
     let allowed_host_path_prefixes = ["artifacts/", "<tempdir>/", "./"];
     for path in &scenario.host_paths_touched {
         if !allowed_host_path_prefixes
@@ -466,6 +473,29 @@ fn is_valid_sha256(value: &str) -> bool {
         return false;
     };
     suffix.len() == 64 && suffix.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn validate_reproduction_script_paths(owner: &str, command: &str, errors: &mut Vec<String>) {
+    for script_path in e2e_script_paths(command) {
+        if !Path::new(REPO_ROOT).join(script_path).is_file() {
+            errors.push(format!(
+                "{owner} reproduction_command references missing script `{script_path}`"
+            ));
+        }
+    }
+}
+
+fn e2e_script_paths(command: &str) -> impl Iterator<Item = &str> {
+    command.split_whitespace().filter_map(|raw| {
+        let token =
+            raw.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '`' | ';' | ',' | '(' | ')'));
+        let token = token.strip_prefix("./").unwrap_or(token);
+        (token.starts_with("scripts/e2e/")
+            && Path::new(token)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("sh")))
+        .then_some(token)
+    })
 }
 
 #[cfg(test)]
@@ -777,6 +807,18 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing reproduction_command"))
         );
+    }
+
+    #[test]
+    fn missing_reproduction_script_is_rejected() {
+        let mut matrix = fixture_matrix();
+        matrix.scenarios[0].reproduction_command =
+            "scripts/e2e/ffs_missing_mounted_repair_boundary_runner.sh".to_owned();
+        let report = validate_mounted_repair_mutation_boundary(&matrix);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("references missing script")
+                && err.contains("ffs_missing_mounted_repair_boundary_runner.sh")
+        }));
     }
 
     #[test]

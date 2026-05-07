@@ -24,7 +24,7 @@
       "host_paths_touched": ["artifacts/repair-boundary/detection_only/run.log"],
       "cleanup_status": "teardown_image",
       "artifact_paths": ["artifacts/repair-boundary/detection_only/result.json"],
-      "reproduction_command": "scripts/e2e/ffs_mounted_repair_policy_e2e.sh detection_only",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-mounted-repair-mutation-boundary --matrix tests/mounted-repair-mutation-boundary/mounted_repair_mutation_boundary.json",
       "host_skip_reason": "",
       "follow_up_bead": ""
     },
@@ -55,7 +55,7 @@
         "artifacts/repair-boundary/ro_repair/result.json",
         "artifacts/repair-boundary/ro_repair/repair-ledger.jsonl"
       ],
-      "reproduction_command": "scripts/e2e/ffs_mounted_repair_policy_e2e.sh ro_repair_with_ledger",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-mounted-repair-mutation-boundary --matrix tests/mounted-repair-mutation-boundary/mounted_repair_mutation_boundary.json",
       "host_skip_reason": "",
       "follow_up_bead": ""
     },
@@ -83,7 +83,7 @@
         "artifacts/repair-boundary/rw_refused/result.json",
         "artifacts/repair-boundary/rw_refused/refusal.log"
       ],
-      "reproduction_command": "scripts/e2e/ffs_mounted_repair_policy_e2e.sh rw_repair_refused",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-mounted-repair-mutation-boundary --matrix tests/mounted-repair-mutation-boundary/mounted_repair_mutation_boundary.json",
       "host_skip_reason": "",
       "follow_up_bead": "bd-rchk0.1"
     },
@@ -108,7 +108,7 @@
       "host_paths_touched": ["artifacts/repair-boundary/missing_ledger/run.log"],
       "cleanup_status": "preserve_artifacts_on_failure",
       "artifact_paths": ["artifacts/repair-boundary/missing_ledger/result.json"],
-      "reproduction_command": "scripts/e2e/ffs_mounted_repair_policy_e2e.sh missing_ledger",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-mounted-repair-mutation-boundary --matrix tests/mounted-repair-mutation-boundary/mounted_repair_mutation_boundary.json",
       "host_skip_reason": "",
       "follow_up_bead": "bd-rchk0.1"
     },
@@ -133,7 +133,7 @@
       "host_paths_touched": ["artifacts/repair-boundary/stale_ledger/run.log"],
       "cleanup_status": "preserve_artifacts_on_failure",
       "artifact_paths": ["artifacts/repair-boundary/stale_ledger/result.json"],
-      "reproduction_command": "scripts/e2e/ffs_mounted_repair_policy_e2e.sh stale_ledger",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-mounted-repair-mutation-boundary --matrix tests/mounted-repair-mutation-boundary/mounted_repair_mutation_boundary.json",
       "host_skip_reason": "",
       "follow_up_bead": "bd-rchk0.1"
     },
@@ -158,7 +158,7 @@
       "host_paths_touched": ["artifacts/repair-boundary/host_skip/skip.json"],
       "cleanup_status": "preserve_artifacts_always",
       "artifact_paths": ["artifacts/repair-boundary/host_skip/skip.json"],
-      "reproduction_command": "FFS_MOUNTED_REPAIR_EXECUTE=1 scripts/e2e/ffs_mounted_repair_policy_e2e.sh host_skip",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-mounted-repair-mutation-boundary --matrix tests/mounted-repair-mutation-boundary/mounted_repair_mutation_boundary.json",
       "host_skip_reason": "low-privilege host has no /dev/fuse; this lane is intentionally skipped",
       "follow_up_bead": ""
     }

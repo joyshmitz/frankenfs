@@ -55,6 +55,10 @@ use ffs_harness::{
         DEFAULT_RECOVERY_MATRIX_PATH, fail_on_mounted_recovery_matrix_errors,
         load_mounted_recovery_matrix, validate_mounted_recovery_matrix,
     },
+    mounted_repair_mutation_boundary::{
+        DEFAULT_MOUNTED_REPAIR_MUTATION_BOUNDARY_PATH, parse_mounted_repair_mutation_boundary,
+        validate_mounted_repair_mutation_boundary,
+    },
     mounted_write_error_classes::{
         DEFAULT_MOUNTED_WRITE_ERROR_CLASSES_PATH, fail_on_mounted_write_error_classes_errors,
         parse_mounted_write_error_classes, validate_mounted_write_error_classes_with_matrix,
@@ -102,6 +106,9 @@ use ffs_harness::{
     release_gate::{
         evaluate_release_gates, fail_on_release_gate_errors, load_release_gate_policy,
         render_release_gate_markdown,
+    },
+    remediation_catalog::{
+        DEFAULT_REMEDIATION_CATALOG_PATH, parse_remediation_catalog, validate_remediation_catalog,
     },
     repair_confidence_lab::{
         DEFAULT_REPAIR_CONFIDENCE_LAB_PATH, fail_on_repair_confidence_lab_errors,
@@ -298,6 +305,9 @@ fn run() -> Result<()> {
         Some("validate-mounted-differential-oracle") => {
             validate_mounted_differential_oracle_cmd(&args[1..])
         }
+        Some("validate-mounted-repair-mutation-boundary") => {
+            validate_mounted_repair_mutation_boundary_cmd(&args[1..])
+        }
         Some("validate-cross-oracle-arbitration") => {
             validate_cross_oracle_arbitration_cmd(&args[1..])
         }
@@ -309,6 +319,7 @@ fn run() -> Result<()> {
         Some("validate-repair-writeback-serialization") => {
             validate_repair_writeback_serialization_cmd(&args[1..])
         }
+        Some("validate-remediation-catalog") => validate_remediation_catalog_cmd(&args[1..]),
         Some("validate-writeback-cache-audit") => validate_writeback_cache_audit_cmd(&args[1..]),
         Some("validate-writeback-cache-ordering") => {
             validate_writeback_cache_ordering_cmd(&args[1..])
@@ -4423,6 +4434,107 @@ fn validate_mounted_write_error_classes_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn validate_mounted_repair_mutation_boundary_cmd(args: &[String]) -> Result<()> {
+    let mut matrix_path = DEFAULT_MOUNTED_REPAIR_MUTATION_BOUNDARY_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--matrix" => {
+                i += 1;
+                args.get(i)
+                    .context("--matrix requires a path")?
+                    .clone_into(&mut matrix_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--help" | "-h" => {
+                print_mounted_repair_mutation_boundary_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-mounted-repair-mutation-boundary argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let text = fs::read_to_string(&matrix_path).with_context(|| {
+        format!("failed to read mounted repair mutation boundary {matrix_path}")
+    })?;
+    let matrix = parse_mounted_repair_mutation_boundary(&text)?;
+    let report = validate_mounted_repair_mutation_boundary(&matrix);
+    if !report.valid {
+        bail!(
+            "mounted repair mutation boundary failed with {} error(s): {}",
+            report.errors.len(),
+            report.errors.join("; ")
+        );
+    }
+    let json = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{json}\n"))?;
+        println!(
+            "mounted repair mutation boundary report written: {} scenarios={}",
+            path, report.scenario_count
+        );
+    } else {
+        println!("{json}");
+    }
+    Ok(())
+}
+
+fn validate_remediation_catalog_cmd(args: &[String]) -> Result<()> {
+    let mut catalog_path = DEFAULT_REMEDIATION_CATALOG_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--catalog" => {
+                i += 1;
+                args.get(i)
+                    .context("--catalog requires a path")?
+                    .clone_into(&mut catalog_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--help" | "-h" => {
+                print_remediation_catalog_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-remediation-catalog argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let text = fs::read_to_string(&catalog_path)
+        .with_context(|| format!("failed to read remediation catalog {catalog_path}"))?;
+    let catalog = parse_remediation_catalog(&text)?;
+    let report = validate_remediation_catalog(&catalog);
+    if !report.valid {
+        bail!(
+            "remediation catalog failed with {} error(s): {}",
+            report.errors.len(),
+            report.errors.join("; ")
+        );
+    }
+    let json = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{json}\n"))?;
+        println!(
+            "remediation catalog report written: {} entries={}",
+            path, report.entry_count
+        );
+    } else {
+        println!("{json}");
+    }
+    Ok(())
+}
+
 fn validate_mounted_recovery_matrix_cmd(args: &[String]) -> Result<()> {
     let mut matrix_path = DEFAULT_RECOVERY_MATRIX_PATH.to_owned();
     let mut out_path: Option<String> = None;
@@ -4784,6 +4896,9 @@ fn print_usage_commands() {
         "  ffs-harness validate-mounted-differential-oracle [--report FILE] [--format json|markdown] [--out FILE]"
     );
     println!(
+        "  ffs-harness validate-mounted-repair-mutation-boundary [--matrix FILE] [--out FILE]"
+    );
+    println!(
         "  ffs-harness validate-cross-oracle-arbitration [--report FILE] [--format json|markdown] [--out FILE]"
     );
     println!(
@@ -4802,6 +4917,7 @@ fn print_usage_commands() {
     print_repair_confidence_lab_usage_summary();
     print_operator_recovery_drill_usage_summary();
     print_repair_writeback_serialization_usage_summary();
+    println!("  ffs-harness validate-remediation-catalog [--catalog FILE] [--out FILE]");
     print_writeback_cache_audit_usage_summary();
     print_writeback_cache_ordering_usage_summary();
     print_writeback_cache_crash_replay_usage_summary();
@@ -4869,6 +4985,9 @@ fn print_usage_examples() {
         "  ffs-harness validate-mounted-differential-oracle --report artifacts/e2e/mounted_differential_oracle/report.json --out artifacts/e2e/mounted_differential_oracle/validation.json"
     );
     println!(
+        "  ffs-harness validate-mounted-repair-mutation-boundary --out artifacts/e2e/mounted_repair_mutation_boundary.json"
+    );
+    println!(
         "  ffs-harness validate-cross-oracle-arbitration --report artifacts/e2e/cross_oracle_arbitration/report.json --out artifacts/e2e/cross_oracle_arbitration/validation.json"
     );
     println!(
@@ -4887,6 +5006,9 @@ fn print_usage_examples() {
     print_repair_confidence_lab_example();
     print_operator_recovery_drill_example();
     print_repair_writeback_serialization_example();
+    println!(
+        "  ffs-harness validate-remediation-catalog --out artifacts/remediation/catalog_report.json"
+    );
     print_writeback_cache_audit_example();
     print_writeback_cache_ordering_example();
     print_writeback_cache_crash_replay_example();
@@ -5539,6 +5661,22 @@ fn print_mounted_differential_oracle_usage() {
     println!("  --report FILE                      Read mounted differential report JSON");
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write validation report to FILE");
+}
+
+fn print_mounted_repair_mutation_boundary_usage() {
+    println!("Usage: ffs-harness validate-mounted-repair-mutation-boundary [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --matrix FILE                      Read mounted repair mutation boundary JSON");
+    println!("  --out FILE                         Write JSON validation report to FILE");
+}
+
+fn print_remediation_catalog_usage() {
+    println!("Usage: ffs-harness validate-remediation-catalog [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --catalog FILE                     Read remediation catalog JSON");
+    println!("  --out FILE                         Write JSON validation report to FILE");
 }
 
 fn print_cross_oracle_arbitration_usage() {
