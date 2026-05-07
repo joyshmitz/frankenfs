@@ -65,6 +65,15 @@ const ALLOWED_EXPECTED_CLASSES: [&str; 11] = [
     "resource_cap",
 ];
 
+const FUZZ_TARGET_HARD_EXIT_PATTERNS: [&str; 6] = [
+    "std::process::abort(",
+    "std::process::exit(",
+    "panic!",
+    "unreachable!",
+    "todo!",
+    "unimplemented!",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FuzzSmokeManifest {
     pub schema_version: u32,
@@ -179,6 +188,14 @@ pub struct FuzzSmokeSeedResult {
     pub quarantine_owning_bead: Option<String>,
     pub artifact_paths: Vec<String>,
     pub reproduction_command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FuzzTargetHardExitMatch {
+    pub source_path: String,
+    pub line_number: usize,
+    pub pattern: String,
+    pub line_text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,6 +354,53 @@ pub fn fail_on_fuzz_smoke_errors(report: &FuzzSmokeReport) -> Result<()> {
         );
     }
     Ok(())
+}
+
+pub fn scan_fuzz_target_hard_exits(workspace_root: &Path) -> Result<Vec<FuzzTargetHardExitMatch>> {
+    let targets_dir = workspace_root.join("fuzz").join("fuzz_targets");
+    let mut target_paths = fs::read_dir(&targets_dir)
+        .with_context(|| format!("failed to read {}", targets_dir.display()))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .with_context(|| format!("failed to read entry under {}", targets_dir.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    target_paths.sort();
+
+    let mut matches = Vec::new();
+    for path in target_paths {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read fuzz target {}", path.display()))?;
+        let source_path = path
+            .strip_prefix(workspace_root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        matches.extend(scan_fuzz_target_hard_exit_text(&source_path, &text));
+    }
+
+    Ok(matches)
+}
+
+fn scan_fuzz_target_hard_exit_text(source_path: &str, text: &str) -> Vec<FuzzTargetHardExitMatch> {
+    let mut matches = Vec::new();
+    for (line_index, line) in text.lines().enumerate() {
+        for pattern in FUZZ_TARGET_HARD_EXIT_PATTERNS {
+            if line.contains(pattern) {
+                matches.push(FuzzTargetHardExitMatch {
+                    source_path: source_path.to_owned(),
+                    line_number: line_index + 1,
+                    pattern: pattern.to_owned(),
+                    line_text: line.trim().to_owned(),
+                });
+            }
+        }
+    }
+    matches
 }
 
 fn validate_artifact_contract(artifact_contract: &[String], errors: &mut Vec<String>) {
@@ -815,6 +879,47 @@ mod tests {
 
     fn workspace_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn render_hard_exit_matches(matches: &[FuzzTargetHardExitMatch]) -> String {
+        matches
+            .iter()
+            .map(|matched| {
+                format!(
+                    "{}:{} matched `{}`: {}",
+                    matched.source_path, matched.line_number, matched.pattern, matched.line_text
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    #[test]
+    fn hard_exit_scanner_reports_file_line_and_pattern() {
+        let matches = scan_fuzz_target_hard_exit_text(
+            "fuzz/fuzz_targets/example.rs",
+            "fn ok() {}\nfn bad() { std::process::abort(); }\n",
+        );
+
+        assert_eq!(
+            matches,
+            vec![FuzzTargetHardExitMatch {
+                source_path: "fuzz/fuzz_targets/example.rs".to_owned(),
+                line_number: 2,
+                pattern: "std::process::abort(".to_owned(),
+                line_text: "fn bad() { std::process::abort(); }".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn fuzz_targets_do_not_use_direct_hard_exits() {
+        let matches = scan_fuzz_target_hard_exits(&workspace_root()).expect("scan fuzz targets");
+        assert!(
+            matches.is_empty(),
+            "fuzz targets must use assert/expect diagnostics instead of direct hard exits: {}",
+            render_hard_exit_matches(&matches)
+        );
     }
 
     #[test]
