@@ -11417,6 +11417,76 @@ mod tests {
         );
     }
 
+    /// bd-m6chz — Kernel-conformance pin for the 17 BTRFS_ITEM_*
+    /// leaf-key type constants per `include/uapi/linux/btrfs_tree.h`.
+    ///
+    /// Every leaf walk in the btrfs read path dispatches to the
+    /// right payload parser (parse_inode_item, parse_dir_items,
+    /// parse_inode_refs, parse_xattr_items, parse_extent_data,
+    /// parse_root_item, parse_root_ref, …) by matching the leaf
+    /// item's `key.type` against these constants. A regression that
+    /// swapped any two values (e.g., DIR_ITEM=84 ↔ DIR_INDEX=96)
+    /// would silently route the wrong parser for every leaf walk
+    /// but pass functional tests that only exercise INODE_ITEM.
+    ///
+    /// Pairs with bd-qyfph (BTRFS_FT_*), bd-cwfuf (FILE_EXTENT +
+    /// COMPRESS), bd-6uu7j (chunk_type_flags), bd-khzn4 (tree
+    /// objectids).
+    #[test]
+    fn btrfs_leaf_item_type_constants_match_kernel_header() {
+        // Values per include/uapi/linux/btrfs_tree.h.
+        // Read-path types.
+        assert_eq!(BTRFS_ITEM_INODE_ITEM, 1);
+        assert_eq!(BTRFS_ITEM_INODE_REF, 12);
+        assert_eq!(BTRFS_ITEM_XATTR_ITEM, 24);
+        assert_eq!(BTRFS_ITEM_DIR_ITEM, 84);
+        assert_eq!(BTRFS_ITEM_DIR_INDEX, 96);
+        assert_eq!(BTRFS_ITEM_EXTENT_DATA, 108);
+        assert_eq!(BTRFS_ITEM_ROOT_ITEM, 132);
+        // Subvolume nav.
+        assert_eq!(BTRFS_ITEM_ROOT_BACKREF, 144);
+        assert_eq!(BTRFS_ITEM_ROOT_REF, 156);
+        // Extent / block-group / chunk management.
+        assert_eq!(BTRFS_ITEM_EXTENT_ITEM, 168);
+        assert_eq!(BTRFS_ITEM_METADATA_ITEM, 169);
+        assert_eq!(BTRFS_ITEM_BLOCK_GROUP_ITEM, 192);
+        assert_eq!(BTRFS_ITEM_FREE_SPACE_INFO, 198);
+        assert_eq!(BTRFS_ITEM_FREE_SPACE_EXTENT, 199);
+        assert_eq!(BTRFS_ITEM_FREE_SPACE_BITMAP, 200);
+        assert_eq!(BTRFS_ITEM_DEV_ITEM, 216);
+        assert_eq!(BTRFS_ITEM_CHUNK, 228);
+
+        // Uniqueness invariant: every constant must have a distinct
+        // value so the leaf-walk dispatch is unambiguous.
+        let constants: [(&str, u8); 17] = [
+            ("INODE_ITEM", BTRFS_ITEM_INODE_ITEM),
+            ("INODE_REF", BTRFS_ITEM_INODE_REF),
+            ("XATTR_ITEM", BTRFS_ITEM_XATTR_ITEM),
+            ("DIR_ITEM", BTRFS_ITEM_DIR_ITEM),
+            ("DIR_INDEX", BTRFS_ITEM_DIR_INDEX),
+            ("EXTENT_DATA", BTRFS_ITEM_EXTENT_DATA),
+            ("ROOT_ITEM", BTRFS_ITEM_ROOT_ITEM),
+            ("ROOT_BACKREF", BTRFS_ITEM_ROOT_BACKREF),
+            ("ROOT_REF", BTRFS_ITEM_ROOT_REF),
+            ("EXTENT_ITEM", BTRFS_ITEM_EXTENT_ITEM),
+            ("METADATA_ITEM", BTRFS_ITEM_METADATA_ITEM),
+            ("BLOCK_GROUP_ITEM", BTRFS_ITEM_BLOCK_GROUP_ITEM),
+            ("FREE_SPACE_INFO", BTRFS_ITEM_FREE_SPACE_INFO),
+            ("FREE_SPACE_EXTENT", BTRFS_ITEM_FREE_SPACE_EXTENT),
+            ("FREE_SPACE_BITMAP", BTRFS_ITEM_FREE_SPACE_BITMAP),
+            ("DEV_ITEM", BTRFS_ITEM_DEV_ITEM),
+            ("CHUNK", BTRFS_ITEM_CHUNK),
+        ];
+        for (i, &(name_a, value_a)) in constants.iter().enumerate() {
+            for &(name_b, value_b) in &constants[i + 1..] {
+                assert_ne!(
+                    value_a, value_b,
+                    "BTRFS_ITEM_{name_a} and BTRFS_ITEM_{name_b} must have distinct values"
+                );
+            }
+        }
+    }
+
     /// bd-qyfph — Kernel-conformance pin for the BTRFS_FT_* directory
     /// file-type constants stored in `struct btrfs_dir_item.type` per
     /// `include/uapi/linux/btrfs_tree.h`. These values mirror the kernel
