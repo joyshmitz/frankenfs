@@ -1142,7 +1142,7 @@ The current suites still emit their native logs/reports directly. The shared art
 | `XFSTESTS_DIR` | *(unset)* | Path to xfstests checkout containing `check` |
 | `XFSTESTS_DRY_RUN` | `1` | In run mode, pass `-n` to `check` (selection validation without executing tests) |
 | `XFSTESTS_FILTER` | `all` | Select `all`, `generic`, or `ext4` curated subsets |
-| `XFSTESTS_STRICT` | `0` | If `1`, missing xfstests prerequisites fail instead of skip |
+| `XFSTESTS_STRICT` | `0` | If `1`, missing xfstests prerequisites fail instead of skip; the regression gate also fails closed when current results or the baseline are missing |
 | `XFSTESTS_REGRESSION_GUARD_JSON` | `scripts/e2e/xfstests_regression_guard.json` | Regression guard config used in run mode to fail on must-pass or pass-rate regressions |
 
 ## Requirements
@@ -1230,6 +1230,10 @@ The E2E tests can be run in CI by:
    ```bash
    cat scripts/e2e/xfstests_regression_guard.json
    ```
+
+Strict regression-gate runs require both current xfstests results and the
+baseline file. Non-strict runs still emit an advisory pass report when either
+input is missing.
 
 ## Adding New Tests
 

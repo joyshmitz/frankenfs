@@ -37,12 +37,47 @@ ARTIFACT_DIR="$E2E_LOG_DIR/regression_gate"
 GATE_REPORT="$ARTIFACT_DIR/gate_report.json"
 mkdir -p "$ARTIFACT_DIR"
 
+write_empty_comparison_report() {
+    local verdict="$1"
+    local reason="$2"
+    cat >"$GATE_REPORT" <<EOF
+{
+  "gate": "xfstests_regression",
+  "verdict": "$verdict",
+  "reason": "$reason",
+  "regressions": [],
+  "new_passes": [],
+  "total_compared": 0
+}
+EOF
+}
+
+finish_missing_input() {
+    local non_strict_reason="$1"
+    local strict_reason="$2"
+
+    if [[ "$XFSTESTS_STRICT" == "1" ]]; then
+        write_empty_comparison_report "fail" "$strict_reason"
+        e2e_fail "$strict_reason"
+    fi
+
+    write_empty_comparison_report "pass" "$non_strict_reason"
+    e2e_pass
+    exit 0
+}
+
 # ── Step 1: Obtain results ────────────────────────────────────────
 
 if [[ -n "$XFSTESTS_RESULTS_JSON" ]] && [[ -f "$XFSTESTS_RESULTS_JSON" ]]; then
     e2e_step "Using existing xfstests results"
     e2e_log "Results: $XFSTESTS_RESULTS_JSON"
     RESULTS_JSON="$XFSTESTS_RESULTS_JSON"
+elif [[ -n "$XFSTESTS_RESULTS_JSON" ]]; then
+    e2e_step "Using existing xfstests results"
+    e2e_log "Requested results file missing: $XFSTESTS_RESULTS_JSON"
+    finish_missing_input \
+        "requested results file missing; no results to compare" \
+        "strict mode requires an existing XFSTESTS_RESULTS_JSON"
 else
     e2e_step "Running xfstests to generate results"
     # Run xfstests E2E, capturing its artifacts.
@@ -59,19 +94,10 @@ else
     done
 
     if [[ -z "$RESULTS_JSON" ]]; then
-        e2e_log "No xfstests results found; gate passes vacuously"
-        cat >"$GATE_REPORT" <<EOF
-{
-  "gate": "xfstests_regression",
-  "verdict": "pass",
-  "reason": "no results to compare",
-  "regressions": [],
-  "new_passes": [],
-  "total_compared": 0
-}
-EOF
-        e2e_pass
-        exit 0
+        e2e_log "No xfstests results found; handling as missing comparison input"
+        finish_missing_input \
+            "no results to compare" \
+            "strict mode requires xfstests results to compare"
     fi
     e2e_log "Found results: $RESULTS_JSON"
 fi
@@ -81,19 +107,10 @@ fi
 e2e_step "Comparing results against baseline"
 
 if [[ ! -f "$XFSTESTS_BASELINE_JSON" ]]; then
-    e2e_log "No baseline found at $XFSTESTS_BASELINE_JSON; gate passes vacuously"
-    cat >"$GATE_REPORT" <<EOF
-{
-  "gate": "xfstests_regression",
-  "verdict": "pass",
-  "reason": "no baseline to compare against",
-  "regressions": [],
-  "new_passes": [],
-  "total_compared": 0
-}
-EOF
-    e2e_pass
-    exit 0
+    e2e_log "No baseline found at $XFSTESTS_BASELINE_JSON; handling as missing comparison input"
+    finish_missing_input \
+        "no baseline to compare against" \
+        "strict mode requires XFSTESTS_BASELINE_JSON"
 fi
 
 # Use python3 for comparison (portable, no Rust binary dependency for gate)
