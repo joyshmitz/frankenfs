@@ -368,3 +368,8 @@ doc = false
 name = "fuzz_authoritative_lane_manifest"
 path = "fuzz_targets/fuzz_authoritative_lane_manifest.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_perf_baseline"
+path = "fuzz_targets/fuzz_perf_baseline.rs"
+doc = false

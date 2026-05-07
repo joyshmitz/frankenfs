@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-05-07T00:00:00Z",
+  "commit": "0000000000000000000000000000000000000000",
+  "branch": "main",
+  "p99_warn_threshold_percent": 10.0,
+  "p99_fail_threshold_percent": 20.0,
+  "measurements": [
+    {
+      "operation": "metadata_parity_cli",
+      "metric": "latency",
+      "p50_us": 800.0,
+      "p95_us": 1100.0,
+      "p99_us": 1450.0,
+      "throughput_ops_sec": 1011.5,
+      "status": "measured"
+    }
+  ]
+}
