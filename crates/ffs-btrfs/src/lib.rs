@@ -7465,6 +7465,59 @@ mod tests {
         assert_eq!(parsed[0], original);
     }
 
+    // bd-2gb89 — Canonical byte-layout snapshot for
+    // BtrfsDirItem::try_to_bytes. Pins the encoder's exact output
+    // for a known fixture so any field-order or offset drift fails
+    // with a hex diff (rather than a silent round-trip with a
+    // similarly-broken parser). Pairs with bd-qwo4a (parse_dir_items
+    // kernel-offset pin) and bd-78fbx (parse_dir_items round-trip
+    // MR proptests) — together those three tests pin the encoder
+    // bytes, the parser offsets, and their agreement separately.
+    #[test]
+    fn dir_item_try_to_bytes_canonical_byte_layout() {
+        let item = BtrfsDirItem {
+            child_objectid: 0x1122_3344_5566_7788,
+            child_key_type: 0xAB,
+            child_key_offset: 0xDEAD_BEEF_CAFE_BABE,
+            file_type: BTRFS_FT_REG_FILE, // 1
+            name: b"snapfix.txt".to_vec(),
+        };
+        let bytes = item.try_to_bytes().expect("canonical fixture encodes");
+
+        // 30 fixed header bytes + 11 name bytes = 41 total.
+        let expected: [u8; 41] = [
+            // child_objectid LE @0..8 = 0x1122_3344_5566_7788
+            0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+            // child_key_type @8 = 0xAB
+            0xAB,
+            // child_key_offset LE @9..17 = 0xDEAD_BEEF_CAFE_BABE
+            0xBE, 0xBA, 0xFE, 0xCA, 0xEF, 0xBE, 0xAD, 0xDE,
+            // transid @17..25 = 0 (encoder always zero)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // data_len LE @25..27 = 0 (DIR_ITEM has no trailing payload)
+            0x00, 0x00,
+            // name_len LE @27..29 = 11
+            0x0B, 0x00,
+            // file_type @29 = 1 (BTRFS_FT_REG_FILE)
+            0x01,
+            // name @30..41 = "snapfix.txt"
+            b's', b'n', b'a', b'p', b'f', b'i', b'x', b'.', b't', b'x', b't',
+        ];
+        assert_eq!(
+            bytes, expected,
+            "BtrfsDirItem::try_to_bytes canonical byte layout drifted"
+        );
+
+        // Parser-side cross-check: the canonical bytes must round-trip
+        // to the exact same struct. (Redundant with bd-qwo4a kernel-pin
+        // and dir_item_round_trip, but cheap and makes the failure mode
+        // explicit when the encoder drifts and the parser is updated to
+        // match — both must be reverted.)
+        let parsed = parse_dir_items(&bytes).expect("canonical bytes parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0], item);
+    }
+
     #[test]
     fn dir_item_try_to_bytes_rejects_name_len_overflow() {
         let original = BtrfsDirItem {
