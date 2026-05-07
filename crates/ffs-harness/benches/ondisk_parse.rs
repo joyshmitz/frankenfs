@@ -5,8 +5,8 @@ use ffs_btrfs::{BtrfsDirItem, BtrfsInodeItem, BtrfsInodeRef};
 use ffs_harness::load_sparse_fixture;
 use ffs_ondisk::{
     BtrfsHeader, BtrfsRaidProfile, BtrfsSuperblock, EXT_INIT_MAX_LEN, Ext4Extent, Ext4GroupDesc,
-    Ext4Inode, chunk_type_flags, dx_hash, ext4_casefold_key, parse_dev_item, parse_dir_block,
-    parse_dx_root, parse_extent_tree, parse_internal_items, parse_leaf_items,
+    Ext4Inode, chunk_type_flags, dx_hash, ext4_casefold_key, ext4_chksum, parse_dev_item,
+    parse_dir_block, parse_dx_root, parse_extent_tree, parse_internal_items, parse_leaf_items,
     parse_sys_chunk_array, parse_xattr_block, verify_btrfs_superblock_checksum,
     verify_btrfs_tree_block_checksum,
 };
@@ -808,6 +808,30 @@ fn bench_btrfs_inode_item_to_bytes(c: &mut Criterion) {
     });
 }
 
+/// bd-tgkxl — ext4_chksum is the CRC32c-based checksum function
+/// called by every ext4 checksum operation: verify_block_bitmap_*,
+/// verify_inode_bitmap_*, verify_group_desc_*, verify_inode_*,
+/// verify_dir_block_*, verify_extent_block_*, plus all stamp_*
+/// counterparts. Bench against a 4 KiB region (typical inode /
+/// dir / group_desc payload size) on a non-trivial seed so the
+/// perf gate tracks regressions on the read AND write metadata
+/// paths. Correctness is fuzzed by bd-e95p9 fuzz_ext4_chksum.
+fn bench_ext4_chksum_4kb(c: &mut Criterion) {
+    // 4 KiB block of pseudo-deterministic content (counter mod
+    // 256) so the bench input is stable across hosts.
+    let block: Vec<u8> = (0_usize..4096)
+        .map(|i| u8::try_from(i & 0xFF).expect("byte fits"))
+        .collect();
+    let seed: u32 = 0xCAFE_BABE;
+
+    c.bench_function("ext4_chksum_4kb", |b| {
+        b.iter(|| {
+            let csum = ext4_chksum(black_box(seed), black_box(&block));
+            black_box(csum);
+        });
+    });
+}
+
 criterion_group!(
     ondisk,
     bench_ext4_inode_parse,
@@ -847,5 +871,6 @@ criterion_group!(
     bench_btrfs_parse_dir_items,
     bench_btrfs_parse_inode_item,
     bench_btrfs_inode_item_to_bytes,
+    bench_ext4_chksum_4kb,
 );
 criterion_main!(ondisk);
