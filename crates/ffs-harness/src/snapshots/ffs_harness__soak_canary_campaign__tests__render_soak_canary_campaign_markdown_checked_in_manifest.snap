@@ -1,0 +1,34 @@
+---
+source: crates/ffs-harness/src/soak_canary_campaign.rs
+expression: markdown
+---
+# Soak/Canary Campaign Report
+
+- manifest: `bd-rchk0.5.9-soak-canary-campaigns-v1`
+- valid: `true`
+- profiles: `4`
+- workloads: `7`
+- long profiles: `nightly, stress, canary`
+- consumers: `operator_proof_bundle, release_gate_evaluator, operational_readiness_report`
+- stop precedence: `resource_budget_exceeded, timeout, infrastructure_error, failure_threshold_exceeded, flake_threshold_exceeded, host_capability_skip, stale_baseline, inconclusive, completed`
+
+## Heartbeats
+- `HEARTBEAT|campaign_id=dry-run-soak-canary|profile_id=smoke|heartbeat_index=1|elapsed_seconds=10|iteration=1|pass=2|fail=0|skip=1|error=0|flake=0|active_workloads=soak_mount_cycle_ext4_ro,soak_mount_cycle_btrfs_ro,soak_metadata_churn_ext4|cpu_percent=15|memory_mib=128|artifact_mib=4`
+
+## Threshold Samples
+- `smoke` `soak_mount_cycle_ext4_ro` -> `pass` (observed pass=3 fail=0 skip=0 error=0 flake=0; allowed fail<=0 error<=0 flake<=0) follow-up `bd-t21em`
+- `smoke` `soak_mount_cycle_ext4_ro` -> `fail` (observed pass=0 fail=1 skip=0 error=0 flake=0; allowed fail<=0 error<=0 flake<=0) follow-up `bd-t21em`
+- `smoke` `soak_mount_cycle_ext4_ro` -> `error` (observed pass=0 fail=0 skip=0 error=1 flake=0; allowed fail<=0 error<=0 flake<=0) follow-up `bd-t21em`
+- `smoke` `soak_mount_cycle_ext4_ro` -> `flake` (observed pass=0 fail=0 skip=0 error=0 flake=1; allowed fail<=0 error<=0 flake<=0) follow-up `bd-t21em`
+- `smoke` `soak_mount_cycle_ext4_ro` -> `skip` (observed pass=0 fail=0 skip=1 error=0 flake=0; allowed fail<=0 error<=0 flake<=0) follow-up `bd-t21em`
+
+## Root Cause Samples
+- `smoke` `soak_mount_cycle_ext4_ro` -> `completed`/`clean_pass` release-gate `eligible`
+- `smoke` `soak_mount_cycle_ext4_ro` -> `failure_threshold_exceeded`/`product_regression` release-gate `block_release_gate`
+- `smoke` `soak_mount_cycle_ext4_ro` -> `host_capability_skip`/`host_capability_skip` release-gate `skip_lane_with_host_blocker`
+- `smoke` `soak_mount_cycle_ext4_ro` -> `infrastructure_error`/`infrastructure_error` release-gate `block_release_gate`
+- `smoke` `soak_mount_cycle_ext4_ro` -> `timeout`/`timeout` release-gate `block_release_gate`
+- `smoke` `soak_mount_cycle_ext4_ro` -> `resource_budget_exceeded`/`resource_exhaustion` release-gate `block_release_gate`
+- `smoke` `soak_mount_cycle_ext4_ro` -> `flake_threshold_exceeded`/`known_quarantined_flake` release-gate `quarantine_with_expiry`
+- `smoke` `soak_mount_cycle_ext4_ro` -> `flake_threshold_exceeded`/`new_recurring_flake` release-gate `block_release_gate`
+- `smoke` `soak_mount_cycle_ext4_ro` -> `stale_baseline`/`inconclusive` release-gate `downgrade_until_fresh_evidence`

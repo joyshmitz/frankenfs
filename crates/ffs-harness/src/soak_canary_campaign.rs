@@ -2063,6 +2063,30 @@ mod tests {
     }
 
     #[test]
+    fn render_soak_canary_campaign_markdown_checked_in_manifest_snapshot() {
+        let manifest = sample_manifest();
+        let report = validate_soak_canary_campaign_manifest(&manifest, "artifacts/soak");
+        assert!(report.valid, "{:?}", report.errors);
+        assert!(
+            report
+                .artifact_consumers
+                .contains(&"release_gate_evaluator".to_owned())
+        );
+        assert!(
+            report
+                .failure_evaluations
+                .iter()
+                .any(|evaluation| evaluation.follow_up_bead == "bd-t21em")
+        );
+
+        let markdown = render_soak_canary_campaign_markdown(&report);
+        insta::assert_snapshot!(
+            "render_soak_canary_campaign_markdown_checked_in_manifest",
+            markdown
+        );
+    }
+
+    #[test]
     fn sample_artifact_manifest_exposes_proof_bundle_and_release_gate_metadata() {
         let manifest = sample_manifest();
         let evaluations = sample_failure_evaluations(&manifest);
