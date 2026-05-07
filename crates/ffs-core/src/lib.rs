@@ -45612,4 +45612,53 @@ mod tests {
             b"\0"
         );
     }
+
+    // bd-wr0sc: cross-implementation MR. The two parallel INODE_REF
+    // payload parsers (ffs_core::OpenFs::btrfs_parse_inode_ref_payload
+    // and ffs_btrfs::parse_inode_refs) must agree on every input.
+    // Each is fuzzed independently; without this drift test, a
+    // regression on either side that diverged the error semantics
+    // or the parsed shape would silently corrupt one of the two
+    // consumers (release-gate evaluator vs subvolume enumeration).
+    proptest::proptest! {
+        #[test]
+        fn ffs_core_inode_ref_parser_agrees_with_ffs_btrfs(
+            data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512),
+        ) {
+            let core_result = fuzz_btrfs_parse_inode_ref_payload(&data);
+            let btrfs_result = ffs_btrfs::parse_inode_refs(&data);
+
+            proptest::prop_assert_eq!(
+                core_result.is_ok(),
+                btrfs_result.is_ok(),
+                "Result.is_ok() must agree on data {:?}",
+                &data[..data.len().min(32)]
+            );
+
+            if let (Ok(core_entries), Ok(btrfs_entries)) = (&core_result, &btrfs_result) {
+                proptest::prop_assert_eq!(
+                    core_entries.len(),
+                    btrfs_entries.len(),
+                    "parsed entry count must agree"
+                );
+                for (i, (core_entry, btrfs_entry)) in
+                    core_entries.iter().zip(btrfs_entries.iter()).enumerate()
+                {
+                    let (core_index, core_name) = core_entry;
+                    proptest::prop_assert_eq!(
+                        *core_index,
+                        btrfs_entry.index,
+                        "entry {} index must agree",
+                        i
+                    );
+                    proptest::prop_assert_eq!(
+                        core_name,
+                        &btrfs_entry.name,
+                        "entry {} name must agree",
+                        i
+                    );
+                }
+            }
+        }
+    }
 }
