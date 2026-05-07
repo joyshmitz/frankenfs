@@ -2019,6 +2019,28 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_json_report_matches_golden() {
+        let report = build_readiness_action_dry_run_report(
+            &planning_input(default_source_reports(), Vec::new()),
+            dry_run_metadata(),
+        );
+        let json = serde_json::to_string_pretty(&report).expect("serialize dry-run report");
+
+        insta::assert_snapshot!("readiness_action_dry_run_json_report", json);
+    }
+
+    #[test]
+    fn dry_run_markdown_report_matches_golden() {
+        let report = build_readiness_action_dry_run_report(
+            &planning_input(default_source_reports(), Vec::new()),
+            dry_run_metadata(),
+        );
+        let markdown = render_readiness_action_dry_run_markdown(&report);
+
+        insta::assert_snapshot!("readiness_action_dry_run_markdown_report", markdown);
+    }
+
+    #[test]
     fn planner_output_is_stable_when_source_report_order_changes() {
         let mut reversed_reports = default_source_reports();
         reversed_reports.reverse();

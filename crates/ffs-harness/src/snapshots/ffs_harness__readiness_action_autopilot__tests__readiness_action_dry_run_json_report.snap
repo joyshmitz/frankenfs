@@ -1,0 +1,274 @@
+---
+source: crates/ffs-harness/src/readiness_action_autopilot.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "report_id": "readiness_action_planner_test_report",
+  "generated_at": "2026-05-07T00:00:00Z",
+  "dry_run": true,
+  "command_metadata": {
+    "invocation": "ffs-harness recommend-readiness-actions",
+    "json_report_path": "artifacts/readiness/actions/report.json",
+    "markdown_report_path": "artifacts/readiness/actions/report.md",
+    "stdout_log_path": "artifacts/readiness/actions/stdout.log",
+    "stderr_log_path": "artifacts/readiness/actions/stderr.log",
+    "cleanup_status": "not_required",
+    "output_paths": [
+      {
+        "kind": "json_report",
+        "path": "artifacts/readiness/actions/report.json"
+      },
+      {
+        "kind": "markdown_report",
+        "path": "artifacts/readiness/actions/report.md"
+      },
+      {
+        "kind": "stdout_log",
+        "path": "artifacts/readiness/actions/stdout.log"
+      },
+      {
+        "kind": "stderr_log",
+        "path": "artifacts/readiness/actions/stderr.log"
+      }
+    ]
+  },
+  "planner_result": {
+    "report": {
+      "schema_version": 1,
+      "report_id": "readiness_action_planner_test_report",
+      "generated_at": "2026-05-07T00:00:00Z",
+      "source_inputs": [
+        {
+          "input_id": "beads-open-queue",
+          "kind": "beads_jsonl",
+          "path": ".beads/issues.jsonl",
+          "required": true,
+          "state": "present",
+          "schema_version": 1
+        },
+        {
+          "input_id": "host-capability-manifest",
+          "kind": "host_capability_artifact",
+          "path": "artifacts/hosts/large_host_capability.json",
+          "required": true,
+          "state": "permission_required",
+          "schema_version": 1
+        },
+        {
+          "input_id": "operational-readiness-report",
+          "kind": "operational_readiness_report",
+          "path": "artifacts/readiness/operational_readiness_report.json",
+          "required": true,
+          "state": "missing",
+          "schema_version": 1
+        },
+        {
+          "input_id": "proof-bundle-report",
+          "kind": "proof_bundle_report",
+          "path": "artifacts/proof_bundles/release_gate.json",
+          "required": true,
+          "state": "contradictory",
+          "schema_version": 1
+        },
+        {
+          "input_id": "proof-bundle-report",
+          "kind": "proof_bundle_report",
+          "path": "artifacts/proof_bundles/swarm_tail_latency.json",
+          "required": true,
+          "state": "stale",
+          "schema_version": 1
+        },
+        {
+          "input_id": "release-gate-policy",
+          "kind": "release_gate_policy",
+          "path": "crates/ffs-harness/fixtures/release_gate_policy_v1.json",
+          "required": true,
+          "state": "present",
+          "schema_version": 1
+        }
+      ],
+      "recommendations": [
+        {
+          "action_id": "define-readiness-action-schema",
+          "title": "Define readiness action autopilot schema and fixtures",
+          "safety_class": "local_safe",
+          "controlling_bead": "bd-rchk0.98.1",
+          "evidence_tier": "tracker_only",
+          "ack_required": false,
+          "reproduction_command": "cargo test -p ffs-harness readiness_action_autopilot",
+          "rationale": "The only required changes are local schema and fixture tests.",
+          "public_claim_effect": "no_change"
+        },
+        {
+          "action_id": "run-permissioned-xfstests-baseline",
+          "title": "Run permissioned xfstests baseline",
+          "safety_class": "permissioned",
+          "controlling_bead": "bd-rchk3.3",
+          "evidence_tier": "operational_readiness",
+          "ack_required": true,
+          "reproduction_command": "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/run_xfstests_baseline.sh",
+          "rationale": "The current queue contains xfstests work that cannot run without explicit mutation authorization.",
+          "public_claim_effect": "block_upgrade",
+          "diagnostics": [
+            {
+              "diagnostic_id": "planner-input-operational-readiness-report-missing",
+              "severity": "error",
+              "source_kind": "operational_readiness_report",
+              "source_path": "artifacts/readiness/operational_readiness_report.json",
+              "message": "Required operational_readiness_report input operational-readiness-report is missing.",
+              "remediation": "provide the missing artifact before acting"
+            },
+            {
+              "diagnostic_id": "planner-xfstests-real-run-evidence-missing",
+              "severity": "error",
+              "source_kind": "operational_readiness_report",
+              "source_path": "artifacts/readiness/operational_readiness_report.json",
+              "message": "No current xfstests real-run report is present for this action.",
+              "remediation": "capture pass/fail/not-run artifacts before upgrading xfstests readiness claims"
+            },
+            {
+              "diagnostic_id": "xfstests-real-run-ack-missing",
+              "severity": "error",
+              "source_kind": "operational_readiness_report",
+              "source_path": "artifacts/readiness/operational_readiness_report.json",
+              "message": "No real xfstests pass/fail artifact is present.",
+              "remediation": "Obtain explicit operator authorization before running the mutating baseline."
+            }
+          ]
+        },
+        {
+          "action_id": "refresh-large-host-swarm-campaign",
+          "title": "Refresh large-host swarm responsiveness evidence",
+          "safety_class": "permissioned",
+          "controlling_bead": "bd-rchk0.53.8",
+          "evidence_tier": "authoritative",
+          "ack_required": true,
+          "reproduction_command": "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host scripts/e2e/run_swarm_workload_campaign.sh",
+          "rationale": "Large-host responsiveness claims require fresh authoritative host evidence.",
+          "public_claim_effect": "downgrade_required",
+          "diagnostics": [
+            {
+              "diagnostic_id": "planner-input-host-capability-manifest-permission_required",
+              "severity": "warning",
+              "source_kind": "host_capability_artifact",
+              "source_path": "artifacts/hosts/large_host_capability.json",
+              "message": "Required host_capability_artifact input host-capability-manifest is permission_required.",
+              "remediation": "obtain explicit operator authorization before acting"
+            },
+            {
+              "diagnostic_id": "planner-input-proof-bundle-report-stale",
+              "severity": "warning",
+              "source_kind": "proof_bundle_report",
+              "source_path": "artifacts/proof_bundles/swarm_tail_latency.json",
+              "message": "Required proof_bundle_report input proof-bundle-report is stale.",
+              "remediation": "refresh the stale artifact before acting"
+            },
+            {
+              "diagnostic_id": "planner-large-host-capability-missing",
+              "severity": "error",
+              "source_kind": "host_capability_artifact",
+              "source_path": "artifacts/hosts/large_host_capability.json",
+              "message": "No present large-host capability artifact backs this swarm action.",
+              "remediation": "publish host capability proof before treating large-host evidence as authoritative"
+            },
+            {
+              "diagnostic_id": "swarm-evidence-stale",
+              "severity": "warning",
+              "source_kind": "proof_bundle_report",
+              "source_path": "artifacts/proof_bundles/swarm_tail_latency.json",
+              "message": "The swarm tail-latency proof bundle is beyond its freshness window.",
+              "remediation": "Rerun on a permissioned large host before upgrading readiness wording.",
+              "stale_age_days": 31,
+              "freshness_ttl_days": 14
+            }
+          ]
+        },
+        {
+          "action_id": "refuse-contradictory-readiness-upgrade",
+          "title": "Refuse contradictory readiness upgrade",
+          "safety_class": "impossible",
+          "controlling_bead": "bd-rchk0",
+          "evidence_tier": "proof_bundle",
+          "ack_required": false,
+          "reproduction_command": "cargo test -p ffs-harness release_gate -- --nocapture",
+          "rationale": "A public readiness upgrade is impossible while proof-bundle and release-gate evidence disagree.",
+          "public_claim_effect": "block_upgrade",
+          "diagnostics": [
+            {
+              "diagnostic_id": "planner-input-proof-bundle-report-contradictory",
+              "severity": "error",
+              "source_kind": "proof_bundle_report",
+              "source_path": "artifacts/proof_bundles/release_gate.json",
+              "message": "Required proof_bundle_report input proof-bundle-report is contradictory.",
+              "remediation": "resolve contradictory evidence before acting"
+            },
+            {
+              "diagnostic_id": "release-gate-proof-contradiction",
+              "severity": "error",
+              "source_kind": "proof_bundle_report",
+              "source_path": "artifacts/proof_bundles/release_gate.json",
+              "message": "The proof bundle contradicts the release-gate policy state.",
+              "remediation": "Resolve the artifact conflict before changing README or FEATURE_PARITY readiness claims."
+            }
+          ]
+        }
+      ]
+    },
+    "suppressed_duplicates": []
+  },
+  "scenarios": [
+    {
+      "scenario_id": "dry-run-define-readiness-action-schema",
+      "action_id": "define-readiness-action-schema",
+      "title": "Define readiness action autopilot schema and fixtures",
+      "safety_class": "local_safe",
+      "ack_required": false,
+      "evidence_tier": "tracker_only",
+      "public_claim_effect": "no_change",
+      "controlling_bead": "bd-rchk0.98.1",
+      "reproduction_command": "cargo test -p ffs-harness readiness_action_autopilot",
+      "diagnostic_count": 0,
+      "dry_run_note": "planner report only; no reproduction command was executed"
+    },
+    {
+      "scenario_id": "dry-run-run-permissioned-xfstests-baseline",
+      "action_id": "run-permissioned-xfstests-baseline",
+      "title": "Run permissioned xfstests baseline",
+      "safety_class": "permissioned",
+      "ack_required": true,
+      "evidence_tier": "operational_readiness",
+      "public_claim_effect": "block_upgrade",
+      "controlling_bead": "bd-rchk3.3",
+      "reproduction_command": "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/run_xfstests_baseline.sh",
+      "diagnostic_count": 3,
+      "dry_run_note": "planner report only; no reproduction command was executed"
+    },
+    {
+      "scenario_id": "dry-run-refresh-large-host-swarm-campaign",
+      "action_id": "refresh-large-host-swarm-campaign",
+      "title": "Refresh large-host swarm responsiveness evidence",
+      "safety_class": "permissioned",
+      "ack_required": true,
+      "evidence_tier": "authoritative",
+      "public_claim_effect": "downgrade_required",
+      "controlling_bead": "bd-rchk0.53.8",
+      "reproduction_command": "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host scripts/e2e/run_swarm_workload_campaign.sh",
+      "diagnostic_count": 4,
+      "dry_run_note": "planner report only; no reproduction command was executed"
+    },
+    {
+      "scenario_id": "dry-run-refuse-contradictory-readiness-upgrade",
+      "action_id": "refuse-contradictory-readiness-upgrade",
+      "title": "Refuse contradictory readiness upgrade",
+      "safety_class": "impossible",
+      "ack_required": false,
+      "evidence_tier": "proof_bundle",
+      "public_claim_effect": "block_upgrade",
+      "controlling_bead": "bd-rchk0",
+      "reproduction_command": "cargo test -p ffs-harness release_gate -- --nocapture",
+      "diagnostic_count": 2,
+      "dry_run_note": "planner report only; no reproduction command was executed"
+    }
+  ]
+}

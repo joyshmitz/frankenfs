@@ -1,0 +1,36 @@
+---
+source: crates/ffs-harness/src/readiness_action_autopilot.rs
+expression: markdown
+---
+# Readiness Action Dry-Run Report
+
+- Report: `readiness_action_planner_test_report`
+- Generated at: `2026-05-07T00:00:00Z`
+- Dry run: `true`
+- Recommendations: `4`
+- Suppressed duplicates: `0`
+- Cleanup status: `not_required`
+
+## Command Metadata
+
+- Invocation: `ffs-harness recommend-readiness-actions`
+- Stdout log: `artifacts/readiness/actions/stdout.log`
+- Stderr log: `artifacts/readiness/actions/stderr.log`
+
+## Output Paths
+
+| Kind | Path |
+|---|---|
+| json_report | `artifacts/readiness/actions/report.json` |
+| markdown_report | `artifacts/readiness/actions/report.md` |
+| stdout_log | `artifacts/readiness/actions/stdout.log` |
+| stderr_log | `artifacts/readiness/actions/stderr.log` |
+
+## Recommendations
+
+| Action | Safety | Ack | Claim | Evidence | Diagnostics | Reproduction Command |
+|---|---:|---:|---|---|---:|---|
+| define-readiness-action-schema | LocalSafe | false | NoChange | TrackerOnly | 0 | `cargo test -p ffs-harness readiness_action_autopilot` |
+| run-permissioned-xfstests-baseline | Permissioned | true | BlockUpgrade | OperationalReadiness | 3 | `XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/run_xfstests_baseline.sh` |
+| refresh-large-host-swarm-campaign | Permissioned | true | DowngradeRequired | Authoritative | 4 | `FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host scripts/e2e/run_swarm_workload_campaign.sh` |
+| refuse-contradictory-readiness-upgrade | Impossible | false | BlockUpgrade | ProofBundle | 2 | `cargo test -p ffs-harness release_gate -- --nocapture` |
