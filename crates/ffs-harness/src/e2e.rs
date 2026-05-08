@@ -2508,8 +2508,6 @@ mod tests {
 
     #[test]
     fn e2e_rch_capture_helpers_do_not_accept_artifact_retrieval_failures() {
-        const BANNED_MARKER: &str = "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED";
-
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let scripts_dir = repo_root.join("scripts/e2e");
         let mut offenders = Vec::new();
@@ -2529,15 +2527,17 @@ mod tests {
                 offenders.push(format!("{display_path} (unreadable)"));
                 continue;
             };
-            if source.contains(BANNED_MARKER) {
-                offenders.push(display_path);
+            for (line_index, line) in source.lines().enumerate() {
+                if line.contains("RCH_ARTIFACT_RETRIEVAL_") && line.contains("ACCEPTED") {
+                    offenders.push(format!("{}:{}", display_path, line_index + 1));
+                }
             }
         }
 
         offenders.sort();
         assert!(
             offenders.is_empty(),
-            "E2E RCH capture helpers must fail closed; remove {BANNED_MARKER} from: {}",
+            "E2E RCH capture helpers must fail closed; remove accepted artifact-retrieval markers from: {}",
             offenders.join(", ")
         );
     }

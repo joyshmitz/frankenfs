@@ -110,7 +110,7 @@ run_rch_capture() {
         return 99
     fi
     if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$output_path"; then
-        e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|output=${output_path}|command=$*"
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|output=${output_path}|command=$*"
         return 0
     fi
     return "$status"

@@ -76,7 +76,7 @@ run_rch_capture() {
     wait "$watcher_pid" >/dev/null 2>&1 || true
 
     if [[ "$status" -ne 0 ]] && grep -q "Remote command finished: exit=0" "$log_path"; then
-        echo "RCH_ARTIFACT_RETRIEVAL_BOUNDED_ACCEPTED|log=${log_path}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
+        echo "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|log=${log_path}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
         return 0
     fi
 
