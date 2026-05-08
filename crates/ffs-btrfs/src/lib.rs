@@ -7820,6 +7820,100 @@ mod tests {
         assert_eq!(parsed.otime_nsec, original.otime_nsec);
     }
 
+    // bd-pketz — Canonical byte-layout snapshot for
+    // BtrfsInodeItem::to_bytes. Pins the encoder's exact output
+    // for a magic-stamped fixture so any field-order or offset
+    // drift fails with a hex diff. The expected literal pins
+    // BOTH magic regions AND the implicit zero regions (transid@8,
+    // block_group@32, flags@64, sequence@72, reserved[4]@80) — so
+    // a regression that wrote non-zero into a "skipped" field
+    // would also be caught (which neither bd-nzs5f kernel-offset
+    // pin nor bd-0rsx6 round-trip MR detects, because they only
+    // exercise fields that the parser reads).
+    //
+    // Pairs with bd-bq6l8 (BtrfsInodeRef), bd-2gb89 (BtrfsDirItem),
+    // bd-yjzhk + bd-fw55q (BtrfsExtentData Regular/Inline).
+    #[test]
+    fn inode_item_to_bytes_canonical_byte_layout() {
+        let item = BtrfsInodeItem {
+            generation: 0x1111_1111_1111_1111,
+            size: 0x2222_2222_2222_2222,
+            nbytes: 0x3333_3333_3333_3333,
+            nlink: 0x4444_4444,
+            uid: 0x5555_5555,
+            gid: 0x6666_6666,
+            mode: 0o100_644, // 0x000081A4
+            rdev: 0x7777_7777_7777_7777,
+            atime_sec: 0x8888_8888_8888_8888,
+            atime_nsec: 100_000_001, // 0x05F5E101
+            ctime_sec: 0xAAAA_AAAA_AAAA_AAAA,
+            ctime_nsec: 200_000_002, // 0x0BEBC202
+            mtime_sec: 0xCCCC_CCCC_CCCC_CCCC,
+            mtime_nsec: 300_000_003, // 0x11E1A303
+            otime_sec: 0xEEEE_EEEE_EEEE_EEEE,
+            otime_nsec: 400_000_004, // 0x17D78404
+        };
+        let bytes = item.to_bytes();
+        assert_eq!(bytes.len(), 160);
+
+        // Round-trip cross-check. Redundant with bd-0rsx6 but
+        // explicit here.
+        let parsed = parse_inode_item(&bytes).expect("canonical bytes parse");
+        assert_eq!(parsed, item);
+
+        let expected: [u8; 160] = [
+            // generation LE @0..8 = 0x1111_1111_1111_1111
+            0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+            // transid @8..16 (zero — encoder hard-codes)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // size LE @16..24 = 0x2222_2222_2222_2222
+            0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+            // nbytes LE @24..32 = 0x3333_3333_3333_3333
+            0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33,
+            // block_group @32..40 (zero — encoder hard-codes)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // nlink LE @40..44 = 0x4444_4444
+            0x44, 0x44, 0x44, 0x44,
+            // uid LE @44..48 = 0x5555_5555
+            0x55, 0x55, 0x55, 0x55,
+            // gid LE @48..52 = 0x6666_6666
+            0x66, 0x66, 0x66, 0x66,
+            // mode LE @52..56 = 0x0000_81A4 (0o100_644)
+            0xA4, 0x81, 0x00, 0x00,
+            // rdev LE @56..64 = 0x7777_7777_7777_7777
+            0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77,
+            // flags @64..72 (zero)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // sequence @72..80 (zero)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // reserved[4] @80..112 (32 bytes zero)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // atime_sec LE @112..120 = 0x8888_8888_8888_8888
+            0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88,
+            // atime_nsec LE @120..124 = 0x05F5_E101 (100_000_001)
+            0x01, 0xE1, 0xF5, 0x05,
+            // ctime_sec LE @124..132 = 0xAAAA_AAAA_AAAA_AAAA
+            0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+            // ctime_nsec LE @132..136 = 0x0BEB_C202 (200_000_002)
+            0x02, 0xC2, 0xEB, 0x0B,
+            // mtime_sec LE @136..144 = 0xCCCC_CCCC_CCCC_CCCC
+            0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+            // mtime_nsec LE @144..148 = 0x11E1_A303 (300_000_003)
+            0x03, 0xA3, 0xE1, 0x11,
+            // otime_sec LE @148..156 = 0xEEEE_EEEE_EEEE_EEEE
+            0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
+            // otime_nsec LE @156..160 = 0x17D7_8404 (400_000_004)
+            0x04, 0x84, 0xD7, 0x17,
+        ];
+        assert_eq!(
+            bytes, expected,
+            "BtrfsInodeItem::to_bytes canonical byte layout drifted"
+        );
+    }
+
     #[test]
     fn dir_item_round_trip() {
         let original = BtrfsDirItem {
