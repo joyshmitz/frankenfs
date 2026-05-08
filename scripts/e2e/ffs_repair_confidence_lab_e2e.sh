@@ -35,9 +35,16 @@ run_rch_capture() {
     shift
     local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-240}"
     if command -v timeout >/dev/null 2>&1; then
-        timeout "${timeout_secs}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+        RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+            timeout "${timeout_secs}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
     else
-        "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+        RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+            "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    fi
+    if grep -Fq "[RCH] local" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
     fi
     if [[ $status -eq 0 ]]; then
         return 0
@@ -234,6 +241,9 @@ for bad in "$BAD_MISSING_LOG" "$BAD_UNSAFE_MUTATION" "$BAD_EXPERIMENTAL_NO_FOLLO
         --spec "$bad" \
         --out "$E2E_LOG_DIR/$(basename "$bad" .json).report.json"; then
         e2e_log "Unexpectedly accepted invalid repair confidence lab: $bad"
+        invalid_failures=$((invalid_failures + 1))
+    elif grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$BAD_RAW"; then
+        e2e_log "Invalid repair confidence lab used local RCH fallback: $bad"
         invalid_failures=$((invalid_failures + 1))
     elif ! grep -q "repair confidence lab validation failed\\|invalid repair confidence lab JSON" "$BAD_RAW"; then
         e2e_log "Invalid repair confidence lab failed without expected diagnostic: $bad"
