@@ -35,6 +35,7 @@ XFSTESTS_PREFLIGHT_SCRIPT="${XFSTESTS_PREFLIGHT_SCRIPT:-$REPO_ROOT/scripts/e2e/f
 XFSTESTS_PREFLIGHT_MAX_AGE_SECS="${XFSTESTS_PREFLIGHT_MAX_AGE_SECS:-3600}"
 XFSTESTS_INVOKE_CHECK_DRY_RUN="${XFSTESTS_INVOKE_CHECK_DRY_RUN:-0}"
 XFSTESTS_REAL_RUN_ACK="${XFSTESTS_REAL_RUN_ACK:-}"
+XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE="${XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE:-0}"
 FFS_HARNESS_BIN="${FFS_HARNESS_BIN:-$REPO_ROOT/target/debug/ffs-harness}"
 
 ARTIFACT_DIR="$E2E_LOG_DIR/xfstests"
@@ -49,6 +50,7 @@ BASELINE_MANIFEST_JSON="$ARTIFACT_DIR/baseline_manifest.json"
 BASELINE_REPORT_MD="$ARTIFACT_DIR/baseline_report.md"
 FAILURE_TRIAGE_JSON="$ARTIFACT_DIR/failure_triage.json"
 FAILURE_TRIAGE_REPORT_MD="$ARTIFACT_DIR/failure_triage.md"
+SYNTHETIC_TRIAGE_DIR="$ARTIFACT_DIR/synthetic_failure_triage"
 XFSTESTS_PREFLIGHT_JSON="${XFSTESTS_PREFLIGHT_JSON:-$ARTIFACT_DIR/preflight.json}"
 mkdir -p "$ARTIFACT_DIR"
 if [[ -n "${XFSTESTS_RESULTS_PATH_OUT:-}" ]]; then
@@ -116,6 +118,7 @@ write_summary() {
     local safe_baseline_report="${BASELINE_REPORT_MD//\"/\\\"}"
     local safe_failure_triage="${FAILURE_TRIAGE_JSON//\"/\\\"}"
     local safe_failure_triage_report="${FAILURE_TRIAGE_REPORT_MD//\"/\\\"}"
+    local safe_synthetic_triage_dir="${SYNTHETIC_TRIAGE_DIR//\"/\\\"}"
     local safe_preflight="${XFSTESTS_PREFLIGHT_JSON//\"/\\\"}"
     local safe_summary="${SUMMARY_JSON//\"/\\\"}"
     local safe_result_base="${RESULT_BASE//\"/\\\"}"
@@ -178,6 +181,7 @@ write_summary() {
   "baseline_report_md": "$safe_baseline_report",
   "failure_triage_json": "$safe_failure_triage",
   "failure_triage_report_md": "$safe_failure_triage_report",
+  "synthetic_failure_triage_dir": "$safe_synthetic_triage_dir",
   "run_log": "$safe_run_log",
   "stdout_log": "$safe_stdout",
   "stderr_log": "$safe_stderr",
@@ -211,6 +215,7 @@ write_summary() {
     "baseline_report_md": "$safe_baseline_report",
     "failure_triage_json": "$safe_failure_triage",
     "failure_triage_report_md": "$safe_failure_triage_report",
+    "synthetic_failure_triage_dir": "$safe_synthetic_triage_dir",
     "summary_json": "$safe_summary",
     "run_log": "$safe_run_log",
     "stdout_log": "$safe_stdout",
@@ -997,6 +1002,7 @@ pathlib.Path(report_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
 
     write_failure_triage_artifacts "$reproduction_command"
+    write_synthetic_failure_triage_fixture_artifacts "$reproduction_command"
 }
 
 write_failure_triage_artifacts() {
@@ -1086,6 +1092,71 @@ def suspected_boundary(test_id):
 def normalize_fragment(value):
     parts = [part for part in re.sub(r"[^A-Za-z0-9]+", "-", value).lower().split("-") if part]
     return "-".join(parts[:12])
+
+
+def xfstests_id_fragment(test_id):
+    parts = [part for part in re.sub(r"[^A-Za-z0-9]+", "-", test_id).lower().split("-") if part]
+    return "-".join(parts)
+
+
+KNOWN_XFSTESTS_ENV_PREFIXES = (
+    "XFSTESTS_MODE=",
+    "XFSTESTS_FILTER=",
+    "XFSTESTS_DRY_RUN=",
+    "XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE=",
+)
+
+
+def trim_known_xfstests_env_assignments(command):
+    parts = command.strip().split()
+    while parts and any(parts[0].startswith(prefix) for prefix in KNOWN_XFSTESTS_ENV_PREFIXES):
+        parts = parts[1:]
+    return " ".join(parts)
+
+
+def validation_command_for(flavor, reproduction_command):
+    invocation = trim_known_xfstests_env_assignments(reproduction_command)
+    if "XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE=1" in reproduction_command.split():
+        return (
+            "XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE=1 XFSTESTS_MODE=plan "
+            f"XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=all {invocation}"
+        )
+    return f"XFSTESTS_MODE=run XFSTESTS_FILTER={flavor} XFSTESTS_DRY_RUN=0 {invocation}"
+
+
+def fixture_recipe(case, flavor, boundary, expected_behavior, actual_behavior, validation_command):
+    test_id = case.get("test_id", "")
+    fragment = xfstests_id_fragment(test_id)
+    proposed_path = f"conformance/fixtures/xfstests/{fragment}.json"
+    return {
+        "schema_version": 1,
+        "recipe_id": f"xfstests-sparse-fixture-{fragment}",
+        "source_xfstests_id": test_id,
+        "related_test_ids": [test_id],
+        "filesystem_flavor": flavor,
+        "suspected_crate_boundary": boundary,
+        "fixture_manifest_kind": "sparse_fixture_generation_recipe",
+        "proposed_fixture_path": proposed_path,
+        "source_raw_log_refs": list(case.get("raw_artifact_refs", [])),
+        "source_raw_log_hash": case.get("raw_log_hash", ""),
+        "minimized_reproducer_command": case.get("command", ""),
+        "expected_behavior": expected_behavior,
+        "actual_behavior": actual_behavior,
+        "validation_command": validation_command,
+        "dependency_hints": [
+            "bd-rchk3.4",
+            "review immutable xfstests baseline before live bead creation",
+            f"suspected boundary: {boundary}",
+        ],
+        "recipe_steps": [
+            f"replay the single xfstests row with `{case.get('command', '')}`",
+            "capture the smallest failing filesystem image or metadata region after reproducing the failure",
+            f"convert the minimized bytes into `{proposed_path}` using `ffs-harness generate-fixture <image> region <offset> <len>` when a bounded region is known",
+            "add a fixture-driven harness assertion before changing product code",
+        ],
+        "promotion_status": "dry_run_recipe_only",
+        "live_fixture_write_enabled": False,
+    }
 
 
 def sh_quote(value):
@@ -1251,10 +1322,7 @@ for case in manifest.get("cases", []):
         existing = proposed_by_key.get(duplicate_key)
         if existing is None:
             index = len(proposed_by_key) + 1
-            validation_command = (
-                f"XFSTESTS_MODE=run XFSTESTS_FILTER={flavor} "
-                f"XFSTESTS_DRY_RUN=0 {reproduction_command}"
-            )
+            validation_command = validation_command_for(flavor, reproduction_command)
             existing = {
                 "proposed_id_placeholder": f"dry-run-xfstests-product-failure-{index:04}",
                 "title": f"xfstests {test_id} product failure in {boundary}",
@@ -1278,19 +1346,32 @@ for case in manifest.get("cases", []):
                 "validation_command": validation_command,
                 "raw_log_refs": list(case.get("raw_artifact_refs", [])),
                 "raw_log_hash": case.get("raw_log_hash", ""),
+                "fixture_recipe": fixture_recipe(
+                    case,
+                    flavor,
+                    boundary,
+                    expected_behavior,
+                    actual_behavior,
+                    validation_command,
+                ),
                 "live_create": False,
             }
             proposed_by_key[duplicate_key] = existing
         else:
             if test_id not in existing["related_test_ids"]:
                 existing["related_test_ids"].append(test_id)
+            if test_id not in existing["fixture_recipe"]["related_test_ids"]:
+                existing["fixture_recipe"]["related_test_ids"].append(test_id)
             for raw_ref in case.get("raw_artifact_refs", []):
                 if raw_ref not in existing["raw_log_refs"]:
                     existing["raw_log_refs"].append(raw_ref)
+                if raw_ref not in existing["fixture_recipe"]["source_raw_log_refs"]:
+                    existing["fixture_recipe"]["source_raw_log_refs"].append(raw_ref)
     else:
         excluded_rows.append(excluded_row(case))
 
 proposed_beads = list(proposed_by_key.values())
+fixture_recipes = [bead["fixture_recipe"] for bead in proposed_beads]
 duplicate_groups = [
     {
         "duplicate_key": bead["duplicate_key"],
@@ -1314,6 +1395,7 @@ report = {
     "disposition_counts": manifest.get("disposition_counts", {}),
     "duplicate_groups": duplicate_groups,
     "proposed_beads": proposed_beads,
+    "fixture_recipes": fixture_recipes,
     "excluded_rows": excluded_rows,
     "proposed_br_commands": [proposed_command(bead) for bead in proposed_beads],
     "reproduction_command": reproduction_command,
@@ -1329,14 +1411,29 @@ lines = [
     "",
     "## Proposed Product Beads",
     "",
-    "| Placeholder | Tests | Boundary | Duplicate key | Command |",
-    "|---|---|---|---|---|",
+    "| Placeholder | Tests | Flavor | Boundary | Expected | Actual | Raw hash | Validation | Dependencies |",
+    "|---|---|---|---|---|---|---|---|---|",
 ]
 for bead in proposed_beads:
     lines.append(
         f"| {bead['proposed_id_placeholder']} | {', '.join(bead['related_test_ids'])} | "
-        f"{bead['suspected_crate_boundary']} | `{bead['duplicate_key']}` | "
-        f"`{bead['validation_command']}` |"
+        f"{bead['filesystem_flavor']} | {bead['suspected_crate_boundary']} | "
+        f"{bead['expected_behavior']} | {bead['actual_behavior']} | "
+        f"`{bead['raw_log_hash']}` | `{bead['validation_command']}` | "
+        f"{', '.join(bead['dependency_beads'])} |"
+    )
+lines.extend([
+    "",
+    "## Sparse Fixture Recipes",
+    "",
+    "| Recipe | Tests | Proposed fixture | Status | Steps |",
+    "|---|---|---|---|---|",
+])
+for recipe in fixture_recipes:
+    lines.append(
+        f"| {recipe['recipe_id']} | {', '.join(recipe['related_test_ids'])} | "
+        f"`{recipe['proposed_fixture_path']}` | {recipe['promotion_status']} | "
+        f"{'<br>'.join(recipe['recipe_steps'])} |"
     )
 lines.extend([
     "",
@@ -1359,6 +1456,219 @@ PY
         fi
         e2e_log "xfstests failure triage not emitted because baseline evidence is not consumable; stderr=$triage_stderr"
     fi
+}
+
+write_synthetic_failure_triage_fixture_artifacts() {
+    local reproduction_command="$1"
+
+    if [[ "$XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE" != "1" ]]; then
+        return 0
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        e2e_fail "python3 is required for XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE=1"
+    fi
+
+    mkdir -p "$SYNTHETIC_TRIAGE_DIR"
+    local synthetic_raw="$SYNTHETIC_TRIAGE_DIR/check.log"
+    local synthetic_baseline="$SYNTHETIC_TRIAGE_DIR/baseline_manifest.json"
+    local synthetic_triage="$SYNTHETIC_TRIAGE_DIR/failure_triage.json"
+    local synthetic_summary="$SYNTHETIC_TRIAGE_DIR/failure_triage.md"
+    local synthetic_reproduction="XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE=1 XFSTESTS_MODE=plan XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=all ./scripts/e2e/ffs_xfstests_e2e.sh"
+
+    python3 - "$synthetic_raw" "$synthetic_baseline" "$synthetic_triage" "$synthetic_summary" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+from collections import Counter
+
+raw_path = pathlib.Path(sys.argv[1])
+baseline_path = pathlib.Path(sys.argv[2])
+triage_path = pathlib.Path(sys.argv[3])
+summary_path = pathlib.Path(sys.argv[4])
+raw_path.write_text(
+    "\n".join(
+        [
+            "generic/001 failed EIO after fsync boundary",
+            "generic/002 passed",
+            "generic/003 skipped missing scratch capability",
+            "generic/004 interrupted after checkpoint",
+            "generic/005 resumed from checkpoint",
+            "ext4/001 host blocked by missing fuse",
+            "btrfs/001 harness failed before product verdict",
+        ]
+    )
+    + "\n",
+    encoding="utf-8",
+)
+
+def sha256_file(path):
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+artifact = {
+    "path": str(raw_path),
+    "sha256": sha256_file(raw_path),
+    "immutable": True,
+}
+combined = hashlib.sha256()
+combined.update(artifact["path"].encode())
+combined.update(b"\0")
+combined.update(artifact["sha256"].encode())
+combined.update(b"\0")
+raw_log_hash = "sha256:" + combined.hexdigest()
+cases = [
+    {
+        "test_id": "generic/001",
+        "status": "failed",
+        "classification": "product_actionable",
+        "not_run_reason": "EIO after fsync boundary",
+        "remediation": None,
+    },
+    {
+        "test_id": "generic/002",
+        "status": "passed",
+        "classification": "product_actionable",
+        "not_run_reason": None,
+        "remediation": None,
+    },
+    {
+        "test_id": "generic/003",
+        "status": "skipped",
+        "classification": "environment_blocked",
+        "not_run_reason": "missing scratch capability",
+        "remediation": None,
+    },
+    {
+        "test_id": "generic/004",
+        "status": "interrupted",
+        "classification": "product_actionable",
+        "not_run_reason": "interrupted after checkpoint",
+        "remediation": "resume xfstests fixture run",
+    },
+    {
+        "test_id": "generic/005",
+        "status": "resumed",
+        "classification": "product_actionable",
+        "not_run_reason": "resumed row records checkpoint continuity",
+        "remediation": None,
+    },
+    {
+        "test_id": "ext4/001",
+        "status": "host_blocked",
+        "classification": "environment_blocked",
+        "not_run_reason": "missing fuse",
+        "remediation": "restore FUSE capability before real xfstests",
+    },
+    {
+        "test_id": "btrfs/001",
+        "status": "harness_failed",
+        "classification": "harness_blocked",
+        "not_run_reason": "parser failed before product verdict",
+        "remediation": "fix harness runner before product triage",
+    },
+]
+materialized = []
+for case in cases:
+    item = {
+        "test_id": case["test_id"],
+        "status": case["status"],
+        "raw_artifact_refs": [str(raw_path)],
+        "raw_log_hash": raw_log_hash,
+        "command": f"./check {case['test_id']}",
+        "partial_run_checkpoint": "checkpoint:synthetic-fixture",
+        "resume_command": "XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE=1 ./scripts/e2e/ffs_xfstests_e2e.sh",
+        "cleanup_status": "synthetic_fixture_no_xfstests_check_invoked",
+        "immutable_raw_artifacts": True,
+        "classification": case["classification"],
+    }
+    if case["not_run_reason"] is not None:
+        item["not_run_reason"] = case["not_run_reason"]
+    if case["remediation"] is not None:
+        item["remediation"] = case["remediation"]
+    materialized.append(item)
+
+manifest = {
+    "schema_version": 1,
+    "baseline_id": "xfstests-baseline-synthetic-fixture",
+    "bead_id": "bd-rchk3.3",
+    "subset_version": "xfstests-curated-v1-synthetic-fixture",
+    "environment": {
+        "manifest_id": "sha256:synthetic-preflight",
+        "age_secs": 0,
+        "max_age_secs": 3600,
+        "freshness_verdict": "fresh",
+    },
+    "status_vocabulary": [
+        "passed",
+        "failed",
+        "skipped",
+        "not_run",
+        "unsupported",
+        "host_blocked",
+        "harness_failed",
+        "interrupted",
+        "resumed",
+    ],
+    "raw_artifact_policy": "raw artifacts are immutable inputs; summaries are derived and may not rewrite raw logs",
+    "generated_summary_path": str(summary_path),
+    "command_transcript": "./check synthetic fixture rows",
+    "checkpoint_id": "checkpoint:synthetic-fixture",
+    "resume_command": "XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE=1 ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "cleanup_status": "synthetic_fixture_no_xfstests_check_invoked",
+    "output_paths": {
+        "baseline_manifest_json": str(baseline_path),
+        "baseline_report_md": str(summary_path.with_name("baseline_report.md")),
+        "failure_triage_json": str(triage_path),
+        "failure_triage_report_md": str(summary_path),
+    },
+    "reproduction_command": "XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE=1 ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "disposition_counts": dict(sorted(Counter(case["status"] for case in materialized).items())),
+    "raw_artifacts": [artifact],
+    "cases": materialized,
+}
+baseline_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+    local saved_baseline="$BASELINE_MANIFEST_JSON"
+    local saved_triage="$FAILURE_TRIAGE_JSON"
+    local saved_summary="$FAILURE_TRIAGE_REPORT_MD"
+    BASELINE_MANIFEST_JSON="$synthetic_baseline"
+    FAILURE_TRIAGE_JSON="$synthetic_triage"
+    FAILURE_TRIAGE_REPORT_MD="$synthetic_summary"
+    write_failure_triage_artifacts "$synthetic_reproduction"
+    BASELINE_MANIFEST_JSON="$saved_baseline"
+    FAILURE_TRIAGE_JSON="$saved_triage"
+    FAILURE_TRIAGE_REPORT_MD="$saved_summary"
+
+    python3 - "$synthetic_triage" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+statuses = {row["status"] for row in report.get("excluded_rows", [])}
+recipes = report.get("fixture_recipes", [])
+errors = []
+if not report.get("proposed_beads"):
+    errors.append("synthetic fixture did not emit a dry-run proposed bead")
+if not recipes:
+    errors.append("synthetic fixture did not emit sparse fixture recipes")
+if {"passed", "skipped", "interrupted", "resumed"} - statuses:
+    errors.append(f"synthetic fixture excluded statuses incomplete: {sorted(statuses)}")
+for recipe in recipes:
+    if recipe.get("promotion_status") != "dry_run_recipe_only":
+        errors.append("sparse fixture recipe is not dry-run only")
+    if recipe.get("live_fixture_write_enabled"):
+        errors.append("sparse fixture recipe enabled live fixture writes")
+    if not str(recipe.get("proposed_fixture_path", "")).startswith("conformance/fixtures/xfstests/"):
+        errors.append("sparse fixture recipe proposed path outside xfstests fixture root")
+if errors:
+    for error in errors:
+        print(error, file=sys.stderr)
+    sys.exit(1)
+PY
+
+    e2e_log "Synthetic xfstests failure triage fixture written to: $SYNTHETIC_TRIAGE_DIR"
 }
 
 prepare_safe_dry_run_config() {

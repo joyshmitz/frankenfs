@@ -298,6 +298,7 @@ pub struct XfstestsFailureTriageReport {
     pub disposition_counts: BTreeMap<String, usize>,
     pub duplicate_groups: Vec<XfstestsFailureDuplicateGroup>,
     pub proposed_beads: Vec<XfstestsProposedFailureBead>,
+    pub fixture_recipes: Vec<XfstestsSparseFixtureRecipe>,
     pub excluded_rows: Vec<XfstestsFailureTriageExcludedRow>,
     pub proposed_br_commands: Vec<String>,
     pub reproduction_command: String,
@@ -324,6 +325,7 @@ pub struct XfstestsProposedFailureBead {
     pub validation_command: String,
     pub raw_log_refs: Vec<String>,
     pub raw_log_hash: String,
+    pub fixture_recipe: XfstestsSparseFixtureRecipe,
     pub live_create: bool,
 }
 
@@ -342,6 +344,28 @@ pub struct XfstestsFailureTriageExcludedRow {
     pub reason: String,
     pub raw_log_hash: String,
     pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XfstestsSparseFixtureRecipe {
+    pub schema_version: u32,
+    pub recipe_id: String,
+    pub source_xfstests_id: String,
+    pub related_test_ids: Vec<String>,
+    pub filesystem_flavor: String,
+    pub suspected_crate_boundary: String,
+    pub fixture_manifest_kind: String,
+    pub proposed_fixture_path: String,
+    pub source_raw_log_refs: Vec<String>,
+    pub source_raw_log_hash: String,
+    pub minimized_reproducer_command: String,
+    pub expected_behavior: String,
+    pub actual_behavior: String,
+    pub validation_command: String,
+    pub dependency_hints: Vec<String>,
+    pub recipe_steps: Vec<String>,
+    pub promotion_status: String,
+    pub live_fixture_write_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -727,6 +751,10 @@ pub fn build_xfstests_failure_triage_report(
 
     let proposed_beads = proposed_by_key.into_values().collect::<Vec<_>>();
     let duplicate_groups = failure_triage_duplicate_groups(&proposed_beads);
+    let fixture_recipes = proposed_beads
+        .iter()
+        .map(|bead| bead.fixture_recipe.clone())
+        .collect::<Vec<_>>();
     let proposed_br_commands = proposed_beads
         .iter()
         .map(XfstestsProposedFailureBead::proposed_br_command)
@@ -741,6 +769,7 @@ pub fn build_xfstests_failure_triage_report(
         disposition_counts: input.baseline_manifest.disposition_counts.clone(),
         duplicate_groups,
         proposed_beads,
+        fixture_recipes,
         excluded_rows,
         proposed_br_commands,
         reproduction_command: input.reproduction_command.to_owned(),
@@ -782,6 +811,14 @@ pub fn validate_xfstests_failure_triage_report(
     if report.proposed_br_commands.len() != report.proposed_beads.len() {
         errors.push("xfstests failure triage proposed_br_commands count mismatch".to_owned());
     }
+    let expected_fixture_recipes = report
+        .proposed_beads
+        .iter()
+        .map(|bead| bead.fixture_recipe.clone())
+        .collect::<Vec<_>>();
+    if report.fixture_recipes != expected_fixture_recipes {
+        errors.push("xfstests failure triage fixture_recipes mismatch proposed beads".to_owned());
+    }
     let expected_duplicate_groups = failure_triage_duplicate_groups(&report.proposed_beads);
     if report.duplicate_groups != expected_duplicate_groups {
         errors.push(format!(
@@ -818,10 +855,164 @@ pub fn validate_xfstests_failure_triage_report(
     for bead in &report.proposed_beads {
         validate_proposed_failure_bead(bead, &mut duplicate_keys, &mut errors);
     }
+    let mut recipe_ids = BTreeSet::new();
+    for recipe in &report.fixture_recipes {
+        validate_sparse_fixture_recipe(recipe, &mut recipe_ids, &mut errors);
+    }
     for excluded in &report.excluded_rows {
         validate_failure_triage_excluded_row(excluded, &mut errors);
     }
     errors
+}
+
+fn validate_sparse_fixture_recipe(
+    recipe: &XfstestsSparseFixtureRecipe,
+    recipe_ids: &mut BTreeSet<String>,
+    errors: &mut Vec<String>,
+) {
+    if recipe.schema_version != 1 {
+        errors.push(format!(
+            "xfstests sparse fixture recipe {} schema_version must be 1",
+            recipe.recipe_id
+        ));
+    }
+    require_non_empty("fixture.recipe_id", &recipe.recipe_id, errors);
+    require_non_empty(
+        "fixture.source_xfstests_id",
+        &recipe.source_xfstests_id,
+        errors,
+    );
+    require_non_empty(
+        "fixture.filesystem_flavor",
+        &recipe.filesystem_flavor,
+        errors,
+    );
+    require_non_empty(
+        "fixture.suspected_crate_boundary",
+        &recipe.suspected_crate_boundary,
+        errors,
+    );
+    require_non_empty(
+        "fixture.proposed_fixture_path",
+        &recipe.proposed_fixture_path,
+        errors,
+    );
+    require_non_empty(
+        "fixture.minimized_reproducer_command",
+        &recipe.minimized_reproducer_command,
+        errors,
+    );
+    require_non_empty(
+        "fixture.expected_behavior",
+        &recipe.expected_behavior,
+        errors,
+    );
+    require_non_empty("fixture.actual_behavior", &recipe.actual_behavior, errors);
+    require_non_empty(
+        "fixture.validation_command",
+        &recipe.validation_command,
+        errors,
+    );
+    if !recipe.recipe_id.starts_with("xfstests-sparse-fixture-") {
+        errors.push(format!(
+            "xfstests sparse fixture recipe {} has malformed recipe_id",
+            recipe.recipe_id
+        ));
+    }
+    if !recipe_ids.insert(recipe.recipe_id.clone()) {
+        errors.push(format!(
+            "xfstests sparse fixture duplicate recipe_id: {}",
+            recipe.recipe_id
+        ));
+    }
+    if recipe.fixture_manifest_kind != "sparse_fixture_generation_recipe" {
+        errors.push(format!(
+            "xfstests sparse fixture recipe {} has unsupported fixture_manifest_kind {}",
+            recipe.recipe_id, recipe.fixture_manifest_kind
+        ));
+    }
+    if recipe.promotion_status != "dry_run_recipe_only" {
+        errors.push(format!(
+            "xfstests sparse fixture recipe {} must remain dry-run only",
+            recipe.recipe_id
+        ));
+    }
+    if recipe.live_fixture_write_enabled {
+        errors.push(format!(
+            "xfstests sparse fixture recipe {} must not write live fixtures",
+            recipe.recipe_id
+        ));
+    }
+    validate_sparse_fixture_recipe_path(recipe, errors);
+    validate_sparse_fixture_recipe_links(recipe, errors);
+}
+
+fn validate_sparse_fixture_recipe_path(
+    recipe: &XfstestsSparseFixtureRecipe,
+    errors: &mut Vec<String>,
+) {
+    let proposed_path = Path::new(&recipe.proposed_fixture_path);
+    if proposed_path.is_absolute()
+        || recipe.proposed_fixture_path.contains("..")
+        || !recipe
+            .proposed_fixture_path
+            .starts_with("conformance/fixtures/xfstests/")
+        || !path_has_json_extension(proposed_path)
+    {
+        errors.push(format!(
+            "xfstests sparse fixture recipe {} has unsafe proposed_fixture_path {}",
+            recipe.recipe_id, recipe.proposed_fixture_path
+        ));
+    }
+}
+
+fn path_has_json_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+}
+
+fn validate_sparse_fixture_recipe_links(
+    recipe: &XfstestsSparseFixtureRecipe,
+    errors: &mut Vec<String>,
+) {
+    if !KNOWN_XFSTESTS_TRIAGE_BOUNDARIES.contains(&recipe.suspected_crate_boundary.as_str()) {
+        errors.push(format!(
+            "xfstests sparse fixture recipe {} has unknown suspected boundary {}",
+            recipe.recipe_id, recipe.suspected_crate_boundary
+        ));
+    }
+    if recipe.related_test_ids.is_empty()
+        || !recipe.related_test_ids.contains(&recipe.source_xfstests_id)
+    {
+        errors.push(format!(
+            "xfstests sparse fixture recipe {} must include source_xfstests_id in related_test_ids",
+            recipe.recipe_id
+        ));
+    }
+    if recipe.source_raw_log_refs.is_empty() || !is_canonical_sha256(&recipe.source_raw_log_hash) {
+        errors.push(format!(
+            "xfstests sparse fixture recipe {} missing source raw log refs/hash",
+            recipe.recipe_id
+        ));
+    }
+    if recipe.dependency_hints.is_empty()
+        || !recipe
+            .dependency_hints
+            .iter()
+            .any(|hint| hint.contains("bd-rchk3.4"))
+    {
+        errors.push(format!(
+            "xfstests sparse fixture recipe {} missing bd-rchk3.4 dependency hint",
+            recipe.recipe_id
+        ));
+    }
+    if recipe.recipe_steps.len() < 3 {
+        errors.push(format!(
+            "xfstests sparse fixture recipe {} needs a concrete minimization recipe",
+            recipe.recipe_id
+        ));
+    }
 }
 
 #[must_use]
@@ -841,18 +1032,41 @@ pub fn render_xfstests_failure_triage_markdown(report: &XfstestsFailureTriageRep
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "| Placeholder | Tests | Boundary | Duplicate key | Command |"
+        "| Placeholder | Tests | Flavor | Boundary | Expected | Actual | Raw hash | Validation | Dependencies |"
     );
-    let _ = writeln!(out, "|---|---|---|---|---|");
+    let _ = writeln!(out, "|---|---|---|---|---|---|---|---|---|");
     for bead in &report.proposed_beads {
         let _ = writeln!(
             out,
-            "| {} | {} | {} | `{}` | `{}` |",
+            "| {} | {} | {} | {} | {} | {} | `{}` | `{}` | {} |",
             bead.proposed_id_placeholder,
             bead.related_test_ids.join(", "),
+            bead.filesystem_flavor,
             bead.suspected_crate_boundary,
-            bead.duplicate_key,
-            bead.validation_command
+            bead.expected_behavior,
+            bead.actual_behavior,
+            bead.raw_log_hash,
+            bead.validation_command,
+            bead.dependency_beads.join(", ")
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Sparse Fixture Recipes");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "| Recipe | Tests | Proposed fixture | Status | Steps |"
+    );
+    let _ = writeln!(out, "|---|---|---|---|---|");
+    for recipe in &report.fixture_recipes {
+        let _ = writeln!(
+            out,
+            "| {} | {} | `{}` | {} | {} |",
+            recipe.recipe_id,
+            recipe.related_test_ids.join(", "),
+            recipe.proposed_fixture_path,
+            recipe.promotion_status,
+            recipe.recipe_steps.join("<br>")
         );
     }
     let _ = writeln!(out);
@@ -2178,6 +2392,71 @@ fn is_product_failure_row(case: &XfstestsBaselineCase) -> bool {
     case.status == XfstestsBaselineRowStatus::Failed && case.classification == "product_actionable"
 }
 
+fn xfstests_id_fragment(test_id: &str) -> String {
+    test_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn trim_known_xfstests_env_assignments(command: &str) -> &str {
+    let mut rest = command.trim_start();
+    loop {
+        let Some(split_index) = rest.find(char::is_whitespace) else {
+            return rest;
+        };
+        let (token, tail) = rest.split_at(split_index);
+        if [
+            "XFSTESTS_MODE=",
+            "XFSTESTS_FILTER=",
+            "XFSTESTS_DRY_RUN=",
+            "XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE=",
+        ]
+        .iter()
+        .any(|prefix| token.starts_with(prefix))
+        {
+            rest = tail.trim_start();
+        } else {
+            return rest;
+        }
+    }
+}
+
+fn failure_triage_validation_command(
+    filesystem_flavor: &str,
+    reproduction_command: &str,
+) -> String {
+    let invocation = trim_known_xfstests_env_assignments(reproduction_command);
+    if synthetic_triage_fixture_enabled(reproduction_command) {
+        format!(
+            "XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE=1 XFSTESTS_MODE=plan XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=all {invocation}"
+        )
+    } else {
+        format!(
+            "XFSTESTS_MODE=run XFSTESTS_FILTER={filesystem_flavor} XFSTESTS_DRY_RUN=0 {invocation}"
+        )
+    }
+}
+
+fn synthetic_triage_fixture_enabled(command: &str) -> bool {
+    command.split_whitespace().any(|token| {
+        matches!(
+            token.strip_prefix("XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE="),
+            Some("1")
+        )
+    })
+}
+
 fn proposed_failure_bead(
     index: usize,
     case: &XfstestsBaselineCase,
@@ -2189,12 +2468,19 @@ fn proposed_failure_bead(
     let actual_behavior = actual_behavior_for_case(case);
     let expected_behavior = expected_behavior_for_case(case, &filesystem_flavor);
     let duplicate_key = duplicate_key_for_case(case, &suspected_crate_boundary, &actual_behavior);
-    let validation_command = format!(
-        "XFSTESTS_MODE=run XFSTESTS_FILTER={filesystem_flavor} XFSTESTS_DRY_RUN=0 {reproduction_command}"
-    );
+    let validation_command =
+        failure_triage_validation_command(&filesystem_flavor, reproduction_command);
     let title = format!(
         "xfstests {} product failure in {}",
         case.test_id, suspected_crate_boundary
+    );
+    let fixture_recipe = sparse_fixture_recipe_for_case(
+        case,
+        &filesystem_flavor,
+        &suspected_crate_boundary,
+        &expected_behavior,
+        &actual_behavior,
+        &validation_command,
     );
     XfstestsProposedFailureBead {
         proposed_id_placeholder: format!("dry-run-xfstests-product-failure-{index:04}"),
@@ -2223,6 +2509,7 @@ fn proposed_failure_bead(
         validation_command,
         raw_log_refs: case.raw_artifact_refs.clone(),
         raw_log_hash: case.raw_log_hash.clone(),
+        fixture_recipe,
         live_create: false,
     }
 }
@@ -2232,6 +2519,70 @@ fn merge_raw_refs(existing: &mut XfstestsProposedFailureBead, case: &XfstestsBas
         if !existing.raw_log_refs.contains(raw_ref) {
             existing.raw_log_refs.push(raw_ref.clone());
         }
+        if !existing
+            .fixture_recipe
+            .source_raw_log_refs
+            .contains(raw_ref)
+        {
+            existing
+                .fixture_recipe
+                .source_raw_log_refs
+                .push(raw_ref.clone());
+        }
+    }
+    if !existing
+        .fixture_recipe
+        .related_test_ids
+        .contains(&case.test_id)
+    {
+        existing
+            .fixture_recipe
+            .related_test_ids
+            .push(case.test_id.clone());
+    }
+}
+
+fn sparse_fixture_recipe_for_case(
+    case: &XfstestsBaselineCase,
+    filesystem_flavor: &str,
+    suspected_crate_boundary: &str,
+    expected_behavior: &str,
+    actual_behavior: &str,
+    validation_command: &str,
+) -> XfstestsSparseFixtureRecipe {
+    let test_fragment = xfstests_id_fragment(&case.test_id);
+    let proposed_fixture_path = format!("conformance/fixtures/xfstests/{test_fragment}.json");
+    XfstestsSparseFixtureRecipe {
+        schema_version: 1,
+        recipe_id: format!("xfstests-sparse-fixture-{test_fragment}"),
+        source_xfstests_id: case.test_id.clone(),
+        related_test_ids: vec![case.test_id.clone()],
+        filesystem_flavor: filesystem_flavor.to_owned(),
+        suspected_crate_boundary: suspected_crate_boundary.to_owned(),
+        fixture_manifest_kind: "sparse_fixture_generation_recipe".to_owned(),
+        proposed_fixture_path: proposed_fixture_path.clone(),
+        source_raw_log_refs: case.raw_artifact_refs.clone(),
+        source_raw_log_hash: case.raw_log_hash.clone(),
+        minimized_reproducer_command: case.command.clone(),
+        expected_behavior: expected_behavior.to_owned(),
+        actual_behavior: actual_behavior.to_owned(),
+        validation_command: validation_command.to_owned(),
+        dependency_hints: vec![
+            "bd-rchk3.4".to_owned(),
+            "review immutable xfstests baseline before live bead creation".to_owned(),
+            format!("suspected boundary: {suspected_crate_boundary}"),
+        ],
+        recipe_steps: vec![
+            format!("replay the single xfstests row with `{}`", case.command),
+            "capture the smallest failing filesystem image or metadata region after reproducing the failure".to_owned(),
+            format!(
+                "convert the minimized bytes into `{}` using `ffs-harness generate-fixture <image> region <offset> <len>` when a bounded region is known",
+                proposed_fixture_path
+            ),
+            "add a fixture-driven harness assertion before changing product code".to_owned(),
+        ],
+        promotion_status: "dry_run_recipe_only".to_owned(),
+        live_fixture_write_enabled: false,
     }
 }
 
@@ -2342,11 +2693,56 @@ fn validate_proposed_failure_bead(
             bead.proposed_id_placeholder
         ));
     }
+    validate_proposed_failure_bead_fixture_link(bead, errors);
     if bead.live_create {
         errors.push(format!(
             "xfstests failure triage proposed bead {} must not create live beads",
             bead.proposed_id_placeholder
         ));
+    }
+}
+
+fn validate_proposed_failure_bead_fixture_link(
+    bead: &XfstestsProposedFailureBead,
+    errors: &mut Vec<String>,
+) {
+    if bead.fixture_recipe.source_xfstests_id != bead.failing_test_id {
+        errors.push(format!(
+            "xfstests failure triage proposed bead {} fixture source does not match failing_test_id",
+            bead.proposed_id_placeholder
+        ));
+    }
+    if bead.fixture_recipe.source_raw_log_hash != bead.raw_log_hash {
+        errors.push(format!(
+            "xfstests failure triage proposed bead {} fixture raw hash does not match bead raw hash",
+            bead.proposed_id_placeholder
+        ));
+    }
+    if bead.fixture_recipe.validation_command != bead.validation_command {
+        errors.push(format!(
+            "xfstests failure triage proposed bead {} fixture validation command drifted",
+            bead.proposed_id_placeholder
+        ));
+    }
+    if bead.fixture_recipe.expected_behavior != bead.expected_behavior
+        || bead.fixture_recipe.actual_behavior != bead.actual_behavior
+    {
+        errors.push(format!(
+            "xfstests failure triage proposed bead {} fixture behavior summary drifted",
+            bead.proposed_id_placeholder
+        ));
+    }
+    for related_test_id in &bead.related_test_ids {
+        if !bead
+            .fixture_recipe
+            .related_test_ids
+            .contains(related_test_id)
+        {
+            errors.push(format!(
+                "xfstests failure triage proposed bead {} fixture recipe missing related test {related_test_id}",
+                bead.proposed_id_placeholder
+            ));
+        }
     }
 }
 
@@ -2585,7 +2981,13 @@ mod tests {
             "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         for bead in &mut report.proposed_beads {
             bead.raw_log_hash = CANONICAL_RAW_LOG_HASH.to_owned();
+            bead.fixture_recipe.source_raw_log_hash = CANONICAL_RAW_LOG_HASH.to_owned();
         }
+        report.fixture_recipes = report
+            .proposed_beads
+            .iter()
+            .map(|bead| bead.fixture_recipe.clone())
+            .collect();
         for row in &mut report.excluded_rows {
             row.raw_log_hash = CANONICAL_RAW_LOG_HASH.to_owned();
         }
@@ -3759,6 +4161,21 @@ generic/001  2s ... pass\n";
             report.proposed_beads[0].related_test_ids,
             vec!["generic/001".to_owned(), "generic/002".to_owned()]
         );
+        assert_eq!(report.fixture_recipes.len(), 1);
+        assert_eq!(
+            report.fixture_recipes[0].related_test_ids,
+            vec!["generic/001".to_owned(), "generic/002".to_owned()]
+        );
+        assert_eq!(
+            report.fixture_recipes[0].proposed_fixture_path,
+            "conformance/fixtures/xfstests/generic-001.json"
+        );
+        assert!(
+            report.fixture_recipes[0]
+                .dependency_hints
+                .iter()
+                .any(|hint| hint.contains("bd-rchk3.4"))
+        );
         assert_eq!(report.duplicate_groups.len(), 1);
         assert_eq!(report.excluded_rows.len(), 2);
         assert!(report.proposed_br_commands[0].starts_with("DRY_RUN br create"));
@@ -3898,6 +4315,7 @@ generic/001  2s ... pass\n";
             disposition_counts: BTreeMap::new(),
             duplicate_groups: Vec::new(),
             proposed_beads: Vec::new(),
+            fixture_recipes: Vec::new(),
             excluded_rows: vec![XfstestsFailureTriageExcludedRow {
                 test_id: "generic/001".to_owned(),
                 status: XfstestsBaselineRowStatus::Failed.as_str().to_owned(),
@@ -4031,6 +4449,86 @@ generic/001  2s ... pass\n";
     }
 
     #[test]
+    fn failure_triage_validates_fixture_recipes_and_synthetic_statuses() -> Result<()> {
+        let tmp = tempdir()?;
+        let raw = tmp.path().join("check.log");
+        fs::write(
+            &raw,
+            "generic/001 failed EIO\ngeneric/002 passed\ngeneric/003 skipped\ngeneric/004 interrupted\ngeneric/005 resumed\n",
+        )?;
+        let mut product = baseline_case("generic/001", XfstestsBaselineRowStatus::Failed);
+        product.not_run_reason = Some("EIO after fsync boundary".to_owned());
+        let passed = baseline_case("generic/002", XfstestsBaselineRowStatus::Passed);
+        let skipped = baseline_case("generic/003", XfstestsBaselineRowStatus::Skipped);
+        let interrupted = baseline_case("generic/004", XfstestsBaselineRowStatus::Interrupted);
+        let resumed = baseline_case("generic/005", XfstestsBaselineRowStatus::Resumed);
+        let manifest =
+            manifest_with_cases(&raw, vec![product, passed, skipped, interrupted, resumed]);
+        let mut report = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
+            triage_id: "triage-fixture",
+            baseline_manifest_path: tmp.path().join("baseline_manifest.json").as_path(),
+            baseline_manifest: &manifest,
+            reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh",
+        })?;
+
+        assert_eq!(report.proposed_beads.len(), 1);
+        assert_eq!(report.fixture_recipes.len(), 1);
+        let recipe = &report.fixture_recipes[0];
+        assert_eq!(recipe.source_xfstests_id, "generic/001");
+        assert_eq!(recipe.promotion_status, "dry_run_recipe_only");
+        assert!(!recipe.live_fixture_write_enabled);
+        assert_eq!(
+            recipe.validation_command,
+            "XFSTESTS_MODE=run XFSTESTS_FILTER=generic XFSTESTS_DRY_RUN=0 ./scripts/e2e/ffs_xfstests_e2e.sh"
+        );
+        let synthetic_report = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
+            triage_id: "triage-fixture-synthetic",
+            baseline_manifest_path: tmp.path().join("baseline_manifest.json").as_path(),
+            baseline_manifest: &manifest,
+            reproduction_command: "XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE=1 XFSTESTS_MODE=plan XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=all ./scripts/e2e/ffs_xfstests_e2e.sh",
+        })?;
+        assert_eq!(
+            synthetic_report.fixture_recipes[0].validation_command,
+            "XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE=1 XFSTESTS_MODE=plan XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=all ./scripts/e2e/ffs_xfstests_e2e.sh"
+        );
+        assert!(
+            report
+                .excluded_rows
+                .iter()
+                .any(|row| row.test_id == "generic/003" && row.status == "skipped")
+        );
+        assert!(
+            report
+                .excluded_rows
+                .iter()
+                .any(|row| row.test_id == "generic/004" && row.status == "interrupted")
+        );
+        assert!(
+            report
+                .excluded_rows
+                .iter()
+                .any(|row| row.test_id == "generic/005" && row.status == "resumed")
+        );
+
+        report.fixture_recipes[0].proposed_fixture_path = "../escape.json".to_owned();
+        report.fixture_recipes[0].recipe_steps.clear();
+        report.fixture_recipes[0].live_fixture_write_enabled = true;
+        let errors = validate_xfstests_failure_triage_report(&report);
+        for expected in [
+            "fixture_recipes mismatch",
+            "unsafe proposed_fixture_path",
+            "must not write live fixtures",
+            "needs a concrete minimization recipe",
+        ] {
+            assert!(
+                errors.iter().any(|error| error.contains(expected)),
+                "expected {expected} error, got {errors:#?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn failure_triage_rejects_stale_raw_refs_missing_command_and_bad_payloads() {
         let tmp = tempdir().expect("tempdir");
         let raw = tmp.path().join("check.log");
@@ -4074,7 +4572,10 @@ generic/001  2s ... pass\n";
             error.contains("missing case.command"),
             "expected missing command error, got {error}"
         );
+    }
 
+    #[test]
+    fn failure_triage_rejects_bad_proposed_and_fixture_payloads() {
         let report = XfstestsFailureTriageReport {
             schema_version: 1,
             triage_id: "triage-fixture".to_owned(),
@@ -4106,8 +4607,32 @@ generic/001  2s ... pass\n";
                 raw_log_hash:
                     "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                         .to_owned(),
+                fixture_recipe: XfstestsSparseFixtureRecipe {
+                    schema_version: 1,
+                    recipe_id: "xfstests-sparse-fixture-generic-001".to_owned(),
+                    source_xfstests_id: "generic/001".to_owned(),
+                    related_test_ids: vec!["generic/001".to_owned()],
+                    filesystem_flavor: "generic".to_owned(),
+                    suspected_crate_boundary: "mystery-crate".to_owned(),
+                    fixture_manifest_kind: "sparse_fixture_generation_recipe".to_owned(),
+                    proposed_fixture_path: "conformance/fixtures/xfstests/generic-001.json"
+                        .to_owned(),
+                    source_raw_log_refs: vec!["check.log".to_owned()],
+                    source_raw_log_hash:
+                        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .to_owned(),
+                    minimized_reproducer_command: "./check generic/001".to_owned(),
+                    expected_behavior: String::new(),
+                    actual_behavior: String::new(),
+                    validation_command: "./check generic/001".to_owned(),
+                    dependency_hints: Vec::new(),
+                    recipe_steps: Vec::new(),
+                    promotion_status: "dry_run_recipe_only".to_owned(),
+                    live_fixture_write_enabled: false,
+                },
                 live_create: true,
             }],
+            fixture_recipes: Vec::new(),
             excluded_rows: Vec::new(),
             proposed_br_commands: Vec::new(),
             reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh".to_owned(),

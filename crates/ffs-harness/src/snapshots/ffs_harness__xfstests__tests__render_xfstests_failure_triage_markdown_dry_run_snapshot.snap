@@ -10,9 +10,15 @@ expression: markdown
 
 ## Proposed Product Beads
 
-| Placeholder | Tests | Boundary | Duplicate key | Command |
+| Placeholder | Tests | Flavor | Boundary | Expected | Actual | Raw hash | Validation | Dependencies |
+|---|---|---|---|---|---|---|---|---|
+| dry-run-xfstests-product-failure-0001 | ext4/001 | ext4 | ffs-ext4 | ./check ext4/001 should satisfy Linux xfstests row ext4/001 for the ext4 compatibility surface | flag mismatch | `sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` | `XFSTESTS_MODE=run XFSTESTS_FILTER=ext4 XFSTESTS_DRY_RUN=0 ./scripts/e2e/ffs_xfstests_e2e.sh` | bd-rchk3.4, xfstests-baseline-test |
+
+## Sparse Fixture Recipes
+
+| Recipe | Tests | Proposed fixture | Status | Steps |
 |---|---|---|---|---|
-| dry-run-xfstests-product-failure-0001 | ext4/001 | ffs-ext4 | `ffs-ext4:failed:flag-mismatch` | `XFSTESTS_MODE=run XFSTESTS_FILTER=ext4 XFSTESTS_DRY_RUN=0 ./scripts/e2e/ffs_xfstests_e2e.sh` |
+| xfstests-sparse-fixture-ext4-001 | ext4/001 | `conformance/fixtures/xfstests/ext4-001.json` | dry_run_recipe_only | replay the single xfstests row with `./check ext4/001`<br>capture the smallest failing filesystem image or metadata region after reproducing the failure<br>convert the minimized bytes into `conformance/fixtures/xfstests/ext4-001.json` using `ffs-harness generate-fixture <image> region <offset> <len>` when a bounded region is known<br>add a fixture-driven harness assertion before changing product code |
 
 ## Excluded Rows
 
