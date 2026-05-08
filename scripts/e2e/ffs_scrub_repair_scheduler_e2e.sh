@@ -11,18 +11,16 @@ cd "$(dirname "$0")/../.."
 REPO_ROOT="$(pwd)"
 export REPO_ROOT
 
-export CARGO_TARGET_DIR="${FFS_SCRUB_REPAIR_SCHEDULER_CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_scrub_repair_scheduler}"
+source "$REPO_ROOT/scripts/e2e/lib.sh"
+
+export CARGO_TARGET_DIR="${FFS_SCRUB_REPAIR_SCHEDULER_CARGO_TARGET_DIR:-${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_scrub_repair_scheduler}}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-300}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-2}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
 TOTAL=0
-E2E_START_TIME="$(date +%s)"
-E2E_LOG_DIR="${REPO_ROOT}/artifacts/e2e/$(date +%Y%m%d_%H%M%S)_ffs_scrub_repair_scheduler"
-E2E_LOG_FILE="${E2E_LOG_DIR}/run.log"
-
-mkdir -p "$E2E_LOG_DIR"
 
 e2e_log() {
     local message="$*"
@@ -83,15 +81,68 @@ scenario_result() {
 run_rch_capture() {
     local output_path="$1"
     shift
-    local status
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    local had_errexit=0
+
+    case $- in
+        *e*) had_errexit=1 ;;
+    esac
+
+    : >"$output_path"
+    set +e
+    RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
+        RCH_VISIBILITY=none \
+        "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
+    pid=$!
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=$*"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=$*"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            status=124
+            break
+        fi
+        sleep 2
+    done
 
     set +e
-    RCH_VISIBILITY=none timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1
-    status=$?
-    set -e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
 
-    if [[ $status -eq 0 ]]; then
-        return 0
+    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}|command=$*"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]] && ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
+        e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}|command=$*"
+        printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
+        return 99
     fi
     if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$output_path"; then
         e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|output=${output_path}|command=$*"
@@ -100,42 +151,90 @@ run_rch_capture() {
     return "$status"
 }
 
+extract_report_json() {
+    local raw_path="$1"
+    local report_path="$2"
+
+    python3 - "$raw_path" "$report_path" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+raw_path, report_path = sys.argv[1:]
+text = pathlib.Path(raw_path).read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+text = "\n".join(
+    line
+    for line in text.splitlines()
+    if not line.startswith(
+        (
+            "scrub/repair scheduler report written:",
+            "scrub/repair scheduler summary written:",
+        )
+    )
+) + "\n"
+decoder = json.JSONDecoder()
+for index, char in enumerate(text):
+    if char != "{":
+        continue
+    try:
+        obj, _ = decoder.raw_decode(text[index:])
+    except json.JSONDecodeError:
+        continue
+    if isinstance(obj, dict) and "classification_counts" in obj and "authoritative_claim_count" in obj:
+        pathlib.Path(report_path).write_text(
+            json.dumps(obj, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        break
+else:
+    raise SystemExit("scrub/repair scheduler JSON report not found")
+PY
+}
+
+extract_report_markdown() {
+    local raw_path="$1"
+    local report_path="$2"
+
+    python3 - "$raw_path" "$report_path" <<'PY'
+import pathlib
+import re
+import sys
+
+raw_path, report_path = sys.argv[1:]
+text = pathlib.Path(raw_path).read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+start = text.find("# Scrub/Repair Scheduler Proof Plan")
+if start < 0:
+    raise SystemExit("scrub/repair scheduler Markdown report not found")
+tail = text[start:]
+match = re.search(r"\n\s*\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*\brch::", tail)
+end = start + match.start() if match else len(text)
+remote_end = text.find("\nRemote command finished:", start)
+if remote_end >= 0:
+    end = min(end, remote_end)
+pathlib.Path(report_path).write_text(text[start:end].rstrip() + "\n", encoding="utf-8")
+PY
+}
+
 run_rch_stdout_capture() {
     local output_path="$1"
     shift
-    local status
     local rch_log_path="${output_path}.rch.log"
+    local status=0
 
-    set +e
-    RCH_VISIBILITY=none timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- bash -lc '
-        set -euo pipefail
-        stdout_path="${CARGO_TARGET_DIR}/e2e_stdout/stdout.$$"
-        mkdir -p "$(dirname "$stdout_path")"
-        set +e
-        "$@" >"$stdout_path"
-        status=$?
-        set -e
-        printf "%s\n" "__FFS_REMOTE_STDOUT_BEGIN__"
-        cat "$stdout_path"
-        printf "%s\n" "__FFS_REMOTE_STDOUT_END__"
-        exit "$status"
-    ' _ "$@" >"$rch_log_path" 2>&1
-    status=$?
-    set -e
-
-    if [[ $status -eq 0 ]] || { [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$rch_log_path"; }; then
-        awk '
-            $0 == "__FFS_REMOTE_STDOUT_BEGIN__" { capture = 1; next }
-            $0 == "__FFS_REMOTE_STDOUT_END__" { found = 1; capture = 0; next }
-            capture { print }
-            END { exit found ? 0 : 1 }
-        ' "$rch_log_path" >"$output_path"
-        if [[ $status -eq 124 ]]; then
-            e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|output=${output_path}|rch_log=${rch_log_path}|command=$*"
-        fi
+    run_rch_capture "$rch_log_path" "$@" || status=$?
+    if [[ $status -ne 0 ]]; then
+        return "$status"
+    fi
+    if extract_report_json "$rch_log_path" "$output_path" 2>/dev/null; then
         return 0
     fi
-    return "$status"
+    if extract_report_markdown "$rch_log_path" "$output_path"; then
+        return 0
+    fi
+    return 1
 }
 
 run_rch_mutated_validator_capture() {
@@ -145,39 +244,31 @@ run_rch_mutated_validator_capture() {
     local source_json="$4"
     local validator="$5"
     local path_flag="$6"
+    local scenario_dir
+    local remote_mutated_json
+    local raw_output="${output_path}.rch.log"
+    local status=0
 
     jq "$jq_filter" "$source_json" >"$local_mutated_json"
-    if run_rch_capture "$output_path" bash -lc '
-        set -euo pipefail
-        jq_filter="$1"
-        source_json="$2"
-        local_mutated_json="$3"
-        validator="$4"
-        path_flag="$5"
-        remote_mutated_json="${CARGO_TARGET_DIR}/e2e_mutations/$(basename "$local_mutated_json")"
-        mkdir -p "$(dirname "$remote_mutated_json")"
-        jq "$jq_filter" "$source_json" >"$remote_mutated_json"
-        cargo run --quiet -p ffs-harness -- "$validator" "$path_flag" "$remote_mutated_json"
-    ' _ "$jq_filter" "$source_json" "$local_mutated_json" "$validator" "$path_flag"; then
-        if grep -q '^error:' "$output_path"; then
-            set +e
-            return 1
-        fi
-        return 0
-    else
-        local rch_status=$?
-        set +e
-        return "$rch_status"
+    scenario_dir="${RCH_INPUT_ROOT}/$(basename "$local_mutated_json" .json)"
+    mkdir -p "$scenario_dir"
+    remote_mutated_json="${scenario_dir}/manifest.json"
+    cp "$local_mutated_json" "$remote_mutated_json"
+
+    run_rch_capture "$raw_output" cargo run --quiet -p ffs-harness -- "$validator" "$path_flag" "$remote_mutated_json" || status=$?
+    if ! extract_report_json "$raw_output" "$output_path" 2>/dev/null; then
+        cp "$raw_output" "$output_path"
     fi
+    if [[ $status -eq 0 ]] && grep -q '^error:' "$output_path"; then
+        return 1
+    fi
+    return "$status"
 }
 
-e2e_log "=============================================="
-e2e_log "E2E Test: ffs_scrub_repair_scheduler"
-e2e_log "=============================================="
-e2e_log "Started: $(date -Iseconds)"
-e2e_log "Log directory: ${E2E_LOG_DIR}"
+e2e_init "ffs_scrub_repair_scheduler"
+RCH_INPUT_ROOT="${REPO_ROOT}/artifacts/rch_e2e/$(basename "$E2E_LOG_DIR")/scrub_repair_scheduler"
+mkdir -p "$RCH_INPUT_ROOT"
 e2e_log "Cargo target dir: ${CARGO_TARGET_DIR}"
-e2e_log ""
 
 MANIFEST_JSON="benchmarks/scrub_repair_scheduler_manifest.json"
 REPORT_RAW="${E2E_LOG_DIR}/scrub_repair_scheduler_report.raw"
