@@ -179,6 +179,8 @@ pub struct ProofBundleValidationReport {
     pub redaction_leaks: Vec<ProofBundleRedactionLeak>,
     pub integrity_errors: Vec<String>,
     pub lanes: Vec<ProofBundleLaneReport>,
+    #[serde(default)]
+    pub lane_provenance: Vec<ProofBundleLaneProvenanceReport>,
     pub swarm_evidence: Vec<ProofBundleSwarmEvidenceReport>,
     pub adaptive_runtime_evidence: Vec<ProofBundleAdaptiveRuntimeEvidenceReport>,
     pub errors: Vec<String>,
@@ -260,6 +262,79 @@ pub struct ProofBundleLaneReport {
     pub artifact_count: usize,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofBundleProvenanceClass {
+    ExecutedProductEvidence,
+    DryRunHandoff,
+    SmallHostSmoke,
+    CapabilityDowngrade,
+    StaleArtifact,
+    MissingRawLog,
+    UnsupportedFutureScope,
+}
+
+impl ProofBundleProvenanceClass {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ExecutedProductEvidence => "executed_product_evidence",
+            Self::DryRunHandoff => "dry_run_handoff",
+            Self::SmallHostSmoke => "small_host_smoke",
+            Self::CapabilityDowngrade => "capability_downgrade",
+            Self::StaleArtifact => "stale_artifact",
+            Self::MissingRawLog => "missing_raw_log",
+            Self::UnsupportedFutureScope => "unsupported_future_scope",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofBundleClaimEffect {
+    StrengthensPublicClaim,
+    BlocksPublicClaim,
+    ExperimentalOnly,
+    HandoffOnly,
+    EvidenceProductionFailure,
+    DoesNotStrengthenPublicClaim,
+}
+
+impl ProofBundleClaimEffect {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::StrengthensPublicClaim => "strengthens_public_claim",
+            Self::BlocksPublicClaim => "blocks_public_claim",
+            Self::ExperimentalOnly => "experimental_only",
+            Self::HandoffOnly => "handoff_only",
+            Self::EvidenceProductionFailure => "evidence_production_failure",
+            Self::DoesNotStrengthenPublicClaim => "does_not_strengthen_public_claim",
+        }
+    }
+
+    #[must_use]
+    pub const fn strengthens_public_claim(self) -> bool {
+        matches!(self, Self::StrengthensPublicClaim)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofBundleLaneProvenanceReport {
+    pub lane_id: String,
+    pub status: ProofBundleOutcome,
+    pub provenance_class: ProofBundleProvenanceClass,
+    pub claim_effect: ProofBundleClaimEffect,
+    pub artifact_roles: Vec<String>,
+    pub source_command: String,
+    pub git_sha: String,
+    pub freshness: String,
+    pub host_class: String,
+    pub raw_log_path: String,
+    pub raw_log_present: bool,
+    pub rationale: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -442,6 +517,35 @@ pub fn render_proof_bundle_markdown(report: &ProofBundleValidationReport) -> Str
         )
         .ok();
     }
+    if !report.lane_provenance.is_empty() {
+        writeln!(&mut out).ok();
+        writeln!(&mut out, "## Lane Provenance").ok();
+        writeln!(
+            &mut out,
+            "| Lane | Outcome | Provenance | Claim effect | Artifact roles | Source command | Git SHA | Freshness | Host class | Raw log | Rationale |"
+        )
+        .ok();
+        writeln!(&mut out, "|---|---:|---|---|---|---|---|---|---|---|---|").ok();
+        for provenance in &report.lane_provenance {
+            writeln!(
+                &mut out,
+                "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | [{}]({}) | `{}` |",
+                provenance.lane_id,
+                provenance.status.label(),
+                provenance.provenance_class.label(),
+                provenance.claim_effect.label(),
+                escape_markdown_table_cell(&provenance.artifact_roles.join(",")),
+                escape_markdown_table_cell(&provenance.source_command),
+                escape_markdown_table_cell(&provenance.git_sha),
+                escape_markdown_table_cell(&provenance.freshness),
+                escape_markdown_table_cell(&provenance.host_class),
+                provenance.raw_log_path,
+                provenance.raw_log_path,
+                escape_markdown_table_cell(&provenance.rationale)
+            )
+            .ok();
+        }
+    }
     if !report.swarm_evidence.is_empty() {
         writeln!(&mut out).ok();
         writeln!(&mut out, "## Swarm Evidence").ok();
@@ -565,6 +669,7 @@ struct ProofBundleReportBuilder {
     redaction_leaks: Vec<ProofBundleRedactionLeak>,
     integrity_errors: Vec<String>,
     lanes: Vec<ProofBundleLaneReport>,
+    lane_provenance: Vec<ProofBundleLaneProvenanceReport>,
     swarm_evidence: Vec<ProofBundleSwarmEvidenceReport>,
     adaptive_runtime_evidence: Vec<ProofBundleAdaptiveRuntimeEvidenceReport>,
     errors: Vec<String>,
@@ -589,6 +694,7 @@ impl ProofBundleReportBuilder {
             redaction_leaks: Vec::new(),
             integrity_errors: Vec::new(),
             lanes: Vec::new(),
+            lane_provenance: Vec::new(),
             swarm_evidence: Vec::new(),
             adaptive_runtime_evidence: Vec::new(),
             errors: Vec::new(),
@@ -681,7 +787,7 @@ impl ProofBundleReportBuilder {
 
         for lane in &manifest.lanes {
             *lane_ids.entry(lane.lane_id.clone()).or_default() += 1;
-            self.validate_lane(lane, bundle_root, &mut scenario_ids);
+            self.validate_lane(lane, bundle_root, &manifest.git_sha, &mut scenario_ids);
         }
 
         self.duplicate_lane_ids = lane_ids
@@ -719,6 +825,7 @@ impl ProofBundleReportBuilder {
         &mut self,
         lane: &ProofBundleLane,
         bundle_root: &Path,
+        git_sha: &str,
         scenario_ids: &mut BTreeMap<String, usize>,
     ) {
         validate_nonempty("lane_id", &lane.lane_id, &mut self.errors);
@@ -772,6 +879,12 @@ impl ProofBundleReportBuilder {
         self.validate_swarm_lane_contract(lane);
         self.validate_adaptive_runtime_lane_contract(lane);
         self.validate_permissioned_campaign_broker_boundary(lane);
+        self.lane_provenance.push(proof_bundle_lane_provenance(
+            lane,
+            bundle_root,
+            git_sha,
+            self.stale_git_sha.is_some() || self.stale_timestamp.is_some(),
+        ));
 
         self.lanes.push(ProofBundleLaneReport {
             lane_id: lane.lane_id.clone(),
@@ -1436,6 +1549,7 @@ impl ProofBundleReportBuilder {
             redaction_leaks: self.redaction_leaks,
             integrity_errors: self.integrity_errors,
             lanes: self.lanes,
+            lane_provenance: self.lane_provenance,
             swarm_evidence: self.swarm_evidence,
             adaptive_runtime_evidence: self.adaptive_runtime_evidence,
             errors: self.errors,
@@ -1479,6 +1593,241 @@ fn adaptive_runtime_evidence_report(
         validator_report: validator_report.unwrap_or_default(),
         runner_report: runner_report.unwrap_or_default(),
         downgrade_reason: lane.metadata.get("downgrade_reason").cloned(),
+    }
+}
+
+fn proof_bundle_lane_provenance(
+    lane: &ProofBundleLane,
+    bundle_root: &Path,
+    git_sha: &str,
+    manifest_is_stale: bool,
+) -> ProofBundleLaneProvenanceReport {
+    let artifact_roles = lane
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.role.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let source_command = lane_metadata_first(
+        &lane.metadata,
+        &[
+            "source_command",
+            "reproduction_command",
+            "command",
+            "exact_command",
+        ],
+    )
+    .map_or_else(|| lane.gate_inputs.join(","), ToOwned::to_owned);
+    let freshness = lane.metadata.get("freshness").cloned().unwrap_or_else(|| {
+        if manifest_is_stale {
+            "stale".to_owned()
+        } else {
+            "freshness_not_declared".to_owned()
+        }
+    });
+    let host_class = lane_metadata_first(
+        &lane.metadata,
+        &[
+            "host_class",
+            "host_classification",
+            "runner_class",
+            "capability_class",
+        ],
+    )
+    .unwrap_or("not_declared")
+    .to_owned();
+    let raw_log_present = proof_bundle_path_exists(bundle_root, &lane.raw_log_path);
+    let provenance_class = classify_proof_bundle_lane_provenance(
+        lane,
+        &artifact_roles,
+        &freshness,
+        &host_class,
+        &source_command,
+        raw_log_present,
+        manifest_is_stale,
+    );
+    let claim_effect = proof_bundle_claim_effect(provenance_class, lane.status);
+    let rationale = proof_bundle_provenance_rationale(provenance_class, claim_effect, lane.status);
+
+    ProofBundleLaneProvenanceReport {
+        lane_id: lane.lane_id.clone(),
+        status: lane.status,
+        provenance_class,
+        claim_effect,
+        artifact_roles,
+        source_command,
+        git_sha: git_sha.to_owned(),
+        freshness,
+        host_class,
+        raw_log_path: lane.raw_log_path.clone(),
+        raw_log_present,
+        rationale,
+    }
+}
+
+fn lane_metadata_first<'a>(
+    metadata: &'a BTreeMap<String, String>,
+    keys: &[&str],
+) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| metadata.get(*key).map(String::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn proof_bundle_path_exists(bundle_root: &Path, raw_path: &str) -> bool {
+    match validate_relative_path(raw_path) {
+        Ok(()) => bundle_root.join(raw_path).is_file(),
+        Err(_) => false,
+    }
+}
+
+fn classify_proof_bundle_lane_provenance(
+    lane: &ProofBundleLane,
+    artifact_roles: &[String],
+    freshness: &str,
+    host_class: &str,
+    source_command: &str,
+    raw_log_present: bool,
+    manifest_is_stale: bool,
+) -> ProofBundleProvenanceClass {
+    if !raw_log_present {
+        return ProofBundleProvenanceClass::MissingRawLog;
+    }
+    if manifest_is_stale || freshness == "stale" {
+        return ProofBundleProvenanceClass::StaleArtifact;
+    }
+    if contains_permissioned_campaign_handoff(lane, artifact_roles)
+        || source_command.contains("--dry-run")
+    {
+        return ProofBundleProvenanceClass::DryRunHandoff;
+    }
+    if lane.lane_id == "known_deferrals"
+        || metadata_value_eq(&lane.metadata, "release_claim", "unsupported_future_scope")
+        || metadata_value_eq(
+            &lane.metadata,
+            "release_claim_state",
+            "unsupported_future_scope",
+        )
+    {
+        return ProofBundleProvenanceClass::UnsupportedFutureScope;
+    }
+    if has_capability_downgrade(lane, host_class) {
+        return ProofBundleProvenanceClass::CapabilityDowngrade;
+    }
+    if metadata_value_eq(&lane.metadata, "release_claim", "small_host_smoke")
+        || metadata_value_eq(&lane.metadata, "release_claim_state", "small_host_smoke")
+        || matches!(host_class, "developer_smoke" | "small_host_smoke")
+    {
+        return ProofBundleProvenanceClass::SmallHostSmoke;
+    }
+    ProofBundleProvenanceClass::ExecutedProductEvidence
+}
+
+fn contains_permissioned_campaign_handoff(
+    lane: &ProofBundleLane,
+    artifact_roles: &[String],
+) -> bool {
+    artifact_roles.iter().any(|role| {
+        matches!(
+            role.as_str(),
+            PERMISSIONED_CAMPAIGN_HANDOFF_ARTIFACT_ROLE | PERMISSIONED_CAMPAIGN_BROKER_REPORT_ROLE
+        )
+    }) || lane
+        .metadata
+        .contains_key(PERMISSIONED_CAMPAIGN_PACKET_STATUS_KEY)
+        || lane
+            .metadata
+            .contains_key(PERMISSIONED_CAMPAIGN_PRODUCT_EVIDENCE_KEY)
+}
+
+fn has_capability_downgrade(lane: &ProofBundleLane, host_class: &str) -> bool {
+    let downgrade_reason = lane
+        .metadata
+        .get("downgrade_reason")
+        .map(String::as_str)
+        .unwrap_or_default();
+    metadata_value_eq(
+        &lane.metadata,
+        "release_claim",
+        "capability_downgraded_smoke",
+    ) || metadata_value_eq(
+        &lane.metadata,
+        "release_claim_state",
+        "capability_downgraded_smoke",
+    ) || host_class == "capability_downgraded_smoke"
+        || downgrade_reason.contains("capability")
+        || downgrade_reason.contains("unavailable")
+        || downgrade_reason.contains("FUSE")
+}
+
+fn metadata_value_eq(metadata: &BTreeMap<String, String>, key: &str, expected: &str) -> bool {
+    metadata
+        .get(key)
+        .map(String::as_str)
+        .is_some_and(|value| value == expected)
+}
+
+const fn proof_bundle_claim_effect(
+    provenance_class: ProofBundleProvenanceClass,
+    status: ProofBundleOutcome,
+) -> ProofBundleClaimEffect {
+    match provenance_class {
+        ProofBundleProvenanceClass::ExecutedProductEvidence => match status {
+            ProofBundleOutcome::Pass => ProofBundleClaimEffect::StrengthensPublicClaim,
+            ProofBundleOutcome::Fail | ProofBundleOutcome::Error => {
+                ProofBundleClaimEffect::BlocksPublicClaim
+            }
+            ProofBundleOutcome::Skip => ProofBundleClaimEffect::DoesNotStrengthenPublicClaim,
+        },
+        ProofBundleProvenanceClass::DryRunHandoff => ProofBundleClaimEffect::HandoffOnly,
+        ProofBundleProvenanceClass::SmallHostSmoke
+        | ProofBundleProvenanceClass::CapabilityDowngrade => {
+            ProofBundleClaimEffect::ExperimentalOnly
+        }
+        ProofBundleProvenanceClass::StaleArtifact | ProofBundleProvenanceClass::MissingRawLog => {
+            ProofBundleClaimEffect::EvidenceProductionFailure
+        }
+        ProofBundleProvenanceClass::UnsupportedFutureScope => {
+            ProofBundleClaimEffect::DoesNotStrengthenPublicClaim
+        }
+    }
+}
+
+fn proof_bundle_provenance_rationale(
+    provenance_class: ProofBundleProvenanceClass,
+    claim_effect: ProofBundleClaimEffect,
+    status: ProofBundleOutcome,
+) -> String {
+    match provenance_class {
+        ProofBundleProvenanceClass::ExecutedProductEvidence => format!(
+            "executed product evidence with outcome={} has claim_effect={}",
+            status.label(),
+            claim_effect.label()
+        ),
+        ProofBundleProvenanceClass::DryRunHandoff => {
+            "dry-run or permissioned handoff material cannot be promoted into product readiness"
+                .to_owned()
+        }
+        ProofBundleProvenanceClass::SmallHostSmoke => {
+            "small-host smoke evidence is useful for regression checks but only supports experimental claims"
+                .to_owned()
+        }
+        ProofBundleProvenanceClass::CapabilityDowngrade => {
+            "capability-downgraded evidence records an environment limitation and cannot strengthen public readiness"
+                .to_owned()
+        }
+        ProofBundleProvenanceClass::StaleArtifact => {
+            "stale proof-bundle evidence must be refreshed before it can affect readiness"
+                .to_owned()
+        }
+        ProofBundleProvenanceClass::MissingRawLog => {
+            "missing raw logs make the lane unauditable and fail evidence production".to_owned()
+        }
+        ProofBundleProvenanceClass::UnsupportedFutureScope => {
+            "unsupported future-scope material is tracked as deferral context only".to_owned()
+        }
     }
 }
 
@@ -1878,6 +2227,10 @@ mod tests {
                     role: ADAPTIVE_RUNTIME_RUNNER_REPORT_ROLE.to_owned(),
                 });
             }
+            metadata.insert(
+                "source_command".to_owned(),
+                format!("cargo run -p ffs-harness -- validate-{lane_id}"),
+            );
             lanes.push(ProofBundleLane {
                 lane_id: (*lane_id).to_owned(),
                 status,
@@ -2034,6 +2387,10 @@ mod tests {
         assert_eq!(report.totals.fail, 3);
         assert_eq!(report.totals.skip, 3);
         assert_eq!(report.totals.error, 3);
+        assert_eq!(
+            report.lane_provenance.len(),
+            REQUIRED_PROOF_BUNDLE_LANES.len()
+        );
         assert_eq!(report.swarm_evidence.len(), 2);
         assert_eq!(report.adaptive_runtime_evidence.len(), 1);
     }
@@ -2247,6 +2604,102 @@ mod tests {
         assert_eq!(conformance.path, "artifacts/conformance.json");
         assert_eq!(conformance.sha256.len(), 64);
         assert_eq!(conformance.role, "primary_evidence");
+    }
+
+    #[test]
+    fn lane_provenance_classifies_claim_effects() -> Result<()> {
+        let mut sample = sample_bundle();
+        let conformance = sample
+            .manifest
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.lane_id == "conformance")
+            .context("conformance lane")?;
+        conformance.status = ProofBundleOutcome::Pass;
+
+        attach_permissioned_campaign_packet(&mut sample, "xfstests")?;
+        set_swarm_lane_for_small_host_smoke(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
+        let fuse = sample
+            .manifest
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.lane_id == "fuse")
+            .context("fuse lane")?;
+        fuse.status = ProofBundleOutcome::Skip;
+        fuse.metadata.insert(
+            "release_claim_state".to_owned(),
+            "capability_downgraded_smoke".to_owned(),
+        );
+        fuse.metadata.insert(
+            "host_classification".to_owned(),
+            "below_large_host_floor".to_owned(),
+        );
+        fuse.metadata.insert(
+            "downgrade_reason".to_owned(),
+            "FUSE capability unavailable".to_owned(),
+        );
+        let repair = sample
+            .manifest
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.lane_id == "repair_lab")
+            .context("repair lane")?;
+        repair
+            .metadata
+            .insert("freshness".to_owned(), "stale".to_owned());
+        let crash = sample
+            .manifest
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.lane_id == "crash_replay")
+            .context("crash lane")?;
+        crash.raw_log_path = "logs/missing-crash-replay.log".to_owned();
+        sample.manifest.integrity = Some(integrity_for(&sample.manifest));
+
+        let report = validate_sample(&sample);
+        let by_lane = report
+            .lane_provenance
+            .iter()
+            .map(|provenance| (provenance.lane_id.as_str(), provenance))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            by_lane["conformance"].provenance_class,
+            ProofBundleProvenanceClass::ExecutedProductEvidence
+        );
+        assert_eq!(
+            by_lane["conformance"].claim_effect,
+            ProofBundleClaimEffect::StrengthensPublicClaim
+        );
+        assert_eq!(
+            by_lane["xfstests"].provenance_class,
+            ProofBundleProvenanceClass::DryRunHandoff
+        );
+        assert_eq!(
+            by_lane["xfstests"].claim_effect,
+            ProofBundleClaimEffect::HandoffOnly
+        );
+        assert_eq!(
+            by_lane[SWARM_WORKLOAD_HARNESS_LANE].provenance_class,
+            ProofBundleProvenanceClass::SmallHostSmoke
+        );
+        assert_eq!(
+            by_lane["fuse"].provenance_class,
+            ProofBundleProvenanceClass::CapabilityDowngrade
+        );
+        assert_eq!(
+            by_lane["repair_lab"].provenance_class,
+            ProofBundleProvenanceClass::StaleArtifact
+        );
+        assert_eq!(
+            by_lane["crash_replay"].provenance_class,
+            ProofBundleProvenanceClass::MissingRawLog
+        );
+        assert_eq!(
+            by_lane["known_deferrals"].provenance_class,
+            ProofBundleProvenanceClass::UnsupportedFutureScope
+        );
+        Ok(())
     }
 
     #[test]
@@ -2664,6 +3117,9 @@ mod tests {
         assert!(summary.contains("swarm_workload_harness"));
         assert!(summary.contains("swarm_tail_latency"));
         assert!(summary.contains("authoritative_large_host"));
+        assert!(summary.contains("Lane Provenance"));
+        assert!(summary.contains("strengthens_public_claim"));
+        assert!(summary.contains("unsupported_future_scope"));
         assert!(summary.contains("Adaptive Runtime Evidence"));
         assert!(summary.contains("adaptive-runtime-run-20260507T000000Z"));
         assert!(summary.contains("Artifact hash chain"));
@@ -2680,6 +3136,7 @@ mod tests {
 
         assert!(markdown.contains("# FrankenFS Proof Bundle"));
         assert!(markdown.contains("## Lanes"));
+        assert!(markdown.contains("## Lane Provenance"));
         assert!(markdown.contains("## Swarm Evidence"));
         assert!(markdown.contains("## Adaptive Runtime Evidence"));
         insta::assert_snapshot!("render_proof_bundle_markdown_sample_bundle", markdown);

@@ -350,6 +350,7 @@ for index, lane in enumerate(lanes):
                 "role": "adaptive_runtime_runner_report",
             }
         )
+    metadata["source_command"] = f"cargo run -p ffs-harness -- validate-{lane}"
     records.append(
         {
             "lane_id": lane,
@@ -495,6 +496,18 @@ if len(adaptive_rows) != 1:
     raise SystemExit(f"unexpected adaptive runtime evidence rows: {len(adaptive_rows)}")
 if adaptive_rows[0].get("release_claim_state") != "accepted_large_host":
     raise SystemExit("adaptive runtime release claim state was not preserved")
+provenance_rows = report.get("lane_provenance", [])
+if len(provenance_rows) != len(required_lanes):
+    raise SystemExit(f"unexpected lane provenance rows: {len(provenance_rows)}")
+provenance_by_lane = {row["lane_id"]: row for row in provenance_rows}
+if provenance_by_lane["conformance"]["claim_effect"] != "strengthens_public_claim":
+    raise SystemExit("passing conformance lane did not strengthen a public claim")
+if provenance_by_lane["swarm_workload_harness"]["provenance_class"] != "small_host_smoke":
+    raise SystemExit("small-host swarm lane was not classified as smoke evidence")
+if provenance_by_lane["known_deferrals"]["provenance_class"] != "unsupported_future_scope":
+    raise SystemExit("known deferrals lane did not stay unsupported future-scope context")
+if not all(row.get("source_command") and row.get("raw_log_path") for row in provenance_rows):
+    raise SystemExit("lane provenance did not preserve source command and raw log path")
 for lane in required_lanes:
     if f"logs/{lane}.log" not in summary:
         raise SystemExit(f"missing raw log link for {lane}")
@@ -504,6 +517,8 @@ if "validate-proof-bundle" not in summary:
     raise SystemExit("summary did not preserve reproduction command")
 if "Artifact hash chain" not in summary:
     raise SystemExit("summary did not preserve hash-chain diagnostics")
+if "Lane Provenance" not in summary or "strengthens_public_claim" not in summary:
+    raise SystemExit("summary did not preserve lane provenance diagnostics")
 if "Swarm Evidence" not in summary or "p99_attribution" not in summary:
     raise SystemExit("summary did not preserve swarm evidence diagnostics")
 if "Adaptive Runtime Evidence" not in summary or "adaptive_runtime_runner" not in summary:

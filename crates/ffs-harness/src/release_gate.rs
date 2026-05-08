@@ -6,7 +6,10 @@
 //! file. It produces machine-readable feature states and generated public
 //! wording so README / FEATURE_PARITY claims cannot outrun gate evidence.
 
-use crate::proof_bundle::{ProofBundleLaneReport, ProofBundleOutcome, ProofBundleValidationReport};
+use crate::proof_bundle::{
+    ProofBundleClaimEffect, ProofBundleLaneProvenanceReport, ProofBundleLaneReport,
+    ProofBundleOutcome, ProofBundleValidationReport,
+};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -721,6 +724,11 @@ fn evaluate_feature(
         .iter()
         .map(|lane| (lane.lane_id.as_str(), lane))
         .collect();
+    let provenance_reports: BTreeMap<&str, &ProofBundleLaneProvenanceReport> = proof
+        .lane_provenance
+        .iter()
+        .map(|provenance| (provenance.lane_id.as_str(), provenance))
+        .collect();
     let mut final_state = feature.target_state;
     let mut facts = GateFacts::default();
     let mut findings = Vec::new();
@@ -785,7 +793,32 @@ fn evaluate_feature(
                 push_finding(&mut findings, feature, policy, input);
                 final_state = more_conservative(final_state, proposed);
             }
-            (Some(observed), _) if observed == lane.expected_outcome => {}
+            (Some(observed), _) if observed == lane.expected_outcome => {
+                if lane.expected_outcome == ProofBundleOutcome::Pass
+                    && let Some(provenance) = provenance_reports.get(lane.lane_id.as_str())
+                    && !provenance.claim_effect.strengthens_public_claim()
+                {
+                    let proposed = provenance_downgrade_state(provenance.claim_effect);
+                    let remediation = lane_remediation(lane, feature);
+                    let mut input = FindingInput::new(
+                        ReleaseGateFindingSeverity::Block,
+                        proposed,
+                        "lane_provenance_not_authoritative",
+                        format!(
+                            "required lane {} observed pass but provenance={} claim_effect={} cannot strengthen public readiness: {}",
+                            lane.lane_id,
+                            provenance.provenance_class.label(),
+                            provenance.claim_effect.label(),
+                            provenance.rationale
+                        ),
+                    );
+                    input.controlling_lane = Some(lane.lane_id.clone());
+                    input.controlling_artifact_hash = Some(controlling_artifact_hash(proof));
+                    input.remediation_id = remediation;
+                    push_finding(&mut findings, feature, policy, input);
+                    final_state = more_conservative(final_state, proposed);
+                }
+            }
             (Some(ProofBundleOutcome::Skip), Some(proposed)) => {
                 facts
                     .triggers
@@ -959,6 +992,17 @@ fn lane_metadata_context(lane: Option<&ProofBundleLaneReport>) -> String {
     }
 }
 
+const fn provenance_downgrade_state(effect: ProofBundleClaimEffect) -> FeatureState {
+    match effect {
+        ProofBundleClaimEffect::StrengthensPublicClaim => FeatureState::Validated,
+        ProofBundleClaimEffect::BlocksPublicClaim
+        | ProofBundleClaimEffect::EvidenceProductionFailure => FeatureState::Disabled,
+        ProofBundleClaimEffect::ExperimentalOnly => FeatureState::Experimental,
+        ProofBundleClaimEffect::HandoffOnly => FeatureState::DryRunOnly,
+        ProofBundleClaimEffect::DoesNotStrengthenPublicClaim => FeatureState::Hidden,
+    }
+}
+
 #[must_use]
 fn metric_value(proof: &ProofBundleValidationReport, metric: ReleaseGateMetric) -> usize {
     match metric {
@@ -1039,8 +1083,9 @@ fn escape_markdown_table_cell(raw: &str) -> String {
 mod tests {
     use super::*;
     use crate::proof_bundle::{
-        ProofBundleBrokenLink, ProofBundleLaneReport, ProofBundleTotals, StaleProofBundleGitSha,
-        proof_bundle_required_lanes,
+        ProofBundleBrokenLink, ProofBundleClaimEffect, ProofBundleLaneProvenanceReport,
+        ProofBundleLaneReport, ProofBundleProvenanceClass, ProofBundleTotals,
+        StaleProofBundleGitSha, proof_bundle_required_lanes,
     };
 
     fn passing_proof() -> ProofBundleValidationReport {
@@ -1054,6 +1099,23 @@ mod tests {
                 scenario_count: 1,
                 artifact_count: 1,
                 metadata: BTreeMap::new(),
+            })
+            .collect::<Vec<_>>();
+        let lane_provenance = lanes
+            .iter()
+            .map(|lane| ProofBundleLaneProvenanceReport {
+                lane_id: lane.lane_id.clone(),
+                status: lane.status,
+                provenance_class: ProofBundleProvenanceClass::ExecutedProductEvidence,
+                claim_effect: ProofBundleClaimEffect::StrengthensPublicClaim,
+                artifact_roles: vec!["primary_evidence".to_owned()],
+                source_command: format!("cargo test -p ffs-harness {}", lane.lane_id),
+                git_sha: "abcdef1".to_owned(),
+                freshness: "fresh".to_owned(),
+                host_class: "permissioned_large_host".to_owned(),
+                raw_log_path: lane.raw_log_path.clone(),
+                raw_log_present: true,
+                rationale: "executed product evidence".to_owned(),
             })
             .collect::<Vec<_>>();
         let lane_count = lanes.len();
@@ -1085,6 +1147,7 @@ mod tests {
             redaction_leaks: Vec::new(),
             integrity_errors: Vec::new(),
             lanes,
+            lane_provenance,
             swarm_evidence: Vec::new(),
             adaptive_runtime_evidence: Vec::new(),
             errors: Vec::new(),
@@ -1193,6 +1256,25 @@ mod tests {
             .count();
     }
 
+    fn set_lane_provenance_effect(
+        proof: &mut ProofBundleValidationReport,
+        lane_id: &str,
+        provenance_class: ProofBundleProvenanceClass,
+        claim_effect: ProofBundleClaimEffect,
+    ) {
+        let provenance = proof
+            .lane_provenance
+            .iter_mut()
+            .find(|provenance| provenance.lane_id == lane_id)
+            .expect("lane provenance present");
+        provenance.provenance_class = provenance_class;
+        provenance.claim_effect = claim_effect;
+        provenance.rationale = format!(
+            "{} evidence cannot strengthen public readiness",
+            provenance_class.label()
+        );
+    }
+
     fn one_lane_policy(
         lane_id: &str,
         previous_state: FeatureState,
@@ -1225,6 +1307,31 @@ mod tests {
             FeatureState::Validated
         );
         assert!(report.generated_wording[0].wording.contains("validated"));
+    }
+
+    #[test]
+    fn pass_lane_requires_authoritative_provenance() {
+        let mut proof = passing_proof();
+        set_lane_provenance_effect(
+            &mut proof,
+            "writeback_cache",
+            ProofBundleProvenanceClass::DryRunHandoff,
+            ProofBundleClaimEffect::HandoffOnly,
+        );
+
+        let report = evaluate_release_gates(&sample_policy(), &proof);
+
+        assert!(!report.valid);
+        assert_eq!(
+            report.feature_reports[0].final_state,
+            FeatureState::DryRunOnly
+        );
+        assert!(report.findings.iter().any(|finding| {
+            finding
+                .finding_id
+                .contains("lane_provenance_not_authoritative")
+                && finding.controlling_lane.as_deref() == Some("writeback_cache")
+        }));
     }
 
     #[test]
