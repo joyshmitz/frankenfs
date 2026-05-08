@@ -528,7 +528,8 @@ struct SoakCanaryCampaignCmdArgs {
 
 #[derive(Debug)]
 struct RepairWritebackSerializationCmdArgs {
-    contract_path: String,
+    contract_path: Option<String>,
+    contract_json_env: Option<String>,
     artifact_root: String,
     out_path: Option<String>,
     artifact_out_path: Option<String>,
@@ -3429,8 +3430,22 @@ fn validate_repair_writeback_serialization_cmd(args: &[String]) -> Result<()> {
     let Some(cmd_args) = parse_repair_writeback_serialization_cmd_args(args)? else {
         return Ok(());
     };
-    let contract =
-        load_repair_writeback_serialization_contract(Path::new(&cmd_args.contract_path))?;
+    let contract = match (&cmd_args.contract_path, &cmd_args.contract_json_env) {
+        (Some(path), None) => load_repair_writeback_serialization_contract(Path::new(path))?,
+        (None, Some(env_name)) => {
+            let raw = env::var(env_name)
+                .with_context(|| format!("--contract-json-env variable {env_name} is not set"))?;
+            serde_json::from_str(&raw).with_context(|| {
+                format!("invalid repair/writeback contract JSON from {env_name}")
+            })?
+        }
+        (Some(_), Some(_)) => bail!("use either --contract or --contract-json-env, not both"),
+        (None, None) => {
+            bail!(
+                "--contract or --contract-json-env is required for repair/writeback serialization validation"
+            )
+        }
+    };
     let report =
         validate_repair_writeback_serialization_contract(&contract, &cmd_args.artifact_root);
     let output = serde_json::to_string_pretty(&report)?;
@@ -3482,6 +3497,7 @@ fn parse_repair_writeback_serialization_cmd_args(
     args: &[String],
 ) -> Result<Option<RepairWritebackSerializationCmdArgs>> {
     let mut contract_path: Option<String> = None;
+    let mut contract_json_env: Option<String> = None;
     let mut artifact_root = "artifacts/repair-writeback/dry-run".to_owned();
     let mut out_path: Option<String> = None;
     let mut artifact_out_path: Option<String> = None;
@@ -3496,6 +3512,14 @@ fn parse_repair_writeback_serialization_cmd_args(
                 contract_path = Some(
                     args.get(i)
                         .context("--contract requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--contract-json-env" => {
+                i += 1;
+                contract_json_env = Some(
+                    args.get(i)
+                        .context("--contract-json-env requires a variable name")?
                         .to_owned(),
                 );
             }
@@ -3543,8 +3567,8 @@ fn parse_repair_writeback_serialization_cmd_args(
     }
 
     Ok(Some(RepairWritebackSerializationCmdArgs {
-        contract_path: contract_path
-            .context("--contract is required for repair/writeback serialization validation")?,
+        contract_path,
+        contract_json_env,
         artifact_root,
         out_path,
         artifact_out_path,
@@ -6009,7 +6033,7 @@ fn print_operator_recovery_drill_example() {
 
 fn print_repair_writeback_serialization_usage_summary() {
     println!(
-        "  ffs-harness validate-repair-writeback-serialization --contract FILE [--artifact-root DIR] [--out FILE] [--artifact-out FILE] [--summary-out FILE]"
+        "  ffs-harness validate-repair-writeback-serialization (--contract FILE | --contract-json-env VAR) [--artifact-root DIR] [--out FILE] [--artifact-out FILE] [--summary-out FILE]"
     );
 }
 
@@ -6457,6 +6481,9 @@ fn print_repair_writeback_serialization_usage() {
     println!("Options:");
     println!(
         "  --contract FILE                    Read repair/writeback serialization contract JSON"
+    );
+    println!(
+        "  --contract-json-env VAR            Read repair/writeback serialization contract JSON from env var"
     );
     println!("  --artifact-root DIR                Root for dry-run serialization artifacts");
     println!("  --out FILE                         Write validation report JSON");
