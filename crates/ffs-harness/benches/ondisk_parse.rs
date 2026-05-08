@@ -795,6 +795,33 @@ fn bench_btrfs_parse_dir_items(c: &mut Criterion) {
     });
 }
 
+/// bd-4ggv5 — BtrfsDirItem::try_to_bytes encoder runs on every
+/// btrfs directory create, rename, mkdir, mknod, symlink, link
+/// operation through ffs_core::OpenFs. Bench paired with bd-coyy0
+/// (parser side) so the perf gate tracks regressions on both
+/// halves of the encode/decode bijection. Correctness pinned by
+/// bd-qwo4a (parser kernel-offset pin), bd-78fbx (round-trip MR),
+/// bd-2gb89 (canonical encoder bytes). Typical directory-entry
+/// shape: 30-byte header + 16-byte name = 46 bytes.
+fn bench_btrfs_dir_item_try_to_bytes(c: &mut Criterion) {
+    let entry = BtrfsDirItem {
+        child_objectid: 0x1000,
+        child_key_type: 1, // INODE_ITEM
+        child_key_offset: 0,
+        file_type: 1, // BTRFS_FT_REG_FILE
+        name: b"regular_file_xy.".to_vec(),
+    };
+
+    c.bench_function("btrfs_dir_item_try_to_bytes", |b| {
+        b.iter(|| {
+            let bytes = black_box(&entry)
+                .try_to_bytes()
+                .expect("typical dir_item encodes within u16");
+            black_box(bytes);
+        });
+    });
+}
+
 /// bd-maryc — parse_inode_item runs on every btrfs inode read
 /// (open, stat, getattr, readdir-with-stat). Bench against a
 /// kernel-stamped 160-byte payload matching the production hot path.
@@ -1012,6 +1039,7 @@ criterion_group!(
     bench_btrfs_parse_inode_refs,
     bench_btrfs_inode_ref_try_to_bytes,
     bench_btrfs_parse_dir_items,
+    bench_btrfs_dir_item_try_to_bytes,
     bench_btrfs_parse_inode_item,
     bench_btrfs_inode_item_to_bytes,
     bench_btrfs_parse_xattr_items,
