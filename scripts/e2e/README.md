@@ -850,6 +850,35 @@ It checks default generated snippets across all required public surfaces,
 injects a hand-upgraded read-write repair claim, injects stale flat parity
 wording, verifies structured drift log fields, and runs the module unit tests.
 
+## Tracker Source Hygiene
+
+Tracker source hygiene keeps agent triage from treating foreign-looking Beads
+rows as FrankenFS-ready work. The report is non-mutating by default and is safe
+to run when `br ready` or `bv --robot-triage` is polluted by cross-project rows.
+
+Run the live report with:
+
+```bash
+./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
+```
+
+Run the deterministic fixture check with:
+
+```bash
+TRACKER_SOURCE_HYGIENE_ISSUES=tests/fixtures/tracker_source_hygiene.jsonl \
+TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=4 \
+TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=22 \
+TRACKER_SOURCE_HYGIENE_EXPECT_READY=2 \
+TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT=20 \
+./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
+```
+
+The report emits `local_open_rows`, `source_aware_ready_rows`,
+`excluded_foreign_open_count`, prefix counts, sample foreign rows, and exact
+reproduction commands. Enable `TRACKER_SOURCE_HYGIENE_STRICT=1` only after the
+criteria in [docs/tracker-hygiene.md](../../docs/tracker-hygiene.md) are met;
+strict mode intentionally fails while foreign-looking open rows exist.
+
 ## Release Gate Evaluation
 
 Release gates are executable policy files that consume a validated proof bundle
