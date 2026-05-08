@@ -66,6 +66,8 @@ run_closeout_report_capture() {
 
     run_rch_capture "$log_path" bash -lc '
 set -euo pipefail
+rust_hash="$(rustc -vV | awk "/commit-hash:/ {print \$2}")"
+export CARGO_TARGET_DIR="/data/tmp/rch_target_frankenfs_performance_delta_closeout_${rust_hash}"
 issues="${CARGO_TARGET_DIR}/performance_delta_closeout/required_followups_issues.jsonl"
 mkdir -p "$(dirname "$issues")"
 cat >"$issues" <<'"'"'JSONL'"'"'
@@ -87,6 +89,8 @@ run_closeout_missing_followup_capture() {
 
     run_rch_capture "$log_path" bash -lc '
 set -euo pipefail
+rust_hash="$(rustc -vV | awk "/commit-hash:/ {print \$2}")"
+export CARGO_TARGET_DIR="/data/tmp/rch_target_frankenfs_performance_delta_closeout_${rust_hash}"
 bad_issues="${CARGO_TARGET_DIR}/performance_delta_closeout/issues_missing_mount_cold_followup.jsonl"
 mkdir -p "$(dirname "$bad_issues")"
 cat >"$bad_issues" <<'"'"'JSONL'"'"'
@@ -99,6 +103,17 @@ JSONL
 cargo run --quiet -p ffs-harness -- performance-delta-closeout \
     --config benchmarks/performance_delta_closeout.json \
     --issues "$bad_issues"
+'
+}
+
+run_closeout_unit_tests_capture() {
+    local log_path="$1"
+
+    run_rch_capture "$log_path" bash -lc '
+set -euo pipefail
+rust_hash="$(rustc -vV | awk "/commit-hash:/ {print \$2}")"
+export CARGO_TARGET_DIR="/data/tmp/rch_target_frankenfs_performance_delta_closeout_${rust_hash}"
+cargo test -p ffs-harness performance_delta_closeout -- --nocapture
 '
 }
 
@@ -309,7 +324,7 @@ else
 fi
 
 e2e_step "Scenario 5: unit tests cover closeout classification and checked-in config"
-if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness performance_delta_closeout -- --nocapture; then
+if run_closeout_unit_tests_capture "$UNIT_LOG"; then
     scenario_result "performance_delta_closeout_unit_tests" "PASS" "unit tests passed"
 else
     log_failure_tail "$UNIT_LOG"
