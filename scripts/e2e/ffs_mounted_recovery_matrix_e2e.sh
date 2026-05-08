@@ -14,11 +14,110 @@ export REPO_ROOT
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_mounted_recovery_matrix}"
-export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
 
 PASS_COUNT=0
 FAIL_COUNT=0
 TOTAL=0
+
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("$RCH_BIN" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "$RCH_BIN" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local log_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+
+    : >"$log_path"
+    set +e
+    RCH_VISIBILITY="$RCH_VISIBILITY" "$RCH_BIN" exec -- "$@" >"$log_path" 2>&1 &
+    pid=$!
+    set -e
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|log=${log_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}"
+        return 0
+    fi
+    return "$status"
+}
 
 scenario_result() {
     local scenario_id="$1"
@@ -33,22 +132,51 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+extract_validation_json() {
+    local raw_path="$1"
+    local report_path="$2"
+    python3 - "$raw_path" "$report_path" <<'PY'
+import json
+import sys
+
+raw_path, report_path = sys.argv[1:]
+text = open(raw_path, encoding="utf-8", errors="replace").read()
+decoder = json.JSONDecoder()
+for index, char in enumerate(text):
+    if char != "{":
+        continue
+    try:
+        obj, _ = decoder.raw_decode(text[index:])
+    except json.JSONDecodeError:
+        continue
+    if isinstance(obj, dict) and "scenario_count" in obj and "lifecycle_events" in obj:
+        with open(report_path, "w", encoding="utf-8") as handle:
+            json.dump(obj, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        break
+else:
+    raise SystemExit("mounted recovery validation JSON object not found")
+PY
+}
+
 e2e_init "ffs_mounted_recovery_matrix"
 
 MATRIX_PATH="${FFS_MOUNTED_RECOVERY_MATRIX:-$REPO_ROOT/tests/workload-matrix/mounted_recovery_matrix.json}"
 VALIDATION_JSON="$E2E_LOG_DIR/mounted_recovery_matrix_validation.json"
+VALIDATION_RAW="$E2E_LOG_DIR/mounted_recovery_matrix_validation.raw"
 RESULT_JSON="$E2E_LOG_DIR/mounted_recovery_results.json"
 RESULT_CSV="$E2E_LOG_DIR/mounted_recovery_results.csv"
 STDOUT_DIR="$E2E_LOG_DIR/stdout"
 STDERR_DIR="$E2E_LOG_DIR/stderr"
 ACTUAL_STATE_DIR="$E2E_LOG_DIR/actual_state"
-BAD_MISSING_LIFECYCLE="$E2E_LOG_DIR/bad_missing_lifecycle.json"
-BAD_UNSAFE_COMMAND="$E2E_LOG_DIR/bad_unsafe_command.json"
 BAD_MISSING_RAW="$E2E_LOG_DIR/bad_missing_lifecycle.raw"
 BAD_UNSAFE_RAW="$E2E_LOG_DIR/bad_unsafe_command.raw"
 UNIT_LOG="$E2E_LOG_DIR/mounted_recovery_unit_tests.log"
+RCH_INPUT_DIR="$REPO_ROOT/artifacts/rch_input/$(basename "$E2E_LOG_DIR")/mounted_recovery_matrix"
+BAD_MISSING_LIFECYCLE="$RCH_INPUT_DIR/bad_missing_lifecycle.json"
+BAD_UNSAFE_COMMAND="$RCH_INPUT_DIR/bad_unsafe_command.json"
 
-mkdir -p "$STDOUT_DIR" "$STDERR_DIR" "$ACTUAL_STATE_DIR"
+mkdir -p "$STDOUT_DIR" "$STDERR_DIR" "$ACTUAL_STATE_DIR" "$RCH_INPUT_DIR"
 
 e2e_step "Scenario 1: module and CLI are wired"
 if grep -q "pub mod mounted_recovery_matrix" crates/ffs-harness/src/lib.rs \
@@ -59,9 +187,9 @@ else
 fi
 
 e2e_step "Scenario 2: matrix validates"
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-mounted-recovery-matrix \
+if run_rch_capture "$VALIDATION_RAW" cargo run --quiet -p ffs-harness -- validate-mounted-recovery-matrix \
     --matrix "$MATRIX_PATH" \
-    --out "$VALIDATION_JSON"; then
+    && extract_validation_json "$VALIDATION_RAW" "$VALIDATION_JSON"; then
     scenario_result "mounted_recovery_matrix_validates" "PASS" "validation report written to $VALIDATION_JSON"
 else
     scenario_result "mounted_recovery_matrix_validates" "FAIL" "matrix validator rejected $MATRIX_PATH"
@@ -267,8 +395,8 @@ with open(out_path, "w", encoding="utf-8") as handle:
     json.dump(data, handle, indent=2, sort_keys=True)
     handle.write("\n")
 PY
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-mounted-recovery-matrix \
-    --matrix "$BAD_MISSING_LIFECYCLE" >"$BAD_MISSING_RAW" 2>&1; then
+if run_rch_capture "$BAD_MISSING_RAW" cargo run --quiet -p ffs-harness -- validate-mounted-recovery-matrix \
+    --matrix "$BAD_MISSING_LIFECYCLE"; then
     scenario_result "mounted_recovery_missing_lifecycle_rejected" "FAIL" "validator accepted a missing cleanup lifecycle row"
 elif grep -q "missing lifecycle event cleanup" "$BAD_MISSING_RAW"; then
     scenario_result "mounted_recovery_missing_lifecycle_rejected" "PASS" "missing lifecycle coverage rejected"
@@ -288,8 +416,8 @@ with open(out_path, "w", encoding="utf-8") as handle:
     json.dump(data, handle, indent=2, sort_keys=True)
     handle.write("\n")
 PY
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-mounted-recovery-matrix \
-    --matrix "$BAD_UNSAFE_COMMAND" >"$BAD_UNSAFE_RAW" 2>&1; then
+if run_rch_capture "$BAD_UNSAFE_RAW" cargo run --quiet -p ffs-harness -- validate-mounted-recovery-matrix \
+    --matrix "$BAD_UNSAFE_COMMAND"; then
     scenario_result "mounted_recovery_unsafe_command_rejected" "FAIL" "validator accepted unsafe recovery command"
 elif grep -q "unsafe host command" "$BAD_UNSAFE_RAW"; then
     scenario_result "mounted_recovery_unsafe_command_rejected" "PASS" "unsafe process-control command rejected"
@@ -298,7 +426,7 @@ else
 fi
 
 e2e_step "Scenario 7: mounted recovery unit tests pass"
-if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib mounted_recovery_matrix -- --nocapture >"$UNIT_LOG" 2>&1; then
+if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib mounted_recovery_matrix -- --nocapture; then
     cat "$UNIT_LOG"
     scenario_result "mounted_recovery_unit_tests" "PASS" "mounted_recovery_matrix unit tests passed"
 else
