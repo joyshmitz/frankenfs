@@ -1459,7 +1459,7 @@ AGENT_NAME="${AGENT_NAME:-operator}" ./scripts/e2e/ffs_permissioned_campaign_bro
 Artifacts are written under
 `artifacts/e2e/<timestamp>_ffs_permissioned_campaign_broker/permissioned_campaign_broker/`.
 The important subdirectories are `manifests/`, `reports/`, `packets/`,
-`blockers/`, and `logs/`, plus `command_transcript.tsv` and
+`ledgers/`, `blockers/`, and `logs/`, plus `command_transcript.tsv` and
 `non_execution_safety_report.json`.
 
 To validate or render a broker manifest directly:
@@ -1474,6 +1474,24 @@ cargo run -p ffs-harness -- generate-permissioned-campaign-packet \
   --manifest artifacts/e2e/<run>/permissioned_campaign_broker/manifests/xfstests_ready_manifest.json \
   --out artifacts/e2e/<run>/permissioned_campaign_broker/packets/xfstests_handoff_packet.json \
   --summary-out artifacts/e2e/<run>/permissioned_campaign_broker/packets/xfstests_handoff_packet.md
+```
+
+Execution ledgers are the next layer after a human grants one of the exact ACK
+boundaries. They complement `bd-rchk3.3` and `bd-rchk0.53.8` by recording
+the ACK text, command-plan hash, git SHA, state transitions, raw logs,
+resume checkpoints, artifact hashes, cleanup status, and proof-bundle lane
+candidates. They do not replace the required operator run: dry-run broker
+packets still cannot be counted as `pass` evidence, and stale git SHAs,
+changed command plans, missing raw logs, missing cleanup reports, or
+packet-as-pass attempts fail validation.
+
+```bash
+cargo run -p ffs-harness -- validate-permissioned-campaign-ledger \
+  --manifest artifacts/e2e/<run>/permissioned_campaign_broker/manifests/xfstests_ready_manifest.json \
+  --ledger artifacts/e2e/<run>/permissioned_campaign_broker/ledgers/xfstests_execution_ledger.json \
+  --current-git-sha "$(git rev-parse HEAD)" \
+  --out artifacts/e2e/<run>/permissioned_campaign_broker/reports/xfstests_execution_ledger_report.json \
+  --summary-out artifacts/e2e/<run>/permissioned_campaign_broker/reports/xfstests_execution_ledger_report.md
 ```
 
 The xfstests ACK boundary is exactly

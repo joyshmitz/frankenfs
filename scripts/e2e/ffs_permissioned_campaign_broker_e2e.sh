@@ -218,6 +218,7 @@ starts = [
     index
     for index in (
         text.find("# Permissioned Campaign Broker"),
+        text.find("# Permissioned Campaign Execution Ledger"),
         text.find("# Permissioned Campaign Handoff"),
     )
     if index >= 0
@@ -237,8 +238,8 @@ run_harness() {
     local stdout_path="$2"
     local stderr_path="$3"
     shift 3
-    local status=0 manifest_path="" out_path="" summary_out_path=""
-    local sync_dir sync_manifest json_raw markdown_raw command_text
+    local status=0 manifest_path="" ledger_path="" out_path="" summary_out_path=""
+    local sync_dir sync_manifest sync_ledger json_raw markdown_raw command_text
     local -a base_args=()
     local arg
     while (($# > 0)); do
@@ -246,6 +247,10 @@ run_harness() {
         case "$arg" in
             --manifest)
                 manifest_path="$2"
+                shift 2
+                ;;
+            --ledger)
+                ledger_path="$2"
                 shift 2
                 ;;
             --out)
@@ -277,6 +282,11 @@ run_harness() {
     sync_manifest="$sync_dir/manifest.json"
     cp "$manifest_path" "$sync_manifest"
     base_args+=("--manifest" "$sync_manifest")
+    if [[ -n "$ledger_path" ]]; then
+        sync_ledger="$sync_dir/ledger.json"
+        cp "$ledger_path" "$sync_ledger"
+        base_args+=("--ledger" "$sync_ledger")
+    fi
 
     json_raw="${stdout_path}.json.rch.log"
     markdown_raw="${stdout_path}.markdown.rch.log"
@@ -317,7 +327,8 @@ write_detailed_result() {
     local summary="$2"
     python3 - "$DETAILED_RESULT_JSON" "$verdict" "$summary" "$PASS_COUNT" "$FAIL_COUNT" "$TOTAL" \
         "$COMMAND_TRANSCRIPT" "$SAFETY_REPORT_JSON" "$XFSTESTS_PACKET_JSON" "$SWARM_PACKET_JSON" \
-        "$SWARM_BLOCKER_PACKET_JSON" "$XFSTESTS_MISSING_INPUTS_JSON" "$SWARM_MISSING_INPUTS_JSON" <<'PY'
+        "$SWARM_BLOCKER_PACKET_JSON" "$XFSTESTS_LEDGER_JSON" "$SWARM_LEDGER_JSON" \
+        "$XFSTESTS_MISSING_INPUTS_JSON" "$SWARM_MISSING_INPUTS_JSON" <<'PY'
 from __future__ import annotations
 
 import json
@@ -336,6 +347,8 @@ import sys
     xfstests_packet,
     swarm_packet,
     swarm_blocker_packet,
+    xfstests_ledger,
+    swarm_ledger,
     xfstests_missing,
     swarm_missing,
 ) = sys.argv[1:]
@@ -359,6 +372,10 @@ payload = {
         swarm_packet,
         swarm_blocker_packet,
     ],
+    "execution_ledgers": [
+        xfstests_ledger,
+        swarm_ledger,
+    ],
     "blocker_artifacts": [
         xfstests_missing,
         swarm_missing,
@@ -378,9 +395,10 @@ ARTIFACT_ROOT_REL="$E2E_LOG_REL/permissioned_campaign_broker"
 MANIFEST_DIR="$ARTIFACT_ROOT/manifests"
 REPORT_DIR="$ARTIFACT_ROOT/reports"
 PACKET_DIR="$ARTIFACT_ROOT/packets"
+LEDGER_DIR="$ARTIFACT_ROOT/ledgers"
 BLOCKER_DIR="$ARTIFACT_ROOT/blockers"
 LOG_DIR="$ARTIFACT_ROOT/logs"
-mkdir -p "$RCH_INPUT_ROOT" "$MANIFEST_DIR" "$REPORT_DIR" "$PACKET_DIR" "$BLOCKER_DIR" "$LOG_DIR"
+mkdir -p "$RCH_INPUT_ROOT" "$MANIFEST_DIR" "$REPORT_DIR" "$PACKET_DIR" "$LEDGER_DIR" "$BLOCKER_DIR" "$LOG_DIR"
 
 COMMAND_TRANSCRIPT="$ARTIFACT_ROOT/command_transcript.tsv"
 DETAILED_RESULT_JSON="$ARTIFACT_ROOT/permissioned_campaign_broker_result.json"
@@ -408,6 +426,15 @@ SWARM_PACKET_MD="$PACKET_DIR/swarm_handoff_packet.md"
 SWARM_BLOCKER_PACKET_JSON="$PACKET_DIR/swarm_blocker_handoff_packet.json"
 SWARM_BLOCKER_PACKET_MD="$PACKET_DIR/swarm_blocker_handoff_packet.md"
 
+XFSTESTS_LEDGER_JSON="$LEDGER_DIR/xfstests_execution_ledger.json"
+XFSTESTS_LEDGER_REPORT_JSON="$REPORT_DIR/xfstests_execution_ledger_report.json"
+XFSTESTS_LEDGER_REPORT_MD="$REPORT_DIR/xfstests_execution_ledger_report.md"
+SWARM_LEDGER_JSON="$LEDGER_DIR/swarm_execution_ledger.json"
+SWARM_LEDGER_REPORT_JSON="$REPORT_DIR/swarm_execution_ledger_report.json"
+SWARM_LEDGER_REPORT_MD="$REPORT_DIR/swarm_execution_ledger_report.md"
+INVALID_LEDGER_JSON="$LEDGER_DIR/invalid_dry_run_pass_ledger.json"
+INVALID_LEDGER_REPORT_JSON="$REPORT_DIR/invalid_dry_run_pass_ledger_report.json"
+
 XFSTESTS_MISSING_INPUTS_JSON="$BLOCKER_DIR/xfstests_missing_inputs.json"
 SWARM_MISSING_INPUTS_JSON="$BLOCKER_DIR/swarm_missing_inputs.json"
 
@@ -428,6 +455,7 @@ if run_capture "permissioned_broker_write_fixtures" "$FIXTURE_STDOUT" "$FIXTURE_
 from __future__ import annotations
 
 import json
+import hashlib
 import pathlib
 import sys
 from datetime import datetime, timezone
@@ -695,10 +723,187 @@ invalid_manifest["campaign_id"] = "bd-rchk3.3-invalid-missing-ack"
 invalid_manifest["required_ack"] = dict(invalid_manifest["required_ack"])
 invalid_manifest["required_ack"]["exact_value"] = ""
 
+
+def command_plan_hash(manifest: dict) -> str:
+    hasher = hashlib.sha256()
+    parts: list[str] = [manifest["campaign_id"], manifest["lane_kind"]]
+    for item in manifest["exact_commands"]:
+        parts.extend([item["command_id"], item["command_role"], item["exact_command"]])
+    for part in parts:
+        hasher.update(part.encode("utf-8"))
+        hasher.update(b"\0")
+    return "sha256:" + hasher.hexdigest()
+
+
+def fixture_sha256(seed: str) -> str:
+    return "sha256:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+def artifact(artifact_id: str, path: str, role: str, stale: bool = False) -> dict:
+    return {
+        "artifact_id": artifact_id,
+        "path": path,
+        "sha256": fixture_sha256(path),
+        "role": role,
+        "stale": stale,
+    }
+
+
+def ledger_step(
+    step_id: str,
+    command_id: str,
+    status: str,
+    raw_logs: list[str],
+    checkpoints: list[str],
+    note: str,
+) -> dict:
+    return {
+        "step_id": step_id,
+        "command_id": command_id,
+        "status": status,
+        "started_at": reference_timestamp,
+        "finished_at": reference_timestamp,
+        "raw_log_paths": raw_logs,
+        "checkpoint_artifacts": checkpoints,
+        "note": note,
+    }
+
+
+def execution_ledger(manifest: dict, final_status: str, resumed: bool = False) -> dict:
+    raw_log = rel("logs", f"{manifest['campaign_id']}.raw.log")
+    checkpoint = rel("ledgers", f"{manifest['campaign_id']}.checkpoint.json")
+    cleanup_report = rel("ledgers", f"{manifest['campaign_id']}.cleanup.json")
+    lane_artifact = rel("ledgers", f"{manifest['campaign_id']}.proof-lane.json")
+    steps = [
+        ledger_step(
+            "step-00-running",
+            manifest["exact_commands"][-1]["command_id"],
+            "running",
+            [raw_log],
+            [],
+            "synthetic permissioned command entered running state without starting a real workload",
+        )
+    ]
+    if resumed:
+        steps.extend(
+            [
+                ledger_step(
+                    "step-01-interrupted",
+                    manifest["exact_commands"][-1]["command_id"],
+                    "interrupted",
+                    [raw_log],
+                    [checkpoint],
+                    "synthetic partial run checkpoint preserved for resume handoff",
+                ),
+                ledger_step(
+                    "step-02-resumed",
+                    manifest["exact_commands"][-1]["command_id"],
+                    "resumed",
+                    [raw_log],
+                    [checkpoint],
+                    "synthetic resume token points at the preserved checkpoint",
+                ),
+            ]
+        )
+    else:
+        steps.append(
+            ledger_step(
+                f"step-01-{final_status}",
+                manifest["exact_commands"][-1]["command_id"],
+                final_status,
+                [raw_log],
+                [],
+                f"synthetic {final_status} terminal state; no permissioned command was started",
+            )
+        )
+    terminal = final_status in {"passed", "failed", "cleanup_failed", "artifact_stale"} and not resumed
+    artifacts = [
+        artifact("raw-log", raw_log, "raw_log"),
+        artifact("resume-checkpoint", checkpoint, "resume_checkpoint"),
+        artifact("proof-lane", lane_artifact, "proof_bundle_lane"),
+    ]
+    if terminal:
+        artifacts.append(artifact("cleanup-report", cleanup_report, "cleanup_report"))
+    return {
+        "schema_version": 1,
+        "campaign_id": manifest["campaign_id"],
+        "lane_kind": manifest["lane_kind"],
+        "target_beads": manifest["target_beads"],
+        "git_sha": git_sha,
+        "command_plan_hash": command_plan_hash(manifest),
+        "required_ack": {
+            "env_var": manifest["required_ack"]["env_var"],
+            "exact_value": manifest["required_ack"]["exact_value"],
+            "observed_value": manifest["required_ack"]["exact_value"],
+            "recorded_at": reference_timestamp,
+        },
+        "preflight_snapshot": {
+            "snapshot_id": f"{manifest['campaign_id']}-preflight",
+            "observed_at": reference_timestamp,
+            "artifact_path": manifest["preflight_references"][0]["artifact_path"],
+            "git_sha": git_sha,
+            "host_class": "synthetic_permissioned_fixture",
+            "blockers": [],
+        },
+        "steps": steps,
+        "artifacts": artifacts,
+        "resume_state": {
+            "resume_token": "synthetic-resume-token" if resumed else None,
+            "last_checkpoint_artifact": checkpoint,
+            "partial_artifacts_preserved": True,
+            "next_command_id": manifest["exact_commands"][-1]["command_id"],
+        },
+        "cleanup": {
+            "status": "preserved_artifacts" if terminal else "not_started",
+            "report_path": cleanup_report if terminal else None,
+            "completed_at": reference_timestamp if terminal else None,
+        },
+        "proof_bundle_lane_candidates": [
+            {
+                "lane_id": manifest["lane_kind"],
+                "artifact_path": lane_artifact,
+                "promotion_status": "candidate" if final_status == "passed" else "blocked",
+                "note": "synthetic dry-run ledger keeps this as a candidate until raw operator artifacts exist",
+            }
+        ],
+        "product_evidence_claim": "executed_evidence_recorded" if final_status == "passed" else "none",
+    }
+
+
+xfstests_ledger = execution_ledger(xfstests_manifest, "failed")
+swarm_ledger = execution_ledger(swarm_manifest(True), "resumed", resumed=True)
+invalid_dry_run_pass_ledger = {
+    **execution_ledger(xfstests_manifest, "passed"),
+    "steps": [
+        ledger_step(
+            "step-00-not-authorized",
+            "xfstests_preflight",
+            "not_authorized",
+            [],
+            [],
+            "operator ACK missing; packet must remain a dry-run handoff",
+        )
+    ],
+    "required_ack": {
+        "env_var": "XFSTESTS_REAL_RUN_ACK",
+        "exact_value": "xfstests-may-mutate-test-and-scratch-devices",
+        "observed_value": None,
+        "recorded_at": None,
+    },
+    "cleanup": {"status": "not_started", "report_path": None, "completed_at": None},
+    "product_evidence_claim": "packet_counts_as_pass_fail",
+}
+
 write_json(manifest_dir / "xfstests_ready_manifest.json", xfstests_manifest)
 write_json(manifest_dir / "swarm_ready_manifest.json", swarm_manifest(True))
 write_json(manifest_dir / "swarm_blocker_manifest.json", swarm_manifest(False))
 write_json(manifest_dir / "invalid_missing_ack_manifest.json", invalid_manifest)
+write_json(manifest_dir.parent / "ledgers" / "xfstests_execution_ledger.json", xfstests_ledger)
+write_json(manifest_dir.parent / "ledgers" / "swarm_execution_ledger.json", swarm_ledger)
+write_json(
+    manifest_dir.parent / "ledgers" / "invalid_dry_run_pass_ledger.json",
+    invalid_dry_run_pass_ledger,
+)
 
 write_json(
     blocker_dir / "xfstests_missing_inputs.json",
@@ -763,6 +968,7 @@ write_json(
         "allowed_commands_executed": [
             "validate-permissioned-campaign-broker",
             "generate-permissioned-campaign-packet",
+            "validate-permissioned-campaign-ledger",
         ],
         "cleanup_status": "preserved_artifacts",
         "artifact_root": artifact_root.as_posix(),
@@ -781,6 +987,9 @@ if jq empty \
     "$SWARM_MANIFEST" \
     "$SWARM_BLOCKER_MANIFEST" \
     "$INVALID_MANIFEST" \
+    "$XFSTESTS_LEDGER_JSON" \
+    "$SWARM_LEDGER_JSON" \
+    "$INVALID_LEDGER_JSON" \
     "$XFSTESTS_MISSING_INPUTS_JSON" \
     "$SWARM_MISSING_INPUTS_JSON" \
     "$SAFETY_REPORT_JSON"; then
@@ -900,7 +1109,63 @@ else
     scenario_result "permissioned_broker_swarm_blocker_packet" "FAIL" "swarm blocker packet contract failed"
 fi
 
-e2e_step "Scenario 7: missing inputs produce structured blocker artifacts"
+e2e_step "Scenario 7: synthetic xfstests and swarm execution ledgers validate"
+XFSTESTS_LEDGER_STDOUT="$LOG_DIR/xfstests_ledger.stdout"
+XFSTESTS_LEDGER_STDERR="$LOG_DIR/xfstests_ledger.stderr"
+SWARM_LEDGER_STDOUT="$LOG_DIR/swarm_ledger.stdout"
+SWARM_LEDGER_STDERR="$LOG_DIR/swarm_ledger.stderr"
+if run_harness "permissioned_broker_xfstests_ledger" "$XFSTESTS_LEDGER_STDOUT" "$XFSTESTS_LEDGER_STDERR" \
+    validate-permissioned-campaign-ledger \
+    --manifest "$XFSTESTS_MANIFEST" \
+    --ledger "$XFSTESTS_LEDGER_JSON" \
+    --current-git-sha "$GIT_SHA" \
+    --out "$XFSTESTS_LEDGER_REPORT_JSON" \
+    --summary-out "$XFSTESTS_LEDGER_REPORT_MD" \
+    && run_harness "permissioned_broker_swarm_ledger" "$SWARM_LEDGER_STDOUT" "$SWARM_LEDGER_STDERR" \
+        validate-permissioned-campaign-ledger \
+        --manifest "$SWARM_MANIFEST" \
+        --ledger "$SWARM_LEDGER_JSON" \
+        --current-git-sha "$GIT_SHA" \
+        --out "$SWARM_LEDGER_REPORT_JSON" \
+        --summary-out "$SWARM_LEDGER_REPORT_MD" \
+    && jq -e '
+        .valid == true
+        and .final_status == "failed"
+        and .cleanup_status == "preserved_artifacts"
+        and .product_evidence_claim == "none"
+    ' "$XFSTESTS_LEDGER_REPORT_JSON" >/dev/null \
+    && jq -e '
+        .valid == true
+        and .final_status == "resumed"
+        and .cleanup_status == "not_started"
+        and (.proof_bundle_lane_candidates | length == 1)
+    ' "$SWARM_LEDGER_REPORT_JSON" >/dev/null \
+    && grep -q "Permissioned Campaign Execution Ledger" "$XFSTESTS_LEDGER_REPORT_MD"; then
+    scenario_result "permissioned_broker_execution_ledgers_validate" "PASS" "synthetic xfstests and swarm ledgers validated"
+else
+    scenario_result "permissioned_broker_execution_ledgers_validate" "FAIL" "synthetic execution ledger validation failed"
+fi
+
+e2e_step "Scenario 8: dry-run packets cannot be promoted as pass evidence"
+INVALID_LEDGER_STDOUT="$LOG_DIR/invalid_dry_run_pass_ledger.stdout"
+INVALID_LEDGER_STDERR="$LOG_DIR/invalid_dry_run_pass_ledger.stderr"
+set +e
+run_harness "permissioned_broker_invalid_dry_run_ledger" "$INVALID_LEDGER_STDOUT" "$INVALID_LEDGER_STDERR" \
+    validate-permissioned-campaign-ledger \
+    --manifest "$XFSTESTS_MANIFEST" \
+    --ledger "$INVALID_LEDGER_JSON" \
+    --current-git-sha "$GIT_SHA" \
+    --out "$INVALID_LEDGER_REPORT_JSON"
+INVALID_LEDGER_STATUS=$?
+set -e
+if [[ "$INVALID_LEDGER_STATUS" -ne 0 ]] \
+    && jq -e '.valid == false and (.issues | any(.code == "dry_run_packet_as_pass_evidence"))' "$INVALID_LEDGER_REPORT_JSON" >/dev/null; then
+    scenario_result "permissioned_broker_invalid_dry_run_ledger_refused" "PASS" "dry-run pass-evidence ledger refused"
+else
+    scenario_result "permissioned_broker_invalid_dry_run_ledger_refused" "FAIL" "dry-run pass-evidence ledger was not refused"
+fi
+
+e2e_step "Scenario 9: missing inputs produce structured blocker artifacts"
 if jq -e '
     .permissioned_execution_attempted == false
     and .cleanup_status == "not_started_dry_run"
@@ -921,7 +1186,7 @@ else
     scenario_result "permissioned_broker_missing_inputs_blockers" "FAIL" "missing input blocker artifact contract failed"
 fi
 
-e2e_step "Scenario 8: invalid manifest is refused before packet generation"
+e2e_step "Scenario 10: invalid manifest is refused before packet generation"
 INVALID_STDOUT="$LOG_DIR/invalid_manifest.stdout"
 INVALID_STDERR="$LOG_DIR/invalid_manifest.stderr"
 set +e
@@ -938,7 +1203,7 @@ else
     scenario_result "permissioned_broker_invalid_manifest_refused" "FAIL" "invalid manifest was not refused"
 fi
 
-e2e_step "Scenario 9: non-execution safety report and command transcript are complete"
+e2e_step "Scenario 11: non-execution safety report and command transcript are complete"
 if jq -e '
     .permissioned_execution_attempted == false
     and .mounted_workload_started == false

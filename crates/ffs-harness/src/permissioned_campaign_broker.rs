@@ -11,6 +11,7 @@
 use crate::artifact_manifest::parse_manifest_timestamp_epoch_days;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path};
@@ -18,6 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const PERMISSIONED_CAMPAIGN_BROKER_SCHEMA_VERSION: u32 = 1;
 pub const PERMISSIONED_CAMPAIGN_HANDOFF_PACKET_SCHEMA_VERSION: u32 = 1;
+pub const PERMISSIONED_CAMPAIGN_EXECUTION_LEDGER_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_PERMISSIONED_CAMPAIGN_BROKER_MANIFEST: &str =
     "docs/permissioned-campaign-broker-manifest.json";
 pub const DEFAULT_PERMISSIONED_CAMPAIGN_PREFLIGHT_MAX_AGE_DAYS: u32 = 14;
@@ -254,6 +256,11 @@ impl Default for PermissionedCampaignBrokerValidationConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PermissionedCampaignExecutionLedgerValidationConfig {
+    pub current_git_sha: Option<String>,
+}
+
 impl PermissionedCampaignBrokerValidationConfig {
     #[must_use]
     pub fn with_current_reference() -> Self {
@@ -390,6 +397,237 @@ pub struct PermissionedCampaignHandoffCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignExecutionLedger {
+    pub schema_version: u32,
+    pub campaign_id: String,
+    pub lane_kind: PermissionedCampaignLaneKind,
+    pub target_beads: Vec<String>,
+    pub git_sha: String,
+    pub command_plan_hash: String,
+    pub required_ack: PermissionedCampaignLedgerAck,
+    pub preflight_snapshot: PermissionedCampaignLedgerPreflightSnapshot,
+    pub steps: Vec<PermissionedCampaignLedgerStep>,
+    pub artifacts: Vec<PermissionedCampaignLedgerArtifact>,
+    pub resume_state: PermissionedCampaignLedgerResumeState,
+    pub cleanup: PermissionedCampaignLedgerCleanup,
+    #[serde(default)]
+    pub proof_bundle_lane_candidates: Vec<PermissionedCampaignProofBundleLaneCandidate>,
+    pub product_evidence_claim: PermissionedCampaignProductEvidenceClaim,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignLedgerAck {
+    pub env_var: String,
+    pub exact_value: String,
+    pub observed_value: Option<String>,
+    pub recorded_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignLedgerPreflightSnapshot {
+    pub snapshot_id: String,
+    pub observed_at: String,
+    pub artifact_path: String,
+    pub git_sha: String,
+    pub host_class: String,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignLedgerStep {
+    pub step_id: String,
+    pub command_id: String,
+    pub status: PermissionedCampaignLedgerStepStatus,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    #[serde(default)]
+    pub raw_log_paths: Vec<String>,
+    #[serde(default)]
+    pub checkpoint_artifacts: Vec<String>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionedCampaignLedgerStepStatus {
+    NotAuthorized,
+    PreflightBlocked,
+    Running,
+    Interrupted,
+    Resumed,
+    Passed,
+    Failed,
+    CleanupFailed,
+    ArtifactStale,
+}
+
+impl PermissionedCampaignLedgerStepStatus {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NotAuthorized => "not_authorized",
+            Self::PreflightBlocked => "preflight_blocked",
+            Self::Running => "running",
+            Self::Interrupted => "interrupted",
+            Self::Resumed => "resumed",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::CleanupFailed => "cleanup_failed",
+            Self::ArtifactStale => "artifact_stale",
+        }
+    }
+
+    #[must_use]
+    pub const fn requires_raw_logs(self) -> bool {
+        matches!(
+            self,
+            Self::Running
+                | Self::Interrupted
+                | Self::Resumed
+                | Self::Passed
+                | Self::Failed
+                | Self::CleanupFailed
+                | Self::ArtifactStale
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignLedgerArtifact {
+    pub artifact_id: String,
+    pub path: String,
+    pub sha256: String,
+    pub role: PermissionedCampaignLedgerArtifactRole,
+    pub stale: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionedCampaignLedgerArtifactRole {
+    RawLog,
+    Stdout,
+    Stderr,
+    Report,
+    ResumeCheckpoint,
+    CleanupReport,
+    ProofBundleLane,
+}
+
+impl PermissionedCampaignLedgerArtifactRole {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::RawLog => "raw_log",
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+            Self::Report => "report",
+            Self::ResumeCheckpoint => "resume_checkpoint",
+            Self::CleanupReport => "cleanup_report",
+            Self::ProofBundleLane => "proof_bundle_lane",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignLedgerResumeState {
+    pub resume_token: Option<String>,
+    pub last_checkpoint_artifact: Option<String>,
+    pub partial_artifacts_preserved: bool,
+    pub next_command_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignLedgerCleanup {
+    pub status: PermissionedCampaignLedgerCleanupStatus,
+    pub report_path: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionedCampaignLedgerCleanupStatus {
+    NotStarted,
+    Clean,
+    PreservedArtifacts,
+    ManualCleanupRequired,
+    CleanupFailed,
+}
+
+impl PermissionedCampaignLedgerCleanupStatus {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NotStarted => "not_started",
+            Self::Clean => "clean",
+            Self::PreservedArtifacts => "preserved_artifacts",
+            Self::ManualCleanupRequired => "manual_cleanup_required",
+            Self::CleanupFailed => "cleanup_failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignProofBundleLaneCandidate {
+    pub lane_id: String,
+    pub artifact_path: String,
+    pub promotion_status: PermissionedCampaignProofBundlePromotionStatus,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionedCampaignProofBundlePromotionStatus {
+    Candidate,
+    Blocked,
+    Promoted,
+}
+
+impl PermissionedCampaignProofBundlePromotionStatus {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Candidate => "candidate",
+            Self::Blocked => "blocked",
+            Self::Promoted => "promoted",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignExecutionLedgerReport {
+    pub schema_version: u32,
+    pub campaign_id: String,
+    pub lane_kind: String,
+    pub valid: bool,
+    pub git_sha: String,
+    pub expected_command_plan_hash: String,
+    pub observed_command_plan_hash: String,
+    pub final_status: Option<String>,
+    pub cleanup_status: String,
+    pub product_evidence_claim: String,
+    pub target_beads: Vec<String>,
+    pub artifact_count: usize,
+    pub proof_bundle_lane_candidates: Vec<PermissionedCampaignProofBundleLaneCandidateSummary>,
+    pub issue_count: usize,
+    pub issues: Vec<PermissionedCampaignExecutionLedgerIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignProofBundleLaneCandidateSummary {
+    pub lane_id: String,
+    pub artifact_path: String,
+    pub promotion_status: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionedCampaignExecutionLedgerIssue {
+    pub path: String,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionedXfstestsBrokerAdapterInput {
     pub campaign_id: String,
     pub generated_at: String,
@@ -480,6 +718,23 @@ pub fn load_permissioned_campaign_broker_manifest(
     serde_json::from_str(&text).with_context(|| {
         format!(
             "invalid permissioned campaign broker manifest JSON {}",
+            path.display()
+        )
+    })
+}
+
+pub fn load_permissioned_campaign_execution_ledger(
+    path: &Path,
+) -> Result<PermissionedCampaignExecutionLedger> {
+    let text = fs::read_to_string(path).with_context(|| {
+        format!(
+            "failed to read permissioned campaign execution ledger {}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&text).with_context(|| {
+        format!(
+            "invalid permissioned campaign execution ledger JSON {}",
             path.display()
         )
     })
@@ -668,6 +923,141 @@ pub fn fail_on_permissioned_campaign_broker_errors(
     } else {
         bail!(
             "permissioned campaign broker validation failed: issues={}",
+            report.issue_count
+        )
+    }
+}
+
+#[must_use]
+pub fn permissioned_campaign_command_plan_hash(
+    manifest: &PermissionedCampaignBrokerManifest,
+) -> String {
+    let mut hasher = Sha256::new();
+    ledger_hash_part(&mut hasher, &manifest.campaign_id);
+    ledger_hash_part(&mut hasher, manifest.lane_kind.label());
+    for command in &manifest.exact_commands {
+        ledger_hash_part(&mut hasher, &command.command_id);
+        ledger_hash_part(&mut hasher, command.command_role.label());
+        ledger_hash_part(&mut hasher, &command.exact_command);
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+#[must_use]
+pub fn validate_permissioned_campaign_execution_ledger(
+    manifest: &PermissionedCampaignBrokerManifest,
+    ledger: &PermissionedCampaignExecutionLedger,
+    config: &PermissionedCampaignExecutionLedgerValidationConfig,
+) -> PermissionedCampaignExecutionLedgerReport {
+    let mut issues = Vec::new();
+    validate_ledger_top_level(manifest, ledger, config, &mut issues);
+    validate_ledger_ack(manifest, ledger, &mut issues);
+    validate_ledger_preflight_snapshot(ledger, &mut issues);
+    validate_ledger_steps(manifest, ledger, &mut issues);
+    validate_ledger_artifacts(ledger, &mut issues);
+    validate_ledger_resume_state(ledger, &mut issues);
+    validate_ledger_cleanup(ledger, &mut issues);
+    validate_ledger_proof_bundle_candidates(ledger, &mut issues);
+    validate_ledger_claim_boundary(ledger, &mut issues);
+
+    PermissionedCampaignExecutionLedgerReport {
+        schema_version: ledger.schema_version,
+        campaign_id: ledger.campaign_id.clone(),
+        lane_kind: ledger.lane_kind.label().to_owned(),
+        valid: issues.is_empty(),
+        git_sha: ledger.git_sha.clone(),
+        expected_command_plan_hash: permissioned_campaign_command_plan_hash(manifest),
+        observed_command_plan_hash: ledger.command_plan_hash.clone(),
+        final_status: ledger
+            .steps
+            .last()
+            .map(|step| step.status.label().to_owned()),
+        cleanup_status: ledger.cleanup.status.label().to_owned(),
+        product_evidence_claim: ledger.product_evidence_claim.label().to_owned(),
+        target_beads: ledger.target_beads.clone(),
+        artifact_count: ledger.artifacts.len(),
+        proof_bundle_lane_candidates: ledger_proof_bundle_candidate_summary(ledger),
+        issue_count: issues.len(),
+        issues,
+    }
+}
+
+#[must_use]
+pub fn render_permissioned_campaign_execution_ledger_markdown(
+    report: &PermissionedCampaignExecutionLedgerReport,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Permissioned Campaign Execution Ledger\n");
+    let _ = writeln!(out, "- Campaign: `{}`", report.campaign_id);
+    let _ = writeln!(out, "- Lane: `{}`", report.lane_kind);
+    let _ = writeln!(out, "- Valid: `{}`", report.valid);
+    let _ = writeln!(
+        out,
+        "- Final status: `{}`",
+        report.final_status.as_deref().unwrap_or("none")
+    );
+    let _ = writeln!(out, "- Cleanup status: `{}`", report.cleanup_status);
+    let _ = writeln!(
+        out,
+        "- Product evidence claim: `{}`",
+        report.product_evidence_claim
+    );
+    let _ = writeln!(out, "- Git SHA: `{}`", report.git_sha);
+    let _ = writeln!(
+        out,
+        "- Command plan hash: `{}`",
+        report.observed_command_plan_hash
+    );
+    let _ = writeln!(
+        out,
+        "- Expected command plan hash: `{}`",
+        report.expected_command_plan_hash
+    );
+    let _ = writeln!(out, "- Artifact count: `{}`", report.artifact_count);
+
+    out.push_str("\n## Target Beads\n\n");
+    for bead in &report.target_beads {
+        let _ = writeln!(out, "- `{bead}`");
+    }
+
+    out.push_str("\n## Proof Bundle Lane Candidates\n\n");
+    out.push_str("| Lane | Promotion status | Artifact | Note |\n");
+    out.push_str("|---|---|---|---|\n");
+    for lane in &report.proof_bundle_lane_candidates {
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | `{}` | {} |",
+            lane.lane_id,
+            lane.promotion_status,
+            lane.artifact_path,
+            markdown_cell(&lane.note)
+        );
+    }
+
+    if report.issues.is_empty() {
+        out.push_str("\n## Issues\n\nnone\n");
+    } else {
+        out.push_str("\n## Issues\n\n");
+        for issue in &report.issues {
+            let _ = writeln!(
+                out,
+                "- `{}` `{}`: {}",
+                issue.path, issue.code, issue.message
+            );
+        }
+    }
+
+    out
+}
+
+pub fn fail_on_permissioned_campaign_execution_ledger_errors(
+    report: &PermissionedCampaignExecutionLedgerReport,
+) -> Result<()> {
+    if report.valid {
+        Ok(())
+    } else {
+        bail!(
+            "permissioned campaign execution ledger validation failed: issues={}",
             report.issue_count
         )
     }
@@ -1794,6 +2184,505 @@ fn validate_exact_commands(
     }
 }
 
+fn validate_ledger_top_level(
+    manifest: &PermissionedCampaignBrokerManifest,
+    ledger: &PermissionedCampaignExecutionLedger,
+    config: &PermissionedCampaignExecutionLedgerValidationConfig,
+    issues: &mut Vec<PermissionedCampaignExecutionLedgerIssue>,
+) {
+    if ledger.schema_version != PERMISSIONED_CAMPAIGN_EXECUTION_LEDGER_SCHEMA_VERSION {
+        push_ledger_issue(
+            issues,
+            "schema_version",
+            "unsupported_schema_version",
+            "schema_version must match the current permissioned campaign execution ledger schema",
+        );
+    }
+    validate_ledger_non_empty(issues, "campaign_id", &ledger.campaign_id);
+    if ledger.campaign_id != manifest.campaign_id {
+        push_ledger_issue(
+            issues,
+            "campaign_id",
+            "campaign_id_mismatch",
+            "ledger campaign_id must match the broker manifest",
+        );
+    }
+    if ledger.lane_kind != manifest.lane_kind {
+        push_ledger_issue(
+            issues,
+            "lane_kind",
+            "lane_kind_mismatch",
+            "ledger lane_kind must match the broker manifest",
+        );
+    }
+    if ledger.target_beads != manifest.target_beads {
+        push_ledger_issue(
+            issues,
+            "target_beads",
+            "target_beads_mismatch",
+            "ledger target_beads must match the broker manifest",
+        );
+    }
+    validate_ledger_non_empty(issues, "git_sha", &ledger.git_sha);
+    if let Some(current_git_sha) = &config.current_git_sha
+        && ledger.git_sha != *current_git_sha
+    {
+        push_ledger_issue(
+            issues,
+            "git_sha",
+            "stale_git_sha",
+            "ledger git_sha does not match the current validation git SHA",
+        );
+    }
+    let expected_hash = permissioned_campaign_command_plan_hash(manifest);
+    if ledger.command_plan_hash != expected_hash {
+        push_ledger_issue(
+            issues,
+            "command_plan_hash",
+            "changed_command_plan",
+            "ledger command_plan_hash must match the broker manifest command plan",
+        );
+    }
+    if !is_valid_sha256_prefixed(&ledger.command_plan_hash) {
+        push_ledger_issue(
+            issues,
+            "command_plan_hash",
+            "invalid_command_plan_hash",
+            "command_plan_hash must be sha256:<64 lowercase hex chars>",
+        );
+    }
+    if ledger.steps.is_empty() {
+        push_ledger_issue(
+            issues,
+            "steps",
+            "missing_ledger_steps",
+            "ledger must include at least one campaign state step",
+        );
+    }
+}
+
+fn validate_ledger_ack(
+    manifest: &PermissionedCampaignBrokerManifest,
+    ledger: &PermissionedCampaignExecutionLedger,
+    issues: &mut Vec<PermissionedCampaignExecutionLedgerIssue>,
+) {
+    validate_ledger_non_empty(issues, "required_ack.env_var", &ledger.required_ack.env_var);
+    validate_ledger_non_empty(
+        issues,
+        "required_ack.exact_value",
+        &ledger.required_ack.exact_value,
+    );
+    if ledger.required_ack.env_var != manifest.required_ack.env_var {
+        push_ledger_issue(
+            issues,
+            "required_ack.env_var",
+            "ack_env_mismatch",
+            "ledger ACK env var must match the broker manifest",
+        );
+    }
+    if ledger.required_ack.exact_value != manifest.required_ack.exact_value {
+        push_ledger_issue(
+            issues,
+            "required_ack.exact_value",
+            "missing_ack_text",
+            "ledger ACK exact value must match the broker manifest",
+        );
+    }
+
+    if ledger_has_permissioned_execution(ledger) {
+        match ledger.required_ack.observed_value.as_deref() {
+            Some(observed) if observed == manifest.required_ack.exact_value => {}
+            Some(_) => push_ledger_issue(
+                issues,
+                "required_ack.observed_value",
+                "ack_value_mismatch",
+                "permissioned execution requires the exact operator ACK value",
+            ),
+            None => push_ledger_issue(
+                issues,
+                "required_ack.observed_value",
+                "missing_ack_text",
+                "permissioned execution requires recorded operator ACK text",
+            ),
+        }
+        if ledger
+            .required_ack
+            .recorded_at
+            .as_deref()
+            .is_none_or(str::is_empty)
+        {
+            push_ledger_issue(
+                issues,
+                "required_ack.recorded_at",
+                "missing_ack_timestamp",
+                "permissioned execution requires an ACK timestamp",
+            );
+        }
+    } else if let Some(observed) = ledger.required_ack.observed_value.as_deref()
+        && observed != manifest.required_ack.exact_value
+    {
+        push_ledger_issue(
+            issues,
+            "required_ack.observed_value",
+            "ack_value_mismatch",
+            "recorded ACK value does not match the manifest",
+        );
+    }
+}
+
+fn validate_ledger_preflight_snapshot(
+    ledger: &PermissionedCampaignExecutionLedger,
+    issues: &mut Vec<PermissionedCampaignExecutionLedgerIssue>,
+) {
+    validate_ledger_non_empty(
+        issues,
+        "preflight_snapshot.snapshot_id",
+        &ledger.preflight_snapshot.snapshot_id,
+    );
+    validate_ledger_non_empty(
+        issues,
+        "preflight_snapshot.observed_at",
+        &ledger.preflight_snapshot.observed_at,
+    );
+    validate_ledger_path(
+        issues,
+        "preflight_snapshot.artifact_path",
+        &ledger.preflight_snapshot.artifact_path,
+    );
+    validate_ledger_non_empty(
+        issues,
+        "preflight_snapshot.git_sha",
+        &ledger.preflight_snapshot.git_sha,
+    );
+    if ledger.preflight_snapshot.git_sha != ledger.git_sha {
+        push_ledger_issue(
+            issues,
+            "preflight_snapshot.git_sha",
+            "preflight_git_sha_mismatch",
+            "preflight snapshot git_sha must match the ledger git_sha",
+        );
+    }
+    validate_ledger_non_empty(
+        issues,
+        "preflight_snapshot.host_class",
+        &ledger.preflight_snapshot.host_class,
+    );
+    if matches!(
+        ledger_final_status(ledger),
+        Some(PermissionedCampaignLedgerStepStatus::Passed)
+    ) && !ledger.preflight_snapshot.blockers.is_empty()
+    {
+        push_ledger_issue(
+            issues,
+            "preflight_snapshot.blockers",
+            "preflight_blockers_not_resolved",
+            "passed ledgers cannot retain unresolved preflight blockers",
+        );
+    }
+}
+
+fn validate_ledger_steps(
+    manifest: &PermissionedCampaignBrokerManifest,
+    ledger: &PermissionedCampaignExecutionLedger,
+    issues: &mut Vec<PermissionedCampaignExecutionLedgerIssue>,
+) {
+    let mut previous_status = None;
+    let mut seen_step_ids = Vec::new();
+    for (index, step) in ledger.steps.iter().enumerate() {
+        let step_path = format!("steps[{index}]");
+        validate_ledger_non_empty(issues, &format!("{step_path}.step_id"), &step.step_id);
+        if seen_step_ids.contains(&step.step_id) {
+            push_ledger_issue(
+                issues,
+                &format!("{step_path}.step_id"),
+                "duplicate_step_id",
+                "ledger step ids must be unique",
+            );
+        }
+        seen_step_ids.push(step.step_id.clone());
+        validate_ledger_non_empty(issues, &format!("{step_path}.command_id"), &step.command_id);
+        if !manifest
+            .exact_commands
+            .iter()
+            .any(|command| command.command_id == step.command_id)
+        {
+            push_ledger_issue(
+                issues,
+                &format!("{step_path}.command_id"),
+                "unknown_command_id",
+                "ledger step command_id must come from the broker manifest command plan",
+            );
+        }
+        if !allowed_ledger_transition(previous_status, step.status) {
+            push_ledger_issue(
+                issues,
+                &step_path,
+                "invalid_state_transition",
+                "ledger step status does not follow the allowed permissioned campaign lifecycle",
+            );
+        }
+        if step.status.requires_raw_logs() && step.raw_log_paths.is_empty() {
+            push_ledger_issue(
+                issues,
+                &format!("{step_path}.raw_log_paths"),
+                "missing_raw_log",
+                "permissioned execution steps must preserve raw log paths",
+            );
+        }
+        for (raw_index, raw_path) in step.raw_log_paths.iter().enumerate() {
+            validate_ledger_path(
+                issues,
+                &format!("{step_path}.raw_log_paths[{raw_index}]"),
+                raw_path,
+            );
+            if !ledger_artifact_path_exists(ledger, raw_path) {
+                push_ledger_issue(
+                    issues,
+                    &format!("{step_path}.raw_log_paths[{raw_index}]"),
+                    "missing_raw_log",
+                    "raw log paths must also appear in ledger artifacts with hashes",
+                );
+            }
+        }
+        for (checkpoint_index, checkpoint_path) in step.checkpoint_artifacts.iter().enumerate() {
+            validate_ledger_path(
+                issues,
+                &format!("{step_path}.checkpoint_artifacts[{checkpoint_index}]"),
+                checkpoint_path,
+            );
+            if !ledger_artifact_path_exists(ledger, checkpoint_path) {
+                push_ledger_issue(
+                    issues,
+                    &format!("{step_path}.checkpoint_artifacts[{checkpoint_index}]"),
+                    "missing_checkpoint_artifact",
+                    "checkpoint artifact paths must also appear in ledger artifacts with hashes",
+                );
+            }
+        }
+        validate_ledger_non_empty(issues, &format!("{step_path}.note"), &step.note);
+        previous_status = Some(step.status);
+    }
+}
+
+fn validate_ledger_artifacts(
+    ledger: &PermissionedCampaignExecutionLedger,
+    issues: &mut Vec<PermissionedCampaignExecutionLedgerIssue>,
+) {
+    if ledger_has_permissioned_execution(ledger) && ledger.artifacts.is_empty() {
+        push_ledger_issue(
+            issues,
+            "artifacts",
+            "missing_artifacts",
+            "permissioned execution ledgers must preserve hashed artifacts",
+        );
+    }
+    for (index, artifact) in ledger.artifacts.iter().enumerate() {
+        let artifact_path = format!("artifacts[{index}]");
+        validate_ledger_non_empty(
+            issues,
+            &format!("{artifact_path}.artifact_id"),
+            &artifact.artifact_id,
+        );
+        validate_ledger_path(issues, &format!("{artifact_path}.path"), &artifact.path);
+        if !is_valid_sha256_prefixed(&artifact.sha256) {
+            push_ledger_issue(
+                issues,
+                &format!("{artifact_path}.sha256"),
+                "invalid_artifact_hash",
+                "artifact sha256 must be sha256:<64 lowercase hex chars>",
+            );
+        }
+    }
+    if matches!(
+        ledger_final_status(ledger),
+        Some(PermissionedCampaignLedgerStepStatus::Passed)
+    ) && ledger.artifacts.iter().any(|artifact| artifact.stale)
+    {
+        push_ledger_issue(
+            issues,
+            "artifacts",
+            "stale_artifact",
+            "passed ledgers cannot include stale artifacts",
+        );
+    }
+    if matches!(
+        ledger_final_status(ledger),
+        Some(PermissionedCampaignLedgerStepStatus::ArtifactStale)
+    ) && !ledger.artifacts.iter().any(|artifact| artifact.stale)
+    {
+        push_ledger_issue(
+            issues,
+            "artifacts",
+            "artifact_stale_without_stale_artifact",
+            "artifact_stale ledgers must identify the stale artifact",
+        );
+    }
+}
+
+fn validate_ledger_resume_state(
+    ledger: &PermissionedCampaignExecutionLedger,
+    issues: &mut Vec<PermissionedCampaignExecutionLedgerIssue>,
+) {
+    if let Some(path) = &ledger.resume_state.last_checkpoint_artifact {
+        validate_ledger_path(issues, "resume_state.last_checkpoint_artifact", path);
+        if !ledger_artifact_path_exists(ledger, path) {
+            push_ledger_issue(
+                issues,
+                "resume_state.last_checkpoint_artifact",
+                "missing_checkpoint_artifact",
+                "resume checkpoint must be present in hashed artifacts",
+            );
+        }
+    }
+    if matches!(
+        ledger_final_status(ledger),
+        Some(PermissionedCampaignLedgerStepStatus::Interrupted)
+    ) && !ledger.resume_state.partial_artifacts_preserved
+    {
+        push_ledger_issue(
+            issues,
+            "resume_state.partial_artifacts_preserved",
+            "partial_artifacts_not_preserved",
+            "interrupted ledgers must preserve partial artifacts for resume",
+        );
+    }
+    if ledger
+        .steps
+        .iter()
+        .any(|step| step.status == PermissionedCampaignLedgerStepStatus::Resumed)
+        && ledger
+            .resume_state
+            .resume_token
+            .as_deref()
+            .is_none_or(str::is_empty)
+    {
+        push_ledger_issue(
+            issues,
+            "resume_state.resume_token",
+            "missing_resume_token",
+            "resumed ledgers must record a resume token",
+        );
+    }
+}
+
+fn validate_ledger_cleanup(
+    ledger: &PermissionedCampaignExecutionLedger,
+    issues: &mut Vec<PermissionedCampaignExecutionLedgerIssue>,
+) {
+    let final_status = ledger_final_status(ledger);
+    let cleanup_required = matches!(
+        final_status,
+        Some(
+            PermissionedCampaignLedgerStepStatus::Passed
+                | PermissionedCampaignLedgerStepStatus::Failed
+                | PermissionedCampaignLedgerStepStatus::CleanupFailed
+                | PermissionedCampaignLedgerStepStatus::ArtifactStale
+        )
+    );
+    if cleanup_required
+        && ledger.cleanup.status == PermissionedCampaignLedgerCleanupStatus::NotStarted
+    {
+        push_ledger_issue(
+            issues,
+            "cleanup.status",
+            "missing_cleanup",
+            "terminal permissioned execution ledgers must record cleanup status",
+        );
+    }
+    if ledger.cleanup.status != PermissionedCampaignLedgerCleanupStatus::NotStarted {
+        match ledger.cleanup.report_path.as_deref() {
+            Some(path) if !path.is_empty() => {
+                validate_ledger_path(issues, "cleanup.report_path", path);
+                if !ledger_artifact_path_exists(ledger, path) {
+                    push_ledger_issue(
+                        issues,
+                        "cleanup.report_path",
+                        "missing_cleanup",
+                        "cleanup report must be preserved as a hashed artifact",
+                    );
+                }
+            }
+            _ => push_ledger_issue(
+                issues,
+                "cleanup.report_path",
+                "missing_cleanup",
+                "cleanup status requires a cleanup report path",
+            ),
+        }
+    }
+}
+
+fn validate_ledger_proof_bundle_candidates(
+    ledger: &PermissionedCampaignExecutionLedger,
+    issues: &mut Vec<PermissionedCampaignExecutionLedgerIssue>,
+) {
+    for (index, candidate) in ledger.proof_bundle_lane_candidates.iter().enumerate() {
+        let candidate_path = format!("proof_bundle_lane_candidates[{index}]");
+        validate_ledger_non_empty(
+            issues,
+            &format!("{candidate_path}.lane_id"),
+            &candidate.lane_id,
+        );
+        validate_ledger_path(
+            issues,
+            &format!("{candidate_path}.artifact_path"),
+            &candidate.artifact_path,
+        );
+        if !ledger_artifact_path_exists(ledger, &candidate.artifact_path) {
+            push_ledger_issue(
+                issues,
+                &format!("{candidate_path}.artifact_path"),
+                "missing_proof_bundle_lane_artifact",
+                "proof-bundle lane candidates must point at a hashed artifact",
+            );
+        }
+        validate_ledger_non_empty(issues, &format!("{candidate_path}.note"), &candidate.note);
+        if candidate.promotion_status == PermissionedCampaignProofBundlePromotionStatus::Promoted
+            && !matches!(
+                ledger_final_status(ledger),
+                Some(PermissionedCampaignLedgerStepStatus::Passed)
+            )
+        {
+            push_ledger_issue(
+                issues,
+                &format!("{candidate_path}.promotion_status"),
+                "premature_proof_bundle_promotion",
+                "proof-bundle lanes can be promoted only after a passed executed run",
+            );
+        }
+    }
+}
+
+fn validate_ledger_claim_boundary(
+    ledger: &PermissionedCampaignExecutionLedger,
+    issues: &mut Vec<PermissionedCampaignExecutionLedgerIssue>,
+) {
+    if ledger.product_evidence_claim
+        == PermissionedCampaignProductEvidenceClaim::PacketCountsAsPassFail
+    {
+        push_ledger_issue(
+            issues,
+            "product_evidence_claim",
+            "dry_run_packet_as_pass_evidence",
+            "dry-run broker packets cannot be marked as pass/fail product evidence",
+        );
+    }
+    if ledger.product_evidence_claim
+        == PermissionedCampaignProductEvidenceClaim::ExecutedEvidenceRecorded
+        && !matches!(
+            ledger_final_status(ledger),
+            Some(PermissionedCampaignLedgerStepStatus::Passed)
+        )
+    {
+        push_ledger_issue(
+            issues,
+            "product_evidence_claim",
+            "executed_evidence_without_pass",
+            "executed evidence claims require a passed permissioned run",
+        );
+    }
+}
+
 fn validate_non_empty(issues: &mut Vec<PermissionedCampaignBrokerIssue>, path: &str, value: &str) {
     if value.trim().is_empty() {
         push_issue(
@@ -1991,6 +2880,118 @@ fn path_under_safe_root(path: &str, roots: &[PermissionedCampaignPathRoot]) -> b
     })
 }
 
+fn ledger_proof_bundle_candidate_summary(
+    ledger: &PermissionedCampaignExecutionLedger,
+) -> Vec<PermissionedCampaignProofBundleLaneCandidateSummary> {
+    ledger
+        .proof_bundle_lane_candidates
+        .iter()
+        .map(
+            |candidate| PermissionedCampaignProofBundleLaneCandidateSummary {
+                lane_id: candidate.lane_id.clone(),
+                artifact_path: candidate.artifact_path.clone(),
+                promotion_status: candidate.promotion_status.label().to_owned(),
+                note: candidate.note.clone(),
+            },
+        )
+        .collect()
+}
+
+fn ledger_hash_part(hasher: &mut Sha256, value: &str) {
+    hasher.update(value.as_bytes());
+    hasher.update([0]);
+}
+
+fn ledger_has_permissioned_execution(ledger: &PermissionedCampaignExecutionLedger) -> bool {
+    ledger
+        .steps
+        .iter()
+        .any(|step| step.status.requires_raw_logs())
+        || ledger.product_evidence_claim
+            == PermissionedCampaignProductEvidenceClaim::ExecutedEvidenceRecorded
+}
+
+fn ledger_final_status(
+    ledger: &PermissionedCampaignExecutionLedger,
+) -> Option<PermissionedCampaignLedgerStepStatus> {
+    ledger.steps.last().map(|step| step.status)
+}
+
+fn ledger_artifact_path_exists(ledger: &PermissionedCampaignExecutionLedger, path: &str) -> bool {
+    ledger
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.path == path)
+}
+
+fn allowed_ledger_transition(
+    previous: Option<PermissionedCampaignLedgerStepStatus>,
+    next: PermissionedCampaignLedgerStepStatus,
+) -> bool {
+    use PermissionedCampaignLedgerStepStatus::{
+        ArtifactStale, CleanupFailed, Failed, Interrupted, NotAuthorized, Passed, PreflightBlocked,
+        Resumed, Running,
+    };
+
+    match previous {
+        None => matches!(next, NotAuthorized | PreflightBlocked | Running),
+        Some(NotAuthorized) => matches!(next, PreflightBlocked | Running),
+        Some(PreflightBlocked) => matches!(next, Resumed | ArtifactStale),
+        Some(Running) => matches!(
+            next,
+            Interrupted | Passed | Failed | CleanupFailed | ArtifactStale
+        ),
+        Some(Interrupted) => matches!(next, Resumed | CleanupFailed),
+        Some(Resumed) => matches!(
+            next,
+            Interrupted | Passed | Failed | CleanupFailed | ArtifactStale
+        ),
+        Some(Passed | Failed | CleanupFailed | ArtifactStale) => false,
+    }
+}
+
+fn is_valid_sha256_prefixed(value: &str) -> bool {
+    let Some(suffix) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    suffix.len() == 64
+        && suffix
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (*byte >= b'a' && *byte <= b'f'))
+}
+
+fn validate_ledger_non_empty(
+    issues: &mut Vec<PermissionedCampaignExecutionLedgerIssue>,
+    path: &str,
+    value: &str,
+) {
+    if value.trim().is_empty() {
+        push_ledger_issue(
+            issues,
+            path,
+            "missing_required_field",
+            "required field must not be empty",
+        );
+    }
+}
+
+fn validate_ledger_path(
+    issues: &mut Vec<PermissionedCampaignExecutionLedgerIssue>,
+    path: &str,
+    value: &str,
+) {
+    validate_ledger_non_empty(issues, path, value);
+    if !is_safe_relative_path(value) {
+        push_ledger_issue(
+            issues,
+            path,
+            "unsafe_path",
+            "path must be a non-empty relative path without parent traversal",
+        );
+    }
+}
+
 fn push_issue(
     issues: &mut Vec<PermissionedCampaignBrokerIssue>,
     path: &str,
@@ -1998,6 +2999,19 @@ fn push_issue(
     message: &str,
 ) {
     issues.push(PermissionedCampaignBrokerIssue {
+        path: path.to_owned(),
+        code: code.to_owned(),
+        message: message.to_owned(),
+    });
+}
+
+fn push_ledger_issue(
+    issues: &mut Vec<PermissionedCampaignExecutionLedgerIssue>,
+    path: &str,
+    code: &str,
+    message: &str,
+) {
+    issues.push(PermissionedCampaignExecutionLedgerIssue {
         path: path.to_owned(),
         code: code.to_owned(),
         message: message.to_owned(),
@@ -2449,6 +3463,179 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn execution_ledger_accepts_supported_state_lifecycle_points() {
+        let cases = [
+            vec![PermissionedCampaignLedgerStepStatus::NotAuthorized],
+            vec![
+                PermissionedCampaignLedgerStepStatus::NotAuthorized,
+                PermissionedCampaignLedgerStepStatus::PreflightBlocked,
+            ],
+            vec![PermissionedCampaignLedgerStepStatus::Running],
+            vec![
+                PermissionedCampaignLedgerStepStatus::Running,
+                PermissionedCampaignLedgerStepStatus::Interrupted,
+            ],
+            vec![
+                PermissionedCampaignLedgerStepStatus::Running,
+                PermissionedCampaignLedgerStepStatus::Interrupted,
+                PermissionedCampaignLedgerStepStatus::Resumed,
+            ],
+            vec![
+                PermissionedCampaignLedgerStepStatus::Running,
+                PermissionedCampaignLedgerStepStatus::Passed,
+            ],
+            vec![
+                PermissionedCampaignLedgerStepStatus::Running,
+                PermissionedCampaignLedgerStepStatus::Failed,
+            ],
+            vec![
+                PermissionedCampaignLedgerStepStatus::Running,
+                PermissionedCampaignLedgerStepStatus::CleanupFailed,
+            ],
+            vec![
+                PermissionedCampaignLedgerStepStatus::Running,
+                PermissionedCampaignLedgerStepStatus::ArtifactStale,
+            ],
+        ];
+
+        let manifest = valid_xfstests_manifest();
+        for statuses in cases {
+            let ledger = valid_execution_ledger(&manifest, &statuses);
+            let report = validate_permissioned_campaign_execution_ledger(
+                &manifest,
+                &ledger,
+                &ledger_config(),
+            );
+            assert!(
+                report.valid,
+                "statuses={statuses:?} issues={:?}",
+                report.issues
+            );
+        }
+    }
+
+    #[test]
+    fn execution_ledger_rejects_missing_ack_for_executed_run() {
+        let manifest = valid_xfstests_manifest();
+        let mut ledger = valid_execution_ledger(
+            &manifest,
+            &[
+                PermissionedCampaignLedgerStepStatus::Running,
+                PermissionedCampaignLedgerStepStatus::Passed,
+            ],
+        );
+        ledger.required_ack.observed_value = None;
+        ledger.required_ack.recorded_at = None;
+        assert_ledger_issue(&manifest, &ledger, "missing_ack_text");
+    }
+
+    #[test]
+    fn execution_ledger_rejects_changed_command_plan() {
+        let manifest = valid_xfstests_manifest();
+        let mut ledger = valid_execution_ledger(
+            &manifest,
+            &[PermissionedCampaignLedgerStepStatus::NotAuthorized],
+        );
+        ledger.command_plan_hash =
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned();
+        assert_ledger_issue(&manifest, &ledger, "changed_command_plan");
+    }
+
+    #[test]
+    fn execution_ledger_rejects_stale_git_sha() {
+        let manifest = valid_xfstests_manifest();
+        let ledger = valid_execution_ledger(
+            &manifest,
+            &[PermissionedCampaignLedgerStepStatus::NotAuthorized],
+        );
+        let report = validate_permissioned_campaign_execution_ledger(
+            &manifest,
+            &ledger,
+            &PermissionedCampaignExecutionLedgerValidationConfig {
+                current_git_sha: Some("different-sha".to_owned()),
+            },
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "stale_git_sha"),
+            "{:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn execution_ledger_rejects_missing_raw_logs() {
+        let manifest = valid_xfstests_manifest();
+        let mut ledger =
+            valid_execution_ledger(&manifest, &[PermissionedCampaignLedgerStepStatus::Running]);
+        ledger.steps[0].raw_log_paths.clear();
+        assert_ledger_issue(&manifest, &ledger, "missing_raw_log");
+    }
+
+    #[test]
+    fn execution_ledger_rejects_missing_cleanup_for_terminal_run() {
+        let manifest = valid_xfstests_manifest();
+        let mut ledger = valid_execution_ledger(
+            &manifest,
+            &[
+                PermissionedCampaignLedgerStepStatus::Running,
+                PermissionedCampaignLedgerStepStatus::Passed,
+            ],
+        );
+        ledger.cleanup.status = PermissionedCampaignLedgerCleanupStatus::NotStarted;
+        ledger.cleanup.report_path = None;
+        assert_ledger_issue(&manifest, &ledger, "missing_cleanup");
+    }
+
+    #[test]
+    fn execution_ledger_rejects_dry_run_packet_as_pass_evidence() {
+        let manifest = valid_xfstests_manifest();
+        let mut ledger = valid_execution_ledger(
+            &manifest,
+            &[PermissionedCampaignLedgerStepStatus::NotAuthorized],
+        );
+        ledger.product_evidence_claim =
+            PermissionedCampaignProductEvidenceClaim::PacketCountsAsPassFail;
+        assert_ledger_issue(&manifest, &ledger, "dry_run_packet_as_pass_evidence");
+    }
+
+    #[test]
+    fn execution_ledger_rejects_invalid_state_transition() {
+        let manifest = valid_xfstests_manifest();
+        let ledger = valid_execution_ledger(
+            &manifest,
+            &[
+                PermissionedCampaignLedgerStepStatus::Running,
+                PermissionedCampaignLedgerStepStatus::Passed,
+                PermissionedCampaignLedgerStepStatus::Resumed,
+            ],
+        );
+        assert_ledger_issue(&manifest, &ledger, "invalid_state_transition");
+    }
+
+    #[test]
+    fn execution_ledger_markdown_explains_resume_and_lane_candidates() {
+        let manifest = valid_xfstests_manifest();
+        let ledger = valid_execution_ledger(
+            &manifest,
+            &[
+                PermissionedCampaignLedgerStepStatus::Running,
+                PermissionedCampaignLedgerStepStatus::Interrupted,
+                PermissionedCampaignLedgerStepStatus::Resumed,
+            ],
+        );
+        let report =
+            validate_permissioned_campaign_execution_ledger(&manifest, &ledger, &ledger_config());
+        assert!(report.valid, "{:?}", report.issues);
+        let markdown = render_permissioned_campaign_execution_ledger_markdown(&report);
+        assert!(markdown.contains("Permissioned Campaign Execution Ledger"));
+        assert!(markdown.contains("Proof Bundle Lane Candidates"));
+        assert!(markdown.contains("resume_checkpoint"));
+    }
+
     fn assert_valid(manifest: &PermissionedCampaignBrokerManifest) {
         let report = validate_permissioned_campaign_broker_manifest(manifest, &config());
         assert!(report.valid, "{:?}", report.issues);
@@ -2465,9 +3652,29 @@ mod tests {
         );
     }
 
+    fn assert_ledger_issue(
+        manifest: &PermissionedCampaignBrokerManifest,
+        ledger: &PermissionedCampaignExecutionLedger,
+        code: &str,
+    ) {
+        let report =
+            validate_permissioned_campaign_execution_ledger(manifest, ledger, &ledger_config());
+        assert!(
+            report.issues.iter().any(|issue| issue.code == code),
+            "missing ledger issue {code}; got {:?}",
+            report.issues
+        );
+    }
+
     fn config() -> PermissionedCampaignBrokerValidationConfig {
         PermissionedCampaignBrokerValidationConfig {
             reference_epoch_days: reference_epoch_days(),
+        }
+    }
+
+    fn ledger_config() -> PermissionedCampaignExecutionLedgerValidationConfig {
+        PermissionedCampaignExecutionLedgerValidationConfig {
+            current_git_sha: Some("abcdef123456".to_owned()),
         }
     }
 
@@ -2483,6 +3690,189 @@ mod tests {
             generated_by: "FrostyRobin".to_owned(),
             git_sha: "abcdef123456".to_owned(),
         }
+    }
+
+    fn valid_execution_ledger(
+        manifest: &PermissionedCampaignBrokerManifest,
+        statuses: &[PermissionedCampaignLedgerStepStatus],
+    ) -> PermissionedCampaignExecutionLedger {
+        let has_execution = statuses.iter().any(|status| status.requires_raw_logs());
+        let final_status = statuses.last().copied();
+        let terminal_cleanup = matches!(
+            final_status,
+            Some(
+                PermissionedCampaignLedgerStepStatus::Passed
+                    | PermissionedCampaignLedgerStepStatus::Failed
+                    | PermissionedCampaignLedgerStepStatus::CleanupFailed
+                    | PermissionedCampaignLedgerStepStatus::ArtifactStale
+            )
+        );
+        let mut artifacts = Vec::new();
+        if has_execution {
+            artifacts.push(ledger_artifact(
+                "raw-log",
+                "artifacts/xfstests/real-run/raw.log",
+                PermissionedCampaignLedgerArtifactRole::RawLog,
+                final_status == Some(PermissionedCampaignLedgerStepStatus::ArtifactStale),
+            ));
+            artifacts.push(ledger_artifact(
+                "resume-checkpoint",
+                "artifacts/xfstests/real-run/checkpoint.json",
+                PermissionedCampaignLedgerArtifactRole::ResumeCheckpoint,
+                false,
+            ));
+            artifacts.push(ledger_artifact(
+                "proof-lane",
+                "artifacts/xfstests/real-run/proof/xfstests.json",
+                PermissionedCampaignLedgerArtifactRole::ProofBundleLane,
+                false,
+            ));
+        }
+        if terminal_cleanup {
+            artifacts.push(ledger_artifact(
+                "cleanup-report",
+                "artifacts/xfstests/real-run/cleanup.json",
+                PermissionedCampaignLedgerArtifactRole::CleanupReport,
+                false,
+            ));
+        }
+
+        let steps = statuses
+            .iter()
+            .enumerate()
+            .map(|(index, status)| {
+                let raw_log_paths = if status.requires_raw_logs() {
+                    vec!["artifacts/xfstests/real-run/raw.log".to_owned()]
+                } else {
+                    Vec::new()
+                };
+                let checkpoint_artifacts = if matches!(
+                    status,
+                    PermissionedCampaignLedgerStepStatus::Interrupted
+                        | PermissionedCampaignLedgerStepStatus::Resumed
+                ) {
+                    vec!["artifacts/xfstests/real-run/checkpoint.json".to_owned()]
+                } else {
+                    Vec::new()
+                };
+                PermissionedCampaignLedgerStep {
+                    step_id: format!("step-{index:02}-{}", status.label()),
+                    command_id: manifest
+                        .exact_commands
+                        .get(usize::from(index > 0))
+                        .map_or_else(
+                            || manifest.exact_commands[0].command_id.clone(),
+                            |command| command.command_id.clone(),
+                        ),
+                    status: *status,
+                    started_at: Some(REFERENCE_TIMESTAMP.to_owned()),
+                    finished_at: Some(REFERENCE_TIMESTAMP.to_owned()),
+                    raw_log_paths,
+                    checkpoint_artifacts,
+                    note: format!("synthetic {} ledger state", status.label()),
+                }
+            })
+            .collect();
+
+        PermissionedCampaignExecutionLedger {
+            schema_version: PERMISSIONED_CAMPAIGN_EXECUTION_LEDGER_SCHEMA_VERSION,
+            campaign_id: manifest.campaign_id.clone(),
+            lane_kind: manifest.lane_kind,
+            target_beads: manifest.target_beads.clone(),
+            git_sha: "abcdef123456".to_owned(),
+            command_plan_hash: permissioned_campaign_command_plan_hash(manifest),
+            required_ack: PermissionedCampaignLedgerAck {
+                env_var: manifest.required_ack.env_var.clone(),
+                exact_value: manifest.required_ack.exact_value.clone(),
+                observed_value: has_execution.then(|| manifest.required_ack.exact_value.clone()),
+                recorded_at: has_execution.then(|| REFERENCE_TIMESTAMP.to_owned()),
+            },
+            preflight_snapshot: PermissionedCampaignLedgerPreflightSnapshot {
+                snapshot_id: "preflight-snapshot".to_owned(),
+                observed_at: REFERENCE_TIMESTAMP.to_owned(),
+                artifact_path: "artifacts/xfstests/preflight/report.json".to_owned(),
+                git_sha: "abcdef123456".to_owned(),
+                host_class: "synthetic_permissioned_fixture".to_owned(),
+                blockers: if final_status
+                    == Some(PermissionedCampaignLedgerStepStatus::PreflightBlocked)
+                {
+                    vec!["operator ACK not provided".to_owned()]
+                } else {
+                    Vec::new()
+                },
+            },
+            steps,
+            artifacts,
+            resume_state: PermissionedCampaignLedgerResumeState {
+                resume_token: statuses
+                    .contains(&PermissionedCampaignLedgerStepStatus::Resumed)
+                    .then(|| "resume-token-001".to_owned()),
+                last_checkpoint_artifact: has_execution
+                    .then(|| "artifacts/xfstests/real-run/checkpoint.json".to_owned()),
+                partial_artifacts_preserved: has_execution,
+                next_command_id: Some("xfstests_permissioned_run".to_owned()),
+            },
+            cleanup: PermissionedCampaignLedgerCleanup {
+                status: if terminal_cleanup {
+                    match final_status {
+                        Some(PermissionedCampaignLedgerStepStatus::CleanupFailed) => {
+                            PermissionedCampaignLedgerCleanupStatus::CleanupFailed
+                        }
+                        _ => PermissionedCampaignLedgerCleanupStatus::PreservedArtifacts,
+                    }
+                } else {
+                    PermissionedCampaignLedgerCleanupStatus::NotStarted
+                },
+                report_path: terminal_cleanup
+                    .then(|| "artifacts/xfstests/real-run/cleanup.json".to_owned()),
+                completed_at: terminal_cleanup.then(|| REFERENCE_TIMESTAMP.to_owned()),
+            },
+            proof_bundle_lane_candidates: if has_execution {
+                vec![PermissionedCampaignProofBundleLaneCandidate {
+                    lane_id: "xfstests".to_owned(),
+                    artifact_path: "artifacts/xfstests/real-run/proof/xfstests.json".to_owned(),
+                    promotion_status: if final_status
+                        == Some(PermissionedCampaignLedgerStepStatus::Passed)
+                    {
+                        PermissionedCampaignProofBundlePromotionStatus::Candidate
+                    } else {
+                        PermissionedCampaignProofBundlePromotionStatus::Blocked
+                    },
+                    note: "resume_checkpoint lane candidate retained for proof-bundle assembly"
+                        .to_owned(),
+                }]
+            } else {
+                Vec::new()
+            },
+            product_evidence_claim: if final_status
+                == Some(PermissionedCampaignLedgerStepStatus::Passed)
+            {
+                PermissionedCampaignProductEvidenceClaim::ExecutedEvidenceRecorded
+            } else {
+                PermissionedCampaignProductEvidenceClaim::None
+            },
+        }
+    }
+
+    fn ledger_artifact(
+        artifact_id: &str,
+        path: &str,
+        role: PermissionedCampaignLedgerArtifactRole,
+        stale: bool,
+    ) -> PermissionedCampaignLedgerArtifact {
+        PermissionedCampaignLedgerArtifact {
+            artifact_id: artifact_id.to_owned(),
+            path: path.to_owned(),
+            sha256: fixture_sha256(path),
+            role,
+            stale,
+        }
+    }
+
+    fn fixture_sha256(seed: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(seed.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
     fn xfstests_adapter_input() -> PermissionedXfstestsBrokerAdapterInput {

@@ -103,11 +103,15 @@ use ffs_harness::{
     },
     permissioned_campaign_broker::{
         DEFAULT_PERMISSIONED_CAMPAIGN_BROKER_MANIFEST, PermissionedCampaignBrokerValidationConfig,
-        PermissionedCampaignHandoffGeneration, fail_on_permissioned_campaign_broker_errors,
+        PermissionedCampaignExecutionLedgerValidationConfig, PermissionedCampaignHandoffGeneration,
+        fail_on_permissioned_campaign_broker_errors,
+        fail_on_permissioned_campaign_execution_ledger_errors,
         generate_permissioned_campaign_handoff_packet, load_permissioned_campaign_broker_manifest,
-        render_permissioned_campaign_broker_markdown,
+        load_permissioned_campaign_execution_ledger, render_permissioned_campaign_broker_markdown,
+        render_permissioned_campaign_execution_ledger_markdown,
         render_permissioned_campaign_handoff_markdown,
         validate_permissioned_campaign_broker_manifest,
+        validate_permissioned_campaign_execution_ledger,
     },
     proof_bundle::{
         ProofBundleValidationConfig, fail_on_proof_bundle_errors, render_proof_bundle_markdown,
@@ -289,6 +293,16 @@ struct PermissionedCampaignBrokerCmdArgs {
 }
 
 #[derive(Debug)]
+struct PermissionedCampaignLedgerCmdArgs {
+    manifest_path: String,
+    ledger_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+    current_git_sha: Option<String>,
+}
+
+#[derive(Debug)]
 struct PermissionedCampaignPacketCmdArgs {
     manifest_path: String,
     out_path: Option<String>,
@@ -336,6 +350,9 @@ fn run_manifest_command(command: Option<&str>, args: &[String]) -> Option<Result
         }
         Some("validate-permissioned-campaign-broker") => {
             Some(validate_permissioned_campaign_broker_cmd(args))
+        }
+        Some("validate-permissioned-campaign-ledger") => {
+            Some(validate_permissioned_campaign_ledger_cmd(args))
         }
         Some("generate-permissioned-campaign-packet") => {
             Some(generate_permissioned_campaign_packet_cmd(args))
@@ -2576,6 +2593,117 @@ fn parse_permissioned_campaign_broker_cmd_args(
         summary_out_path,
         format,
         reference_timestamp,
+    }))
+}
+
+fn validate_permissioned_campaign_ledger_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_permissioned_campaign_ledger_cmd_args(args)? else {
+        return Ok(());
+    };
+    let manifest = load_permissioned_campaign_broker_manifest(Path::new(&cmd_args.manifest_path))?;
+    let ledger = load_permissioned_campaign_execution_ledger(Path::new(&cmd_args.ledger_path))?;
+    let report = validate_permissioned_campaign_execution_ledger(
+        &manifest,
+        &ledger,
+        &PermissionedCampaignExecutionLedgerValidationConfig {
+            current_git_sha: cmd_args.current_git_sha,
+        },
+    );
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => {
+            render_permissioned_campaign_execution_ledger_markdown(&report)
+        }
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "permissioned campaign execution ledger report written: {} valid={} issues={}",
+            path, report.valid, report.issue_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!(
+                "{}\n",
+                render_permissioned_campaign_execution_ledger_markdown(&report)
+            ),
+        )?;
+        println!("permissioned campaign execution ledger summary written: {path}");
+    }
+
+    fail_on_permissioned_campaign_execution_ledger_errors(&report)
+}
+
+fn parse_permissioned_campaign_ledger_cmd_args(
+    args: &[String],
+) -> Result<Option<PermissionedCampaignLedgerCmdArgs>> {
+    let mut manifest_path = DEFAULT_PERMISSIONED_CAMPAIGN_BROKER_MANIFEST.to_owned();
+    let mut ledger_path: Option<String> = None;
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut current_git_sha: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                args.get(i)
+                    .context("--manifest requires a path")?
+                    .clone_into(&mut manifest_path);
+            }
+            "--ledger" => {
+                i += 1;
+                ledger_path = Some(args.get(i).context("--ledger requires a path")?.to_owned());
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--current-git-sha" => {
+                i += 1;
+                current_git_sha = Some(
+                    args.get(i)
+                        .context("--current-git-sha requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_permissioned_campaign_ledger_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-permissioned-campaign-ledger argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(PermissionedCampaignLedgerCmdArgs {
+        manifest_path,
+        ledger_path: ledger_path.context("--ledger is required")?,
+        out_path,
+        summary_out_path,
+        format,
+        current_git_sha,
     }))
 }
 
@@ -5726,6 +5854,9 @@ fn print_usage_core_commands() {
         "  ffs-harness validate-permissioned-campaign-broker [--manifest FILE] [--format json|markdown] [--out FILE] [--summary-out FILE] [--reference-timestamp TS]"
     );
     println!(
+        "  ffs-harness validate-permissioned-campaign-ledger --manifest FILE --ledger FILE [--current-git-sha SHA] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+    println!(
         "  ffs-harness generate-permissioned-campaign-packet [--manifest FILE] [--format json|markdown] [--out FILE] [--summary-out FILE] [--generated-at TS] [--generated-by NAME] [--git-sha SHA]"
     );
     println!(
@@ -5882,6 +6013,13 @@ fn print_usage_examples() {
 fn print_permissioned_campaign_broker_example() {
     println!(
         "  ffs-harness validate-permissioned-campaign-broker --manifest artifacts/permissioned/broker.json --out artifacts/permissioned/broker_report.json --summary-out artifacts/permissioned/broker_report.md"
+    );
+    print_permissioned_campaign_ledger_example();
+}
+
+fn print_permissioned_campaign_ledger_example() {
+    println!(
+        "  ffs-harness validate-permissioned-campaign-ledger --manifest artifacts/permissioned/broker.json --ledger artifacts/permissioned/execution_ledger.json --current-git-sha $(git rev-parse HEAD) --out artifacts/permissioned/ledger_report.json --summary-out artifacts/permissioned/ledger_report.md"
     );
 }
 
@@ -6276,6 +6414,20 @@ fn print_permissioned_campaign_broker_usage() {
     println!("  --out FILE                         Write selected-format validation report");
     println!("  --summary-out FILE                 Write Markdown inspection summary");
     println!("  --reference-timestamp RFC3339      Freshness reference timestamp (default: now)");
+}
+
+fn print_permissioned_campaign_ledger_usage() {
+    println!("Usage: ffs-harness validate-permissioned-campaign-ledger [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!(
+        "  --manifest FILE                    Read permissioned campaign broker manifest JSON"
+    );
+    println!("  --ledger FILE                      Read permissioned execution ledger JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write selected-format ledger report");
+    println!("  --summary-out FILE                 Write Markdown ledger summary");
+    println!("  --current-git-sha SHA              Strictly require ledger git_sha to match SHA");
 }
 
 fn print_permissioned_campaign_packet_usage() {

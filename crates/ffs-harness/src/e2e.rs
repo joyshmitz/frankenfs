@@ -19,6 +19,10 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+fn e2e_step_timer_start() -> Instant {
+    Instant::now()
+}
+
 // ── Structured JSON log types ───────────────────────────────────────────────
 
 /// A single structured log entry for an E2E test step.
@@ -303,10 +307,11 @@ impl E2eTestContext {
             return Ok(false);
         }
 
-        let output = Command::new(mkfs_cmd)
-            .args(&args)
-            .output()
-            .with_context(|| format!("run {mkfs_cmd}"))?;
+        let output = match self.image_type {
+            ImageType::Ext4 => Command::new("mkfs.ext4").args(&args).output(),
+            ImageType::Btrfs => Command::new("mkfs.btrfs").args(&args).output(),
+        }
+        .with_context(|| format!("run {mkfs_cmd}"))?;
 
         let elapsed = start.elapsed();
 
@@ -343,7 +348,7 @@ impl E2eTestContext {
 
     /// Verify a file exists and has the expected content (by SHA256).
     pub fn verify_file_sha256(&self, path: &Path, expected_sha256: &str) -> Result<bool> {
-        let start = Instant::now();
+        let start = e2e_step_timer_start();
         let input = serde_json::json!({
             "path": path.display().to_string(),
             "expected_sha256": expected_sha256,
@@ -379,7 +384,7 @@ impl E2eTestContext {
 
     /// Verify file content matches expected bytes exactly.
     pub fn verify_file_content(&self, path: &Path, expected: &[u8]) -> Result<bool> {
-        let start = Instant::now();
+        let start = e2e_step_timer_start();
         let input = serde_json::json!({
             "path": path.display().to_string(),
             "expected_size": expected.len(),
@@ -2681,7 +2686,7 @@ mod tests {
     ];
 
     fn last_remote_exit(transcript: &str) -> Option<i32> {
-        transcript.lines().filter_map(remote_exit_from_line).last()
+        transcript.lines().rev().find_map(remote_exit_from_line)
     }
 
     fn remote_exit_from_line(line: &str) -> Option<i32> {
