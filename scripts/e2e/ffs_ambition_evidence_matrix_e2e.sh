@@ -13,8 +13,12 @@ export REPO_ROOT
 
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
-export CARGO_TARGET_DIR="/data/tmp/rch_target_frankenfs_ambition_evidence_matrix"
-export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_ambition_evidence_matrix}"
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -33,7 +37,27 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+run_rch_capture() {
+    local log_path="$1"
+    local status
+    shift
+
+    e2e_log "RCH command: $*"
+    status=0
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
+        return 0
+    fi
+    return "$status"
+}
+
 e2e_init "ffs_ambition_evidence_matrix"
+e2e_print_env
 # Preserve the temp workspace as part of the proof artifact. This repo forbids
 # automated file deletion, including cleanup of directories created by a smoke.
 E2E_CLEANUP_ITEMS=()
@@ -46,7 +70,14 @@ MISSING_ARTIFACT_JSONL="${E2E_LOG_DIR}/issues_missing_artifact.jsonl"
 STALE_RAW="${E2E_LOG_DIR}/stale_reference.raw"
 MISSING_ARTIFACT_RAW="${E2E_LOG_DIR}/missing_artifact.raw"
 UNIT_LOG="${E2E_LOG_DIR}/ambition_evidence_matrix_unit_tests.log"
+RCH_INPUT_DIR="$REPO_ROOT/artifacts/rch_inputs/$(basename "$E2E_LOG_DIR")"
+RCH_ISSUES_JSONL="${RCH_INPUT_DIR}/issues.jsonl"
+RCH_STALE_ISSUES_JSONL="${RCH_INPUT_DIR}/issues_stale_reference.jsonl"
+RCH_MISSING_ARTIFACT_JSONL="${RCH_INPUT_DIR}/issues_missing_artifact.jsonl"
+mkdir -p "$RCH_INPUT_DIR"
 cp .beads/issues.jsonl "$ISSUES_JSONL"
+cp .beads/issues.jsonl "$RCH_ISSUES_JSONL"
+e2e_log "RCH input directory: $RCH_INPUT_DIR"
 
 e2e_step "Scenario 1: module and CLI are wired"
 if grep -q "pub mod ambition_evidence_matrix" crates/ffs-harness/src/lib.rs \
@@ -57,8 +88,8 @@ else
 fi
 
 e2e_step "Scenario 2: CLI renders report"
-if cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
-    --issues "$ISSUES_JSONL" >"$REPORT_RAW" 2>&1; then
+if run_rch_capture "$REPORT_RAW" cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
+    --issues "$RCH_ISSUES_JSONL"; then
     if python3 - "$REPORT_RAW" "$REPORT_JSON" <<'PY'
 import json
 import sys
@@ -249,22 +280,27 @@ else
 fi
 
 e2e_step "Scenario 7: stale reference injection fails closed"
-python3 - "$ISSUES_JSONL" "$STALE_ISSUES_JSONL" <<'PY'
+python3 - "$ISSUES_JSONL" "$STALE_ISSUES_JSONL" "$RCH_STALE_ISSUES_JSONL" <<'PY'
 import json
 import sys
 
-source, dest = sys.argv[1], sys.argv[2]
-with open(source, encoding="utf-8") as src, open(dest, "w", encoding="utf-8") as out:
+source, local_dest, rch_dest = sys.argv[1:4]
+rows = []
+with open(source, encoding="utf-8") as src:
     for line in src:
         if not line.strip():
             continue
         row = json.loads(line)
         if row.get("id") == "bd-rchk0.5.14":
             continue
-        out.write(json.dumps(row, separators=(",", ":")) + "\n")
+        rows.append(json.dumps(row, separators=(",", ":")))
+payload = "\n".join(rows) + "\n"
+for dest in (local_dest, rch_dest):
+    with open(dest, "w", encoding="utf-8") as out:
+        out.write(payload)
 PY
-if cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
-    --issues "$STALE_ISSUES_JSONL" >"$STALE_RAW" 2>&1; then
+if run_rch_capture "$STALE_RAW" cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
+    --issues "$RCH_STALE_ISSUES_JSONL"; then
     scenario_result "ambition_matrix_stale_reference_fails" "FAIL" "stale reference unexpectedly passed"
 elif grep -q "bd-rchk0.5.14" "$STALE_RAW"; then
     scenario_result "ambition_matrix_stale_reference_fails" "PASS" "stale reference failed closed"
@@ -273,22 +309,27 @@ else
 fi
 
 e2e_step "Scenario 8: missing artifact injection fails closed"
-python3 - "$ISSUES_JSONL" "$MISSING_ARTIFACT_JSONL" <<'PY'
+python3 - "$ISSUES_JSONL" "$MISSING_ARTIFACT_JSONL" "$RCH_MISSING_ARTIFACT_JSONL" <<'PY'
 import json
 import sys
 
-source, dest = sys.argv[1], sys.argv[2]
-with open(source, encoding="utf-8") as src, open(dest, "w", encoding="utf-8") as out:
+source, local_dest, rch_dest = sys.argv[1:4]
+rows = []
+with open(source, encoding="utf-8") as src:
     for line in src:
         if not line.strip():
             continue
         row = json.loads(line)
         if row.get("id") == "bd-rchk0.5.10.1":
             row["artifact_path"] = ""
-        out.write(json.dumps(row, separators=(",", ":")) + "\n")
+        rows.append(json.dumps(row, separators=(",", ":")))
+payload = "\n".join(rows) + "\n"
+for dest in (local_dest, rch_dest):
+    with open(dest, "w", encoding="utf-8") as out:
+        out.write(payload)
 PY
-if cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
-    --issues "$MISSING_ARTIFACT_JSONL" >"$MISSING_ARTIFACT_RAW" 2>&1; then
+if run_rch_capture "$MISSING_ARTIFACT_RAW" cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
+    --issues "$RCH_MISSING_ARTIFACT_JSONL"; then
     scenario_result "ambition_matrix_missing_artifact_fails" "FAIL" "missing artifact unexpectedly passed"
 elif grep -q "artifact_path" "$MISSING_ARTIFACT_RAW"; then
     scenario_result "ambition_matrix_missing_artifact_fails" "PASS" "missing artifact failed closed"
@@ -297,8 +338,7 @@ else
 fi
 
 e2e_step "Scenario 9: unit/schema tests pass"
-if cargo test -p ffs-harness --lib -- ambition_evidence_matrix \
-    2>"$UNIT_LOG" | tee -a "$UNIT_LOG"; then
+if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib -- ambition_evidence_matrix; then
     TESTS_RUN=$(grep -c "test ambition_evidence_matrix::tests::" "$UNIT_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 10 ]]; then
         scenario_result "ambition_matrix_unit_tests" "PASS" "unit tests passed (${TESTS_RUN} tests)"
@@ -307,6 +347,7 @@ if cargo test -p ffs-harness --lib -- ambition_evidence_matrix \
     fi
 else
     scenario_result "ambition_matrix_unit_tests" "FAIL" "unit tests failed"
+    tail -40 "$UNIT_LOG" | while IFS= read -r line; do e2e_log "  $line"; done
 fi
 
 e2e_step "Summary"
