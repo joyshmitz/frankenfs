@@ -1,0 +1,28 @@
+{"id":"bd-fixture-epic","title":"Fixture local hygiene epic","status":"open","priority":1,"issue_type":"epic","source_repo":"."}
+{"id":"bd-fixture-ready","title":"Fixture local ready row","status":"open","priority":1,"issue_type":"task","source_repo":"."}
+{"id":"bd-fixture-blocker","title":"Fixture local blocker row","status":"open","priority":2,"issue_type":"task","source_repo":"."}
+{"id":"bd-fixture-blocked","title":"Fixture local blocked row","status":"open","priority":2,"issue_type":"task","source_repo":".","dependencies":[{"issue_id":"bd-fixture-blocked","depends_on_id":"bd-fixture-blocker","type":"blocks","created_at":"2026-05-08T00:00:00Z","created_by":"fixture","metadata":"{}","thread_id":""}]}
+{"id":"bd-fixture-closed","title":"Fixture local closed row","status":"closed","priority":2,"issue_type":"task","source_repo":"."}
+{"id":"br-r37-c1-foreign01","title":"Fixture foreign open row 01","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign02","title":"Fixture foreign open row 02","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign03","title":"Fixture foreign open row 03","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign04","title":"Fixture foreign open row 04","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign05","title":"Fixture foreign open row 05","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign06","title":"Fixture foreign open row 06","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign07","title":"Fixture foreign open row 07","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign08","title":"Fixture foreign open row 08","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign09","title":"Fixture foreign open row 09","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign10","title":"Fixture foreign open row 10","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign11","title":"Fixture foreign open row 11","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign12","title":"Fixture foreign open row 12","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign13","title":"Fixture foreign open row 13","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign14","title":"Fixture foreign open row 14","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign15","title":"Fixture foreign open row 15","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign16","title":"Fixture foreign open row 16","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign17","title":"Fixture foreign open row 17","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign18","title":"Fixture foreign open row 18","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign19","title":"Fixture foreign open row 19","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign20","title":"Fixture foreign open row 20","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign21","title":"Fixture foreign open row 21","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign22","title":"Fixture foreign open row 22","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"franken_networkx-closed","title":"Fixture foreign closed row","status":"closed","priority":1,"issue_type":"bug","source_repo":"."}

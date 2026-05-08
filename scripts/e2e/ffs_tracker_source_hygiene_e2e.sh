@@ -180,6 +180,43 @@ else
     scenario_result "tracker_source_hygiene_source_aware_wrapper" "FAIL" "source-aware wrapper fields missing or inconsistent"
 fi
 
+EXPECTATION_DETAIL=""
+EXPECTATION_FAILED=0
+
+check_expected_count() {
+    local field_name="$1"
+    local actual="$2"
+    local expected="$3"
+
+    if [[ -z "$expected" ]]; then
+        return 0
+    fi
+
+    EXPECTATION_DETAIL="${EXPECTATION_DETAIL}${field_name}=${actual}/${expected} "
+    if [[ "$actual" != "$expected" ]]; then
+        EXPECTATION_FAILED=1
+    fi
+}
+
+EXPECTED_LOCAL_OPEN="${TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN:-}"
+EXPECTED_FOREIGN_OPEN="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN:-}"
+EXPECTED_READY="${TRACKER_SOURCE_HYGIENE_EXPECT_READY:-}"
+EXPECTED_FOREIGN_SAMPLE_COUNT="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT:-}"
+FOREIGN_SAMPLE_COUNT="$(jq -r '.foreign_open_samples | length' "$REPORT_JSON")"
+
+check_expected_count "local_open" "$LOCAL_OPEN_COUNT" "$EXPECTED_LOCAL_OPEN"
+check_expected_count "foreign_open" "$FOREIGN_OPEN_COUNT" "$EXPECTED_FOREIGN_OPEN"
+check_expected_count "source_aware_ready" "$READY_COUNT" "$EXPECTED_READY"
+check_expected_count "foreign_sample_count" "$FOREIGN_SAMPLE_COUNT" "$EXPECTED_FOREIGN_SAMPLE_COUNT"
+
+if [[ -n "$EXPECTATION_DETAIL" ]]; then
+    if [[ "$EXPECTATION_FAILED" -eq 0 ]]; then
+        scenario_result "tracker_source_hygiene_expected_fixture_counts" "PASS" "${EXPECTATION_DETAIL% }"
+    else
+        scenario_result "tracker_source_hygiene_expected_fixture_counts" "FAIL" "${EXPECTATION_DETAIL% }"
+    fi
+fi
+
 if [[ "$STRICT_MODE" -eq 1 && "$FOREIGN_OPEN_COUNT" -gt 0 ]]; then
     scenario_result "tracker_source_hygiene_strict_mode" "FAIL" "strict mode found foreign_open=${FOREIGN_OPEN_COUNT}"
 else
