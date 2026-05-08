@@ -18,11 +18,117 @@ export REPO_ROOT
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_repair_writeback_route}"
-export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
 
 PASS_COUNT=0
 FAIL_COUNT=0
 TOTAL=0
+
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("$RCH_BIN" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "$RCH_BIN" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local output_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+
+    : >"$output_path"
+    set +e
+    RCH_VISIBILITY="$RCH_VISIBILITY" "$RCH_BIN" exec -- "$@" >"$output_path" 2>&1 &
+    pid=$!
+    set -e
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$output_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|output=${output_path}|status=${status}"
+        return 0
+    fi
+    return "$status"
+}
+
+print_rch_log() {
+    local output_path="$1"
+    if [[ -s "$output_path" ]]; then
+        tee -a "$E2E_LOG_FILE" <"$output_path"
+    fi
+}
 
 scenario_result() {
     local scenario_id="$1"
@@ -58,10 +164,10 @@ ARTIFACT_JSON="$E2E_LOG_DIR/repair_writeback_route_artifact.json"
 SUMMARY_MD="$E2E_LOG_DIR/repair_writeback_route_summary.md"
 
 e2e_step "Scenario 1: mounted mutation path stages, commits, flushes, and verifies"
-if rch exec -- cargo test -p ffs-core repair_writeback_ -- --nocapture >"$CORE_LOG" 2>&1; then
+if run_rch_capture "$CORE_LOG" cargo test -p ffs-core repair_writeback_ -- --nocapture; then
     scenario_result "repair_writeback_mounted_request_scope" "PASS" "ffs-core mounted writeback tests passed"
 else
-    cat "$CORE_LOG"
+    print_rch_log "$CORE_LOG"
     scenario_result "repair_writeback_mounted_request_scope" "FAIL" "ffs-core mounted writeback tests failed"
 fi
 
@@ -95,26 +201,26 @@ require_core_test \
     "flushed repair writeback is visible after reopen"
 
 e2e_step "Scenario 2: recovery pipeline uses injected writeback authority and fails closed"
-if rch exec -- cargo test -p ffs-repair recovery_ -- --nocapture >"$REPAIR_LOG" 2>&1; then
+if run_rch_capture "$REPAIR_LOG" cargo test -p ffs-repair recovery_ -- --nocapture; then
     scenario_result "repair_writeback_authority_injected" "PASS" "ffs-repair authority and rejection tests passed"
 else
-    cat "$REPAIR_LOG"
+    print_rch_log "$REPAIR_LOG"
     scenario_result "repair_writeback_authority_injected" "FAIL" "ffs-repair authority tests failed"
 fi
 
 e2e_step "Scenario 3: CLI accepts read-write background repair only with durable ledger evidence"
-if rch exec -- cargo test -p ffs-cli mount_background_repair -- --nocapture >"$CLI_LOG" 2>&1; then
+if run_rch_capture "$CLI_LOG" cargo test -p ffs-cli mount_background_repair -- --nocapture; then
     scenario_result "rw_background_repair_cli_enabled" "PASS" "ffs-cli rw background repair parsing and guard tests passed"
 else
-    cat "$CLI_LOG"
+    print_rch_log "$CLI_LOG"
     scenario_result "rw_background_repair_cli_enabled" "FAIL" "ffs-cli rw background repair tests failed"
 fi
 
 e2e_step "Scenario 4: FUSE mount options keep kernel writeback-cache mode disabled"
-if rch exec -- cargo test -p ffs-fuse build_mount_options_excludes_kernel_writeback_cache_mode -- --nocapture >"$FUSE_LOG" 2>&1; then
+if run_rch_capture "$FUSE_LOG" cargo test -p ffs-fuse build_mount_options_excludes_kernel_writeback_cache_mode -- --nocapture; then
     scenario_result "rw_background_repair_writeback_cache_disabled" "PASS" "FUSE writeback-cache exclusion test passed"
 else
-    cat "$FUSE_LOG"
+    print_rch_log "$FUSE_LOG"
     scenario_result "rw_background_repair_writeback_cache_disabled" "FAIL" "FUSE writeback-cache guard test failed"
 fi
 
