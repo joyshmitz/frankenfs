@@ -11270,6 +11270,80 @@ mod tests {
         );
     }
 
+    /// bd-uezhf — Kernel-conformance pin for Ext4ExtentIndex
+    /// 12-byte field offsets per fs/ext4/ext4_extents.h struct
+    /// ext4_extent_idx.
+    ///
+    ///   ei_block   u32 @0..4   (logical_block)
+    ///   ei_leaf_lo u32 @4..8   (low 32 of leaf_block)
+    ///   ei_leaf_hi u16 @8..10  (high 16 of leaf_block)
+    ///   ei_unused  u16 @10..12 (padding, ignored)
+    ///   leaf_block = (ei_leaf_hi << 32) | ei_leaf_lo (48-bit)
+    ///
+    /// bd-bspkl pins the parallel Ext4Extent (leaf) entry offsets.
+    /// The index branch is a separate parser code path with its
+    /// own offset arithmetic — a regression that drifted
+    /// ei_leaf_hi to offset 4..6 would produce a wrong leaf_block
+    /// address and silently route extent lookups to the wrong
+    /// physical block.
+    ///
+    /// Stamp each field with a distinct non-zero magic so any
+    /// single-field offset drift produces a cross-field collision.
+    #[test]
+    fn ext4_extent_index_kernel_offsets_match_extents_h() {
+        let mut buf = [0_u8; 24];
+
+        // 12-byte header: magic (forced), 1 entry, depth=1 (forces
+        // Index branch via parse_extent_index).
+        buf[0..2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+        buf[2..4].copy_from_slice(&1_u16.to_le_bytes()); // entries
+        buf[4..6].copy_from_slice(&1_u16.to_le_bytes()); // max_entries
+        buf[6..8].copy_from_slice(&1_u16.to_le_bytes()); // depth=1 → index
+
+        // 12-byte single index entry at offset 12. Each field gets
+        // a unique magic so an offset drift produces a cross-field
+        // collision.
+        let ei_block: u32 = 0x1234_5678;
+        let ei_leaf_lo: u32 = 0xCAFE_BABE;
+        let ei_leaf_hi: u16 = 0xABCD;
+        let ei_unused: u16 = 0xEEEE; // parser ignores this field
+
+        buf[12..16].copy_from_slice(&ei_block.to_le_bytes());
+        buf[16..20].copy_from_slice(&ei_leaf_lo.to_le_bytes());
+        buf[20..22].copy_from_slice(&ei_leaf_hi.to_le_bytes());
+        buf[22..24].copy_from_slice(&ei_unused.to_le_bytes());
+
+        let (header, tree) =
+            parse_extent_tree(&buf).expect("kernel-stamped extent index must parse");
+
+        assert_eq!(header.entries, 1, "entries must come from offset 2..4");
+        assert_eq!(header.depth, 1, "depth must come from offset 6..8 (index branch selected)");
+
+        let indexes = match tree {
+            ExtentTree::Index(indexes) => indexes,
+            ExtentTree::Leaf(_) => panic!("depth=1 must yield Index branch"),
+        };
+        assert_eq!(indexes.len(), 1, "single-entry payload must parse to one index");
+        let index = indexes[0];
+
+        assert_eq!(
+            index.logical_block, ei_block,
+            "logical_block must come from offset 0..4 (relative to entry)"
+        );
+
+        // leaf_block = (ei_leaf_hi << 32) | ei_leaf_lo per the
+        // parser at lib.rs:3004-3006. Pin both halves.
+        let expected_leaf = (u64::from(ei_leaf_hi) << 32) | u64::from(ei_leaf_lo);
+        assert_eq!(
+            index.leaf_block, expected_leaf,
+            "leaf_block must combine ei_leaf_hi@8..10 (high 16) and ei_leaf_lo@4..8 (low 32)"
+        );
+        assert_eq!(
+            index.leaf_block, 0x0000_ABCD_CAFE_BABE,
+            "explicit literal pinning of the 48-bit leaf-block address"
+        );
+    }
+
     #[test]
     fn extra_nsec_and_epoch_extraction() {
         // extra = 0b...nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnee
