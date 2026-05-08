@@ -509,7 +509,8 @@ struct PerformanceDeltaCloseoutCmdArgs {
 
 #[derive(Debug)]
 struct AdversarialThreatModelCmdArgs {
-    model_path: String,
+    model_path: Option<String>,
+    model_json_env: Option<String>,
     artifact_root: String,
     out_path: Option<String>,
     artifact_out_path: Option<String>,
@@ -2984,7 +2985,19 @@ fn validate_adversarial_threat_model_cmd(args: &[String]) -> Result<()> {
     let Some(cmd_args) = parse_adversarial_threat_model_cmd_args(args)? else {
         return Ok(());
     };
-    let model = load_adversarial_threat_model(Path::new(&cmd_args.model_path))?;
+    let model = match (&cmd_args.model_path, &cmd_args.model_json_env) {
+        (Some(path), None) => load_adversarial_threat_model(Path::new(path))?,
+        (None, Some(env_name)) => {
+            let raw = env::var(env_name)
+                .with_context(|| format!("--model-json-env variable {env_name} is not set"))?;
+            serde_json::from_str(&raw)
+                .with_context(|| format!("invalid adversarial threat model JSON from {env_name}"))?
+        }
+        (Some(_), Some(_)) => bail!("use either --model or --model-json-env, not both"),
+        (None, None) => {
+            bail!("--model or --model-json-env is required for threat model validation")
+        }
+    };
     let report = validate_adversarial_threat_model(&model, &cmd_args.artifact_root);
     let output = serde_json::to_string_pretty(&report)?;
 
@@ -3040,6 +3053,7 @@ fn parse_adversarial_threat_model_cmd_args(
     args: &[String],
 ) -> Result<Option<AdversarialThreatModelCmdArgs>> {
     let mut model_path: Option<String> = None;
+    let mut model_json_env: Option<String> = None;
     let mut artifact_root = "artifacts/security/dry-run".to_owned();
     let mut out_path: Option<String> = None;
     let mut artifact_out_path: Option<String> = None;
@@ -3051,6 +3065,14 @@ fn parse_adversarial_threat_model_cmd_args(
             "--model" => {
                 i += 1;
                 model_path = Some(args.get(i).context("--model requires a path")?.to_owned());
+            }
+            "--model-json-env" => {
+                i += 1;
+                model_json_env = Some(
+                    args.get(i)
+                        .context("--model-json-env requires a variable name")?
+                        .to_owned(),
+                );
             }
             "--artifact-root" => {
                 i += 1;
@@ -3088,7 +3110,8 @@ fn parse_adversarial_threat_model_cmd_args(
     }
 
     Ok(Some(AdversarialThreatModelCmdArgs {
-        model_path: model_path.context("--model is required for threat model validation")?,
+        model_path,
+        model_json_env,
         artifact_root,
         out_path,
         artifact_out_path,
@@ -5938,7 +5961,7 @@ fn print_scrub_repair_scheduler_example() {
 
 fn print_adversarial_threat_model_usage_summary() {
     println!(
-        "  ffs-harness validate-adversarial-threat-model --model FILE [--artifact-root DIR] [--out FILE] [--artifact-out FILE] [--wording-out FILE]"
+        "  ffs-harness validate-adversarial-threat-model (--model FILE | --model-json-env VAR) [--artifact-root DIR] [--out FILE] [--artifact-out FILE] [--wording-out FILE]"
     );
 }
 
@@ -6381,6 +6404,9 @@ fn print_adversarial_threat_model_usage() {
     println!();
     println!("Options:");
     println!("  --model FILE                       Read adversarial threat model JSON");
+    println!(
+        "  --model-json-env VAR               Read adversarial threat model JSON from env var"
+    );
     println!("  --artifact-root DIR                Root for dry-run security artifacts");
     println!("  --out FILE                         Write validation report JSON");
     println!("  --artifact-out FILE                Write sample shared QA artifact manifest JSON");
