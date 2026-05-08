@@ -59,12 +59,27 @@ if jq -s \
     --arg issues_path "$ISSUES_JSONL" \
     --argjson strict "$STRICT_JSON" \
     '
+    . as $issues
+    | def issue_status($id):
+        ([$issues[] | select(.id == $id) | .status][0] // "missing");
     def local_issue:
         ((.id // "") | test("^(bd|frankenfs)-"));
     def foreign_issue:
         (local_issue | not);
     def open_issue:
         ((.status // "open") == "open");
+    def issue_prefix:
+        ((.id // "") | capture("^(?<prefix>[^-]+(?:-[^-]+)?)").prefix // "unknown");
+    def blocking_dependencies:
+        (.dependencies // [])
+        | map(select((.type // "") == "blocks"))
+        | map(.depends_on_id as $dep_id | {id: $dep_id, status: issue_status($dep_id)})
+        | map(select(.status != "closed"));
+    def ready_issue:
+        local_issue
+        and open_issue
+        and ((.issue_type // "") != "epic")
+        and ((blocking_dependencies | length) == 0);
     def issue_sample:
         {
             id: (.id // ""),
@@ -73,6 +88,11 @@ if jq -s \
             priority: (.priority // null),
             issue_type: (.issue_type // null),
             source_repo: (.source_repo // null)
+        };
+    def issue_work_row:
+        issue_sample + {
+            assignee: (.assignee // .owner // null),
+            blocked_by: blocking_dependencies
         };
     def foreign_open_count:
         ([.[] | select(foreign_issue and open_issue)] | length);
@@ -95,10 +115,21 @@ if jq -s \
         open_total: ([.[] | select(open_issue)] | length),
         local_open: ([.[] | select(local_issue and open_issue)] | length),
         foreign_open: foreign_open_count,
+        excluded_foreign_open_count: foreign_open_count,
+        excluded_foreign_by_prefix: (
+            [.[] | select(foreign_issue and open_issue) | issue_prefix]
+            | group_by(.)
+            | map({prefix: .[0], count: length})
+            | sort_by(.prefix)
+        ),
         local_open_ids: ([.[] | select(local_issue and open_issue) | .id] | sort),
+        local_open_rows: ([.[] | select(local_issue and open_issue) | issue_work_row] | sort_by(.priority, .id)),
+        source_aware_ready_rows: ([.[] | select(ready_issue) | issue_work_row] | sort_by(.priority, .id)),
         foreign_open_samples: ([.[] | select(foreign_issue and open_issue) | issue_sample] | sort_by(.id) | .[0:20]),
         reproduction_commands: [
+            "./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
             "jq -s '\''[.[] | select(((.id // \"\") | test(\"^(bd|frankenfs)-\") | not) and ((.status // \"open\") == \"open\")) | {id,title,status,priority,source_repo}]'\'' .beads/issues.jsonl",
+            "jq -s '\''[.[] | select(((.id // \"\") | test(\"^(bd|frankenfs)-\")) and ((.status // \"open\") == \"open\")) | {id,title,status,priority,issue_type,assignee,owner}] | sort_by(.priority, .id)'\'' .beads/issues.jsonl",
             "TRACKER_SOURCE_HYGIENE_STRICT=1 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh"
         ]
     }
@@ -115,8 +146,13 @@ if jq -e '
     and (.open_total | type == "number")
     and (.local_open | type == "number")
     and (.foreign_open | type == "number")
+    and (.excluded_foreign_open_count | type == "number")
     and (.local_open_ids | type == "array")
+    and (.local_open_rows | type == "array")
+    and (.source_aware_ready_rows | type == "array")
     and (.foreign_open_samples | type == "array")
+    and (.excluded_foreign_by_prefix | type == "array")
+    and (.reproduction_commands | type == "array")
     and (.mutation_policy | test("report-only"))
 ' "$REPORT_JSON" >/dev/null; then
     scenario_result "tracker_source_hygiene_report_emitted" "PASS" "report=$REPORT_JSON"
@@ -126,10 +162,22 @@ fi
 
 FOREIGN_OPEN_COUNT="$(jq -r '.foreign_open' "$REPORT_JSON")"
 LOCAL_OPEN_COUNT="$(jq -r '.local_open' "$REPORT_JSON")"
+READY_COUNT="$(jq -r '.source_aware_ready_rows | length' "$REPORT_JSON")"
 if [[ "$FOREIGN_OPEN_COUNT" =~ ^[0-9]+$ && "$LOCAL_OPEN_COUNT" =~ ^[0-9]+$ ]]; then
-    scenario_result "tracker_source_hygiene_foreign_rows_classified" "PASS" "local_open=${LOCAL_OPEN_COUNT} foreign_open=${FOREIGN_OPEN_COUNT}"
+    scenario_result "tracker_source_hygiene_foreign_rows_classified" "PASS" "local_open=${LOCAL_OPEN_COUNT} source_aware_ready=${READY_COUNT} foreign_open=${FOREIGN_OPEN_COUNT}"
 else
     scenario_result "tracker_source_hygiene_foreign_rows_classified" "FAIL" "invalid open counts in $REPORT_JSON"
+fi
+
+if jq -e '
+    (.local_open_rows | type == "array")
+    and (.source_aware_ready_rows | type == "array")
+    and all(.source_aware_ready_rows[]; (.blocked_by | length) == 0)
+    and any(.reproduction_commands[]; contains("bd|frankenfs"))
+' "$REPORT_JSON" >/dev/null; then
+    scenario_result "tracker_source_hygiene_source_aware_wrapper" "PASS" "ready_rows=${READY_COUNT} excluded_foreign=${FOREIGN_OPEN_COUNT}"
+else
+    scenario_result "tracker_source_hygiene_source_aware_wrapper" "FAIL" "source-aware wrapper fields missing or inconsistent"
 fi
 
 if [[ "$STRICT_MODE" -eq 1 && "$FOREIGN_OPEN_COUNT" -gt 0 ]]; then
