@@ -7151,6 +7151,57 @@ mod tests {
         );
     }
 
+    // bd-fw55q — Canonical byte-layout snapshot for
+    // BtrfsExtentData::to_bytes Inline variant. The Inline branch
+    // is a separate encoder code path from Regular (lib.rs:486-503)
+    // with its own offset arithmetic — bd-yjzhk pinned Regular but
+    // an offset drift in the Inline branch would not surface.
+    // Pairs with bd-yjzhk (Regular canonical bytes), bd-3niu3
+    // (proptest round-trip MR for both variants).
+    #[test]
+    fn extent_data_inline_to_bytes_canonical_byte_layout() {
+        let inline_data = vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let extent = BtrfsExtentData::Inline {
+            generation: 0xCAFE_BABE_DEAD_BEEF,
+            ram_bytes: 8, // NONE compression: must equal data.len()
+            compression: BTRFS_COMPRESS_NONE,
+            data: inline_data.clone(),
+        };
+        let bytes = extent.to_bytes();
+        assert_eq!(
+            bytes.len(),
+            21 + 8,
+            "Inline encoding is 21-byte header + data bytes"
+        );
+
+        // Round-trip through parser is a redundant cross-check against
+        // bd-yjzhk's parsing layer; cheap and explicit here.
+        let parsed = parse_extent_data(&bytes).expect("inline canonical bytes parse");
+        assert_eq!(parsed, extent);
+
+        // 21 fixed bytes + 8 inline data bytes = 29 total.
+        let expected: [u8; 29] = [
+            // generation LE @0..8 = 0xCAFE_BABE_DEAD_BEEF
+            0xEF, 0xBE, 0xAD, 0xDE, 0xBE, 0xBA, 0xFE, 0xCA,
+            // ram_bytes LE @8..16 = 8
+            0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // compression @16 = BTRFS_COMPRESS_NONE = 0
+            0x00,
+            // encryption @17 = 0 (always; encoder hard-codes)
+            0x00,
+            // other_encoding LE @18..20 = 0 (always)
+            0x00, 0x00,
+            // extent_type @20 = BTRFS_FILE_EXTENT_INLINE = 0
+            0x00,
+            // inline data @21..29 = 0x11..0x88
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+        ];
+        assert_eq!(
+            bytes, expected,
+            "BtrfsExtentData::to_bytes Inline canonical byte layout drifted"
+        );
+    }
+
     // bd-3niu3 — Property-based round-trip MR for parse_extent_data.
     //
     // BtrfsExtentData::to_bytes (lib.rs:486) and parse_extent_data
