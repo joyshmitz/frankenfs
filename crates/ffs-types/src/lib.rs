@@ -2696,4 +2696,92 @@ mod tests {
             "round-trip: from_le_bytes(\"_BHRfS_M\") must reproduce BTRFS_MAGIC"
         );
     }
+
+    /// bd-wa27v — Kernel-conformance pin for EXT4_XATTR_MAGIC + the 10
+    /// EXT4_XATTR_INDEX_* constants per fs/ext4/xattr.h. The index byte
+    /// is the high-byte of e_name_index in every ext4 xattr entry and
+    /// determines the namespace prefix (user. / trusted. / security. /
+    /// system. / lustre.) prepended on getxattr/listxattr. A regression
+    /// that drifted any index by ±1 would silently mis-route trusted
+    /// attributes as security attributes (or vice versa), corrupting
+    /// every xattr round-trip. EXT4_XATTR_MAGIC is the first 4 bytes
+    /// of every ext4 xattr block — a magic drift breaks every parse.
+    ///
+    /// Sister kernel-pin tests: ext4_btrfs_layout_constants_match_kernel_header,
+    /// btrfs_csum_type_constants_match_kernel_header,
+    /// ext4_inode_flag_constants_match_kernel_header,
+    /// posix_s_if_constant_values_match_sys_stat_h.
+    #[test]
+    fn ext4_xattr_constants_match_xattr_h() {
+        // Per fs/ext4/xattr.h:
+        //   #define EXT4_XATTR_MAGIC          0xEA020000
+        //   #define EXT4_XATTR_INDEX_USER     1
+        //   #define EXT4_XATTR_INDEX_POSIX_ACL_ACCESS  2
+        //   #define EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT 3
+        //   #define EXT4_XATTR_INDEX_TRUSTED  4
+        //   #define EXT4_XATTR_INDEX_LUSTRE   5
+        //   #define EXT4_XATTR_INDEX_SECURITY 6
+        //   #define EXT4_XATTR_INDEX_SYSTEM   7
+        //   #define EXT4_XATTR_INDEX_RICHACL  8
+        //   #define EXT4_XATTR_INDEX_ENCRYPTION 9
+        //   #define EXT4_XATTR_INDEX_HURD     10
+        assert_eq!(
+            EXT4_XATTR_MAGIC, 0xEA02_0000,
+            "EXT4_XATTR_MAGIC must equal kernel value 0xEA020000"
+        );
+        // LE byte sequence: 00 00 02 EA — pin the byte order so an
+        // endian-flip regression fails immediately rather than at
+        // first xattr block parse.
+        let magic_bytes: [u8; 4] = EXT4_XATTR_MAGIC.to_le_bytes();
+        assert_eq!(
+            magic_bytes,
+            [0x00, 0x00, 0x02, 0xEA],
+            "EXT4_XATTR_MAGIC LE byte sequence must be [00, 00, 02, EA]"
+        );
+
+        // Index values: each constant pinned to its kernel integer.
+        let indices: &[(&str, u8, u8)] = &[
+            ("EXT4_XATTR_INDEX_USER", EXT4_XATTR_INDEX_USER, 1),
+            (
+                "EXT4_XATTR_INDEX_POSIX_ACL_ACCESS",
+                EXT4_XATTR_INDEX_POSIX_ACL_ACCESS,
+                2,
+            ),
+            (
+                "EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT",
+                EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT,
+                3,
+            ),
+            ("EXT4_XATTR_INDEX_TRUSTED", EXT4_XATTR_INDEX_TRUSTED, 4),
+            ("EXT4_XATTR_INDEX_LUSTRE", EXT4_XATTR_INDEX_LUSTRE, 5),
+            ("EXT4_XATTR_INDEX_SECURITY", EXT4_XATTR_INDEX_SECURITY, 6),
+            ("EXT4_XATTR_INDEX_SYSTEM", EXT4_XATTR_INDEX_SYSTEM, 7),
+            ("EXT4_XATTR_INDEX_RICHACL", EXT4_XATTR_INDEX_RICHACL, 8),
+            (
+                "EXT4_XATTR_INDEX_ENCRYPTION",
+                EXT4_XATTR_INDEX_ENCRYPTION,
+                9,
+            ),
+            ("EXT4_XATTR_INDEX_HURD", EXT4_XATTR_INDEX_HURD, 10),
+        ];
+        for (name, actual, expected) in indices {
+            assert_eq!(
+                actual, expected,
+                "{name} must equal kernel value {expected}"
+            );
+        }
+
+        // Pairwise distinctness: every namespace must map to a unique
+        // index byte. A future regression that aliased two namespaces
+        // would route both to the same prefix string.
+        let values: Vec<u8> = indices.iter().map(|&(_, v, _)| v).collect();
+        let mut sorted = values.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            values.len(),
+            sorted.len(),
+            "EXT4_XATTR_INDEX_* values must be pairwise distinct"
+        );
+    }
 }
