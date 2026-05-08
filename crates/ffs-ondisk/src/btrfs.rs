@@ -5052,6 +5052,89 @@ mod tests {
         assert_eq!(item.sector_size, 4096);
     }
 
+    /// bd-na4cc — Kernel-conformance pin for parse_dev_item field
+    /// offsets per fs/btrfs/btrfs_tree.h struct btrfs_dev_item.
+    ///
+    ///   devid        u64 @0..8
+    ///   total_bytes  u64 @8..16
+    ///   bytes_used   u64 @16..24
+    ///   io_align     u32 @24..28
+    ///   io_width     u32 @28..32
+    ///   sector_size  u32 @32..36
+    ///   dev_type     u64 @36..44
+    ///   generation   u64 @44..52
+    ///   start_offset u64 @52..60
+    ///   dev_group    u32 @60..64
+    ///   seek_speed   u8  @64
+    ///   bandwidth    u8  @65
+    ///   uuid         [u8;16] @66..82
+    ///   fsid         [u8;16] @82..98
+    /// (98 bytes total = BTRFS_DEV_ITEM_SIZE)
+    ///
+    /// Existing parse_dev_item_valid only verifies devid /
+    /// total_bytes / bytes_used / sector_size — the other 9 fields
+    /// (io_align, io_width, dev_type, generation, start_offset,
+    /// dev_group, seek_speed, bandwidth, uuid, fsid) are not
+    /// pinned at their offsets. A regression that drifted any of
+    /// those would silently corrupt every DEV_ITEM read on btrfs
+    /// mount.
+    ///
+    /// Stamp each addressable field with a distinct non-zero
+    /// magic so any single-field offset drift produces a cross-
+    /// field collision.
+    #[test]
+    fn parse_dev_item_kernel_offsets_match_btrfs_tree_h() {
+        let mut data = vec![0_u8; 98];
+
+        let devid = 0x1111_1111_1111_1111_u64;
+        let total_bytes = 0x2222_2222_2222_2222_u64;
+        let bytes_used = 0x1111_1111_1111_1110_u64; // < total_bytes
+        let io_align: u32 = 0x4444_4444;
+        let io_width: u32 = 0x5555_5555;
+        let sector_size: u32 = 0x6666_6666;
+        let dev_type = 0x7777_7777_7777_7777_u64;
+        let generation = 0x8888_8888_8888_8888_u64;
+        let start_offset = 0x9999_9999_9999_9999_u64;
+        let dev_group: u32 = 0xAAAA_AAAA;
+        let seek_speed: u8 = 0xBB;
+        let bandwidth: u8 = 0xCC;
+        let uuid: [u8; 16] = [0xDD; 16];
+        let fsid: [u8; 16] = [0xEE; 16];
+
+        data[0..8].copy_from_slice(&devid.to_le_bytes());
+        data[8..16].copy_from_slice(&total_bytes.to_le_bytes());
+        data[16..24].copy_from_slice(&bytes_used.to_le_bytes());
+        data[24..28].copy_from_slice(&io_align.to_le_bytes());
+        data[28..32].copy_from_slice(&io_width.to_le_bytes());
+        data[32..36].copy_from_slice(&sector_size.to_le_bytes());
+        data[36..44].copy_from_slice(&dev_type.to_le_bytes());
+        data[44..52].copy_from_slice(&generation.to_le_bytes());
+        data[52..60].copy_from_slice(&start_offset.to_le_bytes());
+        data[60..64].copy_from_slice(&dev_group.to_le_bytes());
+        data[64] = seek_speed;
+        data[65] = bandwidth;
+        data[66..82].copy_from_slice(&uuid);
+        data[82..98].copy_from_slice(&fsid);
+
+        let parsed =
+            parse_dev_item(&data).expect("kernel-stamped dev_item must parse");
+
+        assert_eq!(parsed.devid, devid, "devid @0..8");
+        assert_eq!(parsed.total_bytes, total_bytes, "total_bytes @8..16");
+        assert_eq!(parsed.bytes_used, bytes_used, "bytes_used @16..24");
+        assert_eq!(parsed.io_align, io_align, "io_align @24..28");
+        assert_eq!(parsed.io_width, io_width, "io_width @28..32");
+        assert_eq!(parsed.sector_size, sector_size, "sector_size @32..36");
+        assert_eq!(parsed.dev_type, dev_type, "dev_type @36..44");
+        assert_eq!(parsed.generation, generation, "generation @44..52");
+        assert_eq!(parsed.start_offset, start_offset, "start_offset @52..60");
+        assert_eq!(parsed.dev_group, dev_group, "dev_group @60..64");
+        assert_eq!(parsed.seek_speed, seek_speed, "seek_speed @64");
+        assert_eq!(parsed.bandwidth, bandwidth, "bandwidth @65");
+        assert_eq!(parsed.uuid, uuid, "uuid @66..82");
+        assert_eq!(parsed.fsid, fsid, "fsid @82..98");
+    }
+
     #[test]
     fn parse_dev_item_rejects_bytes_used_above_total() {
         let mut data = vec![0u8; 98];
