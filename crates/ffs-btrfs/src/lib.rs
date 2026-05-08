@@ -7429,6 +7429,45 @@ mod tests {
         assert_eq!(parsed, vec![original]);
     }
 
+    // bd-bq6l8 — Canonical byte-layout snapshot for
+    // BtrfsInodeRef::try_to_bytes. Pins the encoder's exact output
+    // for a known fixture so any field-order or offset drift fails
+    // with a hex diff (rather than a silent round-trip with a
+    // similarly-broken parser). Pairs with bd-kelr0 (parser kernel-
+    // offset pin), bd-pt9pk (round-trip MR), bd-9f8ef (determinism
+    // MR), bd-2gb89 (BtrfsDirItem canonical bytes), bd-yjzhk
+    // (BtrfsExtentData Regular canonical bytes), bd-fw55q
+    // (BtrfsExtentData Inline canonical bytes).
+    #[test]
+    fn inode_ref_to_bytes_canonical_byte_layout() {
+        let entry = BtrfsInodeRef {
+            index: 0xCAFE_BABE_DEAD_BEEF,
+            name: b"kernel-pin-test".to_vec(),
+        };
+        let bytes = entry.try_to_bytes().expect("canonical fixture encodes");
+        assert_eq!(bytes.len(), 10 + 15);
+
+        // Round-trip cross-check is redundant with bd-kelr0 +
+        // bd-pt9pk but cheap and explicit here.
+        let parsed = parse_inode_refs(&bytes).expect("canonical bytes parse");
+        assert_eq!(parsed, vec![entry]);
+
+        // 10 fixed bytes + 15 name bytes = 25 total.
+        let expected: [u8; 25] = [
+            // index LE @0..8 = 0xCAFE_BABE_DEAD_BEEF
+            0xEF, 0xBE, 0xAD, 0xDE, 0xBE, 0xBA, 0xFE, 0xCA,
+            // name_len LE @8..10 = 15
+            0x0F, 0x00,
+            // name @10..25 = "kernel-pin-test"
+            b'k', b'e', b'r', b'n', b'e', b'l', b'-', b'p', b'i', b'n',
+            b'-', b't', b'e', b's', b't',
+        ];
+        assert_eq!(
+            bytes, expected,
+            "BtrfsInodeRef::try_to_bytes canonical byte layout drifted"
+        );
+    }
+
     // bd-kelr0 — Kernel-conformance pin for parse_inode_refs.
     //
     // struct btrfs_inode_ref in fs/btrfs/btrfs_tree.h packs to 10
