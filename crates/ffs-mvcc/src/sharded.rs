@@ -1565,8 +1565,14 @@ mod tests {
             block_num in any::<u64>(),
         ) {
             let store = make_store(shard_count);
+            let effective_shard_count = store.shard_count();
             let idx = store.shard_index(BlockNumber(block_num));
-            prop_assert!(idx < shard_count, "shard_index {} >= {}", idx, shard_count);
+            prop_assert!(
+                idx < effective_shard_count,
+                "shard_index {} >= effective shard count {}",
+                idx,
+                effective_shard_count
+            );
         }
 
         /// Committed writes are visible in ShardedMvccStore.

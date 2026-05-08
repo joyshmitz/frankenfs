@@ -37,6 +37,8 @@ RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
 RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:-CARGO_TARGET_DIR,RUST_LOG,RUST_BACKTRACE}"
 RCH_AGENT_TARGET_SUFFIX="${AGENT_NAME:-${USER:-agent}}"
 RCH_CARGO_TARGET_DIR="${RCH_CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_frankenfs_mvcc_replay_gate_$RCH_AGENT_TARGET_SUFFIX}"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
 rch_allow_env() {
     local name="$1"
@@ -49,11 +51,78 @@ rch_allow_env CARGO_TARGET_DIR
 rch_allow_env RUST_LOG
 rch_allow_env RUST_BACKTRACE
 
-run_rch_cargo() {
-    CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" \
+terminate_rch_capture() {
+    local pid="$1"
+    kill -TERM "-$pid" >/dev/null 2>&1 || kill -TERM "$pid" >/dev/null 2>&1 || true
+}
+
+run_rch_cargo_capture() {
+    local log_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+
+    : >"$log_path"
+    set +e
+    setsid env \
+        CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" \
         RCH_ENV_ALLOWLIST="$RCH_ENV_ALLOWLIST" \
         RCH_VISIBILITY="$RCH_VISIBILITY" \
-        "$RCH_BIN" exec -- cargo "$@"
+        "$RCH_BIN" exec -- cargo "$@" >"$log_path" 2>&1 &
+    pid=$!
+    set -e
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                terminate_rch_capture "$pid"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|log=${log_path}"
+            terminate_rch_capture "$pid"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}"
+        return 0
+    fi
+    return "$status"
 }
 
 PASS_COUNT=0
@@ -84,8 +153,10 @@ PERSIST_SRC="crates/ffs-mvcc/src/persist.rs"
 #######################################
 e2e_step "Scenario 1: Full ffs-mvcc test suite"
 
-TEST_LOG=$(mktemp)
-if run_rch_cargo test -p ffs-mvcc --lib 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="${E2E_LOG_DIR}/mvcc_full_suite.log"
+if run_rch_cargo_capture "$TEST_LOG" test -p ffs-mvcc --lib; then
+    cat "$TEST_LOG"
+    cat "$TEST_LOG" >>"$E2E_LOG_FILE"
     TESTS_RUN=$(grep -c "test .*::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 300 ]]; then
         scenario_result "mvcc_full_suite" "PASS" "Full suite passed (${TESTS_RUN} tests)"
@@ -93,17 +164,20 @@ if run_rch_cargo test -p ffs-mvcc --lib 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
         scenario_result "mvcc_full_suite" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 300)"
     fi
 else
+    cat "$TEST_LOG"
+    cat "$TEST_LOG" >>"$E2E_LOG_FILE"
     scenario_result "mvcc_full_suite" "FAIL" "ffs-mvcc test suite failed"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 2: WAL replay tests
 #######################################
 e2e_step "Scenario 2: WAL replay engine tests"
 
-TEST_LOG=$(mktemp)
-if run_rch_cargo test -p ffs-mvcc --lib -- wal_replay::tests 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="${E2E_LOG_DIR}/wal_replay_tests.log"
+if run_rch_cargo_capture "$TEST_LOG" test -p ffs-mvcc --lib -- wal_replay::tests; then
+    cat "$TEST_LOG"
+    cat "$TEST_LOG" >>"$E2E_LOG_FILE"
     TESTS_RUN=$(grep -c "test wal_replay::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 15 ]]; then
         scenario_result "wal_replay_tests" "PASS" "WAL replay tests passed (${TESTS_RUN} tests)"
@@ -111,17 +185,20 @@ if run_rch_cargo test -p ffs-mvcc --lib -- wal_replay::tests 2>"$TEST_LOG" | tee
         scenario_result "wal_replay_tests" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 15)"
     fi
 else
+    cat "$TEST_LOG"
+    cat "$TEST_LOG" >>"$E2E_LOG_FILE"
     scenario_result "wal_replay_tests" "FAIL" "WAL replay tests failed"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 3: Crash matrix tests
 #######################################
 e2e_step "Scenario 3: Crash matrix deterministic scenarios"
 
-TEST_LOG=$(mktemp)
-if run_rch_cargo test -p ffs-mvcc --lib -- crash_matrix 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="${E2E_LOG_DIR}/crash_matrix_tests.log"
+if run_rch_cargo_capture "$TEST_LOG" test -p ffs-mvcc --lib -- crash_matrix; then
+    cat "$TEST_LOG"
+    cat "$TEST_LOG" >>"$E2E_LOG_FILE"
     TESTS_RUN=$(grep -c "test crash_matrix::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 15 ]]; then
         scenario_result "crash_matrix_tests" "PASS" "Crash matrix tests passed (${TESTS_RUN} tests)"
@@ -129,17 +206,20 @@ if run_rch_cargo test -p ffs-mvcc --lib -- crash_matrix 2>"$TEST_LOG" | tee -a "
         scenario_result "crash_matrix_tests" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 15)"
     fi
 else
+    cat "$TEST_LOG"
+    cat "$TEST_LOG" >>"$E2E_LOG_FILE"
     scenario_result "crash_matrix_tests" "FAIL" "Crash matrix tests failed"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 4: Persist layer tests
 #######################################
 e2e_step "Scenario 4: Persist layer (checkpoint + WAL)"
 
-TEST_LOG=$(mktemp)
-if run_rch_cargo test -p ffs-mvcc --lib -- persist::tests 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="${E2E_LOG_DIR}/persist_layer_tests.log"
+if run_rch_cargo_capture "$TEST_LOG" test -p ffs-mvcc --lib -- persist::tests; then
+    cat "$TEST_LOG"
+    cat "$TEST_LOG" >>"$E2E_LOG_FILE"
     TESTS_RUN=$(grep -c "test persist::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 25 ]]; then
         scenario_result "persist_layer_tests" "PASS" "Persist tests passed (${TESTS_RUN} tests)"
@@ -147,40 +227,47 @@ if run_rch_cargo test -p ffs-mvcc --lib -- persist::tests 2>"$TEST_LOG" | tee -a
         scenario_result "persist_layer_tests" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 25)"
     fi
 else
+    cat "$TEST_LOG"
+    cat "$TEST_LOG" >>"$E2E_LOG_FILE"
     scenario_result "persist_layer_tests" "FAIL" "Persist tests failed"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 5: CLI WAL telemetry tests
 #######################################
 e2e_step "Scenario 5: CLI WAL telemetry tests"
 
-TEST_LOG=$(mktemp)
-if run_rch_cargo test -p ffs-cli -- wal_replay 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
-    TESTS_RUN=$(grep -c "test tests::wal_replay" "$TEST_LOG" 2>/dev/null || echo "0")
+TEST_LOG="${E2E_LOG_DIR}/cli_wal_telemetry_tests.log"
+if run_rch_cargo_capture "$TEST_LOG" test -p ffs-cli -- wal_replay; then
+    cat "$TEST_LOG"
+    cat "$TEST_LOG" >>"$E2E_LOG_FILE"
+    TESTS_RUN=$(grep -c "^test .* \.\.\. ok$" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 4 ]]; then
         scenario_result "cli_wal_telemetry_tests" "PASS" "CLI WAL tests passed (${TESTS_RUN} tests)"
     else
         scenario_result "cli_wal_telemetry_tests" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 4)"
     fi
 else
+    cat "$TEST_LOG"
+    cat "$TEST_LOG" >>"$E2E_LOG_FILE"
     scenario_result "cli_wal_telemetry_tests" "FAIL" "CLI WAL tests failed"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 6: ffs-core WAL recovery integration
 #######################################
 e2e_step "Scenario 6: ffs-core WAL recovery integration"
 
-TEST_LOG=$(mktemp)
-if run_rch_cargo test -p ffs-core -- mvcc_wal_recovery 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="${E2E_LOG_DIR}/core_wal_recovery.log"
+if run_rch_cargo_capture "$TEST_LOG" test -p ffs-core -- mvcc_wal_recovery; then
+    cat "$TEST_LOG"
+    cat "$TEST_LOG" >>"$E2E_LOG_FILE"
     scenario_result "core_wal_recovery" "PASS" "ffs-core WAL recovery tests passed"
 else
+    cat "$TEST_LOG"
+    cat "$TEST_LOG" >>"$E2E_LOG_FILE"
     scenario_result "core_wal_recovery" "FAIL" "ffs-core WAL recovery tests failed"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 7: WAL replay structured logging
