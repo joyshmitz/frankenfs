@@ -13,11 +13,110 @@ export REPO_ROOT
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_cross_oracle}"
-export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
 
 PASS_COUNT=0
 FAIL_COUNT=0
 TOTAL=0
+
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("$RCH_BIN" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "$RCH_BIN" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local log_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+
+    : >"$log_path"
+    set +e
+    RCH_VISIBILITY="$RCH_VISIBILITY" "$RCH_BIN" exec -- "$@" >"$log_path" 2>&1 &
+    pid=$!
+    set -e
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|log=${log_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}"
+        return 0
+    fi
+    return "$status"
+}
 
 scenario_result() {
     local scenario_id="$1"
@@ -34,16 +133,18 @@ scenario_result() {
 
 e2e_init "ffs_cross_oracle_arbitration"
 
+RCH_INPUT_DIR="$REPO_ROOT/artifacts/rch_input/$(basename "$E2E_LOG_DIR")/cross_oracle_arbitration"
+mkdir -p "$RCH_INPUT_DIR"
+
 REPORT_JSON="$E2E_LOG_DIR/cross_oracle_report.json"
+REPORT_JSON_RCH="$RCH_INPUT_DIR/cross_oracle_report.json"
 VALIDATION_JSON="$E2E_LOG_DIR/cross_oracle_validation.json"
 VALIDATION_MD="$E2E_LOG_DIR/cross_oracle_validation.md"
 VALIDATE_RAW="$E2E_LOG_DIR/cross_oracle_validate.raw"
 MARKDOWN_RAW="$E2E_LOG_DIR/cross_oracle_markdown.raw"
-BAD_HIGH_RISK_JSON="$E2E_LOG_DIR/cross_oracle_bad_high_risk.json"
-BAD_HIGH_RISK_OUT="$E2E_LOG_DIR/cross_oracle_bad_high_risk_validation.json"
+BAD_HIGH_RISK_JSON="$RCH_INPUT_DIR/cross_oracle_bad_high_risk.json"
 BAD_HIGH_RISK_RAW="$E2E_LOG_DIR/cross_oracle_bad_high_risk.raw"
-BAD_STALE_JSON="$E2E_LOG_DIR/cross_oracle_bad_stale.json"
-BAD_STALE_OUT="$E2E_LOG_DIR/cross_oracle_bad_stale_validation.json"
+BAD_STALE_JSON="$RCH_INPUT_DIR/cross_oracle_bad_stale.json"
 BAD_STALE_RAW="$E2E_LOG_DIR/cross_oracle_bad_stale.raw"
 UNIT_LOG="$E2E_LOG_DIR/cross_oracle_unit_tests.log"
 
@@ -83,7 +184,7 @@ else
 fi
 
 e2e_step "Scenario 2: generate fixture cross-oracle conflicts"
-python3 - "$REPORT_JSON" <<'PY'
+python3 - "$REPORT_JSON_RCH" "$REPORT_JSON" <<'PY'
 from __future__ import annotations
 
 import json
@@ -91,6 +192,7 @@ import pathlib
 import sys
 
 report_path = pathlib.Path(sys.argv[1])
+local_report_path = pathlib.Path(sys.argv[2])
 hash_a = "a" * 64
 hash_b = "b" * 64
 required_log_fields = [
@@ -239,19 +341,21 @@ report = {
     "arbitrations": arbitrations,
     "artifact_paths": sorted(set(all_artifacts)),
 }
-report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+serialized = json.dumps(report, indent=2, sort_keys=True) + "\n"
+report_path.write_text(serialized, encoding="utf-8")
+local_report_path.write_text(serialized, encoding="utf-8")
 PY
 scenario_result "cross_oracle_fixture_conflicts_generated" "PASS" "fixture conflicts generated"
 
 e2e_step "Scenario 3: validator accepts fixture conflicts"
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- \
+if run_rch_capture "$VALIDATE_RAW" cargo run --quiet -p ffs-harness -- \
     validate-cross-oracle-arbitration \
-    --report "$REPORT_JSON" >"$VALIDATE_RAW" 2>&1 \
+    --report "$REPORT_JSON_RCH" \
     && extract_validation_json "$VALIDATE_RAW" "$VALIDATION_JSON" \
-    && RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- \
+    && run_rch_capture "$MARKDOWN_RAW" cargo run --quiet -p ffs-harness -- \
         validate-cross-oracle-arbitration \
-        --report "$REPORT_JSON" \
-        --format markdown >"$MARKDOWN_RAW" 2>&1; then
+        --report "$REPORT_JSON_RCH" \
+        --format markdown; then
     scenario_result "cross_oracle_fixture_conflicts_classified" "PASS" "validation JSON and markdown generated"
 else
     scenario_result "cross_oracle_fixture_conflicts_classified" "FAIL" "validator rejected fixture conflicts"
@@ -298,7 +402,7 @@ else
 fi
 
 e2e_step "Scenario 5: unresolved high-risk conflict fails closed"
-python3 - "$REPORT_JSON" "$BAD_HIGH_RISK_JSON" <<'PY'
+python3 - "$REPORT_JSON_RCH" "$BAD_HIGH_RISK_JSON" <<'PY'
 from __future__ import annotations
 
 import json
@@ -310,10 +414,9 @@ data = json.loads(source.read_text(encoding="utf-8"))
 data["arbitrations"][0]["release_gate_impact"]["effect"] = "downgrade"
 target.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- \
+if run_rch_capture "$BAD_HIGH_RISK_RAW" cargo run --quiet -p ffs-harness -- \
     validate-cross-oracle-arbitration \
-    --report "$BAD_HIGH_RISK_JSON" \
-    --out "$BAD_HIGH_RISK_OUT" >"$BAD_HIGH_RISK_RAW" 2>&1; then
+    --report "$BAD_HIGH_RISK_JSON"; then
     scenario_result "cross_oracle_unresolved_claim_fails_closed" "FAIL" "unsafe downgrade was accepted"
 elif grep -q "unresolved high-risk public claim must fail closed" "$BAD_HIGH_RISK_RAW"; then
     scenario_result "cross_oracle_unresolved_claim_fails_closed" "PASS" "unsafe downgrade rejected"
@@ -322,7 +425,7 @@ else
 fi
 
 e2e_step "Scenario 6: stale or missing oracle evidence requires gap-aware classification"
-python3 - "$REPORT_JSON" "$BAD_STALE_JSON" <<'PY'
+python3 - "$REPORT_JSON_RCH" "$BAD_STALE_JSON" <<'PY'
 from __future__ import annotations
 
 import json
@@ -334,10 +437,9 @@ data = json.loads(source.read_text(encoding="utf-8"))
 data["arbitrations"][2]["classification"] = "frankenfs_product_bug"
 target.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- \
+if run_rch_capture "$BAD_STALE_RAW" cargo run --quiet -p ffs-harness -- \
     validate-cross-oracle-arbitration \
-    --report "$BAD_STALE_JSON" \
-    --out "$BAD_STALE_OUT" >"$BAD_STALE_RAW" 2>&1; then
+    --report "$BAD_STALE_JSON"; then
     scenario_result "cross_oracle_stale_missing_evidence_rejected" "FAIL" "stale/missing evidence was accepted under product-bug classification"
 elif grep -q "cannot absorb evidence gaps" "$BAD_STALE_RAW"; then
     scenario_result "cross_oracle_stale_missing_evidence_rejected" "PASS" "stale/missing evidence rejected without gap-aware classification"
@@ -346,8 +448,8 @@ else
 fi
 
 e2e_step "Scenario 7: cross-oracle arbitration unit tests pass"
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib \
-    cross_oracle_arbitration -- --nocapture >"$UNIT_LOG" 2>&1; then
+if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib \
+    cross_oracle_arbitration -- --nocapture; then
     scenario_result "cross_oracle_unit_tests" "PASS" "unit tests passed"
 else
     scenario_result "cross_oracle_unit_tests" "FAIL" "unit tests failed"
