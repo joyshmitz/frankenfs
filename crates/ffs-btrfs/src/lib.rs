@@ -7485,6 +7485,37 @@ mod tests {
             // succeed (covers no-panic).
             let _ = format!("{err:?}");
         }
+
+        // bd-9f8ef MR-4 determinism: parse(payload) == parse(payload).
+        // Sister parsers parse_xattr_items (bd-fhznm) and
+        // parse_extent_data (bd-3niu3) have analogous determinism
+        // proptests. A regression that introduced a hash-iteration
+        // or allocator-address dependency in the parser path would
+        // silently surface only under specific scheduling; this
+        // catches it under proptest's deterministic seed sweep.
+        #[test]
+        fn inode_ref_proptest_determinism(
+            entries in proptest::collection::vec(
+                (
+                    proptest::prelude::any::<u64>(),
+                    proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=32),
+                ),
+                1..=8,
+            ),
+        ) {
+            let mut payload = Vec::new();
+            for (index, name) in &entries {
+                let entry = BtrfsInodeRef {
+                    index: *index,
+                    name: name.clone(),
+                };
+                let bytes = entry.try_to_bytes().expect("non-empty name encodes");
+                payload.extend_from_slice(&bytes);
+            }
+            let a = parse_inode_refs(&payload).expect("first parse");
+            let b = parse_inode_refs(&payload).expect("second parse");
+            proptest::prop_assert_eq!(a, b);
+        }
     }
 
     /// bd-nzs5f — Kernel-conformance pin for the btrfs_inode_item
