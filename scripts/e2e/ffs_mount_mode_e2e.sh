@@ -25,6 +25,12 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_mount_mode}"
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-360}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -41,6 +47,25 @@ scenario_result() {
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
     TOTAL=$((TOTAL + 1))
+}
+
+run_rch_capture() {
+    local log_path="$1"
+    local status
+    shift
+
+    e2e_log "RCH command: $*"
+    status=0
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
+        return 0
+    fi
+    return "$status"
 }
 
 e2e_init "ffs_mount_mode"
@@ -154,15 +179,14 @@ fi
 #######################################
 e2e_step "Scenario 8: Mount-mode unit tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-types -p ffs-core -p ffs-error -- mount_mode mode_violation require_native compat_mode >"$TEST_LOG" 2>&1; then
+TEST_LOG="$E2E_LOG_DIR/mount_mode_unit_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-types -p ffs-core -p ffs-error -- mount_mode mode_violation require_native compat_mode; then
     TESTS_RUN=$(grep -oP 'test result: ok\. \K[0-9]+' "$TEST_LOG" | paste -sd+ - | bc 2>/dev/null || echo "0")
     scenario_result "mode_unit_tests" "PASS" "${TESTS_RUN} mount-mode unit tests passed"
 else
     scenario_result "mode_unit_tests" "FAIL" "Mount-mode unit tests failed"
     tail -20 "$TEST_LOG" | while IFS= read -r line; do e2e_log "  $line"; done
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 9: Structured log emission on mode selection
@@ -187,7 +211,7 @@ e2e_step "Scenario 10: Structured log on boundary violation"
 if grep -q "native_mode_boundary_violation" crates/ffs-core/src/lib.rs; then
     VIOLATION_FIELDS=0
     for field in "mount_mode" "rejected_operation" "operation_id" "scenario_id" "outcome"; do
-        if grep -A5 "native_mode_boundary_violation" crates/ffs-core/src/lib.rs | grep -q "$field"; then
+        if grep -B6 -A1 "native_mode_boundary_violation" crates/ffs-core/src/lib.rs | grep -q "$field"; then
             VIOLATION_FIELDS=$((VIOLATION_FIELDS + 1))
         fi
     done
