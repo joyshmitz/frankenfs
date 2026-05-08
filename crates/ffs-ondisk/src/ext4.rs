@@ -6139,6 +6139,96 @@ mod tests {
         assert!(parsed.validate_checksum(&raw, seed).is_ok());
     }
 
+    /// bd-tpgp7 — Kernel-conformance pin for Ext4MmpBlock field
+    /// offsets per fs/ext4/mmp.h struct mmp_struct.
+    ///
+    ///   magic            u32 @0x00
+    ///   seq              u32 @0x04
+    ///   time_lo          u32 @0x08  (kernel: __le64 mmp_time)
+    ///   time_hi          u32 @0x0C
+    ///   nodename       [u8;64] @0x10
+    ///   bdevname       [u8;32] @0x50
+    ///   check_interval   u16 @0x70
+    ///   checksum         u32 @0x3FC
+    ///
+    /// bd-jbilz pins the EXT4_MMP_MAGIC value but the field
+    /// OFFSETS are not pinned — a regression that drifted
+    /// time_lo/time_hi/nodename/bdevname offsets would silently
+    /// corrupt every multi-mount-protection check on mount
+    /// without tripping the existing magic check or the round-
+    /// trip in mmp_block_parse_and_checksum_roundtrip (which
+    /// uses values 123 and 5_u16, not unique offset-detecting
+    /// magics).
+    ///
+    /// Stamp each addressable field with a distinct non-zero
+    /// magic so any single-field offset drift produces a cross-
+    /// field collision on the parsed struct.
+    #[test]
+    fn ext4_mmp_block_kernel_offsets_match_mmp_h() {
+        let mut raw = vec![0_u8; 1024]; // EXT4_SUPERBLOCK_SIZE = 1024
+
+        // magic@0..4 (must be EXT4_MMP_MAGIC for parser to accept).
+        raw[0x00..0x04].copy_from_slice(&EXT4_MMP_MAGIC.to_le_bytes());
+        // seq@4..8 — unique magic.
+        let seq_magic: u32 = 0x1234_5678;
+        raw[0x04..0x08].copy_from_slice(&seq_magic.to_le_bytes());
+        // time_lo@8..0xC — unique magic.
+        let time_lo: u32 = 0x9999_9999;
+        raw[0x08..0x0C].copy_from_slice(&time_lo.to_le_bytes());
+        // time_hi@0xC..0x10 — unique magic (parser merges as u64).
+        let time_hi: u32 = 0xAAAA_AAAA;
+        raw[0x0C..0x10].copy_from_slice(&time_hi.to_le_bytes());
+        // nodename@0x10..0x50 — 15-byte ASCII content, padded with NUL.
+        let nodename_src = b"kernel-pin-test";
+        raw[0x10..0x10 + nodename_src.len()].copy_from_slice(nodename_src);
+        // bdevname@0x50..0x70 — 15-byte ASCII content, padded with NUL.
+        let bdevname_src = b"/dev/kernel-pin";
+        raw[0x50..0x50 + bdevname_src.len()].copy_from_slice(bdevname_src);
+        // check_interval@0x70..0x72 — unique magic.
+        let check_interval: u16 = 0xBBBB;
+        raw[0x70..0x72].copy_from_slice(&check_interval.to_le_bytes());
+        // checksum@0x3FC..0x400 — unique magic (parser stores raw,
+        // validate_checksum is a separate gate).
+        let checksum_magic: u32 = 0xCCCC_DDDD;
+        raw[EXT4_MMP_CHECKSUM_OFFSET..EXT4_MMP_CHECKSUM_OFFSET + 4]
+            .copy_from_slice(&checksum_magic.to_le_bytes());
+
+        let parsed =
+            Ext4MmpBlock::parse_from_bytes(&raw).expect("kernel-stamped MMP block must parse");
+
+        assert_eq!(
+            parsed.magic, EXT4_MMP_MAGIC,
+            "magic must come from offset 0x00 per kernel layout"
+        );
+        assert_eq!(
+            parsed.seq, seq_magic,
+            "seq must come from offset 0x04 per kernel layout"
+        );
+        // time field is parsed as time_hi<<32 | time_lo per the
+        // u64 split at lib.rs:2304-2305. Pin both halves.
+        let expected_time = (u64::from(time_hi) << 32) | u64::from(time_lo);
+        assert_eq!(
+            parsed.time, expected_time,
+            "time must come from offsets 0x08 (lo) and 0x0C (hi) per kernel layout"
+        );
+        assert_eq!(
+            parsed.nodename, "kernel-pin-test",
+            "nodename must come from offset 0x10 (NUL-trimmed from 64-byte field)"
+        );
+        assert_eq!(
+            parsed.bdevname, "/dev/kernel-pin",
+            "bdevname must come from offset 0x50 (NUL-trimmed from 32-byte field)"
+        );
+        assert_eq!(
+            parsed.check_interval, check_interval,
+            "check_interval must come from offset 0x70 per kernel layout"
+        );
+        assert_eq!(
+            parsed.checksum, checksum_magic,
+            "checksum must come from offset EXT4_MMP_CHECKSUM_OFFSET (0x3FC)"
+        );
+    }
+
     #[test]
     fn stamp_group_desc_checksum_matches_verify() {
         let gd = Ext4GroupDesc {
