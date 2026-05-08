@@ -967,6 +967,33 @@ fn bench_btrfs_extent_data_inline_to_bytes(c: &mut Criterion) {
     });
 }
 
+/// bd-4o0be — parse_extent_data routes Inline through
+/// parse_inline_extent_data, a separate code path from the Regular
+/// branch with its own validate_inline_extent_ram_bytes invariant
+/// (uncompressed inline_len must equal ram_bytes) that bd-zuqtr's
+/// Regular bench cannot exercise. Pair with bd-zixaq (inline encoder)
+/// so the perf gate tracks regressions on both halves of the inline-
+/// extent encode/decode bijection. Typical small-file inlining shape:
+/// 8-byte uncompressed inline data + 21-byte header = 29 bytes.
+/// Correctness pinned by bd-fw55q (inline canonical bytes), bd-3niu3
+/// (proptest round-trip MR for both variants).
+fn bench_btrfs_parse_extent_data_inline(c: &mut Criterion) {
+    use ffs_btrfs::{BTRFS_COMPRESS_NONE, BtrfsExtentData};
+    let extent = BtrfsExtentData::Inline {
+        generation: 0x1234,
+        ram_bytes: 8, // NONE compression: must equal data.len()
+        compression: BTRFS_COMPRESS_NONE,
+        data: vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
+    };
+    let payload = extent.to_bytes();
+
+    c.bench_function("btrfs_parse_extent_data_inline", |b| {
+        b.iter(|| {
+            ffs_btrfs::parse_extent_data(black_box(&payload)).expect("inline extent_data parses");
+        });
+    });
+}
+
 /// bd-m9661 — parse_xattr_items runs on every btrfs getxattr /
 /// listxattr / llistxattr call through ffs_core::OpenFs. Bench
 /// against a 30-byte-header + 17-byte-name + 17-byte-value
@@ -1069,6 +1096,7 @@ criterion_group!(
     bench_btrfs_inode_item_to_bytes,
     bench_btrfs_parse_xattr_items,
     bench_btrfs_parse_extent_data_regular,
+    bench_btrfs_parse_extent_data_inline,
     bench_btrfs_extent_data_regular_to_bytes,
     bench_btrfs_extent_data_inline_to_bytes,
     bench_ext4_chksum_4kb,
