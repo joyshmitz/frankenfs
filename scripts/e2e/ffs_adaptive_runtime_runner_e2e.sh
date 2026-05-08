@@ -16,6 +16,8 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_adaptive_runtime_runner}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}FFS_ADAPTIVE_RUNTIME_REAL_RUN_ACK"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-300}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -32,6 +34,53 @@ scenario_result() {
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
     TOTAL=$((TOTAL + 1))
+}
+
+run_rch_capture() {
+    local output_path="$1"
+    shift
+    local status rch_log_path
+    rch_log_path="${output_path}.rch.log"
+    if RCH_VISIBILITY=none RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-error}" timeout "${RCH_COMMAND_TIMEOUT_SECS}s" \
+        "${RCH_BIN:-rch}" exec -- env FFS_REMOTE_RUNNER_ROOT="$RUNNER_ROOT" bash -lc '
+            set -euo pipefail
+            mkdir -p "$FFS_REMOTE_RUNNER_ROOT"
+            remote_output="$FFS_REMOTE_RUNNER_ROOT/rch-command-output.$$.log"
+            set +e
+            "$@" >"$remote_output" 2>&1
+            status=$?
+            set -e
+            printf "%s\n" "__FFS_REMOTE_OUTPUT_BEGIN__"
+            cat "$remote_output"
+            printf "%s\n" "__FFS_REMOTE_OUTPUT_END__"
+            printf "%s\n" "__FFS_REMOTE_TREE_BEGIN__"
+            tar -C "$FFS_REMOTE_RUNNER_ROOT" -cf - . | base64 -w 0
+            printf "\n%s\n" "__FFS_REMOTE_TREE_END__"
+            exit "$status"
+        ' _ "$@" >"$rch_log_path" 2>&1; then
+        status=0
+    else
+        status=$?
+    fi
+    if ! awk '
+        $0 == "__FFS_REMOTE_OUTPUT_BEGIN__" { capture = 1; next }
+        $0 == "__FFS_REMOTE_OUTPUT_END__" { found = 1; capture = 0; next }
+        capture { print }
+        END { exit found ? 0 : 1 }
+    ' "$rch_log_path" >"$output_path"; then
+        cp "$rch_log_path" "$output_path"
+    fi
+    awk '
+        $0 == "__FFS_REMOTE_TREE_BEGIN__" { capture = 1; next }
+        $0 == "__FFS_REMOTE_TREE_END__" { found = 1; capture = 0; next }
+        capture { print }
+        END { exit found ? 0 : 1 }
+    ' "$rch_log_path" | base64 --decode | tar -C "$RUNNER_ROOT" -xf - || true
+    if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$rch_log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|output=${output_path}"
+        return 0
+    fi
+    return "$status"
 }
 
 e2e_init "ffs_adaptive_runtime_runner"
@@ -63,12 +112,12 @@ else
 fi
 
 e2e_step "Scenario 2: default dry-run emits report, manifest, logs, cleanup, and host facts"
-if cargo run --quiet -p ffs-harness -- adaptive-runtime-runner \
+if run_rch_capture "$DRY_RUN_RAW" cargo run --quiet -p ffs-harness -- adaptive-runtime-runner \
     --artifact-root "$DRY_RUN_ROOT" \
     --out "$DRY_RUN_REPORT" \
     --summary-out "$DRY_RUN_SUMMARY" \
     --generated-at "2026-05-07T00:00:00Z" \
-    --git-sha "$GIT_SHA" >"$DRY_RUN_RAW" 2>&1; then
+    --git-sha "$GIT_SHA"; then
     scenario_result "adaptive_runtime_runner_dry_run_writes_artifacts" "PASS" "dry-run artifacts emitted"
 else
     cat "$DRY_RUN_RAW"
@@ -129,13 +178,13 @@ fi
 
 e2e_step "Scenario 4: permissioned-real mode refuses missing ACK"
 set +e
-cargo run --quiet -p ffs-harness -- adaptive-runtime-runner \
+run_rch_capture "$PERMISSIONED_RAW" cargo run --quiet -p ffs-harness -- adaptive-runtime-runner \
     --mode permissioned-real \
     --artifact-root "$PERMISSIONED_ROOT" \
     --out "$PERMISSIONED_REPORT" \
     --summary-out "$PERMISSIONED_SUMMARY" \
     --test-dir "$PERMISSIONED_ROOT/test-dir" \
-    --scratch-mnt "$PERMISSIONED_ROOT/scratch-mnt" >"$PERMISSIONED_RAW" 2>&1
+    --scratch-mnt "$PERMISSIONED_ROOT/scratch-mnt"
 missing_ack_status=$?
 set -e
 
@@ -163,13 +212,13 @@ fi
 e2e_step "Scenario 5: permissioned-real mode refuses unsafe paths even with ACK"
 set +e
 FFS_ADAPTIVE_RUNTIME_REAL_RUN_ACK="adaptive-runtime-may-mount-and-generate-load" \
-    cargo run --quiet -p ffs-harness -- adaptive-runtime-runner \
+    run_rch_capture "$UNSAFE_RAW" cargo run --quiet -p ffs-harness -- adaptive-runtime-runner \
     --mode permissioned-real \
     --artifact-root "$UNSAFE_ROOT" \
     --out "$UNSAFE_REPORT" \
     --summary-out "$UNSAFE_SUMMARY" \
     --test-dir "/" \
-    --scratch-mnt "$UNSAFE_ROOT/scratch-mnt" >"$UNSAFE_RAW" 2>&1
+    --scratch-mnt "$UNSAFE_ROOT/scratch-mnt"
 unsafe_status=$?
 set -e
 
@@ -195,7 +244,7 @@ else
 fi
 
 e2e_step "Scenario 6: focused Rust tests pass"
-if cargo test -p ffs-harness adaptive_runtime_runner -- --nocapture >"$UNIT_LOG" 2>&1; then
+if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness adaptive_runtime_runner -- --nocapture; then
     scenario_result "adaptive_runtime_runner_unit_tests" "PASS" "focused unit tests passed"
 else
     cat "$UNIT_LOG"
