@@ -14,11 +14,110 @@ export REPO_ROOT
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_docs_status_drift}"
-export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
 
 PASS_COUNT=0
 FAIL_COUNT=0
 TOTAL=0
+
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("$RCH_BIN" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "$RCH_BIN" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local log_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+
+    : >"$log_path"
+    set +e
+    RCH_VISIBILITY="$RCH_VISIBILITY" "$RCH_BIN" exec -- "$@" >"$log_path" 2>&1 &
+    pid=$!
+    set -e
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|log=${log_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}"
+        return 0
+    fi
+    return "$status"
+}
 
 scenario_result() {
     local scenario_id="$1"
@@ -39,9 +138,11 @@ REPORT_JSON="${E2E_LOG_DIR}/docs_status_drift.json"
 REPORT_MD="${E2E_LOG_DIR}/docs_status_drift.md"
 REPORT_RAW="${E2E_LOG_DIR}/docs_status_drift.raw"
 REPORT_MD_RAW="${E2E_LOG_DIR}/docs_status_drift_md.raw"
-ISSUES_JSONL="${E2E_LOG_DIR}/issues.jsonl"
-BAD_UPGRADE_JSON="${E2E_LOG_DIR}/bad_upgrade_snippets.json"
-BAD_FLAT_JSON="${E2E_LOG_DIR}/bad_flat_snippets.json"
+RCH_INPUT_DIR="$REPO_ROOT/artifacts/rch_input/$(basename "$E2E_LOG_DIR")/docs_status_drift"
+mkdir -p "$RCH_INPUT_DIR"
+ISSUES_JSONL="${RCH_INPUT_DIR}/issues.jsonl"
+BAD_UPGRADE_JSON="${RCH_INPUT_DIR}/bad_upgrade_snippets.json"
+BAD_FLAT_JSON="${RCH_INPUT_DIR}/bad_flat_snippets.json"
 BAD_UPGRADE_RAW="${E2E_LOG_DIR}/bad_upgrade.raw"
 BAD_FLAT_RAW="${E2E_LOG_DIR}/bad_flat.raw"
 UNIT_LOG="${E2E_LOG_DIR}/unit_tests.log"
@@ -56,13 +157,13 @@ else
 fi
 
 e2e_step "Scenario 2: CLI renders JSON and Markdown reports"
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-docs-status-drift \
+if run_rch_capture "$REPORT_RAW" cargo run --quiet -p ffs-harness -- validate-docs-status-drift \
     --issues "$ISSUES_JSONL" \
-    --feature-parity FEATURE_PARITY.md >"$REPORT_RAW" 2>&1 \
-    && RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-docs-status-drift \
+    --feature-parity FEATURE_PARITY.md \
+    && run_rch_capture "$REPORT_MD_RAW" cargo run --quiet -p ffs-harness -- validate-docs-status-drift \
         --issues "$ISSUES_JSONL" \
         --feature-parity FEATURE_PARITY.md \
-        --format markdown >"$REPORT_MD_RAW" 2>&1; then
+        --format markdown; then
     if python3 - "$REPORT_RAW" "$REPORT_JSON" "$REPORT_MD_RAW" "$REPORT_MD" <<'PY'
 import json
 import sys
@@ -188,10 +289,10 @@ cat >"$BAD_UPGRADE_JSON" <<'JSON'
   ]
 }
 JSON
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-docs-status-drift \
+if run_rch_capture "$BAD_UPGRADE_RAW" cargo run --quiet -p ffs-harness -- validate-docs-status-drift \
     --issues "$ISSUES_JSONL" \
     --feature-parity FEATURE_PARITY.md \
-    --snippets "$BAD_UPGRADE_JSON" >"$BAD_UPGRADE_RAW" 2>&1; then
+    --snippets "$BAD_UPGRADE_JSON"; then
     scenario_result "docs_status_hand_upgrade_fails" "FAIL" "bad upgrade unexpectedly passed"
 else
     if grep -q "feature_id=rw_background_repair" "$BAD_UPGRADE_RAW" \
@@ -220,10 +321,10 @@ cat >"$BAD_FLAT_JSON" <<'JSON'
   ]
 }
 JSON
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-docs-status-drift \
+if run_rch_capture "$BAD_FLAT_RAW" cargo run --quiet -p ffs-harness -- validate-docs-status-drift \
     --issues "$ISSUES_JSONL" \
     --feature-parity FEATURE_PARITY.md \
-    --snippets "$BAD_FLAT_JSON" >"$BAD_FLAT_RAW" 2>&1; then
+    --snippets "$BAD_FLAT_JSON"; then
     scenario_result "docs_status_flat_parity_fails" "FAIL" "flat parity wording unexpectedly passed"
 else
     if grep -q "feature_id=mounted_write_paths" "$BAD_FLAT_RAW" \
@@ -235,8 +336,7 @@ else
 fi
 
 e2e_step "Scenario 7: unit/schema tests pass"
-if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib -- docs_status_drift \
-    2>"$UNIT_LOG" | tee -a "$UNIT_LOG"; then
+if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib -- docs_status_drift; then
     TESTS_RUN=$(grep -c "test docs_status_drift::tests::" "$UNIT_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 8 ]]; then
         scenario_result "docs_status_unit_tests" "PASS" "unit tests passed (${TESTS_RUN} tests)"
