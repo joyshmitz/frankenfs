@@ -11814,6 +11814,25 @@ mod tests {
                 .expect("truncated must reject");
             let _ = format!("{err:?}");
         }
+
+        // bd-x2320 MR-4 determinism: parse(payload) == parse(payload).
+        // Sister parsers parse_xattr_items (bd-fhznm),
+        // parse_extent_data (bd-3niu3), and parse_inode_refs
+        // (bd-9f8ef) have analogous determinism proptests. A
+        // regression that introduced a hash-iteration-order or
+        // allocator-address dependency in parse_root_ref's path
+        // would silently surface only under specific scheduling;
+        // this catches it under proptest's deterministic seed sweep.
+        #[test]
+        fn parse_root_ref_proptest_determinism(
+            dirid in proptest::prelude::any::<u64>(),
+            name in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=32),
+        ) {
+            let bytes = make_root_ref_data(dirid, &name);
+            let a = parse_root_ref(&bytes).expect("first parse");
+            let b = parse_root_ref(&bytes).expect("second parse");
+            proptest::prop_assert_eq!(a, b);
+        }
     }
 
     #[test]
