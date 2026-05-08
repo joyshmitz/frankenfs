@@ -26,9 +26,118 @@ cd "$REPO_ROOT"
 # Source shared helpers
 source "$(dirname "$0")/lib.sh"
 
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_benchmark_expansion}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+
 SCENARIO_RESULTS=()
 PASS_COUNT=0
 FAIL_COUNT=0
+
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("$RCH_BIN" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "$RCH_BIN" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local log_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+
+    : >"$log_path"
+    set +e
+    RCH_VISIBILITY="$RCH_VISIBILITY" "$RCH_BIN" exec -- "$@" >"$log_path" 2>&1 &
+    pid=$!
+    set -e
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|log=${log_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}"
+        return 0
+    fi
+    return "$status"
+}
+
+print_rch_log() {
+    local log_path="$1"
+    if [[ -s "$log_path" ]]; then
+        tee -a "$E2E_LOG_FILE" <"$log_path"
+    fi
+}
 
 log_scenario() {
     local scenario_id="$1"
@@ -39,7 +148,7 @@ log_scenario() {
     if [ -n "$detail" ]; then
         marker="${marker}|detail=${detail}"
     fi
-    echo "$marker"
+    e2e_log "$marker"
     SCENARIO_RESULTS+=("$marker")
 
     if [ "$outcome" = "PASS" ]; then
@@ -49,36 +158,47 @@ log_scenario() {
     fi
 }
 
+e2e_init "ffs_benchmark_expansion"
+
 # ── Scenario: bench_mvcc_expansion_compiles ───────────────────────────
 
-echo "=== Scenario: bench_mvcc_expansion_compiles ==="
-if rch exec -- cargo check -p ffs-mvcc --benches 2>&1; then
-    log_scenario "bench_mvcc_expansion_compiles" "PASS"
+e2e_log "=== Scenario: bench_mvcc_expansion_compiles ==="
+MVCC_BENCH_LOG="$E2E_LOG_DIR/mvcc_bench_check.log"
+if run_rch_capture "$MVCC_BENCH_LOG" cargo check -p ffs-mvcc --benches; then
+    print_rch_log "$MVCC_BENCH_LOG"
+    log_scenario "bench_mvcc_expansion_compiles" "PASS" "log=${MVCC_BENCH_LOG}"
 else
+    print_rch_log "$MVCC_BENCH_LOG"
     log_scenario "bench_mvcc_expansion_compiles" "FAIL" "cargo check ffs-mvcc benches failed"
 fi
 
 # ── Scenario: bench_repair_compiles ───────────────────────────────────
 
-echo "=== Scenario: bench_repair_compiles ==="
-if rch exec -- cargo check -p ffs-repair --benches 2>&1; then
-    log_scenario "bench_repair_compiles" "PASS"
+e2e_log "=== Scenario: bench_repair_compiles ==="
+REPAIR_BENCH_LOG="$E2E_LOG_DIR/repair_bench_check.log"
+if run_rch_capture "$REPAIR_BENCH_LOG" cargo check -p ffs-repair --benches; then
+    print_rch_log "$REPAIR_BENCH_LOG"
+    log_scenario "bench_repair_compiles" "PASS" "log=${REPAIR_BENCH_LOG}"
 else
+    print_rch_log "$REPAIR_BENCH_LOG"
     log_scenario "bench_repair_compiles" "FAIL" "cargo check ffs-repair benches failed"
 fi
 
 # ── Scenario: expanded_taxonomy_coverage ──────────────────────────────
 
-echo "=== Scenario: expanded_taxonomy_coverage ==="
-if rch exec -- cargo test -p ffs-harness --lib benchmark_taxonomy::tests::canonical_taxonomy_has_expanded_suite_operations 2>&1; then
-    log_scenario "expanded_taxonomy_coverage" "PASS"
+e2e_log "=== Scenario: expanded_taxonomy_coverage ==="
+TAXONOMY_COVERAGE_LOG="$E2E_LOG_DIR/expanded_taxonomy_coverage.log"
+if run_rch_capture "$TAXONOMY_COVERAGE_LOG" cargo test -p ffs-harness --lib benchmark_taxonomy::tests::canonical_taxonomy_has_expanded_suite_operations; then
+    print_rch_log "$TAXONOMY_COVERAGE_LOG"
+    log_scenario "expanded_taxonomy_coverage" "PASS" "log=${TAXONOMY_COVERAGE_LOG}"
 else
+    print_rch_log "$TAXONOMY_COVERAGE_LOG"
     log_scenario "expanded_taxonomy_coverage" "FAIL" "expanded taxonomy coverage test failed"
 fi
 
 # ── Scenario: expanded_thresholds_valid ───────────────────────────────
 
-echo "=== Scenario: expanded_thresholds_valid ==="
+e2e_log "=== Scenario: expanded_thresholds_valid ==="
 THRESHOLDS_FILE="$REPO_ROOT/benchmarks/thresholds.toml"
 EXPANDED_OPS=(
     cli_metadata_parse_conformance
@@ -114,7 +234,7 @@ fi
 
 # ── Scenario: record_script_covers_expansion ──────────────────────────
 
-echo "=== Scenario: record_script_covers_expansion ==="
+e2e_log "=== Scenario: record_script_covers_expansion ==="
 RECORD_SCRIPT="$REPO_ROOT/scripts/benchmark_record.sh"
 MISSING_IN_RECORD=""
 for op in "${EXPANDED_OPS[@]}"; do
@@ -131,25 +251,25 @@ fi
 
 # ── Summary ───────────────────────────────────────────────────────────
 
-echo ""
-echo "============================================"
-echo "  Benchmark Expansion E2E Summary"
-echo "============================================"
-echo "  PASS: $PASS_COUNT"
-echo "  FAIL: $FAIL_COUNT"
-echo "  TOTAL: $((PASS_COUNT + FAIL_COUNT))"
-echo "============================================"
+e2e_log ""
+e2e_log "============================================"
+e2e_log "  Benchmark Expansion E2E Summary"
+e2e_log "============================================"
+e2e_log "  PASS: $PASS_COUNT"
+e2e_log "  FAIL: $FAIL_COUNT"
+e2e_log "  TOTAL: $((PASS_COUNT + FAIL_COUNT))"
+e2e_log "============================================"
 
 for result in "${SCENARIO_RESULTS[@]}"; do
-    echo "  $result"
+    e2e_log "  $result"
 done
 
 if [ "$FAIL_COUNT" -gt 0 ]; then
-    echo ""
-    echo "BENCHMARK_EXPANSION_E2E: FAILED"
+    e2e_log ""
+    e2e_log "BENCHMARK_EXPANSION_E2E: FAILED"
     exit 1
 fi
 
-echo ""
-echo "BENCHMARK_EXPANSION_E2E: PASSED"
+e2e_log ""
+e2e_log "BENCHMARK_EXPANSION_E2E: PASSED"
 exit 0
