@@ -27,6 +27,12 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_wal_writer}"
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -45,7 +51,35 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+run_rch_capture() {
+    local log_path="$1"
+    local status
+    shift
+
+    e2e_log "RCH command: $*"
+    status=0
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
+        return 0
+    fi
+    return "$status"
+}
+
+log_test_tail() {
+    local log_path="$1"
+
+    if [[ -f "$log_path" ]]; then
+        tail -40 "$log_path" | while IFS= read -r line; do e2e_log "  $line"; done
+    fi
+}
+
 e2e_init "ffs_wal_writer"
+e2e_print_env
 
 #######################################
 # Scenario 1: WalWriter type exists and is public
@@ -70,111 +104,112 @@ fi
 #######################################
 e2e_step "Scenario 2: WalWriter unit tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- wal_writer::tests 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
-    TESTS_RUN=$(grep -c "test wal_writer::tests" "$TEST_LOG" 2>/dev/null || echo "0")
+TEST_LOG="$E2E_LOG_DIR/wal_writer_unit_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_writer::tests; then
+    TESTS_RUN=$(grep -Ec "^test wal_writer::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 15 ]]; then
         scenario_result "wal_writer_unit" "PASS" "WalWriter unit tests passed (${TESTS_RUN} tests)"
     else
         scenario_result "wal_writer_unit" "FAIL" "Too few WalWriter tests: ${TESTS_RUN} (expected >= 15)"
+        log_test_tail "$TEST_LOG"
     fi
 else
     scenario_result "wal_writer_unit" "FAIL" "WalWriter unit tests failed"
+    log_test_tail "$TEST_LOG"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 3: Monotonicity enforcement tests
 #######################################
 e2e_step "Scenario 3: Monotonicity enforcement"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- wal_writer::tests::rejects_non_monotonic 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/wal_writer_monotonicity.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_writer::tests::rejects_non_monotonic; then
     scenario_result "wal_writer_monotonic" "PASS" "Monotonicity enforcement tests passed"
 else
     scenario_result "wal_writer_monotonic" "FAIL" "Monotonicity enforcement tests failed"
+    log_test_tail "$TEST_LOG"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 4: Sentinel rejection tests (D8)
 #######################################
 e2e_step "Scenario 4: Sentinel rejection (D8)"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- wal_writer::tests::rejects_sentinel 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/wal_writer_sentinel.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_writer::tests::rejects_sentinel; then
     scenario_result "wal_writer_sentinel" "PASS" "Sentinel rejection tests passed"
 else
     scenario_result "wal_writer_sentinel" "FAIL" "Sentinel rejection tests failed"
+    log_test_tail "$TEST_LOG"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 5: Backpressure threshold
 #######################################
 e2e_step "Scenario 5: Backpressure threshold"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- wal_writer::tests::backpressure 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/wal_writer_backpressure.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_writer::tests::backpressure; then
     scenario_result "wal_writer_backpressure" "PASS" "Backpressure threshold tests passed"
 else
     scenario_result "wal_writer_backpressure" "FAIL" "Backpressure threshold tests failed"
+    log_test_tail "$TEST_LOG"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 6: Sync policy variants
 #######################################
 e2e_step "Scenario 6: Sync policy variants"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- wal_writer::tests::sync_policy 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
-    SYNC_TESTS=$(grep -c "test wal_writer::tests::sync_policy" "$TEST_LOG" 2>/dev/null || echo "0")
+TEST_LOG="$E2E_LOG_DIR/wal_writer_sync_policy.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_writer::tests::sync_policy; then
+    SYNC_TESTS=$(grep -Ec "^test wal_writer::tests::sync_policy" "$TEST_LOG" 2>/dev/null || echo "0")
     scenario_result "wal_writer_sync_policy" "PASS" "Sync policy tests passed (${SYNC_TESTS} variants)"
 else
     scenario_result "wal_writer_sync_policy" "FAIL" "Sync policy tests failed"
+    log_test_tail "$TEST_LOG"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 7: Error classification
 #######################################
 e2e_step "Scenario 7: Error classification"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- wal_writer::tests::error_classification 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/wal_writer_error_classification.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_writer::tests::error_classification; then
     scenario_result "wal_writer_error_class" "PASS" "Error classification tests passed"
 else
     scenario_result "wal_writer_error_class" "FAIL" "Error classification tests failed"
+    log_test_tail "$TEST_LOG"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 8: Property test — monotonic ordering
 #######################################
 e2e_step "Scenario 8: Property test — monotonic ordering"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- wal_writer::tests::proptest_monotonic 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/wal_writer_proptest_monotonic.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_writer::tests::proptest_monotonic; then
     scenario_result "wal_writer_proptest_monotonic" "PASS" "Monotonic ordering property test passed"
 else
     scenario_result "wal_writer_proptest_monotonic" "FAIL" "Monotonic ordering property test failed"
+    log_test_tail "$TEST_LOG"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 9: PersistentMvccStore integration (uses WalWriter)
 #######################################
 e2e_step "Scenario 9: PersistentMvccStore integration"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- persist::tests 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
-    PERSIST_TESTS=$(grep -c "test persist::tests" "$TEST_LOG" 2>/dev/null || echo "0")
+TEST_LOG="$E2E_LOG_DIR/wal_writer_persist_integration.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- persist::tests; then
+    PERSIST_TESTS=$(grep -Ec "^test persist::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     scenario_result "wal_writer_persist_integration" "PASS" "PersistentMvccStore tests passed (${PERSIST_TESTS} tests)"
 else
     scenario_result "wal_writer_persist_integration" "FAIL" "PersistentMvccStore tests failed"
+    log_test_tail "$TEST_LOG"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 10: Structured logging markers present
@@ -199,13 +234,13 @@ fi
 #######################################
 e2e_step "Scenario 11: Write verification"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- wal_writer::tests::verify_writes 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/wal_writer_verify_writes.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_writer::tests::verify_writes; then
     scenario_result "wal_writer_verify" "PASS" "Write verification test passed"
 else
     scenario_result "wal_writer_verify" "FAIL" "Write verification test failed"
+    log_test_tail "$TEST_LOG"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Summary
