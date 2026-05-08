@@ -14,6 +14,8 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_soak_canary_campaign}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -32,21 +34,173 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("${RCH_BIN:-rch}" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "${RCH_BIN:-rch}" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local log_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+    local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-600}"
+    : >"$log_path"
+    set +e
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
+    pid=$!
+    set -e
+    deadline=$((SECONDS + timeout_secs))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${timeout_secs}|log=${log_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH artifact retrieval failed after worker-side success; accepting remote exit=0 evidence from $log_path"
+        return 0
+    fi
+    return "$status"
+}
+
+extract_json_object() {
+    local input_path="$1"
+    local output_path="$2"
+    local object_index="${3:-0}"
+    python3 - "$input_path" "$output_path" "$object_index" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1])
+dest = pathlib.Path(sys.argv[2])
+target_index = int(sys.argv[3])
+text = source.read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+decoder = json.JSONDecoder()
+seen = 0
+pos = 0
+while pos < len(text):
+    idx = text.find("{", pos)
+    if idx < 0:
+        break
+    try:
+        _, end = decoder.raw_decode(text[idx:])
+    except json.JSONDecodeError:
+        pos = idx + 1
+        continue
+    if seen == target_index:
+        dest.write_text(text[idx:idx + end].rstrip() + "\n", encoding="utf-8")
+        raise SystemExit(0)
+    seen += 1
+    pos = idx + end
+raise SystemExit(f"JSON object {target_index} not found in {source}")
+PY
+}
+
+extract_markdown_report() {
+    local input_path="$1"
+    local output_path="$2"
+    python3 - "$input_path" "$output_path" <<'PY'
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1])
+dest = pathlib.Path(sys.argv[2])
+text = source.read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+start = text.find("# Soak/Canary Campaign Report")
+if start < 0:
+    raise SystemExit(f"soak/canary markdown report not found in {source}")
+end_marker = "\nsoak/canary campaign summary written:"
+end = text.find(end_marker, start)
+if end < 0:
+    end = len(text)
+dest.write_text(text[start:end].rstrip() + "\n", encoding="utf-8")
+PY
+}
+
 e2e_init "ffs_soak_canary_campaign"
+
+RCH_OUTPUT_DIR="$REPO_ROOT/artifacts/rch/soak_canary_campaign/$(basename "$E2E_LOG_DIR")"
+mkdir -p "$RCH_OUTPUT_DIR"
 
 MANIFEST_JSON="$REPO_ROOT/benchmarks/soak_canary_campaign_manifest.json"
 REPORT_JSON="$E2E_LOG_DIR/soak_canary_campaign_report.json"
 ARTIFACT_JSON="$E2E_LOG_DIR/soak_canary_sample_artifact_manifest.json"
 SUMMARY_MD="$E2E_LOG_DIR/soak_canary_campaign_summary.md"
 VALIDATE_RAW="$E2E_LOG_DIR/soak_canary_validate.raw"
-BAD_DURATION_JSON="$E2E_LOG_DIR/soak_canary_bad_duration.json"
-BAD_LOG_JSON="$E2E_LOG_DIR/soak_canary_bad_log_field.json"
-BAD_FLAKE_JSON="$E2E_LOG_DIR/soak_canary_bad_flake.json"
-BAD_RESOURCE_JSON="$E2E_LOG_DIR/soak_canary_bad_resource.json"
-BAD_COMMAND_JSON="$E2E_LOG_DIR/soak_canary_bad_command.json"
-BAD_CONSUMER_JSON="$E2E_LOG_DIR/soak_canary_bad_consumer.json"
-BAD_POLICY_JSON="$E2E_LOG_DIR/soak_canary_bad_policy.json"
-BAD_QUARANTINE_JSON="$E2E_LOG_DIR/soak_canary_bad_quarantine.json"
+ARTIFACT_RAW="$E2E_LOG_DIR/soak_canary_artifact.raw"
+SUMMARY_RAW="$E2E_LOG_DIR/soak_canary_summary.raw"
+BAD_DURATION_JSON="$RCH_OUTPUT_DIR/soak_canary_bad_duration.json"
+BAD_LOG_JSON="$RCH_OUTPUT_DIR/soak_canary_bad_log_field.json"
+BAD_FLAKE_JSON="$RCH_OUTPUT_DIR/soak_canary_bad_flake.json"
+BAD_RESOURCE_JSON="$RCH_OUTPUT_DIR/soak_canary_bad_resource.json"
+BAD_COMMAND_JSON="$RCH_OUTPUT_DIR/soak_canary_bad_command.json"
+BAD_CONSUMER_JSON="$RCH_OUTPUT_DIR/soak_canary_bad_consumer.json"
+BAD_POLICY_JSON="$RCH_OUTPUT_DIR/soak_canary_bad_policy.json"
+BAD_QUARANTINE_JSON="$RCH_OUTPUT_DIR/soak_canary_bad_quarantine.json"
 BAD_RAW="$E2E_LOG_DIR/soak_canary_bad.raw"
 UNIT_LOG="$E2E_LOG_DIR/soak_canary_unit_tests.log"
 
@@ -59,15 +213,26 @@ else
 fi
 
 e2e_step "Scenario 2: checked-in manifest validates and emits shared QA artifacts"
-if cargo run --quiet -p ffs-harness -- validate-soak-canary-campaigns \
+if run_rch_capture "$VALIDATE_RAW" cargo run --quiet -p ffs-harness -- validate-soak-canary-campaigns \
     --manifest "$MANIFEST_JSON" \
     --artifact-root "artifacts/soak/dry-run" \
-    --out "$REPORT_JSON" \
-    --artifact-out "$ARTIFACT_JSON" \
-    --summary-out "$SUMMARY_MD" >"$VALIDATE_RAW" 2>&1; then
+    --out /dev/stdout \
+    && extract_json_object "$VALIDATE_RAW" "$REPORT_JSON" \
+    && run_rch_capture "$ARTIFACT_RAW" cargo run --quiet -p ffs-harness -- validate-soak-canary-campaigns \
+        --manifest "$MANIFEST_JSON" \
+        --artifact-root "artifacts/soak/dry-run" \
+        --artifact-out /dev/stdout \
+    && extract_json_object "$ARTIFACT_RAW" "$ARTIFACT_JSON" 1 \
+    && run_rch_capture "$SUMMARY_RAW" cargo run --quiet -p ffs-harness -- validate-soak-canary-campaigns \
+        --manifest "$MANIFEST_JSON" \
+        --artifact-root "artifacts/soak/dry-run" \
+        --summary-out /dev/stdout \
+    && extract_markdown_report "$SUMMARY_RAW" "$SUMMARY_MD"; then
     scenario_result "soak_canary_manifest_validates" "PASS" "checked-in campaign manifest accepted"
 else
     cat "$VALIDATE_RAW"
+    [[ -s "$ARTIFACT_RAW" ]] && cat "$ARTIFACT_RAW"
+    [[ -s "$SUMMARY_RAW" ]] && cat "$SUMMARY_RAW"
     scenario_result "soak_canary_manifest_validates" "FAIL" "checked-in campaign manifest rejected"
 fi
 
@@ -203,9 +368,9 @@ PY
 
 invalid_failures=0
 for bad in "$BAD_DURATION_JSON" "$BAD_LOG_JSON" "$BAD_FLAKE_JSON" "$BAD_RESOURCE_JSON" "$BAD_COMMAND_JSON" "$BAD_CONSUMER_JSON" "$BAD_POLICY_JSON" "$BAD_QUARANTINE_JSON"; do
-    if cargo run --quiet -p ffs-harness -- validate-soak-canary-campaigns \
+    if run_rch_capture "$BAD_RAW" cargo run --quiet -p ffs-harness -- validate-soak-canary-campaigns \
         --manifest "$bad" \
-        --out "$E2E_LOG_DIR/$(basename "$bad" .json).report.json" >"$BAD_RAW" 2>&1; then
+        --out "/tmp/$(basename "$bad" .json).report.json"; then
         e2e_log "Unexpectedly accepted invalid campaign manifest: $bad"
         invalid_failures=$((invalid_failures + 1))
     elif ! grep -q "soak/canary campaign manifest validation failed\\|invalid soak/canary manifest JSON" "$BAD_RAW"; then
@@ -245,7 +410,7 @@ else
 fi
 
 e2e_step "Scenario 6: soak/canary campaign unit tests pass"
-if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib soak_canary_campaign -- --nocapture >"$UNIT_LOG" 2>&1; then
+if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib soak_canary_campaign -- --nocapture; then
     cat "$UNIT_LOG"
     scenario_result "soak_canary_unit_tests" "PASS" "soak/canary unit tests passed"
 else
