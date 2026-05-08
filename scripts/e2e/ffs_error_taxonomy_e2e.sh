@@ -33,6 +33,12 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_error_taxonomy}"
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-360}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -49,6 +55,25 @@ scenario_result() {
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
     TOTAL=$((TOTAL + 1))
+}
+
+run_rch_capture() {
+    local log_path="$1"
+    local status
+    shift
+
+    e2e_log "RCH command: $*"
+    status=0
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
+        return 0
+    fi
+    return "$status"
 }
 
 e2e_init "ffs_error_taxonomy"
@@ -200,8 +225,8 @@ fi
 #######################################
 e2e_step "Scenario 9: Unit tests pass"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-harness --lib -- error_taxonomy 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/error_taxonomy_unit_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-harness --lib -- error_taxonomy; then
     TESTS_RUN=$(grep -c "test error_taxonomy::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 10 ]]; then
         scenario_result "taxonomy_unit_tests_pass" "PASS" "Tests passed (${TESTS_RUN} tests)"
@@ -211,7 +236,6 @@ if cargo test -p ffs-harness --lib -- error_taxonomy 2>"$TEST_LOG" | tee -a "$TE
 else
     scenario_result "taxonomy_unit_tests_pass" "FAIL" "Error taxonomy tests failed"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Summary
