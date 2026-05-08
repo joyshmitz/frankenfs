@@ -26,9 +26,123 @@ cd "$REPO_ROOT"
 # Source shared helpers
 source "$(dirname "$0")/lib.sh"
 
+export RUST_LOG="${RUST_LOG:-info}"
+export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_perf_comparison}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+
+for rch_env_var in CARGO_TARGET_DIR RUST_LOG RUST_BACKTRACE; do
+    case ",${RCH_ENV_ALLOWLIST:-}," in
+        *",${rch_env_var},"*) ;;
+        *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}${rch_env_var}" ;;
+    esac
+done
+
 SCENARIO_RESULTS=()
 PASS_COUNT=0
 FAIL_COUNT=0
+PERF_LOG=""
+
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("$RCH_BIN" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "$RCH_BIN" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local output_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+
+    : >"$output_path"
+    set +e
+    RCH_VISIBILITY="$RCH_VISIBILITY" "$RCH_BIN" exec -- "$@" >"$output_path" 2>&1 &
+    pid=$!
+    set -e
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$output_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|output=${output_path}|status=${status}"
+        return 0
+    fi
+    return "$status"
+}
+
+print_rch_log() {
+    local output_path="$1"
+    if [[ -s "$output_path" ]]; then
+        tee -a "$E2E_LOG_FILE" <"$output_path"
+    fi
+}
 
 log_scenario() {
     local scenario_id="$1"
@@ -39,7 +153,7 @@ log_scenario() {
     if [ -n "$detail" ]; then
         marker="${marker}|detail=${detail}"
     fi
-    echo "$marker"
+    e2e_log "$marker"
     SCENARIO_RESULTS+=("$marker")
 
     if [ "$outcome" = "PASS" ]; then
@@ -49,105 +163,107 @@ log_scenario() {
     fi
 }
 
+require_tests_in_log() {
+    local scenario_id="$1"
+    local pass_detail="$2"
+    local missing=""
+    local test_name
+    shift 2
+
+    for test_name in "$@"; do
+        if ! grep -Eq "test .*${test_name} .*\\.\\.\\. ok" "$PERF_LOG"; then
+            missing="${missing}${test_name} "
+        fi
+    done
+
+    if [ -z "$missing" ]; then
+        log_scenario "$scenario_id" "PASS" "$pass_detail"
+    else
+        log_scenario "$scenario_id" "FAIL" "missing_or_failed=${missing}log=${PERF_LOG}"
+    fi
+}
+
+e2e_init "ffs_perf_comparison"
+PERF_LOG="$E2E_LOG_DIR/perf_comparison_tests.log"
+
 # ── Scenario: perf_comparison_builds_clean ────────────────────────────
 
-echo "=== Scenario: perf_comparison_builds_clean ==="
-if rch exec -- cargo test -p ffs-harness --lib perf_comparison 2>&1; then
-    log_scenario "perf_comparison_builds_clean" "PASS"
+e2e_step "Scenario: perf_comparison_builds_clean"
+if run_rch_capture "$PERF_LOG" cargo test -p ffs-harness --lib perf_comparison -- --nocapture; then
+    log_scenario "perf_comparison_builds_clean" "PASS" "cargo test perf_comparison passed; log=${PERF_LOG}"
 else
-    log_scenario "perf_comparison_builds_clean" "FAIL" "cargo test perf_comparison failed"
+    print_rch_log "$PERF_LOG"
+    log_scenario "perf_comparison_builds_clean" "FAIL" "cargo test perf_comparison failed; log=${PERF_LOG}"
 fi
 
 # ── Scenario: perf_comparison_stats_accuracy ──────────────────────────
 
-echo "=== Scenario: perf_comparison_stats_accuracy ==="
-# Verify the stats tests cover known values: mean, std, CV, median
-STATS_TESTS="stats_known_values stats_single_value stats_even_count_median stats_cv_percent_is_correct"
-STATS_FAIL=""
-for test_name in $STATS_TESTS; do
-    if ! rch exec -- cargo test -p ffs-harness --lib "perf_comparison::tests::${test_name}" 2>&1 | grep -q "test result: ok"; then
-        STATS_FAIL="${STATS_FAIL}${test_name} "
-    fi
-done
-
-if [ -z "$STATS_FAIL" ]; then
-    log_scenario "perf_comparison_stats_accuracy" "PASS"
-else
-    log_scenario "perf_comparison_stats_accuracy" "FAIL" "failed=${STATS_FAIL}"
-fi
+e2e_step "Scenario: perf_comparison_stats_accuracy"
+require_tests_in_log \
+    "perf_comparison_stats_accuracy" \
+    "statistical primitive tests passed" \
+    "stats_known_values" \
+    "stats_single_value" \
+    "stats_even_count_median" \
+    "stats_cv_percent_is_correct"
 
 # ── Scenario: perf_comparison_ttest_accuracy ──────────────────────────
 
-echo "=== Scenario: perf_comparison_ttest_accuracy ==="
-TTEST_TESTS="t_test_identical_samples_high_p t_test_clearly_different_samples_low_p t_test_symmetry t_test_too_small_samples"
-TTEST_FAIL=""
-for test_name in $TTEST_TESTS; do
-    if ! rch exec -- cargo test -p ffs-harness --lib "perf_comparison::tests::${test_name}" 2>&1 | grep -q "test result: ok"; then
-        TTEST_FAIL="${TTEST_FAIL}${test_name} "
-    fi
-done
-
-if [ -z "$TTEST_FAIL" ]; then
-    log_scenario "perf_comparison_ttest_accuracy" "PASS"
-else
-    log_scenario "perf_comparison_ttest_accuracy" "FAIL" "failed=${TTEST_FAIL}"
-fi
+e2e_step "Scenario: perf_comparison_ttest_accuracy"
+require_tests_in_log \
+    "perf_comparison_ttest_accuracy" \
+    "Welch t-test accuracy tests passed" \
+    "t_test_identical_samples_high_p" \
+    "t_test_clearly_different_samples_low_p" \
+    "t_test_symmetry" \
+    "t_test_too_small_samples"
 
 # ── Scenario: perf_comparison_hysteresis_gates ────────────────────────
 
-echo "=== Scenario: perf_comparison_hysteresis_gates ==="
-HYST_TESTS="hysteresis_single_fail_is_early_warning hysteresis_two_fails_in_window_confirmed hysteresis_pass_clears_signal hysteresis_reset_clears_history hysteresis_window_evicts_old"
-HYST_FAIL=""
-for test_name in $HYST_TESTS; do
-    if ! rch exec -- cargo test -p ffs-harness --lib "perf_comparison::tests::${test_name}" 2>&1 | grep -q "test result: ok"; then
-        HYST_FAIL="${HYST_FAIL}${test_name} "
-    fi
-done
-
-if [ -z "$HYST_FAIL" ]; then
-    log_scenario "perf_comparison_hysteresis_gates" "PASS"
-else
-    log_scenario "perf_comparison_hysteresis_gates" "FAIL" "failed=${HYST_FAIL}"
-fi
+e2e_step "Scenario: perf_comparison_hysteresis_gates"
+require_tests_in_log \
+    "perf_comparison_hysteresis_gates" \
+    "hysteresis tracker tests passed" \
+    "hysteresis_single_fail_is_early_warning" \
+    "hysteresis_two_fails_in_window_confirmed" \
+    "hysteresis_pass_clears_signal" \
+    "hysteresis_reset_clears_history" \
+    "hysteresis_window_evicts_old"
 
 # ── Scenario: perf_comparison_envelope_integration ────────────────────
 
-echo "=== Scenario: perf_comparison_envelope_integration ==="
-INTEG_TESTS="comparator_noise_floor_passes comparator_significant_large_regression_fails comparator_not_significant_passes_despite_delta comparator_warn_zone_with_significance improvement_is_not_regression"
-INTEG_FAIL=""
-for test_name in $INTEG_TESTS; do
-    if ! rch exec -- cargo test -p ffs-harness --lib "perf_comparison::tests::${test_name}" 2>&1 | grep -q "test result: ok"; then
-        INTEG_FAIL="${INTEG_FAIL}${test_name} "
-    fi
-done
-
-if [ -z "$INTEG_FAIL" ]; then
-    log_scenario "perf_comparison_envelope_integration" "PASS"
-else
-    log_scenario "perf_comparison_envelope_integration" "FAIL" "failed=${INTEG_FAIL}"
-fi
+e2e_step "Scenario: perf_comparison_envelope_integration"
+require_tests_in_log \
+    "perf_comparison_envelope_integration" \
+    "acceptance-envelope integration tests passed" \
+    "comparator_noise_floor_passes" \
+    "comparator_significant_large_regression_fails" \
+    "comparator_not_significant_passes_despite_delta" \
+    "comparator_warn_zone_with_significance" \
+    "improvement_is_not_regression"
 
 # ── Summary ───────────────────────────────────────────────────────────
 
-echo ""
-echo "============================================"
-echo "  Perf Comparison E2E Summary"
-echo "============================================"
-echo "  PASS: $PASS_COUNT"
-echo "  FAIL: $FAIL_COUNT"
-echo "  TOTAL: $((PASS_COUNT + FAIL_COUNT))"
-echo "============================================"
+e2e_log ""
+e2e_log "============================================"
+e2e_log "  Perf Comparison E2E Summary"
+e2e_log "============================================"
+e2e_log "  PASS: $PASS_COUNT"
+e2e_log "  FAIL: $FAIL_COUNT"
+e2e_log "  TOTAL: $((PASS_COUNT + FAIL_COUNT))"
+e2e_log "============================================"
 
 for result in "${SCENARIO_RESULTS[@]}"; do
-    echo "  $result"
+    e2e_log "  ${result/SCENARIO_RESULT/SCENARIO_SUMMARY}"
 done
 
 if [ "$FAIL_COUNT" -gt 0 ]; then
-    echo ""
-    echo "PERF_COMPARISON_E2E: FAILED"
+    e2e_log ""
+    e2e_log "PERF_COMPARISON_E2E: FAILED"
     exit 1
 fi
 
-echo ""
-echo "PERF_COMPARISON_E2E: PASSED"
+e2e_log ""
+e2e_log "PERF_COMPARISON_E2E: PASSED"
+e2e_pass
 exit 0
