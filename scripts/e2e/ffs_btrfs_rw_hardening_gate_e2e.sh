@@ -33,6 +33,12 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_btrfs_rw_hardening_gate}"
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -51,7 +57,27 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+run_rch_capture() {
+    local log_path="$1"
+    local status
+    shift
+
+    e2e_log "RCH command: $*"
+    status=0
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
+        return 0
+    fi
+    return "$status"
+}
+
 e2e_init "ffs_btrfs_rw_hardening_gate"
+e2e_print_env
 
 CORE_SRC="crates/ffs-core/src/lib.rs"
 ERROR_SRC="crates/ffs-error/src/lib.rs"
@@ -159,14 +185,14 @@ e2e_step "Scenario 6: Drift detection"
 
 if [[ -f "$DRIFT_SRC" ]] && grep -q "pub fn check_btrfs_drift" "$DRIFT_SRC"; then
     # Run drift detection tests
-    DRIFT_LOG=$(mktemp)
-    if cargo test -p ffs-harness --lib -- btrfs_capability_drift 2>"$DRIFT_LOG" | tee -a "$DRIFT_LOG" > /dev/null 2>&1; then
+    DRIFT_LOG="$E2E_LOG_DIR/btrfs_capability_drift_tests.log"
+    if run_rch_capture "$DRIFT_LOG" cargo test -p ffs-harness --lib -- btrfs_capability_drift; then
         DRIFT_TESTS=$(grep -c "test btrfs_capability_drift" "$DRIFT_LOG" 2>/dev/null || echo "0")
         scenario_result "hardening_drift_detection" "PASS" "Drift detection passes (${DRIFT_TESTS} tests)"
     else
         scenario_result "hardening_drift_detection" "FAIL" "Drift detection tests failed"
+        tail -40 "$DRIFT_LOG" | while IFS= read -r line; do e2e_log "  $line"; done
     fi
-    rm -f "$DRIFT_LOG"
 else
     scenario_result "hardening_drift_detection" "FAIL" "Drift detection module not found"
 fi
@@ -213,9 +239,9 @@ fi
 #######################################
 e2e_step "Scenario 9: Btrfs write unit tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-core --lib -- btrfs_write 2>"$TEST_LOG" | tee -a "$TEST_LOG" > /dev/null 2>&1; then
-    TESTS_RUN=$(grep -c "test.*btrfs_write" "$TEST_LOG" 2>/dev/null || echo "0")
+TEST_LOG="$E2E_LOG_DIR/btrfs_write_unit_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-core --lib -- btrfs_write; then
+    TESTS_RUN=$(grep -c "^test .*btrfs_write" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 30 ]]; then
         scenario_result "hardening_btrfs_write_tests_pass" "PASS" "${TESTS_RUN} btrfs_write tests passed"
     else
@@ -223,8 +249,8 @@ if cargo test -p ffs-core --lib -- btrfs_write 2>"$TEST_LOG" | tee -a "$TEST_LOG
     fi
 else
     scenario_result "hardening_btrfs_write_tests_pass" "FAIL" "btrfs_write tests failed"
+    tail -40 "$TEST_LOG" | while IFS= read -r line; do e2e_log "  $line"; done
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Summary
