@@ -2764,33 +2764,19 @@ mod tests {
         seed: u64,
         corruption_percent: u64,
     ) {
-        let Ok(dir) = std::env::var("FFS_REPAIR_E2E_ARTIFACT_DIR") else {
-            return;
-        };
-        let dir_path = std::path::Path::new(&dir);
-        std::fs::create_dir_all(dir_path).expect("create artifact dir");
-
         let before_body = before
             .iter()
             .map(|(block, digest)| format!("{block} {digest}"))
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write(
-            dir_path.join("before_checksums.txt"),
-            format!("{before_body}\n"),
-        )
-        .expect("write before checksums");
+        let before_payload = format!("{before_body}\n");
 
         let after_body = after
             .iter()
             .map(|(block, digest)| format!("{block} {digest}"))
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write(
-            dir_path.join("after_checksums.txt"),
-            format!("{after_body}\n"),
-        )
-        .expect("write after checksums");
+        let after_payload = format!("{after_body}\n");
 
         let corruption_plan = serde_json::json!({
             "seed": seed,
@@ -2798,14 +2784,40 @@ mod tests {
             "total_corrupted_blocks": corrupt_blocks.len(),
             "corrupted_blocks": corrupt_blocks,
         });
-        std::fs::write(
-            dir_path.join("corruption_plan.json"),
-            serde_json::to_vec_pretty(&corruption_plan).expect("serialize corruption plan"),
-        )
-        .expect("write corruption plan");
+        let corruption_plan_payload =
+            serde_json::to_string_pretty(&corruption_plan).expect("serialize corruption plan");
+        let ledger_payload = String::from_utf8_lossy(ledger_data).into_owned();
 
-        std::fs::write(dir_path.join("recovery_evidence.jsonl"), ledger_data)
-            .expect("write recovery evidence");
+        if std::env::var("FFS_REPAIR_E2E_ARTIFACT_STDOUT").as_deref() == Ok("1") {
+            for (name, payload) in [
+                ("before_checksums.txt", before_payload.as_str()),
+                ("after_checksums.txt", after_payload.as_str()),
+                ("corruption_plan.json", corruption_plan_payload.as_str()),
+                ("recovery_evidence.jsonl", ledger_payload.as_str()),
+            ] {
+                println!(
+                    "FFS_REPAIR_E2E_ARTIFACT|name={name}|json={}",
+                    serde_json::to_string(payload).expect("serialize stdout artifact")
+                );
+            }
+        }
+
+        if let Ok(dir) = std::env::var("FFS_REPAIR_E2E_ARTIFACT_DIR") {
+            let dir_path = std::path::Path::new(&dir);
+            std::fs::create_dir_all(dir_path).expect("create artifact dir");
+
+            std::fs::write(dir_path.join("before_checksums.txt"), &before_payload)
+                .expect("write before checksums");
+            std::fs::write(dir_path.join("after_checksums.txt"), &after_payload)
+                .expect("write after checksums");
+            std::fs::write(
+                dir_path.join("corruption_plan.json"),
+                &corruption_plan_payload,
+            )
+            .expect("write corruption plan");
+            std::fs::write(dir_path.join("recovery_evidence.jsonl"), ledger_data)
+                .expect("write recovery evidence");
+        }
     }
 
     /// Validator that flags specific block numbers as corrupt.

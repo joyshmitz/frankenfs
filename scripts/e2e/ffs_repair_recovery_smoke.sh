@@ -11,10 +11,135 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target-codex-ruby}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_repair_recovery_smoke}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
 REPAIR_E2E_TEST="${REPAIR_E2E_TEST:-e2e_survive_five_percent_random_block_corruption_with_daemon}"
 REPAIR_FIXTURE_SIZE_MB="${REPAIR_FIXTURE_SIZE_MB:-16}"
+PASS_COUNT=0
+FAIL_COUNT=0
+TOTAL=0
+
+for rch_env_var in CARGO_TARGET_DIR RUST_LOG RUST_BACKTRACE FFS_REPAIR_E2E_ARTIFACT_DIR FFS_REPAIR_E2E_ARTIFACT_STDOUT; do
+    case ",${RCH_ENV_ALLOWLIST:-}," in
+        *",${rch_env_var},"*) ;;
+        *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}${rch_env_var}" ;;
+    esac
+done
+
+scenario_result() {
+    local scenario_id="$1"
+    local status="$2"
+    local detail="$3"
+    e2e_log "SCENARIO_RESULT|scenario_id=${scenario_id}|outcome=${status}|detail=${detail}"
+    if [[ "$status" == "PASS" ]]; then
+        PASS_COUNT=$((PASS_COUNT + 1))
+    else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+    TOTAL=$((TOTAL + 1))
+}
+
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("$RCH_BIN" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "$RCH_BIN" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local output_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+
+    : >"$output_path"
+    set +e
+    RCH_VISIBILITY="$RCH_VISIBILITY" "$RCH_BIN" exec -- "$@" >"$output_path" 2>&1 &
+    pid=$!
+    set -e
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$output_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|output=${output_path}|status=${status}"
+        return 0
+    fi
+    return "$status"
+}
+
+print_rch_log() {
+    local output_path="$1"
+    if [[ -s "$output_path" ]]; then
+        tee -a "$E2E_LOG_FILE" <"$output_path"
+    fi
+}
 
 have_repair_e2e_test() {
     if command -v rg >/dev/null 2>&1; then
@@ -35,6 +160,45 @@ have_artifacts() {
     return 0
 }
 
+extract_repair_artifacts_from_rch_log() {
+    local log_path="$1"
+    local artifact_dir="$2"
+
+    e2e_assert python3 - "$log_path" "$artifact_dir" <<'PY'
+import json
+import pathlib
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+artifact_dir = pathlib.Path(sys.argv[2])
+prefix = "FFS_REPAIR_E2E_ARTIFACT|name="
+expected = {
+    "before_checksums.txt",
+    "after_checksums.txt",
+    "corruption_plan.json",
+    "recovery_evidence.jsonl",
+}
+found = {}
+
+for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+    if prefix not in line:
+        continue
+    payload = line.split(prefix, 1)[1]
+    name, sep, json_payload = payload.partition("|json=")
+    if sep != "|json=" or name not in expected:
+        continue
+    found[name] = json.loads(json_payload)
+
+missing = sorted(expected - set(found))
+if missing:
+    raise SystemExit(f"missing repair stdout artifacts: {missing}")
+
+artifact_dir.mkdir(parents=True, exist_ok=True)
+for name, text in found.items():
+    (artifact_dir / name).write_text(text, encoding="utf-8")
+PY
+}
+
 e2e_init "ffs_repair_recovery_smoke"
 e2e_print_env
 
@@ -50,26 +214,43 @@ if ! have_repair_e2e_test; then
 fi
 
 ARTIFACT_DIR="$E2E_LOG_DIR/repair"
+RCH_ARTIFACT_DIR="$REPO_ROOT/artifacts/rch_output/$(basename "$E2E_LOG_DIR")/repair"
 mkdir -p "$ARTIFACT_DIR"
+mkdir -p "$RCH_ARTIFACT_DIR"
 
 e2e_step "Phase 2: produce ext4 fixture image"
 EXT4_FIXTURE="$ARTIFACT_DIR/ext4_fixture.img"
 e2e_create_ext4_image "$EXT4_FIXTURE" "$REPAIR_FIXTURE_SIZE_MB"
 e2e_assert_file "$EXT4_FIXTURE"
 e2e_assert sha256sum "$EXT4_FIXTURE"
+scenario_result "repair_recovery_fixture_image_prepared" "PASS" "ext4 fixture image prepared and checksummed"
 
 e2e_step "Phase 3: run deterministic corruption/recovery scenario"
-export FFS_REPAIR_E2E_ARTIFACT_DIR="$ARTIFACT_DIR"
-e2e_assert rch exec -- cargo test -p ffs-repair "$REPAIR_E2E_TEST" -- --nocapture
-
-if ! have_artifacts "$ARTIFACT_DIR"; then
-    if [[ "${FFS_REPAIR_LOCAL_ARTIFACT_FALLBACK:-0}" == "1" ]]; then
-        e2e_log "Artifacts not present after rch run; using local fallback capture"
-        e2e_assert cargo test -p ffs-repair "$REPAIR_E2E_TEST" -- --nocapture
-    else
-        e2e_skip "repair test passed via rch but expected artifact files were not materialized locally; rerun with FFS_REPAIR_LOCAL_ARTIFACT_FALLBACK=1 if local artifact capture is required"
-    fi
+export FFS_REPAIR_E2E_ARTIFACT_DIR="$RCH_ARTIFACT_DIR"
+REPAIR_RCH_LOG="$E2E_LOG_DIR/repair_recovery_rch.log"
+if run_rch_capture "$REPAIR_RCH_LOG" env \
+    "FFS_REPAIR_E2E_ARTIFACT_DIR=$RCH_ARTIFACT_DIR" \
+    "FFS_REPAIR_E2E_ARTIFACT_STDOUT=1" \
+    "RUST_LOG=$RUST_LOG" \
+    "RUST_BACKTRACE=$RUST_BACKTRACE" \
+    "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" cargo test -p ffs-repair "$REPAIR_E2E_TEST" -- --nocapture; then
+    scenario_result "repair_recovery_rch_test_passed" "PASS" "repair recovery test passed through RCH"
+else
+    print_rch_log "$REPAIR_RCH_LOG"
+    scenario_result "repair_recovery_rch_test_passed" "FAIL" "repair recovery RCH test failed"
+    e2e_fail "repair recovery RCH test failed"
 fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+    e2e_skip "python3 not found; required for repair artifact extraction"
+fi
+extract_repair_artifacts_from_rch_log "$REPAIR_RCH_LOG" "$ARTIFACT_DIR"
+if ! have_artifacts "$ARTIFACT_DIR"; then
+    print_rch_log "$REPAIR_RCH_LOG"
+    scenario_result "repair_recovery_rch_artifacts_materialized" "FAIL" "stdout artifacts missing from ${ARTIFACT_DIR}"
+    e2e_fail "repair test passed via RCH but expected stdout artifacts were not materialized"
+fi
+scenario_result "repair_recovery_rch_artifacts_materialized" "PASS" "repair artifacts reconstructed from RCH stdout transcript"
 
 e2e_step "Phase 4: verify artifacts and recovery equivalence"
 e2e_assert_file "$ARTIFACT_DIR/before_checksums.txt"
@@ -77,12 +258,13 @@ e2e_assert_file "$ARTIFACT_DIR/after_checksums.txt"
 e2e_assert_file "$ARTIFACT_DIR/corruption_plan.json"
 e2e_assert_file "$ARTIFACT_DIR/recovery_evidence.jsonl"
 e2e_assert cmp "$ARTIFACT_DIR/before_checksums.txt" "$ARTIFACT_DIR/after_checksums.txt"
+scenario_result "repair_recovery_checksums_match" "PASS" "before and after block checksums match"
 
-if command -v python3 >/dev/null 2>&1; then
-    FFS_REPAIR_ARTIFACT_DIR="$ARTIFACT_DIR" e2e_assert python3 -c "import json, os, pathlib; d=pathlib.Path(os.environ['FFS_REPAIR_ARTIFACT_DIR']); plan=json.loads((d/'corruption_plan.json').read_text()); pct=int(plan['corruption_percent']); blocks=plan['corrupted_blocks']; total=int(plan['total_corrupted_blocks']); assert 1 <= pct <= 5, pct; assert total == len(blocks) and total > 0, total; assert len(set(blocks)) == len(blocks), 'duplicate corrupted blocks'; before=(d/'before_checksums.txt').read_text().strip().splitlines(); after=(d/'after_checksums.txt').read_text().strip().splitlines(); assert before and after and before == after, 'checksum mismatch'; lines=[line for line in (d/'recovery_evidence.jsonl').read_text().splitlines() if line.strip()]; assert lines, 'empty evidence ledger'; events={json.loads(line).get('event_type') for line in lines}; assert 'corruption_detected' in events, events; assert 'repair_succeeded' in events, events"
-else
-    e2e_log "python3 not found; skipping deep JSON validation"
+if ! command -v python3 >/dev/null 2>&1; then
+    e2e_skip "python3 not found; required for repair artifact validation"
 fi
+FFS_REPAIR_ARTIFACT_DIR="$ARTIFACT_DIR" e2e_assert python3 -c "import json, os, pathlib; d=pathlib.Path(os.environ['FFS_REPAIR_ARTIFACT_DIR']); plan=json.loads((d/'corruption_plan.json').read_text()); pct=int(plan['corruption_percent']); blocks=plan['corrupted_blocks']; total=int(plan['total_corrupted_blocks']); assert 1 <= pct <= 5, pct; assert total == len(blocks) and total > 0, total; assert len(set(blocks)) == len(blocks), 'duplicate corrupted blocks'; before=(d/'before_checksums.txt').read_text().strip().splitlines(); after=(d/'after_checksums.txt').read_text().strip().splitlines(); assert before and after and before == after, 'checksum mismatch'; lines=[line for line in (d/'recovery_evidence.jsonl').read_text().splitlines() if line.strip()]; assert lines, 'empty evidence ledger'; events={json.loads(line).get('event_type') for line in lines}; assert 'corruption_detected' in events, events; assert 'repair_succeeded' in events, events"
+scenario_result "repair_recovery_evidence_ledger_valid" "PASS" "corruption plan and evidence ledger validated"
 
 e2e_run wc -l "$ARTIFACT_DIR/recovery_evidence.jsonl"
 
