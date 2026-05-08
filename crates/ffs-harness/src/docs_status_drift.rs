@@ -1093,12 +1093,22 @@ mod tests {
             "bd-wjsuj",
             "bd-rchk5.2",
             "bd-hol07",
+            "bd-rchk0.5.10",
             "bd-rchk0.5.10.1",
             "bd-rchk0.5.11",
             "bd-rchk0.5.12",
             "bd-rchk0.5.13",
             "bd-rchk0.5.14",
             "bd-0qx9b",
+            "bd-rchk0.4.1",
+            "bd-rchk0.4.2",
+            "bd-rchk0.4.3",
+            "bd-rchk4.2",
+            "bd-rchk4.3",
+            "bd-rchk7.2",
+            "bd-rchk0.1.3",
+            "bd-rchk0.2.3",
+            "bd-rchk0.3.3",
         ]
         .iter()
         .map(|id| fixture_issue(id))
@@ -1375,14 +1385,14 @@ mod tests {
     /// `render_docs_status_drift_markdown` on the deterministic
     /// `fixture_report(None)`. Pins:
     ///   * the title line `# FrankenFS Docs Status Drift`
-    ///   * the 5-bullet metadata header (Version / Release gate pass /
+    ///   * the metadata header (Version / Release gate pass /
     ///     Rules / Observations / Reproduction)
     ///   * the `## Observations` section heading
     ///   * the 6-column table layout (Feature / Target / Expected /
     ///     Drift / Wording / Remediation) with all 12 fixture rows
-    ///   * the `## Errors` section heading and the per-error bullet
-    ///     format
-    ///   * the exact ordering of observation and error bullets
+    ///   * the absence of an `## Errors` section for the valid default
+    ///     fixture
+    ///   * the exact ordering of observation rows
     ///
     /// Substring-only assertions in `renders_markdown_summary` cannot
     /// detect column reorders, section ordering swaps, or table-cell

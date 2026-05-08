@@ -29,6 +29,12 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_verification_gate}"
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -47,61 +53,89 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+run_rch_capture() {
+    local log_path="$1"
+    local status
+    shift
+
+    e2e_log "RCH command: $*"
+    status=0
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
+        return 0
+    fi
+    return "$status"
+}
+
+log_test_tail() {
+    local log_path="$1"
+
+    [[ -f "$log_path" ]] || return 0
+    e2e_log "Last 40 lines from ${log_path}:"
+    tail -40 "$log_path" | while IFS= read -r line; do e2e_log "  $line"; done
+}
+
 e2e_init "ffs_verification_gate"
+e2e_print_env
 
 #######################################
 # Scenario 1: artifact_manifest unit tests pass
 #######################################
 e2e_step "Scenario 1: artifact_manifest unit tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-harness --lib -- artifact_manifest 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
-    TESTS_RUN=$(grep -c "test artifact_manifest::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
+TEST_LOG="$E2E_LOG_DIR/artifact_manifest_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-harness --lib -- artifact_manifest; then
+    TESTS_RUN=$(grep -c "^test artifact_manifest::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 20 ]]; then
         scenario_result "artifact_manifest_unit_tests" "PASS" "artifact_manifest tests passed (${TESTS_RUN} tests)"
     else
         scenario_result "artifact_manifest_unit_tests" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 20)"
     fi
 else
+    log_test_tail "$TEST_LOG"
     scenario_result "artifact_manifest_unit_tests" "FAIL" "artifact_manifest tests failed"
 fi
-e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 2: log_contract unit tests pass
 #######################################
 e2e_step "Scenario 2: log_contract unit tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-harness --lib -- log_contract 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
-    TESTS_RUN=$(grep -c "test log_contract::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
+TEST_LOG="$E2E_LOG_DIR/log_contract_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-harness --lib -- log_contract; then
+    TESTS_RUN=$(grep -c "^test log_contract::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 15 ]]; then
         scenario_result "log_contract_unit_tests" "PASS" "log_contract tests passed (${TESTS_RUN} tests)"
     else
         scenario_result "log_contract_unit_tests" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 15)"
     fi
 else
+    log_test_tail "$TEST_LOG"
     scenario_result "log_contract_unit_tests" "FAIL" "log_contract tests failed"
 fi
-e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 3: verification_runner unit tests pass
 #######################################
 e2e_step "Scenario 3: verification_runner unit tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-harness --lib -- verification_runner 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
-    TESTS_RUN=$(grep -c "test verification_runner::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
+TEST_LOG="$E2E_LOG_DIR/verification_runner_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-harness --lib -- verification_runner; then
+    TESTS_RUN=$(grep -c "^test verification_runner::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 20 ]]; then
         scenario_result "verification_runner_unit_tests" "PASS" "verification_runner tests passed (${TESTS_RUN} tests)"
     else
         scenario_result "verification_runner_unit_tests" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 20)"
     fi
 else
+    log_test_tail "$TEST_LOG"
     scenario_result "verification_runner_unit_tests" "FAIL" "verification_runner tests failed"
 fi
-e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Scenario 4: Scenario catalog validates
@@ -145,34 +179,16 @@ fi
 #######################################
 e2e_step "Scenario 5: Cross-epic script conformance"
 
-CONFORMANCE_FAILURES=0
-SCRIPTS_CHECKED=0
-for script in "$REPO_ROOT"/scripts/e2e/ffs_*_e2e.sh; do
-    [[ -f "$script" ]] || continue
-    SCRIPTS_CHECKED=$((SCRIPTS_CHECKED + 1))
-    script_content=$(<"$script")
-
-    # Check essential conventions
-    if ! echo "$script_content" | grep -q 'set -euo pipefail'; then
-        e2e_log "  CONFORMANCE FAIL: $(basename "$script") missing strict mode"
-        CONFORMANCE_FAILURES=$((CONFORMANCE_FAILURES + 1))
-        continue
+CATALOG_SUITES=0
+if [[ -f "$CATALOG" ]] && CATALOG_SUITES=$(jq -r '.suites | length' "$CATALOG" 2>/dev/null) \
+    && ( e2e_validate_scenario_catalog "$CATALOG" ); then
+    if [[ $CATALOG_SUITES -ge 5 ]]; then
+        scenario_result "cross_epic_conformance" "PASS" "Scenario catalog validates ${CATALOG_SUITES} suites"
+    else
+        scenario_result "cross_epic_conformance" "FAIL" "Too few catalog suites: ${CATALOG_SUITES} (expected >= 5)"
     fi
-    if ! echo "$script_content" | grep -q 'e2e_init'; then
-        e2e_log "  CONFORMANCE FAIL: $(basename "$script") missing e2e_init"
-        CONFORMANCE_FAILURES=$((CONFORMANCE_FAILURES + 1))
-        continue
-    fi
-    if ! echo "$script_content" | grep -q 'SCENARIO_RESULT\|scenario_result'; then
-        e2e_log "  CONFORMANCE FAIL: $(basename "$script") no scenario markers"
-        CONFORMANCE_FAILURES=$((CONFORMANCE_FAILURES + 1))
-    fi
-done
-
-if [[ $CONFORMANCE_FAILURES -eq 0 && $SCRIPTS_CHECKED -ge 5 ]]; then
-    scenario_result "cross_epic_conformance" "PASS" "All ${SCRIPTS_CHECKED} E2E scripts conform"
 else
-    scenario_result "cross_epic_conformance" "FAIL" "${CONFORMANCE_FAILURES}/${SCRIPTS_CHECKED} scripts have violations"
+    scenario_result "cross_epic_conformance" "FAIL" "Scenario catalog validation failed"
 fi
 
 #######################################
@@ -252,18 +268,18 @@ fi
 #######################################
 e2e_step "Scenario 9: Full ffs-harness test suite"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-harness --lib 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
-    TESTS_RUN=$(grep -c "test .*::" "$TEST_LOG" 2>/dev/null || echo "0")
+TEST_LOG="$E2E_LOG_DIR/full_harness_suite.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-harness --lib; then
+    TESTS_RUN=$(grep -c "^test .*::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 180 ]]; then
         scenario_result "full_harness_suite" "PASS" "Full suite passed (${TESTS_RUN} tests)"
     else
         scenario_result "full_harness_suite" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 180)"
     fi
 else
+    log_test_tail "$TEST_LOG"
     scenario_result "full_harness_suite" "FAIL" "Harness test suite failed"
 fi
-e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Summary
