@@ -4349,6 +4349,54 @@ mod tests {
                 );
             }
         }
+
+        // bd-xqf12 — Determinism MR for parse_dev_item. Sister
+        // btrfs parsers (parse_xattr_items / parse_extent_data /
+        // parse_inode_refs / parse_root_ref / parse_root_item /
+        // parse_inode_item) all have determinism MR proptests.
+        // parse_dev_item runs on every btrfs superblock parse +
+        // every walk_chunk_tree DEV_ITEM read. A regression
+        // introducing a hash-iteration or allocator-address
+        // dependency would silently surface only under specific
+        // scheduling.
+        #[test]
+        fn btrfs_proptest_parse_dev_item_determinism(
+            devid_seed in 1_u64..=u64::MAX,
+            total_bytes in 1_u64..=u64::MAX,
+            io_align in any::<u32>(),
+            io_width in any::<u32>(),
+            sector_size in any::<u32>(),
+            dev_type in any::<u64>(),
+            generation in any::<u64>(),
+            start_offset in any::<u64>(),
+            dev_group in any::<u32>(),
+            seek_speed in any::<u8>(),
+            bandwidth in any::<u8>(),
+            uuid in proptest::array::uniform16(any::<u8>()),
+            fsid in proptest::array::uniform16(any::<u8>()),
+        ) {
+            // bytes_used <= total_bytes per parser invariant.
+            let bytes_used = devid_seed % (total_bytes.saturating_add(1)).max(1);
+            let mut data = vec![0_u8; 98];
+            data[0..8].copy_from_slice(&devid_seed.to_le_bytes());
+            data[8..16].copy_from_slice(&total_bytes.to_le_bytes());
+            data[16..24].copy_from_slice(&bytes_used.to_le_bytes());
+            data[24..28].copy_from_slice(&io_align.to_le_bytes());
+            data[28..32].copy_from_slice(&io_width.to_le_bytes());
+            data[32..36].copy_from_slice(&sector_size.to_le_bytes());
+            data[36..44].copy_from_slice(&dev_type.to_le_bytes());
+            data[44..52].copy_from_slice(&generation.to_le_bytes());
+            data[52..60].copy_from_slice(&start_offset.to_le_bytes());
+            data[60..64].copy_from_slice(&dev_group.to_le_bytes());
+            data[64] = seek_speed;
+            data[65] = bandwidth;
+            data[66..82].copy_from_slice(&uuid);
+            data[82..98].copy_from_slice(&fsid);
+
+            let a = parse_dev_item(&data).expect("first parse");
+            let b = parse_dev_item(&data).expect("second parse");
+            prop_assert_eq!(a, b);
+        }
     }
 
     // ── RAID profile identification ────────────────────────────────
