@@ -840,6 +840,13 @@ rejects hand-upgraded claims, stale flat-parity wording, missing support-state
 or evidence-matrix references, missing remediation beads, and public statuses
 stronger than the controlling support-state/gate outputs allow.
 
+The report also carries release-gate wording contracts for `mount.rw.ext4`,
+`mount.rw.btrfs`, `repair.rw.writeback`, `writeback_cache`,
+`xfstests.baseline`, and `swarm.responsiveness`. Each contract records the exact
+docs target, final/target state, controlling lane, missing artifact, and
+remediation bead. README and FEATURE_PARITY wording may only strengthen when the
+contract's final state is authoritative.
+
 The E2E smoke is:
 
 ```bash
@@ -848,7 +855,8 @@ The E2E smoke is:
 
 It checks default generated snippets across all required public surfaces,
 injects a hand-upgraded read-write repair claim, injects stale flat parity
-wording, verifies structured drift log fields, and runs the module unit tests.
+wording, injects a release-gate overclaim for xfstests readiness, verifies
+structured drift log fields, and runs the module unit tests.
 
 ## Tracker Source Hygiene
 

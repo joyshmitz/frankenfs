@@ -18,108 +18,14 @@ RCH_BIN="${RCH_BIN:-rch}"
 RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
-
-case ",${RCH_ENV_ALLOWLIST:-}," in
-    *",CARGO_TARGET_DIR,"*) ;;
-    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
-esac
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR
 
 PASS_COUNT=0
 FAIL_COUNT=0
 TOTAL=0
 
-cancel_matching_rch_queue_entry() {
-    local command_text="$*"
-    local queue_json
-    local ids
-    if ! command -v jq >/dev/null 2>&1; then
-        return 0
-    fi
-    queue_json="$("$RCH_BIN" queue --json 2>/dev/null || true)"
-    if [[ -z "$queue_json" ]]; then
-        return 0
-    fi
-    ids="$(jq -r --arg cmd "$command_text" '
-        .data.active_builds[]?
-        | select(.project_id | startswith("frankenfs-"))
-        | select(.command == $cmd)
-        | .id
-    ' <<<"$queue_json" || true)"
-    for id in $ids; do
-        if "$RCH_BIN" cancel "$id" >/dev/null 2>&1; then
-            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
-        fi
-    done
-}
-
 run_rch_capture() {
-    local log_path="$1"
-    local status=0
-    local pid
-    local deadline
-    local remote_exit=""
-    local wait_status
-    local had_errexit=0
-    shift
-
-    e2e_log "RCH command: $*"
-    case $- in
-        *e*) had_errexit=1 ;;
-    esac
-
-    : >"$log_path"
-    set +e
-    RCH_VISIBILITY="$RCH_VISIBILITY" "$RCH_BIN" exec -- "$@" >"$log_path" 2>&1 &
-    pid=$!
-    if [[ "$had_errexit" -eq 1 ]]; then
-        set -e
-    fi
-
-    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
-    while kill -0 "$pid" >/dev/null 2>&1; do
-        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
-        if [[ -n "$remote_exit" ]]; then
-            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
-            if kill -0 "$pid" >/dev/null 2>&1; then
-                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}|command=$*"
-                kill -TERM "$pid" >/dev/null 2>&1 || true
-                cancel_matching_rch_queue_entry "$@"
-            fi
-            break
-        fi
-        if ((SECONDS >= deadline)); then
-            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|log=${log_path}|command=$*"
-            kill -TERM "$pid" >/dev/null 2>&1 || true
-            cancel_matching_rch_queue_entry "$@"
-            status=124
-            break
-        fi
-        sleep 2
-    done
-
-    set +e
-    wait "$pid" >/dev/null 2>&1
-    wait_status=$?
-    if [[ "$had_errexit" -eq 1 ]]; then
-        set -e
-    fi
-    if [[ $status -eq 0 && -n "$remote_exit" ]]; then
-        status="$remote_exit"
-    elif [[ $status -eq 0 ]]; then
-        status="$wait_status"
-    fi
-
-    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
-        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}|command=$*"
-        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
-        return 99
-    fi
-    if [[ $status -eq 0 ]] && ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
-        e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}|command=$*"
-        printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
-        return 99
-    fi
-    return "$status"
+    e2e_rch_capture "$@"
 }
 
 scenario_result() {
@@ -146,8 +52,10 @@ mkdir -p "$RCH_INPUT_DIR"
 ISSUES_JSONL="${RCH_INPUT_DIR}/issues.jsonl"
 BAD_UPGRADE_JSON="${RCH_INPUT_DIR}/bad_upgrade_snippets.json"
 BAD_FLAT_JSON="${RCH_INPUT_DIR}/bad_flat_snippets.json"
+BAD_RELEASE_GATE_JSON="${RCH_INPUT_DIR}/bad_release_gate_snippets.json"
 BAD_UPGRADE_RAW="${E2E_LOG_DIR}/bad_upgrade.raw"
 BAD_FLAT_RAW="${E2E_LOG_DIR}/bad_flat.raw"
+BAD_RELEASE_GATE_RAW="${E2E_LOG_DIR}/bad_release_gate.raw"
 UNIT_LOG="${E2E_LOG_DIR}/unit_tests.log"
 cp .beads/issues.jsonl "$ISSUES_JSONL"
 
@@ -247,6 +155,31 @@ if missing_statuses or missing_targets:
     raise SystemExit(f"missing statuses={missing_statuses} targets={missing_targets}")
 if data.get("drift_classification_counts", {}).get("matches") != data.get("observation_count"):
     raise SystemExit("all default snippets should match generated wording")
+release_contracts = {
+    row["feature_id"]: row for row in data.get("release_gate_wording_contracts", [])
+}
+for feature in [
+    "mount.rw.ext4",
+    "mount.rw.btrfs",
+    "repair.rw.writeback",
+    "writeback_cache",
+    "xfstests.baseline",
+    "swarm.responsiveness",
+]:
+    if feature not in release_contracts:
+        raise SystemExit(f"missing release-gate wording contract {feature}")
+for feature, field in [
+    ("xfstests.baseline", "controlling_lane"),
+    ("xfstests.baseline", "missing_artifact"),
+    ("xfstests.baseline", "remediation_id"),
+    ("swarm.responsiveness", "docs_target"),
+    ("writeback_cache", "final_state"),
+    ("repair.rw.writeback", "target_state"),
+]:
+    if not release_contracts[feature].get(field):
+        raise SystemExit(f"missing {field} for {feature}")
+if data.get("release_gate_wording_drift_classification_counts", {}).get("matches") != data.get("release_gate_wording_observation_count"):
+    raise SystemExit("all default release-gate wording snippets should match")
 PY
 then
     scenario_result "docs_status_surface_status_coverage" "PASS" "required surfaces and statuses represented"
@@ -338,10 +271,44 @@ else
     fi
 fi
 
-e2e_step "Scenario 7: unit/schema tests pass"
+e2e_step "Scenario 7: release-gate wording overclaim fails closed"
+cat >"$BAD_RELEASE_GATE_JSON" <<'JSON'
+{
+  "snippets": [
+    {
+      "feature_id": "xfstests.baseline",
+      "docs_target": "FEATURE_PARITY.md",
+      "section_anchor": "xfstests-readiness",
+      "observed_text": "feature_parity.xfstests: xfstests.baseline is validated by fresh release-gate evidence."
+    }
+  ]
+}
+JSON
+if run_rch_capture "$BAD_RELEASE_GATE_RAW" cargo run --quiet -p ffs-harness -- validate-docs-status-drift \
+    --issues "$ISSUES_JSONL" \
+    --feature-parity FEATURE_PARITY.md \
+    --snippets "$BAD_RELEASE_GATE_JSON"; then
+    scenario_result "docs_status_release_gate_overclaim_fails" "FAIL" "release-gate overclaim unexpectedly passed"
+else
+    if grep -q "feature_id=xfstests.baseline" "$BAD_RELEASE_GATE_RAW" \
+        && grep -q "docs_target=FEATURE_PARITY.md" "$BAD_RELEASE_GATE_RAW" \
+        && grep -q "docs_wording_id=feature_parity.xfstests" "$BAD_RELEASE_GATE_RAW" \
+        && grep -q "final_state=hidden" "$BAD_RELEASE_GATE_RAW" \
+        && grep -q "target_state=experimental" "$BAD_RELEASE_GATE_RAW" \
+        && grep -q "controlling_lane=xfstests" "$BAD_RELEASE_GATE_RAW" \
+        && grep -q "missing_artifact=fresh permissioned xfstests baseline proof lane" "$BAD_RELEASE_GATE_RAW" \
+        && grep -q "drift_classification=stronger-than-release-gate" "$BAD_RELEASE_GATE_RAW" \
+        && grep -q "remediation_id=bd-rchk3" "$BAD_RELEASE_GATE_RAW"; then
+        scenario_result "docs_status_release_gate_overclaim_fails" "PASS" "release-gate overclaim failed with lane/remediation diagnostics"
+    else
+        scenario_result "docs_status_release_gate_overclaim_fails" "FAIL" "failure did not include release-gate drift diagnostics"
+    fi
+fi
+
+e2e_step "Scenario 8: unit/schema tests pass"
 if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib -- docs_status_drift; then
     TESTS_RUN=$(grep -c "test docs_status_drift::tests::" "$UNIT_LOG" 2>/dev/null || echo "0")
-    if [[ $TESTS_RUN -ge 8 ]]; then
+    if [[ $TESTS_RUN -ge 10 ]]; then
         scenario_result "docs_status_unit_tests" "PASS" "unit tests passed (${TESTS_RUN} tests)"
     else
         scenario_result "docs_status_unit_tests" "FAIL" "too few tests: ${TESTS_RUN}"

@@ -9,6 +9,7 @@
 //! when observed wording claims a stronger state than the controlling evidence.
 
 use crate::ambition_evidence_matrix::analyze_ambition_evidence_matrix;
+use crate::release_gate::FeatureState;
 use crate::support_state_accounting::{
     SupportStateAccountingRow, analyze_support_state_accounting,
 };
@@ -28,6 +29,9 @@ pub const DEFAULT_DOCS_STATUS_DRIFT_SUMMARY: &str = "artifacts/docs-status/docs_
 const REPRODUCTION_COMMAND: &str = "ffs-harness validate-docs-status-drift --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/docs-status/docs_status_drift.json --summary-out artifacts/docs-status/docs_status_drift.md";
 const RELEASE_GATE_CONTRACT: &str =
     "release-gates:bd-rchk0.5.6.1 fail-closed docs-status drift consumer";
+const RELEASE_GATE_WORDING_SOURCE_POLICY: &str = "tests/release-gates/release_gate_policy_v1.json";
+const RELEASE_GATE_WORDING_SOURCE_PROOF_BUNDLE: &str =
+    "artifacts/proof/bundle/validation_report.json";
 
 const REQUIRED_DOC_TARGETS: [&str; 9] = [
     "README.md",
@@ -70,6 +74,24 @@ const REQUIRED_LOG_FIELDS: [&str; 11] = [
     "reproduction_command",
 ];
 
+const REQUIRED_RELEASE_GATE_WORDING_FIELDS: [&str; 15] = [
+    "feature_id",
+    "docs_wording_id",
+    "docs_target",
+    "section_anchor",
+    "target_state",
+    "final_state",
+    "authoritative",
+    "downgraded",
+    "controlling_lane",
+    "missing_artifact",
+    "remediation_id",
+    "generated_wording",
+    "observed_wording_hash",
+    "drift_classification",
+    "reproduction_command",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocsStatusDriftConfig {
     pub issues_jsonl: PathBuf,
@@ -100,16 +122,22 @@ pub struct DocsStatusDriftReport {
     pub source_issue_count: usize,
     pub rule_count: usize,
     pub observation_count: usize,
+    pub release_gate_wording_contract_count: usize,
+    pub release_gate_wording_observation_count: usize,
     pub required_doc_targets: Vec<String>,
     pub allowed_status_vocabulary: Vec<String>,
     pub generated_artifact_paths: Vec<String>,
     pub rules: Vec<DocsStatusWordingRule>,
     pub observations: Vec<DocsStatusObservation>,
+    pub release_gate_wording_contracts: Vec<DocsStatusReleaseGateWordingContract>,
+    pub release_gate_wording_observations: Vec<DocsStatusReleaseGateWordingObservation>,
     pub structured_logs: Vec<DocsStatusLogEvent>,
     pub grouped_by_docs_target: BTreeMap<String, Vec<String>>,
     pub grouped_by_public_status: BTreeMap<String, Vec<String>>,
     pub drift_classification_counts: BTreeMap<String, usize>,
+    pub release_gate_wording_drift_classification_counts: BTreeMap<String, usize>,
     pub required_log_fields: Vec<String>,
+    pub required_release_gate_wording_fields: Vec<String>,
     pub errors: Vec<String>,
     pub reproduction_command: String,
 }
@@ -161,6 +189,45 @@ pub struct DocsStatusObservation {
     pub observed_wording_hash: String,
     pub drift_classification: String,
     pub remediation_id: String,
+    pub output_path: String,
+    pub reproduction_command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocsStatusReleaseGateWordingContract {
+    pub feature_id: String,
+    pub docs_wording_id: String,
+    pub docs_target: String,
+    pub section_anchor: String,
+    pub target_state: FeatureState,
+    pub final_state: FeatureState,
+    pub authoritative: bool,
+    pub downgraded: bool,
+    pub controlling_lane: String,
+    pub missing_artifact: String,
+    pub remediation_id: String,
+    pub source_policy: String,
+    pub source_proof_bundle: String,
+    pub generated_wording: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocsStatusReleaseGateWordingObservation {
+    pub feature_id: String,
+    pub docs_wording_id: String,
+    pub docs_target: String,
+    pub section_anchor: String,
+    pub target_state: FeatureState,
+    pub final_state: FeatureState,
+    pub authoritative: bool,
+    pub downgraded: bool,
+    pub strongest_observed_state: String,
+    pub controlling_lane: String,
+    pub missing_artifact: String,
+    pub remediation_id: String,
+    pub generated_wording: String,
+    pub observed_wording_hash: String,
+    pub drift_classification: String,
     pub output_path: String,
     pub reproduction_command: String,
 }
@@ -279,12 +346,27 @@ pub fn analyze_docs_status_drift(
     };
     let observations =
         build_observations(&rules, &support_rows, &snippets, generated_artifact_paths);
+    let release_gate_wording_contracts = default_release_gate_wording_contracts();
+    let release_gate_wording_observations = build_release_gate_wording_observations(
+        &release_gate_wording_contracts,
+        &snippets,
+        generated_artifact_paths,
+    );
     errors.extend(validate_observation_coverage(&observations));
+    errors.extend(validate_release_gate_wording_contracts(
+        &release_gate_wording_contracts,
+    ));
     errors.extend(
         observations
             .iter()
             .filter(|observation| observation.drift_classification != "matches")
             .map(drift_error),
+    );
+    errors.extend(
+        release_gate_wording_observations
+            .iter()
+            .filter(|observation| observation.drift_classification != "matches")
+            .map(release_gate_wording_drift_error),
     );
 
     let structured_logs = observations
@@ -300,6 +382,10 @@ pub fn analyze_docs_status_drift(
     let drift_classification_counts = count_by(&observations, |observation| {
         observation.drift_classification.as_str()
     });
+    let release_gate_wording_drift_classification_counts =
+        count_release_gate_wording_by(&release_gate_wording_observations, |observation| {
+            observation.drift_classification.as_str()
+        });
 
     DocsStatusDriftReport {
         docs_status_drift_version: DOCS_STATUS_DRIFT_VERSION.to_owned(),
@@ -311,6 +397,8 @@ pub fn analyze_docs_status_drift(
             .count(),
         rule_count: rules.len(),
         observation_count: observations.len(),
+        release_gate_wording_contract_count: release_gate_wording_contracts.len(),
+        release_gate_wording_observation_count: release_gate_wording_observations.len(),
         required_doc_targets: REQUIRED_DOC_TARGETS
             .iter()
             .map(ToString::to_string)
@@ -322,11 +410,18 @@ pub fn analyze_docs_status_drift(
         generated_artifact_paths: generated_artifact_paths.to_vec(),
         rules,
         observations,
+        release_gate_wording_contracts,
+        release_gate_wording_observations,
         structured_logs,
         grouped_by_docs_target,
         grouped_by_public_status,
         drift_classification_counts,
+        release_gate_wording_drift_classification_counts,
         required_log_fields: REQUIRED_LOG_FIELDS
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        required_release_gate_wording_fields: REQUIRED_RELEASE_GATE_WORDING_FIELDS
             .iter()
             .map(ToString::to_string)
             .collect(),
@@ -581,6 +676,78 @@ pub fn default_docs_status_rules() -> Vec<DocsStatusWordingRule> {
     ]
 }
 
+#[must_use]
+pub fn default_release_gate_wording_contracts() -> Vec<DocsStatusReleaseGateWordingContract> {
+    vec![
+        release_gate_wording_contract(
+            "mount.rw.ext4",
+            "readme.mount.rw.ext4",
+            "README.md",
+            "project-status",
+            FeatureState::Validated,
+            FeatureState::Experimental,
+            "conformance",
+            "authoritative read-write ext4 mount conformance and release-gate proof",
+            "bd-rchk0.5.6",
+        ),
+        release_gate_wording_contract(
+            "mount.rw.btrfs",
+            "readme.mount.rw.btrfs",
+            "README.md",
+            "project-status",
+            FeatureState::Validated,
+            FeatureState::Validated,
+            "release_gates",
+            "none",
+            "bd-rchk0.5.6",
+        ),
+        release_gate_wording_contract(
+            "repair.rw.writeback",
+            "readme.repair.rw.writeback",
+            "README.md",
+            "mounted-self-healing",
+            FeatureState::OptInMutating,
+            FeatureState::DetectionOnly,
+            "repair_lab",
+            "authoritative mutating repair writeback proof bundle",
+            "bd-rchk0.1",
+        ),
+        release_gate_wording_contract(
+            "writeback_cache",
+            "readme.writeback_cache",
+            "CLI help/status text",
+            "mount-options",
+            FeatureState::OptInMutating,
+            FeatureState::Disabled,
+            "writeback_cache",
+            "writeback-cache negative-option, crash-replay, and performance release-gate evidence",
+            "bd-rchk0.2.1",
+        ),
+        release_gate_wording_contract(
+            "xfstests.baseline",
+            "feature_parity.xfstests",
+            "FEATURE_PARITY.md",
+            "xfstests-readiness",
+            FeatureState::Experimental,
+            FeatureState::Hidden,
+            "xfstests",
+            "fresh permissioned xfstests baseline proof lane",
+            "bd-rchk3",
+        ),
+        release_gate_wording_contract(
+            "swarm.responsiveness",
+            "feature_parity.swarm_responsiveness",
+            "FEATURE_PARITY.md",
+            "swarm-responsiveness",
+            FeatureState::Validated,
+            FeatureState::Hidden,
+            "swarm_tail_latency",
+            "large-host swarm workload and p99 attribution evidence",
+            "bd-rchk0.53.5",
+        ),
+    ]
+}
+
 fn rule(
     feature_id: &str,
     source_support_state_feature_id: &str,
@@ -611,6 +778,69 @@ fn rule(
         owning_bead: owning_bead.to_owned(),
         explicit_non_goal: String::new(),
     }
+}
+
+fn release_gate_wording_contract(
+    feature_id: &str,
+    docs_wording_id: &str,
+    docs_target: &str,
+    section_anchor: &str,
+    target_state: FeatureState,
+    final_state: FeatureState,
+    controlling_lane: &str,
+    missing_artifact: &str,
+    remediation_id: &str,
+) -> DocsStatusReleaseGateWordingContract {
+    let authoritative = final_state == target_state && final_state == FeatureState::Validated;
+    let downgraded = final_state.trust_rank() < target_state.trust_rank();
+    let generated_wording = release_gate_generated_wording(
+        feature_id,
+        docs_wording_id,
+        docs_target,
+        section_anchor,
+        target_state,
+        final_state,
+        controlling_lane,
+        missing_artifact,
+        remediation_id,
+    );
+    DocsStatusReleaseGateWordingContract {
+        feature_id: feature_id.to_owned(),
+        docs_wording_id: docs_wording_id.to_owned(),
+        docs_target: docs_target.to_owned(),
+        section_anchor: section_anchor.to_owned(),
+        target_state,
+        final_state,
+        authoritative,
+        downgraded,
+        controlling_lane: controlling_lane.to_owned(),
+        missing_artifact: missing_artifact.to_owned(),
+        remediation_id: remediation_id.to_owned(),
+        source_policy: RELEASE_GATE_WORDING_SOURCE_POLICY.to_owned(),
+        source_proof_bundle: RELEASE_GATE_WORDING_SOURCE_PROOF_BUNDLE.to_owned(),
+        generated_wording,
+    }
+}
+
+fn release_gate_generated_wording(
+    feature_id: &str,
+    docs_wording_id: &str,
+    docs_target: &str,
+    section_anchor: &str,
+    target_state: FeatureState,
+    final_state: FeatureState,
+    controlling_lane: &str,
+    missing_artifact: &str,
+    remediation_id: &str,
+) -> String {
+    format!(
+        "{docs_wording_id}: {} Docs target `{docs_target}` at `{section_anchor}` may publish release-gate final state `{}` from target state `{}`. Controlling lane: `{controlling_lane}`. Missing artifact: `{missing_artifact}`. Remediation: `{remediation_id}`. Source policy: `{}`. Source proof bundle: `{}`.",
+        final_state.public_wording(feature_id),
+        final_state.label(),
+        target_state.label(),
+        RELEASE_GATE_WORDING_SOURCE_POLICY,
+        RELEASE_GATE_WORDING_SOURCE_PROOF_BUNDLE,
+    )
 }
 
 fn parse_issues(issues_jsonl: &str, errors: &mut Vec<String>) -> BTreeMap<String, IssueSummary> {
@@ -889,6 +1119,66 @@ fn build_observations(
         .collect()
 }
 
+fn build_release_gate_wording_observations(
+    contracts: &[DocsStatusReleaseGateWordingContract],
+    snippets: &[DocsStatusSnippet],
+    generated_artifact_paths: &[String],
+) -> Vec<DocsStatusReleaseGateWordingObservation> {
+    let output_path = generated_artifact_paths
+        .first()
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_DOCS_STATUS_DRIFT_ARTIFACT.to_owned());
+    contracts
+        .iter()
+        .map(|contract| {
+            let snippet = snippets.iter().find(|snippet| {
+                snippet.feature_id == contract.feature_id
+                    && snippet.docs_target == contract.docs_target
+            });
+            let (section_anchor, observed_text) = snippet.map_or_else(
+                || {
+                    (
+                        contract.section_anchor.clone(),
+                        contract.generated_wording.clone(),
+                    )
+                },
+                |snippet| {
+                    (
+                        snippet.section_anchor.clone(),
+                        snippet.observed_text.clone(),
+                    )
+                },
+            );
+            let strongest_observed_state = strongest_release_gate_state_in_text(&observed_text);
+            let drift_classification = classify_release_gate_wording_drift(
+                contract,
+                &observed_text,
+                strongest_observed_state,
+            );
+            DocsStatusReleaseGateWordingObservation {
+                feature_id: contract.feature_id.clone(),
+                docs_wording_id: contract.docs_wording_id.clone(),
+                docs_target: contract.docs_target.clone(),
+                section_anchor,
+                target_state: contract.target_state,
+                final_state: contract.final_state,
+                authoritative: contract.authoritative,
+                downgraded: contract.downgraded,
+                strongest_observed_state: strongest_observed_state
+                    .map_or_else(|| "unknown".to_owned(), |state| state.label().to_owned()),
+                controlling_lane: contract.controlling_lane.clone(),
+                missing_artifact: contract.missing_artifact.clone(),
+                remediation_id: contract.remediation_id.clone(),
+                generated_wording: contract.generated_wording.clone(),
+                observed_wording_hash: hash_text(&observed_text),
+                drift_classification,
+                output_path: output_path.clone(),
+                reproduction_command: REPRODUCTION_COMMAND.to_owned(),
+            }
+        })
+        .collect()
+}
+
 fn generated_wording(rule: &DocsStatusWordingRule, row: &SupportStateAccountingRow) -> String {
     format!(
         "{}: `{}` status is `{}` for `{}` at `{}`. Source support-state row `{}` is `{}` with docs wording `{}`; evidence matrix row `{}` and gate consumer `{}` control upgrades. Freshness requirement: {}. Downgrade wording: {}. Remediation: `{}`. Owner: `{}`.",
@@ -937,6 +1227,35 @@ fn classify_drift(
     "wording-hash-drift".to_owned()
 }
 
+fn classify_release_gate_wording_drift(
+    contract: &DocsStatusReleaseGateWordingContract,
+    observed_text: &str,
+    strongest_observed_state: Option<FeatureState>,
+) -> String {
+    if observed_text.trim().is_empty() {
+        return "missing-observed-wording".to_owned();
+    }
+    let lower = observed_text.to_ascii_lowercase();
+    if contains_flat_parity_claim(&lower) {
+        return "stale-flat-parity".to_owned();
+    }
+    if observed_text.trim() == contract.generated_wording.trim() {
+        return "matches".to_owned();
+    }
+    if strongest_observed_state
+        .is_some_and(|state| state.trust_rank() > contract.final_state.trust_rank())
+    {
+        return "stronger-than-release-gate".to_owned();
+    }
+    if !lower.contains(&contract.docs_wording_id.to_ascii_lowercase()) {
+        return "missing-docs-wording-id".to_owned();
+    }
+    if !lower.contains(contract.final_state.label()) {
+        return "missing-release-gate-state".to_owned();
+    }
+    "wording-hash-drift".to_owned()
+}
+
 fn contains_flat_parity_claim(lower_text: &str) -> bool {
     (lower_text.contains("100 percent parity")
         || lower_text.contains("100% parity")
@@ -967,6 +1286,32 @@ fn strongest_status_in_text(text: &str) -> String {
         }
     }
     "unknown".to_owned()
+}
+
+fn strongest_release_gate_state_in_text(text: &str) -> Option<FeatureState> {
+    let lower = text.to_ascii_lowercase();
+    for (needle, state) in [
+        ("production-ready", FeatureState::Validated),
+        ("fully supported", FeatureState::Validated),
+        ("fresh release-gate evidence", FeatureState::Validated),
+        ("validated", FeatureState::Validated),
+        ("opt-in mutating", FeatureState::OptInMutating),
+        ("opt_in_mutating", FeatureState::OptInMutating),
+        ("experimental", FeatureState::Experimental),
+        ("detection-only", FeatureState::DetectionOnly),
+        ("detection_only", FeatureState::DetectionOnly),
+        ("dry-run-only", FeatureState::DryRunOnly),
+        ("dry_run_only", FeatureState::DryRunOnly),
+        ("deprecated-blocked", FeatureState::DeprecatedBlocked),
+        ("deprecated_blocked", FeatureState::DeprecatedBlocked),
+        ("disabled", FeatureState::Disabled),
+        ("hidden", FeatureState::Hidden),
+    ] {
+        if lower.contains(needle) {
+            return Some(state);
+        }
+    }
+    None
 }
 
 fn status_rank(status: &str) -> u8 {
@@ -1010,6 +1355,71 @@ fn validate_observation_coverage(observations: &[DocsStatusObservation]) -> Vec<
     errors
 }
 
+fn validate_release_gate_wording_contracts(
+    contracts: &[DocsStatusReleaseGateWordingContract],
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut seen = BTreeSet::new();
+    for contract in contracts {
+        let key = format!("{}:{}", contract.feature_id, contract.docs_wording_id);
+        if seen.contains(&key) {
+            errors.push(format!("duplicate release-gate wording contract {key}"));
+        } else {
+            seen.insert(key);
+        }
+        for (field, value) in [
+            ("feature_id", contract.feature_id.as_str()),
+            ("docs_wording_id", contract.docs_wording_id.as_str()),
+            ("docs_target", contract.docs_target.as_str()),
+            ("section_anchor", contract.section_anchor.as_str()),
+            ("controlling_lane", contract.controlling_lane.as_str()),
+            ("missing_artifact", contract.missing_artifact.as_str()),
+            ("remediation_id", contract.remediation_id.as_str()),
+            ("source_policy", contract.source_policy.as_str()),
+            ("source_proof_bundle", contract.source_proof_bundle.as_str()),
+            ("generated_wording", contract.generated_wording.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                errors.push(format!(
+                    "{} release-gate wording contract missing {field}",
+                    contract.feature_id
+                ));
+            }
+        }
+        if !REQUIRED_DOC_TARGETS.contains(&contract.docs_target.as_str()) {
+            errors.push(format!(
+                "{} release-gate wording contract invalid docs_target {}",
+                contract.feature_id, contract.docs_target
+            ));
+        }
+        if contract.authoritative && contract.final_state != FeatureState::Validated {
+            errors.push(format!(
+                "{} authoritative wording must be validated",
+                contract.feature_id
+            ));
+        }
+        if contract.downgraded
+            != (contract.final_state.trust_rank() < contract.target_state.trust_rank())
+        {
+            errors.push(format!(
+                "{} downgraded flag disagrees with target/final states",
+                contract.feature_id
+            ));
+        }
+        if !contract
+            .generated_wording
+            .contains(contract.final_state.label())
+        {
+            errors.push(format!(
+                "{} generated wording missing final state {}",
+                contract.feature_id,
+                contract.final_state.label()
+            ));
+        }
+    }
+    errors
+}
+
 fn drift_error(observation: &DocsStatusObservation) -> String {
     format!(
         "docs drift feature_id={} docs_target={} expected_wording_id={} observed_wording_hash={} source_support_state_row={} drift_classification={} remediation_id={}",
@@ -1018,6 +1428,25 @@ fn drift_error(observation: &DocsStatusObservation) -> String {
         observation.generated_wording_id,
         observation.observed_wording_hash,
         observation.source_support_state_row,
+        observation.drift_classification,
+        observation.remediation_id,
+    )
+}
+
+fn release_gate_wording_drift_error(
+    observation: &DocsStatusReleaseGateWordingObservation,
+) -> String {
+    format!(
+        "release-gate docs drift feature_id={} docs_target={} docs_wording_id={} final_state={} target_state={} observed_wording_hash={} strongest_observed_state={} controlling_lane={} missing_artifact={} drift_classification={} remediation_id={}",
+        observation.feature_id,
+        observation.docs_target,
+        observation.docs_wording_id,
+        observation.final_state.label(),
+        observation.target_state.label(),
+        observation.observed_wording_hash,
+        observation.strongest_observed_state,
+        observation.controlling_lane,
+        observation.missing_artifact,
         observation.drift_classification,
         observation.remediation_id,
     )
@@ -1072,6 +1501,20 @@ where
     counts
 }
 
+fn count_release_gate_wording_by<F>(
+    observations: &[DocsStatusReleaseGateWordingObservation],
+    key_fn: F,
+) -> BTreeMap<String, usize>
+where
+    F: Fn(&DocsStatusReleaseGateWordingObservation) -> &str,
+{
+    let mut counts = BTreeMap::new();
+    for observation in observations {
+        *counts.entry(key_fn(observation).to_owned()).or_insert(0) += 1;
+    }
+    counts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1109,6 +1552,11 @@ mod tests {
             "bd-rchk0.1.3",
             "bd-rchk0.2.3",
             "bd-rchk0.3.3",
+            "bd-rchk0.1",
+            "bd-rchk0.2.1",
+            "bd-rchk0.5.6",
+            "bd-rchk3",
+            "bd-rchk0.53.5",
         ]
         .iter()
         .map(|id| fixture_issue(id))
@@ -1191,6 +1639,12 @@ mod tests {
         assert_eq!(report.rule_count, 12);
         assert_eq!(report.observation_count, 12);
         assert_eq!(report.drift_classification_counts["matches"], 12);
+        assert_eq!(report.release_gate_wording_contract_count, 6);
+        assert_eq!(report.release_gate_wording_observation_count, 6);
+        assert_eq!(
+            report.release_gate_wording_drift_classification_counts["matches"],
+            6
+        );
     }
 
     #[test]
@@ -1307,6 +1761,83 @@ mod tests {
                 "missing log field {field}"
             );
         }
+    }
+
+    #[test]
+    fn release_gate_wording_contracts_cover_readiness_state_matrix() {
+        let report = fixture_report(None);
+        let by_feature = report
+            .release_gate_wording_contracts
+            .iter()
+            .map(|contract| (contract.feature_id.as_str(), contract))
+            .collect::<BTreeMap<_, _>>();
+
+        let xfstests = by_feature
+            .get("xfstests.baseline")
+            .expect("xfstests contract");
+        assert_eq!(xfstests.final_state, FeatureState::Hidden);
+        assert_eq!(xfstests.controlling_lane, "xfstests");
+        assert_eq!(xfstests.docs_target, "FEATURE_PARITY.md");
+
+        let swarm = by_feature
+            .get("swarm.responsiveness")
+            .expect("swarm contract");
+        assert_eq!(swarm.final_state, FeatureState::Hidden);
+        assert_eq!(swarm.controlling_lane, "swarm_tail_latency");
+
+        let writeback = by_feature
+            .get("writeback_cache")
+            .expect("writeback-cache contract");
+        assert_eq!(writeback.final_state, FeatureState::Disabled);
+        assert_eq!(writeback.docs_wording_id, "readme.writeback_cache");
+
+        let ext4_mount = by_feature
+            .get("mount.rw.ext4")
+            .expect("ext4 mount contract");
+        assert_eq!(ext4_mount.final_state, FeatureState::Experimental);
+        assert!(ext4_mount.downgraded);
+
+        let repair = by_feature
+            .get("repair.rw.writeback")
+            .expect("repair writeback contract");
+        assert_eq!(repair.target_state, FeatureState::OptInMutating);
+        assert_eq!(repair.final_state, FeatureState::DetectionOnly);
+        assert!(repair.downgraded);
+
+        let btrfs_mount = by_feature
+            .get("mount.rw.btrfs")
+            .expect("btrfs mount contract");
+        assert_eq!(btrfs_mount.final_state, FeatureState::Validated);
+        assert!(btrfs_mount.authoritative);
+    }
+
+    #[test]
+    fn rejects_release_gate_hand_upgrade_with_controlling_lane_diagnostics() {
+        let snippets = r#"{
+  "snippets": [
+    {
+      "feature_id": "xfstests.baseline",
+      "docs_target": "FEATURE_PARITY.md",
+      "section_anchor": "xfstests-readiness",
+      "observed_text": "feature_parity.xfstests: xfstests.baseline is validated by fresh release-gate evidence."
+    }
+  ]
+}"#;
+        let report = fixture_report(Some(snippets));
+        assert!(!report.release_gate_pass);
+        let error = report
+            .errors
+            .iter()
+            .find(|error| error.contains("xfstests.baseline"))
+            .expect("xfstests release-gate error");
+        assert!(error.contains("docs_target=FEATURE_PARITY.md"));
+        assert!(error.contains("docs_wording_id=feature_parity.xfstests"));
+        assert!(error.contains("final_state=hidden"));
+        assert!(error.contains("target_state=experimental"));
+        assert!(error.contains("controlling_lane=xfstests"));
+        assert!(error.contains("missing_artifact=fresh permissioned xfstests baseline proof lane"));
+        assert!(error.contains("drift_classification=stronger-than-release-gate"));
+        assert!(error.contains("remediation_id=bd-rchk3"));
     }
 
     #[test]
