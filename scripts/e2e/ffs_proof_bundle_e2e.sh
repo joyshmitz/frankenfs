@@ -15,6 +15,8 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_proof_bundle}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -33,10 +35,159 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("${RCH_BIN:-rch}" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "${RCH_BIN:-rch}" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local log_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+    local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-600}"
+    : >"$log_path"
+    set +e
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
+    pid=$!
+    set -e
+    deadline=$((SECONDS + timeout_secs))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${timeout_secs}|log=${log_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH artifact retrieval failed after worker-side success; accepting remote exit=0 evidence from $log_path"
+        return 0
+    fi
+    return "$status"
+}
+
+extract_json_object() {
+    local input_path="$1"
+    local output_path="$2"
+    local object_index="${3:-0}"
+    python3 - "$input_path" "$output_path" "$object_index" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1])
+dest = pathlib.Path(sys.argv[2])
+target_index = int(sys.argv[3])
+text = source.read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+decoder = json.JSONDecoder()
+seen = 0
+pos = 0
+while pos < len(text):
+    idx = text.find("{", pos)
+    if idx < 0:
+        break
+    try:
+        _, end = decoder.raw_decode(text[idx:])
+    except json.JSONDecodeError:
+        pos = idx + 1
+        continue
+    if seen == target_index:
+        dest.write_text(text[idx:idx + end].rstrip() + "\n", encoding="utf-8")
+        raise SystemExit(0)
+    seen += 1
+    pos = idx + end
+raise SystemExit(f"JSON object {target_index} not found in {source}")
+PY
+}
+
+extract_markdown_report() {
+    local input_path="$1"
+    local output_path="$2"
+    python3 - "$input_path" "$output_path" <<'PY'
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1])
+dest = pathlib.Path(sys.argv[2])
+text = source.read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+start = text.find("# FrankenFS Proof Bundle")
+if start < 0:
+    raise SystemExit(f"proof-bundle markdown report not found in {source}")
+end = text.find("\n[RCH]", start)
+if end < 0:
+    end = text.find("\nRemote command finished:", start)
+if end < 0:
+    end = len(text)
+dest.write_text(text[start:end].rstrip() + "\n", encoding="utf-8")
+PY
+}
+
 e2e_init "ffs_proof_bundle"
 
 GIT_SHA="$(git rev-parse HEAD)"
-BUNDLE_DIR="$E2E_LOG_DIR/proof_bundle"
+RCH_OUTPUT_DIR="$REPO_ROOT/artifacts/rch/proof_bundle/$(basename "$E2E_LOG_DIR")"
+BUNDLE_DIR="$RCH_OUTPUT_DIR/proof_bundle"
 MANIFEST_JSON="$BUNDLE_DIR/manifest.json"
 REPORT_JSON="$E2E_LOG_DIR/proof_bundle_report.json"
 SUMMARY_MD="$E2E_LOG_DIR/proof_bundle_summary.md"
@@ -93,6 +244,7 @@ lanes = [
     "scrub_repair_status",
     "known_deferrals",
     "release_gates",
+    "adaptive_runtime",
 ]
 statuses = ["pass", "fail", "skip", "error"]
 
@@ -103,12 +255,14 @@ for index, lane in enumerate(lanes):
     gate_input = pathlib.Path("inputs") / f"{lane}.json"
     artifact = pathlib.Path("artifacts") / f"{lane}.json"
     p99_artifact = pathlib.Path("artifacts") / f"{lane}_p99_attribution.json"
+    runner_artifact = pathlib.Path("artifacts") / f"{lane}_runner.json"
+    lane_status = "pass" if lane == "adaptive_runtime" else statuses[index % len(statuses)]
     redacted = index % 2 == 0
     artifact_payload = {"lane": lane, "artifact": "primary"}
     if redacted:
         artifact_payload["redacted_value"] = "[REDACTED]"
     for relative, text in [
-        (raw_log, f"lane={lane}\nstatus={statuses[index % len(statuses)]}\n"),
+        (raw_log, f"lane={lane}\nstatus={lane_status}\n"),
         (summary, f"# {lane}\n\nSummary for {lane}.\n"),
         (gate_input, json.dumps({"lane": lane, "gate": "bd-rchk0.5.4.1"}, sort_keys=True) + "\n"),
         (artifact, json.dumps(artifact_payload, sort_keys=True) + "\n"),
@@ -123,14 +277,18 @@ for index, lane in enumerate(lanes):
             "path": artifact.as_posix(),
             "sha256": digest,
             "redacted": redacted,
-            "role": "swarm_validator_report"
-            if lane in {"swarm_workload_harness", "swarm_tail_latency"}
-            else "primary_evidence",
+            "role": (
+                "adaptive_runtime_validator_report"
+                if lane == "adaptive_runtime"
+                else "swarm_validator_report"
+                if lane in {"swarm_workload_harness", "swarm_tail_latency"}
+                else "primary_evidence"
+            ),
         }
     ]
     metadata = {}
     if lane in {"swarm_workload_harness", "swarm_tail_latency"}:
-        status = statuses[index % len(statuses)]
+        status = lane_status
         metadata = {
             "freshness": "fresh",
             "manifest_hash": "a" * 64,
@@ -168,10 +326,34 @@ for index, lane in enumerate(lanes):
                 "role": "p99_attribution_ledger",
             }
         )
+    if lane == "adaptive_runtime":
+        runner_payload = {"lane": lane, "artifact": "adaptive_runtime_runner"}
+        runner_path = bundle_dir / runner_artifact
+        runner_path.parent.mkdir(parents=True, exist_ok=True)
+        runner_path.write_text(json.dumps(runner_payload, sort_keys=True) + "\n", encoding="utf-8")
+        runner_digest = hashlib.sha256(runner_path.read_bytes()).hexdigest()
+        metadata = {
+            "scenario_id": "adaptive_runtime_accepted_large_host",
+            "run_id": "adaptive-runtime-run-20260508T000000Z",
+            "freshness": "fresh",
+            "release_claim_state": "accepted_large_host",
+            "host_classification": "accepted_large_host",
+            "cleanup_status": "clean",
+            "validator_report": artifact.as_posix(),
+            "runner_report": runner_artifact.as_posix(),
+        }
+        artifacts.append(
+            {
+                "path": runner_artifact.as_posix(),
+                "sha256": runner_digest,
+                "redacted": False,
+                "role": "adaptive_runtime_runner_report",
+            }
+        )
     records.append(
         {
             "lane_id": lane,
-            "status": statuses[index % len(statuses)],
+            "status": lane_status,
             "raw_log_path": raw_log.as_posix(),
             "summary_path": summary.as_posix(),
             "scenario_ids": [f"{lane}_proof_bundle_primary"],
@@ -238,17 +420,21 @@ manifest = {
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 then
-    if cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+    if run_rch_capture "$VALIDATE_RAW" cargo run --quiet -p ffs-harness -- validate-proof-bundle \
         --bundle "$MANIFEST_JSON" \
         --current-git-sha "$GIT_SHA" \
-        --max-age-days 10000 >"$REPORT_JSON" 2>"$VALIDATE_RAW" \
-        && cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+        --max-age-days 10000 \
+        && extract_json_object "$VALIDATE_RAW" "$REPORT_JSON" \
+        && run_rch_capture "$SUMMARY_RAW" cargo run --quiet -p ffs-harness -- validate-proof-bundle \
             --bundle "$MANIFEST_JSON" \
             --current-git-sha "$GIT_SHA" \
             --max-age-days 10000 \
-            --format markdown >"$SUMMARY_MD" 2>"$SUMMARY_RAW"; then
-        scenario_result "proof_bundle_sample_validates" "PASS" "validation JSON and summary captured locally"
+            --format markdown \
+        && extract_markdown_report "$SUMMARY_RAW" "$SUMMARY_MD"; then
+        scenario_result "proof_bundle_sample_validates" "PASS" "validation JSON and summary captured from RCH"
     else
+        [[ -s "$VALIDATE_RAW" ]] && cat "$VALIDATE_RAW"
+        [[ -s "$SUMMARY_RAW" ]] && cat "$SUMMARY_RAW"
         scenario_result "proof_bundle_sample_validates" "FAIL" "validator rejected generated sample bundle"
     fi
 else
@@ -279,6 +465,7 @@ required_lanes = {
     "scrub_repair_status",
     "known_deferrals",
     "release_gates",
+    "adaptive_runtime",
 }
 observed_lanes = {lane["lane_id"] for lane in report["lanes"]}
 if observed_lanes != required_lanes:
@@ -290,17 +477,24 @@ if not report.get("artifact_hash_chain"):
 if report["artifact_hash_chain"]["redaction_policy_version"] != "redaction-v1":
     raise SystemExit("redaction policy version was not preserved in hash-chain report")
 artifact_rows = report.get("artifact_reports", [])
-if len(artifact_rows) != len(required_lanes) + 1:
+if len(artifact_rows) != len(required_lanes) + 2:
     raise SystemExit(f"unexpected artifact report count: {len(artifact_rows)}")
 if not all(row.get("sha256") and row.get("path") for row in artifact_rows):
     raise SystemExit("artifact report rows did not preserve path and hash")
 if not any(row.get("role") == "p99_attribution_ledger" for row in artifact_rows):
     raise SystemExit("p99 attribution ledger artifact was not preserved")
+if not any(row.get("role") == "adaptive_runtime_runner_report" for row in artifact_rows):
+    raise SystemExit("adaptive runtime runner artifact was not preserved")
 swarm_rows = report.get("swarm_evidence", [])
 if len(swarm_rows) != 2:
     raise SystemExit(f"unexpected swarm evidence rows: {len(swarm_rows)}")
 if not all(row.get("host_class") and row.get("manifest_hash") for row in swarm_rows):
     raise SystemExit("swarm evidence did not preserve host class and manifest hash")
+adaptive_rows = report.get("adaptive_runtime_evidence", [])
+if len(adaptive_rows) != 1:
+    raise SystemExit(f"unexpected adaptive runtime evidence rows: {len(adaptive_rows)}")
+if adaptive_rows[0].get("release_claim_state") != "accepted_large_host":
+    raise SystemExit("adaptive runtime release claim state was not preserved")
 for lane in required_lanes:
     if f"logs/{lane}.log" not in summary:
         raise SystemExit(f"missing raw log link for {lane}")
@@ -312,6 +506,8 @@ if "Artifact hash chain" not in summary:
     raise SystemExit("summary did not preserve hash-chain diagnostics")
 if "Swarm Evidence" not in summary or "p99_attribution" not in summary:
     raise SystemExit("summary did not preserve swarm evidence diagnostics")
+if "Adaptive Runtime Evidence" not in summary or "adaptive_runtime_runner" not in summary:
+    raise SystemExit("summary did not preserve adaptive runtime diagnostics")
 PY
 then
     scenario_result "proof_bundle_summary_links" "PASS" "summary contains totals and raw log links"
@@ -332,10 +528,10 @@ data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
 data["lanes"][0]["artifacts"][0]["sha256"] = "0" * 64
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+if run_rch_capture "$BAD_HASH_RAW" cargo run --quiet -p ffs-harness -- validate-proof-bundle \
     --bundle "$BAD_HASH_MANIFEST" \
     --current-git-sha "$GIT_SHA" \
-    --max-age-days 10000 >"$BAD_HASH_RAW" 2>&1; then
+    --max-age-days 10000; then
     scenario_result "proof_bundle_hash_drift_rejected" "FAIL" "validator accepted corrupted artifact"
 elif grep -q "artifact hash mismatch" "$BAD_HASH_RAW"; then
     scenario_result "proof_bundle_hash_drift_rejected" "PASS" "hash drift rejected"
@@ -355,10 +551,10 @@ manifest_path, out_path = sys.argv[1:]
 data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+if run_rch_capture "$BAD_STALE_RAW" cargo run --quiet -p ffs-harness -- validate-proof-bundle \
     --bundle "$BAD_STALE_MANIFEST" \
     --current-git-sha "stale-sha-for-e2e" \
-    --max-age-days 10000 >"$BAD_STALE_RAW" 2>&1; then
+    --max-age-days 10000; then
     scenario_result "proof_bundle_stale_sha_rejected" "FAIL" "validator accepted stale git SHA"
 elif grep -q "stale git_sha" "$BAD_STALE_RAW"; then
     scenario_result "proof_bundle_stale_sha_rejected" "PASS" "stale git SHA rejected"
@@ -379,10 +575,10 @@ data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
 data["lanes"][1]["artifacts"][0]["path"] = "artifacts/does_not_exist.json"
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+if run_rch_capture "$BAD_LINK_RAW" cargo run --quiet -p ffs-harness -- validate-proof-bundle \
     --bundle "$BAD_LINK_MANIFEST" \
     --current-git-sha "$GIT_SHA" \
-    --max-age-days 10000 >"$BAD_LINK_RAW" 2>&1; then
+    --max-age-days 10000; then
     scenario_result "proof_bundle_missing_artifact_rejected" "FAIL" "validator accepted missing artifact link"
 elif grep -q "broken link" "$BAD_LINK_RAW"; then
     scenario_result "proof_bundle_missing_artifact_rejected" "PASS" "missing artifact link rejected"
@@ -403,10 +599,10 @@ data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
 data["integrity"]["artifact_hash_chain_sha256"] = "f" * 64
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+if run_rch_capture "$BAD_CHAIN_RAW" cargo run --quiet -p ffs-harness -- validate-proof-bundle \
     --bundle "$BAD_CHAIN_MANIFEST" \
     --current-git-sha "$GIT_SHA" \
-    --max-age-days 10000 >"$BAD_CHAIN_RAW" 2>&1; then
+    --max-age-days 10000; then
     scenario_result "proof_bundle_hash_chain_rejected" "FAIL" "validator accepted tampered hash chain"
 elif grep -q "artifact hash-chain mismatch" "$BAD_CHAIN_RAW"; then
     scenario_result "proof_bundle_hash_chain_rejected" "PASS" "hash-chain tamper rejected"
@@ -432,10 +628,10 @@ leaky_summary = pathlib.Path("summaries") / "conformance_leaky.md"
 data["lanes"][0]["summary_path"] = leaky_summary.as_posix()
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+if run_rch_capture "$BAD_REDACTION_RAW" cargo run --quiet -p ffs-harness -- validate-proof-bundle \
     --bundle "$BAD_REDACTION_MANIFEST" \
     --current-git-sha "$GIT_SHA" \
-    --max-age-days 10000 >"$BAD_REDACTION_RAW" 2>&1; then
+    --max-age-days 10000; then
     scenario_result "proof_bundle_redaction_leak_rejected" "FAIL" "validator accepted unredacted sensitive marker"
 elif grep -q "redaction leak" "$BAD_REDACTION_RAW"; then
     scenario_result "proof_bundle_redaction_leak_rejected" "PASS" "unredacted sensitive marker rejected"
@@ -462,10 +658,10 @@ data["lanes"][0]["artifacts"][0]["sha256"] = hashlib.sha256(artifact_abs.read_by
 data["lanes"][0]["artifacts"][0]["redacted"] = True
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+if run_rch_capture "$BAD_PLACEHOLDER_RAW" cargo run --quiet -p ffs-harness -- validate-proof-bundle \
     --bundle "$BAD_PLACEHOLDER_MANIFEST" \
     --current-git-sha "$GIT_SHA" \
-    --max-age-days 10000 >"$BAD_PLACEHOLDER_RAW" 2>&1; then
+    --max-age-days 10000; then
     scenario_result "proof_bundle_redaction_placeholder_rejected" "FAIL" "validator accepted redacted artifact without placeholder"
 elif grep -q "lacks placeholder" "$BAD_PLACEHOLDER_RAW"; then
     scenario_result "proof_bundle_redaction_placeholder_rejected" "PASS" "missing redaction placeholder rejected"
@@ -474,7 +670,7 @@ else
 fi
 
 e2e_step "Scenario 10: proof bundle unit tests pass"
-if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib proof_bundle -- --nocapture >"$UNIT_LOG" 2>&1; then
+if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib proof_bundle -- --nocapture; then
     cat "$UNIT_LOG"
     scenario_result "proof_bundle_unit_tests" "PASS" "proof_bundle unit tests passed"
 else
