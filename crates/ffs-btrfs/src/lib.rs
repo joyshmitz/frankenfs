@@ -7306,6 +7306,40 @@ mod tests {
         );
     }
 
+    /// bd-7dhr1 — Canonical byte-layout snapshot for
+    /// BtrfsExtentItem::to_bytes. Pins the encoder's exact 24-byte
+    /// output for a magic-stamped fixture so any field-order or offset
+    /// drift fails with a hex diff. Layout matches struct
+    /// btrfs_extent_item per fs/btrfs/btrfs_tree.h: refs u64@0..8,
+    /// generation u64@8..16, flags u64@16..24. EXTENT_ITEM is written
+    /// on every extent allocation; a regression that drifted
+    /// refs↔generation or generation↔flags would silently corrupt
+    /// every extent record. Pairs with bd-yjzhk (extent_data Regular
+    /// canonical bytes), bd-fw55q (extent_data Inline canonical bytes).
+    #[test]
+    fn extent_item_to_bytes_canonical_byte_layout() {
+        let item = BtrfsExtentItem {
+            refs: 0x1122_3344_5566_7788,
+            generation: 0x99AA_BBCC_DDEE_FF00,
+            flags: 0xCAFE_BABE_DEAD_BEEF,
+        };
+        let bytes = item.to_bytes();
+        assert_eq!(bytes.len(), 24, "btrfs_extent_item is 24 bytes");
+
+        let expected: [u8; 24] = [
+            // refs LE @0..8 = 0x1122_3344_5566_7788
+            0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+            // generation LE @8..16 = 0x99AA_BBCC_DDEE_FF00
+            0x00, 0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA, 0x99,
+            // flags LE @16..24 = 0xCAFE_BABE_DEAD_BEEF
+            0xEF, 0xBE, 0xAD, 0xDE, 0xBE, 0xBA, 0xFE, 0xCA,
+        ];
+        assert_eq!(
+            bytes, expected,
+            "BtrfsExtentItem::to_bytes canonical byte layout drifted"
+        );
+    }
+
     // bd-3niu3 — Property-based round-trip MR for parse_extent_data.
     //
     // BtrfsExtentData::to_bytes (lib.rs:486) and parse_extent_data
