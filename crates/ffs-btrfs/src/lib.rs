@@ -8356,6 +8356,57 @@ mod tests {
             let parsed = parse_inode_item(&bytes).expect("round-trip parse");
             proptest::prop_assert_eq!(parsed, original);
         }
+
+        // bd-v8c1m MR-2 determinism: parse(payload) == parse(payload).
+        // Sister parsers parse_xattr_items (bd-fhznm), parse_extent_data
+        // (bd-3niu3), parse_inode_refs (bd-9f8ef), parse_root_ref
+        // (bd-x2320), parse_root_item (bd-fs41s) all have analogous
+        // determinism proptests. A regression that introduced a hash-
+        // iteration-order or allocator-address dependency in
+        // parse_inode_item's path would silently surface only under
+        // specific scheduling.
+        #[test]
+        fn inode_item_proptest_determinism(
+            generation in proptest::prelude::any::<u64>(),
+            size in proptest::prelude::any::<u64>(),
+            nbytes in proptest::prelude::any::<u64>(),
+            nlink in proptest::prelude::any::<u32>(),
+            uid in proptest::prelude::any::<u32>(),
+            gid in proptest::prelude::any::<u32>(),
+            mode in proptest::prelude::any::<u32>(),
+            rdev in proptest::prelude::any::<u64>(),
+            atime_sec in proptest::prelude::any::<u64>(),
+            atime_nsec in 0_u32..1_000_000_000,
+            ctime_sec in proptest::prelude::any::<u64>(),
+            ctime_nsec in 0_u32..1_000_000_000,
+            mtime_sec in proptest::prelude::any::<u64>(),
+            mtime_nsec in 0_u32..1_000_000_000,
+            otime_sec in proptest::prelude::any::<u64>(),
+            otime_nsec in 0_u32..1_000_000_000,
+        ) {
+            let item = BtrfsInodeItem {
+                generation,
+                size,
+                nbytes,
+                nlink,
+                uid,
+                gid,
+                mode,
+                rdev,
+                atime_sec,
+                atime_nsec,
+                ctime_sec,
+                ctime_nsec,
+                mtime_sec,
+                mtime_nsec,
+                otime_sec,
+                otime_nsec,
+            };
+            let bytes = item.to_bytes();
+            let a = parse_inode_item(&bytes).expect("first parse");
+            let b = parse_inode_item(&bytes).expect("second parse");
+            proptest::prop_assert_eq!(a, b);
+        }
     }
 
     #[test]
