@@ -107,6 +107,71 @@ TOTAL=0
 SCRIPT_RESULTS_JSON="["
 FIRST_RESULT=true
 
+check_direct_cargo_conformance() {
+    local script_path="$1"
+    awk '
+        function trim(value) {
+            sub(/^[[:space:]]+/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            return value
+        }
+
+        function allowed_rch_line(line) {
+            return line ~ /(^|[[:space:]])(rch|"[$][{]?RCH_BIN[^[:space:]]*"?|[$]RCH_BIN)[[:space:]]+exec[[:space:]]+--[[:space:]]+cargo[[:space:]]/ \
+                || line ~ /run_rch_(capture|stdout_capture|cargo)[^#]*[[:space:]]cargo[[:space:]]+(run|test|check|clippy|bench|build)([[:space:]]|$)/ \
+                || line ~ /run_remote_cargo[[:space:]]+(run|test|check|clippy|bench|build)([[:space:]]|$)/
+        }
+
+        function direct_cargo_line(line) {
+            return line ~ /^cargo[[:space:]]+(run|test|check|clippy|bench|build)([[:space:]]|$)/ \
+                || line ~ /^if[[:space:]]+!?[[:space:]]*cargo[[:space:]]+(run|test|check|clippy|bench|build)([[:space:]]|$)/ \
+                || line ~ /^e2e_assert[[:space:]]+cargo[[:space:]]+(run|test|check|clippy|bench|build)([[:space:]]|$)/ \
+                || line ~ /^([[:alnum:]_]+|local[[:space:]]+[[:alnum:]_]+)=\([^)]*cargo[[:space:]]+(run|test|check|clippy|bench|build)([[:space:]]|$)/ \
+                || line ~ /(^|[;&|])[[:space:]]*cargo[[:space:]]+(run|test|check|clippy|bench|build)([[:space:]]|$)/
+        }
+
+        /(^|[[:space:]])(rch|"[$][{]?RCH_BIN[^[:space:]]*"?|[$]RCH_BIN)[[:space:]]+exec[[:space:]]+--/ || /run_rch_/ {
+            rch_command = 1
+        }
+
+        /bash[[:space:]]+-lc[[:space:]]+'\''/ && (rch_command || prior ~ /rch|run_rch_/ || $0 ~ /rch|run_rch_/) {
+            remote_block = 1
+            rch_command = 0
+        }
+
+        {
+            line = trim($0)
+            if (remote_block) {
+                if (line ~ /^'\''([[:space:]]|_|\\|$)/) {
+                    remote_block = 0
+                }
+                prior = $0
+                next
+            }
+            if (line == "" || line ~ /^#/) {
+                prior = $0
+                next
+            }
+            if (line ~ /rch-local-ok/ || allowed_rch_line(line)) {
+                prior = $0
+                next
+            }
+            if (direct_cargo_line(line)) {
+                printf "%s:%d: direct cargo invocation must use rch exec or an approved RCH helper: %s\n", FILENAME, FNR, line
+                failed = 1
+            }
+            if (line !~ /\\$/ && line !~ /(^|[[:space:]])(rch|"[$][{]?RCH_BIN[^[:space:]]*"?|[$]RCH_BIN)[[:space:]]+exec[[:space:]]+--/ && line !~ /run_rch_/) {
+                rch_command = 0
+            }
+            prior = $0
+        }
+
+        END {
+            exit failed ? 1 : 0
+        }
+    ' "$script_path"
+}
+
 # Capture git context
 GIT_COMMIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GIT_BRANCH=$(git -C "$REPO_ROOT" branch --show-current 2>/dev/null || echo "unknown")
@@ -126,21 +191,25 @@ for script in "${SCRIPTS[@]}"; do
     # Optional conformance check
     if [[ "$CHECK_CONFORMANCE" == "true" ]]; then
         CONFORMANCE_OK=true
-        script_content=$(<"$script_path")
-        if ! echo "$script_content" | grep -q 'set -euo pipefail'; then
+        if ! grep -q 'set -euo pipefail' "$script_path"; then
             echo "  CONFORMANCE: missing 'set -euo pipefail'"
             CONFORMANCE_OK=false
         fi
-        if ! echo "$script_content" | grep -q 'e2e_init'; then
+        if ! grep -q 'e2e_init' "$script_path"; then
             echo "  CONFORMANCE: missing e2e_init call"
             CONFORMANCE_OK=false
         fi
-        if ! echo "$script_content" | grep -q 'SCENARIO_RESULT\|scenario_result'; then
+        if ! grep -q 'SCENARIO_RESULT\|scenario_result' "$script_path"; then
             echo "  CONFORMANCE: no SCENARIO_RESULT markers"
             CONFORMANCE_OK=false
         fi
+        if ! cargo_conformance_output="$(check_direct_cargo_conformance "$script_path")"; then
+            echo "$cargo_conformance_output" | sed 's/^/  CONFORMANCE: /'
+            CONFORMANCE_OK=false
+        fi
         if [[ "$CONFORMANCE_OK" == "false" ]]; then
-            echo "  CONFORMANCE WARNING: $script has convention violations"
+            echo "  CONFORMANCE FAIL: $script has convention violations"
+            exit 1
         fi
     fi
 
