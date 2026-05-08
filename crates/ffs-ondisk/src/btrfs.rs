@@ -4431,6 +4431,25 @@ mod tests {
             let b = parse_internal_items(&block);
             prop_assert_eq!(a, b);
         }
+
+        // bd-vnlja — Determinism MR for parse_sys_chunk_array. This
+        // bootstraps the chunk-tree mapping from the superblock; every
+        // subsequent logical→physical address translation depends on
+        // its output. A non-determinism regression here would corrupt
+        // the entire chunk index in ways that surface only under
+        // specific scheduling. Sister parsers (parse_root_item,
+        // parse_root_ref, parse_inode_item, parse_inode_refs,
+        // parse_dev_item, parse_leaf_items, parse_internal_items) all
+        // have determinism MRs; this closes the gap for the highest-
+        // leverage chunk parser.
+        #[test]
+        fn btrfs_proptest_parse_sys_chunk_array_determinism(
+            data in proptest::collection::vec(any::<u8>(), 0..=BTRFS_SYS_CHUNK_ARRAY_MAX),
+        ) {
+            let a = parse_sys_chunk_array(&data);
+            let b = parse_sys_chunk_array(&data);
+            prop_assert_eq!(a, b);
+        }
     }
 
     // ── RAID profile identification ────────────────────────────────
