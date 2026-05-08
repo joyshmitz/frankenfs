@@ -18,6 +18,7 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_permissioned_campaign_broker}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
 REFERENCE_TIMESTAMP="${FFS_PERMISSIONED_BROKER_REFERENCE_TIMESTAMP:-2026-05-07T00:00:00Z}"
 GIT_SHA="$(git rev-parse HEAD)"
@@ -84,123 +85,230 @@ run_capture() {
     return "$status"
 }
 
+run_rch_capture() {
+    local output_path="$1"
+    shift
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    local had_errexit=0
+
+    case $- in
+        *e*) had_errexit=1 ;;
+    esac
+
+    : >"$output_path"
+    set +e
+    RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
+        RCH_VISIBILITY=none \
+        "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
+    pid=$!
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=$*"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=$*"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}|command=$*"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]] && ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
+        e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}|command=$*"
+        printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
+        return 99
+    fi
+    if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$output_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|output=${output_path}|command=$*"
+        return 0
+    fi
+    return "$status"
+}
+
+extract_report_json() {
+    local raw_path="$1"
+    local report_path="$2"
+
+    python3 - "$raw_path" "$report_path" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+raw_path, report_path = sys.argv[1:]
+text = pathlib.Path(raw_path).read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+noise_prefixes = (
+    "Error:",
+    "permissioned campaign broker report written:",
+    "permissioned campaign broker summary written:",
+    "permissioned campaign handoff packet written:",
+    "permissioned campaign handoff summary written:",
+)
+text = "\n".join(
+    line for line in text.splitlines() if not line.startswith(noise_prefixes)
+) + "\n"
+decoder = json.JSONDecoder()
+for index, char in enumerate(text):
+    if char != "{":
+        continue
+    try:
+        obj, _ = decoder.raw_decode(text[index:])
+    except json.JSONDecodeError:
+        continue
+    if isinstance(obj, dict) and (
+        "valid" in obj or "packet_id" in obj or "authorization_notice" in obj
+    ):
+        pathlib.Path(report_path).write_text(
+            json.dumps(obj, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        break
+else:
+    raise SystemExit("permissioned campaign broker JSON output not found")
+PY
+}
+
+extract_report_markdown() {
+    local raw_path="$1"
+    local report_path="$2"
+
+    python3 - "$raw_path" "$report_path" <<'PY'
+import pathlib
+import re
+import sys
+
+raw_path, report_path = sys.argv[1:]
+text = pathlib.Path(raw_path).read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+starts = [
+    index
+    for index in (
+        text.find("# Permissioned Campaign Broker"),
+        text.find("# Permissioned Campaign Handoff"),
+    )
+    if index >= 0
+]
+if not starts:
+    raise SystemExit("permissioned campaign broker Markdown output not found")
+start = min(starts)
+tail = text[start:]
+match = re.search(r"\n\s*\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*\brch::", tail)
+end = start + match.start() if match else len(text)
+pathlib.Path(report_path).write_text(text[start:end].rstrip() + "\n", encoding="utf-8")
+PY
+}
+
 run_harness() {
     local scenario_id="$1"
     local stdout_path="$2"
     local stderr_path="$3"
     shift 3
-    local status manifest_path="" out_path="" summary_out_path=""
-    local remote_work_dir remote_manifest remote_out="" remote_summary_out="" manifest_b64 rch_stdout_path command_text
-    local -a remote_args=() logical_command=("${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- "$@")
+    local status=0 manifest_path="" out_path="" summary_out_path=""
+    local sync_dir sync_manifest json_raw markdown_raw command_text
+    local -a base_args=()
     local arg
     while (($# > 0)); do
         arg="$1"
         case "$arg" in
             --manifest)
                 manifest_path="$2"
-                remote_work_dir="$CARGO_TARGET_DIR/permissioned_campaign_broker/$scenario_id"
-                remote_manifest="$remote_work_dir/manifest.json"
-                remote_args+=("$arg" "$remote_manifest")
                 shift 2
                 ;;
             --out)
                 out_path="$2"
-                remote_out="$CARGO_TARGET_DIR/permissioned_campaign_broker/$scenario_id/out"
-                remote_args+=("$arg" "$remote_out")
                 shift 2
                 ;;
             --summary-out)
                 summary_out_path="$2"
-                remote_summary_out="$CARGO_TARGET_DIR/permissioned_campaign_broker/$scenario_id/summary"
-                remote_args+=("$arg" "$remote_summary_out")
+                shift 2
+                ;;
+            --format)
                 shift 2
                 ;;
             *)
-                remote_args+=("$arg")
+                base_args+=("$arg")
                 shift
                 ;;
         esac
     done
 
-    command_text="$(quote_command "${logical_command[@]}")"
     if [[ -z "$manifest_path" ]]; then
         printf '%s\n' "run_harness requires --manifest" >"$stderr_path"
-        record_command "$scenario_id" 2 "$command_text" "$stdout_path" "$stderr_path"
+        record_command "$scenario_id" 2 "cargo run --quiet -p ffs-harness" "$stdout_path" "$stderr_path"
         return 2
     fi
 
-    manifest_b64="$(base64 -w 0 "$manifest_path")"
-    rch_stdout_path="${stdout_path}.rch.log"
-    if RCH_VISIBILITY=none RCH_LOG_LEVEL=error timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- env \
-        FFS_REMOTE_MANIFEST_B64="$manifest_b64" \
-        FFS_REMOTE_MANIFEST_PATH="$remote_manifest" \
-        FFS_REMOTE_OUT_PATH="$remote_out" \
-        FFS_REMOTE_SUMMARY_OUT_PATH="$remote_summary_out" \
-        bash -lc '
-            set -euo pipefail
-            mkdir -p "$(dirname "$FFS_REMOTE_MANIFEST_PATH")"
-            printf "%s" "$FFS_REMOTE_MANIFEST_B64" | base64 --decode >"$FFS_REMOTE_MANIFEST_PATH"
-            remote_stdout="$(dirname "$FFS_REMOTE_MANIFEST_PATH")/stdout.log"
-            remote_stderr="$(dirname "$FFS_REMOTE_MANIFEST_PATH")/stderr.log"
-            set +e
-            cargo run --quiet -p ffs-harness -- "$@" >"$remote_stdout" 2>"$remote_stderr"
-            status=$?
-            set -e
-            cat "$remote_stderr" >&2
-            printf "%s\n" "__FFS_REMOTE_STDOUT_BEGIN__"
-            cat "$remote_stdout"
-            printf "%s\n" "__FFS_REMOTE_STDOUT_END__"
-            if [[ -n "$FFS_REMOTE_OUT_PATH" && -f "$FFS_REMOTE_OUT_PATH" ]]; then
-                printf "%s\n" "__FFS_REMOTE_FILE_BEGIN__ out"
-                base64 -w 0 "$FFS_REMOTE_OUT_PATH"
-                printf "\n%s\n" "__FFS_REMOTE_FILE_END__ out"
-            fi
-            if [[ -n "$FFS_REMOTE_SUMMARY_OUT_PATH" && -f "$FFS_REMOTE_SUMMARY_OUT_PATH" ]]; then
-                printf "%s\n" "__FFS_REMOTE_FILE_BEGIN__ summary"
-                base64 -w 0 "$FFS_REMOTE_SUMMARY_OUT_PATH"
-                printf "\n%s\n" "__FFS_REMOTE_FILE_END__ summary"
-            fi
-            exit "$status"
-        ' _ "${remote_args[@]}" >"$rch_stdout_path" 2>"$stderr_path"
-    then
-        status=0
-    else
-        status=$?
-    fi
-    record_command "$scenario_id" "$status" "$command_text" "$stdout_path" "$stderr_path"
+    sync_dir="$RCH_INPUT_ROOT/$scenario_id"
+    mkdir -p "$sync_dir"
+    sync_manifest="$sync_dir/manifest.json"
+    cp "$manifest_path" "$sync_manifest"
+    base_args+=("--manifest" "$sync_manifest")
 
-    if ! awk '
-        $0 == "__FFS_REMOTE_STDOUT_BEGIN__" { capture = 1; next }
-        $0 == "__FFS_REMOTE_STDOUT_END__" { found = 1; capture = 0; next }
-        capture { print }
-        END { exit found ? 0 : 1 }
-    ' "$rch_stdout_path" >"$stdout_path"; then
-        cp "$rch_stdout_path" "$stdout_path"
-    fi
+    json_raw="${stdout_path}.json.rch.log"
+    markdown_raw="${stdout_path}.markdown.rch.log"
+    command_text="$(quote_command "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- "${base_args[@]}")"
 
-    if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$rch_stdout_path" "$stderr_path"; then
-        e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|stdout=${stdout_path}|rch_log=${rch_stdout_path}"
-        status=0
-    fi
+    run_rch_capture "$json_raw" cargo run --quiet -p ffs-harness -- "${base_args[@]}" || status=$?
+    cp "$json_raw" "$stderr_path"
 
-    if [[ $status -eq 0 ]]; then
+    if extract_report_json "$json_raw" "$stdout_path"; then
         if [[ -n "$out_path" ]]; then
-            awk '
-                $0 == "__FFS_REMOTE_FILE_BEGIN__ out" { capture = 1; next }
-                $0 == "__FFS_REMOTE_FILE_END__ out" { found = 1; capture = 0; next }
-                capture { print }
-                END { exit found ? 0 : 1 }
-            ' "$rch_stdout_path" | base64 --decode >"$out_path" || return 1
+            cp "$stdout_path" "$out_path"
         fi
-        if [[ -n "$summary_out_path" ]]; then
-            awk '
-                $0 == "__FFS_REMOTE_FILE_BEGIN__ summary" { capture = 1; next }
-                $0 == "__FFS_REMOTE_FILE_END__ summary" { found = 1; capture = 0; next }
-                capture { print }
-                END { exit found ? 0 : 1 }
-            ' "$rch_stdout_path" | base64 --decode >"$summary_out_path" || return 1
+    else
+        cp "$json_raw" "$stdout_path"
+        if [[ "$status" -eq 0 ]]; then
+            status=1
         fi
     fi
+
+    if [[ "$status" -eq 0 && -n "$summary_out_path" ]]; then
+        if run_rch_capture "$markdown_raw" cargo run --quiet -p ffs-harness -- "${base_args[@]}" --format markdown; then
+            if ! extract_report_markdown "$markdown_raw" "$summary_out_path"; then
+                status=1
+            fi
+        else
+            status=$?
+        fi
+        printf '\n--- markdown rch transcript ---\n' >>"$stderr_path"
+        cat "$markdown_raw" >>"$stderr_path"
+    fi
+
+    record_command "$scenario_id" "$status" "$command_text" "$stdout_path" "$stderr_path"
     return "$status"
 }
 
@@ -263,6 +371,7 @@ PY
 e2e_init "ffs_permissioned_campaign_broker"
 e2e_print_env
 
+RCH_INPUT_ROOT="$REPO_ROOT/artifacts/rch_e2e/$(basename "$E2E_LOG_DIR")/permissioned_campaign_broker"
 ARTIFACT_ROOT="$E2E_LOG_DIR/permissioned_campaign_broker"
 E2E_LOG_REL="${E2E_LOG_DIR#"$REPO_ROOT"/}"
 ARTIFACT_ROOT_REL="$E2E_LOG_REL/permissioned_campaign_broker"
@@ -271,7 +380,7 @@ REPORT_DIR="$ARTIFACT_ROOT/reports"
 PACKET_DIR="$ARTIFACT_ROOT/packets"
 BLOCKER_DIR="$ARTIFACT_ROOT/blockers"
 LOG_DIR="$ARTIFACT_ROOT/logs"
-mkdir -p "$MANIFEST_DIR" "$REPORT_DIR" "$PACKET_DIR" "$BLOCKER_DIR" "$LOG_DIR"
+mkdir -p "$RCH_INPUT_ROOT" "$MANIFEST_DIR" "$REPORT_DIR" "$PACKET_DIR" "$BLOCKER_DIR" "$LOG_DIR"
 
 COMMAND_TRANSCRIPT="$ARTIFACT_ROOT/command_transcript.tsv"
 DETAILED_RESULT_JSON="$ARTIFACT_ROOT/permissioned_campaign_broker_result.json"
