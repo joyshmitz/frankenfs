@@ -38,6 +38,7 @@ case ",${RCH_ENV_ALLOWLIST:-}," in
     *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
 esac
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -58,19 +59,69 @@ scenario_result() {
 
 run_rch_capture() {
     local log_path="$1"
-    local status
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    local had_errexit=0
     shift
 
     e2e_log "RCH command: $*"
-    status=0
-    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
-        timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
-    if [[ $status -eq 0 ]]; then
-        return 0
+    case $- in
+        *e*) had_errexit=1 ;;
+    esac
+
+    : >"$log_path"
+    set +e
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
+        "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
+    pid=$!
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
     fi
-    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
-        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
-        return 0
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|log=${log_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]] && ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+        printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+        return 99
     fi
     return "$status"
 }
@@ -242,16 +293,16 @@ for _mod_filter in "error_taxonomy" "health_consistency" "tabletop_drill"; do
 done
 
 MODULES_PASS=0
-if run_rch_capture "$TEST_LOG" bash -lc '
-set -euo pipefail
-cargo test -p ffs-harness --lib -- error_taxonomy
-cargo test -p ffs-harness --lib -- health_consistency
-cargo test -p ffs-harness --lib -- tabletop_drill
-'; then
-    MODULES_PASS=$MODULES_TOTAL
-else
-    log_test_tail "$TEST_LOG"
-fi
+: >"$TEST_LOG"
+for mod_filter in "error_taxonomy" "health_consistency" "tabletop_drill"; do
+    module_log="$E2E_LOG_DIR/operator_tooling_${mod_filter}_unit_tests.log"
+    if run_rch_capture "$module_log" cargo test -p ffs-harness --lib -- "$mod_filter"; then
+        MODULES_PASS=$((MODULES_PASS + 1))
+    else
+        log_test_tail "$module_log"
+    fi
+    cat "$module_log" >>"$TEST_LOG"
+done
 
 TOTAL_TESTS=$(grep -Ec "^test .*::" "$TEST_LOG" 2>/dev/null || true)
 TOTAL_TESTS="${TOTAL_TESTS:-0}"
