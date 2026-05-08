@@ -15,6 +15,8 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_operational_readiness_report}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-420}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -31,6 +33,148 @@ scenario_result() {
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
     TOTAL=$((TOTAL + 1))
+}
+
+log_tail() {
+    local log_path="$1"
+
+    if [[ -f "$log_path" ]]; then
+        tail -40 "$log_path" | while IFS= read -r line; do e2e_log "  $line"; done
+    fi
+}
+
+run_rch_capture() {
+    local output_path="$1"
+    shift
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    local had_errexit=0
+
+    case $- in
+        *e*) had_errexit=1 ;;
+    esac
+
+    : >"$output_path"
+    set +e
+    RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
+        RCH_VISIBILITY=none \
+        "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
+    pid=$!
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=$*"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=$*"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}|command=$*"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]] && ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
+        e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}|command=$*"
+        printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
+        return 99
+    fi
+    if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$output_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|output=${output_path}|command=$*"
+        return 0
+    fi
+    return "$status"
+}
+
+extract_report_json() {
+    local raw_path="$1"
+    local report_path="$2"
+
+    python3 - "$raw_path" "$report_path" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+raw_path, report_path = sys.argv[1:]
+text = pathlib.Path(raw_path).read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+text = "\n".join(
+    line
+    for line in text.splitlines()
+    if not line.startswith("operational readiness report written:")
+) + "\n"
+decoder = json.JSONDecoder()
+for index, char in enumerate(text):
+    if char != "{":
+        continue
+    try:
+        obj, _ = decoder.raw_decode(text[index:])
+    except json.JSONDecodeError:
+        continue
+    if isinstance(obj, dict) and "workstreams" in obj and "totals" in obj:
+        pathlib.Path(report_path).write_text(
+            json.dumps(obj, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        break
+else:
+    raise SystemExit("operational readiness JSON report not found")
+PY
+}
+
+extract_report_markdown() {
+    local raw_path="$1"
+    local report_path="$2"
+
+    python3 - "$raw_path" "$report_path" <<'PY'
+import pathlib
+import re
+import sys
+
+raw_path, report_path = sys.argv[1:]
+text = pathlib.Path(raw_path).read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+start = text.find("# FrankenFS Operational Readiness")
+if start < 0:
+    raise SystemExit("operational readiness markdown report not found")
+end = text.find("\noperational readiness report written:", start)
+if end < 0:
+    end = text.find("\nRemote command finished:", start)
+if end < 0:
+    end = len(text)
+pathlib.Path(report_path).write_text(text[start:end].rstrip() + "\n", encoding="utf-8")
+PY
 }
 
 e2e_init "ffs_operational_readiness_report"
@@ -247,13 +391,10 @@ else
 fi
 
 e2e_step "Scenario 3: JSON report aggregates outcomes and diagnostics"
-RCH_JSON_RC=0
-RCH_LOG_LEVEL=error RCH_VISIBILITY=none timeout 240 "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- operational-readiness-report \
+if run_rch_capture "$REPORT_JSON_CMD_LOG" cargo run --quiet -p ffs-harness -- operational-readiness-report \
     --artifacts "$FIXTURE_DIR" \
     --current-git-sha fixture-head \
-    >"$REPORT_JSON" 2>"$REPORT_JSON_CMD_LOG" || RCH_JSON_RC=$?
-grep -v '^operational readiness report written:' "$REPORT_JSON_CMD_LOG" >"$REPORT_JSON"
-if [[ "$RCH_JSON_RC" -eq 0 || -s "$REPORT_JSON" ]]; then
+    && extract_report_json "$REPORT_JSON_CMD_LOG" "$REPORT_JSON"; then
     if python3 - "$REPORT_JSON" <<'PY'
 import json
 import sys
@@ -336,34 +477,34 @@ PY
     fi
 else
     scenario_result "readiness_report_json" "FAIL" "report command failed"
+    log_tail "$REPORT_JSON_CMD_LOG"
 fi
 
 e2e_step "Scenario 4: Markdown report preserves raw artifact links"
-RCH_MD_RC=0
-RCH_LOG_LEVEL=error RCH_VISIBILITY=none timeout 240 "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- operational-readiness-report \
+if run_rch_capture "$REPORT_MD_CMD_LOG" cargo run --quiet -p ffs-harness -- operational-readiness-report \
     --artifacts "$FIXTURE_DIR" \
     --current-git-sha fixture-head \
     --format markdown \
-    >"$REPORT_MD" 2>"$REPORT_MD_CMD_LOG" || RCH_MD_RC=$?
-grep -v '^operational readiness report written:' "$REPORT_MD_CMD_LOG" >"$REPORT_MD"
-if [[ "$RCH_MD_RC" -eq 0 || -s "$REPORT_MD" ]] \
+    && extract_report_markdown "$REPORT_MD_CMD_LOG" "$REPORT_MD"; then
+    :
+fi
+if [[ -s "$REPORT_MD" ]] \
     && grep -q "artifact \`mounted/ext4_rw.json\`" "$REPORT_MD" \
     && grep -q "event \`event_mounted_ext4_rw\`" "$REPORT_MD" \
     && grep -q "Readiness event envelope: version=1" "$REPORT_MD" \
     && grep -q "Correlation graph: event_nodes=9 parent_edges=9 orphan_parent_edges=0 aggregate_events=0" "$REPORT_MD" \
-    && grep -q "Diagnostics: duplicate_scenarios=1 stale_git_shas=1 missing_logs=0" "$REPORT_MD" \
+    && grep -q "Diagnostics: duplicate_scenarios=1 stale_git_shas=1 stale_artifacts=0 invalid_timestamps=0 missing_logs=0" "$REPORT_MD" \
     && grep -q "Contract: failed=true missing_workstreams=0 violations=0" "$REPORT_MD" \
     && grep -q "output_path=<stdout>" "$REPORT_MD_CMD_LOG"; then
     scenario_result "readiness_report_markdown" "PASS" "Markdown preserves links, diagnostics, and command log summary"
 else
-    cat "$REPORT_MD_CMD_LOG" || true
+    log_tail "$REPORT_MD_CMD_LOG"
     scenario_result "readiness_report_markdown" "FAIL" "Markdown report validation failed"
 fi
 
 e2e_step "Scenario 5: unit tests pass"
 RCH_TEST_RC=0
-RCH_LOG_LEVEL=error RCH_VISIBILITY=none timeout 240 "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib operational_readiness_report -- --nocapture \
-    >"$UNIT_LOG" 2>&1 || RCH_TEST_RC=$?
+run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib operational_readiness_report -- --nocapture || RCH_TEST_RC=$?
 cat "$UNIT_LOG"
 if [[ "$RCH_TEST_RC" -eq 0 || "$(grep -c "test result: ok" "$UNIT_LOG" 2>/dev/null || echo "0")" -ge 1 ]]; then
     TESTS_RUN=$(grep -c "test operational_readiness_report::tests::" "$UNIT_LOG" 2>/dev/null || echo "0")
