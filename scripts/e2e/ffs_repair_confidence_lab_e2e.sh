@@ -31,13 +31,22 @@ scenario_result() {
 
 run_rch_capture() {
     local log_path="$1"
+    local status=0
     shift
     local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-240}"
     if command -v timeout >/dev/null 2>&1; then
-        timeout "${timeout_secs}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1
+        timeout "${timeout_secs}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
     else
-        "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1
+        "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
     fi
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH artifact retrieval failed after worker-side success; accepting remote exit=0 evidence from $log_path"
+        return 0
+    fi
+    return "$status"
 }
 
 e2e_init "ffs_repair_confidence_lab"
@@ -64,10 +73,10 @@ else
 fi
 
 e2e_step "Scenario 2: checked-in repair confidence lab validates"
-if cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab \
+if run_rch_capture "$VALIDATE_RAW" cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab \
     --spec "$SPEC_JSON" \
     --out "$REPORT_JSON" \
-    --summary-out "$SUMMARY_MD" >"$VALIDATE_RAW" 2>&1; then
+    --summary-out "$SUMMARY_MD"; then
     scenario_result "repair_confidence_lab_validates" "PASS" "checked-in lab accepted"
 else
     cat "$VALIDATE_RAW"
@@ -221,9 +230,9 @@ PY
 
 invalid_failures=0
 for bad in "$BAD_MISSING_LOG" "$BAD_UNSAFE_MUTATION" "$BAD_EXPERIMENTAL_NO_FOLLOWUP" "$BAD_MISSING_ARTIFACTS" "$BAD_CALIBRATION_CLASS" "$BAD_CALIBRATION_LEDGER"; do
-    if cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab \
+    if run_rch_capture "$BAD_RAW" cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab \
         --spec "$bad" \
-        --out "$E2E_LOG_DIR/$(basename "$bad" .json).report.json" >"$BAD_RAW" 2>&1; then
+        --out "$E2E_LOG_DIR/$(basename "$bad" .json).report.json"; then
         e2e_log "Unexpectedly accepted invalid repair confidence lab: $bad"
         invalid_failures=$((invalid_failures + 1))
     elif ! grep -q "repair confidence lab validation failed\\|invalid repair confidence lab JSON" "$BAD_RAW"; then

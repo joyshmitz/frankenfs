@@ -14,7 +14,11 @@ export REPO_ROOT
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_performance_delta_closeout}"
-export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -33,7 +37,31 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+run_rch_capture() {
+    local log_path="$1"
+    shift
+    local status=0
+
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    if [[ "$status" -eq 124 ]] && grep -q "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|log=${log_path}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
+        return 0
+    fi
+
+    return "$status"
+}
+
+log_failure_tail() {
+    local log_path="$1"
+    if [[ -s "$log_path" ]]; then
+        e2e_log "Failure tail for ${log_path}:"
+        tail -n 80 "$log_path"
+    fi
+}
+
 e2e_init "ffs_performance_delta_closeout"
+e2e_print_env
 
 CONFIG_JSON="$REPO_ROOT/benchmarks/performance_delta_closeout.json"
 REPORT_JSON="$E2E_LOG_DIR/performance_delta_closeout.json"
@@ -56,13 +84,13 @@ else
 fi
 
 e2e_step "Scenario 2: checked-in closeout config validates artifacts"
-if cargo run --quiet -p ffs-harness -- performance-delta-closeout \
+if run_rch_capture "$VALIDATE_RAW" cargo run --quiet -p ffs-harness -- performance-delta-closeout \
     --config "$CONFIG_JSON" \
-    --issues "$ISSUES_JSONL" >"$VALIDATE_RAW" 2>&1 \
-    && cargo run --quiet -p ffs-harness -- performance-delta-closeout \
+    --issues "$ISSUES_JSONL" \
+    && run_rch_capture "$VALIDATE_MD_RAW" cargo run --quiet -p ffs-harness -- performance-delta-closeout \
         --config "$CONFIG_JSON" \
         --issues "$ISSUES_JSONL" \
-        --format markdown >"$VALIDATE_MD_RAW" 2>&1 \
+        --format markdown \
     && python3 - "$VALIDATE_RAW" "$REPORT_JSON" "$VALIDATE_MD_RAW" "$SUMMARY_MD" <<'PY'
 from __future__ import annotations
 
@@ -98,7 +126,8 @@ PY
 then
     scenario_result "performance_delta_closeout_validates" "PASS" "closeout report accepted"
 else
-    cat "$VALIDATE_RAW"
+    log_failure_tail "$VALIDATE_RAW"
+    log_failure_tail "$VALIDATE_MD_RAW"
     scenario_result "performance_delta_closeout_validates" "FAIL" "closeout report rejected"
 fi
 
@@ -233,22 +262,22 @@ fi
 
 e2e_step "Scenario 4: missing follow-up bead fails closed"
 grep -v '"id":"bd-rchk5.5"' "$REPO_ROOT/.beads/issues.jsonl" >"$BAD_ISSUES_JSONL"
-if cargo run --quiet -p ffs-harness -- performance-delta-closeout \
+if run_rch_capture "$BAD_RAW" cargo run --quiet -p ffs-harness -- performance-delta-closeout \
     --config "$CONFIG_JSON" \
-    --issues "$BAD_ISSUES_JSONL" >"$BAD_RAW" 2>&1; then
+    --issues "$BAD_ISSUES_JSONL"; then
     scenario_result "performance_delta_closeout_missing_followup_rejected" "FAIL" "missing follow-up bead accepted"
 elif grep -q "performance delta closeout validation failed" "$BAD_RAW"; then
     scenario_result "performance_delta_closeout_missing_followup_rejected" "PASS" "missing follow-up bead rejected"
 else
-    cat "$BAD_RAW"
+    log_failure_tail "$BAD_RAW"
     scenario_result "performance_delta_closeout_missing_followup_rejected" "FAIL" "unexpected failure mode"
 fi
 
 e2e_step "Scenario 5: unit tests cover closeout classification and checked-in config"
-if cargo test -p ffs-harness performance_delta_closeout -- --nocapture >"$UNIT_LOG" 2>&1; then
+if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness performance_delta_closeout -- --nocapture; then
     scenario_result "performance_delta_closeout_unit_tests" "PASS" "unit tests passed"
 else
-    cat "$UNIT_LOG"
+    log_failure_tail "$UNIT_LOG"
     scenario_result "performance_delta_closeout_unit_tests" "FAIL" "unit tests failed"
 fi
 
