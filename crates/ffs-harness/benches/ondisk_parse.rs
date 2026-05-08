@@ -748,6 +748,31 @@ fn bench_btrfs_parse_inode_refs(c: &mut Criterion) {
     });
 }
 
+/// bd-biy4b — BtrfsInodeRef::try_to_bytes encoder runs on every
+/// btrfs hardlink creation through ffs_core::OpenFs and on every
+/// snapshot / subvolume metadata write. Bench paired with
+/// bd-coyy0 (parser side) so the perf gate tracks regressions on
+/// both halves of the encode/decode bijection. Correctness pinned
+/// by bd-kelr0 (parser kernel-offset pin), bd-bq6l8 (canonical
+/// encoder bytes), bd-pt9pk + bd-9f8ef (round-trip + determinism
+/// MR proptests). Typical hardlink-target shape: 10-byte header
+/// + 16-byte name = 26 bytes.
+fn bench_btrfs_inode_ref_try_to_bytes(c: &mut Criterion) {
+    let entry = BtrfsInodeRef {
+        index: 0x1234_5678,
+        name: b"hardlink-target1".to_vec(),
+    };
+
+    c.bench_function("btrfs_inode_ref_try_to_bytes", |b| {
+        b.iter(|| {
+            let bytes = black_box(&entry)
+                .try_to_bytes()
+                .expect("typical inode_ref encodes within u16");
+            black_box(bytes);
+        });
+    });
+}
+
 /// bd-coyy0 — parse_dir_items runs on every directory readdir.
 /// Bench a single 30-byte-header + 16-byte-name entry — the typical
 /// directory entry shape.
@@ -985,6 +1010,7 @@ criterion_group!(
     bench_btrfs_parse_root_item,
     bench_btrfs_parse_root_ref,
     bench_btrfs_parse_inode_refs,
+    bench_btrfs_inode_ref_try_to_bytes,
     bench_btrfs_parse_dir_items,
     bench_btrfs_parse_inode_item,
     bench_btrfs_inode_item_to_bytes,
