@@ -11238,14 +11238,24 @@ mod tests {
         // is checked by the parser. depth@6..8 is implicit in the
         // Leaf branch selection.
         assert_eq!(header.entries, 1, "entries must come from offset 2..4");
-        assert_eq!(header.max_entries, 1, "max_entries must come from offset 4..6");
-        assert_eq!(header.depth, 0, "depth must come from offset 6..8 (leaf branch selected)");
+        assert_eq!(
+            header.max_entries, 1,
+            "max_entries must come from offset 4..6"
+        );
+        assert_eq!(
+            header.depth, 0,
+            "depth must come from offset 6..8 (leaf branch selected)"
+        );
 
         let extents = match tree {
             ExtentTree::Leaf(extents) => extents,
-            ExtentTree::Index(_) => panic!("depth=0 must yield Leaf branch"),
+            ExtentTree::Index(_) => unreachable!("depth=0 must yield Leaf branch"),
         };
-        assert_eq!(extents.len(), 1, "single-entry payload must parse to one extent");
+        assert_eq!(
+            extents.len(),
+            1,
+            "single-entry payload must parse to one extent"
+        );
         let extent = extents[0];
 
         assert_eq!(
@@ -11317,13 +11327,20 @@ mod tests {
             parse_extent_tree(&buf).expect("kernel-stamped extent index must parse");
 
         assert_eq!(header.entries, 1, "entries must come from offset 2..4");
-        assert_eq!(header.depth, 1, "depth must come from offset 6..8 (index branch selected)");
+        assert_eq!(
+            header.depth, 1,
+            "depth must come from offset 6..8 (index branch selected)"
+        );
 
         let indexes = match tree {
             ExtentTree::Index(indexes) => indexes,
-            ExtentTree::Leaf(_) => panic!("depth=1 must yield Index branch"),
+            ExtentTree::Leaf(_) => unreachable!("depth=1 must yield Index branch"),
         };
-        assert_eq!(indexes.len(), 1, "single-entry payload must parse to one index");
+        assert_eq!(
+            indexes.len(),
+            1,
+            "single-entry payload must parse to one index"
+        );
         let index = indexes[0];
 
         assert_eq!(
@@ -11341,6 +11358,73 @@ mod tests {
         assert_eq!(
             index.leaf_block, 0x0000_ABCD_CAFE_BABE,
             "explicit literal pinning of the 48-bit leaf-block address"
+        );
+    }
+
+    /// bd-esr1c - Kernel-conformance pin for Ext4ExtentHeader
+    /// 12-byte field offsets per fs/ext4/ext4_extents.h struct
+    /// ext4_extent_header.
+    ///
+    ///   eh_magic      u16 @0..2
+    ///   eh_entries    u16 @2..4
+    ///   eh_max        u16 @4..6
+    ///   eh_depth      u16 @6..8
+    ///   eh_generation u32 @8..12
+    ///
+    /// bd-bspkl + bd-uezhf cover entries/depth implicitly (via
+    /// the loop bound and Leaf/Index branch selection), but
+    /// eh_generation@8..12 is NOT pinned anywhere; a regression
+    /// that drifted generation to read from offset 6..10 instead
+    /// of 8..12 would silently include depth bytes in the parsed
+    /// generation field, and no existing test catches it.
+    ///
+    /// Stamp eh_generation with a unique non-zero magic and assert
+    /// the parsed value matches.
+    #[test]
+    fn ext4_extent_header_kernel_offsets_match_extents_h() {
+        let mut buf = [0_u8; 24];
+
+        // 12-byte header with explicit eh_generation magic.
+        buf[0..2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+        buf[2..4].copy_from_slice(&1_u16.to_le_bytes()); // entries
+        buf[4..6].copy_from_slice(&1_u16.to_le_bytes()); // max_entries
+        buf[6..8].copy_from_slice(&0_u16.to_le_bytes()); // depth=0 selects leaf
+
+        let eh_generation: u32 = 0xCAFE_BABE;
+        buf[8..12].copy_from_slice(&eh_generation.to_le_bytes());
+
+        // 12-byte single leaf entry at offset 12. Use minimal valid
+        // values; the goal here is the header, not the entries.
+        buf[12..16].copy_from_slice(&0_u32.to_le_bytes()); // ee_block
+        buf[16..18].copy_from_slice(&1_u16.to_le_bytes()); // ee_len=1
+        buf[18..20].copy_from_slice(&0_u16.to_le_bytes()); // ee_start_hi
+        buf[20..24].copy_from_slice(&0_u32.to_le_bytes()); // ee_start_lo
+
+        let (header, _tree) = parse_extent_tree(&buf).expect("kernel-stamped header must parse");
+
+        assert_eq!(
+            header.magic, EXT4_EXTENT_MAGIC,
+            "magic must come from offset 0..2 per kernel layout"
+        );
+        assert_eq!(
+            header.entries, 1,
+            "entries must come from offset 2..4 per kernel layout"
+        );
+        assert_eq!(
+            header.max_entries, 1,
+            "max_entries must come from offset 4..6 per kernel layout"
+        );
+        assert_eq!(
+            header.depth, 0,
+            "depth must come from offset 6..8 per kernel layout"
+        );
+        assert_eq!(
+            header.generation, eh_generation,
+            "generation must come from offset 8..12 per kernel layout"
+        );
+        assert_eq!(
+            header.generation, 0xCAFE_BABE,
+            "explicit literal pinning of the eh_generation magic"
         );
     }
 
