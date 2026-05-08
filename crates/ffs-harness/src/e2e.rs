@@ -2543,6 +2543,65 @@ mod tests {
     }
 
     #[test]
+    fn e2e_canonical_rch_capture_helper_is_fail_closed() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let lib_path = repo_root.join("scripts/e2e/lib.sh");
+        let source = std::fs::read_to_string(&lib_path).expect("read scripts/e2e/lib.sh");
+        let helper_start = source
+            .find("e2e_rch_capture()")
+            .expect("canonical e2e_rch_capture helper exists");
+        let helper_source = &source[helper_start..];
+
+        for needle in [
+            "\"$rch_bin\" exec --",
+            "Remote command finished: exit=0",
+            "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT",
+            "RCH_REQUIRED_ARTIFACT_READY",
+            "RCH_TIMEOUT",
+            "[RCH] local",
+            "exec called with non-compilation command",
+            "RCH_LOCAL_FALLBACK_REJECTED",
+            "RCH_REMOTE_EVIDENCE_MISSING",
+        ] {
+            assert!(
+                helper_source.contains(needle),
+                "canonical RCH helper must contain fail-closed contract marker `{needle}`"
+            );
+        }
+
+        let accepted_marker = ["RCH_ARTIFACT_RETRIEVAL_", "ACCEPTED"].concat();
+        assert!(
+            !helper_source.contains(&accepted_marker),
+            "canonical RCH helper must not accept artifact retrieval failure"
+        );
+    }
+
+    #[test]
+    fn e2e_representative_scripts_delegate_to_canonical_rch_capture() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for script in [
+            "scripts/e2e/ffs_invariant_oracle_e2e.sh",
+            "scripts/e2e/ffs_oq_decision_integration_e2e.sh",
+            "scripts/e2e/ffs_verification_runner_e2e.sh",
+        ] {
+            let path = repo_root.join(script);
+            let source = std::fs::read_to_string(&path).expect("read migrated E2E script");
+            assert!(
+                source.contains("e2e_rch_add_env_allowlist CARGO_TARGET_DIR"),
+                "{script} should use the shared RCH env allowlist helper"
+            );
+            assert!(
+                source.contains("e2e_rch_capture \"$@\""),
+                "{script} should delegate run_rch_capture to the shared fail-closed helper"
+            );
+            assert!(
+                !source.contains("exec -- \"$@\""),
+                "{script} should not keep a local rch exec implementation after migration"
+            );
+        }
+    }
+
+    #[test]
     fn e2e_log_entry_skip() {
         let entry = E2eLogEntry::skip("test1", "create_fixture", "mkfs.ext4 not found");
         assert_eq!(entry.status, "skip");

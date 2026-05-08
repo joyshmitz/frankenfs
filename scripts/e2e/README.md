@@ -1337,11 +1337,23 @@ Example:
 cd "$(dirname "$0")/../.."
 source scripts/e2e/lib.sh
 
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_my_test}"
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR
+
 e2e_init "my_test"
 e2e_print_env
 
 e2e_step "My Test"
-e2e_assert cargo test -p my-crate
+e2e_rch_capture "$E2E_LOG_DIR/my_test.raw" cargo test -p my-crate
 
 e2e_pass
 ```
+
+Cargo build, check, test, clippy, bench, and run commands in E2E scripts must
+go through `e2e_rch_capture` or a wrapper that delegates to it. The canonical
+helper rejects local RCH fallback, non-compilation wrapper output, missing
+remote-success evidence, and any `RCH_ARTIFACT_RETRIEVAL_*ACCEPTED` marker.
+When RCH reports `Remote command finished: exit=0` but artifact retrieval keeps
+the local wrapper alive, the helper may terminate the wrapper after the grace
+window and records `RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT` with the
+command-tagged raw log path.

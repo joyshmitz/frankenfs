@@ -398,6 +398,157 @@ e2e_cleanup_tmp_dir() {
 }
 
 #######################################
+# Add variables to the RCH remote environment allowlist.
+# Arguments:
+#   $@ - Environment variable names
+#######################################
+e2e_rch_add_env_allowlist() {
+    local rch_env_var
+
+    for rch_env_var in "$@"; do
+        case ",${RCH_ENV_ALLOWLIST:-}," in
+            *",${rch_env_var},"*) ;;
+            *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}${rch_env_var}" ;;
+        esac
+    done
+}
+
+#######################################
+# Cancel stale RCH queue entries matching a command.
+# Arguments:
+#   $@ - Command previously passed to rch exec
+#######################################
+e2e_rch_cancel_matching_queue_entry() {
+    local command_text="$*"
+    local rch_bin="${RCH_BIN:-rch}"
+    local queue_json
+    local ids
+
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! command -v "$rch_bin" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    queue_json="$("$rch_bin" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "$rch_bin" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+#######################################
+# Run a command through RCH and fail closed on non-authoritative evidence.
+# Arguments:
+#   $1 - Log path
+#   $@ - Command to run through rch exec
+# Environment:
+#   RCH_BIN, RCH_VISIBILITY, RCH_COMMAND_TIMEOUT_SECS,
+#   RCH_ARTIFACT_RETRIEVAL_GRACE_SECS, RCH_REQUIRED_ARTIFACT,
+#   RCH_CLIENT_RUST_LOG
+# Returns:
+#   Remote command exit code, 99 for rejected local/missing evidence, 124 on timeout
+#######################################
+e2e_rch_capture() {
+    if [[ $# -lt 2 ]]; then
+        e2e_log "RCH_CAPTURE_USAGE_ERROR|expected=log_path_and_command"
+        return 2
+    fi
+
+    local log_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local required_artifact="${RCH_REQUIRED_ARTIFACT:-}"
+    local wait_status
+    local had_errexit=0
+    local rch_bin="${RCH_BIN:-rch}"
+    local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+    local grace_secs="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+    shift
+
+    e2e_log "RCH command: $*"
+    case $- in
+        *e*) had_errexit=1 ;;
+    esac
+
+    : >"$log_path"
+    set +e
+    RUST_LOG="${RCH_CLIENT_RUST_LOG:-${RUST_LOG:-info}}" \
+        RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
+        "$rch_bin" exec -- "$@" >"$log_path" 2>&1 &
+    pid=$!
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+
+    deadline=$((SECONDS + timeout_secs))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" && -n "$required_artifact" && -e "$required_artifact" ]]; then
+            e2e_log "RCH_REQUIRED_ARTIFACT_READY|artifact=${required_artifact}|log=${log_path}|command=$*"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            e2e_rch_cancel_matching_queue_entry "$@"
+            break
+        fi
+        if [[ -n "$remote_exit" && -z "$required_artifact" ]]; then
+            sleep "$grace_secs"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}|command=$*"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                e2e_rch_cancel_matching_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${timeout_secs}|log=${log_path}|command=$*"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            e2e_rch_cancel_matching_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+    if [[ $status -eq 0 && -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}|command=$*"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]] && ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}|command=$*"
+        printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    return "$status"
+}
+
+#######################################
 # Run a command and log output
 # Arguments:
 #   $* - Command to run
