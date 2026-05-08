@@ -2249,6 +2249,79 @@ mod tests {
         );
     }
 
+    /// bd-latwe — Kernel-conformance pin for the btrfs_header field
+    /// offsets per fs/btrfs/ctree.h (struct btrfs_header, 101 bytes).
+    /// Each field is stamped with a UNIQUE non-zero magic at its
+    /// canonical kernel offset, then a single
+    /// BtrfsHeader::parse_from_block call must round-trip every field.
+    /// A regression that drifted any single offset by ±4 bytes (one
+    /// field-width) would mis-route bytenr↔flags or generation↔owner
+    /// silently — and BtrfsHeader is parsed at the start of every
+    /// btrfs btree node (every walk_tree call, every leaf_items /
+    /// internal_items parse, every checksum verification).
+    ///
+    /// Sister kernel-offset pins: bd-na4cc (BtrfsDevItem), bd-xbqdw
+    /// (parse_root_item), bd-nzs5f (parse_inode_item), bd-kelr0
+    /// (parse_inode_refs), bd-m9u35 (parse_root_ref), bd-swwp0
+    /// (parse_extent_data).
+    #[test]
+    fn btrfs_header_parse_from_block_kernel_offsets_match_ctree_h() {
+        // 32-byte csum: distinct first/last bytes so a slice-direction
+        // drift surfaces (catches subtle [u8; N] reverse).
+        let mut csum = [0_u8; 32];
+        csum[0] = 0x11;
+        csum[31] = 0x12;
+        // 16-byte fsid and chunk_tree_uuid: distinct first/last bytes.
+        let mut fsid = [0_u8; 16];
+        fsid[0] = 0x21;
+        fsid[15] = 0x22;
+        let mut chunk_tree_uuid = [0_u8; 16];
+        chunk_tree_uuid[0] = 0x41;
+        chunk_tree_uuid[15] = 0x42;
+        // Distinct non-zero u64/u32/u8 magics.
+        let bytenr = 0x3333_3333_3333_3333_u64;
+        let flags = 0x3838_3838_3838_3838_u64;
+        let generation = 0x5050_5050_5050_5050_u64;
+        let owner = 0x5858_5858_5858_5858_u64;
+        let nritems = 0x6060_6060_u32;
+        // level must be ≤ BTRFS_MAX_LEVEL (7) for validate(); use 7
+        // so a drift to a different byte-position would surface as a
+        // different value (the 0x64 byte is unique).
+        let level: u8 = 0x07;
+
+        let mut block = vec![0_u8; BTRFS_HEADER_SIZE];
+        block[0x00..0x20].copy_from_slice(&csum);
+        block[0x20..0x30].copy_from_slice(&fsid);
+        block[0x30..0x38].copy_from_slice(&bytenr.to_le_bytes());
+        block[0x38..0x40].copy_from_slice(&flags.to_le_bytes());
+        block[0x40..0x50].copy_from_slice(&chunk_tree_uuid);
+        block[0x50..0x58].copy_from_slice(&generation.to_le_bytes());
+        block[0x58..0x60].copy_from_slice(&owner.to_le_bytes());
+        block[0x60..0x64].copy_from_slice(&nritems.to_le_bytes());
+        block[0x64] = level;
+
+        let header =
+            BtrfsHeader::parse_from_block(&block).expect("kernel-stamped header must parse");
+
+        assert_eq!(header.csum, csum, "csum @ offset 0x00..0x20");
+        assert_eq!(header.fsid, fsid, "fsid @ offset 0x20..0x30");
+        assert_eq!(header.bytenr, bytenr, "bytenr @ offset 0x30..0x38");
+        assert_eq!(header.flags, flags, "flags @ offset 0x38..0x40");
+        assert_eq!(
+            header.chunk_tree_uuid, chunk_tree_uuid,
+            "chunk_tree_uuid @ offset 0x40..0x50"
+        );
+        assert_eq!(
+            header.generation, generation,
+            "generation @ offset 0x50..0x58"
+        );
+        assert_eq!(header.owner, owner, "owner @ offset 0x58..0x60");
+        assert_eq!(header.nritems, nritems, "nritems @ offset 0x60..0x64");
+        assert_eq!(header.level, level, "level @ offset 0x64");
+        // Total: 0x65 = 101 bytes = BTRFS_HEADER_SIZE.
+        assert_eq!(BTRFS_HEADER_SIZE, 0x65);
+    }
+
     #[test]
     fn header_validate_bytenr_mismatch() {
         let block = make_block(4096, 0, 0);
