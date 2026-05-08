@@ -29,6 +29,12 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_btrfs_write_churn}"
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -47,7 +53,27 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+run_rch_capture() {
+    local log_path="$1"
+    local status
+    shift
+
+    e2e_log "RCH command: $*"
+    status=0
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
+        return 0
+    fi
+    return "$status"
+}
+
 e2e_init "ffs_btrfs_write_churn"
+e2e_print_env
 
 PIPELINE_SRC="crates/ffs-repair/src/pipeline.rs"
 
@@ -114,8 +140,8 @@ fi
 #######################################
 e2e_step "Scenario 5: Write-churn tests pass"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-repair --lib -- scrub_detects_corruption_after_write_churn no_false_clean recovery_succeeds_with_fresh evidence_ledger_captures_churn write_churn_with_staleness 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/write_churn_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-repair --lib -- scrub_detects_corruption_after_write_churn no_false_clean recovery_succeeds_with_fresh evidence_ledger_captures_churn write_churn_with_staleness; then
     TESTS_RUN=$(grep -c "test pipeline::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 5 ]]; then
         scenario_result "churn_tests_pass" "PASS" "Write-churn tests passed (${TESTS_RUN} tests)"
@@ -124,16 +150,16 @@ if cargo test -p ffs-repair --lib -- scrub_detects_corruption_after_write_churn 
     fi
 else
     scenario_result "churn_tests_pass" "FAIL" "Write-churn tests failed"
+    tail -40 "$TEST_LOG" | while IFS= read -r line; do e2e_log "  $line"; done
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 6: Btrfs validator tests pass
 #######################################
 e2e_step "Scenario 6: Btrfs validator tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-repair --lib -- btrfs 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/btrfs_validator_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-repair --lib -- btrfs; then
     TESTS_RUN=$(grep -c "test scrub::tests::btrfs" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 4 ]]; then
         scenario_result "btrfs_validators" "PASS" "Btrfs validator tests passed (${TESTS_RUN} tests)"
@@ -142,16 +168,16 @@ if cargo test -p ffs-repair --lib -- btrfs 2>"$TEST_LOG" | tee -a "$TEST_LOG"; t
     fi
 else
     scenario_result "btrfs_validators" "FAIL" "Btrfs validator tests failed"
+    tail -40 "$TEST_LOG" | while IFS= read -r line; do e2e_log "  $line"; done
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 7: Full pipeline test suite
 #######################################
 e2e_step "Scenario 7: Full pipeline test suite"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-repair --lib -- pipeline::tests 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/pipeline_suite_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-repair --lib -- pipeline::tests; then
     TESTS_RUN=$(grep -c "test pipeline::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 50 ]]; then
         scenario_result "pipeline_suite" "PASS" "Full pipeline suite passed (${TESTS_RUN} tests)"
@@ -160,21 +186,21 @@ if cargo test -p ffs-repair --lib -- pipeline::tests 2>"$TEST_LOG" | tee -a "$TE
     fi
 else
     scenario_result "pipeline_suite" "FAIL" "Pipeline suite failed"
+    tail -40 "$TEST_LOG" | while IFS= read -r line; do e2e_log "  $line"; done
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 8: Btrfs CLI repair tests pass
 #######################################
 e2e_step "Scenario 8: Btrfs CLI repair tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-cli -- btrfs_repair 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/btrfs_cli_repair_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-cli -- btrfs_repair; then
     scenario_result "btrfs_cli_repair" "PASS" "Btrfs CLI repair tests passed"
 else
     scenario_result "btrfs_cli_repair" "FAIL" "Btrfs CLI repair tests failed"
+    tail -40 "$TEST_LOG" | while IFS= read -r line; do e2e_log "  $line"; done
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 9: RefreshTelemetry supports churn observability
