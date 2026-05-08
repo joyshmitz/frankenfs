@@ -28,6 +28,12 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_fuzzing_gate}"
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 mapfile -t FUZZ_TARGETS < <(
     find fuzz/fuzz_targets -maxdepth 1 -name '*.rs' -printf '%f\n' \
         | sed 's/\.rs$//' \
@@ -51,7 +57,35 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+run_rch_capture() {
+    local log_path="$1"
+    local status
+    shift
+
+    e2e_log "RCH command: $*"
+    status=0
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
+        return 0
+    fi
+    return "$status"
+}
+
+log_test_tail() {
+    local log_path="$1"
+
+    if [[ -f "$log_path" ]]; then
+        tail -40 "$log_path" | while IFS= read -r line; do e2e_log "  $line"; done
+    fi
+}
+
 e2e_init "ffs_fuzzing_gate"
+e2e_print_env
 
 #######################################
 # Scenario 1: All sub-bead E2E scripts exist
@@ -251,25 +285,30 @@ fi
 #######################################
 e2e_step "Scenario 8: All fuzz-related unit tests pass"
 
-TEST_LOG=$(mktemp)
+TEST_LOG="$E2E_LOG_DIR/fuzzing_gate_unit_tests.log"
+: >"$TEST_LOG"
 MODULES_PASS=0
 MODULES_TOTAL=0
 for mod_filter in "crash_promotion" "fuzz_dashboard"; do
     MODULES_TOTAL=$((MODULES_TOTAL + 1))
-    if cargo test -p ffs-harness --lib -- "$mod_filter" 2>>"$TEST_LOG" | tee -a "$TEST_LOG" > /dev/null 2>&1; then
+    MODULE_LOG="$E2E_LOG_DIR/fuzzing_gate_${mod_filter}_tests.log"
+    if run_rch_capture "$MODULE_LOG" cargo test -p ffs-harness --lib -- "$mod_filter"; then
         MODULES_PASS=$((MODULES_PASS + 1))
+    else
+        log_test_tail "$MODULE_LOG"
     fi
+    cat "$MODULE_LOG" >>"$TEST_LOG"
 done
 
-TOTAL_TESTS=$(grep -c "^test " "$TEST_LOG" 2>/dev/null || true)
+TOTAL_TESTS=$(grep -Ec "^test .*::" "$TEST_LOG" 2>/dev/null || true)
 TOTAL_TESTS="${TOTAL_TESTS:-0}"
 
 if [[ $MODULES_PASS -eq $MODULES_TOTAL && $TOTAL_TESTS -ge 20 ]]; then
     scenario_result "gate_unit_tests" "PASS" "All ${MODULES_TOTAL} modules pass (${TOTAL_TESTS} tests)"
 else
     scenario_result "gate_unit_tests" "FAIL" "${MODULES_PASS}/${MODULES_TOTAL} modules pass, ${TOTAL_TESTS} tests"
+    log_test_tail "$TEST_LOG"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 9: Pipeline traceability and structured logging
