@@ -15,6 +15,8 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_release_gate}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -31,6 +33,180 @@ scenario_result() {
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
     TOTAL=$((TOTAL + 1))
+}
+
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("${RCH_BIN:-rch}" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "${RCH_BIN:-rch}" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local log_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+    local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-600}"
+    : >"$log_path"
+    set +e
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
+    pid=$!
+    set -e
+    deadline=$((SECONDS + timeout_secs))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${timeout_secs}|log=${log_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH artifact retrieval failed after worker-side success; accepting remote exit=0 evidence from $log_path"
+        return 0
+    fi
+    return "$status"
+}
+
+extract_json_object() {
+    local input_path="$1"
+    local output_path="$2"
+    local object_index="${3:-0}"
+    python3 - "$input_path" "$output_path" "$object_index" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1])
+dest = pathlib.Path(sys.argv[2])
+target_index = int(sys.argv[3])
+text = source.read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+decoder = json.JSONDecoder()
+seen = 0
+pos = 0
+while pos < len(text):
+    idx = text.find("{", pos)
+    if idx < 0:
+        break
+    try:
+        _, end = decoder.raw_decode(text[idx:])
+    except json.JSONDecodeError:
+        pos = idx + 1
+        continue
+    if seen == target_index:
+        dest.write_text(text[idx:idx + end].rstrip() + "\n", encoding="utf-8")
+        raise SystemExit(0)
+    seen += 1
+    pos = idx + end
+raise SystemExit(f"JSON object {target_index} not found in {source}")
+PY
+}
+
+extract_markdown_report() {
+    local input_path="$1"
+    local output_path="$2"
+    python3 - "$input_path" "$output_path" <<'PY'
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1])
+dest = pathlib.Path(sys.argv[2])
+text = source.read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+start = text.find("# FrankenFS Release Gate")
+if start < 0:
+    raise SystemExit(f"release-gate markdown report not found in {source}")
+end = text.find("\n[RCH]", start)
+if end < 0:
+    end = text.find("\nRemote command finished:", start)
+if end < 0:
+    end = len(text)
+dest.write_text(text[start:end].rstrip() + "\n", encoding="utf-8")
+PY
+}
+
+extract_wording_tsv() {
+    local input_path="$1"
+    local output_path="$2"
+    python3 - "$input_path" "$output_path" <<'PY'
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1])
+dest = pathlib.Path(sys.argv[2])
+text = source.read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+lines = [
+    line
+    for line in text.splitlines()
+    if line.count("\t") >= 3
+    and not line.startswith("[RCH]")
+    and not line.startswith("Remote command finished:")
+    and not line.startswith("release gate ")
+]
+if not lines:
+    raise SystemExit(f"release-gate wording TSV not found in {source}")
+dest.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+PY
 }
 
 write_lane_status_variant() {
@@ -62,13 +238,16 @@ PY
 e2e_init "ffs_release_gate"
 
 GIT_SHA="$(git rev-parse HEAD)"
-BUNDLE_DIR="$E2E_LOG_DIR/release_gate_bundle"
+RCH_OUTPUT_DIR="$REPO_ROOT/artifacts/rch/release_gate/$(basename "$E2E_LOG_DIR")"
+BUNDLE_DIR="$RCH_OUTPUT_DIR/release_gate_bundle"
 MANIFEST_JSON="$BUNDLE_DIR/manifest.json"
 POLICY_JSON="$BUNDLE_DIR/release_gate_policy.json"
 REPORT_JSON="$E2E_LOG_DIR/release_gate_report.json"
 SUMMARY_MD="$E2E_LOG_DIR/release_gate_summary.md"
 WORDING_TSV="$E2E_LOG_DIR/release_gate_wording.tsv"
 VALIDATE_RAW="$E2E_LOG_DIR/release_gate_validate.raw"
+WORDING_RAW="$E2E_LOG_DIR/release_gate_wording.raw"
+SUMMARY_RAW="$E2E_LOG_DIR/release_gate_summary.raw"
 MISSING_MANIFEST="$BUNDLE_DIR/release_gate_missing_lane.json"
 MISSING_REPORT="$E2E_LOG_DIR/release_gate_missing_lane_report.json"
 MISSING_RAW="$E2E_LOG_DIR/release_gate_missing_lane.raw"
@@ -130,6 +309,7 @@ lanes = [
     "scrub_repair_status",
     "known_deferrals",
     "release_gates",
+    "adaptive_runtime",
 ]
 
 records = []
@@ -139,6 +319,7 @@ for lane in lanes:
     gate_input = pathlib.Path("inputs") / f"{lane}.json"
     artifact = pathlib.Path("artifacts") / f"{lane}.json"
     p99_artifact = pathlib.Path("artifacts") / f"{lane}_p99_attribution.json"
+    runner_artifact = pathlib.Path("artifacts") / f"{lane}_runner.json"
     payloads = [
         (raw_log, f"lane={lane}\nstatus=pass\n"),
         (summary, f"# {lane}\n\nRelease gate sample summary.\n"),
@@ -155,9 +336,13 @@ for lane in lanes:
             "path": artifact.as_posix(),
             "sha256": digest,
             "redacted": False,
-            "role": "swarm_validator_report"
-            if lane in {"swarm_workload_harness", "swarm_tail_latency"}
-            else "release_gate_evidence",
+            "role": (
+                "adaptive_runtime_validator_report"
+                if lane == "adaptive_runtime"
+                else "swarm_validator_report"
+                if lane in {"swarm_workload_harness", "swarm_tail_latency"}
+                else "release_gate_evidence"
+            ),
         }
     ]
     metadata = {}
@@ -182,6 +367,30 @@ for lane in lanes:
                 "sha256": p99_digest,
                 "redacted": False,
                 "role": "p99_attribution_ledger",
+            }
+        )
+    if lane == "adaptive_runtime":
+        runner_payload = {"lane": lane, "artifact": "adaptive_runtime_runner"}
+        runner_path = bundle_dir / runner_artifact
+        runner_path.parent.mkdir(parents=True, exist_ok=True)
+        runner_path.write_text(json.dumps(runner_payload, sort_keys=True) + "\n", encoding="utf-8")
+        runner_digest = hashlib.sha256(runner_path.read_bytes()).hexdigest()
+        metadata = {
+            "scenario_id": "adaptive_runtime_accepted_large_host",
+            "run_id": "adaptive-runtime-run-20260508T000000Z",
+            "freshness": "fresh",
+            "release_claim_state": "accepted_large_host",
+            "host_classification": "accepted_large_host",
+            "cleanup_status": "clean",
+            "validator_report": artifact.as_posix(),
+            "runner_report": runner_artifact.as_posix(),
+        }
+        artifacts.append(
+            {
+                "path": runner_artifact.as_posix(),
+                "sha256": runner_digest,
+                "redacted": False,
+                "role": "adaptive_runtime_runner_report",
             }
         )
     records.append(
@@ -337,19 +546,28 @@ policy = {
 policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 then
-    if cargo run --quiet -p ffs-harness -- evaluate-release-gates \
+    if run_rch_capture "$VALIDATE_RAW" cargo run --quiet -p ffs-harness -- evaluate-release-gates \
         --bundle "$MANIFEST_JSON" \
         --policy "$POLICY_JSON" \
         --current-git-sha "$GIT_SHA" \
         --max-age-days 10000 \
-        --out "$REPORT_JSON" \
-        --wording-out "$WORDING_TSV" >"$VALIDATE_RAW" 2>&1 \
-        && cargo run --quiet -p ffs-harness -- evaluate-release-gates \
+        && extract_json_object "$VALIDATE_RAW" "$REPORT_JSON" \
+        && run_rch_capture "$WORDING_RAW" cargo run --quiet -p ffs-harness -- evaluate-release-gates \
             --bundle "$MANIFEST_JSON" \
             --policy "$POLICY_JSON" \
             --current-git-sha "$GIT_SHA" \
             --max-age-days 10000 \
-            --format markdown >"$SUMMARY_MD" 2>>"$VALIDATE_RAW"; then
+            --out /dev/null \
+            --wording-out /dev/stdout \
+        && extract_wording_tsv "$WORDING_RAW" "$WORDING_TSV" \
+        && run_rch_capture "$SUMMARY_RAW" cargo run --quiet -p ffs-harness -- evaluate-release-gates \
+            --bundle "$MANIFEST_JSON" \
+            --policy "$POLICY_JSON" \
+            --current-git-sha "$GIT_SHA" \
+            --max-age-days 10000 \
+            --format markdown \
+        && extract_markdown_report "$SUMMARY_RAW" "$SUMMARY_MD"; then
+        printf 'release gate report written: %s\nrelease gate wording written: %s\n' "$REPORT_JSON" "$WORDING_TSV" >>"$VALIDATE_RAW"
         scenario_result "release_gate_sample_passes" "PASS" "release gate accepted fresh sample evidence"
     else
         scenario_result "release_gate_sample_passes" "FAIL" "release gate rejected fresh sample evidence"
@@ -422,14 +640,14 @@ data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
 data["lanes"] = [lane for lane in data["lanes"] if lane["lane_id"] != "release_gates"]
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if cargo run --quiet -p ffs-harness -- evaluate-release-gates \
+if run_rch_capture "$MISSING_RAW" cargo run --quiet -p ffs-harness -- evaluate-release-gates \
     --bundle "$MISSING_MANIFEST" \
     --policy "$POLICY_JSON" \
     --current-git-sha "$GIT_SHA" \
-    --max-age-days 10000 \
-    --out "$MISSING_REPORT" >"$MISSING_RAW" 2>&1; then
+    --max-age-days 10000; then
     scenario_result "release_gate_missing_evidence_rejected" "FAIL" "missing lane was accepted"
-elif grep -q "release gate evaluation failed" "$MISSING_RAW" \
+elif extract_json_object "$MISSING_RAW" "$MISSING_REPORT" \
+    && grep -q "release gate evaluation failed" "$MISSING_RAW" \
     && grep -q "missing_required_lane" "$MISSING_REPORT"; then
     scenario_result "release_gate_missing_evidence_rejected" "PASS" "missing evidence failed closed"
 else
@@ -437,14 +655,14 @@ else
 fi
 
 e2e_step "Scenario 5: stale proof bundle fails closed"
-if cargo run --quiet -p ffs-harness -- evaluate-release-gates \
+if run_rch_capture "$STALE_RAW" cargo run --quiet -p ffs-harness -- evaluate-release-gates \
     --bundle "$MANIFEST_JSON" \
     --policy "$POLICY_JSON" \
     --current-git-sha "stale-sha-for-release-gate" \
-    --max-age-days 10000 \
-    --out "$STALE_REPORT" >"$STALE_RAW" 2>&1; then
+    --max-age-days 10000; then
     scenario_result "release_gate_stale_evidence_rejected" "FAIL" "stale SHA was accepted"
-elif grep -q "release gate evaluation failed" "$STALE_RAW" \
+elif extract_json_object "$STALE_RAW" "$STALE_REPORT" \
+    && grep -q "release gate evaluation failed" "$STALE_RAW" \
     && grep -q "stale_evidence" "$STALE_REPORT"; then
     scenario_result "release_gate_stale_evidence_rejected" "PASS" "stale evidence failed closed"
 else
@@ -467,14 +685,14 @@ for feature in data["features"]:
             threshold["value"] = 99
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if cargo run --quiet -p ffs-harness -- evaluate-release-gates \
+if run_rch_capture "$THRESHOLD_RAW" cargo run --quiet -p ffs-harness -- evaluate-release-gates \
     --bundle "$MANIFEST_JSON" \
     --policy "$THRESHOLD_POLICY" \
     --current-git-sha "$GIT_SHA" \
-    --max-age-days 10000 \
-    --out "$THRESHOLD_REPORT" >"$THRESHOLD_RAW" 2>&1; then
+    --max-age-days 10000; then
     scenario_result "release_gate_threshold_failure_rejected" "FAIL" "threshold failure was accepted"
-elif grep -q "release gate evaluation failed" "$THRESHOLD_RAW" \
+elif extract_json_object "$THRESHOLD_RAW" "$THRESHOLD_REPORT" \
+    && grep -q "release gate evaluation failed" "$THRESHOLD_RAW" \
     && grep -q "threshold_failure" "$THRESHOLD_REPORT"; then
     scenario_result "release_gate_threshold_failure_rejected" "PASS" "threshold failure failed closed"
 else
@@ -483,14 +701,14 @@ fi
 
 e2e_step "Scenario 7: hostile image/security refusal fails closed"
 write_lane_status_variant "$MANIFEST_JSON" "$HOSTILE_MANIFEST" "conformance" "fail"
-if cargo run --quiet -p ffs-harness -- evaluate-release-gates \
+if run_rch_capture "$HOSTILE_RAW" cargo run --quiet -p ffs-harness -- evaluate-release-gates \
     --bundle "$HOSTILE_MANIFEST" \
     --policy "$POLICY_JSON" \
     --current-git-sha "$GIT_SHA" \
-    --max-age-days 10000 \
-    --out "$HOSTILE_REPORT" >"$HOSTILE_RAW" 2>&1; then
+    --max-age-days 10000; then
     scenario_result "release_gate_hostile_image_rejected" "FAIL" "security-refused hostile image was accepted"
-elif python3 - "$HOSTILE_REPORT" <<'PY'
+elif extract_json_object "$HOSTILE_RAW" "$HOSTILE_REPORT" \
+    && python3 - "$HOSTILE_REPORT" <<'PY'
 from __future__ import annotations
 
 import json
@@ -516,14 +734,14 @@ fi
 
 e2e_step "Scenario 8: unsafe repair refusal downgrades mutation to detection-only"
 write_lane_status_variant "$MANIFEST_JSON" "$UNSAFE_REPAIR_MANIFEST" "repair_lab" "fail"
-if cargo run --quiet -p ffs-harness -- evaluate-release-gates \
+if run_rch_capture "$UNSAFE_REPAIR_RAW" cargo run --quiet -p ffs-harness -- evaluate-release-gates \
     --bundle "$UNSAFE_REPAIR_MANIFEST" \
     --policy "$POLICY_JSON" \
     --current-git-sha "$GIT_SHA" \
-    --max-age-days 10000 \
-    --out "$UNSAFE_REPAIR_REPORT" >"$UNSAFE_REPAIR_RAW" 2>&1; then
+    --max-age-days 10000; then
     scenario_result "release_gate_unsafe_repair_rejected" "FAIL" "unsafe repair refusal was accepted"
-elif python3 - "$UNSAFE_REPAIR_REPORT" <<'PY'
+elif extract_json_object "$UNSAFE_REPAIR_RAW" "$UNSAFE_REPAIR_REPORT" \
+    && python3 - "$UNSAFE_REPAIR_REPORT" <<'PY'
 from __future__ import annotations
 
 import json
@@ -549,14 +767,14 @@ fi
 
 e2e_step "Scenario 9: noisy performance evidence downgrades readiness"
 write_lane_status_variant "$MANIFEST_JSON" "$NOISY_PERFORMANCE_MANIFEST" "performance" "fail"
-if cargo run --quiet -p ffs-harness -- evaluate-release-gates \
+if run_rch_capture "$NOISY_PERFORMANCE_RAW" cargo run --quiet -p ffs-harness -- evaluate-release-gates \
     --bundle "$NOISY_PERFORMANCE_MANIFEST" \
     --policy "$POLICY_JSON" \
     --current-git-sha "$GIT_SHA" \
-    --max-age-days 10000 \
-    --out "$NOISY_PERFORMANCE_REPORT" >"$NOISY_PERFORMANCE_RAW" 2>&1; then
+    --max-age-days 10000; then
     scenario_result "release_gate_noisy_performance_downgrades" "FAIL" "noisy performance was accepted"
-elif python3 - "$NOISY_PERFORMANCE_REPORT" <<'PY'
+elif extract_json_object "$NOISY_PERFORMANCE_RAW" "$NOISY_PERFORMANCE_REPORT" \
+    && python3 - "$NOISY_PERFORMANCE_REPORT" <<'PY'
 from __future__ import annotations
 
 import json
@@ -597,12 +815,12 @@ for feature in data["features"]:
             threshold["value"] = 8
 pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if cargo run --quiet -p ffs-harness -- evaluate-release-gates \
+if run_rch_capture "$CAPABILITY_RAW" cargo run --quiet -p ffs-harness -- evaluate-release-gates \
     --bundle "$CAPABILITY_MANIFEST" \
     --policy "$CAPABILITY_POLICY" \
     --current-git-sha "$GIT_SHA" \
     --max-age-days 10000 \
-    --out "$CAPABILITY_REPORT" >"$CAPABILITY_RAW" 2>&1 \
+    && extract_json_object "$CAPABILITY_RAW" "$CAPABILITY_REPORT" \
     && python3 - "$CAPABILITY_REPORT" <<'PY'
 from __future__ import annotations
 
@@ -631,7 +849,7 @@ else
 fi
 
 e2e_step "Scenario 11: release gate unit tests pass"
-if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib release_gate -- --nocapture >"$UNIT_LOG" 2>&1; then
+if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib release_gate -- --nocapture; then
     cat "$UNIT_LOG"
     scenario_result "release_gate_unit_tests" "PASS" "release_gate unit tests passed"
 else
