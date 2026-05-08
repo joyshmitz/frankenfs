@@ -32,6 +32,12 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_btrfs_capability_drift}"
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -50,7 +56,27 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+run_rch_capture() {
+    local log_path="$1"
+    local status
+    shift
+
+    e2e_log "RCH command: $*"
+    status=0
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
+        return 0
+    fi
+    return "$status"
+}
+
 e2e_init "ffs_btrfs_capability_drift"
+e2e_print_env
 
 DRIFT_SRC="crates/ffs-harness/src/btrfs_capability_drift.rs"
 PARITY_MD="FEATURE_PARITY.md"
@@ -93,12 +119,15 @@ fi
 #######################################
 # Scenario 4: Unit contract checker uses fn pattern
 #######################################
-e2e_step "Scenario 4: check_unit_contract verifies fn existence"
+e2e_step "Scenario 4: check_unit_contract verifies tokenized fn existence"
 
-if grep -q 'fn check_unit_contract' "$DRIFT_SRC" && grep -q 'fn {bare_name}(' "$DRIFT_SRC"; then
-    scenario_result "btrfs_drift_unit_checker_pattern" "PASS" "Unit checker uses fn pattern"
+if grep -q 'pub fn check_unit_contract' "$DRIFT_SRC" \
+    && grep -q 'CodeToken::Ident("fn")' "$DRIFT_SRC" \
+    && grep -q 'function_name == bare_name' "$DRIFT_SRC" \
+    && grep -q "CodeToken::Symbol('(' | '<')" "$DRIFT_SRC"; then
+    scenario_result "btrfs_drift_unit_checker_pattern" "PASS" "Unit checker tokenizes fn declarations"
 else
-    scenario_result "btrfs_drift_unit_checker_pattern" "FAIL" "Unit checker pattern not found"
+    scenario_result "btrfs_drift_unit_checker_pattern" "FAIL" "Unit checker tokenized fn pattern not found"
 fi
 
 #######################################
@@ -106,8 +135,10 @@ fi
 #######################################
 e2e_step "Scenario 5: check_e2e_contract verifies scenario names"
 
-if grep -q 'fn check_e2e_contract' "$DRIFT_SRC" && grep -q 'strip_prefix.*btrfs_rw_' "$DRIFT_SRC"; then
-    scenario_result "btrfs_drift_e2e_checker_stripping" "PASS" "E2E checker uses progressive stripping"
+if grep -q 'pub fn check_e2e_contract' "$DRIFT_SRC" \
+    && grep -q 'split_once("_rw_")' "$DRIFT_SRC" \
+    && grep -q 'strip_prefix("crash_matrix_")' "$DRIFT_SRC"; then
+    scenario_result "btrfs_drift_e2e_checker_stripping" "PASS" "E2E checker uses rw-prefix and crash-matrix stripping"
 else
     scenario_result "btrfs_drift_e2e_checker_stripping" "FAIL" "E2E checker stripping logic not found"
 fi
@@ -150,8 +181,8 @@ fi
 #######################################
 e2e_step "Scenario 9: Btrfs capability drift unit tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-harness --lib -- btrfs_capability_drift 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/btrfs_capability_drift_unit_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-harness --lib -- btrfs_capability_drift; then
     TESTS_RUN=$(grep -c "test btrfs_capability_drift::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 5 ]]; then
         scenario_result "btrfs_drift_unit_tests_pass" "PASS" "Tests passed (${TESTS_RUN} tests)"
@@ -160,8 +191,8 @@ if cargo test -p ffs-harness --lib -- btrfs_capability_drift 2>"$TEST_LOG" | tee
     fi
 else
     scenario_result "btrfs_drift_unit_tests_pass" "FAIL" "Drift detection tests failed"
+    tail -40 "$TEST_LOG" | while IFS= read -r line; do e2e_log "  $line"; done
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Summary
