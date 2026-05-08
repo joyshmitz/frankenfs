@@ -27,6 +27,12 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_wal_replay}"
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -43,6 +49,25 @@ scenario_result() {
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
     TOTAL=$((TOTAL + 1))
+}
+
+run_rch_capture() {
+    local log_path="$1"
+    local status
+    shift
+
+    e2e_log "RCH command: $*"
+    status=0
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
+        return 0
+    fi
+    return "$status"
 }
 
 e2e_init "ffs_wal_replay"
@@ -106,8 +131,8 @@ fi
 #######################################
 e2e_step "Scenario 4: Replay engine unit tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- wal_replay::tests 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/wal_replay_unit_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_replay::tests; then
     TESTS_RUN=$(grep -c "test wal_replay::tests" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 15 ]]; then
         scenario_result "replay_engine_unit" "PASS" "Replay engine unit tests passed (${TESTS_RUN} tests)"
@@ -117,73 +142,67 @@ if cargo test -p ffs-mvcc --lib -- wal_replay::tests 2>"$TEST_LOG" | tee -a "$TE
 else
     scenario_result "replay_engine_unit" "FAIL" "Replay engine unit tests failed"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 5: Truncated tail handling tests
 #######################################
 e2e_step "Scenario 5: Truncated tail handling"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- wal_replay::tests::replay_truncated 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/wal_replay_truncated_tail.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_replay::tests::replay_truncated; then
     scenario_result "replay_truncated_tail" "PASS" "Truncated tail tests passed"
 else
     scenario_result "replay_truncated_tail" "FAIL" "Truncated tail tests failed"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 6: FailFast policy tests
 #######################################
 e2e_step "Scenario 6: FailFast policy"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- wal_replay::tests::replay_corrupt_crc_fail_fast 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/wal_replay_fail_fast.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_replay::tests::replay_corrupt_crc_fail_fast; then
     scenario_result "replay_fail_fast" "PASS" "FailFast policy tests passed"
 else
     scenario_result "replay_fail_fast" "FAIL" "FailFast policy tests failed"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 7: Monotonicity enforcement
 #######################################
 e2e_step "Scenario 7: Monotonicity enforcement"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- wal_replay::tests::replay_rejects 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/wal_replay_monotonicity.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_replay::tests::replay_rejects; then
     scenario_result "replay_monotonicity" "PASS" "Monotonicity enforcement tests passed"
 else
     scenario_result "replay_monotonicity" "FAIL" "Monotonicity enforcement tests failed"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 8: Idempotent replay
 #######################################
 e2e_step "Scenario 8: Idempotent replay"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- wal_replay::tests::replay_is_idempotent 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/wal_replay_idempotent.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_replay::tests::replay_is_idempotent; then
     scenario_result "replay_idempotent" "PASS" "Idempotent replay test passed"
 else
     scenario_result "replay_idempotent" "FAIL" "Idempotent replay test failed"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 9: PersistentMvccStore integration (uses replay engine)
 #######################################
 e2e_step "Scenario 9: PersistentMvccStore integration"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- persist::tests 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/wal_replay_persist_integration.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- persist::tests; then
     PERSIST_TESTS=$(grep -c "test persist::tests" "$TEST_LOG" 2>/dev/null || echo "0")
     scenario_result "replay_persist_integration" "PASS" "PersistentMvccStore tests passed (${PERSIST_TESTS} tests)"
 else
     scenario_result "replay_persist_integration" "FAIL" "PersistentMvccStore tests failed"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 10: Structured logging markers present
