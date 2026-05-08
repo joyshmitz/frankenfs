@@ -195,7 +195,7 @@ TEST_LOG="$E2E_LOG_DIR/repair_5pct_cargo_test.log"
 export FFS_REPAIR_E2E_ARTIFACT_DIR="$RCH_ARTIFACT_DIR"
 export FFS_REPAIR_E2E_ARTIFACT_STDOUT=1
 
-if run_rch_capture "$TEST_LOG" env "FFS_REPAIR_E2E_ARTIFACT_DIR=$RCH_ARTIFACT_DIR" "FFS_REPAIR_E2E_ARTIFACT_STDOUT=1" "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" cargo test -p ffs-repair e2e_survive_five_percent_random_block_corruption_with_daemon -- --nocapture; then
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-repair e2e_survive_five_percent_random_block_corruption_with_daemon -- --nocapture; then
     scenario_result "repair_5pct_remote_cargo_test" "PASS" "focused repair corruption test passed via RCH"
 else
     cat "$TEST_LOG"
