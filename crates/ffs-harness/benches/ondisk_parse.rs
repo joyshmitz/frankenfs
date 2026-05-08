@@ -942,6 +942,31 @@ fn bench_btrfs_extent_data_regular_to_bytes(c: &mut Criterion) {
     });
 }
 
+/// bd-zixaq — BtrfsExtentData::to_bytes Inline branch is a
+/// separate encoder code path from Regular with different cost
+/// characteristics (variable inline-data tail vs fixed 53-byte
+/// Regular tail). bd-du0ax benches the Regular branch; this
+/// pairs it with the Inline branch. Typical small-file inlining
+/// shape: 8-byte uncompressed inline data + 21-byte header = 29
+/// bytes total. Correctness pinned by bd-fw55q (canonical bytes)
+/// + bd-3niu3 (proptest round-trip MRs).
+fn bench_btrfs_extent_data_inline_to_bytes(c: &mut Criterion) {
+    use ffs_btrfs::{BTRFS_COMPRESS_NONE, BtrfsExtentData};
+    let extent = BtrfsExtentData::Inline {
+        generation: 0x1234,
+        ram_bytes: 8, // NONE compression: must equal data.len()
+        compression: BTRFS_COMPRESS_NONE,
+        data: vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
+    };
+
+    c.bench_function("btrfs_extent_data_inline_to_bytes", |b| {
+        b.iter(|| {
+            let bytes = black_box(&extent).to_bytes();
+            black_box(bytes);
+        });
+    });
+}
+
 /// bd-m9661 — parse_xattr_items runs on every btrfs getxattr /
 /// listxattr / llistxattr call through ffs_core::OpenFs. Bench
 /// against a 30-byte-header + 17-byte-name + 17-byte-value
@@ -1045,6 +1070,7 @@ criterion_group!(
     bench_btrfs_parse_xattr_items,
     bench_btrfs_parse_extent_data_regular,
     bench_btrfs_extent_data_regular_to_bytes,
+    bench_btrfs_extent_data_inline_to_bytes,
     bench_ext4_chksum_4kb,
 );
 criterion_main!(ondisk);
