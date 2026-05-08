@@ -60,6 +60,48 @@ log_failure_tail() {
     fi
 }
 
+run_closeout_report_capture() {
+    local log_path="$1"
+    shift
+
+    run_rch_capture "$log_path" bash -lc '
+set -euo pipefail
+issues="${CARGO_TARGET_DIR}/performance_delta_closeout/required_followups_issues.jsonl"
+mkdir -p "$(dirname "$issues")"
+cat >"$issues" <<'"'"'JSONL'"'"'
+{"id":"bd-rchk5.5"}
+{"id":"bd-rchk5.6"}
+{"id":"bd-rchk5.7"}
+{"id":"bd-rchk5.8"}
+{"id":"bd-9vzzk"}
+{"id":"bd-t21em"}
+JSONL
+cargo run --quiet -p ffs-harness -- performance-delta-closeout \
+    --config benchmarks/performance_delta_closeout.json \
+    --issues "$issues" "$@"
+' _ "$@"
+}
+
+run_closeout_missing_followup_capture() {
+    local log_path="$1"
+
+    run_rch_capture "$log_path" bash -lc '
+set -euo pipefail
+bad_issues="${CARGO_TARGET_DIR}/performance_delta_closeout/issues_missing_mount_cold_followup.jsonl"
+mkdir -p "$(dirname "$bad_issues")"
+cat >"$bad_issues" <<'"'"'JSONL'"'"'
+{"id":"bd-rchk5.6"}
+{"id":"bd-rchk5.7"}
+{"id":"bd-rchk5.8"}
+{"id":"bd-9vzzk"}
+{"id":"bd-t21em"}
+JSONL
+cargo run --quiet -p ffs-harness -- performance-delta-closeout \
+    --config benchmarks/performance_delta_closeout.json \
+    --issues "$bad_issues"
+'
+}
+
 e2e_init "ffs_performance_delta_closeout"
 e2e_print_env
 
@@ -84,13 +126,8 @@ else
 fi
 
 e2e_step "Scenario 2: checked-in closeout config validates artifacts"
-if run_rch_capture "$VALIDATE_RAW" cargo run --quiet -p ffs-harness -- performance-delta-closeout \
-    --config benchmarks/performance_delta_closeout.json \
-    --issues .beads/issues.jsonl \
-    && run_rch_capture "$VALIDATE_MD_RAW" cargo run --quiet -p ffs-harness -- performance-delta-closeout \
-        --config benchmarks/performance_delta_closeout.json \
-        --issues .beads/issues.jsonl \
-        --format markdown \
+if run_closeout_report_capture "$VALIDATE_RAW" \
+    && run_closeout_report_capture "$VALIDATE_MD_RAW" --format markdown \
     && python3 - "$VALIDATE_RAW" "$REPORT_JSON" "$VALIDATE_MD_RAW" "$SUMMARY_MD" <<'PY'
 from __future__ import annotations
 
@@ -262,15 +299,7 @@ fi
 
 e2e_step "Scenario 4: missing follow-up bead fails closed"
 grep -v '"id":"bd-rchk5.5"' "$REPO_ROOT/.beads/issues.jsonl" >"$BAD_ISSUES_JSONL"
-if run_rch_capture "$BAD_RAW" bash -lc '
-set -euo pipefail
-bad_issues="${CARGO_TARGET_DIR}/performance_delta_closeout/issues_missing_mount_cold_followup.jsonl"
-mkdir -p "$(dirname "$bad_issues")"
-grep -v '"'"'"id":"bd-rchk5.5"'"'"' .beads/issues.jsonl >"$bad_issues"
-cargo run --quiet -p ffs-harness -- performance-delta-closeout \
-    --config benchmarks/performance_delta_closeout.json \
-    --issues "$bad_issues"
-'; then
+if run_closeout_missing_followup_capture "$BAD_RAW"; then
     scenario_result "performance_delta_closeout_missing_followup_rejected" "FAIL" "missing follow-up bead accepted"
 elif grep -q "performance delta closeout validation failed" "$BAD_RAW"; then
     scenario_result "performance_delta_closeout_missing_followup_rejected" "PASS" "missing follow-up bead rejected"

@@ -56,6 +56,69 @@ run_rch_capture() {
     return "$status"
 }
 
+extract_marked_block() {
+    local begin_marker="$1"
+    local end_marker="$2"
+    local input_path="$3"
+    local output_path="$4"
+    awk -v begin="$begin_marker" -v end="$end_marker" '
+        $0 == begin { capture = 1; next }
+        $0 == end { found = 1; capture = 0; next }
+        capture { print }
+        END { exit found ? 0 : 1 }
+    ' "$input_path" >"$output_path"
+}
+
+validate_checked_in_lab_remote() {
+    local log_path="$1"
+    local spec_json="$2"
+    local report_json="$3"
+    local summary_md="$4"
+    if run_rch_capture "$log_path" bash -lc '
+        set -euo pipefail
+        spec_json="$1"
+        report_json="${CARGO_TARGET_DIR}/e2e_outputs/repair_confidence_lab_report.json"
+        summary_md="${CARGO_TARGET_DIR}/e2e_outputs/repair_confidence_lab_summary.md"
+        mkdir -p "$(dirname "$report_json")"
+        cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab \
+            --spec "$spec_json" \
+            --out "$report_json" \
+            --summary-out "$summary_md"
+        printf "%s\n" "__FFS_REPAIR_CONFIDENCE_REPORT_JSON_BEGIN__"
+        cat "$report_json"
+        printf "%s\n" "__FFS_REPAIR_CONFIDENCE_REPORT_JSON_END__"
+        printf "%s\n" "__FFS_REPAIR_CONFIDENCE_SUMMARY_MD_BEGIN__"
+        cat "$summary_md"
+        printf "%s\n" "__FFS_REPAIR_CONFIDENCE_SUMMARY_MD_END__"
+    ' _ "$spec_json" \
+        && extract_marked_block "__FFS_REPAIR_CONFIDENCE_REPORT_JSON_BEGIN__" "__FFS_REPAIR_CONFIDENCE_REPORT_JSON_END__" "$log_path" "$report_json" \
+        && extract_marked_block "__FFS_REPAIR_CONFIDENCE_SUMMARY_MD_BEGIN__" "__FFS_REPAIR_CONFIDENCE_SUMMARY_MD_END__" "$log_path" "$summary_md"; then
+        return 0
+    fi
+    return 1
+}
+
+validate_bad_lab_remote() {
+    local log_path="$1"
+    local bad_json="$2"
+    local bad_name
+    local bad_b64
+    bad_name="$(basename "$bad_json")"
+    bad_b64="$(base64 "$bad_json" | tr -d '\n')"
+    run_rch_capture "$log_path" bash -lc '
+        set -euo pipefail
+        bad_name="$1"
+        bad_b64="$2"
+        remote_spec="${CARGO_TARGET_DIR}/e2e_inputs/${bad_name}"
+        remote_report="${CARGO_TARGET_DIR}/e2e_outputs/${bad_name%.json}.report.json"
+        mkdir -p "$(dirname "$remote_spec")" "$(dirname "$remote_report")"
+        printf "%s" "$bad_b64" | base64 -d >"$remote_spec"
+        cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab \
+            --spec "$remote_spec" \
+            --out "$remote_report"
+    ' _ "$bad_name" "$bad_b64"
+}
+
 e2e_init "ffs_repair_confidence_lab"
 
 SPEC_JSON="$REPO_ROOT/docs/repair-confidence-mutation-safety.json"
@@ -80,10 +143,7 @@ else
 fi
 
 e2e_step "Scenario 2: checked-in repair confidence lab validates"
-if run_rch_capture "$VALIDATE_RAW" cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab \
-    --spec "$SPEC_JSON" \
-    --out "$REPORT_JSON" \
-    --summary-out "$SUMMARY_MD"; then
+if validate_checked_in_lab_remote "$VALIDATE_RAW" "$SPEC_JSON" "$REPORT_JSON" "$SUMMARY_MD"; then
     scenario_result "repair_confidence_lab_validates" "PASS" "checked-in lab accepted"
 else
     cat "$VALIDATE_RAW"
@@ -237,9 +297,7 @@ PY
 
 invalid_failures=0
 for bad in "$BAD_MISSING_LOG" "$BAD_UNSAFE_MUTATION" "$BAD_EXPERIMENTAL_NO_FOLLOWUP" "$BAD_MISSING_ARTIFACTS" "$BAD_CALIBRATION_CLASS" "$BAD_CALIBRATION_LEDGER"; do
-    if run_rch_capture "$BAD_RAW" cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab \
-        --spec "$bad" \
-        --out "$E2E_LOG_DIR/$(basename "$bad" .json).report.json"; then
+    if validate_bad_lab_remote "$BAD_RAW" "$bad"; then
         e2e_log "Unexpectedly accepted invalid repair confidence lab: $bad"
         invalid_failures=$((invalid_failures + 1))
     elif grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$BAD_RAW"; then
