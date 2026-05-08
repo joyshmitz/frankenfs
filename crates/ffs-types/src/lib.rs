@@ -2430,6 +2430,79 @@ mod tests {
         );
     }
 
+    /// bd-2ktji — Kernel-conformance pin for the POSIX S_IF*
+    /// file-mode constant **integer values** per `<sys/stat.h>`.
+    ///
+    /// bd-vnfhb verifies the PREDICATE behavior but not the
+    /// underlying integer values — the predicates are defined as
+    /// `mode & S_IFMT == S_IFREG` (tautological), so a regression
+    /// that changed S_IFREG from 0o100_000 to 0o050_000 would
+    /// still pass bd-vnfhb and would silently misclassify every
+    /// file across the FUSE / ext4 / btrfs layers. Pin each value
+    /// AND the S_IFMT mask invariants directly.
+    #[test]
+    fn posix_s_if_constant_values_match_sys_stat_h() {
+        // Per <sys/stat.h>:
+        //   #define S_IFMT  0170000
+        //   #define S_IFIFO 0010000  (named pipe)
+        //   #define S_IFCHR 0020000  (character device)
+        //   #define S_IFDIR 0040000  (directory)
+        //   #define S_IFBLK 0060000  (block device)
+        //   #define S_IFREG 0100000  (regular file)
+        //   #define S_IFLNK 0120000  (symbolic link)
+        //   #define S_IFSOCK 0140000 (socket)
+        assert_eq!(S_IFMT, 0o170_000, "S_IFMT must equal 0o170_000");
+        assert_eq!(S_IFIFO, 0o010_000, "S_IFIFO must equal 0o010_000");
+        assert_eq!(S_IFCHR, 0o020_000, "S_IFCHR must equal 0o020_000");
+        assert_eq!(S_IFDIR, 0o040_000, "S_IFDIR must equal 0o040_000");
+        assert_eq!(S_IFBLK, 0o060_000, "S_IFBLK must equal 0o060_000");
+        assert_eq!(S_IFREG, 0o100_000, "S_IFREG must equal 0o100_000");
+        assert_eq!(S_IFLNK, 0o120_000, "S_IFLNK must equal 0o120_000");
+        assert_eq!(S_IFSOCK, 0o140_000, "S_IFSOCK must equal 0o140_000");
+
+        // Mask invariants: every S_IF* value is a subset of S_IFMT,
+        // and the lower 12 bits (permissions) are zero in each S_IF*
+        // constant.
+        for (name, value) in [
+            ("S_IFIFO", S_IFIFO),
+            ("S_IFCHR", S_IFCHR),
+            ("S_IFDIR", S_IFDIR),
+            ("S_IFBLK", S_IFBLK),
+            ("S_IFREG", S_IFREG),
+            ("S_IFLNK", S_IFLNK),
+            ("S_IFSOCK", S_IFSOCK),
+        ] {
+            assert_eq!(
+                value & !S_IFMT,
+                0,
+                "{name} ({value:#o}) must have no bits outside S_IFMT mask"
+            );
+            assert_ne!(value, 0, "{name} must be non-zero");
+        }
+
+        // Pairwise distinct under the mask: no two S_IF* values
+        // collide. (They occupy distinct nibbles in the 0o0X0_000
+        // position; this assertion catches any future renumbering.)
+        let values: [(u16, &str); 7] = [
+            (S_IFIFO, "S_IFIFO"),
+            (S_IFCHR, "S_IFCHR"),
+            (S_IFDIR, "S_IFDIR"),
+            (S_IFBLK, "S_IFBLK"),
+            (S_IFREG, "S_IFREG"),
+            (S_IFLNK, "S_IFLNK"),
+            (S_IFSOCK, "S_IFSOCK"),
+        ];
+        for i in 0..values.len() {
+            for j in (i + 1)..values.len() {
+                assert_ne!(
+                    values[i].0, values[j].0,
+                    "{} and {} must not collide",
+                    values[i].1, values[j].1
+                );
+            }
+        }
+    }
+
     /// bd-vnfhb — Kernel-conformance pin for the seven POSIX file-mode
     /// predicates that mirror `<sys/stat.h>`'s S_ISREG / S_ISDIR /
     /// S_ISLNK / S_ISCHR / S_ISBLK / S_ISFIFO / S_ISSOCK macros.
