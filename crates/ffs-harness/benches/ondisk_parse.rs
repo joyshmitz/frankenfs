@@ -863,6 +863,33 @@ fn bench_btrfs_parse_extent_data_regular(c: &mut Criterion) {
     });
 }
 
+/// bd-du0ax — BtrfsExtentData::to_bytes Regular encoder runs on
+/// every btrfs file write commit, fsync, truncate, mark_written,
+/// and snapshot operation through ffs_core::OpenFs. Bench paired
+/// with bd-zuqtr (parser side) so the perf gate tracks regressions
+/// on both halves of the encode/decode bijection. Correctness is
+/// pinned by bd-yjzhk (canonical bytes) + bd-3niu3 (round-trip MR).
+fn bench_btrfs_extent_data_regular_to_bytes(c: &mut Criterion) {
+    use ffs_btrfs::{BTRFS_COMPRESS_NONE, BTRFS_FILE_EXTENT_REG, BtrfsExtentData};
+    let extent = BtrfsExtentData::Regular {
+        generation: 0x1234,
+        ram_bytes: 0x10_0000, // 1 MiB
+        extent_type: BTRFS_FILE_EXTENT_REG,
+        compression: BTRFS_COMPRESS_NONE,
+        disk_bytenr: 0,
+        disk_num_bytes: 0x10_0000,
+        extent_offset: 0,
+        num_bytes: 0x10_0000,
+    };
+
+    c.bench_function("btrfs_extent_data_regular_to_bytes", |b| {
+        b.iter(|| {
+            let bytes = black_box(&extent).to_bytes();
+            black_box(bytes);
+        });
+    });
+}
+
 /// bd-m9661 — parse_xattr_items runs on every btrfs getxattr /
 /// listxattr / llistxattr call through ffs_core::OpenFs. Bench
 /// against a 30-byte-header + 17-byte-name + 17-byte-value
@@ -963,6 +990,7 @@ criterion_group!(
     bench_btrfs_inode_item_to_bytes,
     bench_btrfs_parse_xattr_items,
     bench_btrfs_parse_extent_data_regular,
+    bench_btrfs_extent_data_regular_to_bytes,
     bench_ext4_chksum_4kb,
 );
 criterion_main!(ondisk);
