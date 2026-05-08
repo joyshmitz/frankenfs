@@ -13,10 +13,120 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_evidence_metrics_presets}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+
+for rch_env_var in CARGO_TARGET_DIR RUST_LOG RUST_BACKTRACE; do
+    case ",${RCH_ENV_ALLOWLIST:-}," in
+        *",${rch_env_var},"*) ;;
+        *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}${rch_env_var}" ;;
+    esac
+done
 
 PASS_COUNT=0
 FAIL_COUNT=0
 TOTAL=0
+
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("$RCH_BIN" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "$RCH_BIN" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local output_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+
+    : >"$output_path"
+    set +e
+    RCH_VISIBILITY="$RCH_VISIBILITY" "$RCH_BIN" exec -- "$@" >"$output_path" 2>&1 &
+    pid=$!
+    set -e
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$output_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|output=${output_path}|status=${status}"
+        return 0
+    fi
+    return "$status"
+}
+
+print_rch_output() {
+    local output_path="$1"
+    if [[ -s "$output_path" ]]; then
+        tee -a "$E2E_LOG_FILE" <"$output_path"
+    fi
+}
 
 scenario_result() {
     local scenario_id="$1"
@@ -32,9 +142,11 @@ scenario_result() {
 }
 
 e2e_init "ffs_evidence_metrics_presets"
+RCH_INPUT_DIR="$REPO_ROOT/artifacts/rch_input/$(basename "$E2E_LOG_DIR")/evidence_metrics_presets"
+mkdir -p "$RCH_INPUT_DIR"
 
 e2e_step "Scenario 1: metrics aggregate preset"
-bundle_json="$E2E_LOG_DIR/metrics_bundle.json"
+bundle_json="$RCH_INPUT_DIR/metrics_bundle.json"
 cat >"$bundle_json" <<'JSON'
 {
   "metrics": {
@@ -89,18 +201,19 @@ cat >"$bundle_json" <<'JSON'
 }
 JSON
 metrics_out="$E2E_LOG_DIR/metrics.out"
-if rch exec -- cargo run -q -p ffs-cli -- evidence --preset metrics --json "$bundle_json" \
-    >"$metrics_out" 2>&1 \
+if run_rch_capture "$metrics_out" cargo run -q -p ffs-cli -- evidence --preset metrics --json "$bundle_json" \
     && grep -q '"preset": "metrics"' "$metrics_out" \
     && grep -q '"repair_freshness": "fresh"' "$metrics_out" \
     && grep -q '"mvcc_contention_level": "high"' "$metrics_out"; then
-    scenario_result "evidence_metrics_bundle" "PASS" "Aggregate metrics preset returned derived analyses"
+    print_rch_output "$metrics_out"
+    scenario_result "evidence_metrics_bundle" "PASS" "Aggregate metrics preset returned derived analyses; output=${metrics_out}"
 else
-    scenario_result "evidence_metrics_bundle" "FAIL" "Aggregate metrics preset failed"
+    print_rch_output "$metrics_out"
+    scenario_result "evidence_metrics_bundle" "FAIL" "Aggregate metrics preset failed; output=${metrics_out}"
 fi
 
 e2e_step "Scenario 2: cache preset"
-cache_json="$E2E_LOG_DIR/cache_metrics.json"
+cache_json="$RCH_INPUT_DIR/cache_metrics.json"
 cat >"$cache_json" <<'JSON'
 {
   "cache_hits": 90,
@@ -112,18 +225,19 @@ cat >"$cache_json" <<'JSON'
 }
 JSON
 cache_out="$E2E_LOG_DIR/cache.out"
-if rch exec -- cargo run -q -p ffs-cli -- evidence --preset cache --json "$cache_json" \
-    >"$cache_out" 2>&1 \
+if run_rch_capture "$cache_out" cargo run -q -p ffs-cli -- evidence --preset cache --json "$cache_json" \
     && grep -q '"preset": "cache"' "$cache_out" \
     && grep -q '"dirty_pressure": "high"' "$cache_out" \
     && grep -q '"writeback_pressure": "queued"' "$cache_out"; then
-    scenario_result "evidence_metrics_cache" "PASS" "Cache preset returned hit/miss analysis"
+    print_rch_output "$cache_out"
+    scenario_result "evidence_metrics_cache" "PASS" "Cache preset returned hit/miss analysis; output=${cache_out}"
 else
-    scenario_result "evidence_metrics_cache" "FAIL" "Cache preset failed"
+    print_rch_output "$cache_out"
+    scenario_result "evidence_metrics_cache" "FAIL" "Cache preset failed; output=${cache_out}"
 fi
 
 e2e_step "Scenario 3: mvcc preset"
-mvcc_json="$E2E_LOG_DIR/mvcc_metrics.json"
+mvcc_json="$RCH_INPUT_DIR/mvcc_metrics.json"
 cat >"$mvcc_json" <<'JSON'
 {
   "active_snapshots": 3,
@@ -152,18 +266,19 @@ cat >"$mvcc_json" <<'JSON'
 }
 JSON
 mvcc_out="$E2E_LOG_DIR/mvcc.out"
-if rch exec -- cargo run -q -p ffs-cli -- evidence --preset mvcc --json "$mvcc_json" \
-    >"$mvcc_out" 2>&1 \
+if run_rch_capture "$mvcc_out" cargo run -q -p ffs-cli -- evidence --preset mvcc --json "$mvcc_json" \
     && grep -q '"preset": "mvcc"' "$mvcc_out" \
     && grep -q '"commit_success_rate": 0.9' "$mvcc_out" \
     && grep -q '"contention_level": "elevated"' "$mvcc_out"; then
-    scenario_result "evidence_metrics_mvcc" "PASS" "MVCC preset returned contention analysis"
+    print_rch_output "$mvcc_out"
+    scenario_result "evidence_metrics_mvcc" "PASS" "MVCC preset returned contention analysis; output=${mvcc_out}"
 else
-    scenario_result "evidence_metrics_mvcc" "FAIL" "MVCC preset failed"
+    print_rch_output "$mvcc_out"
+    scenario_result "evidence_metrics_mvcc" "FAIL" "MVCC preset failed; output=${mvcc_out}"
 fi
 
 e2e_step "Scenario 4: repair-live preset"
-repair_json="$E2E_LOG_DIR/repair_live_metrics.json"
+repair_json="$RCH_INPUT_DIR/repair_live_metrics.json"
 cat >"$repair_json" <<'JSON'
 {
   "groups_scrubbed": 20,
@@ -175,14 +290,15 @@ cat >"$repair_json" <<'JSON'
 }
 JSON
 repair_out="$E2E_LOG_DIR/repair_live.out"
-if rch exec -- cargo run -q -p ffs-cli -- evidence --preset repair-live --json "$repair_json" \
-    >"$repair_out" 2>&1 \
+if run_rch_capture "$repair_out" cargo run -q -p ffs-cli -- evidence --preset repair-live --json "$repair_json" \
     && grep -q '"preset": "repair-live"' "$repair_out" \
     && grep -q '"decode_success_rate": 0.75' "$repair_out" \
     && grep -q '"freshness": "aging"' "$repair_out"; then
-    scenario_result "evidence_metrics_repair_live" "PASS" "Repair-live preset returned freshness assessment"
+    print_rch_output "$repair_out"
+    scenario_result "evidence_metrics_repair_live" "PASS" "Repair-live preset returned freshness assessment; output=${repair_out}"
 else
-    scenario_result "evidence_metrics_repair_live" "FAIL" "Repair-live preset failed"
+    print_rch_output "$repair_out"
+    scenario_result "evidence_metrics_repair_live" "FAIL" "Repair-live preset failed; output=${repair_out}"
 fi
 
 e2e_step "Summary"
