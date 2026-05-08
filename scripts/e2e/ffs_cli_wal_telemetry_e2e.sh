@@ -29,6 +29,12 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_cli_wal_telemetry}"
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -45,6 +51,25 @@ scenario_result() {
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
     TOTAL=$((TOTAL + 1))
+}
+
+run_rch_capture() {
+    local log_path="$1"
+    local status
+    shift
+
+    e2e_log "RCH command: $*"
+    status=0
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
+        return 0
+    fi
+    return "$status"
 }
 
 e2e_init "ffs_cli_wal_telemetry"
@@ -132,8 +157,8 @@ fi
 #######################################
 e2e_step "Scenario 6: WAL replay telemetry unit tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-cli -- wal_replay 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/cli_wal_telemetry_unit_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-cli -- wal_replay; then
     TESTS_RUN=$(grep -c "test tests::.*wal_replay\|test tests::mvcc.*wal_replay\|test tests::mvcc_info_output_includes_wal" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 4 ]]; then
         scenario_result "wal_telemetry_tests" "PASS" "Unit tests passed (${TESTS_RUN} tests)"
@@ -143,7 +168,6 @@ if cargo test -p ffs-cli -- wal_replay 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
 else
     scenario_result "wal_telemetry_tests" "FAIL" "Unit tests failed"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 7: skip_serializing_if on optional fields
@@ -200,13 +224,12 @@ fi
 #######################################
 e2e_step "Scenario 9: ffs-core WAL recovery tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-core -- mvcc_wal_recovery 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/core_wal_recovery_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-core -- mvcc_wal_recovery; then
     scenario_result "core_wal_tests" "PASS" "ffs-core WAL recovery tests passed"
 else
     scenario_result "core_wal_tests" "FAIL" "ffs-core WAL recovery tests failed"
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Summary
