@@ -7183,6 +7183,78 @@ mod tests {
         );
     }
 
+    /// bd-swwp0 — Kernel-conformance pin for the btrfs_file_extent_item
+    /// field offsets per fs/btrfs/btrfs_tree.h (struct
+    /// btrfs_file_extent_item, 53 bytes for non-inline). Each field is
+    /// stamped with a UNIQUE non-zero magic at its canonical kernel
+    /// offset, then a single parse_extent_data call must round-trip
+    /// every field. A regression that drifted any single offset by ±4
+    /// bytes (one field-width) would mis-route disk_bytenr↔disk_num_bytes
+    /// or extent_offset↔num_bytes silently. extent_data_regular_to_bytes_canonical_byte_layout
+    /// (bd-yjzhk) pins encoder output for a single fixture; this is the
+    /// parser-side companion pinning input layout directly to the
+    /// kernel header for a fixture with all fields distinct.
+    ///
+    /// Pairs with bd-yjzhk (Regular canonical bytes), bd-fw55q (Inline
+    /// canonical bytes), bd-3niu3 (proptest round-trip MR).
+    #[test]
+    fn parse_extent_data_kernel_offsets_match_btrfs_tree_h() {
+        // Distinct non-zero magics so an offset drift produces a
+        // cross-field collision. Constraint: the source-slice
+        // validator requires extent_offset + num_bytes ≤ disk_num_bytes
+        // when compression = NONE && disk_bytenr != 0. We stamp
+        // disk_num_bytes with a maximal magic (0xFFFF_…) so any
+        // plausible (extent_offset, num_bytes) pair satisfies it.
+        let generation = 0x1111_1111_1111_1111_u64;
+        let ram_bytes = 0x2222_2222_2222_2222_u64;
+        // compression @16 = 0 (NONE; one of {0,1,2,3} required)
+        // encryption  @17 = 0 (parser rejects non-zero)
+        // other_enc   @18..20 = 0 (parser rejects non-zero)
+        // type        @20 = REG (1); 0/2 also valid but we exercise
+        //                  the Regular branch which has the most fields.
+        let disk_bytenr = 0x4444_4444_4444_4444_u64;
+        let disk_num_bytes = 0xFFFF_FFFF_FFFF_FFFE_u64;
+        let extent_offset = 0x0000_0000_0001_0000_u64;
+        let num_bytes = 0x0000_0000_0002_0000_u64;
+
+        let mut data = vec![0_u8; 53];
+        data[0..8].copy_from_slice(&generation.to_le_bytes());
+        data[8..16].copy_from_slice(&ram_bytes.to_le_bytes());
+        // compression already 0
+        // encryption already 0
+        // other_encoding already 0
+        data[20] = BTRFS_FILE_EXTENT_REG;
+        data[21..29].copy_from_slice(&disk_bytenr.to_le_bytes());
+        data[29..37].copy_from_slice(&disk_num_bytes.to_le_bytes());
+        data[37..45].copy_from_slice(&extent_offset.to_le_bytes());
+        data[45..53].copy_from_slice(&num_bytes.to_le_bytes());
+
+        let parsed = parse_extent_data(&data).expect("kernel-stamped extent_data must parse");
+
+        match parsed {
+            BtrfsExtentData::Regular {
+                generation: g,
+                ram_bytes: rb,
+                extent_type,
+                compression,
+                disk_bytenr: db,
+                disk_num_bytes: dnb,
+                extent_offset: eo,
+                num_bytes: nb,
+            } => {
+                assert_eq!(g, generation, "generation @ offset 0..8");
+                assert_eq!(rb, ram_bytes, "ram_bytes @ offset 8..16");
+                assert_eq!(compression, BTRFS_COMPRESS_NONE, "compression @ offset 16");
+                assert_eq!(extent_type, BTRFS_FILE_EXTENT_REG, "type @ offset 20");
+                assert_eq!(db, disk_bytenr, "disk_bytenr @ offset 21..29");
+                assert_eq!(dnb, disk_num_bytes, "disk_num_bytes @ offset 29..37");
+                assert_eq!(eo, extent_offset, "extent_offset @ offset 37..45");
+                assert_eq!(nb, num_bytes, "num_bytes @ offset 45..53");
+            }
+            other => panic!("expected Regular variant, got {other:?}"),
+        }
+    }
+
     // bd-fw55q — Canonical byte-layout snapshot for
     // BtrfsExtentData::to_bytes Inline variant. The Inline branch
     // is a separate encoder code path from Regular (lib.rs:486-503)
