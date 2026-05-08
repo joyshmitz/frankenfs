@@ -15,6 +15,7 @@ export REPO_ROOT
 export CARGO_TARGET_DIR="${FFS_SWARM_TAIL_CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_swarm_tail_latency}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-300}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -84,56 +85,72 @@ scenario_result() {
 run_rch_capture() {
     local output_path="$1"
     shift
-    local status
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    local had_errexit=0
+
+    case $- in
+        *e*) had_errexit=1 ;;
+    esac
+
+    : >"$output_path"
+    set +e
+    RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
+    pid=$!
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=$*"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=$*"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            status=124
+            break
+        fi
+        sleep 2
+    done
 
     set +e
-    RCH_VISIBILITY=none timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1
-    status=$?
-    set -e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
 
+    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}|command=$*"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
+        return 99
+    fi
     if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}|command=$*"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
+            return 99
+        fi
         return 0
     fi
     if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$output_path"; then
         e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|output=${output_path}|command=$*"
-        return 0
-    fi
-    return "$status"
-}
-
-run_rch_stdout_capture() {
-    local output_path="$1"
-    shift
-    local status
-    local rch_log_path="${output_path}.rch.log"
-
-    set +e
-    RCH_VISIBILITY=none timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- bash -lc '
-        set -euo pipefail
-        stdout_path="${CARGO_TARGET_DIR}/e2e_stdout/stdout.$$"
-        mkdir -p "$(dirname "$stdout_path")"
-        set +e
-        "$@" >"$stdout_path"
-        status=$?
-        set -e
-        printf "%s\n" "__FFS_REMOTE_STDOUT_BEGIN__"
-        cat "$stdout_path"
-        printf "%s\n" "__FFS_REMOTE_STDOUT_END__"
-        exit "$status"
-    ' _ "$@" >"$rch_log_path" 2>&1
-    status=$?
-    set -e
-
-    if [[ $status -eq 0 ]] || { [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$rch_log_path"; }; then
-        awk '
-            $0 == "__FFS_REMOTE_STDOUT_BEGIN__" { capture = 1; next }
-            $0 == "__FFS_REMOTE_STDOUT_END__" { found = 1; capture = 0; next }
-            capture { print }
-            END { exit found ? 0 : 1 }
-        ' "$rch_log_path" >"$output_path"
-        if [[ $status -eq 124 ]]; then
-            e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|output=${output_path}|rch_log=${rch_log_path}|command=$*"
-        fi
         return 0
     fi
     return "$status"
@@ -148,28 +165,61 @@ run_rch_mutated_validator_capture() {
     local path_flag="$6"
 
     jq "$jq_filter" "$source_json" >"$local_mutated_json"
-    if run_rch_capture "$output_path" bash -lc '
-        set -euo pipefail
-        jq_filter="$1"
-        source_json="$2"
-        local_mutated_json="$3"
-        validator="$4"
-        path_flag="$5"
-        remote_mutated_json="${CARGO_TARGET_DIR}/e2e_mutations/$(basename "$local_mutated_json")"
-        mkdir -p "$(dirname "$remote_mutated_json")"
-        jq "$jq_filter" "$source_json" >"$remote_mutated_json"
-        cargo run --quiet -p ffs-harness -- "$validator" "$path_flag" "$remote_mutated_json"
-    ' _ "$jq_filter" "$source_json" "$local_mutated_json" "$validator" "$path_flag"; then
-        if grep -q '^error:' "$output_path"; then
-            set +e
-            return 1
-        fi
-        return 0
-    else
-        local rch_status=$?
-        set +e
-        return "$rch_status"
-    fi
+    run_rch_capture "$output_path" cargo run --quiet -p ffs-harness -- "$validator" "$path_flag" "$local_mutated_json"
+}
+
+extract_json_object() {
+    local input_path="$1"
+    local output_path="$2"
+    python3 - "$input_path" "$output_path" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1])
+dest = pathlib.Path(sys.argv[2])
+text = source.read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+decoder = json.JSONDecoder()
+pos = 0
+while pos < len(text):
+    idx = text.find("{", pos)
+    if idx < 0:
+        break
+    try:
+        _, end = decoder.raw_decode(text[idx:])
+    except json.JSONDecodeError:
+        pos = idx + 1
+        continue
+    dest.write_text(text[idx:idx + end].rstrip() + "\n", encoding="utf-8")
+    raise SystemExit(0)
+raise SystemExit(f"JSON report not found in {source}")
+PY
+}
+
+extract_markdown_report() {
+    local input_path="$1"
+    local output_path="$2"
+    python3 - "$input_path" "$output_path" <<'PY'
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1])
+dest = pathlib.Path(sys.argv[2])
+text = source.read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+start = text.find("# Swarm Tail-Latency Ledger")
+if start < 0:
+    raise SystemExit(f"swarm tail-latency markdown report not found in {source}")
+end = text.find("\n[RCH]", start)
+if end < 0:
+    end = text.find("\nRemote command finished:", start)
+if end < 0:
+    end = len(text)
+dest.write_text(text[start:end].rstrip() + "\n", encoding="utf-8")
+PY
 }
 
 e2e_log "=============================================="
@@ -181,16 +231,19 @@ e2e_log "Cargo target dir: ${CARGO_TARGET_DIR}"
 e2e_log ""
 
 LEDGER_JSON="benchmarks/swarm_tail_latency_ledger.json"
+RCH_INPUT_DIR="${REPO_ROOT}/artifacts/rch_input/$(basename "$E2E_LOG_DIR")/swarm_tail_latency"
+mkdir -p "$RCH_INPUT_DIR"
 REPORT_RAW="${E2E_LOG_DIR}/swarm_tail_latency_report.raw"
 REPORT_JSON="${E2E_LOG_DIR}/swarm_tail_latency_report.json"
 REPORT_MD_RAW="${E2E_LOG_DIR}/swarm_tail_latency_report_md.raw"
-MUTATED_COMPONENT_JSON="${E2E_LOG_DIR}/swarm_tail_bad_component.json"
+REPORT_MD="${E2E_LOG_DIR}/swarm_tail_latency_report.md"
+MUTATED_COMPONENT_JSON="${RCH_INPUT_DIR}/swarm_tail_bad_component.json"
 MUTATED_COMPONENT_RAW="${E2E_LOG_DIR}/swarm_tail_bad_component.raw"
-MUTATED_REFERENCE_JSON="${E2E_LOG_DIR}/swarm_tail_bad_reference.json"
+MUTATED_REFERENCE_JSON="${RCH_INPUT_DIR}/swarm_tail_bad_reference.json"
 MUTATED_REFERENCE_RAW="${E2E_LOG_DIR}/swarm_tail_bad_reference.raw"
-MUTATED_HOST_JSON="${E2E_LOG_DIR}/swarm_tail_bad_host.json"
+MUTATED_HOST_JSON="${RCH_INPUT_DIR}/swarm_tail_bad_host.json"
 MUTATED_HOST_RAW="${E2E_LOG_DIR}/swarm_tail_bad_host.raw"
-MUTATED_BUCKET_JSON="${E2E_LOG_DIR}/swarm_tail_bad_bucket.json"
+MUTATED_BUCKET_JSON="${RCH_INPUT_DIR}/swarm_tail_bad_bucket.json"
 MUTATED_BUCKET_RAW="${E2E_LOG_DIR}/swarm_tail_bad_bucket.raw"
 UNIT_LOG="${E2E_LOG_DIR}/unit_tests.log"
 
@@ -211,8 +264,8 @@ else
 fi
 
 e2e_step "Scenario 3: default ledger validates with all classifications and dominance alerts"
-if run_rch_stdout_capture "$REPORT_RAW" cargo run --quiet -p ffs-harness -- validate-swarm-tail-latency --ledger "$LEDGER_JSON"; then
-    cp "$REPORT_RAW" "$REPORT_JSON"
+if run_rch_capture "$REPORT_RAW" cargo run --quiet -p ffs-harness -- validate-swarm-tail-latency --ledger "$LEDGER_JSON" \
+    && extract_json_object "$REPORT_RAW" "$REPORT_JSON"; then
     if jq -e '.valid == true and .row_count == 5 and .missing_reference_count == 1 and .component_dominance_alert_count >= 3 and (.classification_counts.pass == 1) and (.classification_counts.warn == 1) and (.classification_counts.fail == 1) and (.classification_counts.noisy == 1) and (.classification_counts.missing_reference == 1)' "$REPORT_JSON" >/dev/null; then
         scenario_result "swarm_tail_default_ledger" "PASS" "default ledger preserves classifications, missing-reference downgrade, and dominance alerts"
     else
@@ -223,8 +276,9 @@ else
 fi
 
 e2e_step "Scenario 4: markdown rendering includes tail attribution and watched alerts"
-if run_rch_stdout_capture "$REPORT_MD_RAW" cargo run --quiet -p ffs-harness -- validate-swarm-tail-latency --ledger "$LEDGER_JSON" --format markdown; then
-    if grep -q "Tail Attribution" "$REPORT_MD_RAW" && grep -q "wal_fsync" "$REPORT_MD_RAW" && grep -q "fuse_wrapper" "$REPORT_MD_RAW" && grep -q "missing_reference" "$REPORT_MD_RAW"; then
+if run_rch_capture "$REPORT_MD_RAW" cargo run --quiet -p ffs-harness -- validate-swarm-tail-latency --ledger "$LEDGER_JSON" --format markdown \
+    && extract_markdown_report "$REPORT_MD_RAW" "$REPORT_MD"; then
+    if grep -q "Tail Attribution" "$REPORT_MD" && grep -q "wal_fsync" "$REPORT_MD" && grep -q "fuse_wrapper" "$REPORT_MD" && grep -q "missing_reference" "$REPORT_MD"; then
         scenario_result "swarm_tail_markdown" "PASS" "markdown summary includes tail attribution and watched dominant components"
     else
         scenario_result "swarm_tail_markdown" "FAIL" "markdown summary missing tail attribution, watched alert, or missing-reference row"
