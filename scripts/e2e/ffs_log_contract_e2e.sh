@@ -44,9 +44,109 @@ cd "$REPO_ROOT"
 # Source shared helpers
 source "$(dirname "$0")/lib.sh"
 
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_log_contract}"
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+LOG_DIR="${REPO_ROOT}/artifacts/e2e/$(date +%Y%m%d_%H%M%S)_ffs_log_contract"
+mkdir -p "$LOG_DIR"
+
 SCENARIO_RESULTS=()
 PASS_COUNT=0
 FAIL_COUNT=0
+
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("${RCH_BIN:-rch}" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "${RCH_BIN:-rch}" cancel "$id" >/dev/null 2>&1; then
+            echo "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local log_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+
+    : >"$log_path"
+    set +e
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
+    pid=$!
+    set -e
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                echo "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            echo "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|log=${log_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        echo "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+            echo "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        echo "RCH artifact retrieval failed after worker-side success; accepting remote exit=0 evidence from $log_path"
+        return 0
+    fi
+    return "$status"
+}
 
 log_scenario() {
     local scenario_id="$1"
@@ -70,9 +170,11 @@ log_scenario() {
 # ── Scenario: log_contract_builds_clean ───────────────────────────────
 
 echo "=== Scenario: log_contract_builds_clean ==="
-if rch exec -- cargo test -p ffs-harness --lib log_contract 2>&1; then
-    log_scenario "log_contract_builds_clean" "PASS"
+LOG_CONTRACT_TEST_LOG="$LOG_DIR/log_contract_unit_tests.log"
+if run_rch_capture "$LOG_CONTRACT_TEST_LOG" cargo test -p ffs-harness --lib log_contract; then
+    log_scenario "log_contract_builds_clean" "PASS" "log=${LOG_CONTRACT_TEST_LOG}"
 else
+    tail -n 80 "$LOG_CONTRACT_TEST_LOG" || true
     log_scenario "log_contract_builds_clean" "FAIL" "cargo test log_contract failed"
 fi
 
@@ -177,9 +279,11 @@ fi
 # ── Scenario: log_contract_writeback_cache_disabled ───────────────────
 
 echo "=== Scenario: log_contract_writeback_cache_disabled ==="
-if rch exec -- cargo test -p ffs-fuse build_mount_options_excludes_kernel_writeback_cache_mode -- --nocapture 2>&1; then
-    log_scenario "log_contract_writeback_cache_disabled" "PASS"
+WRITEBACK_CACHE_TEST_LOG="$LOG_DIR/writeback_cache_mount_options.log"
+if run_rch_capture "$WRITEBACK_CACHE_TEST_LOG" cargo test -p ffs-fuse build_mount_options_excludes_kernel_writeback_cache_mode -- --nocapture; then
+    log_scenario "log_contract_writeback_cache_disabled" "PASS" "log=${WRITEBACK_CACHE_TEST_LOG}"
 else
+    tail -n 80 "$WRITEBACK_CACHE_TEST_LOG" || true
     log_scenario "log_contract_writeback_cache_disabled" "FAIL" "writeback_cache_guard_test_failed"
 fi
 
@@ -280,9 +384,11 @@ fi
 # ── Scenario: log_contract_artifact_manifest_validation_tests ────────
 
 echo "=== Scenario: log_contract_artifact_manifest_validation_tests ==="
-if rch exec -- cargo test -p ffs-harness artifact_manifest -- --nocapture 2>&1; then
-    log_scenario "log_contract_artifact_manifest_validation_tests" "PASS"
+ARTIFACT_MANIFEST_TEST_LOG="$LOG_DIR/artifact_manifest_unit_tests.log"
+if run_rch_capture "$ARTIFACT_MANIFEST_TEST_LOG" cargo test -p ffs-harness artifact_manifest -- --nocapture; then
+    log_scenario "log_contract_artifact_manifest_validation_tests" "PASS" "log=${ARTIFACT_MANIFEST_TEST_LOG}"
 else
+    tail -n 80 "$ARTIFACT_MANIFEST_TEST_LOG" || true
     log_scenario "log_contract_artifact_manifest_validation_tests" "FAIL" "artifact_manifest_unit_tests_failed"
 fi
 
@@ -581,7 +687,8 @@ for required_text in \
     "bd-rchk4.4" \
     "bd-rchk5" \
     "writeback_cache" \
-    "Read-write mounted automatic repair remains blocked"; do
+    "\`repair.rw.writeback\`" \
+    "repair writeback can safely coexist with client writes"; do
     if grep -Fq "$required_text" README.md; then
         :
     else
@@ -604,6 +711,7 @@ echo "============================================"
 echo "  PASS: $PASS_COUNT"
 echo "  FAIL: $FAIL_COUNT"
 echo "  TOTAL: $((PASS_COUNT + FAIL_COUNT))"
+echo "  LOG_DIR: $LOG_DIR"
 echo "============================================"
 
 for result in "${SCENARIO_RESULTS[@]}"; do
