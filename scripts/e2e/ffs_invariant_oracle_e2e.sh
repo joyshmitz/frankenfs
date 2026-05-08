@@ -19,11 +19,110 @@ export REPO_ROOT
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_invariant_oracle}"
-export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
 
 PASS_COUNT=0
 FAIL_COUNT=0
 TOTAL=0
+
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("$RCH_BIN" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "$RCH_BIN" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local log_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+
+    : >"$log_path"
+    set +e
+    RCH_VISIBILITY="$RCH_VISIBILITY" "$RCH_BIN" exec -- "$@" >"$log_path" 2>&1 &
+    pid=$!
+    set -e
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|log=${log_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}"
+        return 0
+    fi
+    return "$status"
+}
 
 scenario_result() {
     local scenario_id="$1"
@@ -40,18 +139,22 @@ scenario_result() {
 
 e2e_init "ffs_invariant_oracle"
 
-VALID_TRACE="${E2E_LOG_DIR}/valid_trace.json"
-EXPECTED_FAILURE_TRACE="${E2E_LOG_DIR}/expected_failure_trace.json"
-UNEXPECTED_FAILURE_TRACE="${E2E_LOG_DIR}/unexpected_failure_trace.json"
+RCH_INPUT_DIR="$REPO_ROOT/artifacts/rch_input/$(basename "$E2E_LOG_DIR")/invariant_oracle"
+mkdir -p "$RCH_INPUT_DIR"
+
+VALID_TRACE="${RCH_INPUT_DIR}/valid_trace.json"
+EXPECTED_FAILURE_TRACE="${RCH_INPUT_DIR}/expected_failure_trace.json"
+UNEXPECTED_FAILURE_TRACE="${RCH_INPUT_DIR}/unexpected_failure_trace.json"
 VALID_RAW="${E2E_LOG_DIR}/valid_report.raw"
 VALID_REPORT="${E2E_LOG_DIR}/valid_report.json"
+VALID_REPORT_RCH="${RCH_INPUT_DIR}/valid_report.json"
 VALID_CONSUMER_RAW="${E2E_LOG_DIR}/valid_consumer.raw"
-UNKNOWN_MODEL_REPORT="${E2E_LOG_DIR}/unknown_model_report.json"
+UNKNOWN_MODEL_REPORT="${RCH_INPUT_DIR}/unknown_model_report.json"
 UNKNOWN_MODEL_RAW="${E2E_LOG_DIR}/unknown_model.raw"
 EXPECTED_RAW="${E2E_LOG_DIR}/expected_failure_report.raw"
 EXPECTED_REPORT="${E2E_LOG_DIR}/expected_failure_report.json"
 UNEXPECTED_RAW="${E2E_LOG_DIR}/unexpected_failure.raw"
-UNIT_LOG="$(mktemp)"
+UNIT_LOG="${E2E_LOG_DIR}/invariant_oracle_unit_tests.log"
 
 extract_report_json() {
     local raw_path="$1"
@@ -197,8 +300,8 @@ else
 fi
 
 e2e_step "Scenario 2: real write sequence trace validates"
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-invariant-oracle \
-    --trace "$VALID_TRACE" >"$VALID_RAW" 2>&1; then
+if run_rch_capture "$VALID_RAW" cargo run --quiet -p ffs-harness -- validate-invariant-oracle \
+    --trace "$VALID_TRACE"; then
     if extract_report_json "$VALID_RAW" "$VALID_REPORT" "deterministic_replay_id" \
         && python3 - "$VALID_REPORT" <<'PY'
 import json
@@ -243,22 +346,25 @@ else
 fi
 
 e2e_step "Scenario 4: proof-bundle consumer rejects unknown model versions"
-python3 - "$VALID_REPORT" "$UNKNOWN_MODEL_REPORT" <<'PY'
+python3 - "$VALID_REPORT" "$VALID_REPORT_RCH" "$UNKNOWN_MODEL_REPORT" <<'PY'
 import json
 import sys
 
-source, target = sys.argv[1:]
+source, valid_target, unknown_target = sys.argv[1:]
 data = json.loads(open(source, encoding="utf-8").read())
+with open(valid_target, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, indent=2, sort_keys=True)
+    handle.write("\n")
 data["model_version"] = "unknown-model"
-with open(target, "w", encoding="utf-8") as handle:
+with open(unknown_target, "w", encoding="utf-8") as handle:
     json.dump(data, handle, indent=2, sort_keys=True)
     handle.write("\n")
 PY
 
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-invariant-oracle \
-    --report "$VALID_REPORT" >"$VALID_CONSUMER_RAW" 2>&1 \
-    && ! RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-invariant-oracle \
-        --report "$UNKNOWN_MODEL_REPORT" >"$UNKNOWN_MODEL_RAW" 2>&1; then
+if run_rch_capture "$VALID_CONSUMER_RAW" cargo run --quiet -p ffs-harness -- validate-invariant-oracle \
+    --report "$VALID_REPORT_RCH" \
+    && ! run_rch_capture "$UNKNOWN_MODEL_RAW" cargo run --quiet -p ffs-harness -- validate-invariant-oracle \
+        --report "$UNKNOWN_MODEL_REPORT"; then
     if grep -q "report model_version" "$UNKNOWN_MODEL_RAW"; then
         scenario_result "invariant_oracle_consumer_rejects_unknown_model" "PASS" "consumer rejected unknown model version"
     else
@@ -269,8 +375,8 @@ else
 fi
 
 e2e_step "Scenario 5: expected failure emits minimized report"
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-invariant-oracle \
-    --trace "$EXPECTED_FAILURE_TRACE" >"$EXPECTED_RAW" 2>&1; then
+if run_rch_capture "$EXPECTED_RAW" cargo run --quiet -p ffs-harness -- validate-invariant-oracle \
+    --trace "$EXPECTED_FAILURE_TRACE"; then
     if extract_report_json "$EXPECTED_RAW" "$EXPECTED_REPORT" "violations" \
         && python3 - "$EXPECTED_REPORT" <<'PY'
 import json
@@ -312,8 +418,8 @@ else
 fi
 
 e2e_step "Scenario 6: unexpected failure fails closed"
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-invariant-oracle \
-    --trace "$UNEXPECTED_FAILURE_TRACE" >"$UNEXPECTED_RAW" 2>&1; then
+if run_rch_capture "$UNEXPECTED_RAW" cargo run --quiet -p ffs-harness -- validate-invariant-oracle \
+    --trace "$UNEXPECTED_FAILURE_TRACE"; then
     scenario_result "invariant_oracle_unexpected_failure_rejected" "FAIL" "unexpected failure was accepted"
 else
     if grep -q "unexpected invariant violation" "$UNEXPECTED_RAW"; then
@@ -324,8 +430,8 @@ else
 fi
 
 e2e_step "Scenario 7: unit tests pass"
-if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib invariant_oracle -- --nocapture \
-    2>"$UNIT_LOG" | tee -a "$UNIT_LOG"; then
+if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib invariant_oracle -- --nocapture; then
+    cat "$UNIT_LOG"
     TESTS_RUN=$(grep -c "test invariant_oracle::tests::" "$UNIT_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 10 ]]; then
         scenario_result "invariant_oracle_unit_tests" "PASS" "unit tests passed (${TESTS_RUN} tests)"
@@ -333,10 +439,9 @@ if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib invariant_oracle --
         scenario_result "invariant_oracle_unit_tests" "FAIL" "too few tests: ${TESTS_RUN}"
     fi
 else
+    cat "$UNIT_LOG"
     scenario_result "invariant_oracle_unit_tests" "FAIL" "unit tests failed"
 fi
-
-rm -f "$UNIT_LOG"
 
 e2e_step "Summary"
 e2e_log "SUMMARY|total=${TOTAL}|passed=${PASS_COUNT}|failed=${FAIL_COUNT}"
