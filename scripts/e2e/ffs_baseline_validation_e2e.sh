@@ -21,6 +21,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
+source "$SCRIPT_DIR/lib.sh"
+export FFS_E2E_DISABLE_TEMP_CLEANUP="${FFS_E2E_DISABLE_TEMP_CLEANUP:-1}"
+e2e_init "ffs_baseline_validation"
+exec > >(tee -a "$E2E_LOG_FILE") 2>&1
+
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_baseline_validation}"
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-1800}"
+LOG_DIR="${BASELINE_VALIDATION_LOG_DIR:-$E2E_LOG_DIR}"
+mkdir -p "$LOG_DIR"
+
 PASS=0
 FAIL=0
 SKIP=0
@@ -29,8 +43,57 @@ pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 skip() { echo "  SKIP: $1"; SKIP=$((SKIP + 1)); }
 
+run_rch_capture() {
+    local log_path="$1"
+    shift
+    local status=0
+    local rch_pid
+    local watcher_pid
+
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        setsid timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
+    rch_pid=$!
+
+    (
+        while kill -0 "$rch_pid" >/dev/null 2>&1; do
+            if grep -q "Remote command finished: exit=0" "$log_path" \
+                && grep -q "Retrieving artifacts from .*\\.rch-target" "$log_path"; then
+                kill -TERM "-$rch_pid" >/dev/null 2>&1 || true
+                break
+            fi
+            sleep 2
+        done
+    ) &
+    watcher_pid=$!
+
+    if wait "$rch_pid"; then
+        status=0
+    else
+        status=$?
+    fi
+
+    kill "$watcher_pid" >/dev/null 2>&1 || true
+    wait "$watcher_pid" >/dev/null 2>&1 || true
+
+    if [[ "$status" -ne 0 ]] && grep -q "Remote command finished: exit=0" "$log_path"; then
+        echo "RCH_ARTIFACT_RETRIEVAL_BOUNDED_ACCEPTED|log=${log_path}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
+        return 0
+    fi
+
+    return "$status"
+}
+
+log_failure_tail() {
+    local log_path="$1"
+    if [[ -s "$log_path" ]]; then
+        echo "Failure tail for ${log_path}:"
+        tail -n 80 "$log_path"
+    fi
+}
+
 echo "=== FrankenFS Baseline Validation E2E ==="
 echo "SCENARIO_RESULT markers follow bd-m5wf.1.1 acceptance criteria."
+echo "RCH logs: ${LOG_DIR}"
 echo ""
 
 # ── Scenario 1: All criterion bench targets compile ────────────────────
@@ -49,17 +112,40 @@ BENCH_TARGETS=(
     "ffs-extent:extent_resolve"
 )
 
-for target in "${BENCH_TARGETS[@]}"; do
-    crate="${target%%:*}"
-    bench="${target##*:}"
-    if cargo check -p "$crate" --bench "$bench" 2>/dev/null; then
+BENCH_PACKAGES=(
+    "ffs-harness"
+    "ffs-block"
+    "ffs-btree"
+    "ffs-alloc"
+    "ffs-repair"
+    "ffs-fuse"
+    "ffs-mvcc"
+    "ffs-extent"
+)
+
+BENCH_CARGO_ARGS=(check)
+for package in "${BENCH_PACKAGES[@]}"; do
+    BENCH_CARGO_ARGS+=(-p "$package")
+done
+BENCH_CARGO_ARGS+=(--benches)
+
+BENCH_COMPILE_LOG="$LOG_DIR/bench_compile_all.log"
+if run_rch_capture "$BENCH_COMPILE_LOG" cargo "${BENCH_CARGO_ARGS[@]}"; then
+    for target in "${BENCH_TARGETS[@]}"; do
+        crate="${target%%:*}"
+        bench="${target##*:}"
         pass "bench compile: ${crate}/${bench}"
         echo "SCENARIO_RESULT bench_compile_${bench}=pass"
-    else
+    done
+else
+    log_failure_tail "$BENCH_COMPILE_LOG"
+    for target in "${BENCH_TARGETS[@]}"; do
+        crate="${target%%:*}"
+        bench="${target##*:}"
         fail "bench compile: ${crate}/${bench}"
         echo "SCENARIO_RESULT bench_compile_${bench}=fail"
-    fi
-done
+    done
+fi
 
 echo ""
 
@@ -123,10 +209,12 @@ if [[ -f "$TAXONOMY_SRC" ]]; then
     done
 
     # Run taxonomy unit tests
-    if cargo test -p ffs-harness --lib -- benchmark_taxonomy 2>/dev/null; then
+    TAXONOMY_TEST_LOG="$LOG_DIR/benchmark_taxonomy_unit_tests.log"
+    if run_rch_capture "$TAXONOMY_TEST_LOG" cargo test -p ffs-harness --lib -- benchmark_taxonomy; then
         pass "taxonomy unit tests pass"
         echo "SCENARIO_RESULT taxonomy_tests=pass"
     else
+        log_failure_tail "$TAXONOMY_TEST_LOG"
         fail "taxonomy unit tests fail"
         echo "SCENARIO_RESULT taxonomy_tests=fail"
     fi
