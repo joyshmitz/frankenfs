@@ -227,13 +227,9 @@ scenario_result "repair_recovery_fixture_image_prepared" "PASS" "ext4 fixture im
 
 e2e_step "Phase 3: run deterministic corruption/recovery scenario"
 export FFS_REPAIR_E2E_ARTIFACT_DIR="$RCH_ARTIFACT_DIR"
+export FFS_REPAIR_E2E_ARTIFACT_STDOUT=1
 REPAIR_RCH_LOG="$E2E_LOG_DIR/repair_recovery_rch.log"
-if run_rch_capture "$REPAIR_RCH_LOG" env \
-    "FFS_REPAIR_E2E_ARTIFACT_DIR=$RCH_ARTIFACT_DIR" \
-    "FFS_REPAIR_E2E_ARTIFACT_STDOUT=1" \
-    "RUST_LOG=$RUST_LOG" \
-    "RUST_BACKTRACE=$RUST_BACKTRACE" \
-    "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" cargo test -p ffs-repair "$REPAIR_E2E_TEST" -- --nocapture; then
+if run_rch_capture "$REPAIR_RCH_LOG" cargo test -p ffs-repair "$REPAIR_E2E_TEST" -- --nocapture; then
     scenario_result "repair_recovery_rch_test_passed" "PASS" "repair recovery test passed through RCH"
 else
     print_rch_log "$REPAIR_RCH_LOG"
