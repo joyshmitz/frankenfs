@@ -11,6 +11,8 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_operator_recovery_drill}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -31,26 +33,128 @@ scenario_result() {
 
 run_rch_capture() {
     local log_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
     shift
-    local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-240}"
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "${timeout_secs}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1
-    else
-        "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1
+    local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-600}"
+    : >"$log_path"
+    set +e
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
+    pid=$!
+    set -e
+    deadline=$((SECONDS + timeout_secs))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${timeout_secs}|log=${log_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            status=124
+            break
+        fi
+        sleep 2
+    done
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
     fi
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH artifact retrieval failed after worker-side success; accepting remote exit=0 evidence from $log_path"
+        return 0
+    fi
+    return "$status"
+}
+
+extract_json_object() {
+    local input_path="$1"
+    local output_path="$2"
+    python3 - "$input_path" "$output_path" <<'PY'
+import json
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+decoder = json.JSONDecoder()
+for index, char in enumerate(text):
+    if char != "{":
+        continue
+    try:
+        obj, _ = decoder.raw_decode(text[index:])
+    except json.JSONDecodeError:
+        continue
+    pathlib.Path(sys.argv[2]).write_text(
+        json.dumps(obj, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    break
+else:
+    raise SystemExit(f"no JSON object found in {sys.argv[1]}")
+PY
+}
+
+extract_operator_recovery_summary() {
+    local input_path="$1"
+    local output_path="$2"
+    python3 - "$input_path" "$output_path" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+start = text.find("# Operator Recovery Drill Summary")
+if start < 0:
+    raise SystemExit(f"operator recovery markdown summary not found in {sys.argv[1]}")
+end = len(text)
+for marker in ("\n  \x1b[2m", "\n[RCH]", "\nerror:"):
+    pos = text.find(marker, start + 1)
+    if pos != -1:
+        end = min(end, pos)
+summary = text[start:end].strip()
+pathlib.Path(sys.argv[2]).write_text(summary + "\n", encoding="utf-8")
+PY
 }
 
 e2e_init "ffs_operator_recovery_drill"
+
+RCH_OUTPUT_DIR="$REPO_ROOT/artifacts/rch/operator_recovery_drill/$(basename "$E2E_LOG_DIR")"
+mkdir -p "$RCH_OUTPUT_DIR"
 
 SPEC_JSON="$REPO_ROOT/docs/operator-recovery-drill.json"
 REPORT_JSON="$E2E_LOG_DIR/operator_recovery_drill_report.json"
 SUMMARY_MD="$E2E_LOG_DIR/operator_recovery_drill_summary.md"
 VALIDATE_RAW="$E2E_LOG_DIR/operator_recovery_drill_validate.raw"
-BAD_MISSING_LOG="$E2E_LOG_DIR/bad_missing_log.json"
-BAD_MUTATE_PREFLIGHT="$E2E_LOG_DIR/bad_mutate_preflight.json"
-BAD_NO_PROOF_BUNDLE="$E2E_LOG_DIR/bad_no_proof_bundle.json"
-BAD_NO_ROLLBACK="$E2E_LOG_DIR/bad_no_rollback.json"
-BAD_RAW="$E2E_LOG_DIR/operator_recovery_drill_bad.raw"
+SUMMARY_RAW="$E2E_LOG_DIR/operator_recovery_drill_summary.raw"
+BAD_MISSING_LOG="$RCH_OUTPUT_DIR/bad_missing_log.json"
+BAD_MUTATE_PREFLIGHT="$RCH_OUTPUT_DIR/bad_mutate_preflight.json"
+BAD_NO_PROOF_BUNDLE="$RCH_OUTPUT_DIR/bad_no_proof_bundle.json"
+BAD_NO_ROLLBACK="$RCH_OUTPUT_DIR/bad_no_rollback.json"
 UNIT_LOG="$E2E_LOG_DIR/operator_recovery_drill_unit_tests.log"
 
 e2e_step "Scenario 1: operator recovery drill module and CLI are wired"
@@ -62,11 +166,20 @@ else
 fi
 
 e2e_step "Scenario 2: checked-in operator recovery drill validates"
-if cargo run --quiet -p ffs-harness -- validate-operator-recovery-drill \
+if run_rch_capture "$VALIDATE_RAW" cargo run --quiet -p ffs-harness -- validate-operator-recovery-drill \
     --spec "$SPEC_JSON" \
-    --out "$REPORT_JSON" \
-    --summary-out "$SUMMARY_MD" >"$VALIDATE_RAW" 2>&1; then
-    scenario_result "operator_recovery_drill_validates" "PASS" "checked-in drill accepted"
+    --format json; then
+    if extract_json_object "$VALIDATE_RAW" "$REPORT_JSON" \
+        && run_rch_capture "$SUMMARY_RAW" cargo run --quiet -p ffs-harness -- validate-operator-recovery-drill \
+            --spec "$SPEC_JSON" \
+            --format markdown \
+        && extract_operator_recovery_summary "$SUMMARY_RAW" "$SUMMARY_MD"; then
+        scenario_result "operator_recovery_drill_validates" "PASS" "checked-in drill accepted"
+    else
+        cat "$VALIDATE_RAW"
+        cat "$SUMMARY_RAW" 2>/dev/null || true
+        scenario_result "operator_recovery_drill_validates" "FAIL" "RCH stdout artifact extraction failed"
+    fi
 else
     cat "$VALIDATE_RAW"
     scenario_result "operator_recovery_drill_validates" "FAIL" "checked-in drill rejected"
@@ -175,12 +288,13 @@ PY
 
 invalid_failures=0
 for bad in "$BAD_MISSING_LOG" "$BAD_MUTATE_PREFLIGHT" "$BAD_NO_PROOF_BUNDLE" "$BAD_NO_ROLLBACK"; do
-    if cargo run --quiet -p ffs-harness -- validate-operator-recovery-drill \
+    bad_raw="$E2E_LOG_DIR/$(basename "$bad" .json).raw"
+    if run_rch_capture "$bad_raw" cargo run --quiet -p ffs-harness -- validate-operator-recovery-drill \
         --spec "$bad" \
-        --out "$E2E_LOG_DIR/$(basename "$bad" .json).report.json" >"$BAD_RAW" 2>&1; then
+        --format json; then
         e2e_log "Unexpectedly accepted invalid operator recovery drill: $bad"
         invalid_failures=$((invalid_failures + 1))
-    elif ! grep -q "operator recovery drill validation failed\\|invalid operator recovery drill JSON" "$BAD_RAW"; then
+    elif ! grep -q "operator recovery drill validation failed\\|invalid operator recovery drill JSON" "$bad_raw"; then
         e2e_log "Invalid operator recovery drill failed without expected diagnostic: $bad"
         invalid_failures=$((invalid_failures + 1))
     fi
