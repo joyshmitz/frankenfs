@@ -2507,6 +2507,42 @@ mod tests {
     }
 
     #[test]
+    fn e2e_rch_capture_helpers_do_not_accept_artifact_retrieval_failures() {
+        const BANNED_MARKER: &str = "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED";
+
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let scripts_dir = repo_root.join("scripts/e2e");
+        let mut offenders = Vec::new();
+
+        for entry in std::fs::read_dir(&scripts_dir).expect("read scripts/e2e directory") {
+            let path = entry.expect("read scripts/e2e entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("sh") {
+                continue;
+            }
+
+            let display_path = path
+                .strip_prefix(&repo_root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                offenders.push(format!("{display_path} (unreadable)"));
+                continue;
+            };
+            if source.contains(BANNED_MARKER) {
+                offenders.push(display_path);
+            }
+        }
+
+        offenders.sort();
+        assert!(
+            offenders.is_empty(),
+            "E2E RCH capture helpers must fail closed; remove {BANNED_MARKER} from: {}",
+            offenders.join(", ")
+        );
+    }
+
+    #[test]
     fn e2e_log_entry_skip() {
         let entry = E2eLogEntry::skip("test1", "create_fixture", "mkfs.ext4 not found");
         assert_eq!(entry.status, "skip");
