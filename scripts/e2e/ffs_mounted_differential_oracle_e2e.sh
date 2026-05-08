@@ -14,12 +14,155 @@ export REPO_ROOT
 
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_mounted_differential_oracle}"
+export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-420}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+
+extract_json_object() {
+    local raw_path="$1"
+    local out_path="$2"
+    python3 - "$raw_path" "$out_path" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+raw_path, out_path = sys.argv[1:]
+text = pathlib.Path(raw_path).read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+text = "\n".join(
+    line
+    for line in text.splitlines()
+    if not line.startswith("Error: mounted differential oracle report failed")
+    and not line.startswith("error: mounted differential oracle report failed")
+) + "\n"
+decoder = json.JSONDecoder()
+for index, char in enumerate(text):
+    if char != "{":
+        continue
+    try:
+        obj, _ = decoder.raw_decode(text[index:])
+    except json.JSONDecodeError:
+        continue
+    if isinstance(obj, dict) and "valid" in obj and "scenario_count" in obj:
+        pathlib.Path(out_path).write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        break
+else:
+    raise SystemExit("mounted differential validation JSON object not found")
+PY
+}
+
+extract_markdown_report() {
+    local raw_path="$1"
+    local out_path="$2"
+    python3 - "$raw_path" "$out_path" <<'PY'
+import pathlib
+import re
+import sys
+
+raw_path, out_path = sys.argv[1:]
+text = pathlib.Path(raw_path).read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+start = text.find("# Mounted Differential Oracle Report")
+if start < 0:
+    raise SystemExit("mounted differential markdown report not found")
+end = text.find("\n[RCH]", start)
+if end < 0:
+    end = text.find("\nRemote command finished:", start)
+if end < 0:
+    end = len(text)
+pathlib.Path(out_path).write_text(text[start:end].rstrip() + "\n", encoding="utf-8")
+PY
+}
+
+run_rch_capture() {
+    local output_path="$1"
+    shift
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    local had_errexit=0
+
+    case $- in
+        *e*) had_errexit=1 ;;
+    esac
+
+    : >"$output_path"
+    set +e
+    RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
+    pid=$!
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=$*"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=$*"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}|command=$*"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}|command=$*"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
+            return 99
+        fi
+        return 0
+    fi
+    if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$output_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|output=${output_path}|command=$*"
+        return 0
+    fi
+    return "$status"
+}
+
 e2e_init "ffs_mounted_differential_oracle"
 
-REPORT_JSON="$E2E_LOG_DIR/mounted_differential_report.json"
+RCH_INPUT_DIR="${REPO_ROOT}/artifacts/rch_input/$(basename "$E2E_LOG_DIR")/mounted_differential_oracle"
+mkdir -p "$RCH_INPUT_DIR"
+REPORT_JSON="$RCH_INPUT_DIR/mounted_differential_report.json"
+LOCAL_REPORT_JSON="$E2E_LOG_DIR/mounted_differential_report.json"
+VALIDATION_RAW="$E2E_LOG_DIR/mounted_differential_validation.raw"
 VALIDATION_JSON="$E2E_LOG_DIR/mounted_differential_validation.json"
+VALIDATION_MD_RAW="$E2E_LOG_DIR/mounted_differential_validation_md.raw"
 VALIDATION_MD="$E2E_LOG_DIR/mounted_differential_validation.md"
-BROAD_REPORT_JSON="$E2E_LOG_DIR/broad_allowlist_report.json"
+BROAD_REPORT_JSON="$RCH_INPUT_DIR/broad_allowlist_report.json"
+BROAD_LOCAL_REPORT_JSON="$E2E_LOG_DIR/broad_allowlist_report.json"
+BROAD_VALIDATION_RAW="$E2E_LOG_DIR/broad_allowlist_validation.raw"
 BROAD_VALIDATION_JSON="$E2E_LOG_DIR/broad_allowlist_validation.json"
 
 e2e_step "Generate mounted differential oracle dry-run report"
@@ -327,17 +470,23 @@ report = {
 }
 report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
+cp "$REPORT_JSON" "$LOCAL_REPORT_JSON"
 
 e2e_step "Validate mounted differential oracle report"
-e2e_assert "${RCH_BIN:-rch}" exec -- cargo run -p ffs-harness -- \
+if ! run_rch_capture "$VALIDATION_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-mounted-differential-oracle \
+    --report "$REPORT_JSON"; then
+    e2e_fail "mounted differential JSON validation failed; see $VALIDATION_RAW"
+fi
+extract_json_object "$VALIDATION_RAW" "$VALIDATION_JSON"
+
+if ! run_rch_capture "$VALIDATION_MD_RAW" cargo run --quiet -p ffs-harness -- \
     validate-mounted-differential-oracle \
     --report "$REPORT_JSON" \
-    --out "$VALIDATION_JSON"
-e2e_assert "${RCH_BIN:-rch}" exec -- cargo run -p ffs-harness -- \
-    validate-mounted-differential-oracle \
-    --report "$REPORT_JSON" \
-    --format markdown \
-    --out "$VALIDATION_MD"
+    --format markdown; then
+    e2e_fail "mounted differential markdown validation failed; see $VALIDATION_MD_RAW"
+fi
+extract_markdown_report "$VALIDATION_MD_RAW" "$VALIDATION_MD"
 
 echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_create_readback|outcome=PASS|detail=normalized observations match" | tee -a "$E2E_LOG_FILE"
 echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fiemap_transport_errno|outcome=DIFF|detail=exact expiring allowlist accepted" | tee -a "$E2E_LOG_FILE"
@@ -367,16 +516,24 @@ payload["allowlist"][0]["scenario_id"] = "*"
 payload["allowlist"][0]["expires_on"] = "2026-01-01"
 target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
+cp "$BROAD_REPORT_JSON" "$BROAD_LOCAL_REPORT_JSON"
 
-if e2e_run "${RCH_BIN:-rch}" exec -- cargo run -p ffs-harness -- \
+set +e
+run_rch_capture "$BROAD_VALIDATION_RAW" cargo run --quiet -p ffs-harness -- \
     validate-mounted-differential-oracle \
-    --report "$BROAD_REPORT_JSON" \
-    --out "$BROAD_VALIDATION_JSON"; then
+    --report "$BROAD_REPORT_JSON"
+BROAD_STATUS=$?
+set -e
+if [[ $BROAD_STATUS -eq 0 ]]; then
     e2e_fail "broad allowlist report unexpectedly validated"
+fi
+extract_json_object "$BROAD_VALIDATION_RAW" "$BROAD_VALIDATION_JSON"
+if ! grep -q '"valid": false' "$BROAD_VALIDATION_JSON"; then
+    e2e_fail "broad allowlist validation artifact did not record invalid verdict"
 fi
 echo "SCENARIO_RESULT|scenario_id=mounted_diff_broad_allowlist_rejected|outcome=ERROR|detail=validator rejected intentionally broad allowlist" | tee -a "$E2E_LOG_FILE"
 
-e2e_log "Mounted differential report: $REPORT_JSON"
+e2e_log "Mounted differential report: $LOCAL_REPORT_JSON"
 e2e_log "Validation JSON: $VALIDATION_JSON"
 e2e_log "Validation Markdown: $VALIDATION_MD"
 e2e_log "Broad allowlist rejection artifact: $BROAD_VALIDATION_JSON"
