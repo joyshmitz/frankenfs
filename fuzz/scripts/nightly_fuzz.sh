@@ -42,12 +42,79 @@ RESULTS_ROOT="${FUZZ_ARTIFACTS_DIR:-$FUZZ_DIR/campaigns}"
 RESULTS_DIR="$RESULTS_ROOT/$CAMPAIGN_ID"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_nightly_fuzz}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 mkdir -p "$RESULTS_DIR"
 
-run_remote_cargo() {
-    RCH_LOG_LEVEL="${FFS_FUZZ_RCH_LOG_LEVEL:-error}" \
+run_remote_cargo_capture() {
+    local output_path="$1"
+    shift
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    local had_errexit=0
+
+    case $- in
+        *e*) had_errexit=1 ;;
+    esac
+
+    : >"$output_path"
+    set +e
+    RCH_LOG_LEVEL="${FFS_FUZZ_RCH_LOG_LEVEL:-info}" \
         RCH_VISIBILITY="${FFS_FUZZ_RCH_VISIBILITY:-none}" \
-        "${RCH_BIN:-rch}" exec -- cargo "$@"
+        "${RCH_BIN:-rch}" exec -- cargo "$@" >"$output_path" 2>&1 &
+    pid=$!
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                printf 'RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=%s|output=%s|command=cargo %s\n' "$remote_exit" "$output_path" "$*" | tee -a "$output_path"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            printf 'RCH_TIMEOUT|seconds=%s|output=%s|command=cargo %s\n' "$RCH_COMMAND_TIMEOUT_SECS" "$output_path" "$*" | tee -a "$output_path"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" | tee -a "$output_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]] && ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
+        printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" | tee -a "$output_path"
+        return 99
+    fi
+    if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$output_path"; then
+        printf 'RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|output=%s\n' "$output_path" | tee -a "$output_path"
+        return 0
+    fi
+    return "$status"
 }
 
 mapfile -t TARGETS < <(
@@ -55,6 +122,15 @@ mapfile -t TARGETS < <(
         | sed 's/\.rs$//' \
         | sort
 )
+if [[ -n "${FFS_FUZZ_TARGET_LIMIT:-}" ]]; then
+    if ! [[ "$FFS_FUZZ_TARGET_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+        echo "FFS_FUZZ_TARGET_LIMIT must be a positive integer, got: $FFS_FUZZ_TARGET_LIMIT" >&2
+        exit 2
+    fi
+    if [[ "$FFS_FUZZ_TARGET_LIMIT" -lt "${#TARGETS[@]}" ]]; then
+        TARGETS=("${TARGETS[@]:0:$FFS_FUZZ_TARGET_LIMIT}")
+    fi
+fi
 
 echo "=== Nightly Fuzz Campaign: $CAMPAIGN_ID ==="
 echo "Targets: ${#TARGETS[@]}"
@@ -82,12 +158,11 @@ for target in "${TARGETS[@]}"; do
         DICT_ARGS=(-dict=fuzz/dictionaries/btrfs.dict)
     fi
 
-    run_remote_cargo run --manifest-path fuzz/Cargo.toml --bin "$target" \
+    run_remote_cargo_capture "$TARGET_LOG" run --manifest-path fuzz/Cargo.toml --bin "$target" \
         -- \
         -max_total_time="$DURATION" \
         -max_len=65536 \
-        "${DICT_ARGS[@]}" \
-        > "$TARGET_LOG" 2>&1 || TARGET_RC=$?
+        "${DICT_ARGS[@]}" || TARGET_RC=$?
 
     TARGET_END=$(date +%s)
     TARGET_DURATION=$((TARGET_END - TARGET_START))
