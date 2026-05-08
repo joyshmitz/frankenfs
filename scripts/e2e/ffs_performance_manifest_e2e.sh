@@ -14,6 +14,8 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_performance_manifest}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -32,12 +34,133 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("${RCH_BIN:-rch}" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "${RCH_BIN:-rch}" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local log_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+    local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-600}"
+    : >"$log_path"
+    set +e
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
+    pid=$!
+    set -e
+    deadline=$((SECONDS + timeout_secs))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${timeout_secs}|log=${log_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH artifact retrieval failed after worker-side success; accepting remote exit=0 evidence from $log_path"
+        return 0
+    fi
+    return "$status"
+}
+
+extract_json_object() {
+    local input_path="$1"
+    local output_path="$2"
+    local object_index="${3:-0}"
+    python3 - "$input_path" "$output_path" "$object_index" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1])
+dest = pathlib.Path(sys.argv[2])
+target_index = int(sys.argv[3])
+text = source.read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+decoder = json.JSONDecoder()
+seen = 0
+for idx, ch in enumerate(text):
+    if ch != "{":
+        continue
+    try:
+        _, end = decoder.raw_decode(text[idx:])
+    except json.JSONDecodeError:
+        continue
+    if seen == target_index:
+        dest.write_text(text[idx:idx + end].rstrip() + "\n", encoding="utf-8")
+        raise SystemExit(0)
+    seen += 1
+raise SystemExit(f"no JSON object #{target_index} found in {source}")
+PY
+}
+
 e2e_init "ffs_performance_manifest"
 
 MANIFEST_JSON="$REPO_ROOT/benchmarks/performance_baseline_manifest.json"
 REPORT_JSON="$E2E_LOG_DIR/performance_manifest_report.json"
 ARTIFACT_JSON="$E2E_LOG_DIR/performance_sample_artifact_manifest.json"
 VALIDATE_RAW="$E2E_LOG_DIR/performance_manifest_validate.raw"
+ARTIFACT_RAW="$E2E_LOG_DIR/performance_manifest_artifact.raw"
 BAD_CAP_JSON="$E2E_LOG_DIR/performance_manifest_bad_capability.json"
 BAD_ENV_JSON="$E2E_LOG_DIR/performance_manifest_bad_environment.json"
 BAD_ARTIFACT_JSON="$E2E_LOG_DIR/performance_manifest_bad_artifact.json"
@@ -70,14 +193,20 @@ else
 fi
 
 e2e_step "Scenario 2: checked-in manifest validates and emits shared QA artifact"
-if cargo run --quiet -p ffs-harness -- validate-performance-baseline-manifest \
+if run_rch_capture "$VALIDATE_RAW" cargo run --quiet -p ffs-harness -- validate-performance-baseline-manifest \
     --manifest "$MANIFEST_JSON" \
     --artifact-root "artifacts/performance/dry-run" \
-    --out "$REPORT_JSON" \
-    --artifact-out "$ARTIFACT_JSON" >"$VALIDATE_RAW" 2>&1; then
+    && extract_json_object "$VALIDATE_RAW" "$REPORT_JSON" \
+    && run_rch_capture "$ARTIFACT_RAW" cargo run --quiet -p ffs-harness -- validate-performance-baseline-manifest \
+        --manifest "$MANIFEST_JSON" \
+        --artifact-root "artifacts/performance/dry-run" \
+        --out "/tmp/frankenfs_performance_manifest_report.json" \
+        --artifact-out /dev/stdout \
+    && extract_json_object "$ARTIFACT_RAW" "$ARTIFACT_JSON"; then
     scenario_result "performance_manifest_validates" "PASS" "checked-in performance manifest accepted"
 else
-    cat "$VALIDATE_RAW"
+    [[ -s "$VALIDATE_RAW" ]] && cat "$VALIDATE_RAW"
+    [[ -s "$ARTIFACT_RAW" ]] && cat "$ARTIFACT_RAW"
     scenario_result "performance_manifest_validates" "FAIL" "checked-in performance manifest rejected"
 fi
 
@@ -489,9 +618,14 @@ PY
 
 invalid_failures=0
 for bad in "$BAD_CAP_JSON" "$BAD_ENV_JSON" "$BAD_ARTIFACT_JSON" "$BAD_UNIT_JSON" "$BAD_TARGET_JSON" "$BAD_RAW_LOG_JSON" "$BAD_FIXTURE_JSON" "$BAD_CLAIM_JSON" "$BAD_STATS_JSON" "$BAD_AUTHORITATIVE_JSON"; do
-    if cargo run --quiet -p ffs-harness -- validate-performance-baseline-manifest \
-        --manifest "$bad" \
-        --out "$E2E_LOG_DIR/$(basename "$bad" .json).report.json" >"$BAD_RAW" 2>&1; then
+    bad_payload="$(tr -d '\n' <"$bad")"
+    if (
+        export PERFORMANCE_BASELINE_MANIFEST_JSON="$bad_payload"
+        export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}PERFORMANCE_BASELINE_MANIFEST_JSON"
+        run_rch_capture "$BAD_RAW" cargo run --quiet -p ffs-harness -- validate-performance-baseline-manifest \
+            --manifest-json-env PERFORMANCE_BASELINE_MANIFEST_JSON \
+            --out /dev/stdout
+    ); then
         e2e_log "Unexpectedly accepted invalid manifest: $bad"
         invalid_failures=$((invalid_failures + 1))
     elif ! grep -q "performance baseline manifest validation failed\\|invalid performance manifest JSON" "$BAD_RAW"; then
@@ -507,7 +641,7 @@ else
 fi
 
 e2e_step "Scenario 5: performance manifest unit tests pass"
-if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib performance_baseline_manifest -- --nocapture >"$UNIT_LOG" 2>&1; then
+if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib performance_baseline_manifest -- --nocapture; then
     cat "$UNIT_LOG"
     scenario_result "performance_manifest_unit_tests" "PASS" "performance manifest unit tests passed"
 else

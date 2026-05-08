@@ -92,8 +92,9 @@ use ffs_harness::{
         validate_operator_recovery_drill,
     },
     performance_baseline_manifest::{
-        build_performance_sample_artifact_manifest, fail_on_performance_baseline_manifest_errors,
-        load_performance_baseline_manifest, validate_performance_baseline_manifest,
+        PerformanceBaselineManifest, build_performance_sample_artifact_manifest,
+        fail_on_performance_baseline_manifest_errors, load_performance_baseline_manifest,
+        validate_performance_baseline_manifest,
     },
     performance_delta_closeout::{
         DEFAULT_PERFORMANCE_DELTA_CLOSEOUT_CONFIG, fail_on_performance_delta_closeout_errors,
@@ -492,7 +493,8 @@ struct ReleaseGateCmdArgs {
 
 #[derive(Debug)]
 struct PerformanceManifestCmdArgs {
-    manifest_path: String,
+    manifest_path: Option<String>,
+    manifest_json_env: Option<String>,
     artifact_root: String,
     out_path: Option<String>,
     artifact_out_path: Option<String>,
@@ -1632,7 +1634,21 @@ fn validate_performance_baseline_manifest_cmd(args: &[String]) -> Result<()> {
     let Some(cmd_args) = parse_performance_manifest_cmd_args(args)? else {
         return Ok(());
     };
-    let manifest = load_performance_baseline_manifest(Path::new(&cmd_args.manifest_path))?;
+    let manifest = match (&cmd_args.manifest_path, &cmd_args.manifest_json_env) {
+        (Some(path), None) => load_performance_baseline_manifest(Path::new(path))?,
+        (None, Some(env_name)) => {
+            let raw = env::var(env_name)
+                .with_context(|| format!("--manifest-json-env variable {env_name} is not set"))?;
+            serde_json::from_str::<PerformanceBaselineManifest>(&raw)
+                .with_context(|| format!("invalid performance manifest JSON from {env_name}"))?
+        }
+        (Some(_), Some(_)) => bail!("use either --manifest or --manifest-json-env, not both"),
+        (None, None) => {
+            bail!(
+                "--manifest or --manifest-json-env is required for performance manifest validation"
+            )
+        }
+    };
     let report = validate_performance_baseline_manifest(&manifest, &cmd_args.artifact_root);
     let output = serde_json::to_string_pretty(&report)?;
 
@@ -1663,6 +1679,7 @@ fn parse_performance_manifest_cmd_args(
     args: &[String],
 ) -> Result<Option<PerformanceManifestCmdArgs>> {
     let mut manifest_path: Option<String> = None;
+    let mut manifest_json_env: Option<String> = None;
     let mut artifact_root = "artifacts/performance/dry-run".to_owned();
     let mut out_path: Option<String> = None;
     let mut artifact_out_path: Option<String> = None;
@@ -1675,6 +1692,14 @@ fn parse_performance_manifest_cmd_args(
                 manifest_path = Some(
                     args.get(i)
                         .context("--manifest requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--manifest-json-env" => {
+                i += 1;
+                manifest_json_env = Some(
+                    args.get(i)
+                        .context("--manifest-json-env requires a variable name")?
                         .to_owned(),
                 );
             }
@@ -1706,8 +1731,8 @@ fn parse_performance_manifest_cmd_args(
     }
 
     Ok(Some(PerformanceManifestCmdArgs {
-        manifest_path: manifest_path
-            .context("--manifest is required for performance manifest validation")?,
+        manifest_path,
+        manifest_json_env,
         artifact_root,
         out_path,
         artifact_out_path,
@@ -5889,7 +5914,7 @@ fn print_fuzz_smoke_usage() {
 
 fn print_performance_baseline_manifest_usage_summary() {
     println!(
-        "  ffs-harness validate-performance-baseline-manifest --manifest FILE [--artifact-root DIR] [--out FILE] [--artifact-out FILE]"
+        "  ffs-harness validate-performance-baseline-manifest (--manifest FILE | --manifest-json-env VAR) [--artifact-root DIR] [--out FILE] [--artifact-out FILE]"
     );
 }
 
@@ -6343,6 +6368,9 @@ fn print_performance_manifest_usage() {
     println!();
     println!("Options:");
     println!("  --manifest FILE                    Read performance baseline manifest JSON");
+    println!(
+        "  --manifest-json-env VAR            Read performance baseline manifest JSON from env var"
+    );
     println!("  --artifact-root DIR                Root for dry-run expanded artifacts");
     println!("  --out FILE                         Write validation report JSON");
     println!("  --artifact-out FILE                Write sample shared QA artifact manifest JSON");
