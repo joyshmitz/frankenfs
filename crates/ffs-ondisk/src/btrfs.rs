@@ -4397,6 +4397,40 @@ mod tests {
             let b = parse_dev_item(&data).expect("second parse");
             prop_assert_eq!(a, b);
         }
+
+        // bd-edl7j — Determinism MR for parse_leaf_items. Sister
+        // btrfs parsers (parse_root_item / parse_root_ref /
+        // parse_inode_item / parse_inode_refs / parse_dev_item) all
+        // have determinism MR proptests. parse_leaf_items runs on
+        // every walk_tree leaf-node read and is the most heavily-
+        // trafficked btrfs parser. A regression that introduced a
+        // HashMap iteration, allocator-address dependency, or any
+        // non-deterministic per-call state would silently surface
+        // only under specific scheduling. The MR fuzzes arbitrary
+        // bytes (most rejected as Err) but Ok and Err results must
+        // be identical across two calls.
+        #[test]
+        fn btrfs_proptest_parse_leaf_items_determinism(
+            block in proptest::collection::vec(any::<u8>(), 0..=4096),
+        ) {
+            let a = parse_leaf_items(&block);
+            let b = parse_leaf_items(&block);
+            prop_assert_eq!(a, b);
+        }
+
+        // bd-edl7j — Companion determinism MR for parse_internal_items
+        // (the btree-node sibling of parse_leaf_items). Same rationale
+        // as above; both code paths share the BtrfsHeader prefix +
+        // bounds-checking arithmetic, but the item-vs-keyptr fork has
+        // independent state.
+        #[test]
+        fn btrfs_proptest_parse_internal_items_determinism(
+            block in proptest::collection::vec(any::<u8>(), 0..=4096),
+        ) {
+            let a = parse_internal_items(&block);
+            let b = parse_internal_items(&block);
+            prop_assert_eq!(a, b);
+        }
     }
 
     // ── RAID profile identification ────────────────────────────────
