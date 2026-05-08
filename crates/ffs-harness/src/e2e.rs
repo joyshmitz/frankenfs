@@ -2542,6 +2542,357 @@ mod tests {
         );
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum RchFixtureClass {
+        LocalFallback,
+        NonCompilationWrapper,
+        RemoteBuildFailure,
+        RemoteTestFailure,
+        RemoteSuccessArtifactRetrievalHang,
+        TimeoutBeforeRemoteExit,
+        MissingRemoteEvidence,
+    }
+
+    impl RchFixtureClass {
+        const ALL: [Self; 7] = [
+            Self::LocalFallback,
+            Self::NonCompilationWrapper,
+            Self::RemoteBuildFailure,
+            Self::RemoteTestFailure,
+            Self::RemoteSuccessArtifactRetrievalHang,
+            Self::TimeoutBeforeRemoteExit,
+            Self::MissingRemoteEvidence,
+        ];
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum RchFixtureSignal {
+        WrapperExited(i32),
+        ArtifactRetrievalStopped,
+        TimedOut,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RchDecisionAuthority {
+        RemoteEvidence,
+        RejectedWrapperEvidence,
+        Timeout,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct RchCaptureFixture {
+        name: &'static str,
+        class: RchFixtureClass,
+        command: &'static str,
+        transcript: &'static str,
+        signal: RchFixtureSignal,
+        expected_marker: &'static str,
+        expected_remote_exit: Option<i32>,
+        expected_exit_code: i32,
+        expected_authority: RchDecisionAuthority,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RchCaptureDecision {
+        marker: String,
+        remote_exit: Option<i32>,
+        exit_code: i32,
+        authority: RchDecisionAuthority,
+    }
+
+    const RCH_FIXTURE_MATRIX: &[RchCaptureFixture] = &[
+        RchCaptureFixture {
+            name: "local fallback rejected",
+            class: RchFixtureClass::LocalFallback,
+            command: "cargo check -p ffs-harness",
+            transcript: "[RCH] local: no remote workers available\ncargo check completed locally\n",
+            signal: RchFixtureSignal::WrapperExited(0),
+            expected_marker: "RCH_LOCAL_FALLBACK_REJECTED",
+            expected_remote_exit: None,
+            expected_exit_code: 99,
+            expected_authority: RchDecisionAuthority::RejectedWrapperEvidence,
+        },
+        RchCaptureFixture {
+            name: "non-compilation wrapper rejected",
+            class: RchFixtureClass::NonCompilationWrapper,
+            command: "echo not-a-build",
+            transcript: "exec called with non-compilation command: echo not-a-build\n",
+            signal: RchFixtureSignal::WrapperExited(1),
+            expected_marker: "RCH_LOCAL_FALLBACK_REJECTED",
+            expected_remote_exit: None,
+            expected_exit_code: 99,
+            expected_authority: RchDecisionAuthority::RejectedWrapperEvidence,
+        },
+        RchCaptureFixture {
+            name: "remote build failure",
+            class: RchFixtureClass::RemoteBuildFailure,
+            command: "cargo check -p ffs-harness",
+            transcript: "[RCH] remote worker=build-a\nerror: could not compile `ffs-harness`\nRemote command finished: exit=101\n",
+            signal: RchFixtureSignal::WrapperExited(101),
+            expected_marker: "Remote command finished: exit=101",
+            expected_remote_exit: Some(101),
+            expected_exit_code: 101,
+            expected_authority: RchDecisionAuthority::RemoteEvidence,
+        },
+        RchCaptureFixture {
+            name: "remote test failure",
+            class: RchFixtureClass::RemoteTestFailure,
+            command: "cargo test -p ffs-harness --lib e2e_rch",
+            transcript: "[RCH] remote worker=test-a\ntest result: FAILED. 0 passed; 1 failed\nRemote command finished: exit=101\n",
+            signal: RchFixtureSignal::WrapperExited(101),
+            expected_marker: "Remote command finished: exit=101",
+            expected_remote_exit: Some(101),
+            expected_exit_code: 101,
+            expected_authority: RchDecisionAuthority::RemoteEvidence,
+        },
+        RchCaptureFixture {
+            name: "remote success with artifact retrieval hang",
+            class: RchFixtureClass::RemoteSuccessArtifactRetrievalHang,
+            command: "cargo test -p ffs-harness --lib e2e_rch",
+            transcript: "[RCH] remote worker=test-a\ntest result: ok. 7 passed\nRemote command finished: exit=0\n[RCH] retrieving artifacts\n",
+            signal: RchFixtureSignal::ArtifactRetrievalStopped,
+            expected_marker: "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT",
+            expected_remote_exit: Some(0),
+            expected_exit_code: 0,
+            expected_authority: RchDecisionAuthority::RemoteEvidence,
+        },
+        RchCaptureFixture {
+            name: "timeout before remote exit",
+            class: RchFixtureClass::TimeoutBeforeRemoteExit,
+            command: "cargo test -p ffs-harness --lib slow_case",
+            transcript: "[RCH] remote worker=test-a\nrunning tests without completion marker\n",
+            signal: RchFixtureSignal::TimedOut,
+            expected_marker: "RCH_TIMEOUT",
+            expected_remote_exit: None,
+            expected_exit_code: 124,
+            expected_authority: RchDecisionAuthority::Timeout,
+        },
+        RchCaptureFixture {
+            name: "missing remote evidence",
+            class: RchFixtureClass::MissingRemoteEvidence,
+            command: "cargo clippy -p ffs-harness --all-targets -- -D warnings",
+            transcript: "cargo clippy completed with local-looking wrapper output\n",
+            signal: RchFixtureSignal::WrapperExited(0),
+            expected_marker: "RCH_REMOTE_EVIDENCE_MISSING",
+            expected_remote_exit: None,
+            expected_exit_code: 99,
+            expected_authority: RchDecisionAuthority::RejectedWrapperEvidence,
+        },
+    ];
+
+    fn last_remote_exit(transcript: &str) -> Option<i32> {
+        transcript.lines().filter_map(remote_exit_from_line).last()
+    }
+
+    fn remote_exit_from_line(line: &str) -> Option<i32> {
+        let (_, suffix) = line.rsplit_once("Remote command finished: exit=")?;
+        let digit_count = suffix.bytes().take_while(u8::is_ascii_digit).count();
+        if digit_count == 0 {
+            return None;
+        }
+        suffix[..digit_count].parse().ok()
+    }
+
+    fn lacks_remote_success_evidence(transcript: &str) -> bool {
+        !transcript.contains("[RCH] remote")
+            && !transcript.contains("Remote command finished: exit=0")
+    }
+
+    fn wrapper_exit_code(signal: RchFixtureSignal) -> i32 {
+        match signal {
+            RchFixtureSignal::WrapperExited(status) => status,
+            RchFixtureSignal::ArtifactRetrievalStopped => 0,
+            RchFixtureSignal::TimedOut => 124,
+        }
+    }
+
+    fn model_rch_capture_decision(fixture: &RchCaptureFixture) -> RchCaptureDecision {
+        let remote_exit = last_remote_exit(fixture.transcript);
+
+        if fixture.transcript.contains("[RCH] local")
+            || fixture
+                .transcript
+                .contains("exec called with non-compilation command")
+        {
+            return RchCaptureDecision {
+                marker: "RCH_LOCAL_FALLBACK_REJECTED".to_owned(),
+                remote_exit,
+                exit_code: 99,
+                authority: RchDecisionAuthority::RejectedWrapperEvidence,
+            };
+        }
+
+        if matches!(fixture.signal, RchFixtureSignal::TimedOut) && remote_exit.is_none() {
+            return RchCaptureDecision {
+                marker: "RCH_TIMEOUT".to_owned(),
+                remote_exit,
+                exit_code: 124,
+                authority: RchDecisionAuthority::Timeout,
+            };
+        }
+
+        if matches!(fixture.signal, RchFixtureSignal::ArtifactRetrievalStopped) {
+            let exit_code = remote_exit.unwrap_or(99);
+            return RchCaptureDecision {
+                marker: "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT".to_owned(),
+                remote_exit,
+                exit_code,
+                authority: RchDecisionAuthority::RemoteEvidence,
+            };
+        }
+
+        if let Some(exit_code) = remote_exit {
+            return RchCaptureDecision {
+                marker: format!("Remote command finished: exit={exit_code}"),
+                remote_exit,
+                exit_code,
+                authority: RchDecisionAuthority::RemoteEvidence,
+            };
+        }
+
+        let status = wrapper_exit_code(fixture.signal);
+        if status == 0 && lacks_remote_success_evidence(fixture.transcript) {
+            return RchCaptureDecision {
+                marker: "RCH_REMOTE_EVIDENCE_MISSING".to_owned(),
+                remote_exit,
+                exit_code: 99,
+                authority: RchDecisionAuthority::RejectedWrapperEvidence,
+            };
+        }
+
+        RchCaptureDecision {
+            marker: format!("wrapper exit={status}"),
+            remote_exit,
+            exit_code: status,
+            authority: RchDecisionAuthority::RejectedWrapperEvidence,
+        }
+    }
+
+    fn normalized_guardrail_marker(marker: &str) -> &str {
+        if marker.starts_with("Remote command finished: exit=") {
+            "Remote command finished: exit="
+        } else {
+            marker
+        }
+    }
+
+    fn fixture_matrix_guardrail_markers() -> BTreeSet<&'static str> {
+        RCH_FIXTURE_MATRIX
+            .iter()
+            .map(|fixture| normalized_guardrail_marker(fixture.expected_marker))
+            .collect()
+    }
+
+    fn shell_fixture_matrix_markers(source: &str) -> BTreeSet<String> {
+        let marker_function_start = source
+            .find("e2e_rch_capture_fixture_matrix_markers()")
+            .expect("RCH fixture matrix marker function exists");
+        let marker_function_source = &source[marker_function_start..];
+        let heredoc_start = marker_function_source
+            .find("cat <<'EOF'\n")
+            .expect("RCH fixture matrix marker heredoc exists")
+            + "cat <<'EOF'\n".len();
+        let heredoc_source = &marker_function_source[heredoc_start..];
+        let heredoc_end = heredoc_source
+            .find("\nEOF")
+            .expect("RCH fixture matrix marker heredoc closes");
+
+        heredoc_source[..heredoc_end]
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn e2e_rch_fixture_matrix_covers_all_transcript_classes() {
+        let covered: BTreeSet<_> = RCH_FIXTURE_MATRIX
+            .iter()
+            .map(|fixture| fixture.class)
+            .collect();
+        let expected: BTreeSet<_> = RchFixtureClass::ALL.into_iter().collect();
+
+        assert_eq!(
+            covered, expected,
+            "RCH fixture matrix must cover every remote-exit transcript class"
+        );
+    }
+
+    #[test]
+    fn e2e_rch_fixture_matrix_models_exact_wrapper_markers() {
+        for fixture in RCH_FIXTURE_MATRIX {
+            let actual = model_rch_capture_decision(fixture);
+            assert_eq!(
+                actual.marker, fixture.expected_marker,
+                "{} marker",
+                fixture.name
+            );
+            assert_eq!(
+                actual.remote_exit, fixture.expected_remote_exit,
+                "{} remote exit",
+                fixture.name
+            );
+            assert_eq!(
+                actual.exit_code, fixture.expected_exit_code,
+                "{} exit code",
+                fixture.name
+            );
+            assert_eq!(
+                actual.authority, fixture.expected_authority,
+                "{} authority",
+                fixture.name
+            );
+        }
+    }
+
+    #[test]
+    fn e2e_rch_fixture_matrix_has_no_accepted_retrieval_markers() {
+        let accepted_marker = ["RCH_ARTIFACT_RETRIEVAL_", "ACCEPTED"].concat();
+
+        for fixture in RCH_FIXTURE_MATRIX {
+            for (field, value) in [
+                ("name", fixture.name),
+                ("command", fixture.command),
+                ("transcript", fixture.transcript),
+                ("expected_marker", fixture.expected_marker),
+            ] {
+                assert!(
+                    !value.contains(&accepted_marker),
+                    "{} fixture field `{field}` must not contain forbidden marker",
+                    fixture.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn e2e_rch_fixture_matrix_matches_live_guardrail_markers() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let lib_path = repo_root.join("scripts/e2e/lib.sh");
+        let source = std::fs::read_to_string(&lib_path).expect("read scripts/e2e/lib.sh");
+        let helper_start = source
+            .find("e2e_rch_capture()")
+            .expect("canonical e2e_rch_capture helper exists");
+        let helper_source = &source[helper_start..];
+
+        for marker in fixture_matrix_guardrail_markers() {
+            assert!(
+                helper_source.contains(marker),
+                "canonical RCH helper must contain fixture matrix marker `{marker}`"
+            );
+        }
+
+        let expected_markers: BTreeSet<_> = fixture_matrix_guardrail_markers()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            shell_fixture_matrix_markers(&source),
+            expected_markers,
+            "shell smoke marker list must match the Rust fixture matrix"
+        );
+    }
+
     #[test]
     fn e2e_canonical_rch_capture_helper_is_fail_closed() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

@@ -1365,3 +1365,21 @@ When RCH reports `Remote command finished: exit=0` but artifact retrieval keeps
 the local wrapper alive, the helper may terminate the wrapper after the grace
 window and records `RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT` with the
 command-tagged raw log path.
+
+The deterministic RCH regression matrix lives in `crates/ffs-harness/src/e2e.rs`
+and models local fallback, non-compilation wrapper rejection, remote build
+failure, remote test failure, remote success followed by artifact retrieval
+hang, timeout before remote exit, and missing remote evidence. It uses transcript
+fixtures only; it must never invoke real workers. The no-worker smoke command
+below verifies that the fixture marker vocabulary still matches the live helper:
+
+```bash
+bash -c 'source scripts/e2e/lib.sh; e2e_rch_capture_fixture_matrix_self_test'
+```
+
+To add a new RCH failure class, add one transcript fixture with the expected
+marker, remote exit, wrapper exit code, and authority classification, then add
+the marker to `e2e_rch_capture_fixture_matrix_markers` only if the live helper
+emits or parses a new marker. Do not add any accepted artifact-retrieval marker;
+new classes must preserve the existing local-fallback, timeout, missing-evidence,
+and artifact-retrieval fail-closed checks.

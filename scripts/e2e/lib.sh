@@ -549,6 +549,57 @@ e2e_rch_capture() {
 }
 
 #######################################
+# List canonical RCH guardrail markers used by fixture-matrix tests.
+#######################################
+e2e_rch_capture_fixture_matrix_markers() {
+    cat <<'EOF'
+RCH_LOCAL_FALLBACK_REJECTED
+RCH_REMOTE_EVIDENCE_MISSING
+RCH_TIMEOUT
+RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT
+Remote command finished: exit=
+exec called with non-compilation command
+[RCH] local
+EOF
+}
+
+#######################################
+# Verify the fixture matrix marker vocabulary still matches e2e_rch_capture.
+#######################################
+e2e_rch_capture_fixture_matrix_self_test() {
+    local helper_source
+    local accepted_prefix="RCH_ARTIFACT_RETRIEVAL_"
+    local accepted_suffix="ACCEPTED"
+    local marker
+    local marker_count=0
+    local missing=0
+
+    helper_source="$(declare -f e2e_rch_capture)"
+
+    if [[ "$helper_source" == *"$accepted_prefix"*"$accepted_suffix"* ]]; then
+        printf 'RCH_FIXTURE_MATRIX_SELF_TEST|outcome=FAIL|forbidden_marker=%s*%s\n' \
+            "$accepted_prefix" "$accepted_suffix"
+        return 1
+    fi
+
+    while IFS= read -r marker; do
+        [[ -n "$marker" ]] || continue
+        marker_count=$((marker_count + 1))
+        if [[ "$helper_source" != *"$marker"* ]]; then
+            printf 'RCH_FIXTURE_MATRIX_SELF_TEST|outcome=FAIL|missing_marker=%s\n' "$marker"
+            missing=1
+        fi
+    done < <(e2e_rch_capture_fixture_matrix_markers)
+
+    if [[ "$missing" -ne 0 ]]; then
+        return 1
+    fi
+
+    printf 'RCH_FIXTURE_MATRIX_SELF_TEST|outcome=PASS|markers=%s\n' "$marker_count"
+    e2e_rch_capture_fixture_matrix_markers
+}
+
+#######################################
 # Run a command and log output
 # Arguments:
 #   $* - Command to run
