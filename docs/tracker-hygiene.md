@@ -50,6 +50,7 @@ The report writes `tracker_source_hygiene_report.json` under
 - `source_aware_ready_rows`
 - `excluded_foreign_open_count`
 - `excluded_foreign_by_prefix`
+- `foreign_group_summaries`
 - `foreign_open_samples`
 - `reproduction_commands`
 
@@ -125,6 +126,7 @@ TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=4 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=22 \
 TRACKER_SOURCE_HYGIENE_EXPECT_READY=2 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT=20 \
+TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT=1 \
 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
 ```
 
@@ -138,6 +140,7 @@ TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=4 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=22 \
 TRACKER_SOURCE_HYGIENE_EXPECT_READY=2 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT=20 \
+TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT=1 \
 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
 ```
 

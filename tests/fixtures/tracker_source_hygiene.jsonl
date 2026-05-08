@@ -3,7 +3,7 @@
 {"id":"bd-fixture-blocker","title":"Fixture local blocker row","status":"open","priority":2,"issue_type":"task","source_repo":"."}
 {"id":"bd-fixture-blocked","title":"Fixture local blocked row","status":"open","priority":2,"issue_type":"task","source_repo":".","dependencies":[{"issue_id":"bd-fixture-blocked","depends_on_id":"bd-fixture-blocker","type":"blocks","created_at":"2026-05-08T00:00:00Z","created_by":"fixture","metadata":"{}","thread_id":""}]}
 {"id":"bd-fixture-closed","title":"Fixture local closed row","status":"closed","priority":2,"issue_type":"task","source_repo":"."}
-{"id":"br-r37-c1-foreign01","title":"Fixture foreign open row 01","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
+{"id":"br-r37-c1-foreign01","title":"Fixture foreign open row 01","description":"Synthetic FrankenNetworkX review row used to exercise owner hints.","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
 {"id":"br-r37-c1-foreign02","title":"Fixture foreign open row 02","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
 {"id":"br-r37-c1-foreign03","title":"Fixture foreign open row 03","status":"open","priority":1,"issue_type":"bug","source_repo":"."}
 {"id":"br-r37-c1-foreign04","title":"Fixture foreign open row 04","status":"open","priority":1,"issue_type":"bug","source_repo":"."}

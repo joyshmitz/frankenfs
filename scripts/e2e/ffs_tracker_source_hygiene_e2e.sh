@@ -70,6 +70,15 @@ if jq -s \
         ((.status // "open") == "open");
     def issue_prefix:
         ((.id // "") | capture("^(?<prefix>[^-]+(?:-[^-]+)?)").prefix // "unknown");
+    def owner_hint:
+        ([(.id // ""), (.title // ""), (.description // "")] | join(" ")) as $text
+        | if (($text | test("franken_networkx|networkx"; "i")) or ((.id // "") | startswith("franken_networkx-"))) then
+            "franken_networkx"
+        elif (($text | test("frankenfs"; "i")) or ((.id // "") | test("^(bd|frankenfs)-"))) then
+            "frankenfs"
+        else
+            "unknown"
+        end;
     def blocking_dependencies:
         (.dependencies // [])
         | map(select((.type // "") == "blocks"))
@@ -93,6 +102,11 @@ if jq -s \
         issue_sample + {
             assignee: (.assignee // .owner // null),
             blocked_by: blocking_dependencies
+        };
+    def foreign_group_row:
+        issue_sample + {
+            prefix: issue_prefix,
+            owner_hint: owner_hint
         };
     def foreign_open_count:
         ([.[] | select(foreign_issue and open_issue)] | length);
@@ -120,6 +134,26 @@ if jq -s \
             [.[] | select(foreign_issue and open_issue) | issue_prefix]
             | group_by(.)
             | map({prefix: .[0], count: length})
+            | sort_by(.prefix)
+        ),
+        foreign_group_summaries: (
+            [.[] | select(foreign_issue and open_issue) | foreign_group_row]
+            | sort_by(.prefix, .id)
+            | group_by(.prefix)
+            | map({
+                prefix: .[0].prefix,
+                count: length,
+                owner_hints: (
+                    ([.[].owner_hint] | unique) as $hints
+                    | if (($hints | length) > 1 and ($hints | index("unknown"))) then
+                        ($hints | map(select(. != "unknown")))
+                    else
+                        $hints
+                    end
+                ),
+                sample_ids: ([.[].id] | .[0:10]),
+                sample_titles: ([.[].title] | .[0:3])
+            })
             | sort_by(.prefix)
         ),
         local_open_ids: ([.[] | select(local_issue and open_issue) | .id] | sort),
@@ -152,6 +186,7 @@ if jq -e '
     and (.source_aware_ready_rows | type == "array")
     and (.foreign_open_samples | type == "array")
     and (.excluded_foreign_by_prefix | type == "array")
+    and (.foreign_group_summaries | type == "array")
     and (.reproduction_commands | type == "array")
     and (.mutation_policy | test("report-only"))
 ' "$REPORT_JSON" >/dev/null; then
@@ -202,12 +237,15 @@ EXPECTED_LOCAL_OPEN="${TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN:-}"
 EXPECTED_FOREIGN_OPEN="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN:-}"
 EXPECTED_READY="${TRACKER_SOURCE_HYGIENE_EXPECT_READY:-}"
 EXPECTED_FOREIGN_SAMPLE_COUNT="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT:-}"
+EXPECTED_FOREIGN_GROUP_COUNT="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT:-}"
 FOREIGN_SAMPLE_COUNT="$(jq -r '.foreign_open_samples | length' "$REPORT_JSON")"
+FOREIGN_GROUP_COUNT="$(jq -r '.foreign_group_summaries | length' "$REPORT_JSON")"
 
 check_expected_count "local_open" "$LOCAL_OPEN_COUNT" "$EXPECTED_LOCAL_OPEN"
 check_expected_count "foreign_open" "$FOREIGN_OPEN_COUNT" "$EXPECTED_FOREIGN_OPEN"
 check_expected_count "source_aware_ready" "$READY_COUNT" "$EXPECTED_READY"
 check_expected_count "foreign_sample_count" "$FOREIGN_SAMPLE_COUNT" "$EXPECTED_FOREIGN_SAMPLE_COUNT"
+check_expected_count "foreign_group_count" "$FOREIGN_GROUP_COUNT" "$EXPECTED_FOREIGN_GROUP_COUNT"
 
 if [[ -n "$EXPECTATION_DETAIL" ]]; then
     if [[ "$EXPECTATION_FAILED" -eq 0 ]]; then
