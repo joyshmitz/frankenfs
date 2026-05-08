@@ -32,6 +32,10 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_benchmark_governance}"
+export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-420}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -50,11 +54,87 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+run_rch_capture() {
+    local output_path="$1"
+    shift
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    local had_errexit=0
+
+    case $- in
+        *e*) had_errexit=1 ;;
+    esac
+
+    : >"$output_path"
+    set +e
+    RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
+    pid=$!
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=$*"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=$*"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}|command=$*"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}|command=$*"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
+            return 99
+        fi
+        return 0
+    fi
+    if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$output_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|output=${output_path}|command=$*"
+        return 0
+    fi
+    return "$status"
+}
+
 e2e_init "ffs_benchmark_governance"
 
 COMP_SRC="crates/ffs-harness/src/perf_comparison.rs"
 TRIAGE_SRC="crates/ffs-harness/src/perf_triage.rs"
 TAXONOMY_SRC="crates/ffs-harness/src/benchmark_taxonomy.rs"
+BUILD_LOG="$E2E_LOG_DIR/benchmark_governance_build.log"
+TEST_LOG="$E2E_LOG_DIR/benchmark_governance_unit_tests.log"
 
 #######################################
 # Scenario 1: Comparator emits benchmark_id, profile_id, baseline_ref in structured log
@@ -159,7 +239,7 @@ fi
 #######################################
 e2e_step "Scenario 8: All governance modules build"
 
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo check -p ffs-harness 2>/dev/null; then
+if run_rch_capture "$BUILD_LOG" cargo check -p ffs-harness; then
     scenario_result "governance_modules_build" "PASS" "ffs-harness builds cleanly"
 else
     scenario_result "governance_modules_build" "FAIL" "ffs-harness build failed"
@@ -170,17 +250,19 @@ fi
 #######################################
 e2e_step "Scenario 9: Governance unit tests"
 
-TEST_LOG=$(mktemp)
+: >"$TEST_LOG"
 COMBINED_PASS=0
 COMBINED_FAIL=0
 
 # Run tests for all 3 governance modules
 for mod_filter in "benchmark_taxonomy" "perf_comparison" "perf_triage"; do
-    if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib -- "$mod_filter" 2>>"$TEST_LOG" | tee -a "$TEST_LOG" > /dev/null 2>&1; then
+    MOD_LOG="$E2E_LOG_DIR/benchmark_governance_${mod_filter}.log"
+    if run_rch_capture "$MOD_LOG" cargo test -p ffs-harness --lib -- "$mod_filter"; then
         COMBINED_PASS=$((COMBINED_PASS + 1))
     else
         COMBINED_FAIL=$((COMBINED_FAIL + 1))
     fi
+    cat "$MOD_LOG" >>"$TEST_LOG"
 done
 
 TOTAL_TESTS=$(grep -c "^test " "$TEST_LOG" 2>/dev/null || echo "0")
@@ -190,7 +272,6 @@ if [[ $COMBINED_FAIL -eq 0 && $TOTAL_TESTS -ge 50 ]]; then
 else
     scenario_result "governance_unit_tests_pass" "FAIL" "Failures: ${COMBINED_FAIL}/3 modules, ${TOTAL_TESTS} tests"
 fi
-e2e_cleanup_tmp_file "$TEST_LOG"
 
 #######################################
 # Summary
