@@ -72,13 +72,21 @@ run_rch_capture() {
     local deadline
     local remote_exit=""
     local wait_status
+    local had_errexit=0
     shift
+
+    e2e_log "RCH command: $*"
+    case $- in
+        *e*) had_errexit=1 ;;
+    esac
 
     : >"$log_path"
     set +e
     RCH_VISIBILITY="$RCH_VISIBILITY" "$RCH_BIN" exec -- "$@" >"$log_path" 2>&1 &
     pid=$!
-    set -e
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
 
     deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
     while kill -0 "$pid" >/dev/null 2>&1; do
@@ -86,14 +94,14 @@ run_rch_capture() {
         if [[ -n "$remote_exit" ]]; then
             sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
             if kill -0 "$pid" >/dev/null 2>&1; then
-                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}|command=$*"
                 kill -TERM "$pid" >/dev/null 2>&1 || true
                 cancel_matching_rch_queue_entry "$@"
             fi
             break
         fi
         if ((SECONDS >= deadline)); then
-            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|log=${log_path}"
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|log=${log_path}|command=$*"
             kill -TERM "$pid" >/dev/null 2>&1 || true
             cancel_matching_rch_queue_entry "$@"
             status=124
@@ -105,29 +113,24 @@ run_rch_capture() {
     set +e
     wait "$pid" >/dev/null 2>&1
     wait_status=$?
-    set -e
-    if [[ -n "$remote_exit" ]]; then
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+    if [[ $status -eq 0 && -n "$remote_exit" ]]; then
         status="$remote_exit"
     elif [[ $status -eq 0 ]]; then
         status="$wait_status"
     fi
 
     if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
-        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}|command=$*"
         printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
         return 99
     fi
-    if [[ $status -eq 0 ]]; then
-        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
-            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
-            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
-            return 99
-        fi
-        return 0
-    fi
-    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
-        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}"
-        return 0
+    if [[ $status -eq 0 ]] && ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}|command=$*"
+        printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+        return 99
     fi
     return "$status"
 }
