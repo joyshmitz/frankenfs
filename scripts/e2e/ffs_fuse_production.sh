@@ -18,12 +18,23 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-ffs=trace,fuser=debug}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
-export FFS_USE_RCH="${FFS_USE_RCH:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_fuse_production}"
 export FFS_AUTO_UNMOUNT="${FFS_AUTO_UNMOUNT:-0}"
 export FFS_ALLOW_OTHER="${FFS_ALLOW_OTHER:-0}"
 export FFS_RUN_BTRFS_LANE_PROBE="${FFS_RUN_BTRFS_LANE_PROBE:-1}"
 export FFS_REQUIRE_BTRFS_LANE_PROBE="${FFS_REQUIRE_BTRFS_LANE_PROBE:-0}"
-FFS_CLI_BIN="${FFS_CLI_BIN:-$REPO_ROOT/target/release/ffs-cli}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_CLIENT_RUST_LOG="${RCH_CLIENT_RUST_LOG:-info}"
+FFS_CLI_BIN="${FFS_CLI_BIN:-$CARGO_TARGET_DIR/release/ffs-cli}"
+
+for rch_env_var in CARGO_TARGET_DIR RUST_BACKTRACE; do
+    case ",${RCH_ENV_ALLOWLIST:-}," in
+        *",${rch_env_var},"*) ;;
+        *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}${rch_env_var}" ;;
+    esac
+done
 
 e2e_init "ffs_fuse_production"
 e2e_print_env
@@ -420,11 +431,119 @@ run_case_shell() {
     run_case "$test_name" bash -lc "$shell_cmd"
 }
 
-run_cargo() {
-    if [[ "$FFS_USE_RCH" == "1" ]] && command -v rch >/dev/null 2>&1; then
-        e2e_assert rch exec -- cargo "$@"
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("$RCH_BIN" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "$RCH_BIN" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local output_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local required_artifact="${RCH_REQUIRED_ARTIFACT:-}"
+    local wait_status
+    shift
+
+    : >"$output_path"
+    set +e
+    RUST_LOG="$RCH_CLIENT_RUST_LOG" RCH_VISIBILITY="$RCH_VISIBILITY" "$RCH_BIN" exec -- "$@" >"$output_path" 2>&1 &
+    pid=$!
+    set -e
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
+        if [[ -n "$remote_exit" && -n "$required_artifact" && -e "$required_artifact" ]]; then
+            e2e_log "RCH_REQUIRED_ARTIFACT_READY|artifact=${required_artifact}|output=${output_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ $status -eq 0 ]]; then
+        if [[ -n "$remote_exit" ]]; then
+            status="$remote_exit"
+        else
+            status="$wait_status"
+        fi
+    fi
+
+    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
+            return 99
+        fi
+        return 0
+    fi
+    return "$status"
+}
+
+print_rch_log() {
+    local output_path="$1"
+    if [[ -s "$output_path" ]]; then
+        tee -a "$E2E_LOG_FILE" <"$output_path"
+    fi
+}
+
+run_remote_build() {
+    local output_path="$E2E_LOG_DIR/build_ffs_cli.log"
+    local start_ms duration_ms
+
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        fail_suite "build_ffs_cli" 0 "rch not found; this suite requires offloaded cargo execution"
+    fi
+
+    start_ms="$(timestamp_ms)"
+    if RCH_REQUIRED_ARTIFACT="$FFS_CLI_BIN" run_rch_capture "$output_path" cargo build -p ffs-cli --release; then
+        duration_ms=$(( $(timestamp_ms) - start_ms ))
+        if [[ ! -x "$FFS_CLI_BIN" ]]; then
+            fail_suite "build_ffs_cli" "$duration_ms" "ffs-cli binary missing after RCH build at $FFS_CLI_BIN"
+        fi
+        record_test "build_ffs_cli" "pass" "$duration_ms" "binary=$FFS_CLI_BIN log=$output_path"
     else
-        e2e_assert cargo "$@"
+        duration_ms=$(( $(timestamp_ms) - start_ms ))
+        print_rch_log "$output_path"
+        fail_suite "build_ffs_cli" "$duration_ms" "RCH build failed; log=$output_path"
     fi
 }
 
@@ -1021,12 +1140,11 @@ run_optional_btrfs_smoke() {
     run_case "btrfs_ro_mount_stop" stop_mount "$mount_ro"
 }
 
-ensure_mount_capability
-
 e2e_step "Phase 0: build ffs-cli"
-run_cargo build -p ffs-cli --release
+run_remote_build
 e2e_assert_file "$FFS_CLI_BIN"
 
+ensure_mount_capability
 prepare_fixtures
 run_permissioned_fuse_lane_probe
 log_system_state "System snapshot before runtime probes"
