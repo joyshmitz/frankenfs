@@ -17,6 +17,7 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_permissioned_campaign_broker}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 
 REFERENCE_TIMESTAMP="${FFS_PERMISSIONED_BROKER_REFERENCE_TIMESTAMP:-2026-05-07T00:00:00Z}"
 GIT_SHA="$(git rev-parse HEAD)"
@@ -88,8 +89,119 @@ run_harness() {
     local stdout_path="$2"
     local stderr_path="$3"
     shift 3
-    run_capture "$scenario_id" "$stdout_path" "$stderr_path" \
-        "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- "$@"
+    local status manifest_path="" out_path="" summary_out_path=""
+    local remote_work_dir remote_manifest remote_out="" remote_summary_out="" manifest_b64 rch_stdout_path command_text
+    local -a remote_args=() logical_command=("${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- "$@")
+    local arg
+    while (($# > 0)); do
+        arg="$1"
+        case "$arg" in
+            --manifest)
+                manifest_path="$2"
+                remote_work_dir="$CARGO_TARGET_DIR/permissioned_campaign_broker/$scenario_id"
+                remote_manifest="$remote_work_dir/manifest.json"
+                remote_args+=("$arg" "$remote_manifest")
+                shift 2
+                ;;
+            --out)
+                out_path="$2"
+                remote_out="$CARGO_TARGET_DIR/permissioned_campaign_broker/$scenario_id/out"
+                remote_args+=("$arg" "$remote_out")
+                shift 2
+                ;;
+            --summary-out)
+                summary_out_path="$2"
+                remote_summary_out="$CARGO_TARGET_DIR/permissioned_campaign_broker/$scenario_id/summary"
+                remote_args+=("$arg" "$remote_summary_out")
+                shift 2
+                ;;
+            *)
+                remote_args+=("$arg")
+                shift
+                ;;
+        esac
+    done
+
+    command_text="$(quote_command "${logical_command[@]}")"
+    if [[ -z "$manifest_path" ]]; then
+        printf '%s\n' "run_harness requires --manifest" >"$stderr_path"
+        record_command "$scenario_id" 2 "$command_text" "$stdout_path" "$stderr_path"
+        return 2
+    fi
+
+    manifest_b64="$(base64 -w 0 "$manifest_path")"
+    rch_stdout_path="${stdout_path}.rch.log"
+    if RCH_VISIBILITY=none RCH_LOG_LEVEL=error timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- env \
+        FFS_REMOTE_MANIFEST_B64="$manifest_b64" \
+        FFS_REMOTE_MANIFEST_PATH="$remote_manifest" \
+        FFS_REMOTE_OUT_PATH="$remote_out" \
+        FFS_REMOTE_SUMMARY_OUT_PATH="$remote_summary_out" \
+        bash -lc '
+            set -euo pipefail
+            mkdir -p "$(dirname "$FFS_REMOTE_MANIFEST_PATH")"
+            printf "%s" "$FFS_REMOTE_MANIFEST_B64" | base64 --decode >"$FFS_REMOTE_MANIFEST_PATH"
+            remote_stdout="$(dirname "$FFS_REMOTE_MANIFEST_PATH")/stdout.log"
+            remote_stderr="$(dirname "$FFS_REMOTE_MANIFEST_PATH")/stderr.log"
+            set +e
+            cargo run --quiet -p ffs-harness -- "$@" >"$remote_stdout" 2>"$remote_stderr"
+            status=$?
+            set -e
+            cat "$remote_stderr" >&2
+            printf "%s\n" "__FFS_REMOTE_STDOUT_BEGIN__"
+            cat "$remote_stdout"
+            printf "%s\n" "__FFS_REMOTE_STDOUT_END__"
+            if [[ -n "$FFS_REMOTE_OUT_PATH" && -f "$FFS_REMOTE_OUT_PATH" ]]; then
+                printf "%s\n" "__FFS_REMOTE_FILE_BEGIN__ out"
+                base64 -w 0 "$FFS_REMOTE_OUT_PATH"
+                printf "\n%s\n" "__FFS_REMOTE_FILE_END__ out"
+            fi
+            if [[ -n "$FFS_REMOTE_SUMMARY_OUT_PATH" && -f "$FFS_REMOTE_SUMMARY_OUT_PATH" ]]; then
+                printf "%s\n" "__FFS_REMOTE_FILE_BEGIN__ summary"
+                base64 -w 0 "$FFS_REMOTE_SUMMARY_OUT_PATH"
+                printf "\n%s\n" "__FFS_REMOTE_FILE_END__ summary"
+            fi
+            exit "$status"
+        ' _ "${remote_args[@]}" >"$rch_stdout_path" 2>"$stderr_path"
+    then
+        status=0
+    else
+        status=$?
+    fi
+    record_command "$scenario_id" "$status" "$command_text" "$stdout_path" "$stderr_path"
+
+    if ! awk '
+        $0 == "__FFS_REMOTE_STDOUT_BEGIN__" { capture = 1; next }
+        $0 == "__FFS_REMOTE_STDOUT_END__" { found = 1; capture = 0; next }
+        capture { print }
+        END { exit found ? 0 : 1 }
+    ' "$rch_stdout_path" >"$stdout_path"; then
+        cp "$rch_stdout_path" "$stdout_path"
+    fi
+
+    if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$rch_stdout_path" "$stderr_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|stdout=${stdout_path}|rch_log=${rch_stdout_path}"
+        status=0
+    fi
+
+    if [[ $status -eq 0 ]]; then
+        if [[ -n "$out_path" ]]; then
+            awk '
+                $0 == "__FFS_REMOTE_FILE_BEGIN__ out" { capture = 1; next }
+                $0 == "__FFS_REMOTE_FILE_END__ out" { found = 1; capture = 0; next }
+                capture { print }
+                END { exit found ? 0 : 1 }
+            ' "$rch_stdout_path" | base64 --decode >"$out_path" || return 1
+        fi
+        if [[ -n "$summary_out_path" ]]; then
+            awk '
+                $0 == "__FFS_REMOTE_FILE_BEGIN__ summary" { capture = 1; next }
+                $0 == "__FFS_REMOTE_FILE_END__ summary" { found = 1; capture = 0; next }
+                capture { print }
+                END { exit found ? 0 : 1 }
+            ' "$rch_stdout_path" | base64 --decode >"$summary_out_path" || return 1
+        fi
+    fi
+    return "$status"
 }
 
 write_detailed_result() {
