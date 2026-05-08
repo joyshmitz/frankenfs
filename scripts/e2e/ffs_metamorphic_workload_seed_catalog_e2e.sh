@@ -14,6 +14,8 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_metamorphic_workload_seed_catalog}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-420}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -37,10 +39,17 @@ extract_report_json() {
     local report_path="$2"
     python3 - "$raw_path" "$report_path" <<'PY'
 import json
+import re
 import sys
 
 raw_path, report_path = sys.argv[1:]
 text = open(raw_path, encoding="utf-8", errors="replace").read()
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+text = "\n".join(
+    line
+    for line in text.splitlines()
+    if not line.startswith("error: metamorphic workload seed catalog validation failed:")
+) + "\n"
 decoder = json.JSONDecoder()
 for index, char in enumerate(text):
     if char != "{":
@@ -59,30 +68,134 @@ else:
 PY
 }
 
-run_cargo_cmd() {
-    if [[ "${FFS_E2E_LOCAL_CARGO:-0}" == "1" ]]; then
-        cargo "$@"
-    else
-        RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo "$@"
+extract_markdown_report() {
+    local raw_path="$1"
+    local report_path="$2"
+    python3 - "$raw_path" "$report_path" <<'PY'
+import pathlib
+import re
+import sys
+
+raw_path, report_path = sys.argv[1:]
+text = pathlib.Path(raw_path).read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+start = text.find("# Metamorphic Workload Seed Catalog")
+if start < 0:
+    raise SystemExit("metamorphic workload seed catalog markdown not found")
+end = text.find("\n[RCH]", start)
+if end < 0:
+    end = text.find("\nRemote command finished:", start)
+if end < 0:
+    end = len(text)
+pathlib.Path(report_path).write_text(text[start:end].rstrip() + "\n", encoding="utf-8")
+PY
+}
+
+run_rch_capture() {
+    local output_path="$1"
+    shift
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    local had_errexit=0
+
+    case $- in
+        *e*) had_errexit=1 ;;
+    esac
+
+    : >"$output_path"
+    set +e
+    RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
+    pid=$!
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
     fi
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=$*"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=$*"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}|command=$*"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}|command=$*"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
+            return 99
+        fi
+        return 0
+    fi
+    if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$output_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|output=${output_path}|command=$*"
+        return 0
+    fi
+    return "$status"
+}
+
+run_cargo_capture() {
+    local output_path="$1"
+    shift
+    run_rch_capture "$output_path" cargo "$@"
 }
 
 e2e_init "ffs_metamorphic_workload_seed_catalog"
 
 CATALOG_JSON="$REPO_ROOT/tests/metamorphic-workload-seeds/metamorphic_workload_seed_catalog.json"
+RCH_INPUT_DIR="${REPO_ROOT}/artifacts/rch_input/$(basename "$E2E_LOG_DIR")/metamorphic_workload_seed_catalog"
+mkdir -p "$RCH_INPUT_DIR"
 REPORT_JSON="$E2E_LOG_DIR/metamorphic_workload_seed_catalog_report.json"
 SUMMARY_MD="$E2E_LOG_DIR/metamorphic_workload_seed_catalog_summary.md"
 VALIDATE_RAW="$E2E_LOG_DIR/metamorphic_workload_seed_catalog_validate.raw"
+SUMMARY_RAW="$E2E_LOG_DIR/metamorphic_workload_seed_catalog_summary.raw"
 UNIT_LOG="$E2E_LOG_DIR/metamorphic_workload_seed_catalog_unit_tests.log"
-BAD_PERMISSIONED_JSON="$E2E_LOG_DIR/metamorphic_bad_permissioned_ack.json"
-BAD_SOURCE_JSON="$E2E_LOG_DIR/metamorphic_bad_source_artifact.json"
-BAD_NON_JSON_SOURCE="$E2E_LOG_DIR/metamorphic_bad_source_artifact.txt"
-BAD_NON_JSON_JSON="$E2E_LOG_DIR/metamorphic_bad_non_json_source.json"
-BAD_POINTER_JSON="$E2E_LOG_DIR/metamorphic_bad_source_pointer.json"
-BAD_VALUE_JSON="$E2E_LOG_DIR/metamorphic_bad_source_value.json"
-BAD_INVARIANT_JSON="$E2E_LOG_DIR/metamorphic_bad_invariant.json"
+BAD_PERMISSIONED_JSON="$RCH_INPUT_DIR/metamorphic_bad_permissioned_ack.json"
+BAD_PERMISSIONED_RAW="$E2E_LOG_DIR/metamorphic_bad_permissioned_ack.raw"
+BAD_SOURCE_JSON="$RCH_INPUT_DIR/metamorphic_bad_source_artifact.json"
+BAD_SOURCE_RAW="$E2E_LOG_DIR/metamorphic_bad_source_artifact.raw"
+BAD_NON_JSON_SOURCE="$RCH_INPUT_DIR/metamorphic_bad_source_artifact.txt"
+BAD_NON_JSON_JSON="$RCH_INPUT_DIR/metamorphic_bad_non_json_source.json"
+BAD_NON_JSON_RAW="$E2E_LOG_DIR/metamorphic_bad_non_json_source.raw"
+BAD_POINTER_JSON="$RCH_INPUT_DIR/metamorphic_bad_source_pointer.json"
+BAD_POINTER_RAW="$E2E_LOG_DIR/metamorphic_bad_source_pointer.raw"
+BAD_VALUE_JSON="$RCH_INPUT_DIR/metamorphic_bad_source_value.json"
+BAD_VALUE_RAW="$E2E_LOG_DIR/metamorphic_bad_source_value.raw"
+BAD_INVARIANT_JSON="$RCH_INPUT_DIR/metamorphic_bad_invariant.json"
+BAD_INVARIANT_RAW="$E2E_LOG_DIR/metamorphic_bad_invariant.raw"
 BAD_INVARIANT_REPORT="$E2E_LOG_DIR/metamorphic_bad_invariant_report.json"
-BAD_RAW="$E2E_LOG_DIR/metamorphic_bad.raw"
+BAD_INVARIANT_REPORT_RAW="$E2E_LOG_DIR/metamorphic_bad_invariant_report.raw"
 UNIT_TESTS_OK=0
 
 e2e_step "Scenario 1: metamorphic workload seed catalog module and CLI are wired"
@@ -95,11 +208,15 @@ else
 fi
 
 e2e_step "Scenario 2: checked-in metamorphic seed catalog validates"
-if run_cargo_cmd run --quiet -p ffs-harness -- \
+if run_cargo_capture "$VALIDATE_RAW" run --quiet -p ffs-harness -- \
     validate-metamorphic-workload-seeds \
     --catalog "$CATALOG_JSON" \
-    --summary-out "$SUMMARY_MD" >"$VALIDATE_RAW" 2>&1 \
-    && extract_report_json "$VALIDATE_RAW" "$REPORT_JSON"; then
+    && extract_report_json "$VALIDATE_RAW" "$REPORT_JSON" \
+    && run_cargo_capture "$SUMMARY_RAW" run --quiet -p ffs-harness -- \
+        validate-metamorphic-workload-seeds \
+        --catalog "$CATALOG_JSON" \
+        --format markdown \
+    && extract_markdown_report "$SUMMARY_RAW" "$SUMMARY_MD"; then
     scenario_result "metamorphic_seed_catalog_validates" "PASS" "checked-in catalog accepted"
 else
     cat "$VALIDATE_RAW"
@@ -228,24 +345,32 @@ bad_invariant_path.write_text(json.dumps(bad_invariant, indent=2, sort_keys=True
 PY
 
 invalid_failures=0
-for bad_catalog in "$BAD_PERMISSIONED_JSON" "$BAD_SOURCE_JSON" "$BAD_NON_JSON_JSON" "$BAD_POINTER_JSON" "$BAD_VALUE_JSON" "$BAD_INVARIANT_JSON"; do
-    if run_cargo_cmd run --quiet -p ffs-harness -- \
+for invalid_case in \
+    "$BAD_PERMISSIONED_JSON:$BAD_PERMISSIONED_RAW" \
+    "$BAD_SOURCE_JSON:$BAD_SOURCE_RAW" \
+    "$BAD_NON_JSON_JSON:$BAD_NON_JSON_RAW" \
+    "$BAD_POINTER_JSON:$BAD_POINTER_RAW" \
+    "$BAD_VALUE_JSON:$BAD_VALUE_RAW" \
+    "$BAD_INVARIANT_JSON:$BAD_INVARIANT_RAW"; do
+    bad_catalog="${invalid_case%%:*}"
+    bad_raw="${invalid_case#*:}"
+    if run_cargo_capture "$bad_raw" run --quiet -p ffs-harness -- \
         validate-metamorphic-workload-seeds \
-        --catalog "$bad_catalog" >"$BAD_RAW" 2>&1; then
-        cat "$BAD_RAW"
+        --catalog "$bad_catalog"; then
+        cat "$bad_raw"
     else
         invalid_failures=$((invalid_failures + 1))
     fi
 done
 
 coverage_preserved=0
-if run_cargo_cmd run --quiet -p ffs-harness -- \
+if run_cargo_capture "$BAD_INVARIANT_REPORT_RAW" run --quiet -p ffs-harness -- \
     validate-metamorphic-workload-seeds \
-    --catalog "$BAD_INVARIANT_JSON" \
-    --out "$BAD_INVARIANT_REPORT" >"$BAD_RAW" 2>&1; then
-    cat "$BAD_RAW"
+    --catalog "$BAD_INVARIANT_JSON"; then
+    cat "$BAD_INVARIANT_REPORT_RAW"
 else
-    if python3 - "$BAD_INVARIANT_REPORT" <<'PY'
+    if extract_report_json "$BAD_INVARIANT_REPORT_RAW" "$BAD_INVARIANT_REPORT" \
+        && python3 - "$BAD_INVARIANT_REPORT" <<'PY'
 import json
 import pathlib
 import sys
@@ -270,7 +395,7 @@ else
 fi
 
 e2e_step "Scenario 6: unit coverage rejects malformed catalog rows"
-if run_cargo_cmd test -p ffs-harness --lib metamorphic_workload_seed_catalog -- --nocapture >"$UNIT_LOG" 2>&1; then
+if run_cargo_capture "$UNIT_LOG" test -p ffs-harness --lib metamorphic_workload_seed_catalog -- --nocapture; then
     UNIT_TESTS_OK=1
     cat "$UNIT_LOG"
     for test_name in \
