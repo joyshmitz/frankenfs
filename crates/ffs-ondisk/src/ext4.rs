@@ -11183,6 +11183,93 @@ mod tests {
         );
     }
 
+    /// bd-bspkl — Kernel-conformance pin for Ext4Extent leaf entry
+    /// 12-byte field offsets per fs/ext4/ext4_extents.h struct
+    /// ext4_extent.
+    ///
+    ///   ee_block    u32 @0..4   (logical_block)
+    ///   ee_len      u16 @4..6   (raw_len)
+    ///   ee_start_hi u16 @6..8   (physical high 16 bits)
+    ///   ee_start_lo u32 @8..12  (physical low 32 bits)
+    ///   physical_start = (start_hi << 32) | start_lo (48-bit total)
+    ///
+    /// bd-jbilz pins EXT4_EXTENT_MAGIC (0xF30A); bd-9rxhw and the
+    /// extent_tree_*_roundtrip proptests verify parser BEHAVIOR but
+    /// no test pins each FIELD OFFSET within an entry with unique-
+    /// magic stamping. A regression that drifted ee_start_hi to
+    /// offset 4..6 (where ee_len lives) would still pass round-trip
+    /// if the writer were similarly broken, and would silently
+    /// corrupt every physical-block address in extent trees.
+    ///
+    /// Stamp each field with a distinct non-zero magic so any
+    /// single-field offset drift produces a cross-field collision.
+    #[test]
+    fn ext4_extent_leaf_kernel_offsets_match_extents_h() {
+        let mut buf = [0_u8; 24];
+
+        // 12-byte header: magic (forced), 1 entry, depth=0 (leaf),
+        // generation=0 (don't care).
+        buf[0..2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+        buf[2..4].copy_from_slice(&1_u16.to_le_bytes()); // entries
+        buf[4..6].copy_from_slice(&1_u16.to_le_bytes()); // max_entries
+        buf[6..8].copy_from_slice(&0_u16.to_le_bytes()); // depth=0 → leaf
+
+        // 12-byte single entry at offset 12. Each field gets a
+        // unique magic so an offset drift produces a cross-field
+        // collision.
+        let ee_block: u32 = 0x1111_2222;
+        // ee_len must satisfy 0 < actual_len. Choose 0x1234 (well
+        // below EXT_INIT_MAX_LEN=0x8000) → not unwritten, raw_len
+        // round-trips as-is.
+        let ee_len: u16 = 0x1234;
+        let ee_start_hi: u16 = 0xABCD;
+        let ee_start_lo: u32 = 0xDEAD_BEEF;
+
+        buf[12..16].copy_from_slice(&ee_block.to_le_bytes());
+        buf[16..18].copy_from_slice(&ee_len.to_le_bytes());
+        buf[18..20].copy_from_slice(&ee_start_hi.to_le_bytes());
+        buf[20..24].copy_from_slice(&ee_start_lo.to_le_bytes());
+
+        let (header, tree) =
+            parse_extent_tree(&buf).expect("kernel-stamped extent leaf must parse");
+
+        // Header field offsets are pinned implicitly: a regression
+        // in entries@2..4 would change the loop bound; magic@0..2
+        // is checked by the parser. depth@6..8 is implicit in the
+        // Leaf branch selection.
+        assert_eq!(header.entries, 1, "entries must come from offset 2..4");
+        assert_eq!(header.max_entries, 1, "max_entries must come from offset 4..6");
+        assert_eq!(header.depth, 0, "depth must come from offset 6..8 (leaf branch selected)");
+
+        let extents = match tree {
+            ExtentTree::Leaf(extents) => extents,
+            ExtentTree::Index(_) => panic!("depth=0 must yield Leaf branch"),
+        };
+        assert_eq!(extents.len(), 1, "single-entry payload must parse to one extent");
+        let extent = extents[0];
+
+        assert_eq!(
+            extent.logical_block, ee_block,
+            "logical_block must come from offset 0..4 (relative to entry)"
+        );
+        assert_eq!(
+            extent.raw_len, ee_len,
+            "raw_len must come from offset 4..6 (relative to entry)"
+        );
+
+        // physical_start = (ee_start_hi << 32) | ee_start_lo per
+        // the parser at lib.rs:2956-2958. Pin both halves.
+        let expected_physical = (u64::from(ee_start_hi) << 32) | u64::from(ee_start_lo);
+        assert_eq!(
+            extent.physical_start, expected_physical,
+            "physical_start must combine ee_start_hi@6..8 (high 16) and ee_start_lo@8..12 (low 32)"
+        );
+        assert_eq!(
+            extent.physical_start, 0x0000_ABCD_DEAD_BEEF,
+            "explicit literal pinning of the 48-bit physical address"
+        );
+    }
+
     #[test]
     fn extra_nsec_and_epoch_extraction() {
         // extra = 0b...nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnee
