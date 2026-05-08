@@ -5871,6 +5871,80 @@ mod tests {
         assert_eq!(parsed.inode_bitmap_csum, gd.inode_bitmap_csum);
     }
 
+    /// bd-l6cfv — Canonical byte-layout snapshot for
+    /// Ext4GroupDesc::write_to_bytes 32-byte mode. Pins the
+    /// encoder's exact output for a magic-stamped fixture so any
+    /// field-order or offset drift fails with a hex diff. The
+    /// expected literal pins BOTH magic regions AND the implicit
+    /// 4-byte gap at @0x14..0x18 that the encoder leaves
+    /// untouched (a regression that wrote into that gap would be
+    /// caught here).
+    ///
+    /// Pairs with bd-pketz (BtrfsInodeItem), bd-bq6l8
+    /// (BtrfsInodeRef), bd-2gb89 (BtrfsDirItem), bd-yjzhk +
+    /// bd-fw55q (BtrfsExtentData Regular/Inline). Correctness is
+    /// pinned by the bd-ov7zr proptest suite + bd-38xrn fuzz
+    /// target; this pins the byte-exact encoder layout.
+    #[test]
+    fn ext4_group_desc_write_to_bytes_32byte_canonical_byte_layout() {
+        let gd = Ext4GroupDesc {
+            // Magic-stamped values — distinct nibbles per field
+            // so any offset drift produces a cross-field collision.
+            block_bitmap: 0x1122_3344,
+            inode_bitmap: 0x5566_7788,
+            inode_table: 0x99AA_BBCC,
+            free_blocks_count: 0x0000_DDDD,
+            free_inodes_count: 0x0000_EEEE,
+            used_dirs_count: 0x0000_FEFE,
+            itable_unused: 0x0000_DEAD,
+            flags: 0x1234,
+            checksum: 0xBEEF,
+            block_bitmap_csum: 0x0000_5678,
+            inode_bitmap_csum: 0x0000_9ABC,
+        };
+        let mut buf = [0_u8; 32];
+        gd.write_to_bytes(&mut buf, 32)
+            .expect("canonical fixture encodes");
+
+        let expected: [u8; 32] = [
+            // block_bitmap LE @0x00..0x04 = 0x1122_3344 (low 32 bits)
+            0x44, 0x33, 0x22, 0x11,
+            // inode_bitmap LE @0x04..0x08 = 0x5566_7788
+            0x88, 0x77, 0x66, 0x55,
+            // inode_table LE @0x08..0x0C = 0x99AA_BBCC
+            0xCC, 0xBB, 0xAA, 0x99,
+            // free_blocks_count LE @0x0C..0x0E = 0xDDDD (cast u32→u16)
+            0xDD, 0xDD,
+            // free_inodes_count LE @0x0E..0x10 = 0xEEEE
+            0xEE, 0xEE,
+            // used_dirs_count LE @0x10..0x12 = 0xFEFE
+            0xFE, 0xFE,
+            // flags LE @0x12..0x14 = 0x1234
+            0x34, 0x12,
+            // 4-byte gap @0x14..0x18 (encoder leaves untouched)
+            0x00, 0x00, 0x00, 0x00,
+            // block_bitmap_csum LE @0x18..0x1A = 0x5678 (cast u32→u16)
+            0x78, 0x56,
+            // inode_bitmap_csum LE @0x1A..0x1C = 0x9ABC
+            0xBC, 0x9A,
+            // itable_unused LE @0x1C..0x1E = 0xDEAD (cast u32→u16)
+            0xAD, 0xDE,
+            // checksum LE @0x1E..0x20 = 0xBEEF
+            0xEF, 0xBE,
+        ];
+        assert_eq!(
+            buf, expected,
+            "Ext4GroupDesc::write_to_bytes 32-byte canonical byte layout drifted"
+        );
+
+        // Cross-check: parser round-trips the canonical bytes.
+        let parsed = Ext4GroupDesc::parse_from_bytes(&buf, 32)
+            .expect("canonical bytes parse");
+        assert_eq!(parsed.block_bitmap, gd.block_bitmap);
+        assert_eq!(parsed.flags, gd.flags);
+        assert_eq!(parsed.checksum, gd.checksum);
+    }
+
     #[test]
     fn group_desc_write_to_bytes_roundtrip_64() {
         let gd = Ext4GroupDesc {
