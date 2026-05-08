@@ -6494,6 +6494,38 @@ mod tests {
         );
     }
 
+    // bd-fs41s — Determinism MR for parse_root_item. Sister
+    // parsers parse_xattr_items (bd-fhznm), parse_extent_data
+    // (bd-3niu3), parse_inode_refs (bd-9f8ef), parse_root_ref
+    // (bd-x2320) all have determinism proptests; parse_root_item
+    // had only the smoke test and bd-xbqdw kernel-offset pin.
+    //
+    // Valid lengths per parse_root_item invariants (lib.rs:578-590):
+    //   239               (legacy, no UUID extensions)
+    //   247               (legacy + generation_v2 only)
+    //   263               (… + uuid)
+    //   279               (… + parent_uuid)
+    // Lengths in (239, 247) ∪ (247, 263) ∪ (263, 279) are
+    // partial-extension and the parser rejects them — sweep
+    // only the canonical valid sizes.
+    proptest::proptest! {
+        #[test]
+        fn parse_root_item_proptest_determinism(
+            len in proptest::prop_oneof![
+                proptest::prelude::Just(239_usize),
+                proptest::prelude::Just(247_usize),
+                proptest::prelude::Just(263_usize),
+                proptest::prelude::Just(279_usize),
+            ],
+            bytenr in proptest::prelude::any::<u64>(),
+        ) {
+            let payload = make_root_item_payload(len, bytenr);
+            let a = parse_root_item(&payload).expect("first parse");
+            let b = parse_root_item(&payload).expect("second parse");
+            proptest::prop_assert_eq!(a, b);
+        }
+    }
+
     #[test]
     fn parse_inode_item_smoke() {
         let mut inode = [0_u8; 160];
