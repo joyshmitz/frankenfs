@@ -7429,6 +7429,63 @@ mod tests {
         assert_eq!(parsed, vec![original]);
     }
 
+    // bd-kelr0 — Kernel-conformance pin for parse_inode_refs.
+    //
+    // struct btrfs_inode_ref in fs/btrfs/btrfs_tree.h packs to 10
+    // fixed bytes:
+    //   index    u64 @0..8
+    //   name_len u16 @8..10
+    // plus name bytes at @10..10+name_len.
+    //
+    // The existing inode_ref_round_trip test and the bd-pt9pk +
+    // bd-9f8ef proptest MRs verify parser BEHAVIOR but do not pin
+    // the white-box read offsets — a regression that drifted index
+    // to offset 1..9 or name_len to offset 7..9 would be caught
+    // only by the overall equality check, not by a specific offset
+    // assertion. Stamp each addressable field with a unique non-
+    // zero magic so any single-field offset drift produces a
+    // cross-field collision.
+    #[test]
+    fn parse_inode_refs_kernel_offsets_match_btrfs_tree_h() {
+        let name: [u8; 5] = [0x99, 0x99, 0x99, 0x99, 0x99];
+        let mut data = vec![0_u8; 10 + name.len()];
+
+        let index = 0x1111_2222_3333_4444_u64;
+        let name_len = u16::try_from(name.len()).expect("name fits u16");
+
+        data[0..8].copy_from_slice(&index.to_le_bytes());
+        data[8..10].copy_from_slice(&name_len.to_le_bytes());
+        data[10..10 + name.len()].copy_from_slice(&name);
+
+        let parsed = parse_inode_refs(&data).expect("kernel-stamped inode_ref must parse");
+        assert_eq!(parsed.len(), 1, "single-entry payload must parse to one entry");
+        assert_eq!(
+            parsed[0].index, index,
+            "index must come from offset 0..8 per kernel layout"
+        );
+        assert_eq!(
+            parsed[0].name, name,
+            "name bytes must start at offset 10 with length name_len@8..10"
+        );
+
+        // Negative MR: mutate name_len@8..10 to 0 and assert the
+        // parser rejects with InvalidField{field: "inode_ref.name_len"}
+        // — pinning offset 8 explicitly. A regression that drifted
+        // name_len's read to a different offset would either
+        // accidentally read non-zero bytes (allowing this case) or
+        // misalign the name slice (mismatching the equality above).
+        let mut bad = data.clone();
+        bad[8..10].copy_from_slice(&0_u16.to_le_bytes());
+        let err = parse_inode_refs(&bad).expect_err("zero name_len must reject");
+        match err {
+            ParseError::InvalidField { field, .. } => assert_eq!(
+                field, "inode_ref.name_len",
+                "rejection must specifically blame name_len, proving offset 8 is read"
+            ),
+            other => panic!("expected InvalidField{{name_len}}, got {other:?}"),
+        }
+    }
+
     #[test]
     fn inode_ref_try_to_bytes_rejects_name_len_overflow() {
         let original = BtrfsInodeRef {
