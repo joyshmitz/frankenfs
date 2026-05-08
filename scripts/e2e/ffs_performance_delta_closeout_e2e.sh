@@ -44,9 +44,19 @@ run_rch_capture() {
 
     RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
         timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
     if [[ "$status" -eq 124 ]] && grep -q "Remote command finished: exit=0" "$log_path"; then
         e2e_log "RCH_ARTIFACT_RETRIEVAL_TIMEOUT_ACCEPTED|log=${log_path}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
         return 0
+    fi
+    if [[ "$status" -eq 0 ]] && ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+        printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+        return 99
     fi
 
     return "$status"
@@ -64,57 +74,23 @@ run_closeout_report_capture() {
     local log_path="$1"
     shift
 
-    run_rch_capture "$log_path" bash -lc '
-set -euo pipefail
-rust_hash="$(rustc -vV | awk "/commit-hash:/ {print \$2}")"
-export CARGO_TARGET_DIR="/data/tmp/rch_target_frankenfs_performance_delta_closeout_${rust_hash}"
-issues="${CARGO_TARGET_DIR}/performance_delta_closeout/required_followups_issues.jsonl"
-mkdir -p "$(dirname "$issues")"
-cat >"$issues" <<'"'"'JSONL'"'"'
-{"id":"bd-rchk5.5"}
-{"id":"bd-rchk5.6"}
-{"id":"bd-rchk5.7"}
-{"id":"bd-rchk5.8"}
-{"id":"bd-9vzzk"}
-{"id":"bd-t21em"}
-JSONL
-cargo run --quiet -p ffs-harness -- performance-delta-closeout \
-    --config benchmarks/performance_delta_closeout.json \
-    --issues "$issues" "$@"
-' _ "$@"
+    run_rch_capture "$log_path" cargo run --quiet -p ffs-harness -- performance-delta-closeout \
+        --config benchmarks/performance_delta_closeout.json \
+        --issues "$ISSUES_JSONL" "$@"
 }
 
 run_closeout_missing_followup_capture() {
     local log_path="$1"
 
-    run_rch_capture "$log_path" bash -lc '
-set -euo pipefail
-rust_hash="$(rustc -vV | awk "/commit-hash:/ {print \$2}")"
-export CARGO_TARGET_DIR="/data/tmp/rch_target_frankenfs_performance_delta_closeout_${rust_hash}"
-bad_issues="${CARGO_TARGET_DIR}/performance_delta_closeout/issues_missing_mount_cold_followup.jsonl"
-mkdir -p "$(dirname "$bad_issues")"
-cat >"$bad_issues" <<'"'"'JSONL'"'"'
-{"id":"bd-rchk5.6"}
-{"id":"bd-rchk5.7"}
-{"id":"bd-rchk5.8"}
-{"id":"bd-9vzzk"}
-{"id":"bd-t21em"}
-JSONL
-cargo run --quiet -p ffs-harness -- performance-delta-closeout \
-    --config benchmarks/performance_delta_closeout.json \
-    --issues "$bad_issues"
-'
+    run_rch_capture "$log_path" cargo run --quiet -p ffs-harness -- performance-delta-closeout \
+        --config benchmarks/performance_delta_closeout.json \
+        --issues "$BAD_ISSUES_JSONL"
 }
 
 run_closeout_unit_tests_capture() {
     local log_path="$1"
 
-    run_rch_capture "$log_path" bash -lc '
-set -euo pipefail
-rust_hash="$(rustc -vV | awk "/commit-hash:/ {print \$2}")"
-export CARGO_TARGET_DIR="/data/tmp/rch_target_frankenfs_performance_delta_closeout_${rust_hash}"
-cargo test -p ffs-harness performance_delta_closeout -- --nocapture
-'
+    run_rch_capture "$log_path" cargo test -p ffs-harness performance_delta_closeout -- --nocapture
 }
 
 e2e_init "ffs_performance_delta_closeout"
@@ -125,11 +101,21 @@ REPORT_JSON="$E2E_LOG_DIR/performance_delta_closeout.json"
 SUMMARY_MD="$E2E_LOG_DIR/performance_delta_closeout.md"
 VALIDATE_RAW="$E2E_LOG_DIR/performance_delta_closeout.raw"
 VALIDATE_MD_RAW="$E2E_LOG_DIR/performance_delta_closeout_md.raw"
-ISSUES_JSONL="$E2E_LOG_DIR/issues.jsonl"
-BAD_ISSUES_JSONL="$E2E_LOG_DIR/issues_missing_mount_cold_followup.jsonl"
+RCH_INPUT_DIR="$REPO_ROOT/artifacts/rch_input/$(basename "$E2E_LOG_DIR")/performance_delta_closeout"
+mkdir -p "$RCH_INPUT_DIR"
+ISSUES_JSONL="$RCH_INPUT_DIR/issues.jsonl"
+BAD_ISSUES_JSONL="$RCH_INPUT_DIR/issues_missing_mount_cold_followup.jsonl"
 BAD_RAW="$E2E_LOG_DIR/performance_delta_closeout_bad.raw"
 UNIT_LOG="$E2E_LOG_DIR/performance_delta_closeout_unit_tests.log"
-cp "$REPO_ROOT/.beads/issues.jsonl" "$ISSUES_JSONL"
+cat >"$ISSUES_JSONL" <<'JSONL'
+{"id":"bd-rchk5.5"}
+{"id":"bd-rchk5.6"}
+{"id":"bd-rchk5.7"}
+{"id":"bd-rchk5.8"}
+{"id":"bd-9vzzk"}
+{"id":"bd-t21em"}
+JSONL
+grep -v '"id":"bd-rchk5.5"' "$ISSUES_JSONL" >"$BAD_ISSUES_JSONL"
 
 e2e_step "Scenario 1: performance delta closeout module and CLI are wired"
 if grep -q "pub mod performance_delta_closeout" crates/ffs-harness/src/lib.rs \
@@ -313,7 +299,6 @@ else
 fi
 
 e2e_step "Scenario 4: missing follow-up bead fails closed"
-grep -v '"id":"bd-rchk5.5"' "$REPO_ROOT/.beads/issues.jsonl" >"$BAD_ISSUES_JSONL"
 if run_closeout_missing_followup_capture "$BAD_RAW"; then
     scenario_result "performance_delta_closeout_missing_followup_rejected" "FAIL" "missing follow-up bead accepted"
 elif grep -q "performance delta closeout validation failed" "$BAD_RAW"; then
