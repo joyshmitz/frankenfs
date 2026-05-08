@@ -26,9 +26,118 @@ cd "$REPO_ROOT"
 # Source shared helpers
 source "$(dirname "$0")/lib.sh"
 
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_benchmark_taxonomy}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+
 SCENARIO_RESULTS=()
 PASS_COUNT=0
 FAIL_COUNT=0
+
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("$RCH_BIN" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "$RCH_BIN" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
+run_rch_capture() {
+    local log_path="$1"
+    local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
+    shift
+
+    : >"$log_path"
+    set +e
+    RCH_VISIBILITY="$RCH_VISIBILITY" "$RCH_BIN" exec -- "$@" >"$log_path" 2>&1 &
+    pid=$!
+    set -e
+
+    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|log=${log_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
+    fi
+
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
+    if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+            return 99
+        fi
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}"
+        return 0
+    fi
+    return "$status"
+}
+
+print_rch_log() {
+    local log_path="$1"
+    if [[ -s "$log_path" ]]; then
+        tee -a "$E2E_LOG_FILE" <"$log_path"
+    fi
+}
 
 log_scenario() {
     local scenario_id="$1"
@@ -39,7 +148,7 @@ log_scenario() {
     if [ -n "$detail" ]; then
         marker="${marker}|detail=${detail}"
     fi
-    echo "$marker"
+    e2e_log "$marker"
     SCENARIO_RESULTS+=("$marker")
 
     if [ "$outcome" = "PASS" ]; then
@@ -49,12 +158,17 @@ log_scenario() {
     fi
 }
 
+e2e_init "ffs_benchmark_taxonomy"
+
 # ── Scenario: taxonomy_builds_clean ─────────────────────────────────────
 
 echo "=== Scenario: taxonomy_builds_clean ==="
-if rch exec -- cargo test -p ffs-harness --lib benchmark_taxonomy 2>&1; then
-    log_scenario "taxonomy_builds_clean" "PASS"
+TAXONOMY_TEST_LOG="$E2E_LOG_DIR/benchmark_taxonomy_unit_tests.log"
+if run_rch_capture "$TAXONOMY_TEST_LOG" cargo test -p ffs-harness --lib benchmark_taxonomy; then
+    print_rch_log "$TAXONOMY_TEST_LOG"
+    log_scenario "taxonomy_builds_clean" "PASS" "log=${TAXONOMY_TEST_LOG}"
 else
+    print_rch_log "$TAXONOMY_TEST_LOG"
     log_scenario "taxonomy_builds_clean" "FAIL" "cargo test -p ffs-harness benchmark_taxonomy failed"
 fi
 
@@ -149,18 +263,24 @@ fi
 echo "=== Scenario: envelope_ordering_sane ==="
 # This is validated by the Rust unit test envelope_warn_less_than_fail,
 # but we confirm it passes here as an E2E check.
-if rch exec -- cargo test -p ffs-harness --lib benchmark_taxonomy::tests::envelope_warn_less_than_fail 2>&1; then
-    log_scenario "envelope_ordering_sane" "PASS"
+ENVELOPE_TEST_LOG="$E2E_LOG_DIR/envelope_warn_less_than_fail.log"
+if run_rch_capture "$ENVELOPE_TEST_LOG" cargo test -p ffs-harness --lib benchmark_taxonomy::tests::envelope_warn_less_than_fail; then
+    print_rch_log "$ENVELOPE_TEST_LOG"
+    log_scenario "envelope_ordering_sane" "PASS" "log=${ENVELOPE_TEST_LOG}"
 else
+    print_rch_log "$ENVELOPE_TEST_LOG"
     log_scenario "envelope_ordering_sane" "FAIL" "envelope ordering test failed"
 fi
 
 # ── Scenario: taxonomy_json_export ──────────────────────────────────────
 
 echo "=== Scenario: taxonomy_json_export ==="
-if rch exec -- cargo test -p ffs-harness --lib benchmark_taxonomy::tests::taxonomy_json_round_trip 2>&1; then
-    log_scenario "taxonomy_json_export" "PASS"
+JSON_ROUND_TRIP_TEST_LOG="$E2E_LOG_DIR/taxonomy_json_round_trip.log"
+if run_rch_capture "$JSON_ROUND_TRIP_TEST_LOG" cargo test -p ffs-harness --lib benchmark_taxonomy::tests::taxonomy_json_round_trip; then
+    print_rch_log "$JSON_ROUND_TRIP_TEST_LOG"
+    log_scenario "taxonomy_json_export" "PASS" "log=${JSON_ROUND_TRIP_TEST_LOG}"
 else
+    print_rch_log "$JSON_ROUND_TRIP_TEST_LOG"
     log_scenario "taxonomy_json_export" "FAIL" "JSON round-trip test failed"
 fi
 
@@ -176,7 +296,7 @@ echo "  TOTAL: $((PASS_COUNT + FAIL_COUNT))"
 echo "============================================"
 
 for result in "${SCENARIO_RESULTS[@]}"; do
-    echo "  $result"
+    e2e_log "  $result"
 done
 
 if [ "$FAIL_COUNT" -gt 0 ]; then
