@@ -576,6 +576,7 @@ struct WritebackCacheCrashReplayCmdArgs {
 #[derive(Debug)]
 struct RepairConfidenceLabCmdArgs {
     spec_path: String,
+    spec_json_env: Option<String>,
     out_path: Option<String>,
     summary_out_path: Option<String>,
     format: ProofBundleFormat,
@@ -3206,7 +3207,14 @@ fn validate_repair_confidence_lab_cmd(args: &[String]) -> Result<()> {
     let Some(cmd_args) = parse_repair_confidence_lab_cmd_args(args)? else {
         return Ok(());
     };
-    let spec = load_repair_confidence_lab_spec(Path::new(&cmd_args.spec_path))?;
+    let spec = if let Some(env_name) = cmd_args.spec_json_env.as_deref() {
+        let spec_json = env::var(env_name)
+            .with_context(|| format!("--spec-json-env variable {env_name} is unset"))?;
+        serde_json::from_str(&spec_json)
+            .with_context(|| format!("invalid repair confidence lab JSON in ${env_name}"))?
+    } else {
+        load_repair_confidence_lab_spec(Path::new(&cmd_args.spec_path))?
+    };
     let report = validate_repair_confidence_lab(&spec);
     let output = match cmd_args.format {
         ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
@@ -3242,6 +3250,7 @@ fn parse_repair_confidence_lab_cmd_args(
     args: &[String],
 ) -> Result<Option<RepairConfidenceLabCmdArgs>> {
     let mut spec_path = DEFAULT_REPAIR_CONFIDENCE_LAB_PATH.to_owned();
+    let mut spec_json_env: Option<String> = None;
     let mut out_path: Option<String> = None;
     let mut summary_out_path: Option<String> = None;
     let mut format = ProofBundleFormat::Json;
@@ -3254,6 +3263,14 @@ fn parse_repair_confidence_lab_cmd_args(
                 args.get(i)
                     .context("--spec requires a path")?
                     .clone_into(&mut spec_path);
+            }
+            "--spec-json-env" => {
+                i += 1;
+                spec_json_env = Some(
+                    args.get(i)
+                        .context("--spec-json-env requires an environment variable name")?
+                        .to_owned(),
+                );
             }
             "--out" => {
                 i += 1;
@@ -3287,6 +3304,7 @@ fn parse_repair_confidence_lab_cmd_args(
 
     Ok(Some(RepairConfidenceLabCmdArgs {
         spec_path,
+        spec_json_env,
         out_path,
         summary_out_path,
         format,
@@ -6385,6 +6403,7 @@ fn print_repair_confidence_lab_usage() {
     println!();
     println!("Options:");
     println!("  --spec FILE                        Read repair confidence lab JSON");
+    println!("  --spec-json-env VAR                Read repair confidence lab JSON from env var");
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write validation report");
     println!("  --summary-out FILE                 Write Markdown lab summary");

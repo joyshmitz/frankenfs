@@ -11,6 +11,8 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_repair_confidence_lab}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -29,24 +31,85 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local queue_json
+    local ids
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    queue_json="$("${RCH_BIN:-rch}" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "${RCH_BIN:-rch}" cancel "$id" >/dev/null 2>&1; then
+            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
 run_rch_capture() {
     local log_path="$1"
     local status=0
+    local pid
+    local deadline
+    local remote_exit=""
+    local wait_status
     shift
     local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-240}"
-    if command -v timeout >/dev/null 2>&1; then
-        RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
-            timeout "${timeout_secs}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
-    else
-        RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
-            "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    : >"$log_path"
+    set +e
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
+    pid=$!
+    set -e
+    deadline=$((SECONDS + timeout_secs))
+    while kill -0 "$pid" >/dev/null 2>&1; do
+        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        if [[ -n "$remote_exit" ]]; then
+            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
+                kill -TERM "$pid" >/dev/null 2>&1 || true
+                cancel_matching_rch_queue_entry "$@"
+            fi
+            break
+        fi
+        if ((SECONDS >= deadline)); then
+            e2e_log "RCH_TIMEOUT|seconds=${timeout_secs}|log=${log_path}"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            cancel_matching_rch_queue_entry "$@"
+            status=124
+            break
+        fi
+        sleep 2
+    done
+    set +e
+    wait "$pid" >/dev/null 2>&1
+    wait_status=$?
+    set -e
+    if [[ -n "$remote_exit" ]]; then
+        status="$remote_exit"
+    elif [[ $status -eq 0 ]]; then
+        status="$wait_status"
     fi
-    if grep -Fq "[RCH] local" "$log_path"; then
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
         e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
         printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
         return 99
     fi
     if [[ $status -eq 0 ]]; then
+        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
+            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+            return 99
+        fi
         return 0
     fi
     if grep -Fq "Remote command finished: exit=0" "$log_path"; then
@@ -56,17 +119,57 @@ run_rch_capture() {
     return "$status"
 }
 
-extract_marked_block() {
-    local begin_marker="$1"
-    local end_marker="$2"
-    local input_path="$3"
-    local output_path="$4"
-    awk -v begin="$begin_marker" -v end="$end_marker" '
-        $0 == begin { capture = 1; next }
-        $0 == end { found = 1; capture = 0; next }
-        capture { print }
-        END { exit found ? 0 : 1 }
-    ' "$input_path" >"$output_path"
+extract_json_report() {
+    local input_path="$1"
+    local output_path="$2"
+    python3 - "$input_path" "$output_path" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1])
+dest = pathlib.Path(sys.argv[2])
+text = source.read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+decoder = json.JSONDecoder()
+for idx, ch in enumerate(text):
+    if ch != "{":
+        continue
+    try:
+        _, end = decoder.raw_decode(text[idx:])
+    except json.JSONDecodeError:
+        continue
+    dest.write_text(text[idx:idx + end].rstrip() + "\n", encoding="utf-8")
+    raise SystemExit(0)
+raise SystemExit(f"no JSON report found in {source}")
+PY
+}
+
+extract_markdown_summary() {
+    local input_path="$1"
+    local output_path="$2"
+    python3 - "$input_path" "$output_path" <<'PY'
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1])
+dest = pathlib.Path(sys.argv[2])
+text = source.read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+start = text.find("# Repair Confidence Lab Summary")
+if start < 0:
+    raise SystemExit(f"no Markdown summary found in {source}")
+summary = text[start:]
+cut_points = [
+    idx for marker in ("\n  2026-", "\n[RCH] ")
+    if (idx := summary.find(marker)) >= 0
+]
+if cut_points:
+    summary = summary[:min(cut_points)]
+dest.write_text(summary.rstrip() + "\n", encoding="utf-8")
+PY
 }
 
 validate_checked_in_lab_remote() {
@@ -74,25 +177,15 @@ validate_checked_in_lab_remote() {
     local spec_json="$2"
     local report_json="$3"
     local summary_md="$4"
-    if run_rch_capture "$log_path" bash -lc '
-        set -euo pipefail
-        spec_json="$1"
-        report_json="${CARGO_TARGET_DIR}/e2e_outputs/repair_confidence_lab_report.json"
-        summary_md="${CARGO_TARGET_DIR}/e2e_outputs/repair_confidence_lab_summary.md"
-        mkdir -p "$(dirname "$report_json")"
-        cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab \
+    local summary_raw="${summary_md%.md}.raw"
+    if run_rch_capture "$log_path" cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab \
+        --spec "$spec_json" \
+        --format json \
+        && extract_json_report "$log_path" "$report_json" \
+        && run_rch_capture "$summary_raw" cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab \
             --spec "$spec_json" \
-            --out "$report_json" \
-            --summary-out "$summary_md"
-        printf "%s\n" "__FFS_REPAIR_CONFIDENCE_REPORT_JSON_BEGIN__"
-        cat "$report_json"
-        printf "%s\n" "__FFS_REPAIR_CONFIDENCE_REPORT_JSON_END__"
-        printf "%s\n" "__FFS_REPAIR_CONFIDENCE_SUMMARY_MD_BEGIN__"
-        cat "$summary_md"
-        printf "%s\n" "__FFS_REPAIR_CONFIDENCE_SUMMARY_MD_END__"
-    ' _ "$spec_json" \
-        && extract_marked_block "__FFS_REPAIR_CONFIDENCE_REPORT_JSON_BEGIN__" "__FFS_REPAIR_CONFIDENCE_REPORT_JSON_END__" "$log_path" "$report_json" \
-        && extract_marked_block "__FFS_REPAIR_CONFIDENCE_SUMMARY_MD_BEGIN__" "__FFS_REPAIR_CONFIDENCE_SUMMARY_MD_END__" "$log_path" "$summary_md"; then
+            --format markdown \
+        && extract_markdown_summary "$summary_raw" "$summary_md"; then
         return 0
     fi
     return 1
@@ -101,22 +194,15 @@ validate_checked_in_lab_remote() {
 validate_bad_lab_remote() {
     local log_path="$1"
     local bad_json="$2"
-    local bad_name
-    local bad_b64
-    bad_name="$(basename "$bad_json")"
-    bad_b64="$(base64 "$bad_json" | tr -d '\n')"
-    run_rch_capture "$log_path" bash -lc '
-        set -euo pipefail
-        bad_name="$1"
-        bad_b64="$2"
-        remote_spec="${CARGO_TARGET_DIR}/e2e_inputs/${bad_name}"
-        remote_report="${CARGO_TARGET_DIR}/e2e_outputs/${bad_name%.json}.report.json"
-        mkdir -p "$(dirname "$remote_spec")" "$(dirname "$remote_report")"
-        printf "%s" "$bad_b64" | base64 -d >"$remote_spec"
-        cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab \
-            --spec "$remote_spec" \
-            --out "$remote_report"
-    ' _ "$bad_name" "$bad_b64"
+    local bad_payload
+    bad_payload="$(tr -d '\n' <"$bad_json")"
+    (
+        export REPAIR_CONFIDENCE_SPEC_JSON="$bad_payload"
+        export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}REPAIR_CONFIDENCE_SPEC_JSON"
+        run_rch_capture "$log_path" cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab \
+            --spec-json-env REPAIR_CONFIDENCE_SPEC_JSON \
+            --format json
+    )
 }
 
 e2e_init "ffs_repair_confidence_lab"
