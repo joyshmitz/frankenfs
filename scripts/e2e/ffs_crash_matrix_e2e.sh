@@ -27,6 +27,12 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_crash_matrix}"
+case ",${RCH_ENV_ALLOWLIST:-}," in
+    *",CARGO_TARGET_DIR,"*) ;;
+    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
+esac
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -45,7 +51,27 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+run_rch_capture() {
+    local log_path="$1"
+    local status
+    shift
+
+    e2e_log "RCH command: $*"
+    status=0
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_FAILURE_ACCEPTED|log=${log_path}|status=${status}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
+        return 0
+    fi
+    return "$status"
+}
+
 e2e_init "ffs_crash_matrix"
+e2e_print_env
 
 #######################################
 # Scenario 1: crash_matrix module exists
@@ -99,8 +125,8 @@ fi
 #######################################
 e2e_step "Scenario 4: Crash matrix unit tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- crash_matrix 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/crash_matrix_unit_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- crash_matrix; then
     TESTS_RUN=$(grep -c "test crash_matrix::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 15 ]]; then
         scenario_result "crash_matrix_tests" "PASS" "Unit tests passed (${TESTS_RUN} tests)"
@@ -109,8 +135,8 @@ if cargo test -p ffs-mvcc --lib -- crash_matrix 2>"$TEST_LOG" | tee -a "$TEST_LO
     fi
 else
     scenario_result "crash_matrix_tests" "FAIL" "Unit tests failed"
+    tail -40 "$TEST_LOG" | while IFS= read -r line; do e2e_log "  $line"; done
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 5: Structured logging markers
@@ -153,21 +179,21 @@ fi
 #######################################
 e2e_step "Scenario 7: WAL replay + persist tests"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- wal_replay::tests 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/wal_replay_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_replay::tests; then
     scenario_result "wal_replay_tests" "PASS" "WAL replay tests passed"
 else
     scenario_result "wal_replay_tests" "FAIL" "WAL replay tests failed"
+    tail -40 "$TEST_LOG" | while IFS= read -r line; do e2e_log "  $line"; done
 fi
-rm -f "$TEST_LOG"
 
-TEST_LOG=$(mktemp)
-if cargo test -p ffs-mvcc --lib -- persist::tests 2>"$TEST_LOG" | tee -a "$TEST_LOG"; then
+TEST_LOG="$E2E_LOG_DIR/persist_tests.log"
+if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- persist::tests; then
     scenario_result "persist_tests" "PASS" "Persist tests passed"
 else
     scenario_result "persist_tests" "FAIL" "Persist tests failed"
+    tail -40 "$TEST_LOG" | while IFS= read -r line; do e2e_log "  $line"; done
 fi
-rm -f "$TEST_LOG"
 
 #######################################
 # Scenario 8: Serializable report (JSON)
