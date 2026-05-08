@@ -12,7 +12,7 @@ REPO_ROOT="$(pwd)"
 export REPO_ROOT
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_writeback_cache_audit}"
-export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR,FFS_WRITEBACK_CACHE_KILL_SWITCH"
 
 RUN_ID="$(date +%Y%m%d_%H%M%S)_ffs_writeback_cache_audit"
 LOG_DIR="${FFS_E2E_LOG_DIR:-$REPO_ROOT/artifacts/e2e/$RUN_ID}"
@@ -1370,7 +1370,7 @@ if run_rch_capture "$HELP_RAW" cargo run --quiet -p ffs-cli -- mount --help; the
         && grep -Fq "FFS_WRITEBACK_CACHE_KILL_SWITCH" "$HELP_RAW" \
         && grep -Fq "fsync" "$HELP_RAW" \
         && grep -Fq "fsyncdir" "$HELP_RAW" \
-        && grep -Fq "flush remains non-durable" "$HELP_RAW" \
+        && grep -Fq "\`flush\` remains non-durable" "$HELP_RAW" \
         && grep -Fq "bd-rchk0.2.2" README.md \
         && grep -Fq "bd-rchk0.2.1.1" FEATURE_PARITY.md \
         && grep -Fq "bd-rchk0.2.2" FEATURE_PARITY.md \
@@ -1395,7 +1395,7 @@ if run_rch_capture "$CLI_OPT_IN_HELP_RAW" cargo run --quiet -p ffs-cli -- mount 
         && grep -Fq -- "--writeback-cache-ordering-oracle" "$CLI_OPT_IN_HELP_RAW" \
         && grep -Fq -- "--writeback-cache-crash-replay-oracle" "$CLI_OPT_IN_HELP_RAW" \
         && grep -Fq "FFS_WRITEBACK_CACHE_KILL_SWITCH" "$CLI_OPT_IN_HELP_RAW" \
-        && grep -Fq "flush remains non-durable" "$CLI_OPT_IN_HELP_RAW" \
+        && grep -Fq "\`flush\` remains non-durable" "$CLI_OPT_IN_HELP_RAW" \
         && grep -Fq "fsync" "$CLI_OPT_IN_HELP_RAW" \
         && grep -Fq "fsyncdir" "$CLI_OPT_IN_HELP_RAW"; then
         log "WRITEBACK_CACHE_OPT_IN_OBSERVATION|scenario_id=writeback_cache_opt_in_cli_help_boundaries|mount_options=rw,writeback_cache|stdout_stderr=${CLI_OPT_IN_HELP_RAW}|cleanup_status=not_mounted|reproduction_command=cargo run -p ffs-cli -- mount --help"
@@ -1467,12 +1467,15 @@ else
 fi
 
 step "Scenario 16a: runtime kill switch rejects before gate and image I/O"
-if run_rch_capture "$CLI_KILL_SWITCH_RAW" env FFS_WRITEBACK_CACHE_KILL_SWITCH=1 cargo run --quiet -p ffs-cli -- \
-    mount --rw --writeback-cache \
-    --writeback-cache-gate "$ACCEPT_GATE" \
-    --writeback-cache-ordering-oracle "$ORDERING_ACCEPT_ORACLE" \
-    --writeback-cache-crash-replay-oracle "$CRASH_REPLAY_ACCEPT_ORACLE" \
-    /definitely/missing.img /definitely/missing-mnt; then
+if (
+    export FFS_WRITEBACK_CACHE_KILL_SWITCH=1
+    run_rch_capture "$CLI_KILL_SWITCH_RAW" cargo run --quiet -p ffs-cli -- \
+        mount --rw --writeback-cache \
+        --writeback-cache-gate "$ACCEPT_GATE" \
+        --writeback-cache-ordering-oracle "$ORDERING_ACCEPT_ORACLE" \
+        --writeback-cache-crash-replay-oracle "$CRASH_REPLAY_ACCEPT_ORACLE" \
+        /definitely/missing.img /definitely/missing-mnt
+); then
     scenario_result "writeback_cache_runtime_kill_switch_rejected" "FAIL" "runtime kill switch unexpectedly allowed mount"
 elif grep -Fq "FFS_WRITEBACK_CACHE_KILL_SWITCH" "$CLI_KILL_SWITCH_RAW" \
     && ! grep -Fq "failed to open filesystem image" "$CLI_KILL_SWITCH_RAW"; then
