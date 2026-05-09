@@ -2249,6 +2249,106 @@ mod tests {
         );
     }
 
+    /// bd-2zmia — Kernel-conformance pin for the btrfs_key_ptr slot
+    /// field offsets per fs/btrfs/ctree.h. parse_internal_items reads
+    /// each slot at BTRFS_HEADER_SIZE + idx*BTRFS_KEY_PTR_SIZE with
+    /// disk_key (objectid u64@0, type u8@8, offset u64@9) + blockptr
+    /// u64@17 + generation u64@25. Each field is stamped with a UNIQUE
+    /// non-zero magic; a regression that drifted any offset would
+    /// mis-route key↔blockptr silently — and parse_internal_items runs
+    /// on every walk_tree internal-node descent.
+    ///
+    /// Sister pins: bd-latwe (BtrfsHeader fields), bd-h117q (size
+    /// constants), bd-na4cc (BtrfsDevItem fields), bd-nzs5f
+    /// (parse_inode_item), bd-xbqdw (parse_root_item), bd-kelr0
+    /// (parse_inode_refs), bd-m9u35 (parse_root_ref), bd-swwp0
+    /// (parse_extent_data).
+    #[test]
+    fn parse_internal_items_kernel_slot_offsets_match_ctree_h() {
+        // 4096-byte block, 1 slot, level=1 (internal node).
+        let mut block = make_block(4096, 1, 1);
+
+        // Distinct non-zero magics so an offset drift produces a
+        // cross-field collision. item_type byte chosen to be unique
+        // among all bytes in the slot region.
+        let objectid = 0x1111_1111_1111_1111_u64;
+        let item_type = 0x33_u8;
+        let key_offset = 0x4444_4444_4444_4444_u64;
+        let blockptr = 0x5555_5555_5555_5555_u64;
+        let generation = 0x6666_6666_6666_6666_u64;
+
+        let base = BTRFS_HEADER_SIZE;
+        block[base..base + 8].copy_from_slice(&objectid.to_le_bytes());
+        block[base + 8] = item_type;
+        block[base + 9..base + 17].copy_from_slice(&key_offset.to_le_bytes());
+        block[base + 17..base + 25].copy_from_slice(&blockptr.to_le_bytes());
+        block[base + 25..base + 33].copy_from_slice(&generation.to_le_bytes());
+
+        let (_header, ptrs) = parse_internal_items(&block)
+            .expect("kernel-stamped internal node must parse");
+
+        assert_eq!(ptrs.len(), 1);
+        let ptr = &ptrs[0];
+        assert_eq!(ptr.key.objectid, objectid, "key.objectid @ slot+0..8");
+        assert_eq!(ptr.key.item_type, item_type, "key.item_type @ slot+8");
+        assert_eq!(ptr.key.offset, key_offset, "key.offset @ slot+9..17");
+        assert_eq!(ptr.blockptr, blockptr, "blockptr @ slot+17..25");
+        assert_eq!(ptr.generation, generation, "generation @ slot+25..33");
+    }
+
+    /// bd-2zmia — Kernel-conformance pin for the btrfs_item slot field
+    /// offsets per fs/btrfs/ctree.h. parse_leaf_items reads each slot
+    /// at BTRFS_HEADER_SIZE + idx*BTRFS_ITEM_SIZE with disk_key
+    /// (objectid u64@0, type u8@8, offset u64@9) + payload_offset
+    /// u32@17 (relative to leaf header — parser normalizes to absolute)
+    /// + payload_size u32@21. Each field is stamped with a UNIQUE
+    /// non-zero magic. parse_leaf_items runs on every walk_tree
+    /// leaf-node read — the most heavily-trafficked btrfs parser.
+    ///
+    /// Companion to parse_internal_items_kernel_slot_offsets_match_ctree_h.
+    #[test]
+    fn parse_leaf_items_kernel_slot_offsets_match_ctree_h() {
+        // 4096-byte block, 1 slot, level=0 (leaf node).
+        let mut block = make_block(4096, 1, 0);
+
+        let objectid = 0x1111_1111_1111_1111_u64;
+        let item_type = 0x33_u8;
+        let key_offset = 0x4444_4444_4444_4444_u64;
+        // raw payload offset is leaf-relative; pick a value such that
+        // (HEADER_SIZE + raw_offset) lands inside the block AND outside
+        // the items table (items_end = HEADER + 1*ITEM_SIZE = 126).
+        // Using raw_offset = 1024 → absolute payload @ 1125, payload
+        // ends at 1125+8 = 1133 (≤ 4096). Distinct value so a drift
+        // surfaces.
+        let raw_data_offset: u32 = 1024;
+        let data_size: u32 = 8;
+
+        let base = BTRFS_HEADER_SIZE;
+        block[base..base + 8].copy_from_slice(&objectid.to_le_bytes());
+        block[base + 8] = item_type;
+        block[base + 9..base + 17].copy_from_slice(&key_offset.to_le_bytes());
+        block[base + 17..base + 21].copy_from_slice(&raw_data_offset.to_le_bytes());
+        block[base + 21..base + 25].copy_from_slice(&data_size.to_le_bytes());
+
+        let (_header, items) =
+            parse_leaf_items(&block).expect("kernel-stamped leaf must parse");
+
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.key.objectid, objectid, "key.objectid @ slot+0..8");
+        assert_eq!(item.key.item_type, item_type, "key.item_type @ slot+8");
+        assert_eq!(item.key.offset, key_offset, "key.offset @ slot+9..17");
+        // Parser normalizes leaf-relative payload offset to absolute
+        // by adding BTRFS_HEADER_SIZE.
+        let header_size_u32 = u32::try_from(BTRFS_HEADER_SIZE).unwrap();
+        assert_eq!(
+            item.data_offset,
+            raw_data_offset + header_size_u32,
+            "data_offset @ slot+17..21 normalized = raw + HEADER_SIZE"
+        );
+        assert_eq!(item.data_size, data_size, "data_size @ slot+21..25");
+    }
+
     /// bd-h117q — Kernel-conformance pin for the btrfs btree size
     /// constants used for byte-offset arithmetic in parse_leaf_items,
     /// parse_internal_items, parse_chunk_item, and
