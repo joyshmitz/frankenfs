@@ -82,6 +82,10 @@ use ffs_harness::{
         DEFAULT_SOURCE_SCOPE_MANIFEST_PATH, OpenEndedNoteSource, load_source_scope_manifest,
         scan_open_ended_notes, scan_source_scope_manifest, validate_current_inventory,
     },
+    operational_evidence_index::{
+        OperationalEvidenceIndexConfig, build_operational_evidence_index,
+        render_operational_evidence_index_markdown,
+    },
     operational_readiness_report::{
         OperationalReadinessReportConfig, build_operational_readiness_report,
         render_operational_readiness_markdown,
@@ -443,6 +447,7 @@ fn run() -> Result<()> {
             validate_metamorphic_workload_seed_catalog_cmd(&args[1..])
         }
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
+        Some("operational-evidence-index") => operational_evidence_index_cmd(&args[1..]),
         Some("recommend-readiness-actions") => recommend_readiness_actions_cmd(&args[1..]),
         Some("validate-mounted-write-error-classes") => {
             validate_mounted_write_error_classes_cmd(&args[1..])
@@ -981,6 +986,103 @@ fn operational_readiness_report_summary(
             .iter()
             .filter(|row| row.reproduction_command.is_some())
             .count(),
+    )
+}
+
+fn operational_evidence_index_cmd(args: &[String]) -> Result<()> {
+    let mut config = OperationalEvidenceIndexConfig::new("artifacts/e2e");
+    let mut out_path: Option<String> = None;
+    let mut format = ReadinessReportFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--artifacts" => {
+                i += 1;
+                config.artifacts_dir =
+                    Path::new(args.get(i).context("--artifacts requires a path")?).to_path_buf();
+            }
+            "--current-git-sha" => {
+                i += 1;
+                config.current_git_sha = Some(
+                    args.get(i)
+                        .context("--current-git-sha requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--max-age-days" => {
+                i += 1;
+                config.max_artifact_age_days = Some(
+                    args.get(i)
+                        .context("--max-age-days requires a value")?
+                        .parse::<u32>()
+                        .context("invalid --max-age-days value")?,
+                );
+            }
+            "--recency-reference-timestamp" => {
+                i += 1;
+                let timestamp = args
+                    .get(i)
+                    .context("--recency-reference-timestamp requires a value")?;
+                config.recency_reference_epoch_days = Some(
+                    parse_manifest_timestamp_epoch_days(timestamp).with_context(|| {
+                        format!("invalid --recency-reference-timestamp value: {timestamp}")
+                    })?,
+                );
+            }
+            "--format" => {
+                i += 1;
+                format = parse_readiness_report_format(
+                    args.get(i).context("--format requires json or markdown")?,
+                )?;
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--help" | "-h" => {
+                print_operational_evidence_index_usage();
+                return Ok(());
+            }
+            other => bail!("unknown operational-evidence-index argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let index = build_operational_evidence_index(&config)?;
+    let output = match format {
+        ReadinessReportFormat::Json => serde_json::to_string_pretty(&index)?,
+        ReadinessReportFormat::Markdown => render_operational_evidence_index_markdown(&index),
+    };
+
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "{}",
+            operational_evidence_index_summary(&index, path.as_str())
+        );
+    } else {
+        println!("{output}");
+        std::io::stdout().flush().ok();
+        eprintln!("{}", operational_evidence_index_summary(&index, "<stdout>"));
+    }
+    Ok(())
+}
+
+fn operational_evidence_index_summary(
+    index: &ffs_harness::operational_evidence_index::OperationalEvidenceIndex,
+    output_path: &str,
+) -> String {
+    format!(
+        "operational evidence index written: {output_path} records={} authoritative={} selected={} stale={} missing_raw_logs={} conflicts={} duplicate_run_ids={} host_downgrades={} output_path={output_path}",
+        index.source_record_count,
+        index.authoritative_record_count,
+        index.selected_record_count,
+        index.stale_record_count,
+        index.missing_raw_log_record_count,
+        index.conflict_count,
+        index.duplicate_run_id_count,
+        index.host_downgrade_count
     )
 }
 
@@ -5816,6 +5918,9 @@ fn print_usage_core_commands() {
         "  ffs-harness operational-readiness-report [--artifacts DIR] [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE]"
     );
     println!(
+        "  ffs-harness operational-evidence-index [--artifacts DIR] [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE]"
+    );
+    println!(
         "  ffs-harness recommend-readiness-actions [--input FILE] --out-json FILE --out-md FILE --stdout-log FILE --stderr-log FILE [--report-id ID] [--generated-at TS] [--invocation CMD]"
     );
     println!(
@@ -5922,6 +6027,9 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness operational-readiness-report --artifacts artifacts/e2e --current-git-sha $(git rev-parse --short HEAD) --max-age-days 14 --format markdown --out artifacts/e2e/readiness.md"
+    );
+    println!(
+        "  ffs-harness operational-evidence-index --artifacts artifacts/e2e --current-git-sha $(git rev-parse --short HEAD) --max-age-days 14 --format markdown --out artifacts/e2e/evidence-index.md"
     );
     println!(
         "  ffs-harness recommend-readiness-actions --out-json artifacts/readiness/actions/report.json --out-md artifacts/readiness/actions/report.md --stdout-log artifacts/readiness/actions/stdout.log --stderr-log artifacts/readiness/actions/stderr.log"
@@ -6294,6 +6402,22 @@ fn print_operational_readiness_report_usage() {
     );
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write report to FILE");
+}
+
+fn print_operational_evidence_index_usage() {
+    println!("Usage: ffs-harness operational-evidence-index [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --artifacts DIR                    Read manifest/result JSON under DIR");
+    println!(
+        "  --current-git-sha SHA              Downgrade sources captured from a different SHA"
+    );
+    println!("  --max-age-days N                   Downgrade artifacts older than N days");
+    println!(
+        "  --recency-reference-timestamp TS   Compare artifact ages against TS instead of now"
+    );
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write index to FILE");
 }
 
 fn print_recommend_readiness_actions_usage() {
