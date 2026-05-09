@@ -6538,6 +6538,135 @@ mod tests {
         assert_eq!(entries[2].file_type, Ext4FileType::RegFile);
     }
 
+    /// bd-up9ff — Kernel-conformance pin for the Ext4CompatFeatures
+    /// (10 bits) and Ext4RoCompatFeatures (14 bits) values per
+    /// fs/ext4/ext4.h EXT4_FEATURE_COMPAT_* and EXT4_FEATURE_RO_COMPAT_*.
+    /// These bits are read from the superblock @ s_feature_compat
+    /// (0x5C) and s_feature_ro_compat (0x64); they gate JOURNAL
+    /// presence, METADATA_CSUM verification, SPARSE_SUPER placement,
+    /// BIGALLOC, READONLY enforcement, etc. A regression that drifted
+    /// any value would silently mis-detect filesystem features —
+    /// either failing to mount or mounting with wrong semantics.
+    ///
+    /// Companion to bd-eiblh (Ext4IncompatFeatures). Sister pins:
+    /// bd-wa27v (xattr constants),
+    /// ext4_inode_flag_constants_match_kernel_header.
+    #[test]
+    fn ext4_compat_and_ro_compat_features_match_ext4_h() {
+        // Per fs/ext4/ext4.h — EXT4_FEATURE_COMPAT_*:
+        let compat_cases: &[(&str, Ext4CompatFeatures, u32)] = &[
+            (
+                "DIR_PREALLOC",
+                Ext4CompatFeatures::DIR_PREALLOC,
+                0x0001,
+            ),
+            (
+                "IMAGIC_INODES",
+                Ext4CompatFeatures::IMAGIC_INODES,
+                0x0002,
+            ),
+            ("HAS_JOURNAL", Ext4CompatFeatures::HAS_JOURNAL, 0x0004),
+            ("EXT_ATTR", Ext4CompatFeatures::EXT_ATTR, 0x0008),
+            (
+                "RESIZE_INODE",
+                Ext4CompatFeatures::RESIZE_INODE,
+                0x0010,
+            ),
+            ("DIR_INDEX", Ext4CompatFeatures::DIR_INDEX, 0x0020),
+            (
+                "SPARSE_SUPER2",
+                Ext4CompatFeatures::SPARSE_SUPER2,
+                0x0200,
+            ),
+            ("FAST_COMMIT", Ext4CompatFeatures::FAST_COMMIT, 0x0400),
+            (
+                "STABLE_INODES",
+                Ext4CompatFeatures::STABLE_INODES,
+                0x0800,
+            ),
+            ("ORPHAN_FILE", Ext4CompatFeatures::ORPHAN_FILE, 0x1000),
+        ];
+        for (name, actual, expected) in compat_cases {
+            assert_eq!(
+                actual.0, *expected,
+                "EXT4_FEATURE_COMPAT_{name} must equal kernel value 0x{expected:X}"
+            );
+            assert_eq!(
+                actual.0.count_ones(),
+                1,
+                "EXT4_FEATURE_COMPAT_{name} must be a single-bit flag"
+            );
+        }
+
+        // Per fs/ext4/ext4.h — EXT4_FEATURE_RO_COMPAT_*:
+        let ro_compat_cases: &[(&str, Ext4RoCompatFeatures, u32)] = &[
+            (
+                "SPARSE_SUPER",
+                Ext4RoCompatFeatures::SPARSE_SUPER,
+                0x0001,
+            ),
+            ("LARGE_FILE", Ext4RoCompatFeatures::LARGE_FILE, 0x0002),
+            ("BTREE_DIR", Ext4RoCompatFeatures::BTREE_DIR, 0x0004),
+            ("HUGE_FILE", Ext4RoCompatFeatures::HUGE_FILE, 0x0008),
+            ("GDT_CSUM", Ext4RoCompatFeatures::GDT_CSUM, 0x0010),
+            ("DIR_NLINK", Ext4RoCompatFeatures::DIR_NLINK, 0x0020),
+            (
+                "EXTRA_ISIZE",
+                Ext4RoCompatFeatures::EXTRA_ISIZE,
+                0x0040,
+            ),
+            ("QUOTA", Ext4RoCompatFeatures::QUOTA, 0x0100),
+            ("BIGALLOC", Ext4RoCompatFeatures::BIGALLOC, 0x0200),
+            (
+                "METADATA_CSUM",
+                Ext4RoCompatFeatures::METADATA_CSUM,
+                0x0400,
+            ),
+            ("READONLY", Ext4RoCompatFeatures::READONLY, 0x1000),
+            ("PROJECT", Ext4RoCompatFeatures::PROJECT, 0x2000),
+            ("VERITY", Ext4RoCompatFeatures::VERITY, 0x8000),
+            (
+                "ORPHAN_PRESENT",
+                Ext4RoCompatFeatures::ORPHAN_PRESENT,
+                0x1_0000,
+            ),
+        ];
+        for (name, actual, expected) in ro_compat_cases {
+            assert_eq!(
+                actual.0, *expected,
+                "EXT4_FEATURE_RO_COMPAT_{name} must equal kernel value 0x{expected:X}"
+            );
+            assert_eq!(
+                actual.0.count_ones(),
+                1,
+                "EXT4_FEATURE_RO_COMPAT_{name} must be a single-bit flag"
+            );
+        }
+
+        // Pairwise distinctness across compat values.
+        let compat_bits: Vec<u32> = compat_cases.iter().map(|&(_, f, _)| f.0).collect();
+        let mut sorted = compat_bits.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            compat_bits.len(),
+            sorted.len(),
+            "EXT4_FEATURE_COMPAT_* bit values must be pairwise distinct"
+        );
+
+        // Pairwise distinctness across ro_compat values.
+        let ro_compat_bits: Vec<u32> =
+            ro_compat_cases.iter().map(|&(_, f, _)| f.0).collect();
+        let mut sorted = ro_compat_bits.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            ro_compat_bits.len(),
+            sorted.len(),
+            "EXT4_FEATURE_RO_COMPAT_* bit values must be pairwise distinct"
+        );
+    }
+
     /// bd-eiblh — Kernel-conformance pin for the 16 Ext4IncompatFeatures
     /// bit values per fs/ext4/ext4.h EXT4_FEATURE_INCOMPAT_*. These
     /// bits are read from the superblock @ s_feature_incompat (0x60)
