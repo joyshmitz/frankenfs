@@ -6538,6 +6538,86 @@ mod tests {
         assert_eq!(entries[2].file_type, Ext4FileType::RegFile);
     }
 
+    /// bd-eiblh — Kernel-conformance pin for the 16 Ext4IncompatFeatures
+    /// bit values per fs/ext4/ext4.h EXT4_FEATURE_INCOMPAT_*. These
+    /// bits are read from the superblock @ s_feature_incompat (0x60)
+    /// and gate every feature decision: extent vs indirect block,
+    /// htree depth (LARGEDIR), MMP enabled, checksum seed (CSUM_SEED),
+    /// encryption, casefold. A regression that drifted any value
+    /// would silently mis-detect filesystem features and either fail
+    /// to mount or mount with wrong semantics.
+    ///
+    /// Sister pins: ext4_xattr_constants_match_xattr_h (bd-wa27v),
+    /// ext4_inode_flag_constants_match_kernel_header,
+    /// btrfs_csum_type_constants_match_kernel_header,
+    /// ext4_btrfs_layout_constants_match_kernel_header,
+    /// ext4_file_type_constants_match_kernel_header.
+    #[test]
+    fn ext4_incompat_features_match_ext4_h() {
+        // Per fs/ext4/ext4.h:
+        //   #define EXT4_FEATURE_INCOMPAT_COMPRESSION  0x0001
+        //   #define EXT4_FEATURE_INCOMPAT_FILETYPE     0x0002
+        //   #define EXT4_FEATURE_INCOMPAT_RECOVER      0x0004
+        //   #define EXT4_FEATURE_INCOMPAT_JOURNAL_DEV  0x0008
+        //   #define EXT4_FEATURE_INCOMPAT_META_BG      0x0010
+        //   #define EXT4_FEATURE_INCOMPAT_EXTENTS      0x0040
+        //   #define EXT4_FEATURE_INCOMPAT_64BIT        0x0080
+        //   #define EXT4_FEATURE_INCOMPAT_MMP          0x0100
+        //   #define EXT4_FEATURE_INCOMPAT_FLEX_BG      0x0200
+        //   #define EXT4_FEATURE_INCOMPAT_EA_INODE     0x0400
+        //   #define EXT4_FEATURE_INCOMPAT_DIRDATA      0x1000
+        //   #define EXT4_FEATURE_INCOMPAT_CSUM_SEED    0x2000
+        //   #define EXT4_FEATURE_INCOMPAT_LARGEDIR     0x4000
+        //   #define EXT4_FEATURE_INCOMPAT_INLINE_DATA  0x8000
+        //   #define EXT4_FEATURE_INCOMPAT_ENCRYPT      0x10000
+        //   #define EXT4_FEATURE_INCOMPAT_CASEFOLD     0x20000
+        let cases: &[(&str, Ext4IncompatFeatures, u32)] = &[
+            ("COMPRESSION", Ext4IncompatFeatures::COMPRESSION, 0x0001),
+            ("FILETYPE", Ext4IncompatFeatures::FILETYPE, 0x0002),
+            ("RECOVER", Ext4IncompatFeatures::RECOVER, 0x0004),
+            ("JOURNAL_DEV", Ext4IncompatFeatures::JOURNAL_DEV, 0x0008),
+            ("META_BG", Ext4IncompatFeatures::META_BG, 0x0010),
+            ("EXTENTS", Ext4IncompatFeatures::EXTENTS, 0x0040),
+            ("BIT64", Ext4IncompatFeatures::BIT64, 0x0080),
+            ("MMP", Ext4IncompatFeatures::MMP, 0x0100),
+            ("FLEX_BG", Ext4IncompatFeatures::FLEX_BG, 0x0200),
+            ("EA_INODE", Ext4IncompatFeatures::EA_INODE, 0x0400),
+            ("DIRDATA", Ext4IncompatFeatures::DIRDATA, 0x1000),
+            ("CSUM_SEED", Ext4IncompatFeatures::CSUM_SEED, 0x2000),
+            ("LARGEDIR", Ext4IncompatFeatures::LARGEDIR, 0x4000),
+            ("INLINE_DATA", Ext4IncompatFeatures::INLINE_DATA, 0x8000),
+            ("ENCRYPT", Ext4IncompatFeatures::ENCRYPT, 0x10000),
+            ("CASEFOLD", Ext4IncompatFeatures::CASEFOLD, 0x20000),
+        ];
+        for (name, actual, expected) in cases {
+            assert_eq!(
+                actual.0, *expected,
+                "EXT4_FEATURE_INCOMPAT_{name} must equal kernel value 0x{expected:X}"
+            );
+        }
+
+        // Pairwise distinctness: every flag must be a unique bit
+        // (single-bit pattern). A regression that aliased two flags
+        // would route both feature checks to the same bit.
+        let bits: Vec<u32> = cases.iter().map(|&(_, f, _)| f.0).collect();
+        let mut sorted = bits.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            bits.len(),
+            sorted.len(),
+            "EXT4_FEATURE_INCOMPAT_* bit values must be pairwise distinct"
+        );
+        // Each value should be a single bit (power-of-two).
+        for (name, actual, _) in cases {
+            assert_eq!(
+                actual.0.count_ones(),
+                1,
+                "EXT4_FEATURE_INCOMPAT_{name} must be a single-bit flag"
+            );
+        }
+    }
+
     /// bd-ku16x — Kernel-conformance pin for the base 128-byte
     /// ext4_inode field offsets per fs/ext4/ext4.h. Each field is
     /// stamped with a UNIQUE non-zero magic at its canonical kernel
