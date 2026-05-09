@@ -11902,6 +11902,41 @@ mod tests {
             prop_assert_eq!(a, b);
         }
 
+        // bd-z8ko5 — Determinism MR for parse_xattr_block. Runs on
+        // every getxattr / listxattr / llistxattr; parses the 32-byte
+        // ext4_xattr_header followed by variable-length entries.
+        // Sister determinism MRs: parse_dir_block, parse_extent_tree
+        // (both bd-qzwuq).
+        #[test]
+        fn ext4_proptest_parse_xattr_block_determinism(
+            block_data in proptest::collection::vec(any::<u8>(), 0..=4096),
+        ) {
+            let a = parse_xattr_block(&block_data);
+            let b = parse_xattr_block(&block_data);
+            prop_assert_eq!(a, b);
+        }
+
+        // bd-z8ko5 — Determinism MR for parse_inode_extent_tree. Runs
+        // on every ext4 file open / read / write to compute the extent
+        // tree from an Ext4Inode. Companion to bd-qzwuq's
+        // parse_extent_tree determinism MR — that exercises the
+        // "block-bytes" entry point, this exercises the inode-derived
+        // entry point which has independent buffer-extraction logic.
+        #[test]
+        fn ext4_proptest_parse_inode_extent_tree_determinism(
+            inode_bytes in proptest::collection::vec(any::<u8>(), 128..=128),
+        ) {
+            let inode_buf: [u8; 128] = inode_bytes
+                .as_slice()
+                .try_into()
+                .expect("fixed-size inode bytes");
+            if let Ok(inode) = Ext4Inode::parse_from_bytes(&inode_buf) {
+                let a = parse_inode_extent_tree(&inode);
+                let b = parse_inode_extent_tree(&inode);
+                prop_assert_eq!(a, b);
+            }
+        }
+
         #[test]
         fn ext4_proptest_iter_dir_block_no_panic(
             block in proptest::collection::vec(any::<u8>(), 0..=4096),
