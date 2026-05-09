@@ -6548,6 +6548,64 @@ mod tests {
         assert_eq!(entries[2].file_type, Ext4FileType::RegFile);
     }
 
+    /// bd-12nk4 — Kernel-conformance pin for the ext4_dir_entry_2
+    /// header field offsets per fs/ext4/ext4.h (struct ext4_dir_entry_2,
+    /// 8-byte header). Each field is stamped with a UNIQUE non-zero
+    /// magic at its canonical kernel offset, then a single
+    /// parse_dir_block call must round-trip every field. parse_dir_block
+    /// runs on every ext4 readdir / lookup / remove / rename path —
+    /// every directory operation depends on these offsets. A regression
+    /// that drifted any single offset would mis-route inode-vs-rec_len
+    /// or name_len-vs-file_type silently.
+    ///
+    /// Sister kernel-offset pins: ext4_extent_leaf_kernel_offsets_match_extents_h,
+    /// ext4_extent_index_kernel_offsets_match_extents_h,
+    /// ext4_extent_header_kernel_offsets_match_extents_h,
+    /// ext4_mmp_block_kernel_offsets_match_mmp_h, plus
+    /// ext4_file_type_constants_match_kernel_header (which pins the
+    /// file_type discriminants this test relies on).
+    #[test]
+    fn ext4_dir_entry_2_kernel_offsets_match_ext4_h() {
+        // Single 16-byte rec_len entry that fills the block. Magics
+        // chosen so every byte position holds a UNIQUE value, so an
+        // offset drift produces a cross-field collision:
+        //   inode     u32 LE @0..4 = 0x1234_5678 → bytes [0x78,0x56,0x34,0x12]
+        //   rec_len   u16 LE @4..6 = 16          → bytes [0x10, 0x00]
+        //   name_len  u8      @6   = 5           → byte  [0x05]
+        //   file_type u8      @7   = SYMLINK (7) → byte  [0x07]
+        //   name              @8..13            = b"hello"
+        //   pad               @13..16           = zeros (rec_len - 8 - name_len)
+        let block_size = 16_u32;
+        let mut block = vec![0_u8; 16];
+        let inode_magic = 0x1234_5678_u32;
+        let rec_len_raw = 16_u16;
+        let name_len_magic = 5_u8;
+        let file_type_raw = EXT4_FT_SYMLINK;
+
+        block[0..4].copy_from_slice(&inode_magic.to_le_bytes());
+        block[4..6].copy_from_slice(&rec_len_raw.to_le_bytes());
+        block[6] = name_len_magic;
+        block[7] = file_type_raw;
+        block[8..13].copy_from_slice(b"hello");
+
+        let (entries, tail) = parse_dir_block(&block, block_size)
+            .expect("kernel-stamped ext4_dir_entry_2 must parse");
+
+        assert!(tail.is_none(), "no checksum tail for this fixture");
+        assert_eq!(entries.len(), 1, "exactly one entry");
+
+        let entry = &entries[0];
+        assert_eq!(entry.inode, inode_magic, "inode @ offset 0..4");
+        assert_eq!(
+            entry.rec_len,
+            u32::from(rec_len_raw),
+            "rec_len @ offset 4..6"
+        );
+        assert_eq!(entry.name_len, name_len_magic, "name_len @ offset 6");
+        assert_eq!(entry.file_type, Ext4FileType::Symlink, "file_type @ offset 7");
+        assert_eq!(entry.name, b"hello", "name @ offset 8..");
+    }
+
     #[test]
     #[allow(clippy::cast_possible_truncation)]
     fn parse_dir_block_with_checksum_tail() {
