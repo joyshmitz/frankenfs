@@ -1153,6 +1153,10 @@ with these durable surfaces:
 - `manifests/xfstests_ready_manifest.json`
 - `manifests/swarm_ready_manifest.json`
 - `manifests/swarm_blocker_manifest.json`
+- `manifests/swarm_calibration_candidate_manifest.json`
+- `manifests/swarm_calibration_blocked_manifest.json`
+- `manifests/swarm_calibration_release_gate_bundle.json`
+- `manifests/swarm_calibration_release_gate_policy.json`
 - `reports/*_report.json` and `reports/*_report.md`
 - `packets/*_handoff_packet.json` and `packets/*_handoff_packet.md`
 - `blockers/xfstests_missing_inputs.json`
@@ -1173,6 +1177,11 @@ cargo run -p ffs-harness -- generate-permissioned-campaign-packet \
   --manifest artifacts/e2e/<run>/permissioned_campaign_broker/manifests/xfstests_ready_manifest.json \
   --out artifacts/e2e/<run>/permissioned_campaign_broker/packets/xfstests_handoff_packet.json \
   --summary-out artifacts/e2e/<run>/permissioned_campaign_broker/packets/xfstests_handoff_packet.md
+
+cargo run -p ffs-harness -- validate-swarm-capability-calibration \
+  --manifest artifacts/e2e/<run>/permissioned_campaign_broker/manifests/swarm_calibration_candidate_manifest.json \
+  --out artifacts/e2e/<run>/permissioned_campaign_broker/reports/swarm_calibration_candidate_report.json \
+  --summary-out artifacts/e2e/<run>/permissioned_campaign_broker/reports/swarm_calibration_candidate_report.md
 ```
 
 The xfstests ACK boundary is exactly
@@ -1187,6 +1196,20 @@ not product pass/fail evidence. Proof bundles may carry them as
 `permissioned_campaign_handoff_packet` or `permissioned_campaign_broker_report`
 roles only when the lane stays non-pass and the metadata says
 `permissioned_campaign_product_evidence_claim=none`.
+
+The swarm capability calibration packet is a pre-run host classifier, not a
+campaign result. It records CPU, RAM, NUMA visibility, storage class, FUSE
+visibility, RCH worker identity, queue isolation, target-dir isolation, resource
+caps, and the exact artifact root. Its classifications are
+`authoritative_large_host_candidate`, `small_host_smoke`,
+`capability_downgraded_smoke`, and `blocked`; all of them preserve
+`product_evidence_claim=none`. The handoff is: use
+`authoritative_large_host_candidate` only to decide whether the operator should
+authorize `bd-rchk0.53.8`, then run the permissioned campaign to produce raw
+workload logs, p99 attribution, proof-bundle swarm lanes, adaptive-runtime
+evidence, cleanup status, and release-gate output. The calibration E2E includes
+a release-gate fixture proving that calibration-only evidence keeps
+`swarm.responsiveness` hidden until those real campaign artifacts exist.
 
 ## Output
 

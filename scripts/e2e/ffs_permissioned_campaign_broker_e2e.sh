@@ -177,6 +177,8 @@ noise_prefixes = (
     "permissioned campaign broker summary written:",
     "permissioned campaign handoff packet written:",
     "permissioned campaign handoff summary written:",
+    "swarm capability calibration report written:",
+    "swarm capability calibration summary written:",
 )
 text = "\n".join(
     line for line in text.splitlines() if not line.startswith(noise_prefixes)
@@ -220,6 +222,7 @@ starts = [
         text.find("# Permissioned Campaign Broker"),
         text.find("# Permissioned Campaign Execution Ledger"),
         text.find("# Permissioned Campaign Handoff"),
+        text.find("# Swarm Capability Calibration"),
     )
     if index >= 0
 ]
@@ -328,7 +331,9 @@ write_detailed_result() {
     python3 - "$DETAILED_RESULT_JSON" "$verdict" "$summary" "$PASS_COUNT" "$FAIL_COUNT" "$TOTAL" \
         "$COMMAND_TRANSCRIPT" "$SAFETY_REPORT_JSON" "$XFSTESTS_PACKET_JSON" "$SWARM_PACKET_JSON" \
         "$SWARM_BLOCKER_PACKET_JSON" "$XFSTESTS_LEDGER_JSON" "$SWARM_LEDGER_JSON" \
-        "$XFSTESTS_MISSING_INPUTS_JSON" "$SWARM_MISSING_INPUTS_JSON" <<'PY'
+        "$XFSTESTS_MISSING_INPUTS_JSON" "$SWARM_MISSING_INPUTS_JSON" \
+        "$SWARM_CALIBRATION_CANDIDATE_REPORT_JSON" "$SWARM_CALIBRATION_BLOCKED_REPORT_JSON" \
+        "$SWARM_CALIBRATION_RELEASE_GATE_REPORT_JSON" <<'PY'
 from __future__ import annotations
 
 import json
@@ -351,6 +356,9 @@ import sys
     swarm_ledger,
     xfstests_missing,
     swarm_missing,
+    swarm_calibration_candidate,
+    swarm_calibration_blocked,
+    swarm_calibration_release_gate,
 ) = sys.argv[1:]
 
 payload = {
@@ -380,6 +388,11 @@ payload = {
         xfstests_missing,
         swarm_missing,
     ],
+    "swarm_calibration_packets": [
+        swarm_calibration_candidate,
+        swarm_calibration_blocked,
+    ],
+    "swarm_calibration_release_gate_report": swarm_calibration_release_gate,
 }
 pathlib.Path(out_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -409,6 +422,10 @@ FIXTURE_STDERR="$LOG_DIR/write_fixtures.stderr"
 XFSTESTS_MANIFEST="$MANIFEST_DIR/xfstests_ready_manifest.json"
 SWARM_MANIFEST="$MANIFEST_DIR/swarm_ready_manifest.json"
 SWARM_BLOCKER_MANIFEST="$MANIFEST_DIR/swarm_blocker_manifest.json"
+SWARM_CALIBRATION_CANDIDATE_MANIFEST="$MANIFEST_DIR/swarm_calibration_candidate_manifest.json"
+SWARM_CALIBRATION_BLOCKED_MANIFEST="$MANIFEST_DIR/swarm_calibration_blocked_manifest.json"
+SWARM_CALIBRATION_RELEASE_GATE_BUNDLE="$MANIFEST_DIR/swarm_calibration_release_gate_bundle.json"
+SWARM_CALIBRATION_RELEASE_GATE_POLICY="$MANIFEST_DIR/swarm_calibration_release_gate_policy.json"
 INVALID_MANIFEST="$MANIFEST_DIR/invalid_missing_ack_manifest.json"
 
 XFSTESTS_REPORT_JSON="$REPORT_DIR/xfstests_ready_report.json"
@@ -417,6 +434,12 @@ SWARM_REPORT_JSON="$REPORT_DIR/swarm_ready_report.json"
 SWARM_REPORT_MD="$REPORT_DIR/swarm_ready_report.md"
 SWARM_BLOCKER_REPORT_JSON="$REPORT_DIR/swarm_blocker_report.json"
 SWARM_BLOCKER_REPORT_MD="$REPORT_DIR/swarm_blocker_report.md"
+SWARM_CALIBRATION_CANDIDATE_REPORT_JSON="$REPORT_DIR/swarm_calibration_candidate_report.json"
+SWARM_CALIBRATION_CANDIDATE_REPORT_MD="$REPORT_DIR/swarm_calibration_candidate_report.md"
+SWARM_CALIBRATION_BLOCKED_REPORT_JSON="$REPORT_DIR/swarm_calibration_blocked_report.json"
+SWARM_CALIBRATION_BLOCKED_REPORT_MD="$REPORT_DIR/swarm_calibration_blocked_report.md"
+SWARM_CALIBRATION_RELEASE_GATE_REPORT_JSON="$REPORT_DIR/swarm_calibration_release_gate_report.json"
+SWARM_CALIBRATION_RELEASE_GATE_RAW="$REPORT_DIR/swarm_calibration_release_gate.raw"
 INVALID_REPORT_RAW="$REPORT_DIR/invalid_missing_ack.raw"
 
 XFSTESTS_PACKET_JSON="$PACKET_DIR/xfstests_handoff_packet.json"
@@ -443,10 +466,11 @@ printf 'created_at\tscenario_id\texit_status\tcommand\tstdout_path\tstderr_path\
 e2e_step "Scenario 1: broker CLI is wired"
 if grep -q "validate-permissioned-campaign-broker" crates/ffs-harness/src/main.rs \
     && grep -q "generate-permissioned-campaign-packet" crates/ffs-harness/src/main.rs \
+    && grep -q "validate-swarm-capability-calibration" crates/ffs-harness/src/main.rs \
     && grep -q "pub mod permissioned_campaign_broker" crates/ffs-harness/src/lib.rs; then
-    scenario_result "permissioned_broker_cli_wired" "PASS" "validator and packet generator are exported"
+    scenario_result "permissioned_broker_cli_wired" "PASS" "validator, packet generator, and calibration CLI are exported"
 else
-    scenario_result "permissioned_broker_cli_wired" "FAIL" "missing broker CLI or module export"
+    scenario_result "permissioned_broker_cli_wired" "FAIL" "missing broker/calibration CLI or module export"
 fi
 
 e2e_step "Scenario 2: fixture manifests and blocker artifacts are generated"
@@ -718,6 +742,140 @@ def swarm_manifest(capable: bool) -> dict:
     }
 
 
+def swarm_calibration_manifest(kind: str) -> dict:
+    capable = kind == "candidate"
+    blocked = kind == "blocked"
+    observed_root = swarm_root if not blocked else rel("swarm", "unexpected-root")
+    return {
+        "schema_version": 1,
+        "packet_id": f"bd-4v16z.9-swarm-calibration-{kind}",
+        "generated_at": reference_timestamp,
+        "target_beads": ["bd-4v16z.9", "bd-rchk0.53.8"],
+        "host": {
+            "logical_cpus": 96 if capable or blocked else 16,
+            "ram_total_gib": 512.0 if capable or blocked else 64.0,
+            "ram_available_gib": 384.0 if capable or blocked else 48.0,
+            "numa_topology_visible": capable or blocked,
+            "numa_nodes": 2 if capable or blocked else 0,
+            "storage_class": "local_nvme",
+            "fuse": {
+                "state": "available" if capable or blocked else "missing",
+                "detail": "/dev/fuse and fusermount3 available" if capable or blocked else "/dev/fuse unavailable",
+            },
+        },
+        "worker": {
+            "rch_worker_identity": "rch:large-host-01",
+            "worker_fingerprint": "worker=large-host-01 cpu=96 ram=512g numa=2",
+            "worker_fingerprint_observed_at_epoch_days": observed_days - (30 if blocked else 0),
+            "worker_fingerprint_max_age_days": 7,
+            "queue_isolation": "dedicated" if capable or blocked else "shared",
+            "target_dir_isolated": not blocked,
+            "target_dir": rel("swarm", "calibration", kind, "target"),
+        },
+        "artifact_plan": {
+            "expected_artifact_root": swarm_root,
+            "observed_artifact_root": observed_root,
+        },
+        "resource_caps": {
+            "max_duration_secs": 7200,
+            "max_threads": 96 if capable or blocked else 16,
+            "max_memory_gib": 384.0 if capable or blocked else 32.0,
+            "max_temp_storage_gib": 512.0,
+            "max_queue_depth": 4096,
+        },
+        "release_gate_policy_path": "tests/release-gates/release_gate_policy_v1.json",
+        "real_campaign_bead": "bd-rchk0.53.8",
+        "handoff_summary": "calibration packet only; run bd-rchk0.53.8 for executed evidence",
+    }
+
+
+def release_gate_missing_swarm_bundle() -> dict:
+    return {
+        "schema_version": 1,
+        "bundle_id": "bd-4v16z.9-calibration-only-bundle",
+        "generated_at": reference_timestamp,
+        "git_sha": git_sha,
+        "toolchain": "rust-nightly-2024",
+        "kernel": "linux-calibration-e2e",
+        "mount_capability": "not_required",
+        "required_lanes": [
+            "swarm_workload_harness",
+            "swarm_tail_latency",
+            "adaptive_runtime",
+        ],
+        "lanes": [],
+        "redaction": {
+            "redacted_fields": ["hostname", "token"],
+            "preserved_fields": [
+                "reproduction_command",
+                "git_sha",
+                "bundle_id",
+                "artifact_paths",
+                "scenario_ids",
+            ],
+            "reproduction_command": "cargo run -p ffs-harness -- validate-proof-bundle --bundle swarm_calibration_release_gate_bundle.json",
+        },
+    }
+
+
+def release_gate_swarm_policy() -> dict:
+    def lane(lane_id: str, risk_class: str = "generic") -> dict:
+        return {
+            "lane_id": lane_id,
+            "expected_outcome": "pass",
+            "missing_state": "hidden",
+            "failed_state": "experimental",
+            "risk_class": risk_class,
+            "skipped_state": "experimental",
+            "allow_capability_skip": False,
+            "remediation_id": "bd-rchk0.53.8",
+        }
+
+    return {
+        "schema_version": 1,
+        "policy_id": "bd-4v16z.9-swarm-calibration-release-gate",
+        "reproduction_command": "cargo run -p ffs-harness -- evaluate-release-gates --bundle swarm_calibration_release_gate_bundle.json --policy swarm_calibration_release_gate_policy.json",
+        "required_log_fields": [
+            "feature_id",
+            "previous_state",
+            "proposed_state",
+            "final_state",
+            "transition_reason",
+            "controlling_artifact_hash",
+            "threshold_value",
+            "observed_value",
+            "remediation_id",
+            "docs_wording_id",
+            "output_path",
+            "reproduction_command",
+        ],
+        "features": [
+            {
+                "feature_id": "swarm.responsiveness",
+                "docs_wording_id": "feature_parity.swarm_responsiveness",
+                "previous_state": "disabled",
+                "target_state": "validated",
+                "required_lanes": [
+                    lane("swarm_workload_harness", "host_capability_skip"),
+                    lane("swarm_tail_latency", "noisy_performance"),
+                    lane("adaptive_runtime", "host_capability_skip"),
+                ],
+                "thresholds": [],
+                "kill_switches": [
+                    {
+                        "switch_id": "missing-evidence",
+                        "trigger": "any_required_lane_missing",
+                        "downgrade_to": "hidden",
+                        "reason": "calibration packets are not executed swarm evidence",
+                        "remediation_id": "bd-rchk0.53.8",
+                    }
+                ],
+                "remediation_id": "bd-rchk0.53.8",
+            }
+        ],
+    }
+
+
 invalid_manifest = dict(xfstests_manifest)
 invalid_manifest["campaign_id"] = "bd-rchk3.3-invalid-missing-ack"
 invalid_manifest["required_ack"] = dict(invalid_manifest["required_ack"])
@@ -897,6 +1055,10 @@ invalid_dry_run_pass_ledger = {
 write_json(manifest_dir / "xfstests_ready_manifest.json", xfstests_manifest)
 write_json(manifest_dir / "swarm_ready_manifest.json", swarm_manifest(True))
 write_json(manifest_dir / "swarm_blocker_manifest.json", swarm_manifest(False))
+write_json(manifest_dir / "swarm_calibration_candidate_manifest.json", swarm_calibration_manifest("candidate"))
+write_json(manifest_dir / "swarm_calibration_blocked_manifest.json", swarm_calibration_manifest("blocked"))
+write_json(manifest_dir / "swarm_calibration_release_gate_bundle.json", release_gate_missing_swarm_bundle())
+write_json(manifest_dir / "swarm_calibration_release_gate_policy.json", release_gate_swarm_policy())
 write_json(manifest_dir / "invalid_missing_ack_manifest.json", invalid_manifest)
 write_json(manifest_dir.parent / "ledgers" / "xfstests_execution_ledger.json", xfstests_ledger)
 write_json(manifest_dir.parent / "ledgers" / "swarm_execution_ledger.json", swarm_ledger)
@@ -969,6 +1131,8 @@ write_json(
             "validate-permissioned-campaign-broker",
             "generate-permissioned-campaign-packet",
             "validate-permissioned-campaign-ledger",
+            "validate-swarm-capability-calibration",
+            "evaluate-release-gates",
         ],
         "cleanup_status": "preserved_artifacts",
         "artifact_root": artifact_root.as_posix(),
@@ -986,6 +1150,10 @@ if jq empty \
     "$XFSTESTS_MANIFEST" \
     "$SWARM_MANIFEST" \
     "$SWARM_BLOCKER_MANIFEST" \
+    "$SWARM_CALIBRATION_CANDIDATE_MANIFEST" \
+    "$SWARM_CALIBRATION_BLOCKED_MANIFEST" \
+    "$SWARM_CALIBRATION_RELEASE_GATE_BUNDLE" \
+    "$SWARM_CALIBRATION_RELEASE_GATE_POLICY" \
     "$INVALID_MANIFEST" \
     "$XFSTESTS_LEDGER_JSON" \
     "$SWARM_LEDGER_JSON" \
@@ -1109,7 +1277,72 @@ else
     scenario_result "permissioned_broker_swarm_blocker_packet" "FAIL" "swarm blocker packet contract failed"
 fi
 
-e2e_step "Scenario 7: synthetic xfstests and swarm execution ledgers validate"
+e2e_step "Scenario 7: swarm capability calibration emits candidate and blocked packets"
+SWARM_CALIBRATION_CANDIDATE_STDOUT="$LOG_DIR/swarm_calibration_candidate.stdout"
+SWARM_CALIBRATION_CANDIDATE_STDERR="$LOG_DIR/swarm_calibration_candidate.stderr"
+SWARM_CALIBRATION_BLOCKED_STDOUT="$LOG_DIR/swarm_calibration_blocked.stdout"
+SWARM_CALIBRATION_BLOCKED_STDERR="$LOG_DIR/swarm_calibration_blocked.stderr"
+if run_harness "swarm_calibration_candidate" "$SWARM_CALIBRATION_CANDIDATE_STDOUT" "$SWARM_CALIBRATION_CANDIDATE_STDERR" \
+    validate-swarm-capability-calibration \
+    --manifest "$SWARM_CALIBRATION_CANDIDATE_MANIFEST" \
+    --reference-timestamp "$REFERENCE_TIMESTAMP" \
+    --out "$SWARM_CALIBRATION_CANDIDATE_REPORT_JSON" \
+    --summary-out "$SWARM_CALIBRATION_CANDIDATE_REPORT_MD" \
+    && run_harness "swarm_calibration_blocked" "$SWARM_CALIBRATION_BLOCKED_STDOUT" "$SWARM_CALIBRATION_BLOCKED_STDERR" \
+        validate-swarm-capability-calibration \
+        --manifest "$SWARM_CALIBRATION_BLOCKED_MANIFEST" \
+        --reference-timestamp "$REFERENCE_TIMESTAMP" \
+        --out "$SWARM_CALIBRATION_BLOCKED_REPORT_JSON" \
+        --summary-out "$SWARM_CALIBRATION_BLOCKED_REPORT_MD" \
+    && jq -e '
+        .valid == true
+        and .classification == "authoritative_large_host_candidate"
+        and .candidate_for_authorized_run == true
+        and .product_evidence_claim == "none"
+        and (.release_gate_effect | contains("swarm.responsiveness remains hidden"))
+    ' "$SWARM_CALIBRATION_CANDIDATE_REPORT_JSON" >/dev/null \
+    && jq -e '
+        .valid == true
+        and .classification == "blocked"
+        and .candidate_for_authorized_run == false
+        and .product_evidence_claim == "none"
+        and (.blockers | any(contains("worker_fingerprint_stale")))
+        and (.blockers | any(contains("artifact_root_mismatch")))
+    ' "$SWARM_CALIBRATION_BLOCKED_REPORT_JSON" >/dev/null \
+    && grep -q "Product evidence claim: \`none\`" "$SWARM_CALIBRATION_CANDIDATE_REPORT_MD"; then
+    scenario_result "swarm_capability_calibration_packets" "PASS" "candidate and blocked calibration packets emitted without product evidence"
+else
+    scenario_result "swarm_capability_calibration_packets" "FAIL" "swarm calibration packet contract failed"
+fi
+
+e2e_step "Scenario 8: calibration-only evidence keeps swarm.responsiveness hidden at release gate"
+SWARM_CALIBRATION_RELEASE_GATE_SYNC_DIR="$RCH_INPUT_ROOT/swarm_calibration_release_gate"
+mkdir -p "$SWARM_CALIBRATION_RELEASE_GATE_SYNC_DIR"
+SWARM_CALIBRATION_RELEASE_GATE_SYNC_BUNDLE="$SWARM_CALIBRATION_RELEASE_GATE_SYNC_DIR/bundle.json"
+SWARM_CALIBRATION_RELEASE_GATE_SYNC_POLICY="$SWARM_CALIBRATION_RELEASE_GATE_SYNC_DIR/policy.json"
+cp "$SWARM_CALIBRATION_RELEASE_GATE_BUNDLE" "$SWARM_CALIBRATION_RELEASE_GATE_SYNC_BUNDLE"
+cp "$SWARM_CALIBRATION_RELEASE_GATE_POLICY" "$SWARM_CALIBRATION_RELEASE_GATE_SYNC_POLICY"
+set +e
+run_rch_capture "$SWARM_CALIBRATION_RELEASE_GATE_RAW" cargo run --quiet -p ffs-harness -- evaluate-release-gates \
+    --bundle "$SWARM_CALIBRATION_RELEASE_GATE_SYNC_BUNDLE" \
+    --policy "$SWARM_CALIBRATION_RELEASE_GATE_SYNC_POLICY" \
+    --current-git-sha "$GIT_SHA" \
+    --max-age-days 10000
+SWARM_CALIBRATION_RELEASE_GATE_STATUS=$?
+set -e
+if [[ "$SWARM_CALIBRATION_RELEASE_GATE_STATUS" -ne 0 ]] \
+    && extract_report_json "$SWARM_CALIBRATION_RELEASE_GATE_RAW" "$SWARM_CALIBRATION_RELEASE_GATE_REPORT_JSON" \
+    && jq -e '
+        .release_ready == false
+        and (.feature_reports[] | select(.feature_id == "swarm.responsiveness") | .final_state == "hidden")
+        and any(.findings[]; .feature_id == "swarm.responsiveness" and (.finding_id | contains("::missing_required_lane::")))
+    ' "$SWARM_CALIBRATION_RELEASE_GATE_REPORT_JSON" >/dev/null; then
+    scenario_result "swarm_calibration_release_gate_hidden" "PASS" "release gate keeps swarm.responsiveness hidden without executed campaign artifacts"
+else
+    scenario_result "swarm_calibration_release_gate_hidden" "FAIL" "calibration-only release gate did not fail closed"
+fi
+
+e2e_step "Scenario 9: synthetic xfstests and swarm execution ledgers validate"
 XFSTESTS_LEDGER_STDOUT="$LOG_DIR/xfstests_ledger.stdout"
 XFSTESTS_LEDGER_STDERR="$LOG_DIR/xfstests_ledger.stderr"
 SWARM_LEDGER_STDOUT="$LOG_DIR/swarm_ledger.stdout"
@@ -1146,7 +1379,7 @@ else
     scenario_result "permissioned_broker_execution_ledgers_validate" "FAIL" "synthetic execution ledger validation failed"
 fi
 
-e2e_step "Scenario 8: dry-run packets cannot be promoted as pass evidence"
+e2e_step "Scenario 10: dry-run packets cannot be promoted as pass evidence"
 INVALID_LEDGER_STDOUT="$LOG_DIR/invalid_dry_run_pass_ledger.stdout"
 INVALID_LEDGER_STDERR="$LOG_DIR/invalid_dry_run_pass_ledger.stderr"
 set +e
@@ -1165,7 +1398,7 @@ else
     scenario_result "permissioned_broker_invalid_dry_run_ledger_refused" "FAIL" "dry-run pass-evidence ledger was not refused"
 fi
 
-e2e_step "Scenario 9: missing inputs produce structured blocker artifacts"
+e2e_step "Scenario 11: missing inputs produce structured blocker artifacts"
 if jq -e '
     .permissioned_execution_attempted == false
     and .cleanup_status == "not_started_dry_run"
@@ -1186,7 +1419,7 @@ else
     scenario_result "permissioned_broker_missing_inputs_blockers" "FAIL" "missing input blocker artifact contract failed"
 fi
 
-e2e_step "Scenario 10: invalid manifest is refused before packet generation"
+e2e_step "Scenario 12: invalid manifest is refused before packet generation"
 INVALID_STDOUT="$LOG_DIR/invalid_manifest.stdout"
 INVALID_STDERR="$LOG_DIR/invalid_manifest.stderr"
 set +e
@@ -1203,7 +1436,7 @@ else
     scenario_result "permissioned_broker_invalid_manifest_refused" "FAIL" "invalid manifest was not refused"
 fi
 
-e2e_step "Scenario 11: non-execution safety report and command transcript are complete"
+e2e_step "Scenario 13: non-execution safety report and command transcript are complete"
 if jq -e '
     .permissioned_execution_attempted == false
     and .mounted_workload_started == false
@@ -1211,10 +1444,13 @@ if jq -e '
     and (.destructive_commands_started | length == 0)
     and (.allowed_commands_executed | index("validate-permissioned-campaign-broker"))
     and (.allowed_commands_executed | index("generate-permissioned-campaign-packet"))
+    and (.allowed_commands_executed | index("validate-swarm-capability-calibration"))
+    and (.allowed_commands_executed | index("evaluate-release-gates"))
 ' "$SAFETY_REPORT_JSON" >/dev/null \
     && [[ "$(wc -l <"$COMMAND_TRANSCRIPT")" -ge 8 ]] \
     && grep -q "validate-permissioned-campaign-broker" "$COMMAND_TRANSCRIPT" \
-    && grep -q "generate-permissioned-campaign-packet" "$COMMAND_TRANSCRIPT"; then
+    && grep -q "generate-permissioned-campaign-packet" "$COMMAND_TRANSCRIPT" \
+    && grep -q "validate-swarm-capability-calibration" "$COMMAND_TRANSCRIPT"; then
     scenario_result "permissioned_broker_non_execution_guard" "PASS" "safety report and command transcript prove dry-run-only execution"
 else
     scenario_result "permissioned_broker_non_execution_guard" "FAIL" "non-execution safety guard failed"

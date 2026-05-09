@@ -20,6 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const PERMISSIONED_CAMPAIGN_BROKER_SCHEMA_VERSION: u32 = 1;
 pub const PERMISSIONED_CAMPAIGN_HANDOFF_PACKET_SCHEMA_VERSION: u32 = 1;
 pub const PERMISSIONED_CAMPAIGN_EXECUTION_LEDGER_SCHEMA_VERSION: u32 = 1;
+pub const SWARM_CAPABILITY_CALIBRATION_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_PERMISSIONED_CAMPAIGN_BROKER_MANIFEST: &str =
     "docs/permissioned-campaign-broker-manifest.json";
 pub const DEFAULT_PERMISSIONED_CAMPAIGN_PREFLIGHT_MAX_AGE_DAYS: u32 = 14;
@@ -36,6 +37,7 @@ pub const SWARM_ARTIFACT_ROOT_ENV: &str = "FFS_SWARM_WORKLOAD_ARTIFACT_ROOT";
 pub const SWARM_MIN_LOGICAL_CPUS: u32 = 64;
 pub const SWARM_MIN_RAM_GIB: u32 = 256;
 pub const SWARM_MIN_NUMA_NODES: u32 = 2;
+pub const SWARM_CAPABILITY_CALIBRATION_PRODUCT_EVIDENCE_CLAIM: &str = "none";
 
 const ALLOWED_DESTRUCTIVE_OPERATIONS: [&str; 9] = [
     "mount_test_device",
@@ -610,6 +612,173 @@ pub struct PermissionedCampaignExecutionLedgerReport {
     pub proof_bundle_lane_candidates: Vec<PermissionedCampaignProofBundleLaneCandidateSummary>,
     pub issue_count: usize,
     pub issues: Vec<PermissionedCampaignExecutionLedgerIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SwarmCapabilityCalibrationManifest {
+    pub schema_version: u32,
+    pub packet_id: String,
+    pub generated_at: String,
+    pub target_beads: Vec<String>,
+    pub host: SwarmCapabilityCalibrationHost,
+    pub worker: SwarmCapabilityCalibrationWorker,
+    pub artifact_plan: SwarmCapabilityCalibrationArtifactPlan,
+    pub resource_caps: SwarmCapabilityCalibrationResourceCaps,
+    pub release_gate_policy_path: String,
+    pub real_campaign_bead: String,
+    pub handoff_summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SwarmCapabilityCalibrationHost {
+    pub logical_cpus: u32,
+    pub ram_total_gib: f64,
+    pub ram_available_gib: f64,
+    pub numa_topology_visible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numa_nodes: Option<u32>,
+    pub storage_class: String,
+    pub fuse: SwarmCapabilityCalibrationFuse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmCapabilityCalibrationFuse {
+    pub state: SwarmCapabilityCalibrationFuseState,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmCapabilityCalibrationFuseState {
+    Available,
+    Missing,
+    Unknown,
+}
+
+impl SwarmCapabilityCalibrationFuseState {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Missing => "missing",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmCapabilityCalibrationWorker {
+    pub rch_worker_identity: String,
+    pub worker_fingerprint: String,
+    pub worker_fingerprint_observed_at_epoch_days: u32,
+    pub worker_fingerprint_max_age_days: u32,
+    pub queue_isolation: SwarmCapabilityCalibrationIsolation,
+    pub target_dir_isolated: bool,
+    pub target_dir: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmCapabilityCalibrationIsolation {
+    Dedicated,
+    Shared,
+    Unknown,
+}
+
+impl SwarmCapabilityCalibrationIsolation {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Dedicated => "dedicated",
+            Self::Shared => "shared",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmCapabilityCalibrationArtifactPlan {
+    pub expected_artifact_root: String,
+    pub observed_artifact_root: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SwarmCapabilityCalibrationResourceCaps {
+    pub max_duration_secs: u64,
+    pub max_threads: u32,
+    pub max_memory_gib: f64,
+    pub max_temp_storage_gib: f64,
+    pub max_queue_depth: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmCapabilityCalibrationClassification {
+    AuthoritativeLargeHostCandidate,
+    SmallHostSmoke,
+    CapabilityDowngradedSmoke,
+    Blocked,
+}
+
+impl SwarmCapabilityCalibrationClassification {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::AuthoritativeLargeHostCandidate => "authoritative_large_host_candidate",
+            Self::SmallHostSmoke => "small_host_smoke",
+            Self::CapabilityDowngradedSmoke => "capability_downgraded_smoke",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SwarmCapabilityCalibrationReport {
+    pub schema_version: u32,
+    pub packet_id: String,
+    pub valid: bool,
+    pub classification: String,
+    pub candidate_for_authorized_run: bool,
+    pub product_evidence_claim: String,
+    pub release_gate_effect: String,
+    pub target_beads: Vec<String>,
+    pub real_campaign_bead: String,
+    pub host_facts: Vec<PermissionedCampaignHostFactSummary>,
+    pub worker_identity: String,
+    pub worker_fingerprint_age_days: u32,
+    pub queue_isolation: String,
+    pub target_dir_isolated: bool,
+    pub expected_artifact_root: String,
+    pub observed_artifact_root: String,
+    pub resource_caps: SwarmCapabilityCalibrationResourceCapsReport,
+    pub blocker_count: usize,
+    pub blockers: Vec<String>,
+    pub downgrade_count: usize,
+    pub downgrade_reasons: Vec<String>,
+    pub issue_count: usize,
+    pub issues: Vec<PermissionedCampaignBrokerIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SwarmCapabilityCalibrationResourceCapsReport {
+    pub max_duration_secs: u64,
+    pub max_threads: u32,
+    pub max_memory_gib: f64,
+    pub max_temp_storage_gib: f64,
+    pub max_queue_depth: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwarmCapabilityCalibrationValidationConfig {
+    pub reference_epoch_days: u32,
+}
+
+impl Default for SwarmCapabilityCalibrationValidationConfig {
+    fn default() -> Self {
+        Self {
+            reference_epoch_days: current_epoch_days().unwrap_or(0),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1402,6 +1571,198 @@ pub fn generate_swarm_handoff_packet(
     generate_permissioned_campaign_handoff_packet(&manifest, validation_config, generation)
 }
 
+pub fn load_swarm_capability_calibration_manifest(
+    path: &Path,
+) -> Result<SwarmCapabilityCalibrationManifest> {
+    let text = fs::read_to_string(path).with_context(|| {
+        format!(
+            "failed to read swarm capability calibration manifest {}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&text).with_context(|| {
+        format!(
+            "invalid swarm capability calibration manifest JSON {}",
+            path.display()
+        )
+    })
+}
+
+#[must_use]
+pub fn validate_swarm_capability_calibration_manifest(
+    manifest: &SwarmCapabilityCalibrationManifest,
+    config: &SwarmCapabilityCalibrationValidationConfig,
+) -> SwarmCapabilityCalibrationReport {
+    let mut issues = Vec::new();
+    let mut blockers = Vec::new();
+    let mut downgrade_reasons = Vec::new();
+
+    validate_swarm_calibration_schema(manifest, &mut issues);
+    classify_swarm_calibration_host(manifest, config, &mut blockers, &mut downgrade_reasons);
+
+    let classification =
+        swarm_calibration_classification(manifest, &issues, &blockers, &downgrade_reasons);
+    let candidate_for_authorized_run =
+        classification == SwarmCapabilityCalibrationClassification::AuthoritativeLargeHostCandidate;
+    let host_facts = swarm_calibration_host_facts(manifest);
+    let worker_fingerprint_age_days = config
+        .reference_epoch_days
+        .saturating_sub(manifest.worker.worker_fingerprint_observed_at_epoch_days);
+    let resource_caps = SwarmCapabilityCalibrationResourceCapsReport {
+        max_duration_secs: manifest.resource_caps.max_duration_secs,
+        max_threads: manifest.resource_caps.max_threads,
+        max_memory_gib: manifest.resource_caps.max_memory_gib,
+        max_temp_storage_gib: manifest.resource_caps.max_temp_storage_gib,
+        max_queue_depth: manifest.resource_caps.max_queue_depth,
+    };
+
+    SwarmCapabilityCalibrationReport {
+        schema_version: SWARM_CAPABILITY_CALIBRATION_SCHEMA_VERSION,
+        packet_id: manifest.packet_id.clone(),
+        valid: issues.is_empty(),
+        classification: classification.label().to_owned(),
+        candidate_for_authorized_run,
+        product_evidence_claim: SWARM_CAPABILITY_CALIBRATION_PRODUCT_EVIDENCE_CLAIM.to_owned(),
+        release_gate_effect: format!(
+            "swarm.responsiveness remains hidden or blocked until {} records executed large-host proof-bundle lanes and release-gate output",
+            manifest.real_campaign_bead
+        ),
+        target_beads: manifest.target_beads.clone(),
+        real_campaign_bead: manifest.real_campaign_bead.clone(),
+        host_facts,
+        worker_identity: manifest.worker.rch_worker_identity.clone(),
+        worker_fingerprint_age_days,
+        queue_isolation: manifest.worker.queue_isolation.label().to_owned(),
+        target_dir_isolated: manifest.worker.target_dir_isolated,
+        expected_artifact_root: manifest.artifact_plan.expected_artifact_root.clone(),
+        observed_artifact_root: manifest.artifact_plan.observed_artifact_root.clone(),
+        resource_caps,
+        blocker_count: blockers.len(),
+        blockers,
+        downgrade_count: downgrade_reasons.len(),
+        downgrade_reasons,
+        issue_count: issues.len(),
+        issues,
+    }
+}
+
+#[must_use]
+pub fn render_swarm_capability_calibration_markdown(
+    report: &SwarmCapabilityCalibrationReport,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Swarm Capability Calibration\n");
+    let _ = writeln!(out, "- Packet: `{}`", report.packet_id);
+    let _ = writeln!(out, "- Valid: `{}`", report.valid);
+    let _ = writeln!(out, "- Classification: `{}`", report.classification);
+    let _ = writeln!(
+        out,
+        "- Candidate for authorized run: `{}`",
+        report.candidate_for_authorized_run
+    );
+    let _ = writeln!(
+        out,
+        "- Product evidence claim: `{}`",
+        report.product_evidence_claim
+    );
+    let _ = writeln!(
+        out,
+        "- Release gate effect: {}",
+        markdown_cell(&report.release_gate_effect)
+    );
+    let _ = writeln!(out, "- Real campaign bead: `{}`", report.real_campaign_bead);
+    let _ = writeln!(out, "- Worker: `{}`", report.worker_identity);
+    let _ = writeln!(
+        out,
+        "- Worker fingerprint age days: `{}`",
+        report.worker_fingerprint_age_days
+    );
+    let _ = writeln!(out, "- Queue isolation: `{}`", report.queue_isolation);
+    let _ = writeln!(
+        out,
+        "- Target dir isolated: `{}`",
+        report.target_dir_isolated
+    );
+    let _ = writeln!(
+        out,
+        "- Artifact root: expected `{}` observed `{}`",
+        report.expected_artifact_root, report.observed_artifact_root
+    );
+
+    out.push_str("\n## Host Facts\n\n");
+    out.push_str("| Fact | Observed | Required | Proof |\n");
+    out.push_str("|---|---|---|---|\n");
+    for fact in &report.host_facts {
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | `{}` | `{}` |",
+            fact.fact_id, fact.observed_value, fact.required_value, fact.proof_path
+        );
+    }
+
+    out.push_str("\n## Resource Caps\n\n");
+    let _ = writeln!(
+        out,
+        "- Duration: `{}` seconds",
+        report.resource_caps.max_duration_secs
+    );
+    let _ = writeln!(out, "- Threads: `{}`", report.resource_caps.max_threads);
+    let _ = writeln!(
+        out,
+        "- Memory: `{:.1}` GiB",
+        report.resource_caps.max_memory_gib
+    );
+    let _ = writeln!(
+        out,
+        "- Temp storage: `{:.1}` GiB",
+        report.resource_caps.max_temp_storage_gib
+    );
+    let _ = writeln!(
+        out,
+        "- Queue depth: `{}`",
+        report.resource_caps.max_queue_depth
+    );
+
+    if !report.blockers.is_empty() {
+        out.push_str("\n## Blockers\n\n");
+        for blocker in &report.blockers {
+            let _ = writeln!(out, "- {}", markdown_cell(blocker));
+        }
+    }
+    if !report.downgrade_reasons.is_empty() {
+        out.push_str("\n## Downgrade Reasons\n\n");
+        for reason in &report.downgrade_reasons {
+            let _ = writeln!(out, "- {}", markdown_cell(reason));
+        }
+    }
+    if !report.issues.is_empty() {
+        out.push_str("\n## Issues\n\n");
+        for issue in &report.issues {
+            let _ = writeln!(
+                out,
+                "- `{}` `{}`: {}",
+                issue.path,
+                issue.code,
+                markdown_cell(&issue.message)
+            );
+        }
+    }
+    out
+}
+
+pub fn fail_on_swarm_capability_calibration_errors(
+    report: &SwarmCapabilityCalibrationReport,
+) -> Result<()> {
+    if report.valid {
+        Ok(())
+    } else {
+        bail!(
+            "swarm capability calibration validation failed: issues={}",
+            report.issue_count
+        )
+    }
+}
+
 #[must_use]
 pub fn render_permissioned_campaign_handoff_markdown(
     packet: &PermissionedCampaignHandoffPacket,
@@ -1547,6 +1908,278 @@ pub fn render_permissioned_campaign_handoff_markdown(
     }
 
     out
+}
+
+fn validate_swarm_calibration_schema(
+    manifest: &SwarmCapabilityCalibrationManifest,
+    issues: &mut Vec<PermissionedCampaignBrokerIssue>,
+) {
+    if manifest.schema_version != SWARM_CAPABILITY_CALIBRATION_SCHEMA_VERSION {
+        push_issue(
+            issues,
+            "schema_version",
+            "unsupported_schema_version",
+            "schema_version must match the current swarm capability calibration schema",
+        );
+    }
+    validate_non_empty(issues, "packet_id", &manifest.packet_id);
+    validate_non_empty(issues, "generated_at", &manifest.generated_at);
+    validate_non_empty(issues, "handoff_summary", &manifest.handoff_summary);
+    validate_non_empty(
+        issues,
+        "worker.rch_worker_identity",
+        &manifest.worker.rch_worker_identity,
+    );
+    validate_non_empty(
+        issues,
+        "worker.worker_fingerprint",
+        &manifest.worker.worker_fingerprint,
+    );
+    validate_non_empty(issues, "host.storage_class", &manifest.host.storage_class);
+    validate_non_empty(issues, "host.fuse.detail", &manifest.host.fuse.detail);
+    validate_non_empty(
+        issues,
+        "release_gate_policy_path",
+        &manifest.release_gate_policy_path,
+    );
+    validate_non_empty(issues, "real_campaign_bead", &manifest.real_campaign_bead);
+    if !manifest.real_campaign_bead.starts_with("bd-") {
+        push_issue(
+            issues,
+            "real_campaign_bead",
+            "invalid_bead_id",
+            "real_campaign_bead must start with bd-",
+        );
+    }
+    if manifest.target_beads.is_empty() {
+        push_issue(
+            issues,
+            "target_beads",
+            "missing_target_beads",
+            "target_beads must include the calibration and real campaign beads",
+        );
+    }
+    for (index, bead) in manifest.target_beads.iter().enumerate() {
+        if !bead.starts_with("bd-") {
+            push_issue(
+                issues,
+                &format!("target_beads[{index}]"),
+                "invalid_bead_id",
+                "target bead must start with bd-",
+            );
+        }
+    }
+    validate_safe_path(issues, "worker.target_dir", &manifest.worker.target_dir);
+    validate_safe_path(
+        issues,
+        "artifact_plan.expected_artifact_root",
+        &manifest.artifact_plan.expected_artifact_root,
+    );
+    validate_safe_path(
+        issues,
+        "artifact_plan.observed_artifact_root",
+        &manifest.artifact_plan.observed_artifact_root,
+    );
+    validate_safe_path(
+        issues,
+        "release_gate_policy_path",
+        &manifest.release_gate_policy_path,
+    );
+    if manifest.worker.worker_fingerprint_max_age_days == 0 {
+        push_issue(
+            issues,
+            "worker.worker_fingerprint_max_age_days",
+            "invalid_freshness_window",
+            "worker_fingerprint_max_age_days must be positive",
+        );
+    }
+    if manifest.resource_caps.max_duration_secs == 0 {
+        push_issue(
+            issues,
+            "resource_caps.max_duration_secs",
+            "invalid_resource_cap",
+            "max_duration_secs must be positive",
+        );
+    }
+    if manifest.resource_caps.max_threads == 0 {
+        push_issue(
+            issues,
+            "resource_caps.max_threads",
+            "invalid_resource_cap",
+            "max_threads must be positive",
+        );
+    }
+    if manifest.resource_caps.max_memory_gib <= 0.0 {
+        push_issue(
+            issues,
+            "resource_caps.max_memory_gib",
+            "invalid_resource_cap",
+            "max_memory_gib must be positive",
+        );
+    }
+    if manifest.resource_caps.max_temp_storage_gib <= 0.0 {
+        push_issue(
+            issues,
+            "resource_caps.max_temp_storage_gib",
+            "invalid_resource_cap",
+            "max_temp_storage_gib must be positive",
+        );
+    }
+    if manifest.resource_caps.max_queue_depth == 0 {
+        push_issue(
+            issues,
+            "resource_caps.max_queue_depth",
+            "invalid_resource_cap",
+            "max_queue_depth must be positive",
+        );
+    }
+}
+
+fn classify_swarm_calibration_host(
+    manifest: &SwarmCapabilityCalibrationManifest,
+    config: &SwarmCapabilityCalibrationValidationConfig,
+    blockers: &mut Vec<String>,
+    downgrade_reasons: &mut Vec<String>,
+) {
+    let host = &manifest.host;
+    let worker = &manifest.worker;
+    let caps = &manifest.resource_caps;
+    let artifact_plan = &manifest.artifact_plan;
+
+    let worker_age_days = config
+        .reference_epoch_days
+        .saturating_sub(worker.worker_fingerprint_observed_at_epoch_days);
+    if worker_age_days > worker.worker_fingerprint_max_age_days {
+        blockers.push(format!(
+            "worker_fingerprint_stale age_days={} max_age_days={}",
+            worker_age_days, worker.worker_fingerprint_max_age_days
+        ));
+    }
+    if artifact_plan.observed_artifact_root != artifact_plan.expected_artifact_root {
+        blockers.push(format!(
+            "artifact_root_mismatch expected={} observed={}",
+            artifact_plan.expected_artifact_root, artifact_plan.observed_artifact_root
+        ));
+    }
+    if !worker.target_dir_isolated {
+        blockers.push("target_dir_isolated=false".to_owned());
+    }
+    if caps.max_threads > host.logical_cpus {
+        blockers.push(format!(
+            "resource_caps.max_threads={} exceeds logical_cpus={}",
+            caps.max_threads, host.logical_cpus
+        ));
+    }
+    if caps.max_memory_gib > host.ram_total_gib {
+        blockers.push(format!(
+            "resource_caps.max_memory_gib={:.1} exceeds ram_total_gib={:.1}",
+            caps.max_memory_gib, host.ram_total_gib
+        ));
+    }
+
+    if host.logical_cpus < SWARM_MIN_LOGICAL_CPUS {
+        downgrade_reasons.push(format!(
+            "logical_cpus={} below required >={SWARM_MIN_LOGICAL_CPUS}",
+            host.logical_cpus
+        ));
+    }
+    if host.ram_total_gib < f64::from(SWARM_MIN_RAM_GIB) {
+        downgrade_reasons.push(format!(
+            "ram_total_gib={:.1} below required >={SWARM_MIN_RAM_GIB}",
+            host.ram_total_gib
+        ));
+    }
+    if !host.numa_topology_visible {
+        downgrade_reasons.push("numa_topology_visible=false".to_owned());
+    }
+    match host.numa_nodes {
+        Some(nodes) if nodes >= SWARM_MIN_NUMA_NODES => {}
+        Some(nodes) => downgrade_reasons.push(format!(
+            "numa_nodes={nodes} below required >={SWARM_MIN_NUMA_NODES}"
+        )),
+        None => downgrade_reasons.push("numa_nodes missing".to_owned()),
+    }
+    if host.fuse.state != SwarmCapabilityCalibrationFuseState::Available {
+        downgrade_reasons.push(format!("fuse_capability={}", host.fuse.state.label()));
+    }
+    if worker.queue_isolation != SwarmCapabilityCalibrationIsolation::Dedicated {
+        downgrade_reasons.push(format!(
+            "queue_isolation={} expected dedicated",
+            worker.queue_isolation.label()
+        ));
+    }
+}
+
+fn swarm_calibration_classification(
+    manifest: &SwarmCapabilityCalibrationManifest,
+    issues: &[PermissionedCampaignBrokerIssue],
+    blockers: &[String],
+    downgrade_reasons: &[String],
+) -> SwarmCapabilityCalibrationClassification {
+    if !issues.is_empty() || !blockers.is_empty() {
+        return SwarmCapabilityCalibrationClassification::Blocked;
+    }
+    if manifest.host.logical_cpus < SWARM_MIN_LOGICAL_CPUS
+        || manifest.host.ram_total_gib < f64::from(SWARM_MIN_RAM_GIB)
+    {
+        return SwarmCapabilityCalibrationClassification::SmallHostSmoke;
+    }
+    if !downgrade_reasons.is_empty() {
+        return SwarmCapabilityCalibrationClassification::CapabilityDowngradedSmoke;
+    }
+    SwarmCapabilityCalibrationClassification::AuthoritativeLargeHostCandidate
+}
+
+fn swarm_calibration_host_facts(
+    manifest: &SwarmCapabilityCalibrationManifest,
+) -> Vec<PermissionedCampaignHostFactSummary> {
+    vec![
+        PermissionedCampaignHostFactSummary {
+            fact_id: "logical_cpus".to_owned(),
+            observed_value: manifest.host.logical_cpus.to_string(),
+            required_value: format!(">={SWARM_MIN_LOGICAL_CPUS}"),
+            proof_path: "swarm_capability_calibration_manifest".to_owned(),
+        },
+        PermissionedCampaignHostFactSummary {
+            fact_id: "ram_total_gib".to_owned(),
+            observed_value: format!("{:.1}", manifest.host.ram_total_gib),
+            required_value: format!(">={SWARM_MIN_RAM_GIB}"),
+            proof_path: "swarm_capability_calibration_manifest".to_owned(),
+        },
+        PermissionedCampaignHostFactSummary {
+            fact_id: "ram_available_gib".to_owned(),
+            observed_value: format!("{:.1}", manifest.host.ram_available_gib),
+            required_value: "recorded".to_owned(),
+            proof_path: "swarm_capability_calibration_manifest".to_owned(),
+        },
+        PermissionedCampaignHostFactSummary {
+            fact_id: "numa_topology_visible".to_owned(),
+            observed_value: manifest.host.numa_topology_visible.to_string(),
+            required_value: "true".to_owned(),
+            proof_path: "swarm_capability_calibration_manifest".to_owned(),
+        },
+        PermissionedCampaignHostFactSummary {
+            fact_id: "numa_nodes".to_owned(),
+            observed_value: manifest
+                .host
+                .numa_nodes
+                .map_or_else(|| "missing".to_owned(), |nodes| nodes.to_string()),
+            required_value: format!(">={SWARM_MIN_NUMA_NODES}"),
+            proof_path: "swarm_capability_calibration_manifest".to_owned(),
+        },
+        PermissionedCampaignHostFactSummary {
+            fact_id: "storage_class".to_owned(),
+            observed_value: manifest.host.storage_class.clone(),
+            required_value: "recorded".to_owned(),
+            proof_path: "swarm_capability_calibration_manifest".to_owned(),
+        },
+        PermissionedCampaignHostFactSummary {
+            fact_id: "fuse_capability".to_owned(),
+            observed_value: manifest.host.fuse.state.label().to_owned(),
+            required_value: "available".to_owned(),
+            proof_path: "swarm_capability_calibration_manifest".to_owned(),
+        },
+    ]
 }
 
 fn validate_xfstests_adapter_input(input: &PermissionedXfstestsBrokerAdapterInput) -> Result<()> {
@@ -3464,6 +4097,144 @@ mod tests {
     }
 
     #[test]
+    fn swarm_calibration_accepts_authoritative_candidate_without_product_claim() {
+        let manifest = valid_swarm_calibration_manifest();
+        let report =
+            validate_swarm_capability_calibration_manifest(&manifest, &swarm_calibration_config());
+        assert!(report.valid, "{:?}", report.issues);
+        assert_eq!(
+            report.classification,
+            SwarmCapabilityCalibrationClassification::AuthoritativeLargeHostCandidate.label()
+        );
+        assert!(report.candidate_for_authorized_run);
+        assert_eq!(report.product_evidence_claim, "none");
+        assert!(
+            report
+                .release_gate_effect
+                .contains("swarm.responsiveness remains hidden")
+        );
+    }
+
+    #[test]
+    fn swarm_calibration_small_cpu_or_ram_is_smoke_only() {
+        let mut manifest = valid_swarm_calibration_manifest();
+        manifest.host.logical_cpus = 16;
+        manifest.host.ram_total_gib = 64.0;
+        manifest.resource_caps.max_threads = 16;
+        manifest.resource_caps.max_memory_gib = 32.0;
+
+        let report =
+            validate_swarm_capability_calibration_manifest(&manifest, &swarm_calibration_config());
+        assert!(report.valid, "{:?}", report.issues);
+        assert_eq!(
+            report.classification,
+            SwarmCapabilityCalibrationClassification::SmallHostSmoke.label()
+        );
+        assert!(!report.candidate_for_authorized_run);
+        assert!(
+            report
+                .downgrade_reasons
+                .iter()
+                .any(|reason| reason.contains("logical_cpus=16"))
+        );
+    }
+
+    #[test]
+    fn swarm_calibration_missing_numa_visibility_is_capability_downgrade() {
+        let mut manifest = valid_swarm_calibration_manifest();
+        manifest.host.numa_topology_visible = false;
+        manifest.host.numa_nodes = None;
+
+        let report =
+            validate_swarm_capability_calibration_manifest(&manifest, &swarm_calibration_config());
+        assert!(report.valid, "{:?}", report.issues);
+        assert_eq!(
+            report.classification,
+            SwarmCapabilityCalibrationClassification::CapabilityDowngradedSmoke.label()
+        );
+        assert!(
+            report
+                .downgrade_reasons
+                .iter()
+                .any(|reason| reason.contains("numa_topology_visible=false"))
+        );
+    }
+
+    #[test]
+    fn swarm_calibration_missing_fuse_is_capability_downgrade() {
+        let mut manifest = valid_swarm_calibration_manifest();
+        manifest.host.fuse.state = SwarmCapabilityCalibrationFuseState::Missing;
+        manifest.host.fuse.detail = "/dev/fuse unavailable".to_owned();
+
+        let report =
+            validate_swarm_capability_calibration_manifest(&manifest, &swarm_calibration_config());
+        assert!(report.valid, "{:?}", report.issues);
+        assert_eq!(
+            report.classification,
+            SwarmCapabilityCalibrationClassification::CapabilityDowngradedSmoke.label()
+        );
+        assert!(
+            report
+                .downgrade_reasons
+                .iter()
+                .any(|reason| reason == "fuse_capability=missing")
+        );
+    }
+
+    #[test]
+    fn swarm_calibration_stale_worker_fingerprint_blocks_packet() {
+        let mut manifest = valid_swarm_calibration_manifest();
+        manifest.worker.worker_fingerprint_observed_at_epoch_days = reference_epoch_days() - 30;
+        manifest.worker.worker_fingerprint_max_age_days = 7;
+
+        let report =
+            validate_swarm_capability_calibration_manifest(&manifest, &swarm_calibration_config());
+        assert!(report.valid, "{:?}", report.issues);
+        assert_eq!(
+            report.classification,
+            SwarmCapabilityCalibrationClassification::Blocked.label()
+        );
+        assert!(
+            report
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("worker_fingerprint_stale"))
+        );
+    }
+
+    #[test]
+    fn swarm_calibration_mismatched_artifact_root_blocks_packet() {
+        let mut manifest = valid_swarm_calibration_manifest();
+        manifest.artifact_plan.observed_artifact_root = "artifacts/swarm/other-root".to_owned();
+
+        let report =
+            validate_swarm_capability_calibration_manifest(&manifest, &swarm_calibration_config());
+        assert!(report.valid, "{:?}", report.issues);
+        assert_eq!(
+            report.classification,
+            SwarmCapabilityCalibrationClassification::Blocked.label()
+        );
+        assert!(
+            report
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("artifact_root_mismatch"))
+        );
+    }
+
+    #[test]
+    fn swarm_calibration_markdown_names_handoff_boundary() {
+        let manifest = valid_swarm_calibration_manifest();
+        let report =
+            validate_swarm_capability_calibration_manifest(&manifest, &swarm_calibration_config());
+        let markdown = render_swarm_capability_calibration_markdown(&report);
+        assert!(markdown.contains("Swarm Capability Calibration"));
+        assert!(markdown.contains("authoritative_large_host_candidate"));
+        assert!(markdown.contains("Product evidence claim: `none`"));
+        assert!(markdown.contains("swarm.responsiveness remains hidden"));
+    }
+
+    #[test]
     fn execution_ledger_accepts_supported_state_lifecycle_points() {
         let cases = [
             vec![PermissionedCampaignLedgerStepStatus::NotAuthorized],
@@ -3675,6 +4446,12 @@ mod tests {
     fn ledger_config() -> PermissionedCampaignExecutionLedgerValidationConfig {
         PermissionedCampaignExecutionLedgerValidationConfig {
             current_git_sha: Some("abcdef123456".to_owned()),
+        }
+    }
+
+    fn swarm_calibration_config() -> SwarmCapabilityCalibrationValidationConfig {
+        SwarmCapabilityCalibrationValidationConfig {
+            reference_epoch_days: reference_epoch_days(),
         }
     }
 
@@ -3930,6 +4707,51 @@ mod tests {
             numa_topology_visible: true,
             release_claim_classification:
                 PermissionedSwarmReleaseClaimClassification::AuthoritativeLargeHost,
+        }
+    }
+
+    fn valid_swarm_calibration_manifest() -> SwarmCapabilityCalibrationManifest {
+        SwarmCapabilityCalibrationManifest {
+            schema_version: SWARM_CAPABILITY_CALIBRATION_SCHEMA_VERSION,
+            packet_id: "bd-4v16z.9-large-host-calibration-20260509".to_owned(),
+            generated_at: REFERENCE_TIMESTAMP.to_owned(),
+            target_beads: vec!["bd-4v16z.9".to_owned(), "bd-rchk0.53.8".to_owned()],
+            host: SwarmCapabilityCalibrationHost {
+                logical_cpus: 96,
+                ram_total_gib: 512.0,
+                ram_available_gib: 384.0,
+                numa_topology_visible: true,
+                numa_nodes: Some(2),
+                storage_class: "local_nvme".to_owned(),
+                fuse: SwarmCapabilityCalibrationFuse {
+                    state: SwarmCapabilityCalibrationFuseState::Available,
+                    detail: "/dev/fuse and fusermount3 available".to_owned(),
+                },
+            },
+            worker: SwarmCapabilityCalibrationWorker {
+                rch_worker_identity: "rch:large-host-01".to_owned(),
+                worker_fingerprint: "worker=large-host-01 cpu=96 ram=512g numa=2".to_owned(),
+                worker_fingerprint_observed_at_epoch_days: reference_epoch_days(),
+                worker_fingerprint_max_age_days: 7,
+                queue_isolation: SwarmCapabilityCalibrationIsolation::Dedicated,
+                target_dir_isolated: true,
+                target_dir: "artifacts/swarm/calibration/target".to_owned(),
+            },
+            artifact_plan: SwarmCapabilityCalibrationArtifactPlan {
+                expected_artifact_root: "artifacts/swarm/large-host".to_owned(),
+                observed_artifact_root: "artifacts/swarm/large-host".to_owned(),
+            },
+            resource_caps: SwarmCapabilityCalibrationResourceCaps {
+                max_duration_secs: 7200,
+                max_threads: 96,
+                max_memory_gib: 384.0,
+                max_temp_storage_gib: 512.0,
+                max_queue_depth: 4096,
+            },
+            release_gate_policy_path: "tests/release-gates/release_gate_policy_v1.json".to_owned(),
+            real_campaign_bead: "bd-rchk0.53.8".to_owned(),
+            handoff_summary: "calibration packet only; run bd-rchk0.53.8 for executed evidence"
+                .to_owned(),
         }
     }
 

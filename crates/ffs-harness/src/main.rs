@@ -108,14 +108,17 @@ use ffs_harness::{
     permissioned_campaign_broker::{
         DEFAULT_PERMISSIONED_CAMPAIGN_BROKER_MANIFEST, PermissionedCampaignBrokerValidationConfig,
         PermissionedCampaignExecutionLedgerValidationConfig, PermissionedCampaignHandoffGeneration,
-        fail_on_permissioned_campaign_broker_errors,
+        SwarmCapabilityCalibrationValidationConfig, fail_on_permissioned_campaign_broker_errors,
         fail_on_permissioned_campaign_execution_ledger_errors,
-        generate_permissioned_campaign_handoff_packet, load_permissioned_campaign_broker_manifest,
-        load_permissioned_campaign_execution_ledger, render_permissioned_campaign_broker_markdown,
+        fail_on_swarm_capability_calibration_errors, generate_permissioned_campaign_handoff_packet,
+        load_permissioned_campaign_broker_manifest, load_permissioned_campaign_execution_ledger,
+        load_swarm_capability_calibration_manifest, render_permissioned_campaign_broker_markdown,
         render_permissioned_campaign_execution_ledger_markdown,
         render_permissioned_campaign_handoff_markdown,
+        render_swarm_capability_calibration_markdown,
         validate_permissioned_campaign_broker_manifest,
         validate_permissioned_campaign_execution_ledger,
+        validate_swarm_capability_calibration_manifest,
     },
     proof_bundle::{
         ProofBundleValidationConfig, fail_on_proof_bundle_errors, render_proof_bundle_markdown,
@@ -319,6 +322,15 @@ struct PermissionedCampaignPacketCmdArgs {
 }
 
 #[derive(Debug)]
+struct SwarmCapabilityCalibrationCmdArgs {
+    manifest_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+    reference_timestamp: Option<String>,
+}
+
+#[derive(Debug)]
 struct AdaptiveRuntimeRunnerCmdArgs {
     mode: AdaptiveRuntimeRunnerMode,
     artifact_root: String,
@@ -360,6 +372,9 @@ fn run_manifest_command(command: Option<&str>, args: &[String]) -> Option<Result
         }
         Some("generate-permissioned-campaign-packet") => {
             Some(generate_permissioned_campaign_packet_cmd(args))
+        }
+        Some("validate-swarm-capability-calibration") => {
+            Some(validate_swarm_capability_calibration_cmd(args))
         }
         _ => None,
     }
@@ -2953,6 +2968,114 @@ fn parse_permissioned_campaign_packet_cmd_args(
         git_sha: git_sha
             .or_else(|| env::var("GIT_SHA").ok())
             .unwrap_or_else(|| "unknown".to_owned()),
+    }))
+}
+
+fn validate_swarm_capability_calibration_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_swarm_capability_calibration_cmd_args(args)? else {
+        return Ok(());
+    };
+    let manifest = load_swarm_capability_calibration_manifest(Path::new(&cmd_args.manifest_path))?;
+    let reference_epoch_days = match &cmd_args.reference_timestamp {
+        Some(timestamp) => parse_manifest_timestamp_epoch_days(timestamp)
+            .with_context(|| format!("invalid --reference-timestamp {timestamp}"))?,
+        None => SwarmCapabilityCalibrationValidationConfig::default().reference_epoch_days,
+    };
+    let report = validate_swarm_capability_calibration_manifest(
+        &manifest,
+        &SwarmCapabilityCalibrationValidationConfig {
+            reference_epoch_days,
+        },
+    );
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_swarm_capability_calibration_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "swarm capability calibration report written: {} valid={} classification={}",
+            path, report.valid, report.classification
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!(
+                "{}\n",
+                render_swarm_capability_calibration_markdown(&report)
+            ),
+        )?;
+        println!("swarm capability calibration summary written: {path}");
+    }
+
+    fail_on_swarm_capability_calibration_errors(&report)
+}
+
+fn parse_swarm_capability_calibration_cmd_args(
+    args: &[String],
+) -> Result<Option<SwarmCapabilityCalibrationCmdArgs>> {
+    let mut manifest_path: Option<String> = None;
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut reference_timestamp: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                manifest_path = Some(
+                    args.get(i)
+                        .context("--manifest requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--reference-timestamp" => {
+                i += 1;
+                reference_timestamp = Some(
+                    args.get(i)
+                        .context("--reference-timestamp requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_swarm_capability_calibration_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-swarm-capability-calibration argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(SwarmCapabilityCalibrationCmdArgs {
+        manifest_path: manifest_path.context("--manifest is required")?,
+        out_path,
+        summary_out_path,
+        format,
+        reference_timestamp,
     }))
 }
 
@@ -5965,6 +6088,9 @@ fn print_usage_core_commands() {
         "  ffs-harness generate-permissioned-campaign-packet [--manifest FILE] [--format json|markdown] [--out FILE] [--summary-out FILE] [--generated-at TS] [--generated-by NAME] [--git-sha SHA]"
     );
     println!(
+        "  ffs-harness validate-swarm-capability-calibration --manifest FILE [--format json|markdown] [--out FILE] [--summary-out FILE] [--reference-timestamp TS]"
+    );
+    println!(
         "  ffs-harness validate-proof-bundle --bundle FILE [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
@@ -6134,6 +6260,9 @@ fn print_permissioned_campaign_ledger_example() {
 fn print_permissioned_campaign_packet_example() {
     println!(
         "  ffs-harness generate-permissioned-campaign-packet --manifest artifacts/permissioned/broker.json --out artifacts/permissioned/handoff_packet.json --summary-out artifacts/permissioned/handoff_packet.md"
+    );
+    println!(
+        "  ffs-harness validate-swarm-capability-calibration --manifest artifacts/swarm/calibration/candidate.json --out artifacts/swarm/calibration/candidate_report.json --summary-out artifacts/swarm/calibration/candidate_report.md"
     );
 }
 
@@ -6568,6 +6697,19 @@ fn print_permissioned_campaign_packet_usage() {
     println!("  --generated-at TS                  Override packet generated_at");
     println!("  --generated-by NAME                Override packet generator identity");
     println!("  --git-sha SHA                      Override packet git_sha");
+}
+
+fn print_swarm_capability_calibration_usage() {
+    println!("Usage: ffs-harness validate-swarm-capability-calibration [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!(
+        "  --manifest FILE                    Read swarm capability calibration manifest JSON"
+    );
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write selected-format calibration report");
+    println!("  --summary-out FILE                 Write Markdown calibration summary");
+    println!("  --reference-timestamp RFC3339      Freshness reference timestamp (default: now)");
 }
 
 fn print_adaptive_runtime_runner_usage() {
