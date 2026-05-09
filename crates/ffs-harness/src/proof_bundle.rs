@@ -60,6 +60,16 @@ const PRESERVED_REDACTION_FIELDS: [&str; 5] = [
     "artifact_paths",
     "scenario_ids",
 ];
+const FORBIDDEN_ENV_SECRET_MARKERS: [&str; 8] = [
+    "AWS_SECRET_ACCESS_KEY=",
+    "GITHUB_TOKEN=",
+    "SECRET_TOKEN=",
+    "SECRET_KEY=",
+    "API_KEY=",
+    "ACCESS_TOKEN=",
+    "AUTH_TOKEN=",
+    "PASSWORD=",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofBundleValidationConfig {
@@ -100,6 +110,8 @@ pub struct ProofBundleLane {
     pub lane_id: String,
     pub status: ProofBundleOutcome,
     pub raw_log_path: String,
+    #[serde(default)]
+    pub raw_log_sha256: String,
     pub summary_path: String,
     pub scenario_ids: Vec<String>,
     pub gate_inputs: Vec<String>,
@@ -172,6 +184,7 @@ pub struct ProofBundleValidationReport {
     pub stale_git_sha: Option<StaleProofBundleGitSha>,
     pub stale_timestamp: Option<StaleProofBundleTimestamp>,
     pub broken_links: Vec<ProofBundleBrokenLink>,
+    pub raw_log_hash_mismatches: Vec<ProofBundleRawLogHashMismatch>,
     pub artifact_hash_mismatches: Vec<ProofBundleHashMismatch>,
     pub artifact_hash_chain: Option<ProofBundleHashChainReport>,
     pub artifact_reports: Vec<ProofBundleArtifactReport>,
@@ -217,6 +230,14 @@ pub struct ProofBundleBrokenLink {
     pub field: String,
     pub path: String,
     pub diagnostic: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofBundleRawLogHashMismatch {
+    pub lane_id: String,
+    pub path: String,
+    pub expected_sha256: String,
+    pub actual_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -464,11 +485,12 @@ pub fn render_proof_bundle_markdown(report: &ProofBundleValidationReport) -> Str
     .ok();
     writeln!(
         &mut out,
-        "- Diagnostics: missing_lanes={} duplicate_lanes={} duplicate_scenarios={} broken_links={} hash_mismatches={} redaction_errors={} redaction_leaks={} integrity_errors={} errors={} warnings={}",
+        "- Diagnostics: missing_lanes={} duplicate_lanes={} duplicate_scenarios={} broken_links={} raw_log_hash_mismatches={} hash_mismatches={} redaction_errors={} redaction_leaks={} integrity_errors={} errors={} warnings={}",
         report.missing_required_lanes.len(),
         report.duplicate_lane_ids.len(),
         report.duplicate_scenario_ids.len(),
         report.broken_links.len(),
+        report.raw_log_hash_mismatches.len(),
         report.artifact_hash_mismatches.len(),
         report.redaction_errors.len(),
         report.redaction_leaks.len(),
@@ -662,6 +684,7 @@ struct ProofBundleReportBuilder {
     stale_git_sha: Option<StaleProofBundleGitSha>,
     stale_timestamp: Option<StaleProofBundleTimestamp>,
     broken_links: Vec<ProofBundleBrokenLink>,
+    raw_log_hash_mismatches: Vec<ProofBundleRawLogHashMismatch>,
     artifact_hash_mismatches: Vec<ProofBundleHashMismatch>,
     artifact_hash_chain: Option<ProofBundleHashChainReport>,
     artifact_reports: Vec<ProofBundleArtifactReport>,
@@ -687,6 +710,7 @@ impl ProofBundleReportBuilder {
             stale_git_sha: None,
             stale_timestamp: None,
             broken_links: Vec::new(),
+            raw_log_hash_mismatches: Vec::new(),
             artifact_hash_mismatches: Vec::new(),
             artifact_hash_chain: None,
             artifact_reports: Vec::new(),
@@ -847,12 +871,14 @@ impl ProofBundleReportBuilder {
             *scenario_ids.entry(scenario_id.clone()).or_default() += 1;
         }
 
-        self.validate_existing_file(
+        if let Some(raw_log_path) = self.validate_existing_file(
             bundle_root,
             &lane.lane_id,
             "raw_log_path",
             &lane.raw_log_path,
-        );
+        ) {
+            self.validate_raw_log_hash(&lane.lane_id, &lane.raw_log_path, &raw_log_path, lane);
+        }
         self.validate_existing_file(
             bundle_root,
             &lane.lane_id,
@@ -1293,6 +1319,41 @@ impl ProofBundleReportBuilder {
         }
     }
 
+    fn validate_raw_log_hash(
+        &mut self,
+        lane_id: &str,
+        raw_log_path: &str,
+        path: &Path,
+        lane: &ProofBundleLane,
+    ) {
+        if !is_valid_sha256_hex(&lane.raw_log_sha256) {
+            self.errors.push(format!(
+                "lane {lane_id} raw_log_sha256 for {raw_log_path} must be SHA-256 hex"
+            ));
+            return;
+        }
+
+        match sha256_file_hex(path) {
+            Ok(actual) if actual == lane.raw_log_sha256 => {}
+            Ok(actual) => {
+                self.raw_log_hash_mismatches
+                    .push(ProofBundleRawLogHashMismatch {
+                        lane_id: lane_id.to_owned(),
+                        path: raw_log_path.to_owned(),
+                        expected_sha256: lane.raw_log_sha256.clone(),
+                        actual_sha256: actual.clone(),
+                    });
+                self.errors.push(format!(
+                    "raw log hash mismatch lane={lane_id} path={raw_log_path} expected={} actual={actual}",
+                    lane.raw_log_sha256
+                ));
+            }
+            Err(error) => self.errors.push(format!(
+                "failed to hash lane {lane_id} raw log {raw_log_path}: {error:#}"
+            )),
+        }
+    }
+
     fn validate_existing_file(
         &mut self,
         bundle_root: &Path,
@@ -1300,35 +1361,28 @@ impl ProofBundleReportBuilder {
         field: &str,
         raw_path: &str,
     ) -> Option<PathBuf> {
-        let relative = match validate_relative_path(raw_path) {
-            Ok(()) => PathBuf::from(raw_path),
+        match confined_existing_file_path(bundle_root, raw_path) {
+            Ok(path) => Some(path),
             Err(error) => {
+                let diagnostic = error.to_string();
                 self.broken_links.push(ProofBundleBrokenLink {
                     lane_id: lane_id.to_owned(),
                     field: field.to_owned(),
                     path: raw_path.to_owned(),
-                    diagnostic: error.to_string(),
+                    diagnostic: diagnostic.clone(),
                 });
-                self.errors.push(format!(
-                    "lane {lane_id} {field} path {raw_path:?} invalid: {error}"
-                ));
-                return None;
+                if diagnostic == "file does not exist" {
+                    self.errors.push(format!(
+                        "broken link lane={lane_id} field={field} path={raw_path}"
+                    ));
+                } else {
+                    self.errors.push(format!(
+                        "lane {lane_id} {field} path {raw_path:?} invalid: {diagnostic}"
+                    ));
+                }
+                None
             }
-        };
-        let absolute = bundle_root.join(&relative);
-        if !absolute.is_file() {
-            self.broken_links.push(ProofBundleBrokenLink {
-                lane_id: lane_id.to_owned(),
-                field: field.to_owned(),
-                path: raw_path.to_owned(),
-                diagnostic: "file does not exist".to_owned(),
-            });
-            self.errors.push(format!(
-                "broken link lane={lane_id} field={field} path={raw_path}"
-            ));
-            return None;
         }
-        Some(absolute)
     }
 
     fn validate_integrity_policy(&mut self, manifest: &ProofBundleManifest) {
@@ -1404,6 +1458,11 @@ impl ProofBundleReportBuilder {
                 "redaction reproduction_command must preserve validate-proof-bundle invocation"
                     .to_owned(),
             );
+        }
+        if let Some(marker) = env_secret_marker(policy.reproduction_command.as_bytes()) {
+            self.redaction_errors.push(format!(
+                "redaction reproduction_command contains unredacted environment secret marker {marker}"
+            ));
         }
 
         let preserved: BTreeSet<&str> =
@@ -1495,10 +1554,9 @@ impl ProofBundleReportBuilder {
         policy: &ProofBundleRedactionPolicy,
         artifact_is_redacted: bool,
     ) {
-        let Ok(()) = validate_relative_path(raw_path) else {
+        let Ok(path) = confined_existing_file_path(bundle_root, raw_path) else {
             return;
         };
-        let path = bundle_root.join(raw_path);
         let Ok(bytes) = fs::read(&path) else {
             return;
         };
@@ -1515,6 +1573,14 @@ impl ProofBundleReportBuilder {
                     marker: marker.clone(),
                 });
             }
+        }
+        if let Some(marker) = env_secret_marker(&bytes) {
+            self.redaction_leaks.push(ProofBundleRedactionLeak {
+                lane_id: lane_id.to_owned(),
+                field: field.to_owned(),
+                path: raw_path.to_owned(),
+                marker: marker.to_owned(),
+            });
         }
 
         if policy.require_placeholder_in_redacted_artifacts
@@ -1542,6 +1608,7 @@ impl ProofBundleReportBuilder {
             stale_git_sha: self.stale_git_sha,
             stale_timestamp: self.stale_timestamp,
             broken_links: self.broken_links,
+            raw_log_hash_mismatches: self.raw_log_hash_mismatches,
             artifact_hash_mismatches: self.artifact_hash_mismatches,
             artifact_hash_chain: self.artifact_hash_chain,
             artifact_reports: self.artifact_reports,
@@ -1677,10 +1744,7 @@ fn lane_metadata_first<'a>(
 }
 
 fn proof_bundle_path_exists(bundle_root: &Path, raw_path: &str) -> bool {
-    match validate_relative_path(raw_path) {
-        Ok(()) => bundle_root.join(raw_path).is_file(),
-        Err(_) => false,
-    }
+    confined_existing_file_path(bundle_root, raw_path).is_ok()
 }
 
 fn classify_proof_bundle_lane_provenance(
@@ -1917,6 +1981,27 @@ fn validate_relative_path(raw: &str) -> Result<()> {
     Ok(())
 }
 
+fn confined_existing_file_path(bundle_root: &Path, raw_path: &str) -> Result<PathBuf> {
+    validate_relative_path(raw_path)?;
+    let path = bundle_root.join(raw_path);
+    if !path.is_file() {
+        bail!("file does not exist");
+    }
+
+    let canonical_root = fs::canonicalize(bundle_root).with_context(|| {
+        format!(
+            "proof bundle root {} cannot be canonicalized",
+            bundle_root.display()
+        )
+    })?;
+    let canonical_file = fs::canonicalize(&path)
+        .with_context(|| format!("path {raw_path:?} cannot be canonicalized"))?;
+    if !canonical_file.starts_with(&canonical_root) {
+        bail!("path escapes proof bundle root after symlink resolution");
+    }
+    Ok(path)
+}
+
 fn is_valid_sha256_hex(raw: &str) -> bool {
     raw.len() == 64 && raw.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -1930,6 +2015,9 @@ fn artifact_hash_chain_sha256(manifest: &ProofBundleManifest) -> String {
     for lane in &manifest.lanes {
         hash_chain_part(&mut hasher, "lane");
         hash_chain_part(&mut hasher, &lane.lane_id);
+        hash_chain_part(&mut hasher, "raw_log");
+        hash_chain_part(&mut hasher, &lane.raw_log_path);
+        hash_chain_part(&mut hasher, &lane.raw_log_sha256);
         for artifact in &lane.artifacts {
             hash_chain_part(&mut hasher, "artifact");
             hash_chain_part(&mut hasher, &artifact.path);
@@ -1960,6 +2048,13 @@ fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
         && haystack
             .windows(needle.len())
             .any(|window| window == needle)
+}
+
+fn env_secret_marker(bytes: &[u8]) -> Option<&'static str> {
+    FORBIDDEN_ENV_SECRET_MARKERS
+        .iter()
+        .copied()
+        .find(|marker| bytes_contains(bytes, marker.as_bytes()))
 }
 
 fn parse_utc_timestamp_seconds(raw: &str) -> Result<i64> {
@@ -2099,6 +2194,8 @@ mod tests {
                 &format!("{{\"artifact\":\"{lane_id}\"}}\n"),
             );
 
+            let raw_log_hash =
+                sha256_file_hex(&root.path().join(&raw_log_path)).expect("raw log hash");
             let artifact_hash =
                 sha256_file_hex(&root.path().join(&artifact_path)).expect("artifact hash");
             let status = if *lane_id == ADAPTIVE_RUNTIME_LANE {
@@ -2235,6 +2332,7 @@ mod tests {
                 lane_id: (*lane_id).to_owned(),
                 status,
                 raw_log_path,
+                raw_log_sha256: raw_log_hash,
                 summary_path,
                 scenario_ids: vec![format!("{lane_id}_scenario_primary")],
                 gate_inputs: vec![input_path],
@@ -2514,6 +2612,83 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("broken link"))
         );
+    }
+
+    #[test]
+    fn missing_raw_log_hash_is_rejected() {
+        let mut sample = sample_bundle();
+        sample.manifest.lanes[0].raw_log_sha256.clear();
+        let report = validate_sample(&sample);
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("raw_log_sha256") && error.contains("SHA-256 hex") })
+        );
+    }
+
+    #[test]
+    fn raw_log_hash_mismatch_is_rejected() {
+        let mut sample = sample_bundle();
+        sample.manifest.lanes[0].raw_log_sha256 =
+            "0000000000000000000000000000000000000000000000000000000000000000".to_owned();
+        let report = validate_sample(&sample);
+        assert!(!report.valid);
+        assert_eq!(report.raw_log_hash_mismatches.len(), 1);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("raw log hash mismatch"))
+        );
+    }
+
+    #[test]
+    fn relative_parent_traversal_is_rejected() {
+        let mut sample = sample_bundle();
+        sample.manifest.lanes[0].summary_path = "../outside-summary.md".to_owned();
+        let report = validate_sample(&sample);
+        assert!(!report.valid);
+        assert!(report.broken_links.iter().any(|link| {
+            link.field == "summary_path" && link.diagnostic.contains("parent traversal")
+        }));
+    }
+
+    #[test]
+    fn absolute_paths_are_rejected_by_default() {
+        let mut sample = sample_bundle();
+        sample.manifest.lanes[0].summary_path = "/tmp/frankenfs-proof-summary.md".to_owned();
+        let report = validate_sample(&sample);
+        assert!(!report.valid);
+        assert!(report.broken_links.iter().any(|link| {
+            link.field == "summary_path" && link.diagnostic.contains("path must be relative")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escape_is_rejected() {
+        let mut sample = sample_bundle();
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let outside_raw = outside.path().join("outside.log");
+        fs::write(&outside_raw, "escaped raw log\n").expect("outside raw log");
+        let escaped_link = sample.root.path().join("logs/escaped.log");
+        std::os::unix::fs::symlink(&outside_raw, &escaped_link).expect("symlink");
+
+        sample.manifest.lanes[0].raw_log_path = "logs/escaped.log".to_owned();
+        sample.manifest.lanes[0].raw_log_sha256 =
+            sha256_file_hex(&outside_raw).expect("outside raw log hash");
+        sample.manifest.integrity = Some(integrity_for(&sample.manifest));
+
+        let report = validate_sample(&sample);
+        assert!(!report.valid);
+        assert!(report.broken_links.iter().any(|link| {
+            link.field == "raw_log_path"
+                && link
+                    .diagnostic
+                    .contains("escapes proof bundle root after symlink resolution")
+        }));
     }
 
     #[test]
@@ -3067,6 +3242,38 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("redaction leak"))
         );
+    }
+
+    #[test]
+    fn env_like_secret_markers_are_rejected_without_policy_entry() {
+        let sample = sample_bundle();
+        write_file(
+            sample.root.path(),
+            "summaries/conformance.md",
+            "# conformance\nAWS_SECRET_ACCESS_KEY=unredacted\n",
+        );
+
+        let report = validate_sample(&sample);
+
+        assert!(!report.valid);
+        assert!(report.redaction_leaks.iter().any(|leak| {
+            leak.path == "summaries/conformance.md" && leak.marker == "AWS_SECRET_ACCESS_KEY="
+        }));
+    }
+
+    #[test]
+    fn reproduction_command_env_secret_marker_is_rejected() {
+        let mut sample = sample_bundle();
+        sample.manifest.redaction.reproduction_command =
+            "AWS_SECRET_ACCESS_KEY=unredacted cargo run -p ffs-harness -- validate-proof-bundle --bundle manifest.json"
+                .to_owned();
+
+        let report = validate_sample(&sample);
+
+        assert!(!report.valid);
+        assert!(report.redaction_errors.iter().any(|error| {
+            error.contains("reproduction_command") && error.contains("AWS_SECRET_ACCESS_KEY=")
+        }));
     }
 
     #[test]

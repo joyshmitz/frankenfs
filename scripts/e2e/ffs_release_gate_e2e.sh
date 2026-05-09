@@ -330,6 +330,7 @@ for lane in lanes:
         path = bundle_dir / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
+    raw_log_digest = hashlib.sha256((bundle_dir / raw_log).read_bytes()).hexdigest()
     digest = hashlib.sha256((bundle_dir / artifact).read_bytes()).hexdigest()
     artifacts = [
         {
@@ -398,6 +399,7 @@ for lane in lanes:
             "lane_id": lane,
             "status": "pass",
             "raw_log_path": raw_log.as_posix(),
+            "raw_log_sha256": raw_log_digest,
             "summary_path": summary.as_posix(),
             "scenario_ids": [f"{lane}_release_gate_primary"],
             "gate_inputs": [gate_input.as_posix()],

@@ -205,6 +205,12 @@ BAD_REDACTION_MANIFEST="$BUNDLE_DIR/proof_bundle_redaction_leak.json"
 BAD_REDACTION_RAW="$E2E_LOG_DIR/proof_bundle_redaction_leak.raw"
 BAD_PLACEHOLDER_MANIFEST="$BUNDLE_DIR/proof_bundle_missing_placeholder.json"
 BAD_PLACEHOLDER_RAW="$E2E_LOG_DIR/proof_bundle_missing_placeholder.raw"
+BAD_RAW_LOG_HASH_MANIFEST="$BUNDLE_DIR/proof_bundle_bad_raw_log_hash.json"
+BAD_RAW_LOG_HASH_RAW="$E2E_LOG_DIR/proof_bundle_bad_raw_log_hash.raw"
+BAD_TRAVERSAL_MANIFEST="$BUNDLE_DIR/proof_bundle_traversal_path.json"
+BAD_TRAVERSAL_RAW="$E2E_LOG_DIR/proof_bundle_traversal_path.raw"
+BAD_ENV_MANIFEST="$BUNDLE_DIR/proof_bundle_env_secret.json"
+BAD_ENV_RAW="$E2E_LOG_DIR/proof_bundle_env_secret.raw"
 UNIT_LOG="$E2E_LOG_DIR/proof_bundle_unit_tests.log"
 
 mkdir -p "$BUNDLE_DIR"
@@ -271,6 +277,7 @@ for index, lane in enumerate(lanes):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
 
+    raw_log_digest = hashlib.sha256((bundle_dir / raw_log).read_bytes()).hexdigest()
     digest = hashlib.sha256((bundle_dir / artifact).read_bytes()).hexdigest()
     artifacts = [
         {
@@ -356,6 +363,7 @@ for index, lane in enumerate(lanes):
             "lane_id": lane,
             "status": lane_status,
             "raw_log_path": raw_log.as_posix(),
+            "raw_log_sha256": raw_log_digest,
             "summary_path": summary.as_posix(),
             "scenario_ids": [f"{lane}_proof_bundle_primary"],
             "gate_inputs": [gate_input.as_posix()],
@@ -376,6 +384,9 @@ def artifact_hash_chain_sha256(bundle_records: list[dict[str, object]]) -> str:
     for record in bundle_records:
         hash_chain_part(hasher, "lane")
         hash_chain_part(hasher, str(record["lane_id"]))
+        hash_chain_part(hasher, "raw_log")
+        hash_chain_part(hasher, str(record["raw_log_path"]))
+        hash_chain_part(hasher, str(record["raw_log_sha256"]))
         for artifact_record in record["artifacts"]:
             hash_chain_part(hasher, "artifact")
             hash_chain_part(hasher, str(artifact_record["path"]))
@@ -684,7 +695,84 @@ else
     scenario_result "proof_bundle_redaction_placeholder_rejected" "FAIL" "validator failed without placeholder diagnostic"
 fi
 
-e2e_step "Scenario 10: proof bundle unit tests pass"
+e2e_step "Scenario 10: validator rejects raw-log hash drift"
+python3 - "$MANIFEST_JSON" "$BAD_RAW_LOG_HASH_MANIFEST" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+manifest_path, out_path = sys.argv[1:]
+data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
+data["lanes"][0]["raw_log_sha256"] = "0" * 64
+pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if run_rch_capture "$BAD_RAW_LOG_HASH_RAW" cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+    --bundle "$BAD_RAW_LOG_HASH_MANIFEST" \
+    --current-git-sha "$GIT_SHA" \
+    --max-age-days 10000; then
+    scenario_result "proof_bundle_raw_log_hash_rejected" "FAIL" "validator accepted raw-log hash drift"
+elif grep -q "raw log hash mismatch" "$BAD_RAW_LOG_HASH_RAW"; then
+    scenario_result "proof_bundle_raw_log_hash_rejected" "PASS" "raw-log hash drift rejected"
+else
+    scenario_result "proof_bundle_raw_log_hash_rejected" "FAIL" "validator failed without raw-log hash diagnostic"
+fi
+
+e2e_step "Scenario 11: validator rejects relative path traversal"
+python3 - "$MANIFEST_JSON" "$BAD_TRAVERSAL_MANIFEST" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+manifest_path, out_path = sys.argv[1:]
+data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
+data["lanes"][0]["summary_path"] = "../outside-summary.md"
+pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if run_rch_capture "$BAD_TRAVERSAL_RAW" cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+    --bundle "$BAD_TRAVERSAL_MANIFEST" \
+    --current-git-sha "$GIT_SHA" \
+    --max-age-days 10000; then
+    scenario_result "proof_bundle_traversal_path_rejected" "FAIL" "validator accepted relative traversal"
+elif grep -q "parent traversal" "$BAD_TRAVERSAL_RAW"; then
+    scenario_result "proof_bundle_traversal_path_rejected" "PASS" "relative traversal rejected"
+else
+    scenario_result "proof_bundle_traversal_path_rejected" "FAIL" "validator failed without traversal diagnostic"
+fi
+
+e2e_step "Scenario 12: validator rejects env-like secret markers"
+python3 - "$MANIFEST_JSON" "$BAD_ENV_MANIFEST" "$BUNDLE_DIR" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+manifest_path, out_path, bundle_dir = sys.argv[1:]
+data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
+leaky_summary = pathlib.Path("summaries") / "conformance_env_secret.md"
+(pathlib.Path(bundle_dir) / leaky_summary).write_text(
+    "# conformance\n\nAWS_SECRET_ACCESS_KEY=unredacted\n",
+    encoding="utf-8",
+)
+data["lanes"][0]["summary_path"] = leaky_summary.as_posix()
+pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if run_rch_capture "$BAD_ENV_RAW" cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+    --bundle "$BAD_ENV_MANIFEST" \
+    --current-git-sha "$GIT_SHA" \
+    --max-age-days 10000; then
+    scenario_result "proof_bundle_env_secret_rejected" "FAIL" "validator accepted env-like secret marker"
+elif grep -q "AWS_SECRET_ACCESS_KEY=" "$BAD_ENV_RAW"; then
+    scenario_result "proof_bundle_env_secret_rejected" "PASS" "env-like secret marker rejected"
+else
+    scenario_result "proof_bundle_env_secret_rejected" "FAIL" "validator failed without env-secret diagnostic"
+fi
+
+e2e_step "Scenario 13: proof bundle unit tests pass"
 if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib proof_bundle -- --nocapture; then
     cat "$UNIT_LOG"
     scenario_result "proof_bundle_unit_tests" "PASS" "proof_bundle unit tests passed"

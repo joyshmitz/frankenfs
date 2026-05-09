@@ -1140,6 +1140,7 @@ mod tests {
             stale_git_sha: None,
             stale_timestamp: None,
             broken_links: Vec::new(),
+            raw_log_hash_mismatches: Vec::new(),
             artifact_hash_mismatches: Vec::new(),
             artifact_hash_chain: None,
             artifact_reports: Vec::new(),

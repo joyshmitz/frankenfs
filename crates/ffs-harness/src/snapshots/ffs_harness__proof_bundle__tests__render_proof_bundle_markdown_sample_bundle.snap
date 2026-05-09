@@ -8,8 +8,8 @@ expression: markdown
 - Manifest: `$BUNDLE/manifest.json`
 - Valid: `true`
 - Totals: pass=5 fail=3 skip=3 error=3 lanes=14 scenarios=14 artifacts=16
-- Diagnostics: missing_lanes=0 duplicate_lanes=0 duplicate_scenarios=0 broken_links=0 hash_mismatches=0 redaction_errors=0 redaction_leaks=0 integrity_errors=0 errors=0 warnings=0
-- Artifact hash chain: observed=`4f1fc442186bc8859d88f19a4f6c6cbb36e443052544b1879c566cbec08c5965` expected=`4f1fc442186bc8859d88f19a4f6c6cbb36e443052544b1879c566cbec08c5965` artifacts=16 redaction_policy_version=`redaction-v1`
+- Diagnostics: missing_lanes=0 duplicate_lanes=0 duplicate_scenarios=0 broken_links=0 raw_log_hash_mismatches=0 hash_mismatches=0 redaction_errors=0 redaction_leaks=0 integrity_errors=0 errors=0 warnings=0
+- Artifact hash chain: observed=`7c71869ed24132798196e900483767d7f48c7e8943b41da70f29b3e3f5c682ae` expected=`7c71869ed24132798196e900483767d7f48c7e8943b41da70f29b3e3f5c682ae` artifacts=16 redaction_policy_version=`redaction-v1`
 - Reproduction: `cargo run -p ffs-harness -- validate-proof-bundle --bundle manifest.json`
 
 ## Lanes
