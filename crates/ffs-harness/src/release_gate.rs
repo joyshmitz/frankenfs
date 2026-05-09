@@ -1336,6 +1336,34 @@ mod tests {
     }
 
     #[test]
+    fn redaction_provenance_failure_disables_release_claim() {
+        let mut proof = passing_proof();
+        proof
+            .redaction_errors
+            .push("redaction leak lane=writeback_cache marker=SECRET_TOKEN".to_owned());
+        set_lane_provenance_effect(
+            &mut proof,
+            "writeback_cache",
+            ProofBundleProvenanceClass::RedactionFailure,
+            ProofBundleClaimEffect::EvidenceProductionFailure,
+        );
+
+        let report = evaluate_release_gates(&sample_policy(), &proof);
+
+        assert!(!report.valid);
+        assert_eq!(
+            report.feature_reports[0].final_state,
+            FeatureState::Disabled
+        );
+        assert!(report.findings.iter().any(|finding| {
+            finding
+                .transition_reason
+                .contains("claim_effect=evidence_production_failure")
+                && finding.controlling_lane.as_deref() == Some("writeback_cache")
+        }));
+    }
+
+    #[test]
     fn missing_required_lane_fails_closed_to_hidden() {
         let mut proof = passing_proof();
         proof.lanes.retain(|lane| lane.lane_id != "release_gates");

@@ -100,6 +100,7 @@ pub struct ProofBundleManifest {
     pub mount_capability: String,
     pub required_lanes: Vec<String>,
     pub lanes: Vec<ProofBundleLane>,
+    #[serde(default)]
     pub redaction: ProofBundleRedactionPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integrity: Option<ProofBundleIntegrityPolicy>,
@@ -162,6 +163,20 @@ pub struct ProofBundleRedactionPolicy {
     pub forbidden_unredacted_markers: Vec<String>,
     #[serde(default)]
     pub require_placeholder_in_redacted_artifacts: bool,
+}
+
+impl Default for ProofBundleRedactionPolicy {
+    fn default() -> Self {
+        Self {
+            redacted_fields: Vec::new(),
+            preserved_fields: Vec::new(),
+            reproduction_command: String::new(),
+            policy_version: String::new(),
+            redacted_value_placeholder: String::new(),
+            forbidden_unredacted_markers: Vec::new(),
+            require_placeholder_in_redacted_artifacts: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -294,6 +309,7 @@ pub enum ProofBundleProvenanceClass {
     CapabilityDowngrade,
     StaleArtifact,
     MissingRawLog,
+    RedactionFailure,
     UnsupportedFutureScope,
 }
 
@@ -307,6 +323,7 @@ impl ProofBundleProvenanceClass {
             Self::CapabilityDowngrade => "capability_downgrade",
             Self::StaleArtifact => "stale_artifact",
             Self::MissingRawLog => "missing_raw_log",
+            Self::RedactionFailure => "redaction_failure",
             Self::UnsupportedFutureScope => "unsupported_future_scope",
         }
     }
@@ -459,6 +476,7 @@ pub fn validate_proof_bundle_manifest(
     builder.validate_integrity_policy(manifest);
     builder.validate_redaction_policy(&manifest.redaction);
     builder.validate_redaction_contents(manifest, bundle_root);
+    builder.build_lane_provenance(manifest, bundle_root);
 
     builder.finish(manifest)
 }
@@ -690,6 +708,8 @@ struct ProofBundleReportBuilder {
     artifact_reports: Vec<ProofBundleArtifactReport>,
     redaction_errors: Vec<String>,
     redaction_leaks: Vec<ProofBundleRedactionLeak>,
+    redaction_policy_invalid: bool,
+    redaction_blocked_lane_ids: BTreeSet<String>,
     integrity_errors: Vec<String>,
     lanes: Vec<ProofBundleLaneReport>,
     lane_provenance: Vec<ProofBundleLaneProvenanceReport>,
@@ -716,6 +736,8 @@ impl ProofBundleReportBuilder {
             artifact_reports: Vec::new(),
             redaction_errors: Vec::new(),
             redaction_leaks: Vec::new(),
+            redaction_policy_invalid: false,
+            redaction_blocked_lane_ids: BTreeSet::new(),
             integrity_errors: Vec::new(),
             lanes: Vec::new(),
             lane_provenance: Vec::new(),
@@ -811,7 +833,7 @@ impl ProofBundleReportBuilder {
 
         for lane in &manifest.lanes {
             *lane_ids.entry(lane.lane_id.clone()).or_default() += 1;
-            self.validate_lane(lane, bundle_root, &manifest.git_sha, &mut scenario_ids);
+            self.validate_lane(lane, bundle_root, &mut scenario_ids);
         }
 
         self.duplicate_lane_ids = lane_ids
@@ -849,7 +871,6 @@ impl ProofBundleReportBuilder {
         &mut self,
         lane: &ProofBundleLane,
         bundle_root: &Path,
-        git_sha: &str,
         scenario_ids: &mut BTreeMap<String, usize>,
     ) {
         validate_nonempty("lane_id", &lane.lane_id, &mut self.errors);
@@ -905,12 +926,6 @@ impl ProofBundleReportBuilder {
         self.validate_swarm_lane_contract(lane);
         self.validate_adaptive_runtime_lane_contract(lane);
         self.validate_permissioned_campaign_broker_boundary(lane);
-        self.lane_provenance.push(proof_bundle_lane_provenance(
-            lane,
-            bundle_root,
-            git_sha,
-            self.stale_git_sha.is_some() || self.stale_timestamp.is_some(),
-        ));
 
         self.lanes.push(ProofBundleLaneReport {
             lane_id: lane.lane_id.clone(),
@@ -1435,32 +1450,26 @@ impl ProofBundleReportBuilder {
     }
 
     fn validate_redaction_policy(&mut self, policy: &ProofBundleRedactionPolicy) {
-        validate_nonempty(
+        self.validate_redaction_nonempty(
             "redaction.reproduction_command",
             &policy.reproduction_command,
-            &mut self.errors,
         );
-        validate_nonempty(
-            "redaction.policy_version",
-            &policy.policy_version,
-            &mut self.errors,
-        );
-        validate_nonempty(
+        self.validate_redaction_nonempty("redaction.policy_version", &policy.policy_version);
+        self.validate_redaction_nonempty(
             "redaction.redacted_value_placeholder",
             &policy.redacted_value_placeholder,
-            &mut self.errors,
         );
         if !policy
             .reproduction_command
             .contains("validate-proof-bundle")
         {
-            self.redaction_errors.push(
+            self.push_redaction_policy_error(
                 "redaction reproduction_command must preserve validate-proof-bundle invocation"
                     .to_owned(),
             );
         }
         if let Some(marker) = env_secret_marker(policy.reproduction_command.as_bytes()) {
-            self.redaction_errors.push(format!(
+            self.push_redaction_policy_error(format!(
                 "redaction reproduction_command contains unredacted environment secret marker {marker}"
             ));
         }
@@ -1471,19 +1480,33 @@ impl ProofBundleReportBuilder {
 
         for field in PRESERVED_REDACTION_FIELDS {
             if !preserved.contains(field) {
-                self.redaction_errors.push(format!(
+                self.push_redaction_policy_error(format!(
                     "redaction preserved_fields missing required field {field}"
                 ));
             }
             if redacted.contains(field) {
-                self.redaction_errors
-                    .push(format!("redaction may not remove required field {field}"));
+                self.push_redaction_policy_error(format!(
+                    "redaction may not remove required field {field}"
+                ));
             }
         }
 
         for error in &self.redaction_errors {
-            self.errors.push(error.clone());
+            if !self.errors.contains(error) {
+                self.errors.push(error.clone());
+            }
         }
+    }
+
+    fn validate_redaction_nonempty(&mut self, field: &str, value: &str) {
+        if value.trim().is_empty() {
+            self.push_redaction_policy_error(format!("{field} must not be empty"));
+        }
+    }
+
+    fn push_redaction_policy_error(&mut self, error: String) {
+        self.redaction_policy_invalid = true;
+        self.redaction_errors.push(error);
     }
 
     fn validate_redaction_contents(&mut self, manifest: &ProofBundleManifest, bundle_root: &Path) {
@@ -1572,6 +1595,7 @@ impl ProofBundleReportBuilder {
                     path: raw_path.to_owned(),
                     marker: marker.clone(),
                 });
+                self.redaction_blocked_lane_ids.insert(lane_id.to_owned());
             }
         }
         if let Some(marker) = env_secret_marker(&bytes) {
@@ -1581,6 +1605,7 @@ impl ProofBundleReportBuilder {
                 path: raw_path.to_owned(),
                 marker: marker.to_owned(),
             });
+            self.redaction_blocked_lane_ids.insert(lane_id.to_owned());
         }
 
         if policy.require_placeholder_in_redacted_artifacts
@@ -1590,6 +1615,27 @@ impl ProofBundleReportBuilder {
             self.redaction_errors.push(format!(
                 "redacted artifact lane={lane_id} path={raw_path} lacks placeholder {}",
                 policy.redacted_value_placeholder
+            ));
+            self.redaction_blocked_lane_ids.insert(lane_id.to_owned());
+        }
+    }
+
+    fn build_lane_provenance(&mut self, manifest: &ProofBundleManifest, bundle_root: &Path) {
+        let manifest_is_stale = self.stale_git_sha.is_some() || self.stale_timestamp.is_some();
+        for lane in &manifest.lanes {
+            let redaction_failure = if self.redaction_policy_invalid {
+                Some("bundle redaction policy is invalid or missing")
+            } else if self.redaction_blocked_lane_ids.contains(&lane.lane_id) {
+                Some("lane has unredacted sensitive content or an invalid redacted artifact")
+            } else {
+                None
+            };
+            self.lane_provenance.push(proof_bundle_lane_provenance(
+                lane,
+                bundle_root,
+                &manifest.git_sha,
+                manifest_is_stale,
+                redaction_failure,
             ));
         }
     }
@@ -1668,6 +1714,7 @@ fn proof_bundle_lane_provenance(
     bundle_root: &Path,
     git_sha: &str,
     manifest_is_stale: bool,
+    redaction_failure: Option<&str>,
 ) -> ProofBundleLaneProvenanceReport {
     let artifact_roles = lane
         .artifacts
@@ -1713,9 +1760,15 @@ fn proof_bundle_lane_provenance(
         &source_command,
         raw_log_present,
         manifest_is_stale,
+        redaction_failure.is_some(),
     );
     let claim_effect = proof_bundle_claim_effect(provenance_class, lane.status);
-    let rationale = proof_bundle_provenance_rationale(provenance_class, claim_effect, lane.status);
+    let rationale = redaction_failure.map_or_else(
+        || proof_bundle_provenance_rationale(provenance_class, claim_effect, lane.status),
+        |reason| {
+            format!("{reason}; evidence production failed before product readiness can be claimed")
+        },
+    );
 
     ProofBundleLaneProvenanceReport {
         lane_id: lane.lane_id.clone(),
@@ -1755,7 +1808,11 @@ fn classify_proof_bundle_lane_provenance(
     source_command: &str,
     raw_log_present: bool,
     manifest_is_stale: bool,
+    redaction_failure: bool,
 ) -> ProofBundleProvenanceClass {
+    if redaction_failure {
+        return ProofBundleProvenanceClass::RedactionFailure;
+    }
     if !raw_log_present {
         return ProofBundleProvenanceClass::MissingRawLog;
     }
@@ -1853,6 +1910,9 @@ const fn proof_bundle_claim_effect(
         ProofBundleProvenanceClass::StaleArtifact | ProofBundleProvenanceClass::MissingRawLog => {
             ProofBundleClaimEffect::EvidenceProductionFailure
         }
+        ProofBundleProvenanceClass::RedactionFailure => {
+            ProofBundleClaimEffect::EvidenceProductionFailure
+        }
         ProofBundleProvenanceClass::UnsupportedFutureScope => {
             ProofBundleClaimEffect::DoesNotStrengthenPublicClaim
         }
@@ -1888,6 +1948,10 @@ fn proof_bundle_provenance_rationale(
         }
         ProofBundleProvenanceClass::MissingRawLog => {
             "missing raw logs make the lane unauditable and fail evidence production".to_owned()
+        }
+        ProofBundleProvenanceClass::RedactionFailure => {
+            "redaction or path-confinement failures make the lane unsafe to publish and fail evidence production"
+                .to_owned()
         }
         ProofBundleProvenanceClass::UnsupportedFutureScope => {
             "unsupported future-scope material is tracked as deferral context only".to_owned()
@@ -2721,6 +2785,39 @@ mod tests {
     }
 
     #[test]
+    fn missing_redaction_policy_is_reported_and_blocks_lane_provenance() -> Result<()> {
+        let sample = sample_bundle();
+        let mut manifest_value = serde_json::to_value(&sample.manifest)?;
+        manifest_value
+            .as_object_mut()
+            .context("manifest object")?
+            .remove("redaction");
+        let manifest: ProofBundleManifest = serde_json::from_value(manifest_value)?;
+
+        let report = validate_proof_bundle_manifest(
+            &manifest,
+            sample.root.path(),
+            &sample.root.path().join("manifest.json"),
+            Some("abcdef1"),
+            Some(10_000),
+        );
+
+        assert!(!report.valid);
+        assert!(report.redaction_errors.iter().any(|error| {
+            error.contains("redaction.reproduction_command") && error.contains("must not be empty")
+        }));
+        assert!(
+            report.lane_provenance.iter().all(|provenance| {
+                provenance.provenance_class == ProofBundleProvenanceClass::RedactionFailure
+                    && provenance.claim_effect == ProofBundleClaimEffect::EvidenceProductionFailure
+            }),
+            "{:?}",
+            report.lane_provenance
+        );
+        Ok(())
+    }
+
+    #[test]
     fn artifact_hash_chain_mismatch_is_rejected() {
         let mut sample = sample_bundle();
         sample
@@ -3241,6 +3338,44 @@ mod tests {
                 .redaction_errors
                 .iter()
                 .any(|error| error.contains("redaction leak"))
+        );
+    }
+
+    #[test]
+    fn redaction_leak_turns_passing_lane_into_evidence_production_failure() {
+        let mut sample = sample_bundle();
+        let lane = sample
+            .manifest
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.lane_id == "conformance")
+            .expect("conformance lane");
+        lane.status = ProofBundleOutcome::Pass;
+        write_file(
+            sample.root.path(),
+            "summaries/conformance.md",
+            "# conformance\nSECRET_TOKEN\n",
+        );
+
+        let report = validate_sample(&sample);
+
+        let conformance = report
+            .lane_provenance
+            .iter()
+            .find(|provenance| provenance.lane_id == "conformance")
+            .expect("conformance provenance");
+        assert_eq!(
+            conformance.provenance_class,
+            ProofBundleProvenanceClass::RedactionFailure
+        );
+        assert_eq!(
+            conformance.claim_effect,
+            ProofBundleClaimEffect::EvidenceProductionFailure
+        );
+        assert!(
+            conformance
+                .rationale
+                .contains("evidence production failed before product readiness")
         );
     }
 

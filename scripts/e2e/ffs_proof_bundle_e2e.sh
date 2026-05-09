@@ -211,6 +211,8 @@ BAD_TRAVERSAL_MANIFEST="$BUNDLE_DIR/proof_bundle_traversal_path.json"
 BAD_TRAVERSAL_RAW="$E2E_LOG_DIR/proof_bundle_traversal_path.raw"
 BAD_ENV_MANIFEST="$BUNDLE_DIR/proof_bundle_env_secret.json"
 BAD_ENV_RAW="$E2E_LOG_DIR/proof_bundle_env_secret.raw"
+BAD_MISSING_REDACTION_MANIFEST="$BUNDLE_DIR/proof_bundle_missing_redaction.json"
+BAD_MISSING_REDACTION_RAW="$E2E_LOG_DIR/proof_bundle_missing_redaction.raw"
 UNIT_LOG="$E2E_LOG_DIR/proof_bundle_unit_tests.log"
 
 mkdir -p "$BUNDLE_DIR"
@@ -772,7 +774,32 @@ else
     scenario_result "proof_bundle_env_secret_rejected" "FAIL" "validator failed without env-secret diagnostic"
 fi
 
-e2e_step "Scenario 13: proof bundle unit tests pass"
+e2e_step "Scenario 13: validator rejects missing redaction policy as evidence production failure"
+python3 - "$MANIFEST_JSON" "$BAD_MISSING_REDACTION_MANIFEST" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+manifest_path, out_path = sys.argv[1:]
+data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
+data.pop("redaction", None)
+pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if run_rch_capture "$BAD_MISSING_REDACTION_RAW" cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+    --bundle "$BAD_MISSING_REDACTION_MANIFEST" \
+    --current-git-sha "$GIT_SHA" \
+    --max-age-days 10000; then
+    scenario_result "proof_bundle_missing_redaction_rejected" "FAIL" "validator accepted missing redaction policy"
+elif grep -q "redaction.reproduction_command" "$BAD_MISSING_REDACTION_RAW" \
+    && grep -q "evidence_production_failure" "$BAD_MISSING_REDACTION_RAW"; then
+    scenario_result "proof_bundle_missing_redaction_rejected" "PASS" "missing redaction policy rejected as evidence-production failure"
+else
+    scenario_result "proof_bundle_missing_redaction_rejected" "FAIL" "validator failed without redaction/provenance diagnostic"
+fi
+
+e2e_step "Scenario 14: proof bundle unit tests pass"
 if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib proof_bundle -- --nocapture; then
     cat "$UNIT_LOG"
     scenario_result "proof_bundle_unit_tests" "PASS" "proof_bundle unit tests passed"
