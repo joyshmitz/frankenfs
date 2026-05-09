@@ -54,6 +54,7 @@ pub mod proof_bundle;
 pub mod proof_overhead_budget;
 pub mod readiness_action_autopilot;
 pub mod readiness_dashboard;
+pub mod readiness_lab;
 pub mod release_gate;
 pub mod remediation_catalog;
 pub mod remediation_severity_gate;

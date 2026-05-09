@@ -1240,6 +1240,31 @@ claims. The dashboard E2E is non-destructive and uses synthetic reports:
 ./scripts/e2e/ffs_readiness_dashboard_e2e.sh
 ```
 
+### Non-Permissioned Readiness Lab Contracts
+
+Readiness lab contracts describe advisory artifacts that help agents rehearse
+large-host swarm, RCH scheduling, xfstests handoff, evidence graph, and dashboard
+flows without producing product pass/fail evidence. The validator requires an
+explicit advisory notice and rejects any contract that claims authoritative
+product evidence.
+
+```bash
+rch exec -- cargo run -p ffs-harness -- validate-readiness-lab-contracts \
+  --manifest artifacts/readiness-lab/contracts.json \
+  --reference-epoch-days 20001 \
+  --format markdown
+```
+
+These artifacts are allowed to drive preflight, rehearsal, dashboard, and
+runbook work. They are not allowed to mark xfstests or swarm responsiveness as
+validated; release-gate and proof-bundle promotion still require the real
+permissioned evidence lanes. The E2E suite builds synthetic advisory and
+forbidden product-claim manifests:
+
+```bash
+./scripts/e2e/ffs_readiness_lab_contracts_e2e.sh
+```
+
 ## Output
 
 Test artifacts are stored in `artifacts/e2e/<timestamp>/`:

@@ -137,6 +137,11 @@ use ffs_harness::{
     readiness_dashboard::{
         ReadinessDashboardConfig, build_readiness_dashboard, render_readiness_dashboard_markdown,
     },
+    readiness_lab::{
+        ReadinessLabValidationConfig, fail_on_readiness_lab_contract_errors,
+        load_readiness_lab_contract_bundle, render_readiness_lab_contract_markdown,
+        validate_readiness_lab_contract_bundle,
+    },
     release_gate::{
         evaluate_release_gates, fail_on_release_gate_errors, load_release_gate_policy,
         render_release_gate_markdown,
@@ -468,6 +473,9 @@ fn run() -> Result<()> {
         Some("operational-evidence-index") => operational_evidence_index_cmd(&args[1..]),
         Some("recommend-readiness-actions") => recommend_readiness_actions_cmd(&args[1..]),
         Some("readiness-dashboard") => readiness_dashboard_cmd(&args[1..]),
+        Some("validate-readiness-lab-contracts") => {
+            validate_readiness_lab_contracts_cmd(&args[1..])
+        }
         Some("validate-mounted-write-error-classes") => {
             validate_mounted_write_error_classes_cmd(&args[1..])
         }
@@ -1225,6 +1233,105 @@ fn readiness_dashboard_summary(
         report.recommendation_count,
         report.tracker_follow_up_beads.len()
     )
+}
+
+fn validate_readiness_lab_contracts_cmd(args: &[String]) -> Result<()> {
+    let mut manifest_path: Option<String> = None;
+    let mut reference_epoch_days: Option<u32> = None;
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ReadinessReportFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                manifest_path = Some(
+                    args.get(i)
+                        .context("--manifest requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--reference-epoch-days" => {
+                i += 1;
+                reference_epoch_days = Some(
+                    args.get(i)
+                        .context("--reference-epoch-days requires a value")?
+                        .parse()
+                        .context("invalid --reference-epoch-days value")?,
+                );
+            }
+            "--format" => {
+                i += 1;
+                format = parse_readiness_report_format(
+                    args.get(i).context("--format requires json or markdown")?,
+                )?;
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_readiness_lab_contracts_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-readiness-lab-contracts argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let manifest_path = manifest_path.context("--manifest is required")?;
+    let bundle = load_readiness_lab_contract_bundle(&manifest_path)?;
+    let config = ReadinessLabValidationConfig {
+        manifest_path: manifest_path.clone(),
+        reference_epoch_days,
+    };
+    let report = validate_readiness_lab_contract_bundle(&bundle, &config);
+    let json = serde_json::to_string_pretty(&report)?;
+    let markdown = render_readiness_lab_contract_markdown(&report);
+    let output = match format {
+        ReadinessReportFormat::Json => json.as_str(),
+        ReadinessReportFormat::Markdown => markdown.as_str(),
+    };
+
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "readiness lab contract report written: {path} valid={} artifacts={} lanes={} errors={}",
+            report.valid,
+            report.artifact_count,
+            report.lane_count,
+            report.errors.len()
+        );
+    } else {
+        println!("{output}");
+        std::io::stdout().flush().ok();
+    }
+
+    if let Some(path) = summary_out_path {
+        write_text_file(Path::new(&path), &format!("{markdown}\n"))?;
+        println!("readiness lab contract summary written: {path}");
+    }
+
+    fail_on_readiness_lab_contract_errors(&report)
+}
+
+fn print_readiness_lab_contracts_usage() {
+    println!(
+        "ffs-harness validate-readiness-lab-contracts --manifest FILE [--reference-epoch-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+    println!(
+        "  Validates advisory-only readiness-lab artifacts; it never runs permissioned campaigns."
+    );
 }
 
 fn print_readiness_dashboard_usage() {
@@ -6185,6 +6292,9 @@ fn print_usage_core_commands() {
         "  ffs-harness readiness-dashboard [--proof-bundle-report FILE ...] [--release-gate-report FILE ...] [--operational-evidence-index FILE ...] [--permissioned-campaign-report FILE ...] [--beads FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
+        "  ffs-harness validate-readiness-lab-contracts --manifest FILE [--reference-epoch-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+    println!(
         "  ffs-harness fuse-capability-probe [--out FILE] [--require-mount-probe] [--mount-probe-exit N] [--unmount-probe-exit N] [--user-disabled] [--default-permissions-eacces]"
     );
     println!("  ffs-harness validate-open-ended-inventory [--out FILE]");
@@ -6300,6 +6410,9 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness readiness-dashboard --proof-bundle-report artifacts/proof/report.json --release-gate-report artifacts/proof/release_gate.json --operational-evidence-index artifacts/e2e/evidence-index.json --beads .beads/issues.jsonl --format markdown"
+    );
+    println!(
+        "  ffs-harness validate-readiness-lab-contracts --manifest artifacts/readiness-lab/contracts.json --reference-epoch-days 20001 --format markdown"
     );
     println!("  ffs-harness fuse-capability-probe --out artifacts/e2e/run/fuse_capability.json");
     println!(
