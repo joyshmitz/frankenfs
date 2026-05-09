@@ -2249,6 +2249,60 @@ mod tests {
         );
     }
 
+    /// bd-h117q — Kernel-conformance pin for the btrfs btree size
+    /// constants used for byte-offset arithmetic in parse_leaf_items,
+    /// parse_internal_items, parse_chunk_item, and
+    /// BtrfsHeader::parse_from_block. Each constant must equal the
+    /// canonical sizeof(struct *) per fs/btrfs/ctree.h. A regression
+    /// that drifted any size by ±4 bytes (one field-width) would
+    /// mis-align every leaf-slot or internal-slot read, silently
+    /// corrupting every walk_tree call.
+    ///
+    /// Sister pins: bd-latwe (BtrfsHeader field offsets), bd-na4cc
+    /// (BtrfsDevItem field offsets), bd-7dhr1 (BtrfsExtentItem
+    /// canonical bytes).
+    #[test]
+    fn btrfs_btree_size_constants_match_ctree_h() {
+        // struct btrfs_header per fs/btrfs/ctree.h:
+        //   csum[32] + fsid[16] + bytenr u64 + flags u64 +
+        //   chunk_tree_uuid[16] + generation u64 + owner u64 +
+        //   nritems u32 + level u8 = 32+16+8+8+16+8+8+4+1 = 101
+        assert_eq!(
+            BTRFS_HEADER_SIZE, 101,
+            "BTRFS_HEADER_SIZE must equal sizeof(struct btrfs_header) = 101"
+        );
+        // struct btrfs_disk_key per fs/btrfs/ctree.h:
+        //   objectid u64 + type u8 + offset u64 = 8+1+8 = 17
+        assert_eq!(
+            BTRFS_DISK_KEY_SIZE, 17,
+            "BTRFS_DISK_KEY_SIZE must equal sizeof(struct btrfs_disk_key) = 17"
+        );
+        // struct btrfs_item per fs/btrfs/ctree.h:
+        //   key (struct btrfs_disk_key, 17) + offset u32 + size u32
+        //   = 17+4+4 = 25
+        assert_eq!(
+            BTRFS_ITEM_SIZE, 25,
+            "BTRFS_ITEM_SIZE must equal sizeof(struct btrfs_item) = 25"
+        );
+        assert_eq!(
+            BTRFS_ITEM_SIZE,
+            BTRFS_DISK_KEY_SIZE + 4 + 4,
+            "BTRFS_ITEM_SIZE must equal disk_key + offset(u32) + size(u32)"
+        );
+        // struct btrfs_key_ptr per fs/btrfs/ctree.h:
+        //   key (struct btrfs_disk_key, 17) + blockptr u64 + generation u64
+        //   = 17+8+8 = 33
+        assert_eq!(
+            BTRFS_KEY_PTR_SIZE, 33,
+            "BTRFS_KEY_PTR_SIZE must equal sizeof(struct btrfs_key_ptr) = 33"
+        );
+        assert_eq!(
+            BTRFS_KEY_PTR_SIZE,
+            BTRFS_DISK_KEY_SIZE + 8 + 8,
+            "BTRFS_KEY_PTR_SIZE must equal disk_key + blockptr(u64) + generation(u64)"
+        );
+    }
+
     /// bd-latwe — Kernel-conformance pin for the btrfs_header field
     /// offsets per fs/btrfs/ctree.h (struct btrfs_header, 101 bytes).
     /// Each field is stamped with a UNIQUE non-zero magic at its
