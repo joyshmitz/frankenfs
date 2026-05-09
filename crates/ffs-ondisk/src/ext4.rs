@@ -6538,6 +6538,105 @@ mod tests {
         assert_eq!(entries[2].file_type, Ext4FileType::RegFile);
     }
 
+    /// bd-ku16x — Kernel-conformance pin for the base 128-byte
+    /// ext4_inode field offsets per fs/ext4/ext4.h. Each field is
+    /// stamped with a UNIQUE non-zero magic at its canonical kernel
+    /// offset, then a single Ext4Inode::parse_from_bytes call must
+    /// round-trip every field. Ext4Inode is parsed on every ext4 file
+    /// open / readdir / stat / xattr — the most heavily-trafficked
+    /// ext4 struct. A regression that drifted any offset would
+    /// mis-route mode-vs-uid_lo or atime-vs-ctime silently.
+    ///
+    /// Sister kernel-offset pins:
+    /// ext4_dir_entry_2_kernel_offsets_match_ext4_h (bd-12nk4),
+    /// parse_dx_root_kernel_offsets_match_ext4_h (bd-2e5cy),
+    /// ext4_extent_leaf/index/header_kernel_offsets_match_extents_h,
+    /// ext4_mmp_block_kernel_offsets_match_mmp_h, plus
+    /// ext4_inode_flag_constants_match_kernel_header (which pins the
+    /// flag values this test relies on indirectly).
+    #[test]
+    fn ext4_inode_kernel_offsets_match_ext4_h() {
+        // Distinct non-zero magics. Each byte position in the inode
+        // holds a value matching its address (little-endian), so an
+        // offset drift produces a cross-field collision.
+        // mode must encode a known type for size_hi to be read; pick
+        // S_IFREG | 0o644 (0x81A4) so is_reg=true and 0x6C is read.
+        let mode: u16 = 0x81A4;
+        let uid_lo: u16 = 0x0203;
+        let size_lo: u32 = 0x0405_0607;
+        let atime: u32 = 0x0809_0A0B;
+        let ctime: u32 = 0x0C0D_0E0F;
+        let mtime: u32 = 0x1011_1213;
+        let dtime: u32 = 0x1415_1617;
+        let gid_lo: u16 = 0x1819;
+        let links_count: u16 = 0x1A1B;
+        let blocks_lo: u32 = 0x1C1D_1E1F;
+        let flags: u32 = 0x2021_2223;
+        let version: u32 = 0x2425_2627;
+        let generation: u32 = 0x6465_6667;
+        let file_acl_lo: u32 = 0x6869_6A6B;
+        let size_hi: u32 = 0x6C6D_6E6F;
+
+        // 128-byte base area; we don't exercise extra_isize / OS-Linux
+        // extended fields here (those are 0x74..0x80 and 0x80+).
+        let mut bytes = vec![0_u8; 128];
+        bytes[0x00..0x02].copy_from_slice(&mode.to_le_bytes());
+        bytes[0x02..0x04].copy_from_slice(&uid_lo.to_le_bytes());
+        bytes[0x04..0x08].copy_from_slice(&size_lo.to_le_bytes());
+        bytes[0x08..0x0C].copy_from_slice(&atime.to_le_bytes());
+        bytes[0x0C..0x10].copy_from_slice(&ctime.to_le_bytes());
+        bytes[0x10..0x14].copy_from_slice(&mtime.to_le_bytes());
+        bytes[0x14..0x18].copy_from_slice(&dtime.to_le_bytes());
+        bytes[0x18..0x1A].copy_from_slice(&gid_lo.to_le_bytes());
+        bytes[0x1A..0x1C].copy_from_slice(&links_count.to_le_bytes());
+        bytes[0x1C..0x20].copy_from_slice(&blocks_lo.to_le_bytes());
+        bytes[0x20..0x24].copy_from_slice(&flags.to_le_bytes());
+        bytes[0x24..0x28].copy_from_slice(&version.to_le_bytes());
+        // i_block[15] @ 0x28..0x64: 60 bytes left zero (extent_bytes
+        // captures them but we don't pin their content here).
+        bytes[0x64..0x68].copy_from_slice(&generation.to_le_bytes());
+        bytes[0x68..0x6C].copy_from_slice(&file_acl_lo.to_le_bytes());
+        // size_hi only read when len() >= 0x70 AND is_reg/is_dir.
+        // 128 ≥ 0x70, mode encodes S_IFREG, so it's read.
+        bytes[0x6C..0x70].copy_from_slice(&size_hi.to_le_bytes());
+
+        let inode = Ext4Inode::parse_from_bytes(&bytes)
+            .expect("kernel-stamped ext4_inode must parse");
+
+        assert_eq!(inode.mode, mode, "mode @ 0x00..0x02");
+        // uid is recombined from uid_lo (0x02) and uid_hi (0x78); we
+        // didn't write 0x78 so uid_hi==0 and inode.uid == uid_lo.
+        assert_eq!(inode.uid, u32::from(uid_lo), "uid_lo @ 0x02..0x04");
+        // size is recombined from size_lo (0x04) and size_hi (0x6C).
+        assert_eq!(
+            inode.size,
+            u64::from(size_lo) | (u64::from(size_hi) << 32),
+            "size_lo @ 0x04 + size_hi @ 0x6C"
+        );
+        assert_eq!(inode.atime, atime, "atime @ 0x08..0x0C");
+        assert_eq!(inode.ctime, ctime, "ctime @ 0x0C..0x10");
+        assert_eq!(inode.mtime, mtime, "mtime @ 0x10..0x14");
+        assert_eq!(inode.dtime, dtime, "dtime @ 0x14..0x18");
+        assert_eq!(inode.gid, u32::from(gid_lo), "gid_lo @ 0x18..0x1A");
+        assert_eq!(
+            inode.links_count, links_count,
+            "links_count @ 0x1A..0x1C"
+        );
+        assert_eq!(
+            inode.blocks,
+            u64::from(blocks_lo),
+            "blocks_lo @ 0x1C..0x20 (no high-half stamped)"
+        );
+        assert_eq!(inode.flags, flags, "flags @ 0x20..0x24");
+        assert_eq!(inode.version, version, "version (l_i_version) @ 0x24..0x28");
+        assert_eq!(inode.generation, generation, "generation @ 0x64..0x68");
+        assert_eq!(
+            inode.file_acl,
+            u64::from(file_acl_lo),
+            "file_acl_lo @ 0x68..0x6C (no high-half stamped)"
+        );
+    }
+
     /// bd-2e5cy — Kernel-conformance pin for parse_dx_root layout per
     /// fs/ext4/ext4.h struct dx_root + struct dx_entry. parse_dx_root
     /// validates strict kernel offsets:
