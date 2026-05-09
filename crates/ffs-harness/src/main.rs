@@ -134,6 +134,9 @@ use ffs_harness::{
         build_readiness_action_dry_run_report, default_readiness_action_autopilot_fixture_set,
         render_readiness_action_dry_run_markdown,
     },
+    readiness_dashboard::{
+        ReadinessDashboardConfig, build_readiness_dashboard, render_readiness_dashboard_markdown,
+    },
     release_gate::{
         evaluate_release_gates, fail_on_release_gate_errors, load_release_gate_policy,
         render_release_gate_markdown,
@@ -464,6 +467,7 @@ fn run() -> Result<()> {
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
         Some("operational-evidence-index") => operational_evidence_index_cmd(&args[1..]),
         Some("recommend-readiness-actions") => recommend_readiness_actions_cmd(&args[1..]),
+        Some("readiness-dashboard") => readiness_dashboard_cmd(&args[1..]),
         Some("validate-mounted-write-error-classes") => {
             validate_mounted_write_error_classes_cmd(&args[1..])
         }
@@ -1099,6 +1103,137 @@ fn operational_evidence_index_summary(
         index.duplicate_run_id_count,
         index.host_downgrade_count
     )
+}
+
+fn readiness_dashboard_cmd(args: &[String]) -> Result<()> {
+    let mut config = ReadinessDashboardConfig::default();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ReadinessReportFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--proof-bundle-report" => {
+                i += 1;
+                config.proof_bundle_reports.push(PathBuf::from(
+                    args.get(i)
+                        .context("--proof-bundle-report requires a path")?
+                        .as_str(),
+                ));
+            }
+            "--release-gate-report" => {
+                i += 1;
+                config.release_gate_reports.push(PathBuf::from(
+                    args.get(i)
+                        .context("--release-gate-report requires a path")?
+                        .as_str(),
+                ));
+            }
+            "--operational-evidence-index" => {
+                i += 1;
+                config.operational_evidence_indexes.push(PathBuf::from(
+                    args.get(i)
+                        .context("--operational-evidence-index requires a path")?
+                        .as_str(),
+                ));
+            }
+            "--permissioned-campaign-report" => {
+                i += 1;
+                config.permissioned_campaign_reports.push(PathBuf::from(
+                    args.get(i)
+                        .context("--permissioned-campaign-report requires a path")?
+                        .as_str(),
+                ));
+            }
+            "--beads" => {
+                i += 1;
+                config.beads_path = Some(PathBuf::from(
+                    args.get(i).context("--beads requires a path")?.as_str(),
+                ));
+            }
+            "--default-remediation-bead" => {
+                i += 1;
+                config.default_remediation_bead = Some(
+                    args.get(i)
+                        .context("--default-remediation-bead requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format = parse_readiness_report_format(
+                    args.get(i).context("--format requires json or markdown")?,
+                )?;
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_readiness_dashboard_usage();
+                return Ok(());
+            }
+            other => bail!("unknown readiness-dashboard argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let report = build_readiness_dashboard(&config)?;
+    let json = serde_json::to_string_pretty(&report)?;
+    let markdown = render_readiness_dashboard_markdown(&report);
+    let output = match format {
+        ReadinessReportFormat::Json => json.as_str(),
+        ReadinessReportFormat::Markdown => markdown.as_str(),
+    };
+
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!("{}", readiness_dashboard_summary(&report, path.as_str()));
+    } else {
+        println!("{output}");
+        std::io::stdout().flush().ok();
+        eprintln!("{}", readiness_dashboard_summary(&report, "<stdout>"));
+    }
+
+    if let Some(path) = summary_out_path {
+        write_text_file(Path::new(&path), &format!("{markdown}\n"))?;
+        println!("readiness dashboard summary written: {path}");
+    }
+
+    Ok(())
+}
+
+fn readiness_dashboard_summary(
+    report: &ffs_harness::readiness_dashboard::ReadinessDashboardReport,
+    output_path: &str,
+) -> String {
+    format!(
+        "readiness dashboard written: {output_path} valid={} sources={} source_validator_failures={} claims={} recommendations={} tracker_follow_up_beads={} output_path={output_path}",
+        report.valid,
+        report.source_report_count,
+        report.source_validator_failure_count,
+        report.claim_count,
+        report.recommendation_count,
+        report.tracker_follow_up_beads.len()
+    )
+}
+
+fn print_readiness_dashboard_usage() {
+    println!(
+        "ffs-harness readiness-dashboard [--proof-bundle-report FILE ...] [--release-gate-report FILE ...] [--operational-evidence-index FILE ...] [--permissioned-campaign-report FILE ...] [--beads FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+    println!(
+        "  Renders a read-only operator dashboard over strict validator reports; it never upgrades readiness on its own."
+    );
 }
 
 fn recommend_readiness_actions_cmd(args: &[String]) -> Result<()> {
@@ -6047,6 +6182,9 @@ fn print_usage_core_commands() {
         "  ffs-harness recommend-readiness-actions [--input FILE] --out-json FILE --out-md FILE --stdout-log FILE --stderr-log FILE [--report-id ID] [--generated-at TS] [--invocation CMD]"
     );
     println!(
+        "  ffs-harness readiness-dashboard [--proof-bundle-report FILE ...] [--release-gate-report FILE ...] [--operational-evidence-index FILE ...] [--permissioned-campaign-report FILE ...] [--beads FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+    println!(
         "  ffs-harness fuse-capability-probe [--out FILE] [--require-mount-probe] [--mount-probe-exit N] [--unmount-probe-exit N] [--user-disabled] [--default-permissions-eacces]"
     );
     println!("  ffs-harness validate-open-ended-inventory [--out FILE]");
@@ -6159,6 +6297,9 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness recommend-readiness-actions --out-json artifacts/readiness/actions/report.json --out-md artifacts/readiness/actions/report.md --stdout-log artifacts/readiness/actions/stdout.log --stderr-log artifacts/readiness/actions/stderr.log"
+    );
+    println!(
+        "  ffs-harness readiness-dashboard --proof-bundle-report artifacts/proof/report.json --release-gate-report artifacts/proof/release_gate.json --operational-evidence-index artifacts/e2e/evidence-index.json --beads .beads/issues.jsonl --format markdown"
     );
     println!("  ffs-harness fuse-capability-probe --out artifacts/e2e/run/fuse_capability.json");
     println!(

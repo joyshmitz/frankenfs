@@ -1211,6 +1211,35 @@ evidence, cleanup status, and release-gate output. The calibration E2E includes
 a release-gate fixture proving that calibration-only evidence keeps
 `swarm.responsiveness` hidden until those real campaign artifacts exist.
 
+### Operator Readiness Dashboard
+
+The readiness dashboard is a read-only display layer over strict validator
+outputs. It consumes proof-bundle validation reports, release-gate reports,
+operational evidence indexes, permissioned campaign reports or handoff packets,
+and optional `.beads/issues.jsonl` rows. It does not infer readiness, execute
+permissioned work, or strengthen docs/FEATURE_PARITY wording outside those
+validator outputs.
+
+```bash
+rch exec -- cargo run -p ffs-harness -- readiness-dashboard \
+  --proof-bundle-report artifacts/proof/bundle/report.json \
+  --release-gate-report artifacts/proof/release_gate.json \
+  --operational-evidence-index artifacts/e2e/evidence-index.json \
+  --permissioned-campaign-report artifacts/e2e/permissioned_campaign_broker/reports/swarm_report.json \
+  --beads .beads/issues.jsonl \
+  --format markdown
+```
+
+Each claim row shows the validator report path, claim state, controlling lane,
+freshness, host class, missing artifacts, remediation bead, and next safe
+command. Each recommendation links back to a validator report or bead id so an
+operator can inspect the authoritative source before changing public readiness
+claims. The dashboard E2E is non-destructive and uses synthetic reports:
+
+```bash
+./scripts/e2e/ffs_readiness_dashboard_e2e.sh
+```
+
 ## Output
 
 Test artifacts are stored in `artifacts/e2e/<timestamp>/`:
