@@ -4640,7 +4640,7 @@ pub fn parse_xattr_block(block_data: &[u8]) -> Result<Vec<Ext4Xattr>, ParseError
 // ── Hash-tree (htree/DX) structures and algorithms ──────────────────────────
 
 /// Parsed DX root (block 0 of an htree directory).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ext4DxRoot {
     /// Hash version (0=legacy, 1=half_md4, 2=tea, 3=legacy_unsigned, 4=half_md4_unsigned, 5=tea_unsigned).
     pub hash_version: u8,
@@ -5908,28 +5908,19 @@ mod tests {
 
         let expected: [u8; 32] = [
             // block_bitmap LE @0x00..0x04 = 0x1122_3344 (low 32 bits)
-            0x44, 0x33, 0x22, 0x11,
-            // inode_bitmap LE @0x04..0x08 = 0x5566_7788
-            0x88, 0x77, 0x66, 0x55,
-            // inode_table LE @0x08..0x0C = 0x99AA_BBCC
+            0x44, 0x33, 0x22, 0x11, // inode_bitmap LE @0x04..0x08 = 0x5566_7788
+            0x88, 0x77, 0x66, 0x55, // inode_table LE @0x08..0x0C = 0x99AA_BBCC
             0xCC, 0xBB, 0xAA, 0x99,
             // free_blocks_count LE @0x0C..0x0E = 0xDDDD (cast u32→u16)
-            0xDD, 0xDD,
-            // free_inodes_count LE @0x0E..0x10 = 0xEEEE
-            0xEE, 0xEE,
-            // used_dirs_count LE @0x10..0x12 = 0xFEFE
-            0xFE, 0xFE,
-            // flags LE @0x12..0x14 = 0x1234
-            0x34, 0x12,
-            // 4-byte gap @0x14..0x18 (encoder leaves untouched)
+            0xDD, 0xDD, // free_inodes_count LE @0x0E..0x10 = 0xEEEE
+            0xEE, 0xEE, // used_dirs_count LE @0x10..0x12 = 0xFEFE
+            0xFE, 0xFE, // flags LE @0x12..0x14 = 0x1234
+            0x34, 0x12, // 4-byte gap @0x14..0x18 (encoder leaves untouched)
             0x00, 0x00, 0x00, 0x00,
             // block_bitmap_csum LE @0x18..0x1A = 0x5678 (cast u32→u16)
-            0x78, 0x56,
-            // inode_bitmap_csum LE @0x1A..0x1C = 0x9ABC
-            0xBC, 0x9A,
-            // itable_unused LE @0x1C..0x1E = 0xDEAD (cast u32→u16)
-            0xAD, 0xDE,
-            // checksum LE @0x1E..0x20 = 0xBEEF
+            0x78, 0x56, // inode_bitmap_csum LE @0x1A..0x1C = 0x9ABC
+            0xBC, 0x9A, // itable_unused LE @0x1C..0x1E = 0xDEAD (cast u32→u16)
+            0xAD, 0xDE, // checksum LE @0x1E..0x20 = 0xBEEF
             0xEF, 0xBE,
         ];
         assert_eq!(
@@ -5938,8 +5929,7 @@ mod tests {
         );
 
         // Cross-check: parser round-trips the canonical bytes.
-        let parsed = Ext4GroupDesc::parse_from_bytes(&buf, 32)
-            .expect("canonical bytes parse");
+        let parsed = Ext4GroupDesc::parse_from_bytes(&buf, 32).expect("canonical bytes parse");
         assert_eq!(parsed.block_bitmap, gd.block_bitmap);
         assert_eq!(parsed.flags, gd.flags);
         assert_eq!(parsed.checksum, gd.checksum);
@@ -6683,7 +6673,11 @@ mod tests {
             "rec_len @ offset 4..6"
         );
         assert_eq!(entry.name_len, name_len_magic, "name_len @ offset 6");
-        assert_eq!(entry.file_type, Ext4FileType::Symlink, "file_type @ offset 7");
+        assert_eq!(
+            entry.file_type,
+            Ext4FileType::Symlink,
+            "file_type @ offset 7"
+        );
         assert_eq!(entry.name, b"hello", "name @ offset 8..");
     }
 
@@ -11994,6 +11988,21 @@ mod tests {
         ) {
             let a = parse_xattr_block(&block_data);
             let b = parse_xattr_block(&block_data);
+            prop_assert_eq!(a, b);
+        }
+
+        // bd-afwgs — Determinism MR for parse_dx_root, deferred from
+        // bd-qzwuq pending PartialEq+Eq derive on Ext4DxRoot. Runs on
+        // every htree-indexed directory lookup. Closes the last gap;
+        // all 5 heavily-trafficked ext4 parsers (parse_dir_block,
+        // parse_extent_tree, parse_xattr_block, parse_inode_extent_tree,
+        // parse_dx_root) now have determinism MRs.
+        #[test]
+        fn ext4_proptest_parse_dx_root_determinism(
+            block in proptest::collection::vec(any::<u8>(), 0..=4096),
+        ) {
+            let a = parse_dx_root(&block);
+            let b = parse_dx_root(&block);
             prop_assert_eq!(a, b);
         }
 
