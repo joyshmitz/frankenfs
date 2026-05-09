@@ -11870,6 +11870,38 @@ mod tests {
             let _ = parse_dir_block(&block, block_size);
         }
 
+        // bd-qzwuq — Determinism MR for parse_dir_block. parse_dir_block
+        // runs on every readdir / lookup / remove / rename operation —
+        // the most heavily-trafficked ext4 parser. Sister btrfs
+        // parsers all have determinism MRs (bd-fs41s, bd-x2320, bd-v8c1m,
+        // bd-9f8ef, bd-xqf12, bd-edl7j, bd-vnlja); this closes the
+        // ext4-side gap. A regression that introduced HashMap
+        // iteration, allocator-address dependency, or any non-
+        // deterministic per-call state would silently surface only
+        // under specific scheduling.
+        #[test]
+        fn ext4_proptest_parse_dir_block_determinism(
+            block in proptest::collection::vec(any::<u8>(), 0..=4096),
+            block_size in prop_oneof![Just(1024_u32), Just(2048_u32), Just(4096_u32)],
+        ) {
+            let a = parse_dir_block(&block, block_size);
+            let b = parse_dir_block(&block, block_size);
+            prop_assert_eq!(a, b);
+        }
+
+        // bd-qzwuq — Determinism MR for parse_extent_tree. Companion
+        // to parse_dir_block_determinism. parse_extent_tree runs on
+        // every ext4 file read / mmap / truncate path through
+        // ffs_core::OpenFs.
+        #[test]
+        fn ext4_proptest_parse_extent_tree_determinism(
+            block in proptest::collection::vec(any::<u8>(), 0..=4096),
+        ) {
+            let a = parse_extent_tree(&block);
+            let b = parse_extent_tree(&block);
+            prop_assert_eq!(a, b);
+        }
+
         #[test]
         fn ext4_proptest_iter_dir_block_no_panic(
             block in proptest::collection::vec(any::<u8>(), 0..=4096),
