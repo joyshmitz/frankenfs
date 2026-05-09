@@ -7306,6 +7306,50 @@ mod tests {
         );
     }
 
+    /// bd-yy6f5 — Canonical byte-layout snapshot for
+    /// BtrfsBlockGroupItem::to_bytes. Pins the encoder's exact 24-byte
+    /// output for a magic-stamped fixture so any field-order or offset
+    /// drift fails with a hex diff.
+    ///
+    /// Layout matches the kernel struct btrfs_block_group_item per
+    /// fs/btrfs/btrfs_tree.h ONLY for `used`@0..8 and `flags`@16..24.
+    /// The middle 8 bytes (kernel: `chunk_objectid` u64@8..16) are
+    /// **deliberately** repurposed by our encoder to store
+    /// `total_bytes` instead. The kernel conveys total_bytes via
+    /// BTRFS_BLOCK_GROUP_ITEM_KEY.offset, but we don't surface that
+    /// key path on the ffs side, so we co-locate `total_bytes` in the
+    /// `chunk_objectid` slot. This canonical-bytes test pins that
+    /// divergence so any encoder regression that wrote total_bytes to
+    /// a different slot OR wrote the kernel's chunk_objectid value
+    /// (instead of total_bytes) gets caught with a hex diff. Pairs
+    /// with bd-7dhr1 (BtrfsExtentItem 24-byte canonical) and completes
+    /// ffs-btrfs encoder canonical-bytes coverage.
+    #[test]
+    fn block_group_item_to_bytes_canonical_byte_layout() {
+        let item = BtrfsBlockGroupItem {
+            used_bytes: 0x1122_3344_5566_7788,
+            total_bytes: 0x99AA_BBCC_DDEE_FF00,
+            flags: 0xCAFE_BABE_DEAD_BEEF,
+        };
+        let bytes = item.to_bytes();
+        assert_eq!(bytes.len(), 24, "btrfs_block_group_item is 24 bytes");
+
+        let expected: [u8; 24] = [
+            // used_bytes LE @0..8 = 0x1122_3344_5566_7788
+            0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+            // total_bytes LE @8..16 = 0x99AA_BBCC_DDEE_FF00
+            // Kernel slot is `chunk_objectid`; we deliberately store
+            // total_bytes here (see encoder doc comment).
+            0x00, 0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA, 0x99,
+            // flags LE @16..24 = 0xCAFE_BABE_DEAD_BEEF
+            0xEF, 0xBE, 0xAD, 0xDE, 0xBE, 0xBA, 0xFE, 0xCA,
+        ];
+        assert_eq!(
+            bytes, expected,
+            "BtrfsBlockGroupItem::to_bytes canonical byte layout drifted"
+        );
+    }
+
     /// bd-7dhr1 — Canonical byte-layout snapshot for
     /// BtrfsExtentItem::to_bytes. Pins the encoder's exact 24-byte
     /// output for a magic-stamped fixture so any field-order or offset
