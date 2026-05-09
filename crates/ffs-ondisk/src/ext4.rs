@@ -6548,6 +6548,87 @@ mod tests {
         assert_eq!(entries[2].file_type, Ext4FileType::RegFile);
     }
 
+    /// bd-2e5cy — Kernel-conformance pin for parse_dx_root layout per
+    /// fs/ext4/ext4.h struct dx_root + struct dx_entry. parse_dx_root
+    /// validates strict kernel offsets:
+    ///   reserved_zero u32 @ 0x18 (must be 0)
+    ///   hash_version  u8  @ 0x1C
+    ///   info_length   u8  @ 0x1D (must be 8)
+    ///   indirect_levels u8 @ 0x1E
+    ///   unused_flags  u8  @ 0x1F (must be 0)
+    ///   limit         u16 @ 0x20
+    ///   count         u16 @ 0x22
+    ///   first_block   u32 @ 0x24 (implicit-hash-0 entry's block)
+    ///   dx_entry[i]   @ 0x28 + (i-1)*8 for i ≥ 1 (hash u32@0, block u32@4)
+    /// Each field is stamped with a UNIQUE non-zero magic at its
+    /// canonical offset; parse_dx_root must round-trip every field. A
+    /// regression that drifted any single offset would mis-route
+    /// hash_version-vs-info_length or hash-vs-block silently — and
+    /// parse_dx_root runs on every htree-indexed directory lookup.
+    ///
+    /// Sister kernel-offset pins:
+    /// ext4_extent_leaf_kernel_offsets_match_extents_h,
+    /// ext4_extent_index_kernel_offsets_match_extents_h,
+    /// ext4_extent_header_kernel_offsets_match_extents_h,
+    /// ext4_mmp_block_kernel_offsets_match_mmp_h,
+    /// ext4_dir_entry_2_kernel_offsets_match_ext4_h (bd-12nk4).
+    #[test]
+    fn parse_dx_root_kernel_offsets_match_ext4_h() {
+        // Allocate a 0x40-byte block: 0x18 fake-dirents + 0x08
+        // dx_root_info + 0x08 dx_countlimit/entry-0 + 0x10 for two
+        // dx_entries (entries 1, 2 — entry 0 is implicit-hash-0).
+        let mut block = vec![0_u8; 0x40];
+
+        // Distinct non-zero magics. info_length must equal 8 (parser
+        // hard-validates); unused_flags must equal 0; reserved_zero
+        // must equal 0. The remaining fields can hold any magic.
+        let hash_version: u8 = 0x33;
+        let indirect_levels: u8 = 0x02;
+        let limit: u16 = 0x4444;
+        let count: u16 = 3; // 1 implicit + 2 explicit entries
+        let first_block: u32 = 0x6666_6666;
+        let entry1_hash: u32 = 0x7777_7777;
+        let entry1_block: u32 = 0x8888_8888;
+        let entry2_hash: u32 = 0x9999_9999;
+        let entry2_block: u32 = 0xAAAA_AAAA;
+
+        // Header info @ 0x18..0x20.
+        // reserved_zero @ 0x18 = 0 (already zero-initialized)
+        block[0x1C] = hash_version;
+        block[0x1D] = 8; // info_length, parser-required
+        block[0x1E] = indirect_levels;
+        // unused_flags @ 0x1F = 0 (already zero-initialized)
+        // dx_countlimit @ 0x20: limit u16 + count u16.
+        block[0x20..0x22].copy_from_slice(&limit.to_le_bytes());
+        block[0x22..0x24].copy_from_slice(&count.to_le_bytes());
+        // dx_countlimit doubles as entry 0: implicit hash=0, block @ 0x24.
+        block[0x24..0x28].copy_from_slice(&first_block.to_le_bytes());
+        // Entry 1 @ 0x28: hash u32 + block u32.
+        block[0x28..0x2C].copy_from_slice(&entry1_hash.to_le_bytes());
+        block[0x2C..0x30].copy_from_slice(&entry1_block.to_le_bytes());
+        // Entry 2 @ 0x30: hash u32 + block u32.
+        block[0x30..0x34].copy_from_slice(&entry2_hash.to_le_bytes());
+        block[0x34..0x38].copy_from_slice(&entry2_block.to_le_bytes());
+
+        let root = parse_dx_root(&block).expect("kernel-stamped dx_root must parse");
+
+        assert_eq!(root.hash_version, hash_version, "hash_version @ 0x1C");
+        assert_eq!(
+            root.indirect_levels, indirect_levels,
+            "indirect_levels @ 0x1E"
+        );
+        assert_eq!(root.entries.len(), 3);
+        // Entry 0: implicit hash=0, block @ 0x24.
+        assert_eq!(root.entries[0].hash, 0, "entry[0].hash implicit 0");
+        assert_eq!(root.entries[0].block, first_block, "entry[0].block @ 0x24");
+        // Entry 1.
+        assert_eq!(root.entries[1].hash, entry1_hash, "entry[1].hash @ 0x28");
+        assert_eq!(root.entries[1].block, entry1_block, "entry[1].block @ 0x2C");
+        // Entry 2.
+        assert_eq!(root.entries[2].hash, entry2_hash, "entry[2].hash @ 0x30");
+        assert_eq!(root.entries[2].block, entry2_block, "entry[2].block @ 0x34");
+    }
+
     /// bd-12nk4 — Kernel-conformance pin for the ext4_dir_entry_2
     /// header field offsets per fs/ext4/ext4.h (struct ext4_dir_entry_2,
     /// 8-byte header). Each field is stamped with a UNIQUE non-zero
