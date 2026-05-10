@@ -4634,6 +4634,33 @@ pub struct ThrottleInjector<D: BlockDevice> {
 const DEFAULT_THROTTLE_RNG_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
 impl<D: BlockDevice> ThrottleInjector<D> {
+    fn sleep_with_cx_deadline(cx: &Cx, duration: Duration) -> Result<()> {
+        if duration.is_zero() {
+            return Ok(());
+        }
+
+        let mut remaining = duration;
+        let cancel_check_interval = Duration::from_millis(10);
+        while !remaining.is_zero() {
+            let slice = remaining.min(cancel_check_interval);
+            cx_checkpoint(cx)?;
+            let budget = cx.budget();
+            let now = cx.now();
+            if budget.is_past_deadline(now)
+                || budget
+                    .remaining_time(now)
+                    .is_some_and(|remaining_time| remaining_time <= slice)
+            {
+                return Err(FfsError::Cancelled);
+            }
+
+            std::thread::sleep(slice);
+            remaining = remaining.saturating_sub(slice);
+        }
+
+        cx_checkpoint(cx)
+    }
+
     /// Wrap a device with the given throttle configuration.
     #[must_use]
     pub fn new(inner: D, config: ThrottleConfig, seed: u64) -> Self {
@@ -4742,20 +4769,7 @@ impl<D: BlockDevice> ThrottleInjector<D> {
 
         if total_delay > Duration::ZERO {
             if config.respect_deadline {
-                cx_checkpoint(cx)?;
-                let budget = cx.budget();
-                let now = cx.now();
-                if budget.is_past_deadline(now) {
-                    return Err(FfsError::Cancelled);
-                }
-                if budget
-                    .remaining_time(now)
-                    .is_some_and(|remaining| remaining <= total_delay)
-                {
-                    return Err(FfsError::Cancelled);
-                }
-                std::thread::sleep(total_delay);
-                cx_checkpoint(cx)?;
+                Self::sleep_with_cx_deadline(cx, total_delay)?;
             } else {
                 std::thread::sleep(total_delay);
             }
@@ -8126,6 +8140,40 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_millis(100),
             "cancellation should not sleep the full throttle delay"
+        );
+        assert_eq!(ti.inner.write_count(), 0);
+        assert!(ti.throttle_log().is_empty());
+    }
+
+    #[test]
+    fn throttle_respect_deadline_observes_mid_sleep_cancellation() {
+        let dev = CountingBlockDevice::new(MemBlockDevice::new(4096, 8));
+        let config = ThrottleConfig {
+            write_latency: Duration::from_millis(250),
+            respect_deadline: true,
+            ..Default::default()
+        };
+        let ti = ThrottleInjector::new(dev, config, 15);
+        let cx = Cx::for_testing();
+        let cancel_cx = cx.clone();
+        let data = vec![0xF1_u8; 4096];
+
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(15));
+            cancel_cx.set_cancel_requested(true);
+        });
+
+        let start = Instant::now();
+        let err = ti
+            .write_block(&cx, BlockNumber(0), &data)
+            .expect_err("mid-sleep cancellation should stop throttled write");
+        let elapsed = start.elapsed();
+        canceller.join().expect("canceller thread should finish");
+
+        assert!(matches!(err, FfsError::Cancelled));
+        assert!(
+            elapsed < Duration::from_millis(125),
+            "cancelled Cx should interrupt throttle delay promptly, elapsed={elapsed:?}"
         );
         assert_eq!(ti.inner.write_count(), 0);
         assert!(ti.throttle_log().is_empty());
