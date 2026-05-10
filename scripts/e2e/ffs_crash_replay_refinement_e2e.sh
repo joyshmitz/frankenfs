@@ -403,11 +403,7 @@ run_rch_capture() {
     local log_path="$1"
     shift
     local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-240}"
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "${timeout_secs}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1
-    else
-        "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1
-    fi
+    RCH_COMMAND_TIMEOUT_SECS="$timeout_secs" e2e_rch_capture "$log_path" "$@"
 }
 
 e2e_init "ffs_crash_replay_refinement"
@@ -469,7 +465,11 @@ if start < 0:
 report, _ = json.JSONDecoder().raw_decode(raw[start:])
 Path(sys.argv[2]).write_text(json.dumps(report, indent=2) + "\n")
 artifact_dir = Path(sys.argv[3])
-rch_remote = "[RCH] remote" in raw
+rch_remote = (
+    "[RCH] remote" in raw
+    or "Executing command remotely:" in raw
+    or "Remote command finished: exit=" in raw
+)
 missing_remote_schedule_artifacts = 0
 for result in report["results"]:
     schedule_path = artifact_dir / "schedules" / f"schedule_{result['schedule_id']:04}.json"
