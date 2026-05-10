@@ -139,14 +139,15 @@ use ffs_harness::{
     },
     readiness_lab::{
         ReadinessLabHostSimulationConfig, ReadinessLabRchLaneScheduleConfig,
-        ReadinessLabValidationConfig, fail_on_readiness_lab_contract_errors,
-        fail_on_readiness_lab_host_simulation_errors,
-        fail_on_readiness_lab_rch_lane_schedule_errors, load_readiness_lab_contract_bundle,
-        load_readiness_lab_host_simulation_manifest, load_readiness_lab_rch_lane_schedule_manifest,
+        ReadinessLabTruthGraphConfig, ReadinessLabValidationConfig,
+        fail_on_readiness_lab_contract_errors, fail_on_readiness_lab_host_simulation_errors,
+        fail_on_readiness_lab_rch_lane_schedule_errors, fail_on_readiness_lab_truth_graph_errors,
+        load_readiness_lab_contract_bundle, load_readiness_lab_host_simulation_manifest,
+        load_readiness_lab_rch_lane_schedule_manifest, load_readiness_lab_truth_graph_manifest,
         plan_readiness_lab_rch_lanes, render_readiness_lab_contract_markdown,
         render_readiness_lab_host_simulation_markdown,
-        render_readiness_lab_rch_lane_schedule_markdown, simulate_readiness_lab_hosts,
-        validate_readiness_lab_contract_bundle,
+        render_readiness_lab_rch_lane_schedule_markdown, render_readiness_lab_truth_graph_markdown,
+        simulate_readiness_lab_hosts, validate_readiness_lab_contract_bundle,
     },
     release_gate::{
         evaluate_release_gates, fail_on_release_gate_errors, load_release_gate_policy,
@@ -484,6 +485,7 @@ fn run() -> Result<()> {
         }
         Some("simulate-readiness-lab-hosts") => simulate_readiness_lab_hosts_cmd(&args[1..]),
         Some("plan-readiness-lab-rch-lanes") => plan_readiness_lab_rch_lanes_cmd(&args[1..]),
+        Some("build-readiness-lab-truth-graph") => build_readiness_lab_truth_graph_cmd(&args[1..]),
         Some("validate-mounted-write-error-classes") => {
             validate_mounted_write_error_classes_cmd(&args[1..])
         }
@@ -1531,6 +1533,105 @@ fn print_readiness_lab_rch_lane_schedule_usage() {
         "ffs-harness plan-readiness-lab-rch-lanes --manifest FILE [--reference-epoch-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!("  Emits a dry-run RCH validation lane schedule; it never executes planned lanes.");
+}
+
+fn build_readiness_lab_truth_graph_cmd(args: &[String]) -> Result<()> {
+    let mut manifest_path: Option<String> = None;
+    let mut reference_epoch_days: Option<u32> = None;
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ReadinessReportFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                manifest_path = Some(
+                    args.get(i)
+                        .context("--manifest requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--reference-epoch-days" => {
+                i += 1;
+                reference_epoch_days = Some(
+                    args.get(i)
+                        .context("--reference-epoch-days requires a value")?
+                        .parse()
+                        .context("invalid --reference-epoch-days value")?,
+                );
+            }
+            "--format" => {
+                i += 1;
+                format = parse_readiness_report_format(
+                    args.get(i).context("--format requires json or markdown")?,
+                )?;
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_readiness_lab_truth_graph_usage();
+                return Ok(());
+            }
+            other => bail!("unknown build-readiness-lab-truth-graph argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let manifest_path = manifest_path.context("--manifest is required")?;
+    let manifest = load_readiness_lab_truth_graph_manifest(&manifest_path)?;
+    let config = ReadinessLabTruthGraphConfig {
+        manifest_path: manifest_path.clone(),
+        reference_epoch_days,
+    };
+    let report = ffs_harness::readiness_lab::build_readiness_lab_truth_graph(&manifest, &config);
+    let json = serde_json::to_string_pretty(&report)?;
+    let markdown = render_readiness_lab_truth_graph_markdown(&report);
+    let output = match format {
+        ReadinessReportFormat::Json => json.as_str(),
+        ReadinessReportFormat::Markdown => markdown.as_str(),
+    };
+
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "readiness lab truth graph written: {path} valid={} sources={} claims={} nodes={} edges={} blockers={}",
+            report.valid,
+            report.source_count,
+            report.claim_count,
+            report.node_count,
+            report.edge_count,
+            report.blocker_edge_count
+        );
+    } else {
+        println!("{output}");
+        std::io::stdout().flush().ok();
+    }
+
+    if let Some(path) = summary_out_path {
+        write_text_file(Path::new(&path), &format!("{markdown}\n"))?;
+        println!("readiness lab truth graph summary written: {path}");
+    }
+
+    fail_on_readiness_lab_truth_graph_errors(&report)
+}
+
+fn print_readiness_lab_truth_graph_usage() {
+    println!(
+        "ffs-harness build-readiness-lab-truth-graph --manifest FILE [--reference-epoch-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+    println!("  Emits a read-only evidence truth graph over readiness/proof/lab summaries.");
 }
 
 fn print_readiness_dashboard_usage() {
@@ -6500,6 +6601,9 @@ fn print_usage_core_commands() {
         "  ffs-harness plan-readiness-lab-rch-lanes --manifest FILE [--reference-epoch-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
+        "  ffs-harness build-readiness-lab-truth-graph --manifest FILE [--reference-epoch-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+    println!(
         "  ffs-harness fuse-capability-probe [--out FILE] [--require-mount-probe] [--mount-probe-exit N] [--unmount-probe-exit N] [--user-disabled] [--default-permissions-eacces]"
     );
     println!("  ffs-harness validate-open-ended-inventory [--out FILE]");
@@ -6624,6 +6728,9 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness plan-readiness-lab-rch-lanes --manifest artifacts/readiness-lab/rch_lanes.json --reference-epoch-days 20001 --format markdown"
+    );
+    println!(
+        "  ffs-harness build-readiness-lab-truth-graph --manifest artifacts/readiness-lab/truth_graph.json --reference-epoch-days 20001 --format markdown"
     );
     println!("  ffs-harness fuse-capability-probe --out artifacts/e2e/run/fuse_capability.json");
     println!(

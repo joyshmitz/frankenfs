@@ -120,7 +120,7 @@ for index, char in enumerate(text):
     except json.JSONDecodeError:
         continue
     if isinstance(obj, dict) and obj.get("schema_version") == 1 and (
-        "lab_id" in obj or "simulation_id" in obj or "plan_id" in obj
+        "lab_id" in obj or "simulation_id" in obj or "plan_id" in obj or "graph_id" in obj
     ):
         pathlib.Path(report_path).write_text(
             json.dumps(obj, indent=2, sort_keys=True) + "\n",
@@ -140,6 +140,7 @@ VALID_MANIFEST="$FIXTURE_DIR/valid_contracts.json"
 BAD_MANIFEST="$FIXTURE_DIR/product_claim_contracts.json"
 HOST_MANIFEST="$FIXTURE_DIR/host_simulation.json"
 SCHEDULER_MANIFEST="$FIXTURE_DIR/rch_lane_schedule.json"
+TRUTH_GRAPH_MANIFEST="$FIXTURE_DIR/truth_graph.json"
 RAW_JSON="$REPORT_DIR/valid_json_command.log"
 RAW_MD="$REPORT_DIR/valid_markdown_command.log"
 BAD_RAW="$REPORT_DIR/product_claim_command.log"
@@ -147,6 +148,8 @@ HOST_RAW_JSON="$REPORT_DIR/host_simulation_json_command.log"
 HOST_RAW_MD="$REPORT_DIR/host_simulation_markdown_command.log"
 SCHEDULER_RAW_JSON="$REPORT_DIR/rch_lane_schedule_json_command.log"
 SCHEDULER_RAW_MD="$REPORT_DIR/rch_lane_schedule_markdown_command.log"
+TRUTH_GRAPH_RAW_JSON="$REPORT_DIR/truth_graph_json_command.log"
+TRUTH_GRAPH_RAW_MD="$REPORT_DIR/truth_graph_markdown_command.log"
 UNIT_LOG="$REPORT_DIR/unit_tests.log"
 REPORT_JSON="$REPORT_DIR/report.json"
 REPORT_MD="$REPORT_DIR/report.md"
@@ -154,6 +157,8 @@ HOST_REPORT_JSON="$REPORT_DIR/host_simulation_report.json"
 HOST_REPORT_MD="$REPORT_DIR/host_simulation_report.md"
 SCHEDULER_REPORT_JSON="$REPORT_DIR/rch_lane_schedule_report.json"
 SCHEDULER_REPORT_MD="$REPORT_DIR/rch_lane_schedule_report.md"
+TRUTH_GRAPH_REPORT_JSON="$REPORT_DIR/truth_graph_report.json"
+TRUTH_GRAPH_REPORT_MD="$REPORT_DIR/truth_graph_report.md"
 
 mkdir -p "$FIXTURE_DIR" "$REPORT_DIR"
 
@@ -161,6 +166,7 @@ e2e_step "Scenario 1: CLI and module wiring are present"
 if grep -q 'Some("validate-readiness-lab-contracts")' crates/ffs-harness/src/main.rs \
     && grep -q 'Some("simulate-readiness-lab-hosts")' crates/ffs-harness/src/main.rs \
     && grep -q 'Some("plan-readiness-lab-rch-lanes")' crates/ffs-harness/src/main.rs \
+    && grep -q 'Some("build-readiness-lab-truth-graph")' crates/ffs-harness/src/main.rs \
     && grep -q "pub mod readiness_lab" crates/ffs-harness/src/lib.rs; then
     scenario_result "readiness_lab_cli_wired" "PASS" "CLI command and module export found"
 else
@@ -168,13 +174,13 @@ else
 fi
 
 e2e_step "Scenario 2: synthetic advisory manifests are written"
-if python3 - "$VALID_MANIFEST" "$BAD_MANIFEST" "$HOST_MANIFEST" "$SCHEDULER_MANIFEST" <<'PY'
+if python3 - "$VALID_MANIFEST" "$BAD_MANIFEST" "$HOST_MANIFEST" "$SCHEDULER_MANIFEST" "$TRUTH_GRAPH_MANIFEST" <<'PY'
 import copy
 import json
 import pathlib
 import sys
 
-valid_path, bad_path, host_path, scheduler_path = map(pathlib.Path, sys.argv[1:])
+valid_path, bad_path, host_path, scheduler_path, truth_graph_path = map(pathlib.Path, sys.argv[1:])
 valid_path.parent.mkdir(parents=True, exist_ok=True)
 manifest = {
     "schema_version": 1,
@@ -404,6 +410,159 @@ scheduler_path.write_text(
     json.dumps(scheduler_manifest, indent=2, sort_keys=True) + "\n",
     encoding="utf-8",
 )
+
+def truth_graph_claim(
+    claim_id,
+    state,
+    product_claim,
+    report_path,
+    bead,
+    observed,
+    artifact_id,
+    artifact_kind,
+    raw_log_required=True,
+    raw_log_present=True,
+    host=None,
+    blockers=None,
+    permission=None,
+):
+    return {
+        "claim_id": claim_id,
+        "claim_state": state,
+        "product_evidence_claim": product_claim,
+        "validator_report_path": report_path,
+        "source_bead": bead,
+        "command": f"cat {report_path} && br show {bead} --no-db --json",
+        "artifacts": [
+            {
+                "artifact_id": artifact_id,
+                "artifact_kind": artifact_kind,
+                "path": f"artifacts/readiness-lab/truth-graph/{artifact_id}.json",
+                "raw_log_required": raw_log_required,
+                "raw_log_present": raw_log_present,
+            }
+        ],
+        "host": host,
+        "freshness": {
+            "observed_at_epoch_days": observed,
+            "max_age_days": 7,
+            "git_sha": "1234567",
+            "host_class": "permissioned_large_host" if product_claim == "product_pass_fail" else "synthetic",
+        },
+        "blockers": blockers or [],
+        "permission": permission,
+        "supersedes_claim_ids": [],
+    }
+
+truth_graph_manifest = {
+    "schema_version": 1,
+    "graph_id": "readiness-lab-truth-graph-e2e",
+    "generated_at_epoch_days": 20000,
+    "advisory_notice": "advisory readiness-lab material only; not product evidence",
+    "source_bead": "bd-xyypn",
+    "sources": [
+        {
+            "source_id": "proof-old",
+            "source_kind": "proof_bundle_report",
+            "path": "artifacts/proof/old-report.json",
+            "valid": True,
+            "claims": [
+                truth_graph_claim(
+                    "swarm.responsiveness",
+                    "validated",
+                    "product_pass_fail",
+                    "artifacts/proof/old-report.json",
+                    "bd-rchk0.53.8",
+                    19990,
+                    "old-swarm-log",
+                    "planned_workload_lane",
+                )
+            ],
+        },
+        {
+            "source_id": "proof-fresh",
+            "source_kind": "release_gate_report",
+            "path": "artifacts/proof/fresh-release-gate.json",
+            "valid": True,
+            "claims": [
+                truth_graph_claim(
+                    "swarm.responsiveness",
+                    "validated",
+                    "product_pass_fail",
+                    "artifacts/proof/fresh-release-gate.json",
+                    "bd-rchk0.53.8",
+                    20000,
+                    "fresh-swarm-log",
+                    "planned_workload_lane",
+                )
+            ],
+        },
+        {
+            "source_id": "host-sim",
+            "source_kind": "readiness_lab_report",
+            "path": "artifacts/readiness-lab/host-simulation.json",
+            "valid": True,
+            "claims": [
+                truth_graph_claim(
+                    "swarm.capability.simulated",
+                    "simulated",
+                    "none",
+                    "artifacts/readiness-lab/host-simulation.json",
+                    "bd-4532j",
+                    20000,
+                    "host-simulation",
+                    "simulated_host_capability",
+                    raw_log_required=False,
+                    raw_log_present=False,
+                    host={
+                        "host_id": "candidate-sim",
+                        "host_class": "synthetic",
+                        "logical_cpus": 64,
+                        "ram_total_gib": 256,
+                        "numa_topology_visible": True,
+                    },
+                )
+            ],
+        },
+        {
+            "source_id": "xfstests-handoff",
+            "source_kind": "permissioned_campaign_packet",
+            "path": "artifacts/readiness-lab/xfstests-handoff.json",
+            "valid": True,
+            "claims": [
+                truth_graph_claim(
+                    "xfstests.baseline",
+                    "handoff_only",
+                    "none",
+                    "artifacts/readiness-lab/xfstests-handoff.json",
+                    "bd-c7fqh",
+                    20000,
+                    "xfstests-handoff",
+                    "permissioned_run_rehearsal",
+                    raw_log_required=False,
+                    raw_log_present=False,
+                    blockers=[
+                        {
+                            "blocker_id": "operator-ack-missing",
+                            "reason": "real xfstests run requires explicit operator ack",
+                            "bead_id": "bd-rchk3",
+                        }
+                    ],
+                    permission={
+                        "permission_id": "xfstests-real-run-ack",
+                        "boundary": "requires_xfstests_ack",
+                        "bead_id": "bd-rchk3",
+                        "ack_env": "XFSTESTS_REAL_RUN_ACK",
+                    },
+                )
+            ],
+        },
+    ],
+}
+truth_graph_path.write_text(
+    json.dumps(truth_graph_manifest, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
 PY
 then
     scenario_result "readiness_lab_fixtures_written" "PASS" "valid and invalid manifests generated"
@@ -507,7 +666,35 @@ else
     scenario_result "readiness_lab_rch_lane_schedule_markdown" "FAIL" "RCH lane schedule markdown missing expected content"
 fi
 
-e2e_step "Scenario 10: readiness_lab unit tests pass through RCH"
+e2e_step "Scenario 10: truth graph renders JSON with linked blockers"
+if run_rch_capture "$TRUTH_GRAPH_RAW_JSON" cargo run --quiet -p ffs-harness -- \
+    build-readiness-lab-truth-graph \
+    --manifest "$TRUTH_GRAPH_MANIFEST" \
+    --reference-epoch-days 20001 \
+    --format json \
+    && extract_report_json "$TRUTH_GRAPH_RAW_JSON" "$TRUTH_GRAPH_REPORT_JSON" \
+    && jq -e '.valid == true and .dry_run_only == true and .product_evidence_claim == "none" and .source_count == 4 and .stale_claim_count == 1 and .contradictory_claim_count == 0 and .permission_requirement_count == 1 and .simulated_node_count >= 2 and .blocker_edge_count >= 2 and ([.edges[] | select(.edge_kind == "blocks") | ((.validator_report_path // "") != "" or (.bead_id // "") != "")] | all) and ([.edges[] | select(.edge_kind == "supersedes")] | length >= 1)' "$TRUTH_GRAPH_REPORT_JSON" >/dev/null; then
+    scenario_result "readiness_lab_truth_graph_json" "PASS" "truth graph emitted linked blocker and supersedes edges"
+else
+    scenario_result "readiness_lab_truth_graph_json" "FAIL" "truth graph JSON missing expected provenance edges"
+fi
+
+e2e_step "Scenario 11: truth graph renders Markdown"
+if run_rch_capture "$TRUTH_GRAPH_RAW_MD" cargo run --quiet -p ffs-harness -- \
+    build-readiness-lab-truth-graph \
+    --manifest "$TRUTH_GRAPH_MANIFEST" \
+    --reference-epoch-days 20001 \
+    --format markdown \
+    && grep -q "FrankenFS Readiness Lab Truth Graph" "$TRUTH_GRAPH_RAW_MD" \
+    && grep -q "Product evidence claim: \`none\`" "$TRUTH_GRAPH_RAW_MD" \
+    && grep -q "Permission requirements: \`1\`" "$TRUTH_GRAPH_RAW_MD"; then
+    cp "$TRUTH_GRAPH_RAW_MD" "$TRUTH_GRAPH_REPORT_MD"
+    scenario_result "readiness_lab_truth_graph_markdown" "PASS" "truth graph markdown rendered"
+else
+    scenario_result "readiness_lab_truth_graph_markdown" "FAIL" "truth graph markdown missing expected content"
+fi
+
+e2e_step "Scenario 12: readiness_lab unit tests pass through RCH"
 if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib readiness_lab -- --nocapture; then
     scenario_result "readiness_lab_unit_tests" "PASS" "unit tests passed"
 else

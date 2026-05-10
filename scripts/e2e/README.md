@@ -1263,6 +1263,11 @@ rch exec -- cargo run -p ffs-harness -- plan-readiness-lab-rch-lanes \
   --manifest artifacts/readiness-lab/rch_lanes.json \
   --reference-epoch-days 20001 \
   --format markdown
+
+rch exec -- cargo run -p ffs-harness -- build-readiness-lab-truth-graph \
+  --manifest artifacts/readiness-lab/truth_graph.json \
+  --reference-epoch-days 20001 \
+  --format markdown
 ```
 
 These artifacts are allowed to drive preflight, rehearsal, dashboard, and
@@ -1274,7 +1279,10 @@ classifies candidate, small-host, downgraded, and blocked inventories while
 preserving `product_evidence_claim=none`. It also emits a dry-run RCH lane
 schedule for check, test, clippy, and dashboard commands, proving target-dir
 isolation, dependency ordering, duplicate coalescing, and no local cargo
-fallback without executing the planned lanes.
+fallback without executing the planned lanes. The truth-graph fixture links
+reports, claims, commands, artifacts, beads, host capabilities, freshness
+windows, blockers, superseded stale evidence, and permission requirements while
+proving every blocker edge points at a validator report path or bead id.
 
 ```bash
 ./scripts/e2e/ffs_readiness_lab_contracts_e2e.sh

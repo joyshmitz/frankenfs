@@ -26,6 +26,7 @@ pub const READINESS_LAB_SCHEMA_VERSION: u32 = 1;
 pub const READINESS_LAB_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const READINESS_LAB_HOST_SIMULATION_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const READINESS_LAB_RCH_LANE_SCHEDULE_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const READINESS_LAB_TRUTH_GRAPH_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const READINESS_LAB_ADVISORY_NOTICE: &str =
     "advisory readiness-lab material only; not product evidence";
 pub const READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM: &str = "none";
@@ -483,6 +484,207 @@ pub struct ReadinessLabRchLaneScheduleRow {
     pub coalesced_from: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadinessLabTruthGraphConfig {
+    pub manifest_path: String,
+    pub reference_epoch_days: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabTruthGraphManifest {
+    pub schema_version: u32,
+    pub graph_id: String,
+    pub generated_at_epoch_days: u32,
+    pub advisory_notice: String,
+    pub source_bead: String,
+    pub sources: Vec<ReadinessLabTruthGraphSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabTruthGraphSource {
+    pub source_id: String,
+    pub source_kind: ReadinessLabTruthGraphSourceKind,
+    pub path: String,
+    pub valid: bool,
+    pub claims: Vec<ReadinessLabTruthGraphClaimInput>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessLabTruthGraphSourceKind {
+    ProofBundleReport,
+    ReleaseGateReport,
+    OperationalEvidenceIndex,
+    PermissionedCampaignPacket,
+    ReadinessLabReport,
+}
+
+impl ReadinessLabTruthGraphSourceKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ProofBundleReport => "proof_bundle_report",
+            Self::ReleaseGateReport => "release_gate_report",
+            Self::OperationalEvidenceIndex => "operational_evidence_index",
+            Self::PermissionedCampaignPacket => "permissioned_campaign_packet",
+            Self::ReadinessLabReport => "readiness_lab_report",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabTruthGraphClaimInput {
+    pub claim_id: String,
+    pub claim_state: ReadinessLabTruthGraphClaimState,
+    pub product_evidence_claim: ReadinessLabProductEvidenceClaim,
+    pub validator_report_path: String,
+    pub source_bead: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub artifacts: Vec<ReadinessLabTruthGraphArtifactInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<ReadinessLabTruthGraphHostInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<ReadinessLabFreshnessMetadata>,
+    #[serde(default)]
+    pub blockers: Vec<ReadinessLabTruthGraphBlockerInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<ReadinessLabTruthGraphPermissionRequirement>,
+    #[serde(default)]
+    pub supersedes_claim_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessLabTruthGraphClaimState {
+    Validated,
+    Blocked,
+    Stale,
+    Simulated,
+    HandoffOnly,
+    DryRunOnly,
+    Unknown,
+}
+
+impl ReadinessLabTruthGraphClaimState {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Validated => "validated",
+            Self::Blocked => "blocked",
+            Self::Stale => "stale",
+            Self::Simulated => "simulated",
+            Self::HandoffOnly => "handoff_only",
+            Self::DryRunOnly => "dry_run_only",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabTruthGraphArtifactInput {
+    pub artifact_id: String,
+    pub artifact_kind: ReadinessLabArtifactKind,
+    pub path: String,
+    pub raw_log_required: bool,
+    pub raw_log_present: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabTruthGraphHostInput {
+    pub host_id: String,
+    pub host_class: ReadinessLabHostClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_cpus: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_total_gib: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numa_topology_visible: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabTruthGraphBlockerInput {
+    pub blocker_id: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validator_report_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bead_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabTruthGraphPermissionRequirement {
+    pub permission_id: String,
+    pub boundary: ReadinessLabPermissionBoundary,
+    pub bead_id: String,
+    pub ack_env: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessLabTruthGraphReport {
+    pub schema_version: u32,
+    pub graph_id: String,
+    pub manifest_path: String,
+    pub valid: bool,
+    pub dry_run_only: bool,
+    pub product_evidence_claim: String,
+    pub source_bead: String,
+    pub source_count: usize,
+    pub claim_count: usize,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub stale_claim_count: usize,
+    pub contradictory_claim_count: usize,
+    pub missing_raw_log_count: usize,
+    pub permission_requirement_count: usize,
+    pub simulated_node_count: usize,
+    pub blocker_edge_count: usize,
+    pub nodes: Vec<ReadinessLabTruthGraphNode>,
+    pub edges: Vec<ReadinessLabTruthGraphEdge>,
+    pub contradictions: Vec<ReadinessLabTruthGraphContradiction>,
+    pub errors: Vec<ReadinessLabFinding>,
+    pub warnings: Vec<ReadinessLabFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessLabTruthGraphNode {
+    pub node_id: String,
+    pub node_kind: String,
+    pub label: String,
+    pub source_path: Option<String>,
+    pub bead_id: Option<String>,
+    pub claim_state: Option<String>,
+    pub host_class: Option<String>,
+    pub freshness_status: Option<String>,
+    pub product_evidence_claim: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessLabTruthGraphEdge {
+    pub from_node_id: String,
+    pub to_node_id: String,
+    pub edge_kind: String,
+    pub label: String,
+    pub validator_report_path: Option<String>,
+    pub bead_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessLabTruthGraphContradiction {
+    pub claim_id: String,
+    pub observed_states: Vec<String>,
+    pub claim_node_ids: Vec<String>,
+}
+
 #[must_use]
 pub fn validate_readiness_lab_contract_bundle(
     bundle: &ReadinessLabContractBundle,
@@ -853,6 +1055,118 @@ pub fn fail_on_readiness_lab_rch_lane_schedule_errors(
     );
     anyhow::bail!(
         "readiness lab RCH lane schedule validation failed with {} error(s): {first}",
+        report.errors.len()
+    )
+}
+
+pub fn load_readiness_lab_truth_graph_manifest(
+    path: impl AsRef<Path>,
+) -> Result<ReadinessLabTruthGraphManifest> {
+    let path = path.as_ref();
+    let text = fs::read_to_string(path).with_context(|| {
+        format!(
+            "failed to read readiness lab truth graph {}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&text).with_context(|| {
+        format!(
+            "failed to parse readiness lab truth graph {}",
+            path.display()
+        )
+    })
+}
+
+#[must_use]
+pub fn build_readiness_lab_truth_graph(
+    manifest: &ReadinessLabTruthGraphManifest,
+    config: &ReadinessLabTruthGraphConfig,
+) -> ReadinessLabTruthGraphReport {
+    let mut builder = ReadinessLabTruthGraphBuilder::new(manifest, config);
+    builder.validate_manifest();
+    builder.build();
+    builder.finish()
+}
+
+#[must_use]
+pub fn render_readiness_lab_truth_graph_markdown(report: &ReadinessLabTruthGraphReport) -> String {
+    let mut out = String::new();
+    writeln!(&mut out, "# FrankenFS Readiness Lab Truth Graph").ok();
+    writeln!(&mut out).ok();
+    writeln!(&mut out, "- Graph: `{}`", report.graph_id).ok();
+    writeln!(&mut out, "- Manifest: `{}`", report.manifest_path).ok();
+    writeln!(&mut out, "- Valid: `{}`", report.valid).ok();
+    writeln!(&mut out, "- Dry run only: `{}`", report.dry_run_only).ok();
+    writeln!(
+        &mut out,
+        "- Product evidence claim: `{}`",
+        report.product_evidence_claim
+    )
+    .ok();
+    writeln!(&mut out, "- Sources: `{}`", report.source_count).ok();
+    writeln!(&mut out, "- Claims: `{}`", report.claim_count).ok();
+    writeln!(&mut out, "- Nodes: `{}`", report.node_count).ok();
+    writeln!(&mut out, "- Edges: `{}`", report.edge_count).ok();
+    writeln!(&mut out, "- Stale claims: `{}`", report.stale_claim_count).ok();
+    writeln!(
+        &mut out,
+        "- Contradictory claims: `{}`",
+        report.contradictory_claim_count
+    )
+    .ok();
+    writeln!(
+        &mut out,
+        "- Missing raw logs: `{}`",
+        report.missing_raw_log_count
+    )
+    .ok();
+    writeln!(
+        &mut out,
+        "- Permission requirements: `{}`",
+        report.permission_requirement_count
+    )
+    .ok();
+    writeln!(&mut out).ok();
+    writeln!(&mut out, "## Blocker Edges").ok();
+    writeln!(&mut out).ok();
+    writeln!(&mut out, "| from | to | validator_report | bead | reason |").ok();
+    writeln!(&mut out, "|---|---|---|---|---|").ok();
+    for edge in report
+        .edges
+        .iter()
+        .filter(|edge| edge.edge_kind == "blocks")
+    {
+        writeln!(
+            &mut out,
+            "| `{}` | `{}` | `{}` | `{}` | {} |",
+            edge.from_node_id,
+            edge.to_node_id,
+            edge.validator_report_path.as_deref().unwrap_or(""),
+            edge.bead_id.as_deref().unwrap_or(""),
+            edge.label
+        )
+        .ok();
+    }
+    writeln!(&mut out).ok();
+    render_findings(&mut out, "Errors", &report.errors);
+    render_findings(&mut out, "Warnings", &report.warnings);
+    out
+}
+
+pub fn fail_on_readiness_lab_truth_graph_errors(
+    report: &ReadinessLabTruthGraphReport,
+) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    let first = report
+        .errors
+        .first()
+        .map_or("readiness lab truth graph failed validation", |finding| {
+            finding.message.as_str()
+        });
+    anyhow::bail!(
+        "readiness lab truth graph validation failed with {} error(s): {first}",
         report.errors.len()
     )
 }
@@ -1791,6 +2105,972 @@ impl<'a> ReadinessLabRchLanePlanner<'a> {
     }
 }
 
+struct ReadinessLabTruthGraphBuilder<'a> {
+    manifest: &'a ReadinessLabTruthGraphManifest,
+    config: &'a ReadinessLabTruthGraphConfig,
+    nodes: BTreeMap<String, ReadinessLabTruthGraphNode>,
+    edges: Vec<ReadinessLabTruthGraphEdge>,
+    claim_observations: BTreeMap<String, Vec<TruthGraphClaimObservation>>,
+    explicit_supersedes: Vec<(String, String, String)>,
+    errors: Vec<ReadinessLabFinding>,
+    warnings: Vec<ReadinessLabFinding>,
+    stale_claim_count: usize,
+    contradictory_claim_count: usize,
+    missing_raw_log_count: usize,
+    permission_requirement_count: usize,
+    simulated_node_count: usize,
+    blocker_edge_count: usize,
+    claim_count: usize,
+    contradictions: Vec<ReadinessLabTruthGraphContradiction>,
+}
+
+impl<'a> ReadinessLabTruthGraphBuilder<'a> {
+    fn new(
+        manifest: &'a ReadinessLabTruthGraphManifest,
+        config: &'a ReadinessLabTruthGraphConfig,
+    ) -> Self {
+        Self {
+            manifest,
+            config,
+            nodes: BTreeMap::new(),
+            edges: Vec::new(),
+            claim_observations: BTreeMap::new(),
+            explicit_supersedes: Vec::new(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            stale_claim_count: 0,
+            contradictory_claim_count: 0,
+            missing_raw_log_count: 0,
+            permission_requirement_count: 0,
+            simulated_node_count: 0,
+            blocker_edge_count: 0,
+            claim_count: 0,
+            contradictions: Vec::new(),
+        }
+    }
+
+    fn validate_manifest(&mut self) {
+        if self.manifest.schema_version != READINESS_LAB_SCHEMA_VERSION {
+            self.error(
+                "unsupported_schema_version",
+                format!(
+                    "schema_version must be {READINESS_LAB_SCHEMA_VERSION}, got {}",
+                    self.manifest.schema_version
+                ),
+                FindingScope::default().field("schema_version"),
+            );
+        }
+        if self.manifest.graph_id.trim().is_empty() {
+            self.error(
+                "missing_graph_id",
+                "graph_id must be non-empty",
+                FindingScope::default().field("graph_id"),
+            );
+        }
+        if self.manifest.generated_at_epoch_days == 0 {
+            self.error(
+                "missing_generated_at_epoch_days",
+                "generated_at_epoch_days must be non-zero",
+                FindingScope::default().field("generated_at_epoch_days"),
+            );
+        }
+        if self.manifest.advisory_notice.trim() != READINESS_LAB_ADVISORY_NOTICE {
+            self.error(
+                "invalid_advisory_notice",
+                format!("advisory_notice must be exactly {READINESS_LAB_ADVISORY_NOTICE:?}"),
+                FindingScope::default().field("advisory_notice"),
+            );
+        }
+        if !self.manifest.source_bead.starts_with("bd-") {
+            self.error(
+                "malformed_source_bead",
+                "source_bead must look like bd-...",
+                FindingScope::default().field("source_bead"),
+            );
+        }
+        if self.manifest.sources.is_empty() {
+            self.error(
+                "empty_truth_graph_sources",
+                "truth graph sources must include at least one validator or lab report",
+                FindingScope::default().field("sources"),
+            );
+        }
+        if duplicate_count(
+            self.manifest
+                .sources
+                .iter()
+                .map(|source| source.source_id.as_str()),
+        ) > 0
+        {
+            self.error(
+                "duplicate_truth_graph_source_ids",
+                "source_id values must be unique",
+                FindingScope::default().field("sources"),
+            );
+        }
+
+        for source in &self.manifest.sources {
+            self.validate_source(source);
+        }
+    }
+
+    fn validate_source(&mut self, source: &ReadinessLabTruthGraphSource) {
+        if source.source_id.trim().is_empty() {
+            self.error(
+                "missing_truth_graph_source_id",
+                "source_id must be non-empty",
+                FindingScope::default().field("source_id"),
+            );
+        }
+        if source.path.trim().is_empty() {
+            self.error(
+                "missing_truth_graph_source_path",
+                "source path must be non-empty",
+                FindingScope::assumption(source.source_id.as_str()).field("path"),
+            );
+        }
+        if !source.valid {
+            self.error(
+                "source_validator_failed",
+                "truth graph source report says valid=false",
+                FindingScope::assumption(source.source_id.as_str()).field("valid"),
+            );
+        }
+        if source.claims.is_empty() {
+            self.error(
+                "source_without_claims",
+                "truth graph sources must expose at least one claim",
+                FindingScope::assumption(source.source_id.as_str()).field("claims"),
+            );
+        }
+        if duplicate_count(source.claims.iter().map(|claim| claim.claim_id.as_str())) > 0 {
+            self.error(
+                "duplicate_source_claim_ids",
+                "claim_id values must be unique within a source",
+                FindingScope::assumption(source.source_id.as_str()).field("claims"),
+            );
+        }
+        for claim in &source.claims {
+            self.validate_claim(source, claim);
+        }
+    }
+
+    fn validate_claim(
+        &mut self,
+        source: &ReadinessLabTruthGraphSource,
+        claim: &ReadinessLabTruthGraphClaimInput,
+    ) {
+        if claim.claim_id.trim().is_empty() {
+            self.error(
+                "missing_truth_graph_claim_id",
+                "claim_id must be non-empty",
+                FindingScope::assumption(source.source_id.as_str()).field("claim_id"),
+            );
+        }
+        if claim.validator_report_path.trim().is_empty() {
+            self.error(
+                "missing_validator_report_path",
+                "claim validator_report_path must be non-empty",
+                FindingScope::lane(claim.claim_id.as_str()).field("validator_report_path"),
+            );
+        }
+        if !claim.source_bead.starts_with("bd-") {
+            self.error(
+                "malformed_claim_source_bead",
+                "claim source_bead must look like bd-...",
+                FindingScope::lane(claim.claim_id.as_str()).field("source_bead"),
+            );
+        }
+        if matches!(
+            claim.claim_state,
+            ReadinessLabTruthGraphClaimState::Validated
+        ) && !matches!(
+            claim.product_evidence_claim,
+            ReadinessLabProductEvidenceClaim::ProductPassFail
+        ) {
+            self.warning(
+                "validated_claim_without_product_evidence",
+                "validated claims should identify the product pass/fail evidence they derive from",
+                FindingScope::lane(claim.claim_id.as_str()).field("product_evidence_claim"),
+            );
+        }
+        for artifact in &claim.artifacts {
+            if artifact.artifact_id.trim().is_empty() {
+                self.error(
+                    "missing_truth_graph_artifact_id",
+                    "artifact_id must be non-empty",
+                    FindingScope::lane(claim.claim_id.as_str()).field("artifacts"),
+                );
+            }
+            if artifact.path.trim().is_empty() {
+                self.error(
+                    "missing_truth_graph_artifact_path",
+                    "artifact path must be non-empty",
+                    FindingScope::artifact(artifact.artifact_id.as_str()).field("path"),
+                );
+            }
+        }
+        for blocker in &claim.blockers {
+            if blocker.blocker_id.trim().is_empty() {
+                self.error(
+                    "missing_truth_graph_blocker_id",
+                    "blocker_id must be non-empty",
+                    FindingScope::lane(claim.claim_id.as_str()).field("blockers"),
+                );
+            }
+            if blocker.reason.trim().is_empty() {
+                self.error(
+                    "missing_truth_graph_blocker_reason",
+                    "blocker reason must be non-empty",
+                    FindingScope::assumption(blocker.blocker_id.as_str()).field("reason"),
+                );
+            }
+            if blocker_link_missing(
+                blocker.validator_report_path.as_deref(),
+                blocker.bead_id.as_deref(),
+            ) {
+                self.error(
+                    "blocker_without_report_or_bead",
+                    "every blocker edge must link to a validator report path or bead id",
+                    FindingScope::assumption(blocker.blocker_id.as_str()),
+                );
+            }
+        }
+        if let Some(permission) = &claim.permission {
+            if permission.permission_id.trim().is_empty() {
+                self.error(
+                    "missing_permission_id",
+                    "permission_id must be non-empty",
+                    FindingScope::lane(claim.claim_id.as_str()).field("permission"),
+                );
+            }
+            if !permission.bead_id.starts_with("bd-") {
+                self.error(
+                    "malformed_permission_bead",
+                    "permission bead_id must look like bd-...",
+                    FindingScope::assumption(permission.permission_id.as_str()).field("bead_id"),
+                );
+            }
+            if permission.ack_env.trim().is_empty() {
+                self.error(
+                    "missing_permission_ack_env",
+                    "permission ack_env must be non-empty",
+                    FindingScope::assumption(permission.permission_id.as_str()).field("ack_env"),
+                );
+            }
+        }
+    }
+
+    fn build(&mut self) {
+        self.insert_node(ReadinessLabTruthGraphNode {
+            node_id: format!("bead:{}", self.manifest.source_bead),
+            node_kind: "bead".to_owned(),
+            label: self.manifest.source_bead.clone(),
+            source_path: None,
+            bead_id: Some(self.manifest.source_bead.clone()),
+            claim_state: None,
+            host_class: None,
+            freshness_status: None,
+            product_evidence_claim: None,
+            metadata: BTreeMap::new(),
+        });
+
+        for source in &self.manifest.sources {
+            self.build_source(source);
+        }
+        self.link_explicit_supersedes();
+        self.link_fresh_observations_over_stale();
+        self.detect_contradictions();
+    }
+
+    fn build_source(&mut self, source: &ReadinessLabTruthGraphSource) {
+        let report_node_id = truth_node_id("report", &[source.source_id.as_str()]);
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            "source_kind".to_owned(),
+            source.source_kind.label().to_owned(),
+        );
+        self.insert_node(ReadinessLabTruthGraphNode {
+            node_id: report_node_id.clone(),
+            node_kind: "report".to_owned(),
+            label: source.source_id.clone(),
+            source_path: Some(source.path.clone()),
+            bead_id: None,
+            claim_state: None,
+            host_class: None,
+            freshness_status: None,
+            product_evidence_claim: None,
+            metadata,
+        });
+
+        for claim in &source.claims {
+            self.build_claim(source, claim, report_node_id.as_str());
+        }
+    }
+
+    fn build_claim(
+        &mut self,
+        source: &ReadinessLabTruthGraphSource,
+        claim: &ReadinessLabTruthGraphClaimInput,
+        report_node_id: &str,
+    ) {
+        self.claim_count += 1;
+        let claim_node_id = truth_node_id(
+            "claim",
+            &[source.source_id.as_str(), claim.claim_id.as_str()],
+        );
+        let freshness_status = claim
+            .freshness
+            .as_ref()
+            .map(|freshness| self.freshness_status(freshness));
+        if freshness_status.as_deref() == Some("stale") {
+            self.stale_claim_count += 1;
+        }
+        if matches!(
+            claim.claim_state,
+            ReadinessLabTruthGraphClaimState::Simulated
+                | ReadinessLabTruthGraphClaimState::DryRunOnly
+                | ReadinessLabTruthGraphClaimState::HandoffOnly
+        ) {
+            self.simulated_node_count += 1;
+        }
+
+        self.insert_node(ReadinessLabTruthGraphNode {
+            node_id: claim_node_id.clone(),
+            node_kind: "claim".to_owned(),
+            label: claim.claim_id.clone(),
+            source_path: Some(source.path.clone()),
+            bead_id: Some(claim.source_bead.clone()),
+            claim_state: Some(claim.claim_state.label().to_owned()),
+            host_class: claim
+                .freshness
+                .as_ref()
+                .map(|freshness| freshness.host_class.label().to_owned()),
+            freshness_status: freshness_status.clone(),
+            product_evidence_claim: Some(claim.product_evidence_claim.label().to_owned()),
+            metadata: BTreeMap::new(),
+        });
+        self.claim_observations
+            .entry(claim.claim_id.clone())
+            .or_default()
+            .push(TruthGraphClaimObservation {
+                node_id: claim_node_id.clone(),
+                effective_state: effective_claim_state(claim, freshness_status.as_deref()),
+                freshness_status: freshness_status.clone(),
+                validator_report_path: claim.validator_report_path.clone(),
+                source_bead: claim.source_bead.clone(),
+            });
+
+        self.edge(
+            report_node_id,
+            &claim_node_id,
+            "derives_from",
+            "claim extracted from source report",
+            Some(source.path.as_str()),
+            None,
+        );
+        if matches!(
+            claim.claim_state,
+            ReadinessLabTruthGraphClaimState::Validated
+        ) && freshness_status.as_deref() != Some("stale")
+        {
+            self.edge(
+                report_node_id,
+                &claim_node_id,
+                "validates",
+                "source report validates this readiness claim",
+                Some(claim.validator_report_path.as_str()),
+                Some(claim.source_bead.as_str()),
+            );
+        }
+        self.build_claim_bead_edge(claim, claim_node_id.as_str());
+        self.build_command_node(claim, claim_node_id.as_str());
+        self.build_artifact_nodes(claim, claim_node_id.as_str());
+        self.build_host_node(claim, claim_node_id.as_str());
+        self.build_freshness_node(claim, claim_node_id.as_str());
+        self.build_permission_node(claim, claim_node_id.as_str());
+        self.build_blocker_nodes(claim, claim_node_id.as_str());
+        for superseded_claim_id in &claim.supersedes_claim_ids {
+            self.explicit_supersedes.push((
+                claim_node_id.clone(),
+                claim.claim_id.clone(),
+                superseded_claim_id.clone(),
+            ));
+        }
+    }
+
+    fn build_claim_bead_edge(
+        &mut self,
+        claim: &ReadinessLabTruthGraphClaimInput,
+        claim_node_id: &str,
+    ) {
+        let bead_node_id = truth_node_id("bead", &[claim.source_bead.as_str()]);
+        self.insert_node(ReadinessLabTruthGraphNode {
+            node_id: bead_node_id.clone(),
+            node_kind: "bead".to_owned(),
+            label: claim.source_bead.clone(),
+            source_path: None,
+            bead_id: Some(claim.source_bead.clone()),
+            claim_state: None,
+            host_class: None,
+            freshness_status: None,
+            product_evidence_claim: None,
+            metadata: BTreeMap::new(),
+        });
+        self.edge(
+            claim_node_id,
+            &bead_node_id,
+            "derives_from",
+            "claim is tracked by bead",
+            Some(claim.validator_report_path.as_str()),
+            Some(claim.source_bead.as_str()),
+        );
+    }
+
+    fn build_command_node(
+        &mut self,
+        claim: &ReadinessLabTruthGraphClaimInput,
+        claim_node_id: &str,
+    ) {
+        let Some(command) = &claim.command else {
+            return;
+        };
+        if command.trim().is_empty() {
+            return;
+        }
+        let command_node_id = truth_node_id("command", &[claim_node_id]);
+        let mut metadata = BTreeMap::new();
+        metadata.insert("command".to_owned(), command.clone());
+        self.insert_node(ReadinessLabTruthGraphNode {
+            node_id: command_node_id.clone(),
+            node_kind: "command".to_owned(),
+            label: command.clone(),
+            source_path: None,
+            bead_id: Some(claim.source_bead.clone()),
+            claim_state: None,
+            host_class: None,
+            freshness_status: None,
+            product_evidence_claim: None,
+            metadata,
+        });
+        self.edge(
+            claim_node_id,
+            &command_node_id,
+            "derives_from",
+            "claim includes reproduction command",
+            Some(claim.validator_report_path.as_str()),
+            Some(claim.source_bead.as_str()),
+        );
+    }
+
+    fn build_artifact_nodes(
+        &mut self,
+        claim: &ReadinessLabTruthGraphClaimInput,
+        claim_node_id: &str,
+    ) {
+        for artifact in &claim.artifacts {
+            let artifact_node_id =
+                truth_node_id("artifact", &[claim_node_id, artifact.artifact_id.as_str()]);
+            let mut metadata = BTreeMap::new();
+            metadata.insert(
+                "artifact_kind".to_owned(),
+                artifact.artifact_kind.label().to_owned(),
+            );
+            metadata.insert(
+                "raw_log_required".to_owned(),
+                artifact.raw_log_required.to_string(),
+            );
+            metadata.insert(
+                "raw_log_present".to_owned(),
+                artifact.raw_log_present.to_string(),
+            );
+            self.insert_node(ReadinessLabTruthGraphNode {
+                node_id: artifact_node_id.clone(),
+                node_kind: "artifact".to_owned(),
+                label: artifact.artifact_id.clone(),
+                source_path: Some(artifact.path.clone()),
+                bead_id: Some(claim.source_bead.clone()),
+                claim_state: None,
+                host_class: None,
+                freshness_status: None,
+                product_evidence_claim: None,
+                metadata,
+            });
+            if matches!(
+                artifact.artifact_kind,
+                ReadinessLabArtifactKind::SimulatedHostCapability
+                    | ReadinessLabArtifactKind::RchSchedulingPlan
+                    | ReadinessLabArtifactKind::PermissionedRunRehearsal
+                    | ReadinessLabArtifactKind::ReplayFixture
+            ) {
+                self.simulated_node_count += 1;
+            }
+            self.edge(
+                claim_node_id,
+                &artifact_node_id,
+                "derives_from",
+                "claim derives from artifact",
+                Some(claim.validator_report_path.as_str()),
+                Some(claim.source_bead.as_str()),
+            );
+            if artifact.raw_log_required && !artifact.raw_log_present {
+                self.missing_raw_log_count += 1;
+                self.error(
+                    "missing_required_raw_log",
+                    format!(
+                        "required raw log is missing for artifact {}",
+                        artifact.artifact_id
+                    ),
+                    FindingScope::artifact(artifact.artifact_id.as_str()),
+                );
+                let blocker_node_id = truth_node_id(
+                    "blocker",
+                    &[
+                        claim_node_id,
+                        "missing_raw_log",
+                        artifact.artifact_id.as_str(),
+                    ],
+                );
+                self.insert_blocker_node(
+                    &blocker_node_id,
+                    "missing required raw log",
+                    claim.source_bead.as_str(),
+                );
+                self.blocking_edge(
+                    &blocker_node_id,
+                    claim_node_id,
+                    format!(
+                        "required raw log missing for artifact {}",
+                        artifact.artifact_id
+                    ),
+                    Some(claim.validator_report_path.as_str()),
+                    Some(claim.source_bead.as_str()),
+                );
+            }
+        }
+    }
+
+    fn build_host_node(&mut self, claim: &ReadinessLabTruthGraphClaimInput, claim_node_id: &str) {
+        let Some(host) = &claim.host else {
+            return;
+        };
+        let host_node_id = truth_node_id("host", &[claim_node_id, host.host_id.as_str()]);
+        let mut metadata = BTreeMap::new();
+        if let Some(logical_cpus) = host.logical_cpus {
+            metadata.insert("logical_cpus".to_owned(), logical_cpus.to_string());
+        }
+        if let Some(ram_total_gib) = host.ram_total_gib {
+            metadata.insert("ram_total_gib".to_owned(), ram_total_gib.to_string());
+        }
+        if let Some(numa_topology_visible) = host.numa_topology_visible {
+            metadata.insert(
+                "numa_topology_visible".to_owned(),
+                numa_topology_visible.to_string(),
+            );
+        }
+        self.insert_node(ReadinessLabTruthGraphNode {
+            node_id: host_node_id.clone(),
+            node_kind: "host_capability".to_owned(),
+            label: host.host_id.clone(),
+            source_path: None,
+            bead_id: Some(claim.source_bead.clone()),
+            claim_state: None,
+            host_class: Some(host.host_class.label().to_owned()),
+            freshness_status: None,
+            product_evidence_claim: None,
+            metadata,
+        });
+        if matches!(
+            host.host_class,
+            ReadinessLabHostClass::Synthetic | ReadinessLabHostClass::DeveloperSmoke
+        ) {
+            self.simulated_node_count += 1;
+        }
+        self.edge(
+            claim_node_id,
+            &host_node_id,
+            "derives_from",
+            "claim derives from host capability",
+            Some(claim.validator_report_path.as_str()),
+            Some(claim.source_bead.as_str()),
+        );
+    }
+
+    fn build_freshness_node(
+        &mut self,
+        claim: &ReadinessLabTruthGraphClaimInput,
+        claim_node_id: &str,
+    ) {
+        let Some(freshness) = &claim.freshness else {
+            return;
+        };
+        let freshness_status = self.freshness_status(freshness);
+        let freshness_node_id = truth_node_id("freshness", &[claim_node_id]);
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            "observed_at_epoch_days".to_owned(),
+            freshness.observed_at_epoch_days.to_string(),
+        );
+        metadata.insert(
+            "max_age_days".to_owned(),
+            freshness.max_age_days.to_string(),
+        );
+        metadata.insert("git_sha".to_owned(), freshness.git_sha.clone());
+        self.insert_node(ReadinessLabTruthGraphNode {
+            node_id: freshness_node_id.clone(),
+            node_kind: "freshness_window".to_owned(),
+            label: freshness_status.clone(),
+            source_path: None,
+            bead_id: Some(claim.source_bead.clone()),
+            claim_state: None,
+            host_class: Some(freshness.host_class.label().to_owned()),
+            freshness_status: Some(freshness_status.clone()),
+            product_evidence_claim: None,
+            metadata,
+        });
+        self.edge(
+            claim_node_id,
+            &freshness_node_id,
+            "derives_from",
+            "claim derives from freshness window",
+            Some(claim.validator_report_path.as_str()),
+            Some(claim.source_bead.as_str()),
+        );
+        if matches!(freshness_status.as_str(), "stale" | "future") {
+            let blocker_node_id =
+                truth_node_id("blocker", &[claim_node_id, freshness_status.as_str()]);
+            self.insert_blocker_node(
+                &blocker_node_id,
+                format!("claim freshness is {freshness_status}"),
+                claim.source_bead.as_str(),
+            );
+            self.blocking_edge(
+                &blocker_node_id,
+                claim_node_id,
+                format!("claim freshness is {freshness_status}"),
+                Some(claim.validator_report_path.as_str()),
+                Some(claim.source_bead.as_str()),
+            );
+        }
+    }
+
+    fn build_permission_node(
+        &mut self,
+        claim: &ReadinessLabTruthGraphClaimInput,
+        claim_node_id: &str,
+    ) {
+        let Some(permission) = &claim.permission else {
+            return;
+        };
+        self.permission_requirement_count += 1;
+        let permission_node_id = truth_node_id(
+            "permission",
+            &[claim_node_id, permission.permission_id.as_str()],
+        );
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            "boundary".to_owned(),
+            permission.boundary.label().to_owned(),
+        );
+        metadata.insert("ack_env".to_owned(), permission.ack_env.clone());
+        self.insert_node(ReadinessLabTruthGraphNode {
+            node_id: permission_node_id.clone(),
+            node_kind: "permission_requirement".to_owned(),
+            label: permission.permission_id.clone(),
+            source_path: None,
+            bead_id: Some(permission.bead_id.clone()),
+            claim_state: None,
+            host_class: None,
+            freshness_status: None,
+            product_evidence_claim: None,
+            metadata,
+        });
+        self.edge(
+            claim_node_id,
+            &permission_node_id,
+            "requires_permission",
+            "claim requires explicit operator permission",
+            Some(claim.validator_report_path.as_str()),
+            Some(permission.bead_id.as_str()),
+        );
+    }
+
+    fn build_blocker_nodes(
+        &mut self,
+        claim: &ReadinessLabTruthGraphClaimInput,
+        claim_node_id: &str,
+    ) {
+        for blocker in &claim.blockers {
+            let blocker_node_id =
+                truth_node_id("blocker", &[claim_node_id, blocker.blocker_id.as_str()]);
+            self.insert_blocker_node(
+                &blocker_node_id,
+                blocker.reason.as_str(),
+                blocker
+                    .bead_id
+                    .as_deref()
+                    .unwrap_or(claim.source_bead.as_str()),
+            );
+            self.blocking_edge(
+                &blocker_node_id,
+                claim_node_id,
+                blocker.reason.clone(),
+                blocker.validator_report_path.as_deref(),
+                blocker.bead_id.as_deref(),
+            );
+        }
+    }
+
+    fn link_explicit_supersedes(&mut self) {
+        let explicit_supersedes = std::mem::take(&mut self.explicit_supersedes);
+        for (from_node_id, claim_id, superseded_claim_id) in explicit_supersedes {
+            let Some(observations) = self.claim_observations.get(&superseded_claim_id).cloned()
+            else {
+                self.error(
+                    "missing_superseded_claim",
+                    format!(
+                        "claim {claim_id:?} supersedes unknown claim_id {superseded_claim_id:?}"
+                    ),
+                    FindingScope::lane(claim_id.as_str()).field("supersedes_claim_ids"),
+                );
+                continue;
+            };
+            for observation in observations {
+                self.edge(
+                    &from_node_id,
+                    &observation.node_id,
+                    "supersedes",
+                    "claim explicitly supersedes older evidence",
+                    Some(observation.validator_report_path.as_str()),
+                    Some(observation.source_bead.as_str()),
+                );
+            }
+        }
+    }
+
+    fn link_fresh_observations_over_stale(&mut self) {
+        let observation_groups = self.claim_observations.clone();
+        for observations in observation_groups.values() {
+            let fresh = observations
+                .iter()
+                .filter(|observation| observation.freshness_status.as_deref() != Some("stale"))
+                .collect::<Vec<_>>();
+            let stale = observations
+                .iter()
+                .filter(|observation| observation.freshness_status.as_deref() == Some("stale"))
+                .collect::<Vec<_>>();
+            if fresh.is_empty() || stale.is_empty() {
+                continue;
+            }
+            for fresh_observation in &fresh {
+                for stale_observation in &stale {
+                    self.edge(
+                        &fresh_observation.node_id,
+                        &stale_observation.node_id,
+                        "supersedes",
+                        "fresh evidence supersedes stale observation",
+                        Some(fresh_observation.validator_report_path.as_str()),
+                        Some(fresh_observation.source_bead.as_str()),
+                    );
+                }
+            }
+        }
+    }
+
+    fn detect_contradictions(&mut self) {
+        let observation_groups = self.claim_observations.clone();
+        for (claim_id, observations) in observation_groups {
+            let states = observations
+                .iter()
+                .filter(|observation| observation.freshness_status.as_deref() != Some("stale"))
+                .map(|observation| observation.effective_state.clone())
+                .collect::<BTreeSet<_>>();
+            if states.len() <= 1 {
+                continue;
+            }
+            self.contradictory_claim_count += 1;
+            let claim_node_ids = observations
+                .iter()
+                .map(|observation| observation.node_id.clone())
+                .collect::<Vec<_>>();
+            self.contradictions
+                .push(ReadinessLabTruthGraphContradiction {
+                    claim_id: claim_id.clone(),
+                    observed_states: states.iter().cloned().collect(),
+                    claim_node_ids: claim_node_ids.clone(),
+                });
+            self.error(
+                "contradictory_claim_states",
+                format!("claim {claim_id:?} has contradictory non-stale states"),
+                FindingScope::lane(claim_id.as_str()),
+            );
+            let blocker_node_id = truth_node_id("blocker", &["contradiction", claim_id.as_str()]);
+            self.insert_blocker_node(
+                &blocker_node_id,
+                "contradictory claim states",
+                self.manifest.source_bead.as_str(),
+            );
+            for observation in observations {
+                if observation.freshness_status.as_deref() == Some("stale") {
+                    continue;
+                }
+                self.blocking_edge(
+                    &blocker_node_id,
+                    &observation.node_id,
+                    "contradictory non-stale claim states",
+                    Some(observation.validator_report_path.as_str()),
+                    Some(observation.source_bead.as_str()),
+                );
+            }
+        }
+    }
+
+    fn freshness_status(&self, freshness: &ReadinessLabFreshnessMetadata) -> String {
+        let Some(reference_epoch_days) = self.config.reference_epoch_days else {
+            return "unknown".to_owned();
+        };
+        if freshness.observed_at_epoch_days > reference_epoch_days {
+            "future".to_owned()
+        } else if freshness
+            .observed_at_epoch_days
+            .saturating_add(freshness.max_age_days)
+            < reference_epoch_days
+        {
+            "stale".to_owned()
+        } else {
+            "fresh".to_owned()
+        }
+    }
+
+    fn insert_node(&mut self, node: ReadinessLabTruthGraphNode) {
+        self.nodes.entry(node.node_id.clone()).or_insert(node);
+    }
+
+    fn insert_blocker_node(&mut self, node_id: &str, label: impl Into<String>, bead_id: &str) {
+        self.insert_node(ReadinessLabTruthGraphNode {
+            node_id: node_id.to_owned(),
+            node_kind: "blocker".to_owned(),
+            label: label.into(),
+            source_path: None,
+            bead_id: Some(bead_id.to_owned()),
+            claim_state: None,
+            host_class: None,
+            freshness_status: None,
+            product_evidence_claim: None,
+            metadata: BTreeMap::new(),
+        });
+    }
+
+    fn blocking_edge(
+        &mut self,
+        from_node_id: &str,
+        to_node_id: &str,
+        label: impl Into<String>,
+        validator_report_path: Option<&str>,
+        bead_id: Option<&str>,
+    ) {
+        self.blocker_edge_count += 1;
+        if blocker_link_missing(validator_report_path, bead_id) {
+            self.error(
+                "blocker_edge_without_report_or_bead",
+                "blocker edge is missing both validator_report_path and bead_id",
+                FindingScope::default(),
+            );
+        }
+        self.edge(
+            from_node_id,
+            to_node_id,
+            "blocks",
+            label,
+            validator_report_path,
+            bead_id,
+        );
+    }
+
+    fn edge(
+        &mut self,
+        from_node_id: &str,
+        to_node_id: &str,
+        edge_kind: &str,
+        label: impl Into<String>,
+        validator_report_path: Option<&str>,
+        bead_id: Option<&str>,
+    ) {
+        self.edges.push(ReadinessLabTruthGraphEdge {
+            from_node_id: from_node_id.to_owned(),
+            to_node_id: to_node_id.to_owned(),
+            edge_kind: edge_kind.to_owned(),
+            label: label.into(),
+            validator_report_path: validator_report_path.map(str::to_owned),
+            bead_id: bead_id.map(str::to_owned),
+        });
+    }
+
+    fn finish(self) -> ReadinessLabTruthGraphReport {
+        let node_count = self.nodes.len();
+        let edge_count = self.edges.len();
+        ReadinessLabTruthGraphReport {
+            schema_version: READINESS_LAB_TRUTH_GRAPH_REPORT_SCHEMA_VERSION,
+            graph_id: self.manifest.graph_id.clone(),
+            manifest_path: self.config.manifest_path.clone(),
+            valid: self.errors.is_empty(),
+            dry_run_only: true,
+            product_evidence_claim: READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM.to_owned(),
+            source_bead: self.manifest.source_bead.clone(),
+            source_count: self.manifest.sources.len(),
+            claim_count: self.claim_count,
+            node_count,
+            edge_count,
+            stale_claim_count: self.stale_claim_count,
+            contradictory_claim_count: self.contradictory_claim_count,
+            missing_raw_log_count: self.missing_raw_log_count,
+            permission_requirement_count: self.permission_requirement_count,
+            simulated_node_count: self.simulated_node_count,
+            blocker_edge_count: self.blocker_edge_count,
+            nodes: self.nodes.into_values().collect(),
+            edges: self.edges,
+            contradictions: self.contradictions,
+            errors: self.errors,
+            warnings: self.warnings,
+        }
+    }
+
+    fn error(
+        &mut self,
+        finding_id: impl Into<String>,
+        message: impl Into<String>,
+        scope: FindingScope,
+    ) {
+        self.errors.push(scope.into_finding(
+            finding_id.into(),
+            ReadinessLabFindingSeverity::Error,
+            message.into(),
+        ));
+    }
+
+    fn warning(
+        &mut self,
+        finding_id: impl Into<String>,
+        message: impl Into<String>,
+        scope: FindingScope,
+    ) {
+        self.warnings.push(scope.into_finding(
+            finding_id.into(),
+            ReadinessLabFindingSeverity::Warning,
+            message.into(),
+        ));
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TruthGraphClaimObservation {
+    node_id: String,
+    effective_state: String,
+    freshness_status: Option<String>,
+    validator_report_path: String,
+    source_bead: String,
+}
+
 #[derive(Debug, Default)]
 struct FindingScope {
     artifact_id: Option<String>,
@@ -2208,6 +3488,32 @@ fn lane_work_key(lane: &ReadinessLabRchValidationLane) -> String {
     )
 }
 
+fn truth_node_id(prefix: &str, parts: &[&str]) -> String {
+    let mut out = String::from(prefix);
+    for part in parts {
+        out.push(':');
+        out.push_str(part.trim());
+    }
+    out
+}
+
+fn effective_claim_state(
+    claim: &ReadinessLabTruthGraphClaimInput,
+    freshness_status: Option<&str>,
+) -> String {
+    if freshness_status == Some("stale") {
+        "stale".to_owned()
+    } else {
+        claim.claim_state.label().to_owned()
+    }
+}
+
+fn blocker_link_missing(validator_report_path: Option<&str>, bead_id: Option<&str>) -> bool {
+    let has_report = validator_report_path.is_some_and(|path| !path.trim().is_empty());
+    let has_bead = bead_id.is_some_and(|id| id.starts_with("bd-"));
+    !has_report && !has_bead
+}
+
 fn duplicate_count<'a>(ids: impl Iterator<Item = &'a str>) -> usize {
     let mut seen = BTreeSet::new();
     let mut duplicates = BTreeSet::new();
@@ -2476,6 +3782,187 @@ mod tests {
             manifest,
             &ReadinessLabRchLaneScheduleConfig {
                 manifest_path: "rch-lanes.json".to_owned(),
+                reference_epoch_days: Some(20_001),
+            },
+        )
+    }
+
+    fn sample_truth_graph_manifest() -> ReadinessLabTruthGraphManifest {
+        ReadinessLabTruthGraphManifest {
+            schema_version: READINESS_LAB_SCHEMA_VERSION,
+            graph_id: "readiness-lab-truth-graph".to_owned(),
+            generated_at_epoch_days: 20_000,
+            advisory_notice: READINESS_LAB_ADVISORY_NOTICE.to_owned(),
+            source_bead: "bd-xyypn".to_owned(),
+            sources: vec![
+                truth_graph_source(
+                    "proof-old",
+                    ReadinessLabTruthGraphSourceKind::ProofBundleReport,
+                    "artifacts/proof/old-report.json",
+                    truth_graph_claim(
+                        "swarm.responsiveness",
+                        ReadinessLabTruthGraphClaimState::Validated,
+                        ReadinessLabProductEvidenceClaim::ProductPassFail,
+                        "artifacts/proof/old-report.json",
+                        "bd-rchk0.53.8",
+                        19_990,
+                    ),
+                ),
+                truth_graph_source(
+                    "proof-fresh",
+                    ReadinessLabTruthGraphSourceKind::ReleaseGateReport,
+                    "artifacts/proof/fresh-release-gate.json",
+                    truth_graph_claim(
+                        "swarm.responsiveness",
+                        ReadinessLabTruthGraphClaimState::Validated,
+                        ReadinessLabProductEvidenceClaim::ProductPassFail,
+                        "artifacts/proof/fresh-release-gate.json",
+                        "bd-rchk0.53.8",
+                        20_000,
+                    ),
+                ),
+                truth_graph_source(
+                    "host-sim",
+                    ReadinessLabTruthGraphSourceKind::ReadinessLabReport,
+                    "artifacts/readiness-lab/host-simulation.json",
+                    simulated_truth_graph_claim(),
+                ),
+                truth_graph_source(
+                    "xfstests-handoff",
+                    ReadinessLabTruthGraphSourceKind::PermissionedCampaignPacket,
+                    "artifacts/readiness-lab/xfstests-handoff.json",
+                    permissioned_handoff_truth_graph_claim(),
+                ),
+            ],
+        }
+    }
+
+    fn truth_graph_source(
+        source_id: &str,
+        source_kind: ReadinessLabTruthGraphSourceKind,
+        path: &str,
+        claim: ReadinessLabTruthGraphClaimInput,
+    ) -> ReadinessLabTruthGraphSource {
+        ReadinessLabTruthGraphSource {
+            source_id: source_id.to_owned(),
+            source_kind,
+            path: path.to_owned(),
+            valid: true,
+            claims: vec![claim],
+        }
+    }
+
+    fn truth_graph_claim(
+        claim_id: &str,
+        claim_state: ReadinessLabTruthGraphClaimState,
+        product_evidence_claim: ReadinessLabProductEvidenceClaim,
+        validator_report_path: &str,
+        source_bead: &str,
+        observed_at_epoch_days: u32,
+    ) -> ReadinessLabTruthGraphClaimInput {
+        ReadinessLabTruthGraphClaimInput {
+            claim_id: claim_id.to_owned(),
+            claim_state,
+            product_evidence_claim,
+            validator_report_path: validator_report_path.to_owned(),
+            source_bead: source_bead.to_owned(),
+            command: Some(format!(
+                "cat {validator_report_path} && br show {source_bead} --no-db --json"
+            )),
+            artifacts: vec![ReadinessLabTruthGraphArtifactInput {
+                artifact_id: format!("{claim_id}-raw-log"),
+                artifact_kind: ReadinessLabArtifactKind::PlannedWorkloadLane,
+                path: format!("artifacts/raw/{claim_id}.log"),
+                raw_log_required: true,
+                raw_log_present: true,
+            }],
+            host: None,
+            freshness: Some(ReadinessLabFreshnessMetadata {
+                observed_at_epoch_days,
+                max_age_days: 7,
+                git_sha: "1234567".to_owned(),
+                host_class: ReadinessLabHostClass::PermissionedLargeHost,
+            }),
+            blockers: Vec::new(),
+            permission: None,
+            supersedes_claim_ids: Vec::new(),
+        }
+    }
+
+    fn simulated_truth_graph_claim() -> ReadinessLabTruthGraphClaimInput {
+        ReadinessLabTruthGraphClaimInput {
+            claim_id: "swarm.capability.simulated".to_owned(),
+            claim_state: ReadinessLabTruthGraphClaimState::Simulated,
+            product_evidence_claim: ReadinessLabProductEvidenceClaim::None,
+            validator_report_path: "artifacts/readiness-lab/host-simulation.json".to_owned(),
+            source_bead: "bd-4532j".to_owned(),
+            command: Some("ffs-harness simulate-readiness-lab-hosts --format json".to_owned()),
+            artifacts: vec![ReadinessLabTruthGraphArtifactInput {
+                artifact_id: "host-simulation".to_owned(),
+                artifact_kind: ReadinessLabArtifactKind::SimulatedHostCapability,
+                path: "artifacts/readiness-lab/host-simulation.json".to_owned(),
+                raw_log_required: false,
+                raw_log_present: false,
+            }],
+            host: Some(ReadinessLabTruthGraphHostInput {
+                host_id: "candidate-sim".to_owned(),
+                host_class: ReadinessLabHostClass::Synthetic,
+                logical_cpus: Some(64),
+                ram_total_gib: Some(256),
+                numa_topology_visible: Some(true),
+            }),
+            freshness: Some(ReadinessLabFreshnessMetadata {
+                observed_at_epoch_days: 20_000,
+                max_age_days: 7,
+                git_sha: "1234567".to_owned(),
+                host_class: ReadinessLabHostClass::Synthetic,
+            }),
+            blockers: Vec::new(),
+            permission: None,
+            supersedes_claim_ids: Vec::new(),
+        }
+    }
+
+    fn permissioned_handoff_truth_graph_claim() -> ReadinessLabTruthGraphClaimInput {
+        ReadinessLabTruthGraphClaimInput {
+            claim_id: "xfstests.baseline".to_owned(),
+            claim_state: ReadinessLabTruthGraphClaimState::HandoffOnly,
+            product_evidence_claim: ReadinessLabProductEvidenceClaim::None,
+            validator_report_path: "artifacts/readiness-lab/xfstests-handoff.json".to_owned(),
+            source_bead: "bd-c7fqh".to_owned(),
+            command: Some("br show bd-rchk3 --no-db --json".to_owned()),
+            artifacts: vec![ReadinessLabTruthGraphArtifactInput {
+                artifact_id: "xfstests-handoff-packet".to_owned(),
+                artifact_kind: ReadinessLabArtifactKind::PermissionedRunRehearsal,
+                path: "artifacts/readiness-lab/xfstests-handoff.json".to_owned(),
+                raw_log_required: false,
+                raw_log_present: false,
+            }],
+            host: None,
+            freshness: Some(sample_freshness()),
+            blockers: vec![ReadinessLabTruthGraphBlockerInput {
+                blocker_id: "operator-ack-missing".to_owned(),
+                reason: "real xfstests run requires explicit operator ack".to_owned(),
+                validator_report_path: None,
+                bead_id: Some("bd-rchk3".to_owned()),
+            }],
+            permission: Some(ReadinessLabTruthGraphPermissionRequirement {
+                permission_id: "xfstests-real-run-ack".to_owned(),
+                boundary: ReadinessLabPermissionBoundary::RequiresXfstestsAck,
+                bead_id: "bd-rchk3".to_owned(),
+                ack_env: "XFSTESTS_REAL_RUN_ACK".to_owned(),
+            }),
+            supersedes_claim_ids: Vec::new(),
+        }
+    }
+
+    fn build_truth_graph(
+        manifest: &ReadinessLabTruthGraphManifest,
+    ) -> ReadinessLabTruthGraphReport {
+        build_readiness_lab_truth_graph(
+            manifest,
+            &ReadinessLabTruthGraphConfig {
+                manifest_path: "truth-graph.json".to_owned(),
                 reference_epoch_days: Some(20_001),
             },
         )
@@ -2858,5 +4345,123 @@ mod tests {
             .expect_err("unknown fields must fail closed");
 
         assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn truth_graph_supersedes_stale_observations_with_fresh_claims() {
+        let report = build_truth_graph(&sample_truth_graph_manifest());
+
+        assert!(report.valid);
+        assert_eq!(report.stale_claim_count, 1);
+        assert_eq!(report.contradictory_claim_count, 0);
+        assert!(
+            report
+                .edges
+                .iter()
+                .any(|edge| edge.edge_kind == "supersedes"
+                    && edge.label == "fresh evidence supersedes stale observation")
+        );
+        assert!(
+            render_readiness_lab_truth_graph_markdown(&report)
+                .contains("FrankenFS Readiness Lab Truth Graph")
+        );
+    }
+
+    #[test]
+    fn truth_graph_exposes_contradictory_non_stale_claims() {
+        let mut manifest = sample_truth_graph_manifest();
+        manifest.sources[0].claims[0]
+            .freshness
+            .as_mut()
+            .expect("fixture claim has freshness")
+            .observed_at_epoch_days = 20_000;
+        manifest.sources[1].claims[0].claim_state = ReadinessLabTruthGraphClaimState::Blocked;
+        manifest.sources[1].claims[0].product_evidence_claim =
+            ReadinessLabProductEvidenceClaim::None;
+
+        let report = build_truth_graph(&manifest);
+
+        assert!(!report.valid);
+        assert_eq!(report.contradictory_claim_count, 1);
+        assert_eq!(report.contradictions[0].claim_id, "swarm.responsiveness");
+        assert!(report.edges.iter().any(|edge| edge.edge_kind == "blocks"
+            && edge.label == "contradictory non-stale claim states"));
+    }
+
+    #[test]
+    fn truth_graph_turns_missing_raw_logs_into_linked_blockers() {
+        let mut manifest = sample_truth_graph_manifest();
+        manifest.sources[1].claims[0].artifacts[0].raw_log_present = false;
+
+        let report = build_truth_graph(&manifest);
+
+        assert!(!report.valid);
+        assert_eq!(report.missing_raw_log_count, 1);
+        let blocker = report
+            .edges
+            .iter()
+            .find(|edge| edge.label.contains("required raw log missing"))
+            .expect("missing raw log must emit blocker edge");
+        assert_eq!(
+            blocker.validator_report_path.as_deref(),
+            Some("artifacts/proof/fresh-release-gate.json")
+        );
+    }
+
+    #[test]
+    fn truth_graph_links_permissioned_handoff_to_bead_and_ack() {
+        let report = build_truth_graph(&sample_truth_graph_manifest());
+
+        assert!(report.valid);
+        assert_eq!(report.permission_requirement_count, 1);
+        assert!(
+            report
+                .edges
+                .iter()
+                .any(|edge| edge.edge_kind == "requires_permission"
+                    && edge.bead_id.as_deref() == Some("bd-rchk3"))
+        );
+        assert!(report.nodes.iter().any(|node| {
+            node.node_kind == "permission_requirement"
+                && node
+                    .metadata
+                    .get("ack_env")
+                    .is_some_and(|ack| ack == "XFSTESTS_REAL_RUN_ACK")
+        }));
+    }
+
+    #[test]
+    fn truth_graph_surfaces_simulated_evidence_nodes_without_product_claims() {
+        let report = build_truth_graph(&sample_truth_graph_manifest());
+
+        assert!(report.valid);
+        assert_eq!(
+            report.product_evidence_claim,
+            READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM
+        );
+        assert!(report.simulated_node_count >= 2);
+        assert!(
+            report
+                .nodes
+                .iter()
+                .any(|node| node.node_kind == "host_capability"
+                    && node.host_class.as_deref() == Some("synthetic"))
+        );
+    }
+
+    #[test]
+    fn truth_graph_rejects_blockers_without_validator_report_or_bead() {
+        let mut manifest = sample_truth_graph_manifest();
+        manifest.sources[3].claims[0].blockers[0].bead_id = None;
+
+        let report = build_truth_graph(&manifest);
+
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.finding_id == "blocker_without_report_or_bead")
+        );
     }
 }
