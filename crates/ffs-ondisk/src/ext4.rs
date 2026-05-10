@@ -12633,6 +12633,35 @@ mod tests {
             }
         }
 
+        // bd-3fkbj — Determinism MR for Ext4Inode::parse_from_bytes.
+        // Companion to parse_inode_extent_tree_determinism: that
+        // exercises post-parse extent-tree derivation; this exercises
+        // the inode-byte parse itself. Ext4Inode is parsed on every
+        // ext4 file open / readdir / stat / xattr.
+        #[test]
+        fn ext4_proptest_ext4_inode_parse_from_bytes_determinism(
+            inode_bytes in proptest::collection::vec(any::<u8>(), 128..=256),
+        ) {
+            let a = Ext4Inode::parse_from_bytes(&inode_bytes);
+            let b = Ext4Inode::parse_from_bytes(&inode_bytes);
+            prop_assert_eq!(a, b);
+        }
+
+        // bd-3fkbj — Determinism MR for
+        // Ext4Superblock::parse_superblock_region. The ext4 superblock
+        // is the entry point for every mount/probe; non-determinism
+        // here would silently corrupt mount-time bootstrap state.
+        // Sized at 1024..=1024 (matches EXT4_SUPERBLOCK_SIZE) so the
+        // proptest fuzzes only the byte content, not the buffer length.
+        #[test]
+        fn ext4_proptest_ext4_superblock_parse_superblock_region_determinism(
+            region in proptest::collection::vec(any::<u8>(), EXT4_SUPERBLOCK_SIZE..=EXT4_SUPERBLOCK_SIZE),
+        ) {
+            let a = Ext4Superblock::parse_superblock_region(&region);
+            let b = Ext4Superblock::parse_superblock_region(&region);
+            prop_assert_eq!(a, b);
+        }
+
         #[test]
         fn ext4_proptest_iter_dir_block_no_panic(
             block in proptest::collection::vec(any::<u8>(), 0..=4096),
