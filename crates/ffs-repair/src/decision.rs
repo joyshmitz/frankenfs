@@ -465,8 +465,8 @@ mod tests {
 
             prop_assert!(decision.safety_override);
             prop_assert_eq!(decision.action, expected_action);
-            prop_assert_eq!(decision.loss, loss(state, expected_action));
-            prop_assert_eq!(decision.corruption_posterior, posterior);
+            prop_assert!((decision.loss - loss(state, expected_action)).abs() <= f64::EPSILON);
+            prop_assert!((decision.corruption_posterior - posterior).abs() <= f64::EPSILON);
         }
     }
 }

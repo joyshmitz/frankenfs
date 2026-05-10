@@ -2424,6 +2424,17 @@ impl<'a, W: Write> ScrubDaemon<'a, W> {
             return Ok(());
         }
 
+        cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
+        let budget = cx.budget();
+        let now = cx.now();
+        if budget.is_past_deadline(now)
+            || budget
+                .remaining_time(now)
+                .is_some_and(|remaining| remaining <= duration)
+        {
+            return Err(FfsError::Cancelled);
+        }
+
         let mut remaining = duration;
         while !remaining.is_zero() {
             let slice = remaining.min(self.config.cancel_check_interval);
@@ -4768,6 +4779,66 @@ mod tests {
 
         let _step = daemon.run_once(&cx).expect("run once");
         assert_eq!(daemon.metrics().backpressure_yields, 1);
+    }
+
+    #[test]
+    fn scrub_daemon_backpressure_yield_rejects_deadline_that_cannot_fit() {
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 8;
+
+        write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+
+        let validator = CorruptBlockValidator::new(vec![]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let mut ledger_buf = Vec::new();
+        let pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        );
+        let pressure = Arc::new(SystemPressure::with_headroom(0.1));
+        let yield_sleep = Duration::from_millis(250);
+        let mut daemon = ScrubDaemon::new(
+            pipeline,
+            ScrubDaemonConfig {
+                interval: Duration::ZERO,
+                cancel_check_interval: yield_sleep,
+                backpressure_headroom_threshold: 0.5,
+                backpressure_sleep: yield_sleep,
+                ..ScrubDaemonConfig::default()
+            },
+        )
+        .with_pressure(pressure);
+
+        let tight_deadline = Cx::for_testing().now() + Duration::from_millis(20);
+        let tight_cx =
+            Cx::for_testing_with_budget(asupersync::Budget::new().with_deadline(tight_deadline));
+        let started = Instant::now();
+        let err = daemon
+            .run_once(&tight_cx)
+            .expect_err("too-tight deadline should reject throttle admission");
+        let elapsed = started.elapsed();
+
+        assert!(matches!(err, FfsError::Cancelled));
+        assert!(
+            elapsed < yield_sleep / 2,
+            "too-tight Cx should skip scrub-daemon throttle sleep promptly, elapsed={elapsed:?}"
+        );
+        assert_eq!(daemon.metrics().backpressure_yields, 1);
+        assert_eq!(daemon.metrics().blocks_scanned_total, 0);
     }
 
     #[test]
