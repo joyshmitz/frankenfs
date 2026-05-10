@@ -37,32 +37,20 @@ scenario_result() {
 run_rch_capture() {
     local output_path="$1"
     shift
-    local status
-
-    set +e
-    RCH_VISIBILITY=none timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1
-    status=$?
-    set -e
-
-    if [[ $status -eq 0 ]]; then
-        return 0
-    fi
-    if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$output_path"; then
-        e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|output=${output_path}|command=$*"
-        return 0
-    fi
-    return "$status"
+    RCH_VISIBILITY=none e2e_rch_capture "$output_path" "$@"
 }
 
 e2e_init "ffs_proof_overhead_budget"
 
-BUDGET_JSON="${E2E_LOG_DIR}/proof_overhead_budget.json"
-METRICS_JSON="${E2E_LOG_DIR}/proof_overhead_metrics.json"
+RCH_INPUT_DIR="$REPO_ROOT/artifacts/rch_input/$(basename "$E2E_LOG_DIR")/proof_overhead_budget"
+mkdir -p "$RCH_INPUT_DIR"
+BUDGET_JSON="${RCH_INPUT_DIR}/proof_overhead_budget.json"
+METRICS_JSON="${RCH_INPUT_DIR}/proof_overhead_metrics.json"
 REPORT_JSON="${E2E_LOG_DIR}/proof_overhead_budget_report.json"
 REPORT_RAW="${E2E_LOG_DIR}/proof_overhead_budget_report.raw"
 PROOF_STDOUT="${E2E_LOG_DIR}/proof_workflow_stdout.log"
-PROOF_BUNDLE="${E2E_LOG_DIR}/proof_bundle.json"
-REPRO_PACK="${E2E_LOG_DIR}/reproduction_pack.json"
+PROOF_BUNDLE="${RCH_INPUT_DIR}/proof_bundle.json"
+REPRO_PACK="${RCH_INPUT_DIR}/reproduction_pack.json"
 UNIT_LOG="${E2E_LOG_DIR}/unit_tests.log"
 
 e2e_step "Scenario 1: module and CLI are wired"
