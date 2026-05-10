@@ -51,7 +51,7 @@ for index, char in enumerate(text):
         obj, _ = decoder.raw_decode(text[index:])
     except json.JSONDecodeError:
         continue
-    if isinstance(obj, dict) and obj.get("scanner_version") == "bd-l7ov7-open-ended-note-scanner-v1" and "rows" in obj:
+    if isinstance(obj, dict) and obj.get("scanner_version") == "bd-mockscan-open-ended-note-scanner-v2" and "rows" in obj:
         pathlib.Path(report_path).write_text(
             json.dumps(obj, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -118,7 +118,7 @@ if not positive["valid"]:
     raise SystemExit(f"positive report invalid: {positive['errors']}")
 if negative["valid"]:
     raise SystemExit("negative report should be invalid")
-if positive["scanner_version"] != "bd-l7ov7-open-ended-note-scanner-v1":
+if positive["scanner_version"] != "bd-mockscan-open-ended-note-scanner-v2":
     raise SystemExit("scanner version drifted")
 if positive["reproduction_command"] != positive_reproduction_command:
     raise SystemExit("positive report did not preserve reproduction command")
@@ -130,8 +130,8 @@ if positive["false_positive_count"] < 2:
     raise SystemExit("positive fixture should include false-positive controls")
 if positive["unresolved_note_count"] != 0:
     raise SystemExit("positive fixture should have no unresolved rows")
-if negative["unresolved_note_count"] != 1:
-    raise SystemExit("negative fixture should have exactly one unresolved row")
+if negative["unresolved_note_count"] != 2:
+    raise SystemExit("negative fixture should have exactly two unresolved rows")
 if not any("lacks linked bead/artifact" in error for error in negative["errors"]):
     raise SystemExit("negative report missing linkage diagnostic")
 
@@ -143,6 +143,11 @@ required_patterns = {
     "adversarial inputs",
     "more goldens",
     "known gaps",
+    "fake delay",
+    "placeholder implementation",
+    "stub implementation",
+    "temporary sleep",
+    "thread::sleep",
 }
 if set(positive["search_patterns"]) != required_patterns:
     raise SystemExit("scanner pattern vocabulary changed")

@@ -372,10 +372,20 @@ const ALLOWED_RISK_CATEGORIES: [&str; 9] = [
 const ALLOWED_SOURCE_STATUSES: [&str; 4] = ["active", "deferred", "sunset", "non_applicable"];
 
 const ALLOWED_FRESHNESS_STATES: [&str; 3] = ["fresh", "stale", "exempt"];
-const NOTE_MATCH_TOKENS: [&str; 5] = ["TODO", "FIXME", "NOTE", "non-goal", "bd-"];
-pub const OPEN_ENDED_NOTE_SCANNER_VERSION: &str = "bd-l7ov7-open-ended-note-scanner-v1";
+const NOTE_MATCH_TOKENS: [&str; 9] = [
+    "TODO",
+    "FIXME",
+    "NOTE",
+    "non-goal",
+    "bd-",
+    "fake",
+    "placeholder",
+    "stub",
+    "thread::sleep",
+];
+pub const OPEN_ENDED_NOTE_SCANNER_VERSION: &str = "bd-mockscan-open-ended-note-scanner-v2";
 
-const OPEN_ENDED_NOTE_PATTERNS: [&str; 7] = [
+const OPEN_ENDED_NOTE_PATTERNS: [&str; 12] = [
     "add more cases",
     "expand corpus",
     "TODO fuzz",
@@ -383,6 +393,11 @@ const OPEN_ENDED_NOTE_PATTERNS: [&str; 7] = [
     "adversarial inputs",
     "more goldens",
     "known gaps",
+    "fake delay",
+    "placeholder implementation",
+    "stub implementation",
+    "temporary sleep",
+    "thread::sleep",
 ];
 
 const REQUIRED_NOTE_LOG_FIELDS: [&str; 8] = [
@@ -1382,6 +1397,10 @@ fn infer_note_risk_surface(line: &str, matched_phrase: &str) -> &'static str {
     );
     if lower.contains("fuzz") || lower.contains("adversarial") {
         "fuzz"
+    } else if lower.contains("sleep") || lower.contains("delay") || lower.contains("backoff") {
+        "runtime-liveness"
+    } else if lower.contains("fake") || lower.contains("stub") || lower.contains("placeholder") {
+        "implementation-placeholder"
     } else if lower.contains("golden") {
         "golden-fixture"
     } else if lower.contains("corpus") {
@@ -1411,6 +1430,7 @@ fn note_proof_type(decision: &str, risk_surface: &str) -> &'static str {
     }
     match risk_surface {
         "fuzz" => "property-test",
+        "runtime-liveness" | "implementation-placeholder" => "long-campaign",
         "golden-fixture" => "golden-fixture",
         "corpus" => "corpus-seed",
         "parser" => "parser-unit",
@@ -1729,13 +1749,16 @@ mod tests {
             negative.scanner_version
         );
         assert!(!negative.valid);
-        assert_eq!(negative.unresolved_note_count, 1);
+        assert_eq!(negative.unresolved_note_count, 2);
         assert!(
             negative
                 .errors
                 .iter()
                 .any(|error| error.contains("lacks linked bead/artifact"))
         );
+        assert!(negative.rows.iter().any(|row| {
+            row.matched_phrase == "fake delay" && row.risk_surface == "runtime-liveness"
+        }));
     }
 
     #[test]
@@ -1763,6 +1786,9 @@ mod tests {
                 "missing pattern {pattern}"
             );
         }
+        assert!(report.rows.iter().any(|row| {
+            row.matched_phrase == "thread::sleep" && row.proof_type == "long-campaign"
+        }));
     }
 
     #[test]
