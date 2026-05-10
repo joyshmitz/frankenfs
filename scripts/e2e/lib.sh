@@ -901,6 +901,7 @@ e2e_emit_json_summary() {
     [[ -z "${E2E_LOG_FILE:-}" ]] && return 0
     [[ ! -f "$E2E_LOG_FILE" ]] && return 0
 
+    local script_exit_code="${1:-0}"
     local json_path
     json_path="$E2E_LOG_DIR/result.json"
     local end_time duration_secs
@@ -959,6 +960,9 @@ e2e_emit_json_summary() {
     if echo "$scenarios_json" | grep -q '"outcome":"FAIL"'; then
         verdict="FAIL"
     fi
+    if [[ "$script_exit_code" -ne 0 ]]; then
+        verdict="FAIL"
+    fi
 
     # Write result.json
     cat > "$json_path" <<ENDJSON
@@ -982,6 +986,7 @@ e2e_emit_json_summary() {
   },
   "scenarios": $scenarios_json,
   "verdict": "$verdict",
+  "exit_code": $script_exit_code,
   "duration_secs": $duration_secs,
   "log_file": "$E2E_LOG_FILE"
 }
@@ -1032,7 +1037,7 @@ e2e_cleanup() {
     local exit_code=$?
 
     # Emit JSON summary before cleanup (best-effort)
-    e2e_emit_json_summary 2>/dev/null || true
+    e2e_emit_json_summary "$exit_code" 2>/dev/null || true
 
     # Unmount any active mount
     e2e_unmount "${E2E_MOUNT_POINT:-}" 2>/dev/null || true
