@@ -57,6 +57,9 @@ e2e_step "Parse tracker JSONL and emit report"
 if jq -s \
     --arg run_id "$(basename "$E2E_LOG_DIR")" \
     --arg issues_path "$ISSUES_JSONL" \
+    --arg xfstests_ack "${XFSTESTS_REAL_RUN_ACK:-}" \
+    --arg swarm_enable "${FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD:-}" \
+    --arg swarm_ack "${FFS_SWARM_WORKLOAD_REAL_RUN_ACK:-}" \
     --argjson strict "$STRICT_JSON" \
     '
     . as $issues
@@ -79,16 +82,49 @@ if jq -s \
         else
             "unknown"
         end;
+    def issue_text:
+        [
+            (.id // ""),
+            (.title // ""),
+            (.description // ""),
+            (.notes // ""),
+            ((.labels // []) | join(" "))
+        ] | join(" ");
     def blocking_dependencies:
         (.dependencies // [])
         | map(select((.type // "") == "blocks"))
         | map(.depends_on_id as $dep_id | {id: $dep_id, status: issue_status($dep_id)})
         | map(select(.status != "closed"));
+    def xfstests_ack_present:
+        $xfstests_ack == "xfstests-may-mutate-test-and-scratch-devices";
+    def swarm_ack_present:
+        ($swarm_enable == "1")
+        and ($swarm_ack == "swarm-workload-may-use-permissioned-large-host");
+    def permission_gate:
+        issue_text as $text
+        | if (($text | test("XFSTESTS_REAL_RUN_ACK|xfstests-may-mutate-test-and-scratch-devices|real xfstests run|execute[^.]*xfstests baseline|run[^.]*xfstests baseline"; "i")) and (xfstests_ack_present | not)) then
+            {
+                gate_kind: "xfstests_real_run",
+                required_env: "XFSTESTS_REAL_RUN_ACK",
+                required_value: "xfstests-may-mutate-test-and-scratch-devices",
+                present: false
+            }
+        elif (($text | test("FFS_SWARM_WORKLOAD_REAL_RUN_ACK|swarm-workload-may-use-permissioned-large-host|large-host|large host|permissioned.*swarm"; "i")) and (swarm_ack_present | not)) then
+            {
+                gate_kind: "large_host_swarm_real_run",
+                required_env: "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD,FFS_SWARM_WORKLOAD_REAL_RUN_ACK",
+                required_value: "1,swarm-workload-may-use-permissioned-large-host",
+                present: false
+            }
+        else
+            null
+        end;
     def ready_issue:
         local_issue
         and open_issue
         and ((.issue_type // "") != "epic")
-        and ((blocking_dependencies | length) == 0);
+        and ((blocking_dependencies | length) == 0)
+        and ((permission_gate // null) == null);
     def issue_sample:
         {
             id: (.id // ""),
@@ -159,11 +195,17 @@ if jq -s \
         local_open_ids: ([.[] | select(local_issue and open_issue) | .id] | sort),
         local_open_rows: ([.[] | select(local_issue and open_issue) | issue_work_row] | sort_by(.priority, .id)),
         source_aware_ready_rows: ([.[] | select(ready_issue) | issue_work_row] | sort_by(.priority, .id)),
+        permission_gated_rows: (
+            [.[] | select(local_issue and open_issue and ((.issue_type // "") != "epic") and ((permission_gate // null) != null)) | issue_work_row + {permission_gate: permission_gate}]
+            | sort_by(.priority, .id)
+        ),
         foreign_open_samples: ([.[] | select(foreign_issue and open_issue) | issue_sample] | sort_by(.id) | .[0:20]),
         reproduction_commands: [
             "./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
             "jq -s '\''[.[] | select(((.id // \"\") | test(\"^(bd|frankenfs)-\") | not) and ((.status // \"open\") == \"open\")) | {id,title,status,priority,source_repo}]'\'' .beads/issues.jsonl",
             "jq -s '\''[.[] | select(((.id // \"\") | test(\"^(bd|frankenfs)-\")) and ((.status // \"open\") == \"open\")) | {id,title,status,priority,issue_type,assignee,owner}] | sort_by(.priority, .id)'\'' .beads/issues.jsonl",
+            "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
+            "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
             "TRACKER_SOURCE_HYGIENE_STRICT=1 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh"
         ]
     }
@@ -184,6 +226,7 @@ if jq -e '
     and (.local_open_ids | type == "array")
     and (.local_open_rows | type == "array")
     and (.source_aware_ready_rows | type == "array")
+    and (.permission_gated_rows | type == "array")
     and (.foreign_open_samples | type == "array")
     and (.excluded_foreign_by_prefix | type == "array")
     and (.foreign_group_summaries | type == "array")
@@ -207,7 +250,10 @@ fi
 if jq -e '
     (.local_open_rows | type == "array")
     and (.source_aware_ready_rows | type == "array")
+    and (.permission_gated_rows | type == "array")
     and all(.source_aware_ready_rows[]; (.blocked_by | length) == 0)
+    and all(.source_aware_ready_rows[]; has("permission_gate") | not)
+    and all(.permission_gated_rows[]; (.permission_gate.present == false))
     and any(.reproduction_commands[]; contains("bd|frankenfs"))
 ' "$REPORT_JSON" >/dev/null; then
     scenario_result "tracker_source_hygiene_source_aware_wrapper" "PASS" "ready_rows=${READY_COUNT} excluded_foreign=${FOREIGN_OPEN_COUNT}"
@@ -236,14 +282,17 @@ check_expected_count() {
 EXPECTED_LOCAL_OPEN="${TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN:-}"
 EXPECTED_FOREIGN_OPEN="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN:-}"
 EXPECTED_READY="${TRACKER_SOURCE_HYGIENE_EXPECT_READY:-}"
+EXPECTED_PERMISSION_GATED="${TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED:-}"
 EXPECTED_FOREIGN_SAMPLE_COUNT="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT:-}"
 EXPECTED_FOREIGN_GROUP_COUNT="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT:-}"
 FOREIGN_SAMPLE_COUNT="$(jq -r '.foreign_open_samples | length' "$REPORT_JSON")"
 FOREIGN_GROUP_COUNT="$(jq -r '.foreign_group_summaries | length' "$REPORT_JSON")"
+PERMISSION_GATED_COUNT="$(jq -r '.permission_gated_rows | length' "$REPORT_JSON")"
 
 check_expected_count "local_open" "$LOCAL_OPEN_COUNT" "$EXPECTED_LOCAL_OPEN"
 check_expected_count "foreign_open" "$FOREIGN_OPEN_COUNT" "$EXPECTED_FOREIGN_OPEN"
 check_expected_count "source_aware_ready" "$READY_COUNT" "$EXPECTED_READY"
+check_expected_count "permission_gated" "$PERMISSION_GATED_COUNT" "$EXPECTED_PERMISSION_GATED"
 check_expected_count "foreign_sample_count" "$FOREIGN_SAMPLE_COUNT" "$EXPECTED_FOREIGN_SAMPLE_COUNT"
 check_expected_count "foreign_group_count" "$FOREIGN_GROUP_COUNT" "$EXPECTED_FOREIGN_GROUP_COUNT"
 

@@ -898,17 +898,20 @@ Run the deterministic fixture check with:
 
 ```bash
 TRACKER_SOURCE_HYGIENE_ISSUES=tests/fixtures/tracker_source_hygiene.jsonl \
-TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=4 \
+TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=5 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=22 \
 TRACKER_SOURCE_HYGIENE_EXPECT_READY=2 \
+TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED=1 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT=20 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT=1 \
 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
 ```
 
 The report emits `local_open_rows`, `source_aware_ready_rows`,
-`excluded_foreign_open_count`, prefix counts, foreign group summaries with
-owner hints, sample foreign rows, and exact reproduction commands. Enable
+`permission_gated_rows`, `excluded_foreign_open_count`, prefix counts, foreign
+group summaries with owner hints, sample foreign rows, and exact reproduction
+commands. `source_aware_ready_rows` excludes real xfstests and permissioned
+large-host swarm rows until their explicit ACK env vars are present. Enable
 `TRACKER_SOURCE_HYGIENE_STRICT=1` only after the criteria in
 [docs/tracker-hygiene.md](../../docs/tracker-hygiene.md) are met; strict mode
 intentionally fails while foreign-looking open rows exist.

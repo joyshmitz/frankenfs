@@ -1,5 +1,6 @@
 {"id":"bd-fixture-epic","title":"Fixture local hygiene epic","status":"open","priority":1,"issue_type":"epic","source_repo":"."}
 {"id":"bd-fixture-ready","title":"Fixture local ready row","status":"open","priority":1,"issue_type":"task","source_repo":"."}
+{"id":"bd-fixture-permissioned","title":"Fixture permission-gated xfstests row","notes":"Requires XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices before a real xfstests run can execute.","status":"open","priority":1,"issue_type":"task","source_repo":"."}
 {"id":"bd-fixture-blocker","title":"Fixture local blocker row","status":"open","priority":2,"issue_type":"task","source_repo":"."}
 {"id":"bd-fixture-blocked","title":"Fixture local blocked row","status":"open","priority":2,"issue_type":"task","source_repo":".","dependencies":[{"issue_id":"bd-fixture-blocked","depends_on_id":"bd-fixture-blocker","type":"blocks","created_at":"2026-05-08T00:00:00Z","created_by":"fixture","metadata":"{}","thread_id":""}]}
 {"id":"bd-fixture-closed","title":"Fixture local closed row","status":"closed","priority":2,"issue_type":"task","source_repo":"."}

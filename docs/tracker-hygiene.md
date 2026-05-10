@@ -48,11 +48,23 @@ The report writes `tracker_source_hygiene_report.json` under
 
 - `local_open_rows`
 - `source_aware_ready_rows`
+- `permission_gated_rows`
 - `excluded_foreign_open_count`
 - `excluded_foreign_by_prefix`
 - `foreign_group_summaries`
 - `foreign_open_samples`
 - `reproduction_commands`
+
+`source_aware_ready_rows` excludes local rows that require an explicit
+permission ACK until the ACK is present in the environment. Permission-gated
+rows are still reported under `permission_gated_rows` with the required env
+name and value so agents can distinguish "ready after operator authorization"
+from ordinary ready work. Current gates are:
+
+| Gate | Required environment |
+|---|---|
+| real xfstests execution | `XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices` |
+| permissioned large-host swarm execution | `FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1` and `FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host` |
 
 ## Reconciliation Rules
 
@@ -122,9 +134,10 @@ Validate the fixture contract:
 
 ```bash
 TRACKER_SOURCE_HYGIENE_ISSUES=tests/fixtures/tracker_source_hygiene.jsonl \
-TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=4 \
+TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=5 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=22 \
 TRACKER_SOURCE_HYGIENE_EXPECT_READY=2 \
+TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED=1 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT=20 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT=1 \
 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
@@ -136,9 +149,10 @@ open rows:
 ```bash
 TRACKER_SOURCE_HYGIENE_ISSUES=tests/fixtures/tracker_source_hygiene.jsonl \
 TRACKER_SOURCE_HYGIENE_STRICT=1 \
-TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=4 \
+TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=5 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=22 \
 TRACKER_SOURCE_HYGIENE_EXPECT_READY=2 \
+TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED=1 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT=20 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT=1 \
 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
