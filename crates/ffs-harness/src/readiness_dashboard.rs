@@ -9,7 +9,8 @@
 //!
 //! This module deliberately does not evaluate readiness itself. It consumes
 //! reports already emitted by the proof-bundle validator, release-gate
-//! evaluator, operational evidence index, and permissioned campaign tooling.
+//! evaluator, operational evidence index, readiness-lab tooling, and
+//! permissioned campaign tooling.
 
 use crate::operational_evidence_index::{
     OperationalEvidenceFreshness, OperationalEvidenceHostClass, OperationalEvidenceIndex,
@@ -36,6 +37,7 @@ pub struct ReadinessDashboardConfig {
     pub release_gate_reports: Vec<PathBuf>,
     pub operational_evidence_indexes: Vec<PathBuf>,
     pub permissioned_campaign_reports: Vec<PathBuf>,
+    pub readiness_lab_reports: Vec<PathBuf>,
     pub beads_path: Option<PathBuf>,
     pub default_remediation_bead: Option<String>,
 }
@@ -94,6 +96,7 @@ pub enum ReadinessDashboardClaimState {
     Disabled,
     Hidden,
     HandoffOnly,
+    AdvisoryOnly,
     Blocked,
     Unknown,
 }
@@ -110,6 +113,7 @@ impl ReadinessDashboardClaimState {
             Self::Disabled => "disabled",
             Self::Hidden => "hidden",
             Self::HandoffOnly => "handoff_only",
+            Self::AdvisoryOnly => "advisory_only",
             Self::Blocked => "blocked",
             Self::Unknown => "unknown",
         }
@@ -214,7 +218,7 @@ impl DashboardBuilder {
                     rationale: "the dashboard is only a display layer over validator outputs"
                         .to_owned(),
                     missing_artifacts: vec![
-                        "proof-bundle report, release-gate report, operational evidence index, or permissioned campaign report".to_owned(),
+                        "proof-bundle report, release-gate report, operational evidence index, permissioned campaign report, or readiness-lab report".to_owned(),
                     ],
                     controlling_lane: None,
                 });
@@ -262,6 +266,10 @@ pub fn build_readiness_dashboard(
     for path in &config.permissioned_campaign_reports {
         let report = load_json::<Value>(path)?;
         add_permissioned_campaign_report(&mut builder, path, &report);
+    }
+    for path in &config.readiness_lab_reports {
+        let report = load_json::<Value>(path)?;
+        add_readiness_lab_report(&mut builder, path, &report);
     }
 
     Ok(builder.finish())
@@ -693,6 +701,55 @@ fn add_permissioned_campaign_report(builder: &mut DashboardBuilder, path: &Path,
     });
 }
 
+fn add_readiness_lab_report(builder: &mut DashboardBuilder, path: &Path, value: &Value) {
+    let source_path = display_path(path);
+    let source_kind = readiness_lab_source_kind(value);
+    let report_id = readiness_lab_report_id(value, &source_path);
+    let valid = value.get("valid").and_then(Value::as_bool).unwrap_or(false);
+    let product_evidence_claim =
+        string_field(value, "product_evidence_claim").unwrap_or_else(|| "unknown".to_owned());
+    let release_gate_effect =
+        string_field(value, "release_gate_effect").unwrap_or_else(|| "advisory only".to_owned());
+    let referenced_beads = readiness_lab_beads(value);
+    let remediation_bead = referenced_beads
+        .first()
+        .cloned()
+        .or_else(|| builder.default_remediation_bead.clone());
+    let claim_id = format!("readiness_lab:{source_kind}:{report_id}");
+    let reproduction_command = readiness_lab_reproduction_command(value, &source_path);
+    let missing_artifacts =
+        readiness_lab_missing_artifacts(value, valid, product_evidence_claim.as_str());
+
+    builder.push_claim(ReadinessDashboardClaimReport {
+        claim_id: claim_id.clone(),
+        claim_state: readiness_lab_claim_state(valid, product_evidence_claim.as_str()),
+        source_kind: source_kind.clone(),
+        source_path: source_path.clone(),
+        validator_report: source_path.clone(),
+        controlling_lane: readiness_lab_lane(value),
+        freshness: Some(readiness_lab_freshness(value)),
+        host_class: readiness_lab_host_class(value),
+        missing_artifacts,
+        remediation_bead: remediation_bead.clone(),
+        next_safe_command: next_safe_command(remediation_bead.as_deref(), &reproduction_command),
+        evidence_basis: vec![
+            format!("readiness_lab_report:{report_id}"),
+            format!("product_evidence_claim:{product_evidence_claim}"),
+            format!("release_gate_effect:{release_gate_effect}"),
+        ],
+    });
+    builder.push_source(ReadinessDashboardSourceReport {
+        source_kind,
+        path: source_path,
+        valid: valid && product_evidence_claim == "none",
+        summary: format!(
+            "report_id={report_id} product_evidence_claim={product_evidence_claim} release_gate_effect={release_gate_effect}"
+        ),
+        referenced_beads,
+        produced_claim_ids: vec![claim_id],
+    });
+}
+
 fn recommendation_for_claim(
     claim: &ReadinessDashboardClaimReport,
 ) -> ReadinessDashboardRecommendation {
@@ -704,6 +761,7 @@ fn recommendation_for_claim(
             ReadinessDashboardRecommendationSeverity::Blocker
         }
         ReadinessDashboardClaimState::HandoffOnly
+        | ReadinessDashboardClaimState::AdvisoryOnly
         | ReadinessDashboardClaimState::DryRunOnly
         | ReadinessDashboardClaimState::DetectionOnly
         | ReadinessDashboardClaimState::Experimental
@@ -1036,6 +1094,182 @@ fn permissioned_host_class(value: &Value) -> Option<String> {
         })
 }
 
+fn readiness_lab_source_kind(value: &Value) -> String {
+    if value.get("replay_id").is_some() {
+        "readiness_lab_replay".to_owned()
+    } else if value.get("simulation_id").is_some() {
+        "readiness_lab_host_simulation".to_owned()
+    } else if value.get("plan_id").is_some() {
+        "readiness_lab_rch_schedule".to_owned()
+    } else if value.get("graph_id").is_some() {
+        "readiness_lab_truth_graph".to_owned()
+    } else if value.get("lab_id").is_some() {
+        "readiness_lab_contracts".to_owned()
+    } else {
+        "readiness_lab".to_owned()
+    }
+}
+
+fn readiness_lab_report_id(value: &Value, source_path: &str) -> String {
+    string_field(value, "replay_id")
+        .or_else(|| string_field(value, "simulation_id"))
+        .or_else(|| string_field(value, "plan_id"))
+        .or_else(|| string_field(value, "graph_id"))
+        .or_else(|| string_field(value, "lab_id"))
+        .map_or_else(|| sanitize_id(source_path), |id| sanitize_id(&id))
+}
+
+fn readiness_lab_claim_state(
+    valid: bool,
+    product_evidence_claim: &str,
+) -> ReadinessDashboardClaimState {
+    if !valid || product_evidence_claim != "none" {
+        ReadinessDashboardClaimState::Blocked
+    } else {
+        ReadinessDashboardClaimState::AdvisoryOnly
+    }
+}
+
+fn readiness_lab_missing_artifacts(
+    value: &Value,
+    valid: bool,
+    product_evidence_claim: &str,
+) -> Vec<String> {
+    let mut artifacts = BTreeSet::new();
+    if product_evidence_claim != "none" {
+        artifacts.insert(format!(
+            "readiness-lab product_evidence_claim must be `none`, got `{product_evidence_claim}`"
+        ));
+    }
+    if !valid {
+        artifacts.insert("valid readiness-lab advisory report".to_owned());
+    }
+    artifacts.extend(readiness_lab_findings(value, "errors"));
+    artifacts.extend(readiness_lab_rows(value).iter().filter_map(|row| {
+        if row.get("valid").and_then(Value::as_bool).unwrap_or(true) {
+            None
+        } else {
+            Some(format!(
+                "invalid readiness-lab row `{}`",
+                readiness_lab_row_id(row)
+            ))
+        }
+    }));
+    artifacts.into_iter().collect()
+}
+
+fn readiness_lab_findings(value: &Value, field: &str) -> Vec<String> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    let finding_id = string_field(item, "finding_id")
+                        .unwrap_or_else(|| format!("{field}_entry"));
+                    let message =
+                        string_field(item, "message").unwrap_or_else(|| value_to_string(item));
+                    format!("{finding_id}: {message}")
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn readiness_lab_rows(value: &Value) -> &[Value] {
+    value
+        .get("rows")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
+
+fn readiness_lab_row_id(value: &Value) -> String {
+    string_field(value, "fixture_id")
+        .or_else(|| string_field(value, "host_id"))
+        .or_else(|| string_field(value, "lane_id"))
+        .or_else(|| string_field(value, "claim_id"))
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn readiness_lab_beads(value: &Value) -> Vec<String> {
+    let mut beads = BTreeSet::new();
+    for field in ["source_bead", "real_campaign_bead"] {
+        if let Some(bead) = string_field(value, field)
+            && bead.starts_with("bd-")
+        {
+            beads.insert(bead);
+        }
+    }
+    beads.extend(
+        string_array_field(value, "target_beads")
+            .into_iter()
+            .filter(|id| id.starts_with("bd-")),
+    );
+    for field in ["rows", "claims", "nodes", "edges"] {
+        if let Some(items) = value.get(field).and_then(Value::as_array) {
+            for item in items {
+                for nested_field in ["source_bead", "bead_id"] {
+                    if let Some(bead) = string_field(item, nested_field)
+                        && bead.starts_with("bd-")
+                    {
+                        beads.insert(bead);
+                    }
+                }
+            }
+        }
+    }
+    beads.into_iter().collect()
+}
+
+fn readiness_lab_reproduction_command(value: &Value, source_path: &str) -> String {
+    string_field(value, "reproduction_command").unwrap_or_else(|| {
+        format!(
+            "cargo run -p ffs-harness -- readiness-dashboard --readiness-lab-report {source_path}"
+        )
+    })
+}
+
+fn readiness_lab_lane(value: &Value) -> Option<String> {
+    string_field(value, "lane_id").or_else(|| {
+        value
+            .get("rows")
+            .and_then(Value::as_array)
+            .and_then(|rows| rows.iter().find_map(|row| string_field(row, "lane_id")))
+    })
+}
+
+fn readiness_lab_freshness(value: &Value) -> String {
+    if let Some(count) = value.get("stale_artifact_count").map(value_to_string)
+        && count != "0"
+    {
+        return format!("stale_artifact_count={count}");
+    }
+    if let Some(count) = value.get("stale_claim_count").map(value_to_string)
+        && count != "0"
+    {
+        return format!("stale_claim_count={count}");
+    }
+    if let Some(count) = value.get("stale_inventory_count").map(value_to_string)
+        && count != "0"
+    {
+        return format!("stale_inventory_count={count}");
+    }
+    "advisory_report_fresh_or_unchecked".to_owned()
+}
+
+fn readiness_lab_host_class(value: &Value) -> Option<String> {
+    value
+        .get("rows")
+        .and_then(Value::as_array)
+        .and_then(|rows| {
+            rows.iter().find_map(|row| {
+                string_field(row, "host_class").or_else(|| string_field(row, "classification"))
+            })
+        })
+}
+
 fn string_field(value: &Value, field: &str) -> Option<String> {
     value
         .get(field)
@@ -1179,6 +1413,7 @@ mod tests {
             proof_claim_effect_to_state(ProofBundleClaimEffect::HandoffOnly, true),
             proof_claim_effect_to_state(ProofBundleClaimEffect::BlocksPublicClaim, true),
             proof_claim_effect_to_state(ProofBundleClaimEffect::DoesNotStrengthenPublicClaim, true),
+            readiness_lab_claim_state(true, "none"),
         ];
         assert!(states.contains(&ReadinessDashboardClaimState::Validated));
         assert!(states.contains(&ReadinessDashboardClaimState::OptInMutating));
@@ -1188,6 +1423,7 @@ mod tests {
         assert!(states.contains(&ReadinessDashboardClaimState::Disabled));
         assert!(states.contains(&ReadinessDashboardClaimState::Hidden));
         assert!(states.contains(&ReadinessDashboardClaimState::HandoffOnly));
+        assert!(states.contains(&ReadinessDashboardClaimState::AdvisoryOnly));
         assert!(states.contains(&ReadinessDashboardClaimState::Blocked));
         assert!(states.contains(&ReadinessDashboardClaimState::Unknown));
     }
@@ -1336,6 +1572,297 @@ mod tests {
         assert_eq!(
             report.recommendations[0].bead_id.as_deref(),
             Some("bd-rchk0.53.8")
+        );
+    }
+
+    #[test]
+    fn readiness_lab_reports_stay_advisory_beside_authoritative_claims() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let release_path = dir.path().join("release_gate.json");
+        let host_path = dir.path().join("host_simulation.json");
+        let schedule_path = dir.path().join("rch_schedule.json");
+        let truth_path = dir.path().join("truth_graph.json");
+        let replay_path = dir.path().join("numa_p99_replay.json");
+        fs::write(
+            &release_path,
+            r#"{
+  "schema_version": 1,
+  "policy_id": "policy-a",
+  "bundle_id": "bundle-a",
+  "valid": true,
+  "release_ready": false,
+  "proof_bundle_valid": true,
+  "feature_reports": [
+    {
+      "feature_id": "mount.rw.ext4",
+      "docs_wording_id": "docs-mount",
+      "previous_state": "experimental",
+      "target_state": "validated",
+      "final_state": "validated",
+      "upgrade_allowed": true,
+      "finding_ids": []
+    }
+  ],
+  "findings": [],
+  "generated_wording": [],
+  "required_log_fields": [],
+  "errors": [],
+  "warnings": [],
+  "reproduction_command": "cargo run -p ffs-harness -- evaluate-release-gates --bundle bundle.json --policy policy.json"
+}"#,
+        )
+        .expect("write release gate");
+        fs::write(
+            &host_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "simulation_id": "readiness-lab-hosts",
+                "valid": true,
+                "product_evidence_claim": "none",
+                "release_gate_effect": "advisory simulation only; public readiness unchanged",
+                "source_bead": "bd-919xg",
+                "real_campaign_bead": "bd-c7fqh",
+                "candidate_count": 1,
+                "blocked_count": 0,
+                "rows": [
+                    {
+                        "host_id": "large-a",
+                        "valid": true,
+                        "classification": "permissioned_large_host_candidate",
+                        "product_evidence_claim": "none"
+                    }
+                ],
+                "errors": [],
+                "warnings": []
+            }))
+            .expect("serialize host report"),
+        )
+        .expect("write host report");
+        fs::write(
+            &schedule_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "plan_id": "readiness-lab-rch-plan",
+                "valid": true,
+                "dry_run_only": true,
+                "product_evidence_claim": "none",
+                "release_gate_effect": "rehearsal schedule only; public readiness unchanged",
+                "source_bead": "bd-919xg",
+                "lane_count": 2,
+                "planned_lane_count": 2,
+                "rows": [
+                    {
+                        "lane_id": "xfstests",
+                        "valid": true,
+                        "product_evidence_claim": "none",
+                        "source_bead": "bd-919xg"
+                    }
+                ],
+                "errors": [],
+                "warnings": []
+            }))
+            .expect("serialize schedule report"),
+        )
+        .expect("write schedule report");
+        fs::write(
+            &truth_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "graph_id": "readiness-lab-truth-graph",
+                "valid": true,
+                "product_evidence_claim": "none",
+                "source_bead": "bd-919xg",
+                "source_count": 2,
+                "claim_count": 2,
+                "stale_claim_count": 0,
+                "contradictory_claim_count": 0,
+                "nodes": [
+                    {"node_id": "bead:bd-919xg", "bead_id": "bd-919xg", "product_evidence_claim": null}
+                ],
+                "edges": [],
+                "errors": [],
+                "warnings": []
+            }))
+            .expect("serialize truth graph"),
+        )
+        .expect("write truth graph");
+        fs::write(
+            &replay_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "replay_id": "readiness-lab-numa-p99",
+                "valid": true,
+                "product_evidence_claim": "none",
+                "release_gate_effect": "replay fixture is advisory only; public readiness unchanged",
+                "source_bead": "bd-919xg",
+                "fixture_count": 1,
+                "rows": [
+                    {
+                        "fixture_id": "balanced-numa",
+                        "valid": true,
+                        "product_evidence_claim": "none",
+                        "source_bead": "bd-919xg"
+                    }
+                ],
+                "errors": [],
+                "warnings": []
+            }))
+            .expect("serialize replay report"),
+        )
+        .expect("write replay report");
+
+        let report = build_readiness_dashboard(&ReadinessDashboardConfig {
+            release_gate_reports: vec![release_path],
+            readiness_lab_reports: vec![host_path, schedule_path, truth_path, replay_path],
+            default_remediation_bead: Some("bd-4v16z.10".to_owned()),
+            ..ReadinessDashboardConfig::default()
+        })
+        .expect("dashboard");
+
+        assert!(report.valid);
+        assert_eq!(report.source_report_count, 5);
+        assert!(
+            report
+                .claims
+                .iter()
+                .any(|claim| claim.claim_state == ReadinessDashboardClaimState::Validated)
+        );
+        let advisory_claims = report
+            .claims
+            .iter()
+            .filter(|claim| claim.source_kind.starts_with("readiness_lab_"))
+            .collect::<Vec<_>>();
+        assert_eq!(advisory_claims.len(), 4);
+        for claim in advisory_claims {
+            assert_eq!(
+                claim.claim_state,
+                ReadinessDashboardClaimState::AdvisoryOnly
+            );
+            assert_eq!(claim.remediation_bead.as_deref(), Some("bd-919xg"));
+            assert_eq!(claim.validator_report, claim.source_path);
+            assert!(
+                claim
+                    .evidence_basis
+                    .iter()
+                    .any(|basis| basis == "product_evidence_claim:none")
+            );
+            let recommendation = report
+                .recommendations
+                .iter()
+                .find(|recommendation| recommendation.claim_id == claim.claim_id)
+                .expect("advisory recommendation");
+            assert_eq!(
+                recommendation.severity,
+                ReadinessDashboardRecommendationSeverity::FollowUp
+            );
+            assert_eq!(
+                recommendation.validator_report.as_deref(),
+                Some(claim.validator_report.as_str())
+            );
+            assert_eq!(recommendation.bead_id.as_deref(), Some("bd-919xg"));
+        }
+    }
+
+    #[test]
+    fn stale_readiness_lab_artifact_blocks_with_report_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("stale_replay.json");
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "replay_id": "readiness-lab-stale-replay",
+                "valid": false,
+                "product_evidence_claim": "none",
+                "release_gate_effect": "replay fixture is advisory only; public readiness unchanged",
+                "source_bead": "bd-919xg",
+                "stale_artifact_count": 1,
+                "rows": [
+                    {"fixture_id": "old-fixture", "valid": false, "source_bead": "bd-919xg"}
+                ],
+                "errors": [
+                    {
+                        "finding_id": "stale_fixture",
+                        "severity": "error",
+                        "message": "fixture is older than the advisory replay horizon"
+                    }
+                ],
+                "warnings": []
+            }))
+            .expect("serialize stale replay"),
+        )
+        .expect("write stale replay");
+
+        let report = build_readiness_dashboard(&ReadinessDashboardConfig {
+            readiness_lab_reports: vec![path.clone()],
+            default_remediation_bead: Some("bd-4v16z.10".to_owned()),
+            ..ReadinessDashboardConfig::default()
+        })
+        .expect("dashboard");
+
+        assert_eq!(report.source_validator_failure_count, 1);
+        assert_eq!(
+            report.claims[0].claim_state,
+            ReadinessDashboardClaimState::Blocked
+        );
+        assert_eq!(
+            report.claims[0].freshness.as_deref(),
+            Some("stale_artifact_count=1")
+        );
+        assert!(
+            report.claims[0]
+                .missing_artifacts
+                .iter()
+                .any(|artifact| artifact.contains("stale_fixture"))
+        );
+        assert!(
+            report.claims[0]
+                .missing_artifacts
+                .iter()
+                .any(|artifact| artifact.contains("old-fixture"))
+        );
+        assert_eq!(
+            report.recommendations[0].validator_report.as_deref(),
+            Some(path.display().to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn readiness_lab_product_claim_violation_is_blocked() {
+        let mut builder = DashboardBuilder::new(&ReadinessDashboardConfig {
+            default_remediation_bead: Some("bd-4v16z.10".to_owned()),
+            ..ReadinessDashboardConfig::default()
+        });
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "simulation_id": "bad-product-claim",
+            "valid": true,
+            "product_evidence_claim": "product_pass_fail",
+            "release_gate_effect": "should not strengthen public readiness",
+            "source_bead": "bd-919xg",
+            "rows": [],
+            "errors": [],
+            "warnings": []
+        });
+        add_readiness_lab_report(&mut builder, Path::new("bad_lab.json"), &value);
+        let report = builder.finish();
+
+        assert_eq!(report.source_validator_failure_count, 1);
+        assert_eq!(
+            report.claims[0].claim_state,
+            ReadinessDashboardClaimState::Blocked
+        );
+        assert!(
+            report.claims[0]
+                .missing_artifacts
+                .iter()
+                .any(|artifact| artifact.contains("product_evidence_claim"))
+        );
+        assert!(
+            report.claims[0]
+                .evidence_basis
+                .iter()
+                .any(|basis| basis == "product_evidence_claim:product_pass_fail")
         );
     }
 

@@ -176,6 +176,10 @@ PROOF_REPORT="$FIXTURE_DIR/proof_bundle_report.json"
 RELEASE_REPORT="$FIXTURE_DIR/release_gate_report.json"
 EVIDENCE_INDEX="$FIXTURE_DIR/operational_evidence_index.json"
 PERMISSIONED_REPORT="$FIXTURE_DIR/permissioned_campaign_report.json"
+LAB_HOST_REPORT="$FIXTURE_DIR/readiness_lab_host_simulation.json"
+LAB_SCHEDULE_REPORT="$FIXTURE_DIR/readiness_lab_rch_schedule.json"
+LAB_TRUTH_REPORT="$FIXTURE_DIR/readiness_lab_truth_graph.json"
+LAB_REPLAY_REPORT="$FIXTURE_DIR/readiness_lab_numa_p99_replay.json"
 BEADS_FILE="$FIXTURE_DIR/issues.jsonl"
 
 mkdir -p "$FIXTURE_DIR" "$REPORT_DIR"
@@ -188,14 +192,34 @@ else
     scenario_result "readiness_dashboard_cli_wired" "FAIL" "missing readiness dashboard command wiring"
 fi
 
-e2e_step "Scenario 2: synthetic validator reports are written"
-if python3 - "$PROOF_REPORT" "$RELEASE_REPORT" "$EVIDENCE_INDEX" "$PERMISSIONED_REPORT" "$BEADS_FILE" <<'PY'
+e2e_step "Scenario 2: synthetic validator and advisory lab reports are written"
+if python3 - "$PROOF_REPORT" "$RELEASE_REPORT" "$EVIDENCE_INDEX" "$PERMISSIONED_REPORT" "$LAB_HOST_REPORT" "$LAB_SCHEDULE_REPORT" "$LAB_TRUTH_REPORT" "$LAB_REPLAY_REPORT" "$BEADS_FILE" <<'PY'
 import json
 import pathlib
 import sys
 
-proof_report, release_report, evidence_index, permissioned_report, beads_file = map(pathlib.Path, sys.argv[1:])
-for path in [proof_report, release_report, evidence_index, permissioned_report, beads_file]:
+(
+    proof_report,
+    release_report,
+    evidence_index,
+    permissioned_report,
+    lab_host_report,
+    lab_schedule_report,
+    lab_truth_report,
+    lab_replay_report,
+    beads_file,
+) = map(pathlib.Path, sys.argv[1:])
+for path in [
+    proof_report,
+    release_report,
+    evidence_index,
+    permissioned_report,
+    lab_host_report,
+    lab_schedule_report,
+    lab_truth_report,
+    lab_replay_report,
+    beads_file,
+]:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 proof_report.write_text(json.dumps({
@@ -340,6 +364,97 @@ permissioned_report.write_text(json.dumps({
     "host_facts": [{"fact_id": "host_class", "observed_value": "permissioned_large_host_candidate", "required_value": "permissioned_large_host", "proof_path": "host.json"}]
 }, indent=2) + "\n", encoding="utf-8")
 
+lab_host_report.write_text(json.dumps({
+    "schema_version": 1,
+    "simulation_id": "dashboard-host-simulation",
+    "valid": True,
+    "product_evidence_claim": "none",
+    "release_gate_effect": "advisory host simulation only; public readiness unchanged",
+    "source_bead": "bd-919xg",
+    "real_campaign_bead": "bd-c7fqh",
+    "host_count": 2,
+    "candidate_count": 1,
+    "blocked_count": 0,
+    "rows": [
+        {
+            "host_id": "large-host-a",
+            "valid": True,
+            "classification": "permissioned_large_host_candidate",
+            "candidate_for_authorized_run": True,
+            "product_evidence_claim": "none",
+            "source_bead": "bd-919xg"
+        }
+    ],
+    "errors": [],
+    "warnings": []
+}, indent=2) + "\n", encoding="utf-8")
+
+lab_schedule_report.write_text(json.dumps({
+    "schema_version": 1,
+    "plan_id": "dashboard-rch-plan",
+    "valid": True,
+    "dry_run_only": True,
+    "product_evidence_claim": "none",
+    "release_gate_effect": "rehearsal schedule only; public readiness unchanged",
+    "source_bead": "bd-919xg",
+    "lane_count": 2,
+    "planned_lane_count": 2,
+    "rows": [
+        {
+            "lane_id": "xfstests",
+            "valid": True,
+            "product_evidence_claim": "none",
+            "source_bead": "bd-919xg"
+        }
+    ],
+    "errors": [],
+    "warnings": []
+}, indent=2) + "\n", encoding="utf-8")
+
+lab_truth_report.write_text(json.dumps({
+    "schema_version": 1,
+    "graph_id": "dashboard-truth-graph",
+    "valid": True,
+    "product_evidence_claim": "none",
+    "source_bead": "bd-919xg",
+    "source_count": 2,
+    "claim_count": 2,
+    "node_count": 2,
+    "edge_count": 1,
+    "stale_claim_count": 0,
+    "contradictory_claim_count": 0,
+    "nodes": [
+        {"node_id": "bead:bd-919xg", "bead_id": "bd-919xg", "product_evidence_claim": None},
+        {"node_id": "claim:advisory", "bead_id": "bd-919xg", "product_evidence_claim": "none"}
+    ],
+    "edges": [
+        {"from_node_id": "bead:bd-919xg", "to_node_id": "claim:advisory", "bead_id": "bd-919xg", "validator_report_path": "readiness_lab_truth_graph.json"}
+    ],
+    "errors": [],
+    "warnings": []
+}, indent=2) + "\n", encoding="utf-8")
+
+lab_replay_report.write_text(json.dumps({
+    "schema_version": 1,
+    "replay_id": "dashboard-numa-p99",
+    "valid": True,
+    "product_evidence_claim": "none",
+    "release_gate_effect": "replay fixture is advisory only; public readiness unchanged",
+    "source_bead": "bd-919xg",
+    "fixture_count": 1,
+    "stale_artifact_count": 0,
+    "rows": [
+        {
+            "fixture_id": "balanced-numa",
+            "valid": True,
+            "product_evidence_claim": "none",
+            "source_bead": "bd-919xg"
+        }
+    ],
+    "errors": [],
+    "warnings": []
+}, indent=2) + "\n", encoding="utf-8")
+
 beads_file.write_text(
     "\n".join([
         json.dumps({"id": "bd-4v16z.10", "title": "Build operator readiness dashboard over proof and evidence state", "status": "in_progress", "priority": 3}),
@@ -350,7 +465,7 @@ beads_file.write_text(
 )
 PY
 then
-    scenario_result "readiness_dashboard_fixtures_written" "PASS" "synthetic validator reports and tracker rows emitted"
+    scenario_result "readiness_dashboard_fixtures_written" "PASS" "synthetic validator, advisory lab, and tracker rows emitted"
 else
     scenario_result "readiness_dashboard_fixtures_written" "FAIL" "fixture generation failed"
 fi
@@ -361,6 +476,10 @@ if run_rch_capture "$RAW_JSON" cargo run --quiet -p ffs-harness -- readiness-das
     --release-gate-report "$RELEASE_REPORT" \
     --operational-evidence-index "$EVIDENCE_INDEX" \
     --permissioned-campaign-report "$PERMISSIONED_REPORT" \
+    --readiness-lab-report "$LAB_HOST_REPORT" \
+    --readiness-lab-report "$LAB_SCHEDULE_REPORT" \
+    --readiness-lab-report "$LAB_TRUTH_REPORT" \
+    --readiness-lab-report "$LAB_REPLAY_REPORT" \
     --beads "$BEADS_FILE" \
     --default-remediation-bead bd-4v16z.10 \
     --format json \
@@ -370,8 +489,10 @@ import json
 import sys
 
 data = json.loads(open(sys.argv[1], encoding="utf-8").read())
-if data["source_report_count"] != 4:
-    raise SystemExit(f"expected four source reports, got {data['source_report_count']}")
+if data.get("release_ready") is True:
+    raise SystemExit("dashboard must not mark release_ready=true from advisory lab reports")
+if data["source_report_count"] != 8:
+    raise SystemExit(f"expected eight source reports, got {data['source_report_count']}")
 claims = {claim["claim_id"]: claim for claim in data["claims"]}
 required = {
     "release_gate:mount.rw.ext4": "validated",
@@ -379,10 +500,22 @@ required = {
     "permissioned:swarm-large-host": "handoff_only",
     "proof_bundle:dashboard-proof-bundle:missing:xfstests": "blocked",
     "operational_evidence:swarm_tail_latency:tail_latency": "validated",
+    "readiness_lab:readiness_lab_host_simulation:dashboard-host-simulation": "advisory_only",
+    "readiness_lab:readiness_lab_rch_schedule:dashboard-rch-plan": "advisory_only",
+    "readiness_lab:readiness_lab_truth_graph:dashboard-truth-graph": "advisory_only",
+    "readiness_lab:readiness_lab_replay:dashboard-numa-p99": "advisory_only",
 }
 for claim_id, state in required.items():
     if claims.get(claim_id, {}).get("claim_state") != state:
         raise SystemExit(f"{claim_id} state {claims.get(claim_id)} != {state}")
+for claim_id in [claim_id for claim_id in required if claim_id.startswith("readiness_lab:")]:
+    claim = claims[claim_id]
+    if "product_evidence_claim:none" not in claim["evidence_basis"]:
+        raise SystemExit(f"{claim_id} lost explicit non-product evidence basis: {claim}")
+    if not claim["validator_report"]:
+        raise SystemExit(f"{claim_id} lost validator report path")
+    if claim["remediation_bead"] != "bd-919xg":
+        raise SystemExit(f"{claim_id} lost advisory source bead: {claim}")
 hidden = claims["release_gate:xfstests.baseline"]
 if hidden["controlling_lane"] != "xfstests" or hidden["remediation_bead"] != "bd-rchk3.3":
     raise SystemExit(f"release-gate follow-up link lost: {hidden}")
@@ -390,6 +523,9 @@ if "br show bd-rchk3.3 --no-db --json" != hidden["next_safe_command"]:
     raise SystemExit(f"unexpected next command: {hidden['next_safe_command']}")
 if not all(rec.get("validator_report") or rec.get("bead_id") for rec in data["recommendations"]):
     raise SystemExit("every recommendation must link to a validator report or bead")
+for rec in data["recommendations"]:
+    if rec["claim_id"].startswith("readiness_lab:") and not (rec.get("validator_report") or rec.get("bead_id")):
+        raise SystemExit(f"advisory lab recommendation lacks source link: {rec}")
 tracker_ids = {row["issue_id"] for row in data["tracker_follow_up_beads"]}
 if "bd-4v16z.10" not in tracker_ids or "bd-rchk3.3" not in tracker_ids:
     raise SystemExit(f"tracker follow-up beads missing: {tracker_ids}")
@@ -408,6 +544,10 @@ if run_rch_capture "$RAW_MD" cargo run --quiet -p ffs-harness -- readiness-dashb
     --release-gate-report "$RELEASE_REPORT" \
     --operational-evidence-index "$EVIDENCE_INDEX" \
     --permissioned-campaign-report "$PERMISSIONED_REPORT" \
+    --readiness-lab-report "$LAB_HOST_REPORT" \
+    --readiness-lab-report "$LAB_SCHEDULE_REPORT" \
+    --readiness-lab-report "$LAB_TRUTH_REPORT" \
+    --readiness-lab-report "$LAB_REPLAY_REPORT" \
     --beads "$BEADS_FILE" \
     --default-remediation-bead bd-4v16z.10 \
     --format markdown \
@@ -415,6 +555,8 @@ if run_rch_capture "$RAW_MD" cargo run --quiet -p ffs-harness -- readiness-dashb
     if grep -q "FrankenFS Operator Readiness Dashboard" "$DASHBOARD_MD" \
         && grep -q "release_gate:xfstests.baseline" "$DASHBOARD_MD" \
         && grep -q "handoff_only" "$DASHBOARD_MD" \
+        && grep -q "readiness_lab:readiness_lab_host_simulation:dashboard-host-simulation" "$DASHBOARD_MD" \
+        && grep -q "advisory_only" "$DASHBOARD_MD" \
         && grep -q "validator=" "$DASHBOARD_MD" \
         && grep -q "bd-rchk3.3" "$DASHBOARD_MD" \
         && grep -q "Tracker Follow-Up Beads" "$DASHBOARD_MD"; then

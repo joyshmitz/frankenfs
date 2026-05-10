@@ -399,6 +399,7 @@ fn run_manifest_command(command: Option<&str>, args: &[String]) -> Option<Result
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str);
@@ -1130,6 +1131,7 @@ fn operational_evidence_index_summary(
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn readiness_dashboard_cmd(args: &[String]) -> Result<()> {
     let mut config = ReadinessDashboardConfig::default();
     let mut out_path: Option<String> = None;
@@ -1168,6 +1170,14 @@ fn readiness_dashboard_cmd(args: &[String]) -> Result<()> {
                 config.permissioned_campaign_reports.push(PathBuf::from(
                     args.get(i)
                         .context("--permissioned-campaign-report requires a path")?
+                        .as_str(),
+                ));
+            }
+            "--readiness-lab-report" => {
+                i += 1;
+                config.readiness_lab_reports.push(PathBuf::from(
+                    args.get(i)
+                        .context("--readiness-lab-report requires a path")?
                         .as_str(),
                 ));
             }
@@ -1309,7 +1319,7 @@ fn validate_readiness_lab_contracts_cmd(args: &[String]) -> Result<()> {
     let manifest_path = manifest_path.context("--manifest is required")?;
     let bundle = load_readiness_lab_contract_bundle(&manifest_path)?;
     let config = ReadinessLabValidationConfig {
-        manifest_path: manifest_path.clone(),
+        manifest_path,
         reference_epoch_days,
     };
     let report = validate_readiness_lab_contract_bundle(&bundle, &config);
@@ -1408,7 +1418,7 @@ fn simulate_readiness_lab_hosts_cmd(args: &[String]) -> Result<()> {
     let manifest_path = manifest_path.context("--manifest is required")?;
     let manifest = load_readiness_lab_host_simulation_manifest(&manifest_path)?;
     let config = ReadinessLabHostSimulationConfig {
-        manifest_path: manifest_path.clone(),
+        manifest_path,
         reference_epoch_days,
     };
     let report = simulate_readiness_lab_hosts(&manifest, &config);
@@ -1502,7 +1512,7 @@ fn plan_readiness_lab_rch_lanes_cmd(args: &[String]) -> Result<()> {
     let manifest_path = manifest_path.context("--manifest is required")?;
     let manifest = load_readiness_lab_rch_lane_schedule_manifest(&manifest_path)?;
     let config = ReadinessLabRchLaneScheduleConfig {
-        manifest_path: manifest_path.clone(),
+        manifest_path,
         reference_epoch_days,
     };
     let report = plan_readiness_lab_rch_lanes(&manifest, &config);
@@ -1599,7 +1609,7 @@ fn build_readiness_lab_truth_graph_cmd(args: &[String]) -> Result<()> {
     let manifest_path = manifest_path.context("--manifest is required")?;
     let manifest = load_readiness_lab_truth_graph_manifest(&manifest_path)?;
     let config = ReadinessLabTruthGraphConfig {
-        manifest_path: manifest_path.clone(),
+        manifest_path,
         reference_epoch_days,
     };
     let report = ffs_harness::readiness_lab::build_readiness_lab_truth_graph(&manifest, &config);
@@ -1703,7 +1713,7 @@ fn validate_readiness_lab_numa_p99_replay_cmd(args: &[String]) -> Result<()> {
         manifest_path.unwrap_or_else(|| DEFAULT_READINESS_LAB_NUMA_P99_REPLAY_MANIFEST.to_owned());
     let manifest = load_readiness_lab_numa_p99_replay_manifest(&manifest_path)?;
     let config = ReadinessLabNumaP99ReplayConfig {
-        manifest_path: manifest_path.clone(),
+        manifest_path,
         reference_epoch_days,
     };
     let report = validate_readiness_lab_numa_p99_replay(&manifest, &config);
@@ -1747,7 +1757,7 @@ fn print_readiness_lab_numa_p99_replay_usage() {
 
 fn print_readiness_dashboard_usage() {
     println!(
-        "ffs-harness readiness-dashboard [--proof-bundle-report FILE ...] [--release-gate-report FILE ...] [--operational-evidence-index FILE ...] [--permissioned-campaign-report FILE ...] [--beads FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+        "ffs-harness readiness-dashboard [--proof-bundle-report FILE ...] [--release-gate-report FILE ...] [--operational-evidence-index FILE ...] [--permissioned-campaign-report FILE ...] [--readiness-lab-report FILE ...] [--beads FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
         "  Renders a read-only operator dashboard over strict validator reports; it never upgrades readiness on its own."
@@ -6665,6 +6675,7 @@ fn print_usage() {
     print_usage_examples();
 }
 
+#[allow(clippy::too_many_lines)]
 fn print_usage_core_commands() {
     println!("  ffs-harness parity");
     println!("  ffs-harness check-fixtures");
@@ -6700,7 +6711,7 @@ fn print_usage_core_commands() {
         "  ffs-harness recommend-readiness-actions [--input FILE] --out-json FILE --out-md FILE --stdout-log FILE --stderr-log FILE [--report-id ID] [--generated-at TS] [--invocation CMD]"
     );
     println!(
-        "  ffs-harness readiness-dashboard [--proof-bundle-report FILE ...] [--release-gate-report FILE ...] [--operational-evidence-index FILE ...] [--permissioned-campaign-report FILE ...] [--beads FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+        "  ffs-harness readiness-dashboard [--proof-bundle-report FILE ...] [--release-gate-report FILE ...] [--operational-evidence-index FILE ...] [--permissioned-campaign-report FILE ...] [--readiness-lab-report FILE ...] [--beads FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
         "  ffs-harness validate-readiness-lab-contracts --manifest FILE [--reference-epoch-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
@@ -6809,6 +6820,7 @@ fn print_usage_commands() {
     println!("  ffs-harness validate-mounted-recovery-matrix [--matrix FILE] [--out FILE]");
 }
 
+#[allow(clippy::too_many_lines)]
 fn print_usage_examples() {
     println!("  ffs-harness generate-fixture my_ext4.img > conformance/fixtures/my_ext4.json");
     println!(
@@ -6832,7 +6844,7 @@ fn print_usage_examples() {
         "  ffs-harness recommend-readiness-actions --out-json artifacts/readiness/actions/report.json --out-md artifacts/readiness/actions/report.md --stdout-log artifacts/readiness/actions/stdout.log --stderr-log artifacts/readiness/actions/stderr.log"
     );
     println!(
-        "  ffs-harness readiness-dashboard --proof-bundle-report artifacts/proof/report.json --release-gate-report artifacts/proof/release_gate.json --operational-evidence-index artifacts/e2e/evidence-index.json --beads .beads/issues.jsonl --format markdown"
+        "  ffs-harness readiness-dashboard --proof-bundle-report artifacts/proof/report.json --release-gate-report artifacts/proof/release_gate.json --operational-evidence-index artifacts/e2e/evidence-index.json --readiness-lab-report artifacts/readiness-lab/truth-graph.json --beads .beads/issues.jsonl --format markdown"
     );
     println!(
         "  ffs-harness validate-readiness-lab-contracts --manifest artifacts/readiness-lab/contracts.json --reference-epoch-days 20001 --format markdown"
