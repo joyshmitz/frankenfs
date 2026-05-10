@@ -12,6 +12,8 @@ cd "$(dirname "$0")/../.."
 REPO_ROOT="$(pwd)"
 export REPO_ROOT
 
+source "$REPO_ROOT/scripts/e2e/lib.sh"
+
 export CARGO_TARGET_DIR="${FFS_SWARM_TAIL_CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_swarm_tail_latency}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-300}"
@@ -112,12 +114,14 @@ run_rch_capture() {
             if kill -0 "$pid" >/dev/null 2>&1; then
                 e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=$*"
                 kill -TERM "$pid" >/dev/null 2>&1 || true
+                e2e_rch_cancel_matching_queue_entry "$@"
             fi
             break
         fi
         if ((SECONDS >= deadline)); then
             e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=$*"
             kill -TERM "$pid" >/dev/null 2>&1 || true
+            e2e_rch_cancel_matching_queue_entry "$@"
             status=124
             break
         fi
