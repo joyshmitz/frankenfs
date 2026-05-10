@@ -6538,6 +6538,49 @@ mod tests {
         assert_eq!(entries[2].file_type, Ext4FileType::RegFile);
     }
 
+    /// bd-7stug — Kernel-conformance pin for the 3 Ext4SuperFlags
+    /// bit values per fs/ext4/ext4.h EXT4_FLAGS_*. These are read
+    /// from the superblock @ s_flags (0x160). SIGNED_HASH /
+    /// UNSIGNED_HASH gate effective_dirhash_version() — a drift
+    /// would silently route every htree directory lookup through
+    /// the wrong hash variant.
+    ///
+    /// Companion to bd-eiblh (incompat), bd-up9ff (compat/ro_compat),
+    /// bd-wa27v (xattr), bd-mo92w (DX_HASH_*).
+    #[test]
+    fn ext4_super_flags_match_ext4_h() {
+        // Per fs/ext4/ext4.h:
+        //   #define EXT4_FLAGS_SIGNED_HASH   0x0001
+        //   #define EXT4_FLAGS_UNSIGNED_HASH 0x0002
+        //   #define EXT4_FLAGS_TEST_FILESYS  0x0004
+        let cases: &[(&str, Ext4SuperFlags, u32)] = &[
+            ("SIGNED_HASH", Ext4SuperFlags::SIGNED_HASH, 0x0001),
+            ("UNSIGNED_HASH", Ext4SuperFlags::UNSIGNED_HASH, 0x0002),
+            ("TEST_FILESYS", Ext4SuperFlags::TEST_FILESYS, 0x0004),
+        ];
+        for (name, actual, expected) in cases {
+            assert_eq!(
+                actual.0, *expected,
+                "EXT4_FLAGS_{name} must equal kernel value 0x{expected:X}"
+            );
+            assert_eq!(
+                actual.0.count_ones(),
+                1,
+                "EXT4_FLAGS_{name} must be a single-bit flag"
+            );
+        }
+        // Pairwise distinctness.
+        let bits: Vec<u32> = cases.iter().map(|&(_, f, _)| f.0).collect();
+        let mut sorted = bits.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            bits.len(),
+            sorted.len(),
+            "EXT4_FLAGS_* bit values must be pairwise distinct"
+        );
+    }
+
     /// bd-mo92w — Kernel-conformance pin for the 6 DX_HASH_*
     /// hash-version constants + the 4-word DX_HASH_DEFAULT_SEED per
     /// fs/ext4/ext4.h. These values are read from the superblock @
