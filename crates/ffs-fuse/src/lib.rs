@@ -1842,11 +1842,10 @@ impl FrankenFuse {
         if self.inner.read_only {
             return Err(libc::EROFS);
         }
-        if self.should_shed(RequestOp::Fsync) {
-            return Err(libc::EBUSY);
-        }
-
         let cx = Self::cx_for_request();
+        if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Fsync) {
+            return Err(errno);
+        }
         self.with_request_scope(&cx, RequestOp::Fsync, |cx, scope| {
             self.inner
                 .ops
@@ -1975,8 +1974,9 @@ impl FrankenFuse {
         if self.inner.read_only {
             return Err(libc::EROFS);
         }
-        if self.should_shed(RequestOp::Create) {
-            return Err(libc::EBUSY);
+        let cx = Self::cx_for_request();
+        if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Create) {
+            return Err(errno);
         }
 
         #[cfg(not(unix))]
@@ -1986,7 +1986,6 @@ impl FrankenFuse {
         #[cfg(not(unix))]
         let name = owned_name.as_os_str();
 
-        let cx = Self::cx_for_request();
         self.with_request_scope(&cx, RequestOp::Create, |cx, scope| {
             let attr =
                 self.inner
@@ -2019,22 +2018,23 @@ impl FrankenFuse {
         if self.inner.read_only {
             return Err(libc::EROFS);
         }
-        if self.should_shed(RequestOp::Setattr) {
-            return Err(libc::EBUSY);
+        let cx = Self::cx_for_request();
+        if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Setattr) {
+            return Err(errno);
         }
 
-        self.dispatch_setattr(ino, attrs, caller_uid)
+        self.dispatch_setattr(&cx, ino, attrs, caller_uid)
             .map_err(|error| error.to_errno())
     }
 
     fn dispatch_setattr(
         &self,
+        cx: &Cx,
         ino: u64,
         attrs: &SetAttrRequest,
         caller_uid: u32,
     ) -> ffs_error::Result<InodeAttr> {
-        let cx = Self::cx_for_request();
-        self.with_request_scope(&cx, RequestOp::Setattr, |cx, scope| {
+        self.with_request_scope(cx, RequestOp::Setattr, |cx, scope| {
             self.authorize_setattr_owner_change(cx, scope, InodeNumber(ino), attrs, caller_uid)?;
             let attr = self.inner.ops.setattr(cx, scope, InodeNumber(ino), attrs)?;
             self.inner.ops.commit_request_scope(scope)?;
@@ -2204,8 +2204,9 @@ impl FrankenFuse {
         if self.inner.read_only {
             return Err(libc::EROFS);
         }
-        if self.should_shed(RequestOp::Symlink) {
-            return Err(libc::EBUSY);
+        let cx = Self::cx_for_request();
+        if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Symlink) {
+            return Err(errno);
         }
 
         #[cfg(not(unix))]
@@ -2220,7 +2221,6 @@ impl FrankenFuse {
         #[cfg(not(unix))]
         let target = PathBuf::from(String::from_utf8_lossy(target_bytes).into_owned());
 
-        let cx = Self::cx_for_request();
         self.with_request_scope(&cx, RequestOp::Symlink, |cx, scope| {
             let attr =
                 self.inner
@@ -2232,15 +2232,23 @@ impl FrankenFuse {
         .map_err(|error| error.to_errno())
     }
 
+    fn backpressure_errno(&self, cx: &Cx, op: RequestOp) -> Option<c_int> {
+        match self.should_shed_with_cx(cx, op) {
+            Ok(false) => None,
+            Ok(true) => Some(libc::EBUSY),
+            Err(error) => Some(error.to_errno()),
+        }
+    }
+
     /// Check backpressure for an operation. Returns `true` if the operation
     /// should be rejected (shed).
-    fn should_shed(&self, op: RequestOp) -> bool {
+    fn should_shed_with_cx(&self, cx: &Cx, op: RequestOp) -> ffs_error::Result<bool> {
         let Some(gate) = self.inner.backpressure.as_ref() else {
-            return false;
+            return Ok(false);
         };
 
         match gate.check(op) {
-            BackpressureDecision::Proceed => false,
+            BackpressureDecision::Proceed => Ok(false),
             BackpressureDecision::Throttle => {
                 self.inner.metrics.record_throttled();
                 trace!(
@@ -2248,14 +2256,39 @@ impl FrankenFuse {
                     delay_ms = BACKPRESSURE_THROTTLE_DELAY.as_millis(),
                     "backpressure: throttling request"
                 );
-                std::thread::sleep(BACKPRESSURE_THROTTLE_DELAY);
-                false
+                Self::sleep_with_cx_budget(cx, BACKPRESSURE_THROTTLE_DELAY)?;
+                Ok(false)
             }
             BackpressureDecision::Shed => {
                 self.inner.metrics.record_shed();
-                true
+                Ok(true)
             }
         }
+    }
+
+    fn sleep_with_cx_budget(cx: &Cx, delay: Duration) -> ffs_error::Result<()> {
+        if delay.is_zero() {
+            return Ok(());
+        }
+
+        cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
+        let budget = cx.budget();
+        let now = cx.now();
+        if budget.is_past_deadline(now)
+            || budget
+                .remaining_time(now)
+                .is_some_and(|remaining| remaining <= delay)
+        {
+            return Err(FfsError::Cancelled);
+        }
+        std::thread::sleep(delay);
+        cx.checkpoint().map_err(|_| FfsError::Cancelled)
+    }
+
+    #[cfg(test)]
+    fn should_shed(&self, op: RequestOp) -> bool {
+        let cx = Self::cx_for_request();
+        self.should_shed_with_cx(&cx, op).unwrap_or(true)
     }
 
     fn acquire_mutation_inode_guards(&self, inodes: &[InodeNumber]) -> FuseInodeGuards {
@@ -3468,19 +3501,20 @@ impl FrankenFuse {
 
     fn enforce_mutation_guards(
         &self,
+        cx: &Cx,
         op: RequestOp,
         ino_for_logging: u64,
     ) -> Result<(), MutationDispatchError> {
         if self.inner.read_only {
             return Err(MutationDispatchError::Errno(libc::EROFS));
         }
-        if self.should_shed(op) {
+        if let Some(errno) = self.backpressure_errno(cx, op) {
             warn!(
                 ino = ino_for_logging,
                 ?op,
                 "backpressure: shedding mutation request"
             );
-            return Err(MutationDispatchError::Errno(libc::EBUSY));
+            return Err(MutationDispatchError::Errno(errno));
         }
         Ok(())
     }
@@ -3493,8 +3527,8 @@ impl FrankenFuse {
         uid: u32,
         gid: u32,
     ) -> Result<InodeAttr, MutationDispatchError> {
-        self.enforce_mutation_guards(RequestOp::Mkdir, parent)?;
         let cx = Self::cx_for_request();
+        self.enforce_mutation_guards(&cx, RequestOp::Mkdir, parent)?;
         {
             let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(parent)]);
             self.with_request_scope(&cx, RequestOp::Mkdir, |cx, scope| {
@@ -3513,8 +3547,8 @@ impl FrankenFuse {
     }
 
     fn dispatch_rmdir(&self, parent: u64, name: &OsStr) -> Result<(), MutationDispatchError> {
-        self.enforce_mutation_guards(RequestOp::Rmdir, parent)?;
         let cx = Self::cx_for_request();
+        self.enforce_mutation_guards(&cx, RequestOp::Rmdir, parent)?;
         let result = {
             let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(parent)]);
             self.with_request_scope(&cx, RequestOp::Rmdir, |cx, scope| {
@@ -3532,8 +3566,8 @@ impl FrankenFuse {
     }
 
     fn dispatch_unlink(&self, parent: u64, name: &OsStr) -> Result<(), MutationDispatchError> {
-        self.enforce_mutation_guards(RequestOp::Unlink, parent)?;
         let cx = Self::cx_for_request();
+        self.enforce_mutation_guards(&cx, RequestOp::Unlink, parent)?;
         let result = {
             let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(parent)]);
             self.with_request_scope(&cx, RequestOp::Unlink, |cx, scope| {
@@ -3562,7 +3596,8 @@ impl FrankenFuse {
         uid: u32,
         gid: u32,
     ) -> Result<InodeAttr, MutationDispatchError> {
-        self.enforce_mutation_guards(RequestOp::Create, parent)?;
+        let cx = Self::cx_for_request();
+        self.enforce_mutation_guards(&cx, RequestOp::Create, parent)?;
 
         let s_ifmt = mode & libc::S_IFMT;
         // Regular files keep the legacy `create` fast path so we avoid
@@ -3572,7 +3607,6 @@ impl FrankenFuse {
         // i_block for char/block). overlayfs whiteouts land here as
         // S_IFCHR + rdev = makedev(0,0) = 0.
         if rdev == 0 && s_ifmt == libc::S_IFREG {
-            let cx = Self::cx_for_request();
             return {
                 let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(parent)]);
                 self.with_request_scope(&cx, RequestOp::Create, |cx, scope| {
@@ -3608,7 +3642,6 @@ impl FrankenFuse {
         let full_mode = u16::try_from(s_ifmt | (mode & 0o7777))
             .map_err(|_| MutationDispatchError::Errno(libc::EINVAL))?;
 
-        let cx = Self::cx_for_request();
         {
             let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(parent)]);
             self.with_request_scope(&cx, RequestOp::Create, |cx, scope| {
@@ -3640,8 +3673,8 @@ impl FrankenFuse {
         newname: &OsStr,
         flags: u32,
     ) -> Result<(), MutationDispatchError> {
-        self.enforce_mutation_guards(RequestOp::Rename, parent)?;
         let cx = Self::cx_for_request();
+        self.enforce_mutation_guards(&cx, RequestOp::Rename, parent)?;
         let result = {
             let _inode_guards =
                 self.acquire_mutation_inode_guards(&[InodeNumber(parent), InodeNumber(newparent)]);
@@ -3684,14 +3717,14 @@ impl FrankenFuse {
         data: &[u8],
         intent: WriteIntent,
     ) -> Result<u32, MutationDispatchError> {
-        self.enforce_mutation_guards(RequestOp::Write, ino)?;
+        let cx = Self::cx_for_request();
+        self.enforce_mutation_guards(&cx, RequestOp::Write, ino)?;
         if let Some(errno) = intent.unsupported_errno() {
             return Err(MutationDispatchError::Errno(errno));
         }
         let byte_offset =
             u64::try_from(offset).map_err(|_| MutationDispatchError::Errno(libc::EINVAL))?;
         let mut operation_offset = byte_offset;
-        let cx = Self::cx_for_request();
         let (written, _commit_seq) = {
             let _inode_guards = if intent.nowait() {
                 self.try_acquire_mutation_inode_guards(&[InodeNumber(ino)])
@@ -3761,9 +3794,9 @@ impl FrankenFuse {
         if len == 0 {
             return Ok(0);
         }
-        self.enforce_mutation_guards(RequestOp::Write, ino_out)?;
-        let copy_len = len.min(u64::from(u32::MAX));
         let cx = Self::cx_for_request();
+        self.enforce_mutation_guards(&cx, RequestOp::Write, ino_out)?;
+        let copy_len = len.min(u64::from(u32::MAX));
         let copied = {
             let _inode_guards =
                 self.acquire_mutation_inode_guards(&[InodeNumber(ino_in), InodeNumber(ino_out)]);
@@ -3793,19 +3826,19 @@ impl FrankenFuse {
 
     fn dispatch_setxattr(
         &self,
+        cx: &Cx,
         ino: u64,
         name: &str,
         value: &[u8],
         flags: i32,
         position: u32,
     ) -> Result<XattrSetMode, MutationDispatchError> {
-        self.enforce_mutation_guards(RequestOp::Setxattr, ino)?;
+        self.enforce_mutation_guards(cx, RequestOp::Setxattr, ino)?;
         let mode =
             Self::parse_setxattr_mode(flags, position).map_err(MutationDispatchError::Errno)?;
-        let cx = Self::cx_for_request();
         {
             let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(ino)]);
-            self.with_request_scope(&cx, RequestOp::Setxattr, |cx, scope| {
+            self.with_request_scope(cx, RequestOp::Setxattr, |cx, scope| {
                 self.inner
                     .ops
                     .setxattr(cx, scope, InodeNumber(ino), name, value, mode)?;
@@ -4186,12 +4219,12 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EROFS);
             return;
         }
-        if self.should_shed(RequestOp::Symlink) {
+        let cx = Self::cx_for_request();
+        if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Symlink) {
             warn!(parent, "backpressure: shedding symlink");
-            reply.error(libc::EBUSY);
+            reply.error(errno);
             return;
         }
-        let cx = Self::cx_for_request();
         match self.with_request_scope(&cx, RequestOp::Symlink, |cx, scope| {
             let attr = self.inner.ops.symlink(
                 cx,
@@ -4266,17 +4299,17 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EROFS);
             return;
         }
-        if self.should_shed(RequestOp::Setxattr) {
+        let cx = Self::cx_for_request();
+        if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Setxattr) {
             warn!(ino, "backpressure: shedding setxattr");
-            reply.error(libc::EBUSY);
+            reply.error(errno);
             return;
         }
         let Some(name) = name.to_str() else {
             reply.error(libc::EINVAL);
             return;
         };
-        let cx = Self::cx_for_request();
-        match self.dispatch_setxattr(ino, name, value, flags, position) {
+        match self.dispatch_setxattr(&cx, ino, name, value, flags, position) {
             Ok(_) => reply.ok(),
             Err(MutationDispatchError::Errno(errno)) => reply.error(errno),
             Err(MutationDispatchError::Operation { error: e, .. }) => {
@@ -4316,9 +4349,10 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EROFS);
             return;
         }
-        if self.should_shed(RequestOp::Removexattr) {
+        let cx = Self::cx_for_request();
+        if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Removexattr) {
             warn!(ino, "backpressure: shedding removexattr");
-            reply.error(libc::EBUSY);
+            reply.error(errno);
             return;
         }
         let Some(name) = name.to_str() else {
@@ -4326,7 +4360,6 @@ impl Filesystem for FrankenFuse {
             return;
         };
 
-        let cx = Self::cx_for_request();
         match self.with_request_scope(&cx, RequestOp::Removexattr, |cx, scope| {
             let removed = self
                 .inner
@@ -4398,9 +4431,10 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EROFS);
             return;
         }
-        if self.should_shed(RequestOp::Setattr) {
+        let cx = Self::cx_for_request();
+        if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Setattr) {
             warn!(ino, "backpressure: shedding setattr");
-            reply.error(libc::EBUSY);
+            reply.error(errno);
             return;
         }
         let resolve_time = |t: TimeOrNow| -> SystemTime {
@@ -4418,7 +4452,7 @@ impl Filesystem for FrankenFuse {
             atime: atime.map(resolve_time),
             mtime: mtime.map(resolve_time),
         };
-        match self.dispatch_setattr(ino, &attrs, req.uid()) {
+        match self.dispatch_setattr(&cx, ino, &attrs, req.uid()) {
             Ok(attr) => reply.attr(&ATTR_TTL, &to_file_attr(&attr)),
             Err(e) => {
                 Self::reply_error_attr(
@@ -4494,12 +4528,12 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EROFS);
             return;
         }
-        if self.should_shed(RequestOp::Unlink) {
+        let cx = Self::cx_for_request();
+        if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Unlink) {
             warn!(parent, "backpressure: shedding unlink");
-            reply.error(libc::EBUSY);
+            reply.error(errno);
             return;
         }
-        let cx = Self::cx_for_request();
         match self.with_request_scope(&cx, RequestOp::Unlink, |cx, scope| {
             self.inner
                 .ops
@@ -4582,12 +4616,12 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EROFS);
             return;
         }
-        if self.should_shed(RequestOp::Link) {
+        let cx = Self::cx_for_request();
+        if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Link) {
             warn!(ino, "backpressure: shedding link");
-            reply.error(libc::EBUSY);
+            reply.error(errno);
             return;
         }
-        let cx = Self::cx_for_request();
         match self.with_request_scope(&cx, RequestOp::Link, |cx, scope| {
             let attr = self.inner.ops.link(
                 cx,
@@ -4704,9 +4738,10 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EROFS);
             return;
         }
-        if self.should_shed(RequestOp::Fallocate) {
+        let cx = Self::cx_for_request();
+        if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Fallocate) {
             warn!(ino, "backpressure: shedding fallocate");
-            reply.error(libc::EBUSY);
+            reply.error(errno);
             return;
         }
 
@@ -4718,7 +4753,6 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EINVAL);
             return;
         };
-        let cx = Self::cx_for_request();
         match self.with_request_scope(&cx, RequestOp::Fallocate, |cx, scope| {
             self.inner.ops.fallocate(
                 cx,
@@ -4889,12 +4923,12 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EROFS);
             return;
         }
-        if self.should_shed(RequestOp::Fsync) {
+        let cx = Self::cx_for_request();
+        if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Fsync) {
             warn!(ino, "backpressure: shedding fsync");
-            reply.error(libc::EBUSY);
+            reply.error(errno);
             return;
         }
-        let cx = Self::cx_for_request();
         match self.with_request_scope(&cx, RequestOp::Fsync, |cx, scope| {
             self.inner
                 .ops
@@ -4929,12 +4963,12 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EROFS);
             return;
         }
-        if self.should_shed(RequestOp::Fsyncdir) {
+        let cx = Self::cx_for_request();
+        if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Fsyncdir) {
             warn!(ino, "backpressure: shedding fsyncdir");
-            reply.error(libc::EBUSY);
+            reply.error(errno);
             return;
         }
-        let cx = Self::cx_for_request();
         match self.with_request_scope(&cx, RequestOp::Fsyncdir, |cx, scope| {
             self.inner
                 .ops
@@ -4972,12 +5006,12 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EROFS);
             return;
         }
-        if self.should_shed(RequestOp::Create) {
+        let cx = Self::cx_for_request();
+        if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Create) {
             warn!(parent, "backpressure: shedding create");
-            reply.error(libc::EBUSY);
+            reply.error(errno);
             return;
         }
-        let cx = Self::cx_for_request();
         match self.with_request_scope(&cx, RequestOp::Create, |cx, scope| {
             let attr = self.inner.ops.create(
                 cx,
@@ -11702,8 +11736,9 @@ mod tests {
             "setattr under emergency backpressure should return EBUSY, got {setattr:?}"
         );
 
+        let cx = FrankenFuse::cx_for_request();
         let setxattr =
-            fuse.dispatch_setxattr(11, "user.pressure", b"blocked", XATTR_FLAG_CREATE, 0);
+            fuse.dispatch_setxattr(&cx, 11, "user.pressure", b"blocked", XATTR_FLAG_CREATE, 0);
         assert!(
             matches!(setxattr, Err(MutationDispatchError::Errno(errno)) if errno == libc::EBUSY),
             "setxattr under emergency backpressure should return EBUSY, got {setxattr:?}"
@@ -11746,9 +11781,10 @@ mod tests {
             ("nonzero_position", XATTR_FLAG_CREATE, 1_u32),
         ];
 
+        let cx = FrankenFuse::cx_for_request();
         for (label, flags, position) in invalid_cases {
             let err = fuse
-                .dispatch_setxattr(42, "user.bad", b"value", flags, position)
+                .dispatch_setxattr(&cx, 42, "user.bad", b"value", flags, position)
                 .unwrap_err();
             assert!(
                 matches!(err, MutationDispatchError::Errno(libc::EINVAL)),
@@ -12729,6 +12765,36 @@ mod tests {
         let start = std::time::Instant::now();
         assert!(!fuse.should_shed(RequestOp::Write));
         assert!(start.elapsed() >= BACKPRESSURE_THROTTLE_DELAY);
+    }
+
+    #[test]
+    fn should_shed_with_degraded_gate_honors_expired_cx_without_sleeping() {
+        use asupersync::{Budget, SystemPressure};
+        use ffs_core::DegradationFsm;
+
+        let pressure = Arc::new(SystemPressure::with_headroom(0.2));
+        let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
+        fsm.tick();
+        let gate = BackpressureGate::new(fsm);
+
+        let opts = MountOptions::default();
+        let fuse = FrankenFuse::with_backpressure(Box::new(MinimalTestFs), &opts, gate);
+        let expired = Budget::new().with_deadline(asupersync::types::Time::ZERO);
+        let cx = Cx::for_testing_with_budget(expired);
+
+        let start = std::time::Instant::now();
+        let err = fuse
+            .should_shed_with_cx(&cx, RequestOp::Write)
+            .expect_err("expired request budget should reject throttle admission");
+
+        assert!(matches!(err, FfsError::Cancelled));
+        assert!(
+            start.elapsed() < BACKPRESSURE_THROTTLE_DELAY,
+            "expired Cx should not pay the throttle sleep"
+        );
+        let metrics = fuse.metrics().snapshot();
+        assert_eq!(metrics.requests_throttled, 1);
+        assert_eq!(metrics.requests_shed, 0);
     }
 
     // ── AccessPredictor backward sequence detection ──────────────────────
