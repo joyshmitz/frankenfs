@@ -59,6 +59,7 @@ run_rch_capture() {
             if grep -q "Remote command finished: exit=0" "$log_path" \
                 && grep -q "Retrieving artifacts from .*\\.rch-target" "$log_path"; then
                 kill -TERM "-$rch_pid" >/dev/null 2>&1 || true
+                e2e_rch_cancel_matching_queue_entry "$@"
                 break
             fi
             sleep 2
@@ -74,6 +75,10 @@ run_rch_capture() {
 
     kill "$watcher_pid" >/dev/null 2>&1 || true
     wait "$watcher_pid" >/dev/null 2>&1 || true
+
+    if [[ "$status" -eq 124 ]]; then
+        e2e_rch_cancel_matching_queue_entry "$@"
+    fi
 
     if [[ "$status" -ne 0 ]] && grep -q "Remote command finished: exit=0" "$log_path"; then
         echo "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|log=${log_path}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
