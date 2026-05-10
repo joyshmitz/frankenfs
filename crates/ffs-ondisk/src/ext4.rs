@@ -6667,6 +6667,182 @@ mod tests {
         );
     }
 
+    /// bd-o7qbe — Kernel-conformance pin for the core
+    /// ext4_super_block field offsets per fs/ext4/ext4.h. Each of
+    /// 25 critical fields is stamped with a UNIQUE non-zero magic at
+    /// its canonical kernel offset, then a single
+    /// Ext4Superblock::parse_superblock_region call must round-trip
+    /// every field. The ext4 superblock is the entry point for every
+    /// mount/probe; a regression that drifted any single offset
+    /// would silently corrupt mount-time bootstrap and either fail to
+    /// mount or mount with wrong geometry.
+    ///
+    /// Sister kernel pins: ext4_inode (bd-ku16x), ext4_dir_entry_2
+    /// (bd-12nk4), parse_dx_root (bd-2e5cy), btrfs_super_block
+    /// (bd-ormcf), ext4_extent_leaf/index/header,
+    /// ext4_mmp_block_kernel_offsets_match_mmp_h.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn ext4_super_block_kernel_offsets_match_ext4_h() {
+        // Core geometry (constrained: log_block_size in 0..=2).
+        let inodes_count: u32 = 0x0001_0203;
+        let blocks_count_lo: u32 = 0x0405_0607;
+        let r_blocks_count_lo: u32 = 0x0809_0A0B;
+        let free_blocks_count_lo: u32 = 0x0C0D_0E0F;
+        let free_inodes_count: u32 = 0x1011_1213;
+        let first_data_block: u32 = 0x1415_1617;
+        let log_block_size: u32 = 2; // → 4096
+        let log_cluster_size: u32 = 2; // → 4096
+        let blocks_per_group: u32 = 0x2021_2223;
+        let clusters_per_group: u32 = 0x2425_2627;
+        let inodes_per_group: u32 = 0x2829_2A2B;
+        let mtime: u32 = 0x2C2D_2E2F;
+        let wtime: u32 = 0x3031_3233;
+        let mnt_count: u16 = 0x3435;
+        let max_mnt_count: u16 = 0x3637;
+        // s_magic must equal EXT4_SUPER_MAGIC.
+        let state: u16 = 0x3A3B;
+        let errors: u16 = 0x3C3D;
+        let minor_rev_level: u16 = 0x3E3F;
+        let lastcheck: u32 = 0x4041_4243;
+        let creator_os: u32 = 0x4849_4A4B;
+        let rev_level: u32 = 0x4C4D_4E4F;
+        let first_ino: u32 = 0x5455_5657;
+        let inode_size: u16 = 0x5859;
+        let feature_compat: u32 = 0x5C5D_5E5F;
+        let feature_incompat: u32 = 0x6061_6263;
+        let feature_ro_compat: u32 = 0x6465_6667;
+        // 16-byte uuid: distinct first/last bytes.
+        let mut uuid = [0_u8; 16];
+        uuid[0] = 0x68;
+        uuid[15] = 0x77;
+        // s_volume_name @ 0x78..0x88 — use a known label.
+        let volume_name: &[u8] = b"FRANKEN-PIN";
+        let blocks_count_hi: u32 = 0x1501_5253;
+        let r_blocks_count_hi: u32 = 0x1545_5657;
+        let free_blocks_count_hi: u32 = 0x1589_5A5B;
+        let desc_size: u16 = 64; // valid power-of-two, supported
+        let log_groups_per_flex: u8 = 0x74;
+        let checksum_type: u8 = 0x75;
+
+        let mut sb = [0_u8; EXT4_SUPERBLOCK_SIZE];
+
+        // Magic + log_block_size + log_cluster_size to satisfy validators.
+        sb[0x38..0x3A].copy_from_slice(&EXT4_SUPER_MAGIC.to_le_bytes());
+        sb[0x18..0x1C].copy_from_slice(&log_block_size.to_le_bytes());
+        sb[0x1C..0x20].copy_from_slice(&log_cluster_size.to_le_bytes());
+
+        // Stamp each field at its canonical offset.
+        sb[0x00..0x04].copy_from_slice(&inodes_count.to_le_bytes());
+        sb[0x04..0x08].copy_from_slice(&blocks_count_lo.to_le_bytes());
+        sb[0x08..0x0C].copy_from_slice(&r_blocks_count_lo.to_le_bytes());
+        sb[0x0C..0x10].copy_from_slice(&free_blocks_count_lo.to_le_bytes());
+        sb[0x10..0x14].copy_from_slice(&free_inodes_count.to_le_bytes());
+        sb[0x14..0x18].copy_from_slice(&first_data_block.to_le_bytes());
+        sb[0x20..0x24].copy_from_slice(&blocks_per_group.to_le_bytes());
+        sb[0x24..0x28].copy_from_slice(&clusters_per_group.to_le_bytes());
+        sb[0x28..0x2C].copy_from_slice(&inodes_per_group.to_le_bytes());
+        sb[0x2C..0x30].copy_from_slice(&mtime.to_le_bytes());
+        sb[0x30..0x34].copy_from_slice(&wtime.to_le_bytes());
+        sb[0x34..0x36].copy_from_slice(&mnt_count.to_le_bytes());
+        sb[0x36..0x38].copy_from_slice(&max_mnt_count.to_le_bytes());
+        sb[0x3A..0x3C].copy_from_slice(&state.to_le_bytes());
+        sb[0x3C..0x3E].copy_from_slice(&errors.to_le_bytes());
+        sb[0x3E..0x40].copy_from_slice(&minor_rev_level.to_le_bytes());
+        sb[0x40..0x44].copy_from_slice(&lastcheck.to_le_bytes());
+        sb[0x48..0x4C].copy_from_slice(&creator_os.to_le_bytes());
+        sb[0x4C..0x50].copy_from_slice(&rev_level.to_le_bytes());
+        sb[0x54..0x58].copy_from_slice(&first_ino.to_le_bytes());
+        sb[0x58..0x5A].copy_from_slice(&inode_size.to_le_bytes());
+        sb[0x5C..0x60].copy_from_slice(&feature_compat.to_le_bytes());
+        sb[0x60..0x64].copy_from_slice(&feature_incompat.to_le_bytes());
+        sb[0x64..0x68].copy_from_slice(&feature_ro_compat.to_le_bytes());
+        sb[0x68..0x78].copy_from_slice(&uuid);
+        sb[0x78..0x78 + volume_name.len()].copy_from_slice(volume_name);
+        sb[0xFE..0x100].copy_from_slice(&desc_size.to_le_bytes());
+        sb[0x150..0x154].copy_from_slice(&blocks_count_hi.to_le_bytes());
+        sb[0x154..0x158].copy_from_slice(&r_blocks_count_hi.to_le_bytes());
+        sb[0x158..0x15C].copy_from_slice(&free_blocks_count_hi.to_le_bytes());
+        sb[0x174] = log_groups_per_flex;
+        sb[0x175] = checksum_type;
+
+        let parsed =
+            Ext4Superblock::parse_superblock_region(&sb).expect("kernel-stamped sb must parse");
+
+        assert_eq!(parsed.inodes_count, inodes_count, "inodes_count @ 0x00");
+        assert_eq!(
+            parsed.blocks_count,
+            u64::from(blocks_count_lo) | (u64::from(blocks_count_hi) << 32),
+            "blocks_count_lo @ 0x04 + blocks_count_hi @ 0x150"
+        );
+        assert_eq!(
+            parsed.reserved_blocks_count,
+            u64::from(r_blocks_count_lo) | (u64::from(r_blocks_count_hi) << 32),
+            "r_blocks_count_lo @ 0x08 + r_blocks_count_hi @ 0x154"
+        );
+        assert_eq!(
+            parsed.free_blocks_count,
+            u64::from(free_blocks_count_lo) | (u64::from(free_blocks_count_hi) << 32),
+            "free_blocks_count_lo @ 0x0C + free_blocks_count_hi @ 0x158"
+        );
+        assert_eq!(
+            parsed.free_inodes_count, free_inodes_count,
+            "free_inodes_count @ 0x10"
+        );
+        assert_eq!(
+            parsed.first_data_block, first_data_block,
+            "first_data_block @ 0x14"
+        );
+        assert_eq!(parsed.block_size, 4096, "block_size derived from 0x18");
+        assert_eq!(
+            parsed.blocks_per_group, blocks_per_group,
+            "blocks_per_group @ 0x20"
+        );
+        assert_eq!(
+            parsed.clusters_per_group, clusters_per_group,
+            "clusters_per_group @ 0x24"
+        );
+        assert_eq!(
+            parsed.inodes_per_group, inodes_per_group,
+            "inodes_per_group @ 0x28"
+        );
+        assert_eq!(parsed.mtime, mtime, "mtime @ 0x2C");
+        assert_eq!(parsed.wtime, wtime, "wtime @ 0x30");
+        assert_eq!(parsed.mnt_count, mnt_count, "mnt_count @ 0x34");
+        assert_eq!(parsed.max_mnt_count, max_mnt_count, "max_mnt_count @ 0x36");
+        assert_eq!(parsed.magic, EXT4_SUPER_MAGIC, "magic @ 0x38");
+        assert_eq!(parsed.state, state, "state @ 0x3A");
+        assert_eq!(parsed.errors, errors, "errors @ 0x3C");
+        assert_eq!(
+            parsed.minor_rev_level, minor_rev_level,
+            "minor_rev_level @ 0x3E"
+        );
+        assert_eq!(parsed.lastcheck, lastcheck, "lastcheck @ 0x40");
+        assert_eq!(parsed.creator_os, creator_os, "creator_os @ 0x48");
+        assert_eq!(parsed.rev_level, rev_level, "rev_level @ 0x4C");
+        assert_eq!(parsed.first_ino, first_ino, "first_ino @ 0x54");
+        assert_eq!(parsed.inode_size, inode_size, "inode_size @ 0x58");
+        assert_eq!(
+            parsed.feature_compat.0, feature_compat,
+            "feature_compat @ 0x5C"
+        );
+        assert_eq!(
+            parsed.feature_incompat.0, feature_incompat,
+            "feature_incompat @ 0x60"
+        );
+        assert_eq!(
+            parsed.feature_ro_compat.0, feature_ro_compat,
+            "feature_ro_compat @ 0x64"
+        );
+        assert_eq!(parsed.uuid, uuid, "uuid @ 0x68..0x78");
+        assert_eq!(
+            parsed.volume_name,
+            std::str::from_utf8(volume_name).unwrap(),
+            "volume_name @ 0x78..0x88"
+        );
+        assert_eq!(parsed.desc_size, desc_size, "desc_size @ 0xFE");
+    }
+
     /// bd-eiblh — Kernel-conformance pin for the 16 Ext4IncompatFeatures
     /// bit values per fs/ext4/ext4.h EXT4_FEATURE_INCOMPAT_*. These
     /// bits are read from the superblock @ s_feature_incompat (0x60)
