@@ -3598,6 +3598,7 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
 mod tests {
     use super::*;
     use std::collections::{BTreeSet, HashMap};
+    use std::sync::atomic::AtomicBool;
 
     /// Simple in-memory block device for testing `MvccBlockDevice`.
     #[derive(Debug)]
@@ -3650,6 +3651,24 @@ mod tests {
 
     fn test_cx() -> Cx {
         Cx::for_testing()
+    }
+
+    fn spawn_snapshot_registry_watchdog(
+        stop: Arc<AtomicBool>,
+        workers_complete: Arc<AtomicBool>,
+        timeout: Duration,
+    ) -> std::thread::JoinHandle<bool> {
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + timeout;
+            while Instant::now() < deadline {
+                if workers_complete.load(Ordering::Acquire) {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            stop.store(true, Ordering::Release);
+            true
+        })
     }
 
     fn seed_block(store: &mut MvccStore, block: BlockNumber, bytes: &[u8]) {
@@ -9880,18 +9899,16 @@ mod tests {
     /// running concurrently and trip the watchdog.
     #[test]
     fn snapshot_registry_concurrent_register_release_check_stalls_no_hang() {
-        use std::sync::atomic::AtomicBool;
-        use std::time::{Duration, Instant};
-
-        let registry = Arc::new(SnapshotRegistry::new());
-
         const ITERATIONS: usize = 256;
         const REGISTERERS: usize = 4;
         const RELEASERS: usize = 2;
         const CHECKERS: usize = 2;
         const WATCHDOG_SECS: u64 = 5;
 
+        let registry = Arc::new(SnapshotRegistry::new());
+
         let stop = Arc::new(AtomicBool::new(false));
+        let workers_complete = Arc::new(AtomicBool::new(false));
         let mut handles = Vec::new();
 
         for tid in 0..REGISTERERS {
@@ -9943,29 +9960,35 @@ mod tests {
             }));
         }
 
-        let watchdog_handle = {
-            let stop = Arc::clone(&stop);
-            std::thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(WATCHDOG_SECS);
-                while Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                stop.store(true, Ordering::Relaxed);
-            })
-        };
+        let watchdog_handle = spawn_snapshot_registry_watchdog(
+            Arc::clone(&stop),
+            Arc::clone(&workers_complete),
+            Duration::from_secs(WATCHDOG_SECS),
+        );
 
         let start = Instant::now();
         for handle in handles {
             handle.join().expect("worker thread joins cleanly");
         }
         let elapsed = start.elapsed();
-        watchdog_handle
+        workers_complete.store(true, Ordering::Release);
+        let watchdog_join_started_at = Instant::now();
+        let watchdog_timed_out = watchdog_handle
             .join()
             .expect("watchdog thread joins cleanly");
+        let watchdog_join_elapsed = watchdog_join_started_at.elapsed();
 
         assert!(
             elapsed < Duration::from_secs(WATCHDOG_SECS),
             "concurrent register + release + check_stalls must not deadlock; elapsed={elapsed:?}"
+        );
+        assert!(
+            !watchdog_timed_out,
+            "watchdog timed out even though all workers joined; elapsed={elapsed:?}"
+        );
+        assert!(
+            watchdog_join_elapsed < Duration::from_millis(250),
+            "watchdog should return promptly after worker completion; join elapsed={watchdog_join_elapsed:?}"
         );
     }
 }
