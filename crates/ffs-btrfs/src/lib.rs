@@ -7161,14 +7161,10 @@ mod tests {
             // ram_bytes LE @8..16 = 0x0010_0000
             0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
             // compression @16 = BTRFS_COMPRESS_NONE = 0
-            0x00,
-            // encryption @17 = 0 (always; encoder hard-codes)
-            0x00,
-            // other_encoding LE @18..20 = 0 (always)
-            0x00, 0x00,
-            // extent_type @20 = BTRFS_FILE_EXTENT_REG = 1
-            0x01,
-            // disk_bytenr LE @21..29 = 0xDEAD_BEEF_CAFE_BABE
+            0x00, // encryption @17 = 0 (always; encoder hard-codes)
+            0x00, // other_encoding LE @18..20 = 0 (always)
+            0x00, 0x00, // extent_type @20 = BTRFS_FILE_EXTENT_REG = 1
+            0x01, // disk_bytenr LE @21..29 = 0xDEAD_BEEF_CAFE_BABE
             0xBE, 0xBA, 0xFE, 0xCA, 0xEF, 0xBE, 0xAD, 0xDE,
             // disk_num_bytes LE @29..37 = 0x1234_5678_9ABC_DEF0
             0xF0, 0xDE, 0xBC, 0x9A, 0x78, 0x56, 0x34, 0x12,
@@ -7286,18 +7282,13 @@ mod tests {
         // 21 fixed bytes + 8 inline data bytes = 29 total.
         let expected: [u8; 29] = [
             // generation LE @0..8 = 0xCAFE_BABE_DEAD_BEEF
-            0xEF, 0xBE, 0xAD, 0xDE, 0xBE, 0xBA, 0xFE, 0xCA,
-            // ram_bytes LE @8..16 = 8
+            0xEF, 0xBE, 0xAD, 0xDE, 0xBE, 0xBA, 0xFE, 0xCA, // ram_bytes LE @8..16 = 8
             0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             // compression @16 = BTRFS_COMPRESS_NONE = 0
-            0x00,
-            // encryption @17 = 0 (always; encoder hard-codes)
-            0x00,
-            // other_encoding LE @18..20 = 0 (always)
-            0x00, 0x00,
-            // extent_type @20 = BTRFS_FILE_EXTENT_INLINE = 0
-            0x00,
-            // inline data @21..29 = 0x11..0x88
+            0x00, // encryption @17 = 0 (always; encoder hard-codes)
+            0x00, // other_encoding LE @18..20 = 0 (always)
+            0x00, 0x00, // extent_type @20 = BTRFS_FILE_EXTENT_INLINE = 0
+            0x00, // inline data @21..29 = 0x11..0x88
             0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
         ];
         assert_eq!(
@@ -7637,12 +7628,9 @@ mod tests {
         // 10 fixed bytes + 15 name bytes = 25 total.
         let expected: [u8; 25] = [
             // index LE @0..8 = 0xCAFE_BABE_DEAD_BEEF
-            0xEF, 0xBE, 0xAD, 0xDE, 0xBE, 0xBA, 0xFE, 0xCA,
-            // name_len LE @8..10 = 15
-            0x0F, 0x00,
-            // name @10..25 = "kernel-pin-test"
-            b'k', b'e', b'r', b'n', b'e', b'l', b'-', b'p', b'i', b'n',
-            b'-', b't', b'e', b's', b't',
+            0xEF, 0xBE, 0xAD, 0xDE, 0xBE, 0xBA, 0xFE, 0xCA, // name_len LE @8..10 = 15
+            0x0F, 0x00, // name @10..25 = "kernel-pin-test"
+            b'k', b'e', b'r', b'n', b'e', b'l', b'-', b'p', b'i', b'n', b'-', b't', b'e', b's', b't',
         ];
         assert_eq!(
             bytes, expected,
@@ -7679,7 +7667,11 @@ mod tests {
         data[10..10 + name.len()].copy_from_slice(&name);
 
         let parsed = parse_inode_refs(&data).expect("kernel-stamped inode_ref must parse");
-        assert_eq!(parsed.len(), 1, "single-entry payload must parse to one entry");
+        assert_eq!(
+            parsed.len(),
+            1,
+            "single-entry payload must parse to one entry"
+        );
         assert_eq!(
             parsed[0].index, index,
             "index must come from offset 0..8 per kernel layout"
@@ -8023,37 +8015,26 @@ mod tests {
             // block_group @32..40 (zero — encoder hard-codes)
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             // nlink LE @40..44 = 0x4444_4444
-            0x44, 0x44, 0x44, 0x44,
-            // uid LE @44..48 = 0x5555_5555
-            0x55, 0x55, 0x55, 0x55,
-            // gid LE @48..52 = 0x6666_6666
-            0x66, 0x66, 0x66, 0x66,
-            // mode LE @52..56 = 0x0000_81A4 (0o100_644)
-            0xA4, 0x81, 0x00, 0x00,
-            // rdev LE @56..64 = 0x7777_7777_7777_7777
-            0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77,
-            // flags @64..72 (zero)
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // sequence @72..80 (zero)
+            0x44, 0x44, 0x44, 0x44, // uid LE @44..48 = 0x5555_5555
+            0x55, 0x55, 0x55, 0x55, // gid LE @48..52 = 0x6666_6666
+            0x66, 0x66, 0x66, 0x66, // mode LE @52..56 = 0x0000_81A4 (0o100_644)
+            0xA4, 0x81, 0x00, 0x00, // rdev LE @56..64 = 0x7777_7777_7777_7777
+            0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, // flags @64..72 (zero)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // sequence @72..80 (zero)
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             // reserved[4] @80..112 (32 bytes zero)
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // atime_sec LE @112..120 = 0x8888_8888_8888_8888
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, // atime_sec LE @112..120 = 0x8888_8888_8888_8888
             0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88,
             // atime_nsec LE @120..124 = 0x05F5_E101 (100_000_001)
-            0x01, 0xE1, 0xF5, 0x05,
-            // ctime_sec LE @124..132 = 0xAAAA_AAAA_AAAA_AAAA
+            0x01, 0xE1, 0xF5, 0x05, // ctime_sec LE @124..132 = 0xAAAA_AAAA_AAAA_AAAA
             0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
             // ctime_nsec LE @132..136 = 0x0BEB_C202 (200_000_002)
-            0x02, 0xC2, 0xEB, 0x0B,
-            // mtime_sec LE @136..144 = 0xCCCC_CCCC_CCCC_CCCC
+            0x02, 0xC2, 0xEB, 0x0B, // mtime_sec LE @136..144 = 0xCCCC_CCCC_CCCC_CCCC
             0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
             // mtime_nsec LE @144..148 = 0x11E1_A303 (300_000_003)
-            0x03, 0xA3, 0xE1, 0x11,
-            // otime_sec LE @148..156 = 0xEEEE_EEEE_EEEE_EEEE
+            0x03, 0xA3, 0xE1, 0x11, // otime_sec LE @148..156 = 0xEEEE_EEEE_EEEE_EEEE
             0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
             // otime_nsec LE @156..160 = 0x17D7_8404 (400_000_004)
             0x04, 0x84, 0xD7, 0x17,
@@ -8644,9 +8625,12 @@ mod tests {
         data[30..30 + name.len()].copy_from_slice(&name);
         data[30 + name.len()..30 + name.len() + value.len()].copy_from_slice(&value);
 
-        let parsed = parse_xattr_items(&data)
-            .expect("kernel-stamped xattr_item must parse");
-        assert_eq!(parsed.len(), 1, "single-entry payload must parse to one item");
+        let parsed = parse_xattr_items(&data).expect("kernel-stamped xattr_item must parse");
+        assert_eq!(
+            parsed.len(),
+            1,
+            "single-entry payload must parse to one item"
+        );
         assert_eq!(
             parsed[0].name, name,
             "name bytes must come from offset 30..30+name_len@27..29"
@@ -8661,8 +8645,7 @@ mod tests {
         // SAME bytes ending up there from a misaligned read).
         let mut bad = data.clone();
         bad[27..29].copy_from_slice(&0_u16.to_le_bytes());
-        let err = parse_xattr_items(&bad)
-            .expect_err("zero name_len must reject");
+        let err = parse_xattr_items(&bad).expect_err("zero name_len must reject");
         match err {
             ParseError::InvalidField { field, .. } => assert_eq!(
                 field, "xattr.name_len",
@@ -12076,8 +12059,7 @@ mod tests {
         data[16..18].copy_from_slice(&name_len.to_le_bytes());
         data[18..18 + name.len()].copy_from_slice(name);
 
-        let parsed =
-            parse_root_ref(&data).expect("kernel-stamped root_ref must parse");
+        let parsed = parse_root_ref(&data).expect("kernel-stamped root_ref must parse");
 
         assert_eq!(
             parsed.dirid, dirid,
