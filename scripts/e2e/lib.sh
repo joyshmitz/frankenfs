@@ -498,6 +498,7 @@ e2e_rch_capture() {
     local deadline
     local remote_exit=""
     local required_artifact="${RCH_REQUIRED_ARTIFACT:-}"
+    local required_artifact_deadline=0
     local wait_status
     local had_errexit=0
     local rch_bin="${RCH_BIN:-rch}"
@@ -528,6 +529,18 @@ e2e_rch_capture() {
             e2e_log "RCH_REQUIRED_ARTIFACT_READY|artifact=${required_artifact}|log=${log_path}|command=$*"
             kill -TERM "$pid" >/dev/null 2>&1 || true
             e2e_rch_cancel_matching_queue_entry "$@"
+            break
+        fi
+        if [[ -n "$remote_exit" && -n "$required_artifact" && "$required_artifact_deadline" -eq 0 ]]; then
+            required_artifact_deadline=$((SECONDS + grace_secs))
+        fi
+        if [[ -n "$remote_exit" && -n "$required_artifact" && "$required_artifact_deadline" -gt 0 ]] \
+            && ((SECONDS >= required_artifact_deadline)); then
+            e2e_log "RCH_REQUIRED_ARTIFACT_MISSING|artifact=${required_artifact}|log=${log_path}|command=$*"
+            printf 'RCH_REQUIRED_ARTIFACT_MISSING|artifact=%s|log=%s\n' "$required_artifact" "$log_path" >>"$log_path"
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            e2e_rch_cancel_matching_queue_entry "$@"
+            status=99
             break
         fi
         if [[ -n "$remote_exit" && -z "$required_artifact" ]]; then
@@ -583,6 +596,7 @@ RCH_LOCAL_FALLBACK_REJECTED
 RCH_REMOTE_EVIDENCE_MISSING
 RCH_TIMEOUT
 RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT
+RCH_REQUIRED_ARTIFACT_MISSING
 Remote command finished: exit=
 exec called with non-compilation command
 [RCH] local

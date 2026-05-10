@@ -266,6 +266,56 @@ verify_e2e_artifact_roots_are_collision_resistant() {
     done
 }
 
+verify_rch_required_artifact_missing_fails_fast() {
+    local probe_dir fake_rch output_path missing_artifact status start elapsed
+    probe_dir="$E2E_TEMP_DIR/rch_required_artifact_missing_probe"
+    fake_rch="$probe_dir/rch"
+    output_path="$probe_dir/capture.log"
+    missing_artifact="$probe_dir/missing-required-artifact"
+
+    mkdir -p "$probe_dir"
+    cat >"$fake_rch" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "exec" && "${2:-}" == "--" ]]; then
+    printf '[RCH] remote worker=fake-required-artifact\n'
+    printf 'Remote command finished: exit=0\n'
+    while :; do
+        sleep 1
+    done
+fi
+
+if [[ "${1:-}" == "queue" && "${2:-}" == "--json" ]]; then
+    printf '{"data":{"active_builds":[]}}\n'
+    exit 0
+fi
+
+if [[ "${1:-}" == "cancel" ]]; then
+    exit 0
+fi
+
+printf 'unsupported fake rch invocation\n' >&2
+exit 2
+SH
+    chmod +x "$fake_rch"
+
+    start=$SECONDS
+    set +e
+    RCH_BIN="$fake_rch" \
+        RCH_COMMAND_TIMEOUT_SECS=20 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        RCH_REQUIRED_ARTIFACT="$missing_artifact" \
+        e2e_rch_capture "$output_path" cargo build -p fake-required-artifact
+    status=$?
+    set -e
+    elapsed=$((SECONDS - start))
+
+    [[ "$status" -eq 99 ]] \
+        && ((elapsed < 20)) \
+        && grep -Fq "RCH_REQUIRED_ARTIFACT_MISSING" "$output_path"
+}
+
 e2e_init "ffs_verification_runner"
 
 RUNNER_SRC="crates/ffs-harness/src/verification_runner.rs"
@@ -381,6 +431,18 @@ if verify_e2e_artifact_roots_are_collision_resistant; then
     scenario_result "standalone_e2e_artifact_roots_unique" "PASS" "Standalone E2E scripts use unique artifact roots"
 else
     scenario_result "standalone_e2e_artifact_roots_unique" "FAIL" "Standalone E2E scripts still use collision-prone artifact roots"
+fi
+
+#######################################
+# Scenario 4f: lib.sh RCH required artifacts fail closed
+#######################################
+e2e_step "Scenario 4f: lib.sh RCH required artifact missing fail-closed"
+
+if e2e_rch_capture_fixture_matrix_self_test >/dev/null \
+    && verify_rch_required_artifact_missing_fails_fast; then
+    scenario_result "lib_rch_required_artifact_missing_fails_fast" "PASS" "Missing required artifact returned 99 before command timeout"
+else
+    scenario_result "lib_rch_required_artifact_missing_fails_fast" "FAIL" "Missing required artifact did not fail closed promptly"
 fi
 
 #######################################
