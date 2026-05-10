@@ -90,8 +90,9 @@ fi
 
 # Gate-level output directory
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-GATE_DIR="$REPO_ROOT/artifacts/gates/${TIMESTAMP}_${GATE_ID}"
-mkdir -p "$GATE_DIR"
+GATE_ROOT="$REPO_ROOT/artifacts/gates"
+mkdir -p "$GATE_ROOT"
+GATE_DIR=$(mktemp -d "$GATE_ROOT/${TIMESTAMP}_${GATE_ID}_XXXXXX")
 
 echo "=== Verification Gate: $GATE_ID ==="
 echo "Scripts: ${#SCRIPTS[@]}"
