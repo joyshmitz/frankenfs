@@ -57,7 +57,10 @@ done
 
 if [[ -z "$OUT_PATH" ]]; then
     timestamp=$(date +%Y%m%d_%H%M%S)
-    OUT_PATH="$REPO_ROOT/artifacts/e2e/${timestamp}_xfstests_preflight/preflight.json"
+    artifact_root="$REPO_ROOT/artifacts/e2e"
+    mkdir -p "$artifact_root"
+    artifact_dir=$(mktemp -d "$artifact_root/${timestamp}_xfstests_preflight_XXXXXX")
+    OUT_PATH="$artifact_dir/preflight.json"
 fi
 
 export OUT_PATH FIXTURE_MODE SELF_TEST
