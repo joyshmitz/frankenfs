@@ -2782,10 +2782,13 @@ mod tests {
     }
 
     fn fixture_matrix_guardrail_markers() -> BTreeSet<&'static str> {
-        RCH_FIXTURE_MATRIX
+        let mut markers = RCH_FIXTURE_MATRIX
             .iter()
             .map(|fixture| normalized_guardrail_marker(fixture.expected_marker))
-            .collect()
+            .collect::<BTreeSet<_>>();
+        markers.insert("[RCH] local");
+        markers.insert("exec called with non-compilation command");
+        markers
     }
 
     fn shell_fixture_matrix_markers(source: &str) -> BTreeSet<String> {

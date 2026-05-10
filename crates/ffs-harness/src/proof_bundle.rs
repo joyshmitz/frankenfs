@@ -150,7 +150,7 @@ pub struct ProofBundleArtifact {
     pub role: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProofBundleRedactionPolicy {
     pub redacted_fields: Vec<String>,
     pub preserved_fields: Vec<String>,
@@ -163,20 +163,6 @@ pub struct ProofBundleRedactionPolicy {
     pub forbidden_unredacted_markers: Vec<String>,
     #[serde(default)]
     pub require_placeholder_in_redacted_artifacts: bool,
-}
-
-impl Default for ProofBundleRedactionPolicy {
-    fn default() -> Self {
-        Self {
-            redacted_fields: Vec::new(),
-            preserved_fields: Vec::new(),
-            reproduction_command: String::new(),
-            policy_version: String::new(),
-            redacted_value_placeholder: String::new(),
-            forbidden_unredacted_markers: Vec::new(),
-            require_placeholder_in_redacted_artifacts: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1758,9 +1744,11 @@ fn proof_bundle_lane_provenance(
         &freshness,
         &host_class,
         &source_command,
-        raw_log_present,
-        manifest_is_stale,
-        redaction_failure.is_some(),
+        ProofBundleLaneProvenanceSignals {
+            raw_log_present,
+            manifest_is_stale,
+            redaction_failure: redaction_failure.is_some(),
+        },
     );
     let claim_effect = proof_bundle_claim_effect(provenance_class, lane.status);
     let rationale = redaction_failure.map_or_else(
@@ -1800,23 +1788,28 @@ fn proof_bundle_path_exists(bundle_root: &Path, raw_path: &str) -> bool {
     confined_existing_file_path(bundle_root, raw_path).is_ok()
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ProofBundleLaneProvenanceSignals {
+    raw_log_present: bool,
+    manifest_is_stale: bool,
+    redaction_failure: bool,
+}
+
 fn classify_proof_bundle_lane_provenance(
     lane: &ProofBundleLane,
     artifact_roles: &[String],
     freshness: &str,
     host_class: &str,
     source_command: &str,
-    raw_log_present: bool,
-    manifest_is_stale: bool,
-    redaction_failure: bool,
+    signals: ProofBundleLaneProvenanceSignals,
 ) -> ProofBundleProvenanceClass {
-    if redaction_failure {
+    if signals.redaction_failure {
         return ProofBundleProvenanceClass::RedactionFailure;
     }
-    if !raw_log_present {
+    if !signals.raw_log_present {
         return ProofBundleProvenanceClass::MissingRawLog;
     }
-    if manifest_is_stale || freshness == "stale" {
+    if signals.manifest_is_stale || freshness == "stale" {
         return ProofBundleProvenanceClass::StaleArtifact;
     }
     if contains_permissioned_campaign_handoff(lane, artifact_roles)
@@ -1907,10 +1900,9 @@ const fn proof_bundle_claim_effect(
         | ProofBundleProvenanceClass::CapabilityDowngrade => {
             ProofBundleClaimEffect::ExperimentalOnly
         }
-        ProofBundleProvenanceClass::StaleArtifact | ProofBundleProvenanceClass::MissingRawLog => {
-            ProofBundleClaimEffect::EvidenceProductionFailure
-        }
-        ProofBundleProvenanceClass::RedactionFailure => {
+        ProofBundleProvenanceClass::StaleArtifact
+        | ProofBundleProvenanceClass::MissingRawLog
+        | ProofBundleProvenanceClass::RedactionFailure => {
             ProofBundleClaimEffect::EvidenceProductionFailure
         }
         ProofBundleProvenanceClass::UnsupportedFutureScope => {

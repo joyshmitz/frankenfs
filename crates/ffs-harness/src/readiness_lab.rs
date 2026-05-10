@@ -3555,7 +3555,8 @@ impl<'a> ReadinessLabNumaP99ReplayValidator<'a> {
         if finding_count > 0 {
             self.invalid_fixture_ids.insert(fixture.fixture_id.clone());
         }
-        self.rows.push(self.row_for_fixture(fixture, finding_count));
+        self.rows
+            .push(Self::row_for_fixture(fixture, finding_count));
     }
 
     fn validate_freshness(&mut self, fixture: &ReadinessLabNumaP99ReplayFixture) {
@@ -3908,7 +3909,6 @@ impl<'a> ReadinessLabNumaP99ReplayValidator<'a> {
     }
 
     fn row_for_fixture(
-        &self,
         fixture: &ReadinessLabNumaP99ReplayFixture,
         finding_count: usize,
     ) -> ReadinessLabNumaP99ReplayRow {

@@ -61,6 +61,10 @@ pub struct OperationalEvidenceIndex {
     pub duplicate_run_ids: Vec<OperationalEvidenceDuplicateRunId>,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "flat evidence JSON keeps independent audit booleans queryable"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationalEvidenceRecord {
     pub record_id: String,
@@ -160,9 +164,9 @@ pub enum OperationalEvidenceReleaseClaimEffect {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct EvidenceKey {
-    lane_id: String,
-    scenario_id: String,
-    bead_id: Option<String>,
+    lane: String,
+    scenario: String,
+    bead: Option<String>,
 }
 
 #[must_use]
@@ -381,9 +385,9 @@ fn group_records(records: &[OperationalEvidenceRecord]) -> BTreeMap<EvidenceKey,
     for (index, record) in records.iter().enumerate() {
         groups
             .entry(EvidenceKey {
-                lane_id: record.lane_id.clone(),
-                scenario_id: record.scenario_id.clone(),
-                bead_id: record.bead_id.clone(),
+                lane: record.lane_id.clone(),
+                scenario: record.scenario_id.clone(),
+                bead: record.bead_id.clone(),
             })
             .or_default()
             .push(index);
@@ -415,9 +419,9 @@ fn collect_conflicts(
             .into_iter()
             .collect::<Vec<_>>();
         conflicts.push(OperationalEvidenceConflict {
-            lane_id: key.lane_id.clone(),
-            scenario_id: key.scenario_id.clone(),
-            bead_id: key.bead_id.clone(),
+            lane_id: key.lane.clone(),
+            scenario_id: key.scenario.clone(),
+            bead_id: key.bead.clone(),
             outcomes: outcomes.into_iter().collect(),
             record_ids,
             source_paths,
@@ -476,9 +480,9 @@ fn select_latest_authoritative_records(
         let selected_record = &records[selected_index];
         selected_indices.push(selected_index);
         selected.push(OperationalEvidenceSelection {
-            lane_id: key.lane_id.clone(),
-            scenario_id: key.scenario_id.clone(),
-            bead_id: key.bead_id.clone(),
+            lane_id: key.lane.clone(),
+            scenario_id: key.scenario.clone(),
+            bead_id: key.bead.clone(),
             selected_record_id: selected_record.record_id.clone(),
             selected_run_id: selected_record.run_id.clone(),
             selected_source_path: selected_record.source_path.clone(),
@@ -590,7 +594,7 @@ fn parse_number_before_token(text: &str, token: &str) -> Option<u32> {
     let digits = prefix
         .chars()
         .rev()
-        .take_while(|character| character.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
         .collect::<String>();
     if digits.is_empty() {
         return None;
@@ -962,6 +966,7 @@ mod tests {
         assert!(markdown.contains("Strengthens"));
     }
 
+    #[derive(Clone, Copy)]
     struct SampleManifestInput<'a> {
         run_id: &'a str,
         scenario_id: &'a str,
@@ -1003,11 +1008,10 @@ mod tests {
                 expected_outcome: input.result,
                 actual_outcome: input.result,
                 classification: input.classification,
-                exit_status: if matches!(input.classification, OperationalOutcomeClass::Pass) {
-                    0
-                } else {
-                    1
-                },
+                exit_status: i32::from(!matches!(
+                    input.classification,
+                    OperationalOutcomeClass::Pass
+                )),
                 stdout_path: stdout_path.clone(),
                 stderr_path: stderr_path.clone(),
                 ledger_paths: Vec::new(),
