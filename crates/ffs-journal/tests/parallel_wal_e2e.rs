@@ -407,15 +407,27 @@ fn await_durability_blocks_until_group_commit() {
         GroupCommitConfig::default(),
     );
 
-    // Spawn waiters before flush.
+    assert_eq!(
+        notifier.await_epoch_timeout(1, std::time::Duration::ZERO),
+        None,
+        "epoch should not be durable before group commit flush"
+    );
+
+    // Spawn waiters before flush. The barrier removes the old timing guess:
+    // all waiter threads are ready to call await_epoch before we flush.
+    let waiter_count = 4;
+    let waiter_barrier = Arc::new(Barrier::new(waiter_count + 1));
     let mut waiter_handles = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..waiter_count {
         let n = Arc::clone(&notifier);
-        waiter_handles.push(std::thread::spawn(move || n.await_epoch(1)));
+        let waiter_barrier = Arc::clone(&waiter_barrier);
+        waiter_handles.push(std::thread::spawn(move || {
+            waiter_barrier.wait();
+            n.await_epoch(1)
+        }));
     }
 
-    // Give waiters time to block.
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    waiter_barrier.wait();
 
     // Now flush.
     let entries = vec![WalEntry {
