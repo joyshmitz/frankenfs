@@ -1,92 +1,103 @@
-# Profile Analysis (bd-3ib.1)
+# Profile Analysis (bd-3ib.1 / bd-1ieht)
 
 ## Metadata
 
-- Profile date (UTC): `2026-02-13T08:38:17Z`
-- Commit: `fe476693ab708709fbb7d83d3d430953785bb6b1`
+- Profile date (UTC): `2026-05-10T06:05:07Z` through `2026-05-10T06:10:09Z`
+- Captured git head: `8b149b28b77b93af5a20dc4e9c94b7b4db8c3b65`
 - Kernel: `Linux 6.17.0-14-generic x86_64 GNU/Linux`
-- CPU: `AMD Ryzen Threadripper PRO 5995WX 64-Cores` (128 logical CPUs)
+- CPU: `AMD Ryzen Threadripper PRO 5975WX 32-Cores`
+- CPU governor: `powersave`
 - Toolchain:
-  - `cargo 1.95.0-nightly (ce69df6f7 2026-02-12)`
-  - `rustc 1.95.0-nightly (47611e160 2026-02-12)`
-  - `flamegraph-flamegraph 0.6.10`
-  - `perf version 6.17.9`
+  - `cargo 1.97.0-nightly (eb9b60f1f 2026-04-24)`
+  - `rustc 1.97.0-nightly (37d85e592 2026-04-28)`
+  - `linux-perf record -F 4999 --call-graph fp`
 
 ## Scope
 
-Target bead: `bd-3ib.1` ("Profile read path and generate flamegraph").
+Target bead: `bd-1ieht`, completion debt for `bd-3ib.1`.
 
-Canonical target command:
+Committed artifacts:
 
-```bash
-ffs inspect conformance/golden/ext4_8mb_reference.ext4 --json
-```
+| Artifact | Target | Samples | Duration |
+|---|---|---:|---:|
+| `profiles/flamegraph_cli_inspect.svg` | canonical ext4 inspect/read-path loop | `297160` | `60544 ms` |
+| `profiles/flamegraph_fuse_read.svg` | `FrankenFuse` adapter read dispatch via `read_for_fuzzing` | `297190` | `60525 ms` |
+| `profiles/flamegraph_diff_vs_baseline.svg` | metadata diff against `baselines/baseline-20260213.md` | `4000` | `0 ms` |
 
-**Status (2026-02-27):** Non-contiguous ext4 journal extents are now fully supported.
-The golden fixture (`ext4_8mb_reference.ext4`) has 3 journal segments and inspects
-successfully in ~3.7 ms, producing:
+The original 2026-02-13 profile used a temporary no-journal image and collected
+only 18 samples. The 2026-05-10 run uses the canonical generated fixture path
+`conformance/golden/ext4_8mb_reference.ext4`; the raw ext4 image is regenerated
+when missing and remains ignored, while the checked-in JSON golden remains the
+freshness anchor.
 
-```json
-{"filesystem":"ext4","block_size":4096,"inodes_count":2048,"blocks_count":2048,"volume_name":"ffs-ref","free_blocks_total":851,"free_inodes_total":2033}
-```
-
-The original profiling run (2026-02-13) predated the multi-segment journal support
-and used a workaround no-journal image instead:
-
-```bash
-cargo flamegraph --root -p ffs-cli --output profiles/flamegraph_cli_inspect.svg -- \
-  inspect /tmp/ffs-profile-nojournal.fjnSmr.ext4 --json
-```
-
-Artifact:
-
-- `profiles/flamegraph_cli_inspect.svg`
+Kernel FUSE mounting was denied on the available host (`fusermount3: Permission
+denied`), so the FUSE artifact profiles `FrankenFuse::read_for_fuzzing` instead
+of a live kernel mount. That path still exercises the FUSE adapter's request
+scope, readahead, metric accounting, and backend `OpenFs` read path.
 
 ## Hotspots
 
-Sample summary from `perf report --stdio -i perf.data`:
+`perf report --stdio --no-children` now shows application-level symbols instead
+of loader-only startup noise.
 
-- Total samples: `18`
-- Event: `cycles:P`
-- Lost samples: `0`
+CLI/read-path top self symbols:
 
-Top symbols:
-
-| Self % | Symbol | Shared Object | Interpretation |
+| Self % | Symbol | Object | Interpretation |
 |---:|---|---|---|
-| 32.08% | `vma_interval_tree_remove` | kernel | ELF/object mapping lifecycle during process startup |
-| 31.96% | `perf_iterate_ctx` | kernel | perf event/context overhead around exec/mmap |
-| 30.98% | `srso_alias_return_thunk` | kernel | kernel return-thunk overhead in sampled startup path |
-| 2.29% | `mas_preallocate` | kernel | mmap/VMA tree setup work |
-| 2.11% | `_dl_map_object_deps` | `ld-linux-x86-64.so.2` | dynamic loader dependency mapping |
+| 2.42% | `__memmove_avx_unaligned_erms` | `libc.so.6` | buffer movement during repeated metadata reads |
+| 1.97% | `ffs_types::ensure_slice` | `ffs-harness` | bounds checking in little-endian parsers |
+| 1.84% | `Cx::checkpoint` | `ffs-harness` | asupersync request checkpoint overhead |
+| 1.50% | `__memset_avx2_unaligned_erms` | `libc.so.6` | allocation/zero-fill on block buffers |
+| 1.25% | `Result<&[u8], ParseError>::branch` | `ffs-harness` | parser error-path branching |
+| 1.10% | `ffs_types::read_le_u32` | `ffs-harness` | primitive ext4 field decode |
+| 1.00% | `Ext4Superblock::parse_superblock_region` | `ffs-harness` | superblock parse loop |
+
+FUSE-adapter top self symbols:
+
+| Self % | Symbol | Object | Interpretation |
+|---:|---|---|---|
+| 2.73% | `__memmove_avx_unaligned_erms` | `libc.so.6` | read-buffer movement |
+| 1.98% | `Cx::checkpoint` | `ffs-harness` | request-scope checkpoint overhead |
+| 1.92% | `ffs_types::ensure_slice` | `ffs-harness` | metadata parser bounds checks |
+| 1.78% | `__memset_avx2_unaligned_erms` | `libc.so.6` | buffer zero-fill |
+| 1.45% | `Result<&[u8], ParseError>::branch` | `ffs-harness` | parser branch overhead |
+| 1.27% | `Ext4Inode::parse_from_bytes` | `ffs-harness` | inode decode on read path |
+
+Bootstrap note: the rendered folded stacks contain `166283` CLI user-space stack
+samples and `195274` FUSE-adapter user-space stack samples after unresolved
+kernel frames are excluded. The top rendered stack CIs are well above 1%:
+CLI file read stack `13.53% [13.37, 13.70]`; FUSE file read stack
+`22.83% [22.64, 23.01]`. The lower self-symbol rows above are hotspot leads,
+not final optimization claims when their confidence interval would touch 1%.
 
 ## Baseline Tie-In
 
 From `baselines/baseline-20260213.md`:
 
-- `ffs-cli inspect ext4_8mb_reference.ext4 --json` was skipped at baseline time due to the (now-resolved) non-contiguous journal extent limitation.
-- Available baseline numbers were for parity/check-fixtures commands only (`~0.9–1.2 ms` range).
+- `ffs-cli inspect ext4_8mb_reference.ext4 --json` was skipped at baseline time
+  due to the now-resolved non-contiguous journal extent limitation.
+- Available baseline numbers were only parity/check-fixtures commands
+  (`~0.9-1.2 ms` range).
 
-**Update (2026-02-27):** The inspect path now works on the canonical fixture. Inspect-path regression tracking can be added to future baselines.
+`profiles/flamegraph_diff_vs_baseline.svg` records this as a metadata-only diff
+because the prior snapshot has no comparable canonical inspect or FUSE stack
+profile.
 
 ## Opportunity Matrix
 
-| Candidate | Impact | Confidence | Effort | Score (I*C/E) | Status |
-|---|---|---|---|---:|---|
-| ~~Implement ext4 non-contiguous journal extent support~~ | ~~High~~ | ~~High~~ | ~~Medium~~ | ~~3.0~~ | **DONE** — multi-segment journal replay implemented |
-| Add a repeatable inspect profiling harness (looped workload) to raise sample count and expose Rust hot code | Medium | High | Low | 4.0 | Open — current profile has only 18 samples, dominated by loader/startup |
-| Add FUSE read-path flamegraph (inspect fixture path now unblocked) | Medium | Medium | Medium | 1.0 | Open — no longer blocked by journal extent support |
-| Optimize CLI cold-start overhead (link/load + startup path) after longer-run profile confirms bottleneck | Low-Medium | Low | Medium | 0.5 | Open — low-confidence, needs profiling harness first |
-
-## Recommended Next Targets
-
-1. ~~Unblock canonical inspect path by implementing support for non-contiguous ext4 journal extents.~~ **DONE.**
-2. Add a deterministic profiling harness that runs inspect repeatedly in one invocation window (to collect meaningful Rust-symbol samples).
-3. Re-run flamegraph against canonical fixture and update this document with post-fix hotspot data.
-4. Add FUSE read-path flamegraph (now unblocked).
+| Candidate | Impact | Confidence | Effort | Status |
+|---|---|---|---|---|
+| Implement ext4 non-contiguous journal extent support | High | High | Medium | Done before this bead |
+| Add repeatable in-process inspect profiling | Medium | High | Low | Done in `ffs-harness profile-read-path` |
+| Add FUSE read-path profiling | Medium | Medium | Low | Done via `FrankenFuse` adapter dispatch; live kernel mount still blocked by host permissions |
+| Reduce repeated metadata buffer movement | Medium | Medium | Medium | Open; investigate `memmove`/`memset` and `FileExt::read_at` stacks |
+| Reduce parser primitive overhead | Low-Medium | Medium | Medium | Open; inspect `ensure_slice` and `read_le_*` call density before optimizing |
+| Add live kernel-mounted FUSE profile on a permitted host | Medium | High | Low | Open environment follow-up |
 
 ## Limitations
 
-- The original (2026-02-13) run used a temporary no-journal ext4 image rather than the canonical golden ext4 fixture. The journal extent blocker is now resolved.
-- The sample count (18) is too low for high-confidence micro-optimization decisions.
-- A useful application-level hotspot map requires a longer-running inspect workload (or in-process repeated inspection).
+- `git_clean` is recorded as false in metadata because this was captured in an
+  active swarm worktree with unrelated agent edits present.
+- Kernel symbols are partially unresolved due `/proc/kallsyms` restrictions.
+- The FUSE artifact is adapter-level, not kernel-mounted, because both the rch
+  worker and local host denied `fusermount3`.

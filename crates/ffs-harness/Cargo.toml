@@ -8,7 +8,9 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+asupersync = { workspace = true }
 ffs-core = { workspace = true }
+ffs-fuse = { workspace = true }
 ffs-ondisk = { workspace = true }
 ffs-types = { workspace = true }
 hex = { workspace = true }
@@ -20,7 +22,6 @@ toml = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-asupersync = { workspace = true }
 blake3 = { workspace = true }
 crc32c = { workspace = true }
 criterion = { workspace = true }
@@ -28,7 +29,6 @@ ffs-alloc = { workspace = true }
 ffs-block = { workspace = true }
 ffs-btrfs = { workspace = true }
 ffs-error = { workspace = true }
-ffs-fuse = { workspace = true }
 ffs-inode = { workspace = true }
 ffs-xattr = { workspace = true }
 flate2 = { workspace = true }

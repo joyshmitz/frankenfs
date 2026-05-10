@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
 use anyhow::{Context, Result, bail};
+use asupersync::Cx;
+use ffs_core::{OpenFs, OpenOptions};
+use ffs_fuse::{FrankenFuse, MountOptions};
 use ffs_harness::{
     ParityReport,
     adaptive_runtime_manifest::{
@@ -240,9 +243,12 @@ use ffs_harness::{
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
+use std::hint::black_box;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use ffs_types::{BlockNumber, InodeNumber};
 
 #[derive(Debug, Default)]
 struct XfstestsReportConfig {
@@ -411,6 +417,7 @@ fn run() -> Result<()> {
     match cmd {
         Some("parity") => parity_cmd(),
         Some("check-fixtures") => check_fixtures_cmd(),
+        Some("profile-read-path") => profile_read_path_cmd(&args[1..]),
         Some("generate-fixture") => generate_fixture(&args[1..]),
         Some("run-crash-replay") => run_crash_replay(&args[1..]),
         Some("run-fsx-stress") => run_fsx_stress_cmd(&args[1..]),
@@ -531,6 +538,198 @@ fn check_fixtures_cmd() -> Result<()> {
     println!(
         "btrfs: nodesize={} label={}",
         btrfs_sb.nodesize, btrfs_sb.label
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfileReadPathMode {
+    CliInspect,
+    DirectRead,
+    FuseRead,
+}
+
+impl ProfileReadPathMode {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "cli-inspect" => Ok(Self::CliInspect),
+            "direct-read" => Ok(Self::DirectRead),
+            "fuse-read" => Ok(Self::FuseRead),
+            other => bail!("unknown profile-read-path mode: {other}"),
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::CliInspect => "cli-inspect",
+            Self::DirectRead => "direct-read",
+            Self::FuseRead => "fuse-read",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ProfileReadPathCmdArgs {
+    fixture: PathBuf,
+    duration: Duration,
+    iterations: Option<u64>,
+    mode: ProfileReadPathMode,
+}
+
+fn parse_profile_read_path_args(args: &[String]) -> Result<ProfileReadPathCmdArgs> {
+    let mut fixture = PathBuf::from("conformance/golden/ext4_8mb_reference.ext4");
+    let mut duration = Duration::from_secs(30);
+    let mut iterations = None;
+    let mut mode = ProfileReadPathMode::CliInspect;
+    let mut idx = 0;
+
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--fixture" => {
+                let value = args
+                    .get(idx + 1)
+                    .context("--fixture requires a path argument")?;
+                fixture = PathBuf::from(value);
+                idx += 2;
+            }
+            "--duration-sec" => {
+                let value = args
+                    .get(idx + 1)
+                    .context("--duration-sec requires an integer argument")?;
+                duration = Duration::from_secs(value.parse().context("parse --duration-sec")?);
+                idx += 2;
+            }
+            "--iterations" => {
+                let value = args
+                    .get(idx + 1)
+                    .context("--iterations requires an integer argument")?;
+                iterations = Some(value.parse().context("parse --iterations")?);
+                idx += 2;
+            }
+            "--mode" => {
+                let value = args.get(idx + 1).context("--mode requires an argument")?;
+                mode = ProfileReadPathMode::parse(value)?;
+                idx += 2;
+            }
+            "-h" | "--help" => {
+                println!(
+                    "usage: ffs-harness profile-read-path --fixture PATH --duration-sec N [--iterations N] [--mode cli-inspect|direct-read|fuse-read]"
+                );
+                return Ok(ProfileReadPathCmdArgs {
+                    fixture,
+                    duration: Duration::ZERO,
+                    iterations: Some(0),
+                    mode,
+                });
+            }
+            other => bail!("unknown profile-read-path argument: {other}"),
+        }
+    }
+
+    Ok(ProfileReadPathCmdArgs {
+        fixture,
+        duration,
+        iterations,
+        mode,
+    })
+}
+
+fn profile_read_path_iteration(
+    cx: &Cx,
+    args: &ProfileReadPathCmdArgs,
+    cached_fs: &mut Option<OpenFs>,
+    cached_fuse: &mut Option<(FrankenFuse, u64)>,
+) -> Result<u64> {
+    let checksum = match args.mode {
+        ProfileReadPathMode::CliInspect => {
+            let fs = OpenFs::open_with_options(cx, &args.fixture, &OpenOptions::default())
+                .with_context(|| format!("open fixture {}", args.fixture.display()))?;
+            let summary = fs.free_space_summary(cx)?;
+            let orphans = fs.read_ext4_orphan_list(cx)?;
+            let root_inode = fs.read_inode(cx, InodeNumber(2))?;
+            let superblock = fs.read_block_vec(cx, BlockNumber(0))?;
+            let group_descriptor = fs.read_block_vec(cx, BlockNumber(1))?;
+            black_box(summary.free_blocks_total)
+                ^ black_box(summary.free_inodes_total)
+                ^ u64::from(black_box(root_inode.mode))
+                ^ u64::try_from(black_box(orphans.count())).unwrap_or(u64::MAX)
+                ^ u64::try_from(black_box(superblock.len())).unwrap_or(u64::MAX)
+                ^ u64::try_from(black_box(group_descriptor.len())).unwrap_or(u64::MAX)
+        }
+        ProfileReadPathMode::DirectRead => {
+            if cached_fs.is_none() {
+                *cached_fs = Some(
+                    OpenFs::open_with_options(cx, &args.fixture, &OpenOptions::default())
+                        .with_context(|| format!("open fixture {}", args.fixture.display()))?,
+                );
+            }
+            let fs = cached_fs.as_ref().context("cached filesystem missing")?;
+            let root_inode = fs.read_inode(cx, InodeNumber(2))?;
+            let superblock = fs.read_block_vec(cx, BlockNumber(0))?;
+            let group_descriptor = fs.read_block_vec(cx, BlockNumber(1))?;
+            u64::from(black_box(root_inode.mode))
+                ^ u64::try_from(black_box(superblock.len())).unwrap_or(u64::MAX)
+                ^ u64::try_from(black_box(group_descriptor.len())).unwrap_or(u64::MAX)
+        }
+        ProfileReadPathMode::FuseRead => {
+            if cached_fuse.is_none() {
+                let fs = OpenFs::open_with_options(cx, &args.fixture, &OpenOptions::default())
+                    .with_context(|| format!("open fixture {}", args.fixture.display()))?;
+                let fuse = FrankenFuse::with_options(
+                    Box::new(fs),
+                    &MountOptions {
+                        read_only: true,
+                        ..MountOptions::default()
+                    },
+                );
+                let attr = fuse
+                    .lookup_for_fuzzing(2, b"readme.txt")
+                    .map_err(|errno| anyhow::anyhow!("fuse lookup_for_fuzzing errno {errno}"))?;
+                *cached_fuse = Some((fuse, attr.ino.0));
+            }
+            let (fuse, ino) = cached_fuse
+                .as_ref()
+                .context("cached fuse adapter missing")?;
+            let data = fuse
+                .read_for_fuzzing(*ino, 0, 1024 * 1024)
+                .map_err(|errno| anyhow::anyhow!("fuse read_for_fuzzing errno {errno}"))?;
+            u64::try_from(black_box(data.len())).unwrap_or(u64::MAX)
+        }
+    };
+
+    Ok(checksum)
+}
+
+fn profile_read_path_cmd(args: &[String]) -> Result<()> {
+    let args = parse_profile_read_path_args(args)?;
+    if args.iterations == Some(0) {
+        return Ok(());
+    }
+
+    let cx = Cx::for_testing();
+    let deadline = Instant::now() + args.duration;
+    let mut cached_fs = None;
+    let mut cached_fuse = None;
+    let mut iterations = 0_u64;
+    let mut checksum = 0_u64;
+
+    loop {
+        checksum ^= profile_read_path_iteration(&cx, &args, &mut cached_fs, &mut cached_fuse)?;
+        iterations = iterations.saturating_add(1);
+        if args.iterations.is_some_and(|limit| iterations >= limit) || Instant::now() >= deadline {
+            break;
+        }
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "mode": args.mode.label(),
+            "fixture": args.fixture,
+            "duration_ms": args.duration.as_millis(),
+            "iterations": iterations,
+            "checksum": checksum,
+        }))?
     );
     Ok(())
 }
@@ -6679,6 +6878,9 @@ fn print_usage() {
 fn print_usage_core_commands() {
     println!("  ffs-harness parity");
     println!("  ffs-harness check-fixtures");
+    println!(
+        "  ffs-harness profile-read-path --fixture PATH --duration-sec N [--mode cli-inspect|direct-read|fuse-read]"
+    );
     println!(
         "  ffs-harness generate-fixture <image> [ext4-superblock|btrfs-superblock|region <offset> <len>]"
     );

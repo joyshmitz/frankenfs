@@ -30,8 +30,10 @@ baselines/hyperfine/*/ffs_cli_inspect_probe.stderr
 # FastEmbed model caches (downloaded at runtime)
 .fastembed_cache/
 
-# Profiling output directories
-profiles/
+# Profiling raw data stays local; checked-in profile SVG/metadata artifacts live
+# under profiles/ and are guarded by ffs-harness tests.
+profiles/work/
+profiles/smoke-*/
 
 # Codex build artifacts
 target-codex*/

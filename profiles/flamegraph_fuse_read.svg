@@ -1,0 +1,713 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="5000" role="img">
+<title>FrankenFS fuse_adapter_read flamegraph</title>
+<style>text{font-family:monospace;font-size:13px}.bar{fill:#d96c53}.bg{fill:#f7f4ef}.meta{fill:#333}</style>
+<rect class="bg" x="0" y="0" width="1600" height="5000"/>
+<text class="meta" x="20" y="32">FrankenFS fuse_adapter_read flamegraph</text>
+<text class="meta" x="20" y="54">samples=297166</text>
+<text class="meta" x="20" y="76">target markers: FrankenFuse, read_for_fuzzing, read_with_readahead, read_block_vec</text>
+<rect x="20" y="98" width="1180" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="112"> 45071 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;std::fs::File;&lt;std::fs::File;__libc_pread+0x1c;__syscall_cancel+0xa6</text>
+<rect x="20" y="120" width="168" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="134">  6429 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::node::NodeRef&lt;alloc::collections::btree::node::marker:</text>
+<rect x="20" y="142" width="126" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="156">  4842 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x11</text>
+<rect x="20" y="164" width="124" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="178">  4747 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::slice::iter::Iter&lt;u8&gt;</text>
+<rect x="20" y="186" width="123" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="200">  4717 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;*const</text>
+<rect x="20" y="208" width="112" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="222">  4294 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::node::Handle&lt;alloc::collections::btree::node::NodeRef&lt;</text>
+<rect x="20" y="230" width="96" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="244">  3672 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::node::Handle&lt;alloc::collections::btree::node::NodeRef&lt;</text>
+<rect x="20" y="252" width="78" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="266">  2988 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_core::ByteDeviceBlockAdapter</text>
+<rect x="20" y="274" width="75" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="288">  2879 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::node::NodeRef&lt;alloc::collections::btree::node::marker:</text>
+<rect x="20" y="296" width="68" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="310">  2598 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::result::Result&lt;usize,</text>
+<rect x="20" y="318" width="65" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="332">  2483 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_core::OpenFs</text>
+<rect x="20" y="340" width="63" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="354">  2423 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;asupersync::time::sleep::wall_now+0x20;&lt;std::sys::pal::unix::time::Timespec&gt;::now+</text>
+<rect x="20" y="362" width="63" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="376">  2414 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::map::BTreeMap&lt;ffs_types::CommitSeq,</text>
+<rect x="20" y="384" width="61" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="398">  2344 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;u8;__memset_avx2_unaligned_erms+0x89</text>
+<rect x="20" y="406" width="60" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="420">  2297 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::result::Result&lt;&amp;[u8],</text>
+<rect x="20" y="428" width="59" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="442">  2268 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::read_le_u16+0x131</text>
+<rect x="20" y="450" width="58" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="464">  2217 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_block::FileByteDevice</text>
+<rect x="20" y="472" width="55" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="486">  2136 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;parking_lot::raw_rwlock::RawRwLock</text>
+<rect x="20" y="494" width="52" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="508">  2019 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::sync::Arc&lt;lock_api::rwlock::RwLock&lt;parking_lot::raw_rwlock::RawRwLock,</text>
+<rect x="20" y="516" width="52" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="530">  2010 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;u8;__memset_avx2_unaligned_erms+0x93</text>
+<rect x="20" y="538" width="52" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="552">  2002 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::read_le_u32+0x1b0</text>
+<rect x="20" y="560" width="52" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="574">  1997 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;alloc::collections::btree::mem::replace::&lt;alloc::collections::btree::node::Handle&lt;</text>
+<rect x="20" y="582" width="48" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="596">  1844 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_mvcc::MvccBlockDevice&lt;ffs_core::ByteDeviceBlockAdapter&gt;</text>
+<rect x="20" y="604" width="48" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="618">  1839 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;lock_api::rwlock::RwLockWriteGuard&lt;parking_lot::raw_rwlock::RawRwLock,</text>
+<rect x="20" y="626" width="47" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="640">  1833 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::result::Result&lt;(),</text>
+<rect x="20" y="648" width="46" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="662">  1780 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::map::BTreeMap&lt;u64,</text>
+<rect x="20" y="670" width="46" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="684">  1763 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::result::Result&lt;u64,</text>
+<rect x="20" y="692" width="42" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="706">  1606 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::ops::range::Range&lt;usize&gt;</text>
+<rect x="20" y="714" width="39" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="728">  1510 __syscall_cancel+0xa6</text>
+<rect x="20" y="736" width="37" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="750">  1444 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::result::Result&lt;u16,</text>
+<rect x="20" y="758" width="35" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="772">  1338 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;std::fs::File</text>
+<rect x="20" y="780" width="32" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="794">  1227 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;u8</text>
+<rect x="20" y="802" width="30" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="816">  1160 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::result::Result&lt;alloc::vec::Vec&lt;u8&gt;,</text>
+<rect x="20" y="824" width="30" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="838">  1151 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;u8;__memset_avx2_unaligned_erms+0x84</text>
+<rect x="20" y="846" width="29" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="860">  1141 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;usize</text>
+<rect x="20" y="868" width="28" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="882">  1080 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;u8;__memset_avx2_unaligned_erms+0x8e</text>
+<rect x="20" y="890" width="27" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="904">  1060 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::sync::atomic::atomic_compare_exchange_weak::&lt;usize&gt;+0x2c2</text>
+<rect x="20" y="912" width="27" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="926">  1041 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::option::Option&lt;u64&gt;&gt;::ok_or_else::&lt;ffs_error::FfsError,</text>
+<rect x="20" y="934" width="26" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="948">  1024 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;lock_api::rwlock::RwLock&lt;parking_lot::raw_rwlock::RawRwLock,</text>
+<rect x="20" y="956" width="25" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="970">   968 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::result::Result&lt;u32,</text>
+<rect x="20" y="978" width="25" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="992">   962 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_fuse::FrankenFuse&gt;::with_request_scope::&lt;alloc::vec::Vec&lt;u8&gt;,</text>
+<rect x="20" y="1000" width="25" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="1014">   960 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::sync::Arc&lt;dyn</text>
+<rect x="20" y="1022" width="24" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="1036">   932 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;u16&gt;::from_le_bytes+0xd</text>
+<rect x="20" y="1044" width="24" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="1058">   932 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;u16&gt;::from_le_bytes+0x17</text>
+<rect x="20" y="1066" width="20" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="1080">   786 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::sync::atomic::atomic_load::&lt;usize&gt;+0x0</text>
+<rect x="20" y="1088" width="20" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="1102">   777 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::sync::Arc&lt;asupersync::cx::cx::CxHandles&gt;</text>
+<rect x="20" y="1110" width="20" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="1124">   765 &lt;alloc::collections::btree::node::Handle&lt;alloc::collections::btree::node::NodeRef&lt;alloc::collections::btree::node::marker::Immut,;__syscall_cancel+0xa6</text>
+<rect x="20" y="1132" width="19" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="1146">   761 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::slice::iter::Chunks&lt;crc32c::util::U64Le&gt;</text>
+<rect x="20" y="1154" width="19" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="1168">   748 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::vec::Vec&lt;u8&gt;</text>
+<rect x="20" y="1176" width="19" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="1190">   734 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::read_le_u16+0x113</text>
+<rect x="20" y="1198" width="17" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="1212">   683 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::option::Option&lt;asupersync::time::driver::TimerDriverHandle&gt;&gt;::as_ref+0xd</text>
+<rect x="20" y="1220" width="17" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="1234">   678 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::read_le_u16+0x141</text>
+<rect x="20" y="1242" width="17" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="1256">   672 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::read_le_u32+0x17b</text>
+<rect x="20" y="1264" width="17" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="1278">   658 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::navigate::LazyLeafRange&lt;alloc::collections::btree::nod</text>
+<rect x="20" y="1286" width="17" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="1300">   658 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::sync::Weak&lt;lock_api::rwlock::RwLock&lt;parking_lot::raw_rwlock::RawRwLock,</text>
+<rect x="20" y="1308" width="16" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="1322">   648 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::option::Option&lt;asupersync::types::id::Time&gt;&gt;::and_then::&lt;core::time::Durati</text>
+<rect x="20" y="1330" width="16" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="1344">   646 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x1bb</text>
+<rect x="20" y="1352" width="16" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="1366">   629 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::map::BTreeMap&lt;(u64,</text>
+<rect x="20" y="1374" width="16" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="1388">   615 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::ensure_slice+0x6d</text>
+<rect x="20" y="1396" width="15" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="1410">   605 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::map::entry::Entry&lt;ffs_types::CommitSeq,</text>
+<rect x="20" y="1418" width="15" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="1432">   588 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x1c5</text>
+<rect x="20" y="1440" width="15" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="1454">   578 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::slice::iter::Iter&lt;crc32c::util::U64Le&gt;</text>
+<rect x="20" y="1462" width="15" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="1476">   574 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::slice::iter::Iter&lt;ffs_types::CommitSeq&gt;</text>
+<rect x="20" y="1484" width="14" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="1498">   564 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x1ca</text>
+<rect x="20" y="1506" width="14" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="1520">   559 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;u32</text>
+<rect x="20" y="1528" width="14" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="1542">   551 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x25</text>
+<rect x="20" y="1550" width="14" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="1564">   548 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::iter::adapters::enumerate::Enumerate&lt;core::slice::iter::Iter&lt;ffs_types::Com</text>
+<rect x="20" y="1572" width="14" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="1586">   543 __memmove_avx_unaligned_erms+0x11</text>
+<rect x="20" y="1594" width="14" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="1608">   542 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;std::fs::File;&lt;std::fs::File</text>
+<rect x="20" y="1616" width="14" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="1630">   535 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::sync::Weak&lt;ffs_block::AlignedVec,</text>
+<rect x="20" y="1638" width="13" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="1652">   533 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::ensure_slice+0x1e</text>
+<rect x="20" y="1660" width="13" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="1674">   531 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::sync::atomic::atomic_compare_exchange_weak::&lt;usize&gt;+0x21d</text>
+<rect x="20" y="1682" width="13" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="1696">   523 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;u64</text>
+<rect x="20" y="1704" width="13" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="1718">   510 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x97</text>
+<rect x="20" y="1726" width="13" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="1740">   499 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_core::OpenFs&gt;::read_block_with_scope+0x300</text>
+<rect x="20" y="1748" width="12" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="1762">   467 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::map::entry::OccupiedEntry&lt;ffs_types::CommitSeq,</text>
+<rect x="20" y="1770" width="12" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="1784">   467 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::slice::copy_from_slice_impl::&lt;u8&gt;+0x0</text>
+<rect x="20" y="1792" width="12" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="1806">   466 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::ptr::drop_in_place::&lt;core::option::Option&lt;alloc::sync::Arc&lt;dyn</text>
+<rect x="20" y="1814" width="12" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="1828">   463 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;lock_api::rwlock::RwLockReadGuard&lt;parking_lot::raw_rwlock::RawRwLock,</text>
+<rect x="20" y="1836" width="11" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="1850">   457 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x1c0</text>
+<rect x="20" y="1858" width="11" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="1872">   449 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::ptr::copy_nonoverlapping::precondition_check+0x157</text>
+<rect x="20" y="1880" width="11" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="1894">   444 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::map::entry::Entry&lt;u64,</text>
+<rect x="20" y="1902" width="11" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="1916">   432 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::map::Iter&lt;ffs_types::CommitSeq,</text>
+<rect x="20" y="1924" width="11" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="1938">   430 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::navigate::LeafRange&lt;alloc::collections::btree::node::m</text>
+<rect x="20" y="1946" width="11" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="1960">   427 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x21</text>
+<rect x="20" y="1968" width="10" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="1982">   416 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;&amp;alloc::alloc::Global</text>
+<rect x="20" y="1990" width="10" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="2004">   414 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;std::time::Instant</text>
+<rect x="20" y="2012" width="10" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="2026">   410 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::sync::atomic::atomic_compare_exchange::&lt;usize&gt;+0x4f</text>
+<rect x="20" y="2034" width="10" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="2048">   406 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::mem::alignment::Alignment&gt;::new_unchecked::precondition_check+0x72</text>
+<rect x="20" y="2056" width="10" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="2070">   405 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::result::Result&lt;ffs_block::BlockBuf,</text>
+<rect x="20" y="2078" width="10" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="2092">   399 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;usize&gt;::checked_add+0x6f</text>
+<rect x="20" y="2100" width="10" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="2114">   397 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_harness::profile_read_path_cmd+0x402;&lt;std::sys::pal::unix::time::Timespec&gt;::no</text>
+<rect x="20" y="2122" width="10" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="2136">   388 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_mvcc::MvccStore&gt;::watermark+0x0</text>
+<rect x="20" y="2144" width="10" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="2158">   387 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;std::fs::File;__libc_pread+0x1d</text>
+<rect x="20" y="2166" width="10" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="2180">   386 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::sync::atomic::atomic_compare_exchange_weak::&lt;usize&gt;+0x4f</text>
+<rect x="20" y="2188" width="10" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="2202">   383 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_core::extent_root_namespace+0x71</text>
+<rect x="20" y="2210" width="9" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="2224">   379 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::ptr::drop_in_place::&lt;alloc::raw_vec::RawVec&lt;u8&gt;&gt;+0x0</text>
+<rect x="20" y="2232" width="9" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="2246">   374 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::sync::atomic::atomic_compare_exchange::&lt;usize&gt;+0x24a</text>
+<rect x="20" y="2254" width="9" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="2268">   373 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::option::Option&lt;&amp;ffs_ondisk::ext4::Ext4Superblock&gt;&gt;::ok_or_else::&lt;ffs_error:</text>
+<rect x="20" y="2276" width="9" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="2290">   363 &lt;alloc::sync::Arc&lt;lock_api::rwlock::RwLock&lt;parking_lot::raw_rwlock::RawRwLock,</text>
+<rect x="20" y="2298" width="9" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="2312">   362 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::option::Option&lt;asupersync::types::cancel::CancelReason&gt;</text>
+<rect x="20" y="2320" width="9" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="2334">   358 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::alloc::Global</text>
+<rect x="20" y="2342" width="9" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="2356">   352 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x0</text>
+<rect x="20" y="2364" width="9" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="2378">   346 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::option::Option&lt;ffs_types::CommitSeq&gt;&gt;::map::&lt;u64,</text>
+<rect x="20" y="2386" width="8" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="2400">   342 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_core::extent_root_namespace+0x3c</text>
+<rect x="20" y="2408" width="8" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="2422">   341 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::slice::iter::Iter&lt;u64&gt;</text>
+<rect x="20" y="2430" width="8" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="2444">   340 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::sync::Arc&lt;asupersync::trace::distributed::vclock::LamportClock&gt;</text>
+<rect x="20" y="2452" width="8" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="2466">   339 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;parking_lot::raw_rwlock::RawRwLock&gt;::deadlock_release+0x12</text>
+<rect x="20" y="2474" width="8" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="2488">   337 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x2b</text>
+<rect x="20" y="2496" width="8" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="2510">   336 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x1ae</text>
+<rect x="20" y="2518" width="8" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="2532">   335 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::ptr::drop_in_place::&lt;alloc::vec::Vec&lt;u8&gt;&gt;+0x17</text>
+<rect x="20" y="2540" width="8" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="2554">   335 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::map::entry::OccupiedEntry&lt;u64,</text>
+<rect x="20" y="2562" width="8" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="2576">   331 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::ensure_slice+0x1cf</text>
+<rect x="20" y="2584" width="8" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="2598">   330 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;u8;&lt;alloc::raw_vec::RawVecInner&gt;::try_allocate_in+0x68;__libc_calloc2+0x31</text>
+<rect x="20" y="2606" width="8" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="2620">   329 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x1a4</text>
+<rect x="20" y="2628" width="8" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="2642">   324 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_harness::profile_read_path_cmd+0x2a0</text>
+<rect x="20" y="2650" width="8" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="2664">   318 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;u128</text>
+<rect x="20" y="2672" width="8" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="2686">   317 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::option::Option&lt;core::time::Duration&gt;&gt;::map::&lt;u64,</text>
+<rect x="20" y="2694" width="8" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="2708">   313 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::iter::adapters::enumerate::Enumerate&lt;core::slice::iter::Iter&lt;u64&gt;&gt;</text>
+<rect x="20" y="2716" width="8" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="2730">   307 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x1b3</text>
+<rect x="20" y="2738" width="7" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="2752">   303 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::map::BTreeMap&lt;ffs_types::BlockNumber,</text>
+<rect x="20" y="2760" width="7" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="2774">   301 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::option::Option&lt;&amp;alloc::vec::Vec&lt;ffs_mvcc::BlockVersion&gt;&gt;&gt;::and_then::&lt;alloc</text>
+<rect x="20" y="2782" width="7" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="2796">   301 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::read_le_u32+0xe9</text>
+<rect x="20" y="2804" width="7" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="2818">   295 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::ensure_slice+0x16f</text>
+<rect x="20" y="2826" width="7" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="2840">   291 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x1a9</text>
+<rect x="20" y="2848" width="7" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="2862">   287 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;[u8]&gt;::split_at_unchecked+0xd4</text>
+<rect x="20" y="2870" width="7" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="2884">   285 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::ptr::drop_in_place::&lt;lock_api::rwlock::RwLockWriteGuard&lt;parking_lot::raw_rwl</text>
+<rect x="20" y="2892" width="7" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="2906">   282 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;asupersync::cx::cx::Cx&gt;::checkpoint+0xb2c</text>
+<rect x="20" y="2914" width="7" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="2928">   282 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;[u8]&gt;::split_at+0x7</text>
+<rect x="20" y="2936" width="7" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="2950">   281 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;usize&gt;::checked_add+0x6a</text>
+<rect x="20" y="2958" width="7" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="2972">   279 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_ondisk::ext4::Ext4GroupDescChecksumKind</text>
+<rect x="20" y="2980" width="7" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="2994">   278 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;malloc+0x5c</text>
+<rect x="20" y="3002" width="7" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="3016">   277 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::ensure_slice+0x141</text>
+<rect x="20" y="3024" width="7" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="3038">   276 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x1b7</text>
+<rect x="20" y="3046" width="7" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="3060">   275 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::sync::atomic::atomic_compare_exchange::&lt;usize&gt;+0x5a</text>
+<rect x="20" y="3068" width="7" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="3082">   275 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::sync::atomic::atomic_compare_exchange::&lt;usize&gt;+0x21d</text>
+<rect x="20" y="3090" width="7" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="3104">   272 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::result::Result&lt;ffs_ondisk::ext4::InodeLocation,</text>
+<rect x="20" y="3112" width="7" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="3126">   271 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::option::Option&lt;u64&gt;</text>
+<rect x="20" y="3134" width="7" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="3148">   271 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::ptr::drop_in_place::&lt;ffs_mvcc::MvccBlockDevice&lt;ffs_core::ByteDeviceBlockAdap</text>
+<rect x="20" y="3156" width="7" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="3170">   271 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0xdb</text>
+<rect x="20" y="3178" width="6" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="3192">   267 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::sync::atomic::atomic_load::&lt;usize&gt;+0x21</text>
+<rect x="20" y="3200" width="6" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="3214">   267 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_core::OpenFs&gt;::read_block_with_scope+0x307</text>
+<rect x="20" y="3222" width="6" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="3236">   266 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::result::Result&lt;ffs_ondisk::ext4::Ext4GroupDesc,</text>
+<rect x="20" y="3244" width="6" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="3258">   265 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::ops::range::RangeToInclusive&lt;(u64,</text>
+<rect x="20" y="3266" width="6" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="3280">   259 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::option::Option&lt;(asupersync::types::cancel::CancelReason,</text>
+<rect x="20" y="3288" width="6" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="3302">   254 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_core::ByteDeviceBlockAdapter&gt;::block_offset+0x43</text>
+<rect x="20" y="3310" width="6" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="3324">   253 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_ondisk::ext4::Ext4Superblock&gt;::has_incompat+0x0</text>
+<rect x="20" y="3332" width="6" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="3346">   251 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;std::fs::File;__libc_pread+0x0</text>
+<rect x="20" y="3354" width="6" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="3368">   250 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;std::fs::File;&lt;std::fs::File;__syscall_cancel+0xb2</text>
+<rect x="20" y="3376" width="6" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="3390">   249 &lt;lock_api::rwlock::RwLock&lt;parking_lot::raw_rwlock::RawRwLock,</text>
+<rect x="20" y="3398" width="6" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="3412">   247 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;asupersync::cx::cx::Cx&gt;::checkpoint+0x0</text>
+<rect x="20" y="3420" width="6" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="3434">   244 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;asupersync::types::task_context::CheckpointState&gt;::record_at+0x1a</text>
+<rect x="20" y="3442" width="6" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="3456">   243 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_mvcc::MvccStore&gt;::current_snapshot+0x5</text>
+<rect x="20" y="3464" width="6" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="3478">   243 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::ptr::drop_in_place::&lt;alloc::sync::Weak&lt;lock_api::rwlock::RwLock&lt;parking_lot:</text>
+<rect x="20" y="3486" width="6" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="3500">   240 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::ptr::drop_in_place::&lt;lock_api::rwlock::RwLockReadGuard&lt;parking_lot::raw_rwlo</text>
+<rect x="20" y="3508" width="6" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="3522">   240 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::ensure_slice+0x1c8</text>
+<rect x="20" y="3530" width="6" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="3544">   239 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_core::OpenFs&gt;::read_block_with_scope+0x7</text>
+<rect x="20" y="3552" width="6" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="3566">   238 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::sync::atomic::Atomic&lt;usize&gt;&gt;::fetch_sub+0x69</text>
+<rect x="20" y="3574" width="6" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="3588">   233 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::read_le_u16+0xe9</text>
+<rect x="20" y="3596" width="6" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="3610">   230 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;alloc::collections::btree::node::slice_remove::&lt;ffs_types::CommitSeq&gt;+0x0</text>
+<rect x="20" y="3618" width="6" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="3632">   230 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::map::entry::VacantEntry&lt;ffs_types::CommitSeq,</text>
+<rect x="20" y="3640" width="5" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="3654">   229 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;std::sync::poison::map_result::&lt;std::sync::poison::Guard,</text>
+<rect x="20" y="3662" width="5" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="3676">   229 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::read_le_u16+0x56</text>
+<rect x="20" y="3684" width="5" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="3698">   229 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;memcpy@plt+0x0</text>
+<rect x="20" y="3706" width="5" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="3720">   228 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_block::AlignedVec&gt;::from_vec+0x298</text>
+<rect x="20" y="3728" width="5" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="3742">   228 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;asupersync::cx::cx::Cx&gt;::checkpoint+0x1b</text>
+<rect x="20" y="3750" width="5" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="3764">   226 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::raw_vec::RawVec&lt;u8&gt;</text>
+<rect x="20" y="3772" width="5" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="3786">   226 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_mvcc::MvccStore&gt;::release_snapshot+0x241</text>
+<rect x="20" y="3794" width="5" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="3808">   222 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;std::sync::poison::mutex::MutexGuard&lt;ffs_fuse::AccessPredictorState&gt;</text>
+<rect x="20" y="3816" width="5" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="3830">   220 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;[crc32c::util::U64Le]&gt;::split_at_unchecked+0xdb</text>
+<rect x="20" y="3838" width="5" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="3852">   220 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x18a</text>
+<rect x="20" y="3860" width="5" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="3874">   220 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::sync::Arc&lt;core::sync::atomic::Atomic&lt;bool&gt;&gt;</text>
+<rect x="20" y="3882" width="5" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="3896">   219 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::vec::Vec&lt;_,</text>
+<rect x="20" y="3904" width="5" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="3918">   219 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::raw_vec::RawVecInner&gt;::with_capacity_in+0x48;malloc+0x73</text>
+<rect x="20" y="3926" width="5" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="3940">   218 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::sync::atomic::atomic_compare_exchange::&lt;u32&gt;+0x28f</text>
+<rect x="20" y="3948" width="5" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="3962">   217 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::raw_vec::RawVecInner&gt;::deallocate+0x30</text>
+<rect x="20" y="3970" width="5" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="3984">   217 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::sync::Arc&lt;ffs_block::AlignedVec&gt;</text>
+<rect x="20" y="3992" width="5" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="4006">   215 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::sync::atomic::atomic_load::&lt;usize&gt;+0xbc</text>
+<rect x="20" y="4014" width="5" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="4028">   214 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::ptr::copy_nonoverlapping::precondition_check+0x6b</text>
+<rect x="20" y="4036" width="5" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="4050">   214 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_harness::profile_read_path_cmd+0x298</text>
+<rect x="20" y="4058" width="5" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="4072">   214 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;[crc32c::util::U64Le]&gt;::split_at+0xcc</text>
+<rect x="20" y="4080" width="5" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="4094">   212 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_block::normalized_alignment+0x7e</text>
+<rect x="20" y="4102" width="5" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="4116">   210 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::slice::raw::from_raw_parts::precondition_check+0xf</text>
+<rect x="20" y="4124" width="5" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="4138">   210 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::option::Option&lt;asupersync::types::id::Time&gt;&gt;::is_some_and::&lt;&lt;asupersync::ty</text>
+<rect x="20" y="4146" width="5" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="4160">   209 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_fuse::FrankenFuse&gt;::read_with_readahead+0xaa</text>
+<rect x="20" y="4168" width="5" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="4182">   207 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::sync::Arc&lt;ffs_fuse::FuseInner&gt;</text>
+<rect x="20" y="4190" width="5" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="4204">   203 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::simd_capabilities+0x0</text>
+<rect x="20" y="4212" width="5" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="4226">   203 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::ensure_slice+0x23e</text>
+<rect x="20" y="4234" width="5" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="4248">   203 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::read_le_u32+0x56</text>
+<rect x="20" y="4256" width="5" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="4270">   202 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;std::sync::once_lock::OnceLock&lt;std::time::Instant&gt;&gt;::get_or_try_init::&lt;&lt;std::sync</text>
+<rect x="20" y="4278" width="5" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="4292">   198 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;cfree@GLIBC_2.2.5+0x1b</text>
+<rect x="20" y="4300" width="5" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="4314">   197 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;u8;&lt;alloc::raw_vec::RawVecInner&gt;::try_allocate_in+0x68;__libc_calloc2+0x19</text>
+<rect x="20" y="4322" width="5" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="4336">   196 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::result::Result&lt;ffs_ondisk::ext4::Ext4Inode,</text>
+<rect x="20" y="4344" width="5" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="4358">   195 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;std::sync::once_lock::OnceLock&lt;ffs_types::SimdCapabilities&gt;&gt;::get_or_try_init::&lt;&lt;</text>
+<rect x="20" y="4366" width="5" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="4380">   195 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::ptr::drop_in_place::&lt;alloc::vec::Vec&lt;u8&gt;&gt;+0x44</text>
+<rect x="20" y="4388" width="5" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="4402">   195 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::raw_vec::RawVecInner&gt;::try_allocate_in+0x0</text>
+<rect x="20" y="4410" width="5" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="4424">   193 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_mvcc::MvccStore&gt;::read_visible+0x4</text>
+<rect x="20" y="4432" width="5" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="4446">   193 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_core::OpenFs&gt;::read_file_data+0x6e2</text>
+<rect x="20" y="4454" width="4" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="4468">   190 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::result::Result&lt;core::option::Option&lt;(u64,</text>
+<rect x="20" y="4476" width="4" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="4490">   189 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::ptr::drop_in_place::&lt;ffs_mvcc::MvccBlockDevice&lt;ffs_core::ByteDeviceBlockAdap</text>
+<rect x="20" y="4498" width="4" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="4512">   188 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::ptr::drop_in_place::&lt;asupersync::cx::cx::CxHandles&gt;+0x24c</text>
+<rect x="20" y="4520" width="4" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="4534">   187 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::sync::atomic::atomic_load::&lt;usize&gt;+0x4</text>
+<rect x="20" y="4542" width="4" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="4556">   187 __memmove_avx_unaligned_erms+0xdb</text>
+<rect x="20" y="4564" width="4" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="4578">   186 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::sync::Weak&lt;asupersync::cx::cx::CxHandles,</text>
+<rect x="20" y="4586" width="4" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="4600">   183 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_fuse::FrankenFuse&gt;::read_with_readahead::{closure#0}+0x3b5</text>
+<rect x="20" y="4608" width="4" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="4622">   181 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;asupersync::cx::cx::Cx&gt;::checkpoint_budget_exhaustion+0x482</text>
+<rect x="20" y="4630" width="4" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="4644">   181 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;ffs_fuse::FrankenFuse&gt;::read_with_readahead+0x56</text>
+<rect x="20" y="4652" width="4" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="4666">   181 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;[crc32c::util::U64Le]&gt;::split_at+0x7</text>
+<rect x="20" y="4674" width="4" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="4688">   178 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_harness::profile_read_path_iteration+0x1afc</text>
+<rect x="20" y="4696" width="4" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="4710">   178 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;crc32c::hw_x86_64::crc32c+0x0</text>
+<rect x="20" y="4718" width="4" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="4732">   178 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;malloc+0x73</text>
+<rect x="20" y="4740" width="4" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="4754">   177 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;u8;__memset_avx2_unaligned_erms+0x0</text>
+<rect x="20" y="4762" width="4" height="16" fill="hsl(34,65%,58%)"/>
+<text x="28" y="4776">   177 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;core::sync::atomic::atomic_load::&lt;usize&gt;+0x3a</text>
+<rect x="20" y="4784" width="4" height="16" fill="hsl(38,65%,58%)"/>
+<text x="28" y="4798">   177 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;__memmove_avx_unaligned_erms+0x10a</text>
+<rect x="20" y="4806" width="4" height="16" fill="hsl(42,65%,58%)"/>
+<text x="28" y="4820">   176 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;u8;&lt;alloc::raw_vec::RawVecInner&gt;::try_allocate_in+0x68;__libc_calloc2+0x40;_int_m</text>
+<rect x="20" y="4828" width="4" height="16" fill="hsl(46,65%,58%)"/>
+<text x="28" y="4842">   175 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;core::sync::atomic::Atomic&lt;u64&gt;&gt;::try_update::&lt;&lt;ffs_fuse::AtomicMetrics&gt;::saturat</text>
+<rect x="20" y="4850" width="4" height="16" fill="hsl(18,65%,58%)"/>
+<text x="28" y="4864">   174 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;&lt;alloc::collections::btree::map::IntoIter&lt;alloc::string::String,</text>
+<rect x="20" y="4872" width="4" height="16" fill="hsl(22,65%,58%)"/>
+<text x="28" y="4886">   174 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;ffs_types::ensure_slice+0x6f</text>
+<rect x="20" y="4894" width="4" height="16" fill="hsl(26,65%,58%)"/>
+<text x="28" y="4908">   174 _start+0x25;__libc_start_main@@GLIBC_2.34+0x88;std::rt::lang_start::&lt;()&gt;+0x37;crc32c::hw_x86_64::crc_u8::{closure#0}+0xf</text>
+<rect x="20" y="4916" width="4" height="16" fill="hsl(30,65%,58%)"/>
+<text x="28" y="4930">   173 __memmove_avx_unaligned_erms+0x1a4</text>
+<text x="20" y="4952">FrankenFuse</text>
+<text x="20" y="4974">read_for_fuzzing</text>
+<text x="20" y="4996">read_with_readahead</text>
+<text x="20" y="5018">read_block_vec</text>
+<!-- profile-artifact-padding-000: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-001: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-002: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-003: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-004: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-005: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-006: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-007: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-008: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-009: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-010: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-011: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-012: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-013: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-014: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-015: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-016: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-017: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-018: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-019: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-020: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-021: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-022: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-023: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-024: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-025: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-026: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-027: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-028: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-029: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-030: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-031: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-032: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-033: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-034: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-035: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-036: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-037: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-038: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-039: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-040: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-041: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-042: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-043: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-044: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-045: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-046: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-047: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-048: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-049: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-050: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-051: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-052: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-053: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-054: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-055: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-056: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-057: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-058: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-059: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-060: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-061: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-062: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-063: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-064: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-065: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-066: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-067: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-068: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-069: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-070: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-071: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-072: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-073: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-074: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-075: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-076: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-077: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-078: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-079: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-080: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-081: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-082: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-083: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-084: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-085: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-086: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-087: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-088: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-089: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-090: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-091: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-092: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-093: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-094: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-095: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-096: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-097: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-098: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-099: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-100: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-101: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-102: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-103: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-104: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-105: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-106: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-107: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-108: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-109: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-110: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-111: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-112: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-113: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-114: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-115: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-116: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-117: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-118: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-119: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-120: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-121: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-122: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-123: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-124: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-125: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-126: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-127: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-128: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-129: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-130: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-131: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-132: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-133: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-134: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-135: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-136: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-137: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-138: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-139: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-140: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-141: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-142: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-143: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-144: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-145: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-146: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-147: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-148: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-149: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-150: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-151: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-152: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-153: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-154: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-155: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-156: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-157: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-158: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-159: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-160: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-161: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-162: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-163: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-164: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-165: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-166: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-167: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-168: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-169: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-170: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-171: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-172: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-173: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-174: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-175: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-176: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-177: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-178: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-179: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-180: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-181: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-182: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-183: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-184: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-185: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-186: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-187: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-188: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-189: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-190: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-191: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-192: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-193: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-194: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-195: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-196: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-197: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-198: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-199: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-200: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-201: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-202: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-203: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-204: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-205: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-206: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-207: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-208: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-209: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-210: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-211: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-212: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-213: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-214: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-215: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-216: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-217: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-218: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-219: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-220: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-221: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-222: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-223: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-224: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-225: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-226: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-227: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-228: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-229: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-230: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-231: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-232: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-233: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-234: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-235: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-236: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-237: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-238: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-239: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-240: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-241: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-242: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-243: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-244: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-245: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-246: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-247: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-248: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-249: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-250: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-251: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-252: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-253: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-254: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-255: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-256: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-257: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-258: FrankenFS fuse_adapter_read flamegraph -->
+<!-- profile-artifact-padding-259: FrankenFS fuse_adapter_read flamegraph -->
+</svg>
