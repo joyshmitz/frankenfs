@@ -592,6 +592,7 @@ fn ownership_counter_exhausted(field: &str, value: u64) -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn record_path_for_image() {
@@ -1112,6 +1113,38 @@ mod tests {
         let err = next_temp_file_nonce(&counter).expect_err("counter exhaustion should fail");
         assert_eq!(err.kind(), std::io::ErrorKind::Other);
         assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn proptest_rewrite_decision_orders_by_generation_then_host_id(
+            our_seed in any::<u16>(),
+            current_seed in any::<u16>(),
+            expected_generation in 0_u64..1_000_000,
+            current_generation in 0_u64..1_000_000,
+        ) {
+            let our_host = format!("host-{our_seed:04x}");
+            let current_host = format!("host-{current_seed:04x}");
+            let mgr = RepairOwnership::new(our_host.clone(), "worker-a".into());
+            let current = record_fixture(&current_host, current_generation, 1);
+
+            let should_rewrite =
+                mgr.should_rewrite_conflicting_claim(&current, expected_generation);
+            let expected = expected_generation > current_generation
+                || (expected_generation == current_generation && our_host < current_host);
+
+            prop_assert_eq!(
+                should_rewrite,
+                expected,
+                "expected_gen={} current_gen={} our={} current={}",
+                expected_generation,
+                current_generation,
+                our_host,
+                current_host,
+            );
+        }
     }
 
     fn record_fixture(
