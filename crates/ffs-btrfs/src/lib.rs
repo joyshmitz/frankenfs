@@ -6644,7 +6644,7 @@ mod tests {
         bad[25..27].copy_from_slice(&0x5555_u16.to_le_bytes());
         let err = parse_dir_items(&bad).expect_err("non-zero data_len must reject");
         assert!(
-            matches!(err, ParseError::InvalidField { ref field, .. } if *field == "dir_item.data_len"),
+            matches!(err, ParseError::InvalidField { field, .. } if field == "dir_item.data_len"),
             "expected InvalidField{{data_len}}, got {err:?}"
         );
     }
@@ -7227,27 +7227,29 @@ mod tests {
 
         let parsed = parse_extent_data(&data).expect("kernel-stamped extent_data must parse");
 
-        match parsed {
-            BtrfsExtentData::Regular {
-                generation: g,
-                ram_bytes: rb,
-                extent_type,
-                compression,
-                disk_bytenr: db,
-                disk_num_bytes: dnb,
-                extent_offset: eo,
-                num_bytes: nb,
-            } => {
-                assert_eq!(g, generation, "generation @ offset 0..8");
-                assert_eq!(rb, ram_bytes, "ram_bytes @ offset 8..16");
-                assert_eq!(compression, BTRFS_COMPRESS_NONE, "compression @ offset 16");
-                assert_eq!(extent_type, BTRFS_FILE_EXTENT_REG, "type @ offset 20");
-                assert_eq!(db, disk_bytenr, "disk_bytenr @ offset 21..29");
-                assert_eq!(dnb, disk_num_bytes, "disk_num_bytes @ offset 29..37");
-                assert_eq!(eo, extent_offset, "extent_offset @ offset 37..45");
-                assert_eq!(nb, num_bytes, "num_bytes @ offset 45..53");
-            }
-            other => panic!("expected Regular variant, got {other:?}"),
+        assert!(
+            matches!(parsed, BtrfsExtentData::Regular { .. }),
+            "expected Regular variant, got {parsed:?}"
+        );
+        if let BtrfsExtentData::Regular {
+            generation: g,
+            ram_bytes: rb,
+            extent_type,
+            compression,
+            disk_bytenr: db,
+            disk_num_bytes: dnb,
+            extent_offset: eo,
+            num_bytes: nb,
+        } = parsed
+        {
+            assert_eq!(g, generation, "generation @ offset 0..8");
+            assert_eq!(rb, ram_bytes, "ram_bytes @ offset 8..16");
+            assert_eq!(compression, BTRFS_COMPRESS_NONE, "compression @ offset 16");
+            assert_eq!(extent_type, BTRFS_FILE_EXTENT_REG, "type @ offset 20");
+            assert_eq!(db, disk_bytenr, "disk_bytenr @ offset 21..29");
+            assert_eq!(dnb, disk_num_bytes, "disk_num_bytes @ offset 29..37");
+            assert_eq!(eo, extent_offset, "extent_offset @ offset 37..45");
+            assert_eq!(nb, num_bytes, "num_bytes @ offset 45..53");
         }
     }
 
@@ -7265,7 +7267,7 @@ mod tests {
             generation: 0xCAFE_BABE_DEAD_BEEF,
             ram_bytes: 8, // NONE compression: must equal data.len()
             compression: BTRFS_COMPRESS_NONE,
-            data: inline_data.clone(),
+            data: inline_data,
         };
         let bytes = extent.to_bytes();
         assert_eq!(
@@ -7630,7 +7632,8 @@ mod tests {
             // index LE @0..8 = 0xCAFE_BABE_DEAD_BEEF
             0xEF, 0xBE, 0xAD, 0xDE, 0xBE, 0xBA, 0xFE, 0xCA, // name_len LE @8..10 = 15
             0x0F, 0x00, // name @10..25 = "kernel-pin-test"
-            b'k', b'e', b'r', b'n', b'e', b'l', b'-', b'p', b'i', b'n', b'-', b't', b'e', b's', b't',
+            b'k', b'e', b'r', b'n', b'e', b'l', b'-', b'p', b'i', b'n', b'-', b't', b'e', b's',
+            b't',
         ];
         assert_eq!(
             bytes, expected,
@@ -7690,13 +7693,10 @@ mod tests {
         let mut bad = data.clone();
         bad[8..10].copy_from_slice(&0_u16.to_le_bytes());
         let err = parse_inode_refs(&bad).expect_err("zero name_len must reject");
-        match err {
-            ParseError::InvalidField { field, .. } => assert_eq!(
-                field, "inode_ref.name_len",
-                "rejection must specifically blame name_len, proving offset 8 is read"
-            ),
-            other => panic!("expected InvalidField{{name_len}}, got {other:?}"),
-        }
+        assert!(
+            matches!(err, ParseError::InvalidField { field, .. } if field == "inode_ref.name_len"),
+            "rejection must specifically blame name_len, proving offset 8 is read; got {err:?}"
+        );
     }
 
     #[test]
@@ -8646,13 +8646,10 @@ mod tests {
         let mut bad = data.clone();
         bad[27..29].copy_from_slice(&0_u16.to_le_bytes());
         let err = parse_xattr_items(&bad).expect_err("zero name_len must reject");
-        match err {
-            ParseError::InvalidField { field, .. } => assert_eq!(
-                field, "xattr.name_len",
-                "rejection must specifically blame name_len, proving offset 27 is read"
-            ),
-            other => panic!("expected InvalidField{{name_len}}, got {other:?}"),
-        }
+        assert!(
+            matches!(err, ParseError::InvalidField { field, .. } if field == "xattr.name_len"),
+            "rejection must specifically blame name_len, proving offset 27 is read; got {err:?}"
+        );
     }
 
     #[test]
@@ -12082,13 +12079,10 @@ mod tests {
         let mut padded = data.clone();
         padded.push(0x55);
         let err = parse_root_ref(&padded).expect_err("trailing byte must reject");
-        match err {
-            ParseError::InvalidField { field, .. } => assert_eq!(
-                field, "root_ref.name_len",
-                "trailing-byte rejection must blame name_len contract"
-            ),
-            other => panic!("expected InvalidField{{name_len}}, got {other:?}"),
-        }
+        assert!(
+            matches!(err, ParseError::InvalidField { field, .. } if field == "root_ref.name_len"),
+            "trailing-byte rejection must blame name_len contract; got {err:?}"
+        );
     }
 
     #[test]
@@ -12139,7 +12133,7 @@ mod tests {
         ) {
             let mut bytes = make_root_ref_data(dirid, &name);
             bytes.extend_from_slice(&suffix);
-            let err = parse_root_ref(&bytes).err().expect("append must reject");
+            let err = parse_root_ref(&bytes).expect_err("append must reject");
             // Specific variant intentionally not asserted to avoid
             // over-coupling; rendering must succeed (no-panic).
             let _ = format!("{err:?}");
@@ -12157,9 +12151,7 @@ mod tests {
             let bytes = make_root_ref_data(dirid, &name);
             let trunc = k.min(bytes.len() - 1);
             let truncated = &bytes[..bytes.len() - trunc];
-            let err = parse_root_ref(truncated)
-                .err()
-                .expect("truncated must reject");
+            let err = parse_root_ref(truncated).expect_err("truncated must reject");
             let _ = format!("{err:?}");
         }
 

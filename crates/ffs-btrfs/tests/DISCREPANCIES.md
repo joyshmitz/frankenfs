@@ -42,7 +42,7 @@ round-trips), not SKIP.
   side is XFAIL.
 - **Resolution:** ACCEPTED for V1 read-only + V1.x single-subvolume
   writable. WILL-FIX when multi-subvolume write lands.
-- **Tests affected:** `golden_root_item_256_bytes_parse_only`,
+- **Tests affected:** `golden_root_item_279_bytes_parse_only`,
   `root_item_bytenr_zero_rejected`, `root_ref_minimal_payload_parses`.
 - **Review date:** 2026-04-24
 

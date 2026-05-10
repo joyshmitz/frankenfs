@@ -1108,3 +1108,66 @@ fn bitexact_roundtrip_helper_exercises_inode_item() {
         BtrfsInodeItem::to_bytes,
     );
 }
+
+#[test]
+fn discrepancies_tests_affected_reference_existing_tests() {
+    let docs = include_str!("DISCREPANCIES.md");
+    let source = include_str!("conformance_ondisk_golden.rs");
+    let documented = documented_tests_affected(docs);
+    assert!(
+        !documented.is_empty(),
+        "DISCREPANCIES.md should document at least one exact affected test"
+    );
+
+    for test_name in documented {
+        let needle = format!("fn {test_name}(");
+        assert!(
+            source
+                .lines()
+                .any(|line| line.trim_start().starts_with(&needle)),
+            "`{test_name}` is listed in DISCREPANCIES.md Tests affected, but no `{needle}` exists"
+        );
+    }
+}
+
+fn documented_tests_affected(markdown: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut in_tests_affected = false;
+
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("- **Tests affected:**") {
+            in_tests_affected = true;
+            collect_backticked_test_names(trimmed, &mut names);
+            continue;
+        }
+
+        if in_tests_affected {
+            if line.starts_with("  ") {
+                collect_backticked_test_names(trimmed, &mut names);
+            } else {
+                in_tests_affected = false;
+            }
+        }
+    }
+
+    names
+}
+
+fn collect_backticked_test_names(line: &str, names: &mut Vec<String>) {
+    let mut rest = line;
+    while let Some(start) = rest.find('`') {
+        let after_start = &rest[start + 1..];
+        let Some(end) = after_start.find('`') else {
+            break;
+        };
+        let candidate = &after_start[..end];
+        if candidate
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        {
+            names.push(candidate.to_owned());
+        }
+        rest = &after_start[end + 1..];
+    }
+}
