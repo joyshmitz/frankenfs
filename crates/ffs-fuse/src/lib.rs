@@ -53,6 +53,7 @@ const FUSE_MAX_READ_BYTES: u32 = 16 * 1024 * 1024;
 const MAX_PENDING_READAHEAD_ENTRIES: usize = 64;
 const MAX_ACCESS_PREDICTOR_ENTRIES: usize = 4096;
 const BACKPRESSURE_THROTTLE_DELAY: Duration = Duration::from_millis(5);
+const BACKPRESSURE_SLEEP_CHECK_INTERVAL: Duration = Duration::from_millis(10);
 const XATTR_FLAG_CREATE: i32 = 0x1;
 const XATTR_FLAG_REPLACE: i32 = 0x2;
 const FS_IOC_FIEMAP: u32 = 0xC020_660B;
@@ -2281,8 +2282,24 @@ impl FrankenFuse {
         {
             return Err(FfsError::Cancelled);
         }
-        std::thread::sleep(delay);
-        cx.checkpoint().map_err(|_| FfsError::Cancelled)
+        let mut remaining = delay;
+        while !remaining.is_zero() {
+            let slice = remaining.min(BACKPRESSURE_SLEEP_CHECK_INTERVAL);
+            let budget = cx.budget();
+            let now = cx.now();
+            if budget.is_past_deadline(now)
+                || budget
+                    .remaining_time(now)
+                    .is_some_and(|remaining| remaining <= slice)
+            {
+                return Err(FfsError::Cancelled);
+            }
+            std::thread::sleep(slice);
+            remaining = remaining.saturating_sub(slice);
+            cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
+        }
+
+        Ok(())
     }
 
     #[cfg(test)]
@@ -12795,6 +12812,30 @@ mod tests {
         let metrics = fuse.metrics().snapshot();
         assert_eq!(metrics.requests_throttled, 1);
         assert_eq!(metrics.requests_shed, 0);
+    }
+
+    #[test]
+    fn backpressure_sleep_observes_mid_sleep_cancellation() {
+        let cx = Cx::for_testing();
+        let cancel_cx = cx.clone();
+        let delay = Duration::from_millis(250);
+
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(15));
+            cancel_cx.set_cancel_requested(true);
+        });
+
+        let start = std::time::Instant::now();
+        let err = FrankenFuse::sleep_with_cx_budget(&cx, delay)
+            .expect_err("cancelled Cx should interrupt backpressure sleep");
+        let elapsed = start.elapsed();
+        canceller.join().expect("canceller thread should finish");
+
+        assert!(matches!(err, FfsError::Cancelled));
+        assert!(
+            elapsed < delay / 2,
+            "cancelled Cx should interrupt throttle delay promptly, elapsed={elapsed:?}"
+        );
     }
 
     // ── AccessPredictor backward sequence detection ──────────────────────
