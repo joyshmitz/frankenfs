@@ -927,9 +927,11 @@ before agents create fallback work, and its stale in-progress fields identify
 claimed local rows that require Agent Mail/worktree verification before any
 reopen. `TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN` compares the deterministic
 fixture report against the scrubbed committed golden so report-shape drift is a
-reviewed diff. Enable `TRACKER_SOURCE_HYGIENE_STRICT=1` only after the criteria
-in [docs/tracker-hygiene.md](../../docs/tracker-hygiene.md) are met; strict
-mode intentionally fails while foreign-looking open rows exist.
+reviewed diff. `TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN_MISMATCH=1` proves the
+golden guard fails closed by diffing against an artifact-local corrupted golden
+copy. Enable `TRACKER_SOURCE_HYGIENE_STRICT=1` only after the criteria in
+[docs/tracker-hygiene.md](../../docs/tracker-hygiene.md) are met; strict mode
+intentionally fails while foreign-looking open rows exist.
 
 ## Release Gate Evaluation
 

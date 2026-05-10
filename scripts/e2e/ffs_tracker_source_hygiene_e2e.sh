@@ -34,6 +34,7 @@ e2e_init "ffs_tracker_source_hygiene"
 ISSUES_JSONL="${TRACKER_SOURCE_HYGIENE_ISSUES:-$REPO_ROOT/.beads/issues.jsonl}"
 REPORT_JSON="${E2E_LOG_DIR}/tracker_source_hygiene_report.json"
 REPORT_CANONICAL_JSON="${E2E_LOG_DIR}/tracker_source_hygiene_report.canonical.json"
+REPORT_MISMATCH_GOLDEN_JSON="${E2E_LOG_DIR}/tracker_source_hygiene_report.mismatched_golden.json"
 LOCAL_OPEN_JSONL="${E2E_LOG_DIR}/tracker_source_hygiene_local_open.jsonl"
 SOURCE_AWARE_READY_JSONL="${E2E_LOG_DIR}/tracker_source_hygiene_source_aware_ready.jsonl"
 LOCAL_OPEN_SHA256="${LOCAL_OPEN_JSONL}.sha256"
@@ -43,11 +44,17 @@ STRICT_JSON=false
 STALE_IN_PROGRESS_SECONDS="${TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS:-21600}"
 REPORT_NOW_EPOCH="${TRACKER_SOURCE_HYGIENE_NOW_EPOCH:-$(date -u +%s)}"
 EXPECTED_GOLDEN="${TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN:-}"
+EXPECT_GOLDEN_MISMATCH=0
 
 case "${TRACKER_SOURCE_HYGIENE_STRICT:-0}" in
     1|true|TRUE|yes|YES)
         STRICT_MODE=1
         STRICT_JSON=true
+        ;;
+esac
+case "${TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN_MISMATCH:-0}" in
+    1|true|TRUE|yes|YES)
+        EXPECT_GOLDEN_MISMATCH=1
         ;;
 esac
 
@@ -71,6 +78,10 @@ fi
 if [[ -n "$EXPECTED_GOLDEN" && ! -f "$EXPECTED_GOLDEN" ]]; then
     scenario_result "tracker_source_hygiene_jsonl_parses" "FAIL" "golden missing: $EXPECTED_GOLDEN"
     e2e_fail "TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN does not exist: $EXPECTED_GOLDEN"
+fi
+if [[ "$EXPECT_GOLDEN_MISMATCH" -eq 1 && -z "$EXPECTED_GOLDEN" ]]; then
+    scenario_result "tracker_source_hygiene_jsonl_parses" "FAIL" "golden mismatch self-test requires TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN"
+    e2e_fail "TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN_MISMATCH requires TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN"
 fi
 
 e2e_step "Parse tracker JSONL and emit report"
@@ -498,6 +509,16 @@ if [[ -n "$EXPECTED_GOLDEN" ]]; then
         scenario_result "tracker_source_hygiene_golden_report_matches" "PASS" "golden=$EXPECTED_GOLDEN"
     else
         scenario_result "tracker_source_hygiene_golden_report_matches" "FAIL" "golden mismatch diff=${REPORT_CANONICAL_JSON}.diff"
+    fi
+fi
+
+if [[ "$EXPECT_GOLDEN_MISMATCH" -eq 1 ]]; then
+    if jq '.source_aware_queue_state.verdict = "intentional-mismatch-for-fail-closed-test"' \
+        "$EXPECTED_GOLDEN" >"$REPORT_MISMATCH_GOLDEN_JSON" \
+        && ! diff -u "$REPORT_MISMATCH_GOLDEN_JSON" "$REPORT_CANONICAL_JSON" >"${REPORT_MISMATCH_GOLDEN_JSON}.diff"; then
+        scenario_result "tracker_source_hygiene_golden_mismatch_fails_closed" "PASS" "diff=${REPORT_MISMATCH_GOLDEN_JSON}.diff"
+    else
+        scenario_result "tracker_source_hygiene_golden_mismatch_fails_closed" "FAIL" "mismatched golden was not rejected"
     fi
 fi
 

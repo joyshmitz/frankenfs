@@ -89,7 +89,10 @@ For deterministic fixture runs, `TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN` compares
 a canonicalized report against a checked-in JSON golden. Canonicalization scrubs
 the run ID, timestamp, input path, and generated artifact paths, but keeps queue
 state, local rows, stale rows, permission gates, foreign summaries, export
-metadata, and reproduction commands exact.
+metadata, and reproduction commands exact. Set
+`TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN_MISMATCH=1` with the same golden to run a
+negative self-test that intentionally corrupts an artifact-local golden copy and
+passes only if the diff rejects it.
 
 The same run writes local-only JSONL graph inputs next to the report:
 
