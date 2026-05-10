@@ -38687,6 +38687,17 @@ mod tests {
         assert_eq!(ops.getxattr(&cx, attr.ino, "user.missing").unwrap(), None);
     }
 
+    fn wait_until_wall_clock_after(previous: SystemTime) {
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while SystemTime::now() <= previous {
+            assert!(
+                Instant::now() < deadline,
+                "wall clock did not advance past {previous:?} before ctime-sensitive assertion"
+            );
+            std::thread::yield_now();
+        }
+    }
+
     #[test]
     fn btrfs_write_xattr_rejects_invalid_names_without_poisoning_payload() {
         let (fs, cx) = open_writable_btrfs();
@@ -38717,7 +38728,7 @@ mod tests {
             .getattr(&cx, &mut RequestScope::empty(), attr.ino)
             .unwrap()
             .ctime;
-        std::thread::sleep(Duration::from_millis(2));
+        wait_until_wall_clock_after(before_invalid);
 
         for invalid_name in ["", "user.", "naked", "unknown.name"] {
             let err = ops
@@ -38879,7 +38890,7 @@ mod tests {
             .getattr(&cx, &mut RequestScope::empty(), attr.ino)
             .unwrap()
             .ctime;
-        std::thread::sleep(Duration::from_millis(2));
+        wait_until_wall_clock_after(before_set);
 
         ops.setxattr(
             &cx,
@@ -38900,7 +38911,7 @@ mod tests {
             "setxattr should advance ctime: before={before_set:?} after={after_set:?}"
         );
 
-        std::thread::sleep(Duration::from_millis(2));
+        wait_until_wall_clock_after(after_set);
         assert!(
             ops.removexattr(&cx, &mut RequestScope::empty(), attr.ino, "user.key")
                 .unwrap()
