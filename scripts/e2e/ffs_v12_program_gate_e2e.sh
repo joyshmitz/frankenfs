@@ -51,6 +51,40 @@ tail_text() {
     fi
 }
 
+count_active_waiver_rows() {
+    local waiver_doc="$1"
+    if [[ ! -f "$waiver_doc" ]]; then
+        printf '0\n'
+        return
+    fi
+    python3 - "$waiver_doc" <<'PY'
+from __future__ import annotations
+
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+in_active_section = False
+count = 0
+for line in path.read_text(encoding="utf-8").splitlines():
+    stripped = line.strip()
+    if stripped == "## Active Waivers":
+        in_active_section = True
+        continue
+    if in_active_section and stripped.startswith("## "):
+        break
+    if not in_active_section or not stripped.startswith("|"):
+        continue
+    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+    if not cells or cells[0].lower() == "failure":
+        continue
+    if all(set(cell) <= {"-", ":", " "} for cell in cells):
+        continue
+    count += 1
+print(count)
+PY
+}
+
 write_scenario_record() {
     local number="$1"
     local name="$2"
@@ -236,12 +270,15 @@ run_full_mode() {
 write_manifest() {
     local recommendation="PROCEED"
     local reason="all scenarios passed"
+    local waiver_path="docs/release/V1.2_test_waivers.md"
+    local active_waiver_count
+    active_waiver_count="$(count_active_waiver_rows "$REPO_ROOT/$waiver_path")"
     if [[ "$FAIL_COUNT" -gt 0 || "$TIMEOUT_COUNT" -gt 0 ]]; then
         recommendation="NO-PROCEED"
         reason="${FAIL_COUNT} failed, ${TIMEOUT_COUNT} timed out"
-    elif [[ -s "$REPO_ROOT/docs/release/V1.2_test_waivers.md" ]]; then
+    elif [[ "$active_waiver_count" -gt 0 ]]; then
         recommendation="PASS-WITH-WAIVERS"
-        reason="all scenarios passed with documented waivers"
+        reason="all scenarios passed with ${active_waiver_count} active waiver(s)"
     fi
 
     local records_json="$E2E_LOG_DIR/scenario_records.json"
@@ -258,17 +295,16 @@ for item in sys.argv[2:]:
 pathlib.Path(sys.argv[1]).write_text(json.dumps(records, sort_keys=True), encoding="utf-8")
 PY
 
-    local git_head kernel rustc cargo_version package_version waiver_path
+    local git_head kernel rustc cargo_version package_version
     git_head="$(git rev-parse HEAD)"
     kernel="$(uname -srmo 2>/dev/null || uname -a)"
     rustc="$("${RUSTC_BIN:-rustc}" --version 2>/dev/null || printf 'rustc unavailable')"
     cargo_version="$("${CARGO_BIN:-cargo}" --version 2>/dev/null || printf 'cargo unavailable')"
     package_version="$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' crates/ffs-harness/Cargo.toml | head -1)"
-    waiver_path="docs/release/V1.2_test_waivers.md"
 
     python3 - "$MANIFEST_JSON" "$records_json" "$recommendation" "$reason" "$git_head" \
         "$kernel" "$rustc" "$cargo_version" "$package_version" "$COMMAND_LOG" "$waiver_path" \
-        "$PASS_COUNT" "$FAIL_COUNT" "$TIMEOUT_COUNT" "$SKIP_COUNT" "$TOTAL" <<'PY'
+        "$active_waiver_count" "$PASS_COUNT" "$FAIL_COUNT" "$TIMEOUT_COUNT" "$SKIP_COUNT" "$TOTAL" <<'PY'
 from __future__ import annotations
 
 import json
@@ -288,6 +324,7 @@ from datetime import datetime, timezone
     package_version,
     command_log,
     waiver_path,
+    active_waiver_count,
     pass_count,
     fail_count,
     timeout_count,
@@ -317,6 +354,7 @@ payload = {
     "release_recommendation_reason": reason,
     "command_transcript": command_log,
     "waiver_document": waiver_path,
+    "active_waiver_count": int(active_waiver_count),
 }
 pathlib.Path(out_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY

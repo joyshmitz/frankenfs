@@ -25,6 +25,7 @@ const SAMPLE_MANIFEST: &str = r#"
   "release_recommendation_reason": "all scenarios passed",
   "command_transcript": "artifacts/release_gate/v12/command_transcript.tsv",
   "waiver_document": "docs/release/V1.2_test_waivers.md",
+  "active_waiver_count": 0,
   "scenarios": [
     {"scenario":1,"name":"perf","status":"PASS","duration_ms":10,"budget_ms":300000,"started_at":"2026-05-10T04:00:00Z","finished_at":"2026-05-10T04:00:01Z","evidence_paths":["a"],"child_gate_bead":"bd-m5wf.1.7","exit_code":0,"stderr_tail":""},
     {"scenario":2,"name":"writeback","status":"PASS","duration_ms":10,"budget_ms":300000,"started_at":"2026-05-10T04:00:00Z","finished_at":"2026-05-10T04:00:01Z","evidence_paths":["a"],"child_gate_bead":"bd-m5wf.2.5","exit_code":0,"stderr_tail":""},
@@ -72,6 +73,48 @@ fn v12_manifest_allows_timeout_to_exceed_budget_only_when_status_timeout() {
     assert!(validate_manifest(&manifest, true).is_ok());
 }
 
+#[test]
+fn v12_waiver_detection_counts_only_active_rows() {
+    let empty_active = r"
+# V1.2 Test Waivers
+
+## Active Waivers
+
+| Failure | Scope | Sign-off | Tracking bead | Program-gate effect |
+|---|---|---|---|---|
+
+## Resolved Waivers (Historical)
+
+| Failure | Scope | Sign-off | Tracking bead | Program-gate effect |
+|---|---|---|---|---|
+| `old_failure` | Re-run and fixed. | gate owner | `bd-old` | Resolved. |
+";
+    assert_eq!(active_waiver_row_count(empty_active), 0);
+    assert_eq!(recommendation_for_waiver_doc(empty_active), "PROCEED");
+
+    let active = r"
+# V1.2 Test Waivers
+
+## Active Waivers
+
+| Failure | Scope | Sign-off | Tracking bead | Program-gate effect |
+|---|---|---|---|---|
+| `still_failing` | Needs release-owner approval. | gate owner | `bd-open` | Blocks clean `PROCEED`. |
+
+## Resolved Waivers (Historical)
+
+| Failure | Scope | Sign-off | Tracking bead | Program-gate effect |
+|---|---|---|---|---|
+| `old_failure` | Re-run and fixed. | gate owner | `bd-old` | Resolved. |
+";
+    assert_eq!(active_waiver_row_count(active), 1);
+    assert_eq!(recommendation_for_waiver_doc(active), "PASS-WITH-WAIVERS");
+
+    let checked_in = include_str!("../../../docs/release/V1.2_test_waivers.md");
+    assert_eq!(active_waiver_row_count(checked_in), 0);
+    assert_eq!(recommendation_for_waiver_doc(checked_in), "PROCEED");
+}
+
 fn validate_manifest(manifest: &Value, require_fourteen: bool) -> Result<(), String> {
     let scenarios = manifest
         .get("scenarios")
@@ -84,6 +127,7 @@ fn validate_manifest(manifest: &Value, require_fourteen: bool) -> Result<(), Str
     if !["PROCEED", "NO-PROCEED", "PASS-WITH-WAIVERS"].contains(&recommendation.as_str()) {
         return Err(format!("invalid recommendation: {recommendation}"));
     }
+    required_u64(manifest, "active_waiver_count")?;
 
     let mut seen = BTreeSet::new();
     for scenario in scenarios {
@@ -100,6 +144,48 @@ fn validate_manifest(manifest: &Value, require_fourteen: bool) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+fn recommendation_for_waiver_doc(markdown: &str) -> &'static str {
+    if active_waiver_row_count(markdown) == 0 {
+        "PROCEED"
+    } else {
+        "PASS-WITH-WAIVERS"
+    }
+}
+
+fn active_waiver_row_count(markdown: &str) -> usize {
+    let mut in_active_section = false;
+    let mut count = 0;
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if trimmed == "## Active Waivers" {
+            in_active_section = true;
+            continue;
+        }
+        if in_active_section && trimmed.starts_with("## ") {
+            break;
+        }
+        if !in_active_section || !trimmed.starts_with('|') {
+            continue;
+        }
+        let cells = trimmed
+            .trim_matches('|')
+            .split('|')
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        if cells.is_empty() || cells[0].eq_ignore_ascii_case("failure") {
+            continue;
+        }
+        if cells
+            .iter()
+            .all(|cell| cell.chars().all(|ch| matches!(ch, '-' | ':' | ' ')))
+        {
+            continue;
+        }
+        count += 1;
+    }
+    count
 }
 
 fn validate_scenario(scenario: &Value) -> Result<(), String> {
