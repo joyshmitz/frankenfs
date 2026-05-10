@@ -874,6 +874,10 @@ mod tests {
         })
     }
 
+    fn complement_bitmap(bitmap: &[u8]) -> Vec<u8> {
+        bitmap.iter().map(|byte| !byte).collect()
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(128))]
 
@@ -922,6 +926,52 @@ mod tests {
         fn proptest_count_ones_plus_zeros_equals_len((ref bitmap, len) in bitmap_strategy()) {
             let sb = SuccinctBitmap::build(bitmap, len);
             prop_assert_eq!(sb.count_ones() + sb.count_zeros(), sb.len());
+        }
+
+        #[test]
+        fn proptest_complement_swaps_rank_and_select((ref bitmap, len) in bitmap_strategy()) {
+            let sb = SuccinctBitmap::build(bitmap, len);
+            let complement = complement_bitmap(bitmap);
+            let flipped = SuccinctBitmap::build(&complement, len);
+
+            prop_assert_eq!(sb.count_ones(), flipped.count_zeros());
+            prop_assert_eq!(sb.count_zeros(), flipped.count_ones());
+
+            for pos in 0..=len {
+                prop_assert_eq!(
+                    sb.rank1(pos),
+                    flipped.rank0(pos),
+                    "rank1/rank0 complement mismatch at pos {} len {}",
+                    pos,
+                    len
+                );
+                prop_assert_eq!(
+                    sb.rank0(pos),
+                    flipped.rank1(pos),
+                    "rank0/rank1 complement mismatch at pos {} len {}",
+                    pos,
+                    len
+                );
+            }
+
+            for k in 0..sb.count_ones() {
+                prop_assert_eq!(
+                    sb.select1(k),
+                    flipped.select0(k),
+                    "select1/select0 complement mismatch at k {} len {}",
+                    k,
+                    len
+                );
+            }
+            for k in 0..sb.count_zeros() {
+                prop_assert_eq!(
+                    sb.select0(k),
+                    flipped.select1(k),
+                    "select0/select1 complement mismatch at k {} len {}",
+                    k,
+                    len
+                );
+            }
         }
 
         #[test]
