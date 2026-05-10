@@ -925,8 +925,10 @@ e2e_emit_json_summary() {
     [[ ! -f "$E2E_LOG_FILE" ]] && return 0
 
     local script_exit_code="${1:-0}"
-    local json_path
+    local json_path json_tmp merge_tmp
     json_path="$E2E_LOG_DIR/result.json"
+    json_tmp="${json_path}.tmp.$$"
+    merge_tmp="${json_path}.merged.$$"
     local end_time duration_secs
     end_time=$(date +%s)
     duration_secs=$((end_time - E2E_START_TIME))
@@ -983,8 +985,10 @@ e2e_emit_json_summary() {
         verdict="FAIL"
     fi
 
-    # Write result.json
-    cat > "$json_path" <<ENDJSON
+    # Write the generic summary to a temporary file first. Some E2E scripts emit
+    # suite-specific fields to result.json before exit; preserve those fields
+    # while keeping this generic summary authoritative for shared keys.
+    cat > "$json_tmp" <<ENDJSON
 {
   "schema_version": 1,
   "runner_contract_version": 1,
@@ -1010,6 +1014,18 @@ e2e_emit_json_summary() {
   "log_file": "$E2E_LOG_FILE"
 }
 ENDJSON
+
+    if [[ -s "$json_path" ]] \
+        && command -v jq >/dev/null 2>&1 \
+        && jq -e 'type == "object"' "$json_path" >/dev/null 2>&1 \
+        && jq -e 'type == "object"' "$json_tmp" >/dev/null 2>&1 \
+        && jq -s '.[0] * .[1]' "$json_path" "$json_tmp" >"$merge_tmp"; then
+        mv "$merge_tmp" "$json_path"
+        e2e_cleanup_tmp_file "$json_tmp"
+    else
+        mv "$json_tmp" "$json_path"
+        e2e_cleanup_tmp_file "$merge_tmp"
+    fi
 
     e2e_log "JSON summary written: $json_path"
 }
