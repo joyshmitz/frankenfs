@@ -953,6 +953,25 @@ impl Default for GcBackpressureConfig {
     }
 }
 
+fn sleep_for_gc_throttle(cx: &Cx, duration: Duration) {
+    if duration.is_zero() || cx.checkpoint().is_err() {
+        return;
+    }
+
+    let budget = cx.budget();
+    let now = cx.now();
+    if budget.is_past_deadline(now)
+        || budget
+            .remaining_time(now)
+            .is_some_and(|remaining| remaining <= duration)
+    {
+        return;
+    }
+
+    std::thread::sleep(duration);
+    let _ = cx.checkpoint();
+}
+
 #[derive(Debug, Clone)]
 struct EbrVersionReclaimer {
     collector: Arc<epoch::Collector>,
@@ -1279,9 +1298,7 @@ impl MvccStore {
                 "daemon_throttled"
             );
             self.gc_throttled = true;
-            if !config.throttle_sleep.is_zero() {
-                std::thread::sleep(config.throttle_sleep);
-            }
+            sleep_for_gc_throttle(cx, config.throttle_sleep);
             return None;
         }
 
@@ -1308,9 +1325,7 @@ impl MvccStore {
                 "daemon_throttled"
             );
             self.gc_throttled = true;
-            if !config.throttle_sleep.is_zero() {
-                std::thread::sleep(config.throttle_sleep);
-            }
+            sleep_for_gc_throttle(cx, config.throttle_sleep);
         }
         Some(watermark)
     }
@@ -5610,6 +5625,44 @@ mod tests {
             store.ebr_stats().pending_versions(),
             pending_before,
             "pending retired versions should be unchanged when throttled"
+        );
+    }
+
+    #[test]
+    fn gc_batch_honors_expired_cx_without_throttle_sleep() {
+        let mut store = MvccStore::new();
+        let block = BlockNumber(779);
+        for v in 1_u8..=16 {
+            let mut txn = store.begin();
+            txn.stage_write(block, vec![v; 32]);
+            store.commit(txn).expect("commit");
+        }
+
+        let _ = store.prune_safe();
+        let pending_before = store.ebr_stats().pending_versions();
+        assert!(pending_before > 0, "expected pending retired versions");
+
+        let expired = asupersync::Budget::new().with_deadline(asupersync::types::Time::ZERO);
+        let expired_cx = Cx::for_testing_with_budget(expired);
+        let throttle_sleep = Duration::from_millis(250);
+        let started = Instant::now();
+        let _ = store.run_gc_batch(
+            &expired_cx,
+            GcBackpressureConfig {
+                min_poll_quota: 0,
+                throttle_sleep,
+            },
+        );
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < throttle_sleep / 2,
+            "expired Cx should skip throttle sleep promptly, elapsed={elapsed:?}"
+        );
+        assert_eq!(
+            store.ebr_stats().pending_versions(),
+            pending_before,
+            "expired Cx should not reclaim retired versions"
         );
     }
 
