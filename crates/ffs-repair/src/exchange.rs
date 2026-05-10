@@ -19,6 +19,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_MAX_RETRIES: u32 = 3;
 const DEFAULT_INITIAL_BACKOFF_MS: u64 = 100;
 const DEFAULT_ACCEPT_POLL_INTERVAL_MS: u64 = 50;
+const DEFAULT_SLEEP_CHECK_INTERVAL_MS: u64 = 50;
 const DEFAULT_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const FRAME_PREFIX_BYTES: usize = 4;
 
@@ -572,8 +573,16 @@ fn sleep_with_budget(cx: &Cx, fallback: Duration) -> Result<()> {
         return Err(FfsError::Cancelled);
     }
 
-    thread::sleep(fallback);
-    cx.checkpoint().map_err(|_| FfsError::Cancelled)
+    let mut remaining = fallback;
+    let cancel_check_interval = Duration::from_millis(DEFAULT_SLEEP_CHECK_INTERVAL_MS);
+    while !remaining.is_zero() {
+        let slice = remaining.min(cancel_check_interval);
+        thread::sleep(slice);
+        remaining = remaining.saturating_sub(slice);
+        cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
+    }
+
+    Ok(())
 }
 
 fn retry_with_backoff<T, F>(cx: &Cx, config: &Config, mut op: F) -> Result<T>
@@ -754,6 +763,31 @@ mod tests {
         assert!(
             elapsed < backoff / 4,
             "too-tight Cx should skip exchange backoff sleep promptly, elapsed={elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn exchange_backoff_observes_mid_sleep_cancellation() {
+        let backoff = Duration::from_millis(500);
+        let prompt_cutoff = Duration::from_millis(400);
+        let cx = Cx::for_testing();
+        let cancel_cx = cx.clone();
+
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            cancel_cx.set_cancel_requested(true);
+        });
+
+        let started = Instant::now();
+        let err = sleep_with_budget(&cx, backoff)
+            .expect_err("mid-sleep cancellation should stop backoff");
+        let elapsed = started.elapsed();
+        canceller.join().expect("canceller thread should finish");
+
+        assert!(matches!(err, ffs_error::FfsError::Cancelled));
+        assert!(
+            elapsed < prompt_cutoff,
+            "Cx cancellation should be observed before the full backoff, elapsed={elapsed:?}"
         );
     }
 
