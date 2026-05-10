@@ -138,9 +138,11 @@ use ffs_harness::{
         ReadinessDashboardConfig, build_readiness_dashboard, render_readiness_dashboard_markdown,
     },
     readiness_lab::{
-        ReadinessLabValidationConfig, fail_on_readiness_lab_contract_errors,
-        load_readiness_lab_contract_bundle, render_readiness_lab_contract_markdown,
-        validate_readiness_lab_contract_bundle,
+        ReadinessLabHostSimulationConfig, ReadinessLabValidationConfig,
+        fail_on_readiness_lab_contract_errors, fail_on_readiness_lab_host_simulation_errors,
+        load_readiness_lab_contract_bundle, load_readiness_lab_host_simulation_manifest,
+        render_readiness_lab_contract_markdown, render_readiness_lab_host_simulation_markdown,
+        simulate_readiness_lab_hosts, validate_readiness_lab_contract_bundle,
     },
     release_gate::{
         evaluate_release_gates, fail_on_release_gate_errors, load_release_gate_policy,
@@ -476,6 +478,7 @@ fn run() -> Result<()> {
         Some("validate-readiness-lab-contracts") => {
             validate_readiness_lab_contracts_cmd(&args[1..])
         }
+        Some("simulate-readiness-lab-hosts") => simulate_readiness_lab_hosts_cmd(&args[1..]),
         Some("validate-mounted-write-error-classes") => {
             validate_mounted_write_error_classes_cmd(&args[1..])
         }
@@ -1332,6 +1335,100 @@ fn print_readiness_lab_contracts_usage() {
     println!(
         "  Validates advisory-only readiness-lab artifacts; it never runs permissioned campaigns."
     );
+}
+
+fn simulate_readiness_lab_hosts_cmd(args: &[String]) -> Result<()> {
+    let mut manifest_path: Option<String> = None;
+    let mut reference_epoch_days: Option<u32> = None;
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ReadinessReportFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                manifest_path = Some(
+                    args.get(i)
+                        .context("--manifest requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--reference-epoch-days" => {
+                i += 1;
+                reference_epoch_days = Some(
+                    args.get(i)
+                        .context("--reference-epoch-days requires a value")?
+                        .parse()
+                        .context("invalid --reference-epoch-days value")?,
+                );
+            }
+            "--format" => {
+                i += 1;
+                format = parse_readiness_report_format(
+                    args.get(i).context("--format requires json or markdown")?,
+                )?;
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_readiness_lab_host_simulation_usage();
+                return Ok(());
+            }
+            other => bail!("unknown simulate-readiness-lab-hosts argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let manifest_path = manifest_path.context("--manifest is required")?;
+    let manifest = load_readiness_lab_host_simulation_manifest(&manifest_path)?;
+    let config = ReadinessLabHostSimulationConfig {
+        manifest_path: manifest_path.clone(),
+        reference_epoch_days,
+    };
+    let report = simulate_readiness_lab_hosts(&manifest, &config);
+    let json = serde_json::to_string_pretty(&report)?;
+    let markdown = render_readiness_lab_host_simulation_markdown(&report);
+    let output = match format {
+        ReadinessReportFormat::Json => json.as_str(),
+        ReadinessReportFormat::Markdown => markdown.as_str(),
+    };
+
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "readiness lab host simulation report written: {path} valid={} hosts={} candidates={} blocked={}",
+            report.valid, report.host_count, report.candidate_count, report.blocked_count
+        );
+    } else {
+        println!("{output}");
+        std::io::stdout().flush().ok();
+    }
+
+    if let Some(path) = summary_out_path {
+        write_text_file(Path::new(&path), &format!("{markdown}\n"))?;
+        println!("readiness lab host simulation summary written: {path}");
+    }
+
+    fail_on_readiness_lab_host_simulation_errors(&report)
+}
+
+fn print_readiness_lab_host_simulation_usage() {
+    println!(
+        "ffs-harness simulate-readiness-lab-hosts --manifest FILE [--reference-epoch-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+    println!("  Classifies synthetic host inventories as advisory readiness-lab material only.");
 }
 
 fn print_readiness_dashboard_usage() {
@@ -6295,6 +6392,9 @@ fn print_usage_core_commands() {
         "  ffs-harness validate-readiness-lab-contracts --manifest FILE [--reference-epoch-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
+        "  ffs-harness simulate-readiness-lab-hosts --manifest FILE [--reference-epoch-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+    println!(
         "  ffs-harness fuse-capability-probe [--out FILE] [--require-mount-probe] [--mount-probe-exit N] [--unmount-probe-exit N] [--user-disabled] [--default-permissions-eacces]"
     );
     println!("  ffs-harness validate-open-ended-inventory [--out FILE]");
@@ -6413,6 +6513,9 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness validate-readiness-lab-contracts --manifest artifacts/readiness-lab/contracts.json --reference-epoch-days 20001 --format markdown"
+    );
+    println!(
+        "  ffs-harness simulate-readiness-lab-hosts --manifest artifacts/readiness-lab/host_matrix.json --reference-epoch-days 20001 --format markdown"
     );
     println!("  ffs-harness fuse-capability-probe --out artifacts/e2e/run/fuse_capability.json");
     println!(

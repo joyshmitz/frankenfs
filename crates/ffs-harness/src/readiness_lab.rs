@@ -8,6 +8,13 @@
 //! intentionally strict about advisory claim boundaries so simulated artifacts
 //! cannot be promoted into proof-bundle or release-gate pass evidence.
 
+use crate::permissioned_campaign_broker::{
+    SwarmCapabilityCalibrationArtifactPlan, SwarmCapabilityCalibrationFuse,
+    SwarmCapabilityCalibrationFuseState, SwarmCapabilityCalibrationHost,
+    SwarmCapabilityCalibrationIsolation, SwarmCapabilityCalibrationManifest,
+    SwarmCapabilityCalibrationResourceCaps, SwarmCapabilityCalibrationValidationConfig,
+    SwarmCapabilityCalibrationWorker, validate_swarm_capability_calibration_manifest,
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -17,8 +24,10 @@ use std::path::Path;
 
 pub const READINESS_LAB_SCHEMA_VERSION: u32 = 1;
 pub const READINESS_LAB_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const READINESS_LAB_HOST_SIMULATION_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const READINESS_LAB_ADVISORY_NOTICE: &str =
     "advisory readiness-lab material only; not product evidence";
+pub const READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM: &str = "none";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadinessLabValidationConfig {
@@ -237,6 +246,124 @@ pub enum ReadinessLabFindingSeverity {
     Error,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadinessLabHostSimulationConfig {
+    pub manifest_path: String,
+    pub reference_epoch_days: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabHostSimulationManifest {
+    pub schema_version: u32,
+    pub simulation_id: String,
+    pub generated_at_epoch_days: u32,
+    pub advisory_notice: String,
+    pub source_bead: String,
+    pub real_campaign_bead: String,
+    pub expected_artifact_root: String,
+    pub release_gate_policy_path: String,
+    pub hosts: Vec<ReadinessLabSyntheticHostInventory>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ReadinessLabSyntheticHostInventory {
+    pub host_id: String,
+    pub observed_at_epoch_days: u32,
+    pub max_age_days: u32,
+    pub logical_cpus: u32,
+    pub ram_total_gib: u32,
+    pub ram_available_gib: u32,
+    pub numa_topology_visible: bool,
+    pub numa_nodes: Option<u32>,
+    pub storage_class: String,
+    pub storage_visible: bool,
+    pub fuse_available: bool,
+    pub runner_configured: bool,
+    pub swarm_ack_configured: bool,
+    pub rch_worker_identity: String,
+    pub worker_fingerprint: String,
+    pub queue_isolation: ReadinessLabSimulationQueueIsolation,
+    pub target_dir_isolated: bool,
+    pub target_dir: String,
+    pub artifact_root: String,
+    pub max_threads: u32,
+    pub max_memory_gib: u32,
+    pub max_temp_storage_gib: u32,
+    pub max_queue_depth: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessLabSimulationQueueIsolation {
+    Dedicated,
+    Shared,
+    Unknown,
+}
+
+impl ReadinessLabSimulationQueueIsolation {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Dedicated => "dedicated",
+            Self::Shared => "shared",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessLabHostSimulationReport {
+    pub schema_version: u32,
+    pub simulation_id: String,
+    pub manifest_path: String,
+    pub valid: bool,
+    pub product_evidence_claim: String,
+    pub release_gate_effect: String,
+    pub source_bead: String,
+    pub real_campaign_bead: String,
+    pub expected_artifact_root: String,
+    pub host_count: usize,
+    pub candidate_count: usize,
+    pub small_host_count: usize,
+    pub capability_downgrade_count: usize,
+    pub blocked_count: usize,
+    pub stale_inventory_count: usize,
+    pub future_inventory_count: usize,
+    pub rows: Vec<ReadinessLabHostSimulationRow>,
+    pub errors: Vec<ReadinessLabFinding>,
+    pub warnings: Vec<ReadinessLabFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ReadinessLabHostSimulationRow {
+    pub host_id: String,
+    pub valid: bool,
+    pub classification: String,
+    pub candidate_for_authorized_run: bool,
+    pub product_evidence_claim: String,
+    pub release_gate_effect: String,
+    pub logical_cpus: u32,
+    pub ram_total_gib: u32,
+    pub numa_topology_visible: bool,
+    pub numa_nodes: Option<u32>,
+    pub storage_visible: bool,
+    pub fuse_available: bool,
+    pub runner_configured: bool,
+    pub swarm_ack_configured: bool,
+    pub worker_identity: String,
+    pub queue_isolation: String,
+    pub target_dir_isolated: bool,
+    pub artifact_root: String,
+    pub blocker_count: usize,
+    pub blockers: Vec<String>,
+    pub downgrade_count: usize,
+    pub downgrade_reasons: Vec<String>,
+}
+
 #[must_use]
 pub fn validate_readiness_lab_contract_bundle(
     bundle: &ReadinessLabContractBundle,
@@ -304,6 +431,198 @@ pub fn fail_on_readiness_lab_contract_errors(report: &ReadinessLabValidationRepo
         });
     anyhow::bail!(
         "readiness lab contract validation failed with {} error(s): {first}",
+        report.errors.len()
+    )
+}
+
+pub fn load_readiness_lab_host_simulation_manifest(
+    path: impl AsRef<Path>,
+) -> Result<ReadinessLabHostSimulationManifest> {
+    let path = path.as_ref();
+    let text = fs::read_to_string(path).with_context(|| {
+        format!(
+            "failed to read readiness lab host simulation {}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&text).with_context(|| {
+        format!(
+            "failed to parse readiness lab host simulation {}",
+            path.display()
+        )
+    })
+}
+
+#[must_use]
+pub fn simulate_readiness_lab_hosts(
+    manifest: &ReadinessLabHostSimulationManifest,
+    config: &ReadinessLabHostSimulationConfig,
+) -> ReadinessLabHostSimulationReport {
+    let mut errors = Vec::new();
+    let warnings = Vec::new();
+    validate_host_simulation_manifest(manifest, &mut errors);
+
+    let mut seen_hosts = BTreeSet::new();
+    for host in &manifest.hosts {
+        if !host.host_id.trim().is_empty() && !seen_hosts.insert(host.host_id.as_str()) {
+            push_readiness_lab_finding(
+                &mut errors,
+                "duplicate_host_id",
+                "host_id values must be unique",
+                FindingScope::artifact(host.host_id.as_str()).field("host_id"),
+            );
+        }
+    }
+
+    let mut rows = Vec::new();
+    let mut candidate_count = 0;
+    let mut small_host_count = 0;
+    let mut capability_downgrade_count = 0;
+    let mut blocked_count = 0;
+    let mut stale_inventory_count = 0;
+    let mut future_inventory_count = 0;
+
+    for host in &manifest.hosts {
+        let row = simulate_readiness_lab_host(manifest, host, config);
+        if row
+            .blockers
+            .iter()
+            .any(|blocker| blocker.starts_with("stale_inventory"))
+        {
+            stale_inventory_count += 1;
+        }
+        if row
+            .blockers
+            .iter()
+            .any(|blocker| blocker.starts_with("future_inventory"))
+        {
+            future_inventory_count += 1;
+        }
+        match row.classification.as_str() {
+            "authoritative_large_host_candidate" => candidate_count += 1,
+            "small_host_smoke" => small_host_count += 1,
+            "capability_downgraded_smoke" => capability_downgrade_count += 1,
+            "blocked" => blocked_count += 1,
+            _ => {}
+        }
+        rows.push(row);
+    }
+
+    ReadinessLabHostSimulationReport {
+        schema_version: READINESS_LAB_HOST_SIMULATION_REPORT_SCHEMA_VERSION,
+        simulation_id: manifest.simulation_id.clone(),
+        manifest_path: config.manifest_path.clone(),
+        valid: errors.is_empty(),
+        product_evidence_claim: READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM.to_owned(),
+        release_gate_effect: format!(
+            "simulator output is advisory only; swarm.responsiveness remains hidden or blocked until {} records executed large-host proof-bundle lanes and release-gate output",
+            manifest.real_campaign_bead
+        ),
+        source_bead: manifest.source_bead.clone(),
+        real_campaign_bead: manifest.real_campaign_bead.clone(),
+        expected_artifact_root: manifest.expected_artifact_root.clone(),
+        host_count: manifest.hosts.len(),
+        candidate_count,
+        small_host_count,
+        capability_downgrade_count,
+        blocked_count,
+        stale_inventory_count,
+        future_inventory_count,
+        rows,
+        errors,
+        warnings,
+    }
+}
+
+#[must_use]
+pub fn render_readiness_lab_host_simulation_markdown(
+    report: &ReadinessLabHostSimulationReport,
+) -> String {
+    let mut out = String::new();
+    writeln!(&mut out, "# FrankenFS Readiness Lab Host Simulation").ok();
+    writeln!(&mut out).ok();
+    writeln!(&mut out, "- Simulation: `{}`", report.simulation_id).ok();
+    writeln!(&mut out, "- Manifest: `{}`", report.manifest_path).ok();
+    writeln!(&mut out, "- Valid: `{}`", report.valid).ok();
+    writeln!(
+        &mut out,
+        "- Product evidence claim: `{}`",
+        report.product_evidence_claim
+    )
+    .ok();
+    writeln!(
+        &mut out,
+        "- Release-gate effect: {}",
+        report.release_gate_effect
+    )
+    .ok();
+    writeln!(&mut out, "- Hosts: `{}`", report.host_count).ok();
+    writeln!(&mut out, "- Candidates: `{}`", report.candidate_count).ok();
+    writeln!(
+        &mut out,
+        "- Small-host smoke: `{}`",
+        report.small_host_count
+    )
+    .ok();
+    writeln!(
+        &mut out,
+        "- Capability downgrades: `{}`",
+        report.capability_downgrade_count
+    )
+    .ok();
+    writeln!(&mut out, "- Blocked: `{}`", report.blocked_count).ok();
+    writeln!(&mut out).ok();
+    writeln!(
+        &mut out,
+        "| host | classification | candidate | cpu | ram_gib | numa | runner | ack | blockers | downgrades |"
+    )
+    .ok();
+    writeln!(&mut out, "|---|---|---:|---:|---:|---|---|---|---:|---:|").ok();
+    for row in &report.rows {
+        let numa = row.numa_nodes.map_or_else(
+            || "missing".to_owned(),
+            |nodes| {
+                if row.numa_topology_visible {
+                    nodes.to_string()
+                } else {
+                    format!("{nodes} (hidden)")
+                }
+            },
+        );
+        writeln!(
+            &mut out,
+            "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |",
+            row.host_id,
+            row.classification,
+            row.candidate_for_authorized_run,
+            row.logical_cpus,
+            row.ram_total_gib,
+            numa,
+            row.runner_configured,
+            row.swarm_ack_configured,
+            row.blocker_count,
+            row.downgrade_count
+        )
+        .ok();
+    }
+    writeln!(&mut out).ok();
+    render_findings(&mut out, "Errors", &report.errors);
+    render_findings(&mut out, "Warnings", &report.warnings);
+    out
+}
+
+pub fn fail_on_readiness_lab_host_simulation_errors(
+    report: &ReadinessLabHostSimulationReport,
+) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    let first = report.errors.first().map_or(
+        "readiness lab host simulation failed validation",
+        |finding| finding.message.as_str(),
+    );
+    anyhow::bail!(
+        "readiness lab host simulation validation failed with {} error(s): {first}",
         report.errors.len()
     )
 }
@@ -747,6 +1066,360 @@ impl FindingScope {
     }
 }
 
+fn validate_host_simulation_manifest(
+    manifest: &ReadinessLabHostSimulationManifest,
+    errors: &mut Vec<ReadinessLabFinding>,
+) {
+    if manifest.schema_version != READINESS_LAB_SCHEMA_VERSION {
+        push_readiness_lab_finding(
+            errors,
+            "unsupported_schema_version",
+            format!(
+                "schema_version must be {READINESS_LAB_SCHEMA_VERSION}, got {}",
+                manifest.schema_version
+            ),
+            FindingScope::default().field("schema_version"),
+        );
+    }
+    if manifest.simulation_id.trim().is_empty() {
+        push_readiness_lab_finding(
+            errors,
+            "missing_simulation_id",
+            "simulation_id must be non-empty",
+            FindingScope::default().field("simulation_id"),
+        );
+    }
+    if manifest.generated_at_epoch_days == 0 {
+        push_readiness_lab_finding(
+            errors,
+            "missing_generated_at_epoch_days",
+            "generated_at_epoch_days must be non-zero",
+            FindingScope::default().field("generated_at_epoch_days"),
+        );
+    }
+    if manifest.advisory_notice.trim() != READINESS_LAB_ADVISORY_NOTICE {
+        push_readiness_lab_finding(
+            errors,
+            "invalid_advisory_notice",
+            format!("advisory_notice must be exactly {READINESS_LAB_ADVISORY_NOTICE:?}"),
+            FindingScope::default().field("advisory_notice"),
+        );
+    }
+    if !manifest.source_bead.starts_with("bd-") {
+        push_readiness_lab_finding(
+            errors,
+            "malformed_source_bead",
+            "source_bead must look like bd-...",
+            FindingScope::default().field("source_bead"),
+        );
+    }
+    if !manifest.real_campaign_bead.starts_with("bd-") {
+        push_readiness_lab_finding(
+            errors,
+            "malformed_real_campaign_bead",
+            "real_campaign_bead must look like bd-...",
+            FindingScope::default().field("real_campaign_bead"),
+        );
+    }
+    if manifest.expected_artifact_root.trim().is_empty() {
+        push_readiness_lab_finding(
+            errors,
+            "missing_expected_artifact_root",
+            "expected_artifact_root must be non-empty",
+            FindingScope::default().field("expected_artifact_root"),
+        );
+    }
+    if manifest.release_gate_policy_path.trim().is_empty() {
+        push_readiness_lab_finding(
+            errors,
+            "missing_release_gate_policy_path",
+            "release_gate_policy_path must be non-empty",
+            FindingScope::default().field("release_gate_policy_path"),
+        );
+    }
+    if manifest.hosts.is_empty() {
+        push_readiness_lab_finding(
+            errors,
+            "empty_host_matrix",
+            "hosts must include at least one synthetic inventory row",
+            FindingScope::default().field("hosts"),
+        );
+    }
+    for host in &manifest.hosts {
+        validate_synthetic_host_inventory(host, errors);
+    }
+}
+
+fn validate_synthetic_host_inventory(
+    host: &ReadinessLabSyntheticHostInventory,
+    errors: &mut Vec<ReadinessLabFinding>,
+) {
+    let scope = || FindingScope::artifact(host.host_id.as_str());
+    if host.host_id.trim().is_empty() {
+        push_readiness_lab_finding(
+            errors,
+            "missing_host_id",
+            "host_id must be non-empty",
+            FindingScope::default().field("host_id"),
+        );
+    }
+    if host.observed_at_epoch_days == 0 {
+        push_readiness_lab_finding(
+            errors,
+            "missing_observed_at_epoch_days",
+            "observed_at_epoch_days must be non-zero",
+            scope().field("observed_at_epoch_days"),
+        );
+    }
+    if host.max_age_days == 0 {
+        push_readiness_lab_finding(
+            errors,
+            "zero_max_age_days",
+            "max_age_days must be greater than zero",
+            scope().field("max_age_days"),
+        );
+    }
+    if host.storage_class.trim().is_empty() {
+        push_readiness_lab_finding(
+            errors,
+            "missing_storage_class",
+            "storage_class must be non-empty",
+            scope().field("storage_class"),
+        );
+    }
+    if host.rch_worker_identity.trim().is_empty() {
+        push_readiness_lab_finding(
+            errors,
+            "missing_rch_worker_identity",
+            "rch_worker_identity must be non-empty",
+            scope().field("rch_worker_identity"),
+        );
+    }
+    if host.worker_fingerprint.trim().is_empty() {
+        push_readiness_lab_finding(
+            errors,
+            "missing_worker_fingerprint",
+            "worker_fingerprint must be non-empty",
+            scope().field("worker_fingerprint"),
+        );
+    }
+    if host.target_dir.trim().is_empty() {
+        push_readiness_lab_finding(
+            errors,
+            "missing_target_dir",
+            "target_dir must be non-empty",
+            scope().field("target_dir"),
+        );
+    }
+    if host.artifact_root.trim().is_empty() {
+        push_readiness_lab_finding(
+            errors,
+            "missing_artifact_root",
+            "artifact_root must be non-empty",
+            scope().field("artifact_root"),
+        );
+    }
+    if host.max_threads == 0 {
+        push_readiness_lab_finding(
+            errors,
+            "zero_max_threads",
+            "max_threads must be greater than zero",
+            scope().field("max_threads"),
+        );
+    }
+    if host.max_memory_gib == 0 {
+        push_readiness_lab_finding(
+            errors,
+            "zero_max_memory_gib",
+            "max_memory_gib must be greater than zero",
+            scope().field("max_memory_gib"),
+        );
+    }
+    if host.max_temp_storage_gib == 0 {
+        push_readiness_lab_finding(
+            errors,
+            "zero_max_temp_storage_gib",
+            "max_temp_storage_gib must be greater than zero",
+            scope().field("max_temp_storage_gib"),
+        );
+    }
+    if host.max_queue_depth == 0 {
+        push_readiness_lab_finding(
+            errors,
+            "zero_max_queue_depth",
+            "max_queue_depth must be greater than zero",
+            scope().field("max_queue_depth"),
+        );
+    }
+}
+
+fn simulate_readiness_lab_host(
+    manifest: &ReadinessLabHostSimulationManifest,
+    host: &ReadinessLabSyntheticHostInventory,
+    config: &ReadinessLabHostSimulationConfig,
+) -> ReadinessLabHostSimulationRow {
+    let calibration_manifest = calibration_manifest_for_host(manifest, host);
+    let calibration_report = validate_swarm_capability_calibration_manifest(
+        &calibration_manifest,
+        &SwarmCapabilityCalibrationValidationConfig {
+            reference_epoch_days: config
+                .reference_epoch_days
+                .unwrap_or(manifest.generated_at_epoch_days),
+        },
+    );
+    let mut blockers = calibration_report.blockers;
+    let mut downgrade_reasons = calibration_report.downgrade_reasons;
+
+    if !host.runner_configured {
+        blockers.push("permissioned_runner_configured=false".to_owned());
+    }
+    if !host.swarm_ack_configured {
+        blockers.push("swarm_real_run_ack_configured=false".to_owned());
+    }
+    if !host.storage_visible {
+        downgrade_reasons.push("storage_visible=false".to_owned());
+    }
+    if let Some(reference_epoch_days) = config.reference_epoch_days {
+        if host.observed_at_epoch_days > reference_epoch_days {
+            blockers.push(format!(
+                "future_inventory observed_at_epoch_days={} reference_epoch_days={reference_epoch_days}",
+                host.observed_at_epoch_days
+            ));
+        }
+        if host
+            .observed_at_epoch_days
+            .saturating_add(host.max_age_days)
+            < reference_epoch_days
+        {
+            blockers.push(format!(
+                "stale_inventory observed_at_epoch_days={} max_age_days={} reference_epoch_days={reference_epoch_days}",
+                host.observed_at_epoch_days, host.max_age_days
+            ));
+        }
+    }
+
+    let mut classification = calibration_report.classification;
+    if !calibration_report.valid || !blockers.is_empty() {
+        "blocked".clone_into(&mut classification);
+    } else if classification == "authoritative_large_host_candidate"
+        && !downgrade_reasons.is_empty()
+    {
+        "capability_downgraded_smoke".clone_into(&mut classification);
+    }
+    let candidate_for_authorized_run =
+        classification == "authoritative_large_host_candidate" && blockers.is_empty();
+    let blocker_count = blockers.len();
+    let downgrade_count = downgrade_reasons.len();
+
+    ReadinessLabHostSimulationRow {
+        host_id: host.host_id.clone(),
+        valid: calibration_report.valid,
+        classification,
+        candidate_for_authorized_run,
+        product_evidence_claim: READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM.to_owned(),
+        release_gate_effect: calibration_report.release_gate_effect,
+        logical_cpus: host.logical_cpus,
+        ram_total_gib: host.ram_total_gib,
+        numa_topology_visible: host.numa_topology_visible,
+        numa_nodes: host.numa_nodes,
+        storage_visible: host.storage_visible,
+        fuse_available: host.fuse_available,
+        runner_configured: host.runner_configured,
+        swarm_ack_configured: host.swarm_ack_configured,
+        worker_identity: host.rch_worker_identity.clone(),
+        queue_isolation: host.queue_isolation.label().to_owned(),
+        target_dir_isolated: host.target_dir_isolated,
+        artifact_root: host.artifact_root.clone(),
+        blocker_count,
+        blockers,
+        downgrade_count,
+        downgrade_reasons,
+    }
+}
+
+fn calibration_manifest_for_host(
+    manifest: &ReadinessLabHostSimulationManifest,
+    host: &ReadinessLabSyntheticHostInventory,
+) -> SwarmCapabilityCalibrationManifest {
+    SwarmCapabilityCalibrationManifest {
+        schema_version: READINESS_LAB_SCHEMA_VERSION,
+        packet_id: format!("{}-{}", manifest.simulation_id, host.host_id),
+        generated_at: manifest.generated_at_epoch_days.to_string(),
+        target_beads: vec![
+            manifest.source_bead.clone(),
+            manifest.real_campaign_bead.clone(),
+        ],
+        host: SwarmCapabilityCalibrationHost {
+            logical_cpus: host.logical_cpus,
+            ram_total_gib: f64::from(host.ram_total_gib),
+            ram_available_gib: f64::from(host.ram_available_gib),
+            numa_topology_visible: host.numa_topology_visible,
+            numa_nodes: host.numa_nodes,
+            storage_class: host.storage_class.clone(),
+            fuse: SwarmCapabilityCalibrationFuse {
+                state: if host.fuse_available {
+                    SwarmCapabilityCalibrationFuseState::Available
+                } else {
+                    SwarmCapabilityCalibrationFuseState::Missing
+                },
+                detail: if host.fuse_available {
+                    "synthetic readiness-lab inventory reports FUSE available".to_owned()
+                } else {
+                    "synthetic readiness-lab inventory reports FUSE missing".to_owned()
+                },
+            },
+        },
+        worker: SwarmCapabilityCalibrationWorker {
+            rch_worker_identity: host.rch_worker_identity.clone(),
+            worker_fingerprint: host.worker_fingerprint.clone(),
+            worker_fingerprint_observed_at_epoch_days: host.observed_at_epoch_days,
+            worker_fingerprint_max_age_days: host.max_age_days,
+            queue_isolation: match host.queue_isolation {
+                ReadinessLabSimulationQueueIsolation::Dedicated => {
+                    SwarmCapabilityCalibrationIsolation::Dedicated
+                }
+                ReadinessLabSimulationQueueIsolation::Shared => {
+                    SwarmCapabilityCalibrationIsolation::Shared
+                }
+                ReadinessLabSimulationQueueIsolation::Unknown => {
+                    SwarmCapabilityCalibrationIsolation::Unknown
+                }
+            },
+            target_dir_isolated: host.target_dir_isolated,
+            target_dir: host.target_dir.clone(),
+        },
+        artifact_plan: SwarmCapabilityCalibrationArtifactPlan {
+            expected_artifact_root: manifest.expected_artifact_root.clone(),
+            observed_artifact_root: host.artifact_root.clone(),
+        },
+        resource_caps: SwarmCapabilityCalibrationResourceCaps {
+            max_duration_secs: 1,
+            max_threads: host.max_threads,
+            max_memory_gib: f64::from(host.max_memory_gib),
+            max_temp_storage_gib: f64::from(host.max_temp_storage_gib),
+            max_queue_depth: host.max_queue_depth,
+        },
+        release_gate_policy_path: manifest.release_gate_policy_path.clone(),
+        real_campaign_bead: manifest.real_campaign_bead.clone(),
+        handoff_summary:
+            "readiness-lab host simulation only; run the real campaign for product evidence"
+                .to_owned(),
+    }
+}
+
+fn push_readiness_lab_finding(
+    findings: &mut Vec<ReadinessLabFinding>,
+    finding_id: impl Into<String>,
+    message: impl Into<String>,
+    scope: FindingScope,
+) {
+    findings.push(scope.into_finding(
+        finding_id.into(),
+        ReadinessLabFindingSeverity::Error,
+        message.into(),
+    ));
+}
+
 fn duplicate_count<'a>(ids: impl Iterator<Item = &'a str>) -> usize {
     let mut seen = BTreeSet::new();
     let mut duplicates = BTreeSet::new();
@@ -828,11 +1501,65 @@ mod tests {
         }
     }
 
+    fn sample_host_simulation_manifest() -> ReadinessLabHostSimulationManifest {
+        ReadinessLabHostSimulationManifest {
+            schema_version: READINESS_LAB_SCHEMA_VERSION,
+            simulation_id: "host-matrix".to_owned(),
+            generated_at_epoch_days: 20_000,
+            advisory_notice: READINESS_LAB_ADVISORY_NOTICE.to_owned(),
+            source_bead: "bd-4532j".to_owned(),
+            real_campaign_bead: "bd-rchk0.53.8".to_owned(),
+            expected_artifact_root: "artifacts/swarm/large-host".to_owned(),
+            release_gate_policy_path: "artifacts/swarm/release_gate_policy.json".to_owned(),
+            hosts: vec![capable_host("candidate")],
+        }
+    }
+
+    fn capable_host(host_id: &str) -> ReadinessLabSyntheticHostInventory {
+        ReadinessLabSyntheticHostInventory {
+            host_id: host_id.to_owned(),
+            observed_at_epoch_days: 20_000,
+            max_age_days: 7,
+            logical_cpus: 64,
+            ram_total_gib: 256,
+            ram_available_gib: 220,
+            numa_topology_visible: true,
+            numa_nodes: Some(2),
+            storage_class: "local-nvme".to_owned(),
+            storage_visible: true,
+            fuse_available: true,
+            runner_configured: true,
+            swarm_ack_configured: true,
+            rch_worker_identity: "vmi-sim-64c-256gb".to_owned(),
+            worker_fingerprint: "sim-abcdef1".to_owned(),
+            queue_isolation: ReadinessLabSimulationQueueIsolation::Dedicated,
+            target_dir_isolated: true,
+            target_dir: "artifacts/swarm/target".to_owned(),
+            artifact_root: "artifacts/swarm/large-host".to_owned(),
+            max_threads: 64,
+            max_memory_gib: 192,
+            max_temp_storage_gib: 256,
+            max_queue_depth: 32,
+        }
+    }
+
     fn validate(bundle: &ReadinessLabContractBundle) -> ReadinessLabValidationReport {
         validate_readiness_lab_contract_bundle(
             bundle,
             &ReadinessLabValidationConfig {
                 manifest_path: "fixture.json".to_owned(),
+                reference_epoch_days: Some(20_001),
+            },
+        )
+    }
+
+    fn simulate_hosts(
+        manifest: &ReadinessLabHostSimulationManifest,
+    ) -> ReadinessLabHostSimulationReport {
+        simulate_readiness_lab_hosts(
+            manifest,
+            &ReadinessLabHostSimulationConfig {
+                manifest_path: "hosts.json".to_owned(),
                 reference_epoch_days: Some(20_001),
             },
         )
@@ -973,5 +1700,136 @@ mod tests {
                 .iter()
                 .any(|finding| finding.finding_id == "missing_cargo_target_dir_allowlist")
         );
+    }
+
+    #[test]
+    fn host_simulator_accepts_borderline_large_host_as_advisory_candidate() {
+        let report = simulate_hosts(&sample_host_simulation_manifest());
+
+        assert!(report.valid);
+        assert_eq!(
+            report.product_evidence_claim,
+            READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM
+        );
+        assert_eq!(report.candidate_count, 1);
+        assert_eq!(
+            report.rows[0].classification,
+            "authoritative_large_host_candidate"
+        );
+        assert!(report.rows[0].candidate_for_authorized_run);
+        assert!(
+            report
+                .release_gate_effect
+                .contains("swarm.responsiveness remains hidden")
+        );
+    }
+
+    #[test]
+    fn host_simulator_classifies_small_cpu_or_ram_as_smoke_only() {
+        let mut manifest = sample_host_simulation_manifest();
+        manifest.hosts[0].logical_cpus = 16;
+        manifest.hosts[0].ram_total_gib = 128;
+        manifest.hosts[0].max_threads = 16;
+        manifest.hosts[0].max_memory_gib = 96;
+
+        let report = simulate_hosts(&manifest);
+
+        assert!(report.valid);
+        assert_eq!(report.small_host_count, 1);
+        assert_eq!(report.rows[0].classification, "small_host_smoke");
+        assert!(!report.rows[0].candidate_for_authorized_run);
+    }
+
+    #[test]
+    fn host_simulator_downgrades_missing_numa_storage_or_fuse() {
+        let mut manifest = sample_host_simulation_manifest();
+        manifest.hosts[0].numa_topology_visible = false;
+        manifest.hosts[0].numa_nodes = None;
+        manifest.hosts[0].storage_visible = false;
+        manifest.hosts[0].fuse_available = false;
+
+        let report = simulate_hosts(&manifest);
+
+        assert!(report.valid);
+        assert_eq!(report.capability_downgrade_count, 1);
+        assert_eq!(report.rows[0].classification, "capability_downgraded_smoke");
+        assert!(
+            report.rows[0]
+                .downgrade_reasons
+                .iter()
+                .any(|reason| reason == "storage_visible=false")
+        );
+    }
+
+    #[test]
+    fn host_simulator_blocks_missing_runner_or_ack() {
+        let mut manifest = sample_host_simulation_manifest();
+        manifest.hosts[0].runner_configured = false;
+        manifest.hosts[0].swarm_ack_configured = false;
+
+        let report = simulate_hosts(&manifest);
+
+        assert!(report.valid);
+        assert_eq!(report.blocked_count, 1);
+        assert_eq!(report.rows[0].classification, "blocked");
+        assert!(
+            report.rows[0]
+                .blockers
+                .iter()
+                .any(|blocker| blocker == "permissioned_runner_configured=false")
+        );
+        assert!(
+            report.rows[0]
+                .blockers
+                .iter()
+                .any(|blocker| blocker == "swarm_real_run_ack_configured=false")
+        );
+    }
+
+    #[test]
+    fn host_simulator_blocks_stale_future_and_mismatched_artifact_roots() {
+        let mut manifest = sample_host_simulation_manifest();
+        manifest.hosts = vec![
+            capable_host("stale"),
+            capable_host("future"),
+            capable_host("root"),
+        ];
+        manifest.hosts[0].observed_at_epoch_days = 19_900;
+        manifest.hosts[1].observed_at_epoch_days = 20_010;
+        manifest.hosts[2].artifact_root = "artifacts/swarm/wrong-root".to_owned();
+
+        let report = simulate_hosts(&manifest);
+
+        assert!(report.valid);
+        assert_eq!(report.blocked_count, 3);
+        assert_eq!(report.stale_inventory_count, 1);
+        assert_eq!(report.future_inventory_count, 1);
+        assert!(
+            report.rows[2]
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("artifact_root_mismatch"))
+        );
+    }
+
+    #[test]
+    fn host_simulator_rejects_unknown_manifest_fields() {
+        let raw = r#"{
+            "schema_version": 1,
+            "simulation_id": "host-matrix",
+            "generated_at_epoch_days": 20000,
+            "advisory_notice": "advisory readiness-lab material only; not product evidence",
+            "source_bead": "bd-4532j",
+            "real_campaign_bead": "bd-rchk0.53.8",
+            "expected_artifact_root": "artifacts/swarm/large-host",
+            "release_gate_policy_path": "artifacts/swarm/release_gate_policy.json",
+            "hosts": [],
+            "unexpected": true
+        }"#;
+
+        let err = serde_json::from_str::<ReadinessLabHostSimulationManifest>(raw)
+            .expect_err("unknown fields must fail closed");
+
+        assert!(err.to_string().contains("unknown field"));
     }
 }

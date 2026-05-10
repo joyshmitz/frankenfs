@@ -1253,13 +1253,20 @@ rch exec -- cargo run -p ffs-harness -- validate-readiness-lab-contracts \
   --manifest artifacts/readiness-lab/contracts.json \
   --reference-epoch-days 20001 \
   --format markdown
+
+rch exec -- cargo run -p ffs-harness -- simulate-readiness-lab-hosts \
+  --manifest artifacts/readiness-lab/host_matrix.json \
+  --reference-epoch-days 20001 \
+  --format markdown
 ```
 
 These artifacts are allowed to drive preflight, rehearsal, dashboard, and
 runbook work. They are not allowed to mark xfstests or swarm responsiveness as
 validated; release-gate and proof-bundle promotion still require the real
 permissioned evidence lanes. The E2E suite builds synthetic advisory and
-forbidden product-claim manifests:
+forbidden product-claim manifests plus a synthetic large-host matrix that
+classifies candidate, small-host, downgraded, and blocked inventories while
+preserving `product_evidence_claim=none`.
 
 ```bash
 ./scripts/e2e/ffs_readiness_lab_contracts_e2e.sh

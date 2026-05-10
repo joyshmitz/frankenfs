@@ -119,7 +119,9 @@ for index, char in enumerate(text):
         obj, _ = decoder.raw_decode(text[index:])
     except json.JSONDecodeError:
         continue
-    if isinstance(obj, dict) and obj.get("schema_version") == 1 and "lab_id" in obj:
+    if isinstance(obj, dict) and obj.get("schema_version") == 1 and (
+        "lab_id" in obj or "simulation_id" in obj
+    ):
         pathlib.Path(report_path).write_text(
             json.dumps(obj, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -136,17 +138,23 @@ FIXTURE_DIR="$REPO_ROOT/artifacts/rch_e2e/$(basename "$E2E_LOG_DIR")/readiness_l
 REPORT_DIR="$E2E_LOG_DIR/readiness_lab_contracts"
 VALID_MANIFEST="$FIXTURE_DIR/valid_contracts.json"
 BAD_MANIFEST="$FIXTURE_DIR/product_claim_contracts.json"
+HOST_MANIFEST="$FIXTURE_DIR/host_simulation.json"
 RAW_JSON="$REPORT_DIR/valid_json_command.log"
 RAW_MD="$REPORT_DIR/valid_markdown_command.log"
 BAD_RAW="$REPORT_DIR/product_claim_command.log"
+HOST_RAW_JSON="$REPORT_DIR/host_simulation_json_command.log"
+HOST_RAW_MD="$REPORT_DIR/host_simulation_markdown_command.log"
 UNIT_LOG="$REPORT_DIR/unit_tests.log"
 REPORT_JSON="$REPORT_DIR/report.json"
 REPORT_MD="$REPORT_DIR/report.md"
+HOST_REPORT_JSON="$REPORT_DIR/host_simulation_report.json"
+HOST_REPORT_MD="$REPORT_DIR/host_simulation_report.md"
 
 mkdir -p "$FIXTURE_DIR" "$REPORT_DIR"
 
 e2e_step "Scenario 1: CLI and module wiring are present"
 if grep -q 'Some("validate-readiness-lab-contracts")' crates/ffs-harness/src/main.rs \
+    && grep -q 'Some("simulate-readiness-lab-hosts")' crates/ffs-harness/src/main.rs \
     && grep -q "pub mod readiness_lab" crates/ffs-harness/src/lib.rs; then
     scenario_result "readiness_lab_cli_wired" "PASS" "CLI command and module export found"
 else
@@ -154,13 +162,13 @@ else
 fi
 
 e2e_step "Scenario 2: synthetic advisory manifests are written"
-if python3 - "$VALID_MANIFEST" "$BAD_MANIFEST" <<'PY'
+if python3 - "$VALID_MANIFEST" "$BAD_MANIFEST" "$HOST_MANIFEST" <<'PY'
 import copy
 import json
 import pathlib
 import sys
 
-valid_path, bad_path = map(pathlib.Path, sys.argv[1:])
+valid_path, bad_path, host_path = map(pathlib.Path, sys.argv[1:])
 valid_path.parent.mkdir(parents=True, exist_ok=True)
 manifest = {
     "schema_version": 1,
@@ -221,6 +229,54 @@ valid_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", enc
 bad = copy.deepcopy(manifest)
 bad["artifacts"][0]["product_evidence_claim"] = "product_pass_fail"
 bad_path.write_text(json.dumps(bad, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+def host(host_id, **updates):
+    row = {
+        "host_id": host_id,
+        "observed_at_epoch_days": 20000,
+        "max_age_days": 7,
+        "logical_cpus": 64,
+        "ram_total_gib": 256,
+        "ram_available_gib": 220,
+        "numa_topology_visible": True,
+        "numa_nodes": 2,
+        "storage_class": "local-nvme",
+        "storage_visible": True,
+        "fuse_available": True,
+        "runner_configured": True,
+        "swarm_ack_configured": True,
+        "rch_worker_identity": "vmi-sim-64c-256gb",
+        "worker_fingerprint": f"{host_id}-abcdef1",
+        "queue_isolation": "dedicated",
+        "target_dir_isolated": True,
+        "target_dir": "artifacts/swarm/target",
+        "artifact_root": "artifacts/swarm/large-host",
+        "max_threads": 64,
+        "max_memory_gib": 192,
+        "max_temp_storage_gib": 256,
+        "max_queue_depth": 32,
+    }
+    row.update(updates)
+    return row
+
+host_manifest = {
+    "schema_version": 1,
+    "simulation_id": "readiness-lab-host-simulation-e2e",
+    "generated_at_epoch_days": 20000,
+    "advisory_notice": "advisory readiness-lab material only; not product evidence",
+    "source_bead": "bd-4532j",
+    "real_campaign_bead": "bd-rchk0.53.8",
+    "expected_artifact_root": "artifacts/swarm/large-host",
+    "release_gate_policy_path": "artifacts/swarm/release_gate_policy.json",
+    "hosts": [
+        host("candidate"),
+        host("small", logical_cpus=16, ram_total_gib=128, max_threads=16, max_memory_gib=96),
+        host("numa-hidden", numa_topology_visible=False, numa_nodes=None),
+        host("runner-missing", runner_configured=False, swarm_ack_configured=False),
+        host("stale", observed_at_epoch_days=19900),
+    ],
+}
+host_path.write_text(json.dumps(host_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 then
     scenario_result "readiness_lab_fixtures_written" "PASS" "valid and invalid manifests generated"
@@ -268,7 +324,35 @@ else
     scenario_result "readiness_lab_product_claim_rejected" "FAIL" "expected product-claim diagnostic missing"
 fi
 
-e2e_step "Scenario 6: readiness_lab unit tests pass through RCH"
+e2e_step "Scenario 6: synthetic host simulation renders JSON"
+if run_rch_capture "$HOST_RAW_JSON" cargo run --quiet -p ffs-harness -- \
+    simulate-readiness-lab-hosts \
+    --manifest "$HOST_MANIFEST" \
+    --reference-epoch-days 20001 \
+    --format json \
+    && extract_report_json "$HOST_RAW_JSON" "$HOST_REPORT_JSON" \
+    && jq -e '.valid == true and .product_evidence_claim == "none" and .candidate_count == 1 and .small_host_count == 1 and .capability_downgrade_count == 1 and .blocked_count == 2 and (.release_gate_effect | test("swarm.responsiveness remains hidden"))' "$HOST_REPORT_JSON" >/dev/null; then
+    scenario_result "readiness_lab_host_simulation_json" "PASS" "synthetic host matrix classified as advisory"
+else
+    scenario_result "readiness_lab_host_simulation_json" "FAIL" "host simulation JSON missing expected classifications"
+fi
+
+e2e_step "Scenario 7: synthetic host simulation renders Markdown"
+if run_rch_capture "$HOST_RAW_MD" cargo run --quiet -p ffs-harness -- \
+    simulate-readiness-lab-hosts \
+    --manifest "$HOST_MANIFEST" \
+    --reference-epoch-days 20001 \
+    --format markdown \
+    && grep -q "FrankenFS Readiness Lab Host Simulation" "$HOST_RAW_MD" \
+    && grep -q "Product evidence claim: \`none\`" "$HOST_RAW_MD" \
+    && grep -q "swarm.responsiveness remains hidden" "$HOST_RAW_MD"; then
+    cp "$HOST_RAW_MD" "$HOST_REPORT_MD"
+    scenario_result "readiness_lab_host_simulation_markdown" "PASS" "synthetic host matrix markdown rendered"
+else
+    scenario_result "readiness_lab_host_simulation_markdown" "FAIL" "host simulation markdown missing advisory boundary"
+fi
+
+e2e_step "Scenario 8: readiness_lab unit tests pass through RCH"
 if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib readiness_lab -- --nocapture; then
     scenario_result "readiness_lab_unit_tests" "PASS" "unit tests passed"
 else
