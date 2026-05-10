@@ -39,6 +39,8 @@ LOCAL_OPEN_SHA256="${LOCAL_OPEN_JSONL}.sha256"
 SOURCE_AWARE_READY_SHA256="${SOURCE_AWARE_READY_JSONL}.sha256"
 STRICT_MODE=0
 STRICT_JSON=false
+STALE_IN_PROGRESS_SECONDS="${TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS:-21600}"
+REPORT_NOW_EPOCH="${TRACKER_SOURCE_HYGIENE_NOW_EPOCH:-$(date -u +%s)}"
 
 case "${TRACKER_SOURCE_HYGIENE_STRICT:-0}" in
     1|true|TRUE|yes|YES)
@@ -56,6 +58,14 @@ if [[ ! -f "$ISSUES_JSONL" ]]; then
     scenario_result "tracker_source_hygiene_jsonl_parses" "FAIL" "issues JSONL missing: $ISSUES_JSONL"
     e2e_fail "issues JSONL missing: $ISSUES_JSONL"
 fi
+if [[ ! "$STALE_IN_PROGRESS_SECONDS" =~ ^[0-9]+$ ]]; then
+    scenario_result "tracker_source_hygiene_jsonl_parses" "FAIL" "invalid stale threshold: $STALE_IN_PROGRESS_SECONDS"
+    e2e_fail "TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS must be a non-negative integer"
+fi
+if [[ ! "$REPORT_NOW_EPOCH" =~ ^[0-9]+$ ]]; then
+    scenario_result "tracker_source_hygiene_jsonl_parses" "FAIL" "invalid report epoch: $REPORT_NOW_EPOCH"
+    e2e_fail "TRACKER_SOURCE_HYGIENE_NOW_EPOCH must be a non-negative integer"
+fi
 
 e2e_step "Parse tracker JSONL and emit report"
 if jq -s \
@@ -69,6 +79,8 @@ if jq -s \
     --arg swarm_enable "${FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD:-}" \
     --arg swarm_ack "${FFS_SWARM_WORKLOAD_REAL_RUN_ACK:-}" \
     --argjson strict "$STRICT_JSON" \
+    --argjson stale_in_progress_seconds "$STALE_IN_PROGRESS_SECONDS" \
+    --argjson report_now_epoch "$REPORT_NOW_EPOCH" \
     '
     . as $issues
     | def issue_status($id):
@@ -79,6 +91,16 @@ if jq -s \
         (local_issue | not);
     def open_issue:
         ((.status // "open") == "open");
+    def in_progress_issue:
+        ((.status // "open") == "in_progress");
+    def normalized_iso8601:
+        if type == "string" then
+            sub("\\.[0-9]+Z$"; "Z")
+        else
+            null
+        end;
+    def activity_epoch:
+        ((.updated_at // .created_at // null) | normalized_iso8601 | fromdateiso8601?);
     def issue_prefix:
         ((.id // "") | capture("^(?<prefix>[^-]+(?:-[^-]+)?)").prefix // "unknown");
     def owner_hint:
@@ -147,6 +169,28 @@ if jq -s \
             assignee: (.assignee // .owner // null),
             blocked_by: blocking_dependencies
         };
+    def issue_progress_row:
+        activity_epoch as $activity_epoch
+        | issue_work_row + {
+            created_at: (.created_at // null),
+            updated_at: (.updated_at // null),
+            last_activity_epoch: $activity_epoch,
+            age_seconds: (
+                if $activity_epoch == null then
+                    null
+                else
+                    (($report_now_epoch - $activity_epoch) | floor)
+                end
+            ),
+            stale_after_seconds: $stale_in_progress_seconds,
+            stale: (
+                if $activity_epoch == null then
+                    true
+                else
+                    (($report_now_epoch - $activity_epoch) >= $stale_in_progress_seconds)
+                end
+            )
+        };
     def foreign_group_row:
         issue_sample + {
             prefix: issue_prefix,
@@ -167,12 +211,19 @@ if jq -s \
     def local_epic_rows_arr:
         [.[] | select(local_issue and open_issue and ((.issue_type // "") == "epic")) | issue_sample]
         | sort_by(.priority, .id);
+    def local_in_progress_rows_arr:
+        [.[] | select(local_issue and in_progress_issue) | issue_progress_row]
+        | sort_by(.priority, .id);
+    def stale_in_progress_rows_arr:
+        [local_in_progress_rows_arr[] | select(.stale)]
+        | sort_by(.priority, .id);
     {
         schema_version: 1,
         run_id: $run_id,
         created_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
         issues_path: $issues_path,
         strict: $strict,
+        report_now_epoch: $report_now_epoch,
         status: (if ($strict and (foreign_open_count > 0)) then "fail" else "pass" end),
         mutation_policy: "report-only; this command never deletes, rewrites, closes, or edits tracker rows",
         classifier: {
@@ -221,11 +272,15 @@ if jq -s \
             | permission_gated_rows_arr as $permission_gated
             | blocked_local_rows_arr as $blocked_rows
             | local_epic_rows_arr as $epic_rows
+            | local_in_progress_rows_arr as $in_progress_rows
+            | stale_in_progress_rows_arr as $stale_rows
             | {
                 schema_version: 1,
                 verdict: (
                     if ($ready_rows | length) > 0 then
                         "ready"
+                    elif ($stale_rows | length) > 0 then
+                        "stale_in_progress"
                     elif (($permission_gated | length) > 0 and ($blocked_rows | length) > 0) then
                         "blocked_or_permission_gated"
                     elif ($permission_gated | length) > 0 then
@@ -243,14 +298,20 @@ if jq -s \
                 local_epic_count: ($epic_rows | length),
                 blocked_local_count: ($blocked_rows | length),
                 permission_gated_count: ($permission_gated | length),
+                local_in_progress_count: ($in_progress_rows | length),
+                stale_in_progress_count: ($stale_rows | length),
                 excluded_foreign_open_count: foreign_open_count,
                 claimable_ids: ($ready_rows | map(.id)),
                 local_epic_ids: ($epic_rows | map(.id)),
                 blocked_local_ids: ($blocked_rows | map(.id)),
                 permission_gated_ids: ($permission_gated | map(.id)),
+                local_in_progress_ids: ($in_progress_rows | map(.id)),
+                stale_in_progress_ids: ($stale_rows | map(.id)),
                 next_safe_actions: (
                     if ($ready_rows | length) > 0 then
                         ["claim one source_aware_ready row before creating fallback work"]
+                    elif ($stale_rows | length) > 0 then
+                        ["inspect stale_in_progress_ids and Agent Mail before reopening stalled claims"]
                     elif ($permission_gated | length) > 0 then
                         ["request the exact permission ACK before running permissioned rows", "create or claim only non-mutating fallback work"]
                     elif ($blocked_rows | length) > 0 then
@@ -283,6 +344,8 @@ if jq -s \
         },
         permission_gated_rows: permission_gated_rows_arr,
         blocked_local_rows: blocked_local_rows_arr,
+        local_in_progress_rows: local_in_progress_rows_arr,
+        stale_in_progress_rows: stale_in_progress_rows_arr,
         foreign_open_samples: ([.[] | select(foreign_issue and open_issue) | issue_sample] | sort_by(.id) | .[0:20]),
         reproduction_commands: [
             "./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
@@ -312,11 +375,14 @@ if jq -e '
     and (.local_open_rows | type == "array")
     and (.source_aware_ready_rows | type == "array")
     and (.source_aware_queue_state.schema_version == 1)
-    and (.source_aware_queue_state.verdict as $verdict | (["ready", "blocked_or_permission_gated", "permission_gated", "blocked", "epic_only", "empty"] | index($verdict)) != null)
+    and (.source_aware_queue_state.verdict as $verdict | (["ready", "stale_in_progress", "blocked_or_permission_gated", "permission_gated", "blocked", "epic_only", "empty"] | index($verdict)) != null)
     and (.source_aware_queue_state.claimable_count == (.source_aware_ready_rows | length))
     and (.source_aware_queue_state.local_open_count == .local_open)
     and (.source_aware_queue_state.permission_gated_count == (.permission_gated_rows | length))
+    and (.source_aware_queue_state.local_in_progress_count == (.local_in_progress_rows | length))
+    and (.source_aware_queue_state.stale_in_progress_count == (.stale_in_progress_rows | length))
     and (.source_aware_queue_state.blocked_local_ids | type == "array")
+    and (.source_aware_queue_state.stale_in_progress_ids | type == "array")
     and (.source_aware_queue_state.next_safe_actions | type == "array")
     and (.local_graph_exports.schema_version == 1)
     and (.local_graph_exports.local_open.path | test("tracker_source_hygiene_local_open\\.jsonl$"))
@@ -392,13 +458,19 @@ if jq -e '
     and (.source_aware_ready_rows | type == "array")
     and (.permission_gated_rows | type == "array")
     and (.blocked_local_rows | type == "array")
+    and (.local_in_progress_rows | type == "array")
+    and (.stale_in_progress_rows | type == "array")
     and all(.source_aware_ready_rows[]; (.blocked_by | length) == 0)
     and all(.source_aware_ready_rows[]; has("permission_gate") | not)
     and all(.permission_gated_rows[]; (.permission_gate.present == false))
     and all(.blocked_local_rows[]; (.blocked_by | length) > 0)
+    and all(.local_in_progress_rows[]; .status == "in_progress")
+    and all(.stale_in_progress_rows[]; .status == "in_progress" and .stale == true)
     and (.source_aware_queue_state.claimable_ids == (.source_aware_ready_rows | map(.id)))
     and (.source_aware_queue_state.permission_gated_ids == (.permission_gated_rows | map(.id)))
     and (.source_aware_queue_state.blocked_local_ids == (.blocked_local_rows | map(.id)))
+    and (.source_aware_queue_state.local_in_progress_ids == (.local_in_progress_rows | map(.id)))
+    and (.source_aware_queue_state.stale_in_progress_ids == (.stale_in_progress_rows | map(.id)))
     and any(.reproduction_commands[]; contains("bd|frankenfs"))
 ' "$REPORT_JSON" >/dev/null; then
     scenario_result "tracker_source_hygiene_source_aware_wrapper" "PASS" "ready_rows=${READY_COUNT} excluded_foreign=${FOREIGN_OPEN_COUNT}"
@@ -428,16 +500,22 @@ EXPECTED_LOCAL_OPEN="${TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN:-}"
 EXPECTED_FOREIGN_OPEN="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN:-}"
 EXPECTED_READY="${TRACKER_SOURCE_HYGIENE_EXPECT_READY:-}"
 EXPECTED_PERMISSION_GATED="${TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED:-}"
+EXPECTED_IN_PROGRESS="${TRACKER_SOURCE_HYGIENE_EXPECT_IN_PROGRESS:-}"
+EXPECTED_STALE_IN_PROGRESS="${TRACKER_SOURCE_HYGIENE_EXPECT_STALE_IN_PROGRESS:-}"
 EXPECTED_FOREIGN_SAMPLE_COUNT="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT:-}"
 EXPECTED_FOREIGN_GROUP_COUNT="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT:-}"
 FOREIGN_SAMPLE_COUNT="$(jq -r '.foreign_open_samples | length' "$REPORT_JSON")"
 FOREIGN_GROUP_COUNT="$(jq -r '.foreign_group_summaries | length' "$REPORT_JSON")"
 PERMISSION_GATED_COUNT="$(jq -r '.permission_gated_rows | length' "$REPORT_JSON")"
+IN_PROGRESS_COUNT="$(jq -r '.local_in_progress_rows | length' "$REPORT_JSON")"
+STALE_IN_PROGRESS_COUNT="$(jq -r '.stale_in_progress_rows | length' "$REPORT_JSON")"
 
 check_expected_count "local_open" "$LOCAL_OPEN_COUNT" "$EXPECTED_LOCAL_OPEN"
 check_expected_count "foreign_open" "$FOREIGN_OPEN_COUNT" "$EXPECTED_FOREIGN_OPEN"
 check_expected_count "source_aware_ready" "$READY_COUNT" "$EXPECTED_READY"
 check_expected_count "permission_gated" "$PERMISSION_GATED_COUNT" "$EXPECTED_PERMISSION_GATED"
+check_expected_count "local_in_progress" "$IN_PROGRESS_COUNT" "$EXPECTED_IN_PROGRESS"
+check_expected_count "stale_in_progress" "$STALE_IN_PROGRESS_COUNT" "$EXPECTED_STALE_IN_PROGRESS"
 check_expected_count "foreign_sample_count" "$FOREIGN_SAMPLE_COUNT" "$EXPECTED_FOREIGN_SAMPLE_COUNT"
 check_expected_count "foreign_group_count" "$FOREIGN_GROUP_COUNT" "$EXPECTED_FOREIGN_GROUP_COUNT"
 

@@ -52,6 +52,8 @@ The report writes `tracker_source_hygiene_report.json` under
 - `local_graph_exports`
 - `permission_gated_rows`
 - `blocked_local_rows`
+- `local_in_progress_rows`
+- `stale_in_progress_rows`
 - `excluded_foreign_open_count`
 - `excluded_foreign_by_prefix`
 - `foreign_group_summaries`
@@ -71,9 +73,17 @@ from ordinary ready work. Current gates are:
 
 `source_aware_queue_state` is the one-field queue verdict for agents. It
 includes `claimable_count`, `local_epic_count`, `blocked_local_count`,
-`permission_gated_count`, `excluded_foreign_open_count`, the matching ID lists,
-and `next_safe_actions`. If `verdict` is not `ready`, do not claim ordinary
-work from raw `br` or `bv` output until you have checked this field.
+`permission_gated_count`, `local_in_progress_count`,
+`stale_in_progress_count`, `excluded_foreign_open_count`, the matching ID
+lists, and `next_safe_actions`. If `verdict` is not `ready`, do not claim
+ordinary work from raw `br` or `bv` output until you have checked this field.
+
+`local_in_progress_rows` reports FrankenFS-local rows already claimed by an
+agent. `stale_in_progress_rows` is the subset whose `updated_at` or `created_at`
+timestamp is older than `TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS`
+(default: 21600 seconds). Missing or unparsable activity timestamps are treated
+as stale. A stale row is only a reclaim candidate after checking Agent Mail and
+the worktree; the report does not reopen or mutate it.
 
 The same run writes local-only JSONL graph inputs next to the report:
 
@@ -161,6 +171,10 @@ TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=5 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=22 \
 TRACKER_SOURCE_HYGIENE_EXPECT_READY=2 \
 TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED=1 \
+TRACKER_SOURCE_HYGIENE_EXPECT_IN_PROGRESS=2 \
+TRACKER_SOURCE_HYGIENE_EXPECT_STALE_IN_PROGRESS=1 \
+TRACKER_SOURCE_HYGIENE_NOW_EPOCH=2000000000 \
+TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS=3600 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT=20 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT=1 \
 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
@@ -176,6 +190,10 @@ TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=5 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=22 \
 TRACKER_SOURCE_HYGIENE_EXPECT_READY=2 \
 TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED=1 \
+TRACKER_SOURCE_HYGIENE_EXPECT_IN_PROGRESS=2 \
+TRACKER_SOURCE_HYGIENE_EXPECT_STALE_IN_PROGRESS=1 \
+TRACKER_SOURCE_HYGIENE_NOW_EPOCH=2000000000 \
+TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS=3600 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT=20 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT=1 \
 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
