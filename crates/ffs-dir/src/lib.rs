@@ -737,6 +737,33 @@ mod tests {
         }
 
         #[test]
+        fn proptest_distinct_add_order_preserves_live_names(
+            reserved_tail in prop_oneof![Just(0_usize), Just(12_usize), Just(24_usize)],
+            (name_a, name_b) in (valid_dir_name_strategy(48), valid_dir_name_strategy(48))
+                .prop_filter("directory names must be distinct", |(a, b)| a != b),
+        ) {
+            let mut first_order = vec![0u8; 1024];
+            let mut second_order = vec![0u8; 1024];
+            init_dir_block(&mut first_order, 2, 2, reserved_tail).unwrap();
+            init_dir_block(&mut second_order, 2, 2, reserved_tail).unwrap();
+
+            add_entry(&mut first_order, 3, &name_a, Ext4FileType::RegFile, reserved_tail)
+                .unwrap();
+            add_entry(&mut first_order, 4, &name_b, Ext4FileType::Dir, reserved_tail).unwrap();
+
+            add_entry(&mut second_order, 4, &name_b, Ext4FileType::Dir, reserved_tail).unwrap();
+            add_entry(&mut second_order, 3, &name_a, Ext4FileType::RegFile, reserved_tail)
+                .unwrap();
+
+            prop_assert_eq!(live_name_set(&first_order), live_name_set(&second_order));
+
+            let (_, first_tail) = parse_dir_block(&first_order, 1024).unwrap();
+            let (_, second_tail) = parse_dir_block(&second_order, 1024).unwrap();
+            prop_assert_eq!(first_tail.is_some(), reserved_tail >= 12);
+            prop_assert_eq!(second_tail.is_some(), reserved_tail >= 12);
+        }
+
+        #[test]
         fn proptest_add_sequence_remains_parseable_until_enospc(
             reserved_tail in prop_oneof![Just(0_usize), Just(12_usize), Just(24_usize)],
             operations in proptest::collection::vec(
