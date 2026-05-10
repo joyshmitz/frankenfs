@@ -28,7 +28,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const EOPNOTSUPP_ERRNO: i64 = 95;
@@ -60,6 +60,9 @@ const ACL_USER_OBJ_TAG: u16 = 0x0001;
 const ACL_GROUP_OBJ_TAG: u16 = 0x0004;
 const ACL_OTHER_TAG: u16 = 0x0020;
 const ACL_UNDEFINED_ID: u32 = u32::MAX;
+const FUSE_MOUNT_STATE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const FUSE_MOUNT_READY_TIMEOUT: Duration = Duration::from_secs(1);
+const FUSE_MOUNT_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn patterned_bytes(len: usize, modulus: usize, offset: usize) -> Vec<u8> {
     assert!(
@@ -124,6 +127,75 @@ fn fuse_available() -> bool {
     Path::new("/dev/fuse").exists()
         && command_available("mkfs.ext4")
         && command_available("debugfs")
+}
+
+fn mountinfo_unescape(field: &str) -> Vec<u8> {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+    while let Some(byte) = bytes.get(idx) {
+        if *byte == b'\\' {
+            if let Some(octal) = idx
+                .checked_add(1)
+                .zip(idx.checked_add(4))
+                .and_then(|(start, end)| bytes.get(start..end))
+            {
+                if octal.iter().all(|byte| matches!(*byte, b'0'..=b'7')) {
+                    let value = octal
+                        .iter()
+                        .fold(0_u16, |acc, byte| acc * 8 + u16::from(byte - b'0'));
+                    if let Ok(byte) = u8::try_from(value) {
+                        out.push(byte);
+                        idx += 4;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(*byte);
+        idx += 1;
+    }
+    out
+}
+
+fn mountinfo_has_mountpoint(mountpoint: &Path) -> bool {
+    let target = mountpoint.as_os_str().as_bytes();
+    fs::read_to_string("/proc/self/mountinfo").is_ok_and(|mountinfo| {
+        mountinfo.lines().any(|line| {
+            line.split(' ')
+                .nth(4)
+                .is_some_and(|field| mountinfo_unescape(field) == target)
+        })
+    })
+}
+
+fn wait_for_fuse_mount_state(mountpoint: &Path, expected_mounted: bool, timeout: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if mountinfo_has_mountpoint(mountpoint) == expected_mounted {
+            return;
+        }
+        let remaining = timeout.saturating_sub(start.elapsed());
+        thread::sleep(std::cmp::min(FUSE_MOUNT_STATE_POLL_INTERVAL, remaining));
+    }
+    let expected = if expected_mounted {
+        "mounted"
+    } else {
+        "released"
+    };
+    assert!(
+        mountinfo_has_mountpoint(mountpoint) == expected_mounted,
+        "timed out after {timeout:?} waiting for {} to become {expected}",
+        mountpoint.display()
+    );
+}
+
+fn wait_for_fuse_mount_ready(mountpoint: &Path) {
+    wait_for_fuse_mount_state(mountpoint, true, FUSE_MOUNT_READY_TIMEOUT);
+}
+
+fn wait_for_fuse_mount_released(mountpoint: &Path) {
+    wait_for_fuse_mount_state(mountpoint, false, FUSE_MOUNT_RELEASE_TIMEOUT);
 }
 
 /// Create a small ext4 image and populate it with test files using debugfs.
@@ -971,8 +1043,7 @@ fn try_mount_ffs_with_options(
     let fs = OpenFs::open_with_options(&cx, image, &opts).expect("open ext4 image");
     match mount_background(Box::new(fs), mountpoint, mount_opts) {
         Ok(session) => {
-            // Give FUSE a moment to initialize.
-            thread::sleep(Duration::from_millis(300));
+            wait_for_fuse_mount_ready(mountpoint);
             Some(session)
         }
         Err(e) => {
@@ -1220,7 +1291,7 @@ fn try_mount_ffs_rw_with_options(
     fs.enable_writes(&cx).expect("enable ext4 write support");
     match mount_background(Box::new(fs), mountpoint, mount_opts) {
         Ok(session) => {
-            thread::sleep(Duration::from_millis(300));
+            wait_for_fuse_mount_ready(mountpoint);
             Some(session)
         }
         Err(e) => {
@@ -4813,6 +4884,7 @@ fn assert_pwritev2_rwf_persists_after_remount(
     );
 
     drop(session);
+    wait_for_fuse_mount_released(&mnt);
 
     let Some(_remount) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
         return;
@@ -7513,6 +7585,7 @@ fn fuse_ioctl_ext4_setfslabel_updates_label_and_survives_remount() {
     );
 
     drop(session);
+    wait_for_fuse_mount_released(&mnt);
 
     let Some(_remount) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
         return;
@@ -8583,8 +8656,7 @@ fn fuse_ioctl_ext4_mutation_ioctls_fast_fail_erofs_on_read_only_mount() {
         fs::write(mnt.join(donor_rel), &donor_payload).expect("write ro donor seed");
         drop(setup_session);
     }
-    // Give the kernel a beat to release the mount before Phase 2 rebinds it.
-    thread::sleep(Duration::from_millis(500));
+    wait_for_fuse_mount_released(&mnt);
 
     // ── Phase 2: ro mount, attempt mutation ioctls, assert EROFS + no drift.
     let ro_trace_path: PathBuf = tmp.path().join("ioctl-ext4-erofs.log");
@@ -9067,7 +9139,7 @@ fn fuse_spec_i3_write_and_persist_after_remount() {
         );
     } // drop first mount session before remounting the same image
 
-    thread::sleep(Duration::from_millis(150));
+    wait_for_fuse_mount_released(&mount_a);
 
     let mount_b = tmp.path().join("mnt_b");
     fs::create_dir_all(&mount_b).expect("create second mountpoint");
@@ -9578,7 +9650,7 @@ fn writeback_cache_ext4_opt_in_flush_fsyncdir_reopen() {
     );
 
     drop(session);
-    thread::sleep(Duration::from_millis(150));
+    wait_for_fuse_mount_released(&mnt);
 
     let Some(_remount) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
         emit_scenario_result(scenario_id, "SKIP", Some("fuse_remount_failed"));
@@ -11238,7 +11310,7 @@ fn try_mount_btrfs_rw_with_options(
     }
     match mount_background(Box::new(fs), mountpoint, mount_opts) {
         Ok(session) => {
-            thread::sleep(Duration::from_millis(300));
+            wait_for_fuse_mount_ready(mountpoint);
             Some(session)
         }
         Err(e) => {
@@ -11411,7 +11483,7 @@ fn try_mount_btrfs_ro(image: &Path, mountpoint: &Path) -> Option<fuser::Backgrou
     };
     match mount_background(Box::new(fs), mountpoint, &mount_opts) {
         Ok(session) => {
-            thread::sleep(Duration::from_millis(300));
+            wait_for_fuse_mount_ready(mountpoint);
             Some(session)
         }
         Err(e) => {
@@ -11438,7 +11510,7 @@ fn try_mount_btrfs_with_open_options(
     };
     match mount_background(Box::new(fs), mountpoint, mount_opts) {
         Ok(session) => {
-            thread::sleep(Duration::from_millis(300));
+            wait_for_fuse_mount_ready(mountpoint);
             Some(session)
         }
         Err(e) => {
@@ -11689,6 +11761,7 @@ fn assert_btrfs_pwritev2_rwf_persists_after_remount(
     );
 
     drop(session);
+    wait_for_fuse_mount_released(&mnt);
 
     let Some(_remount) = try_mount_btrfs_rw_with_options(&image, &mnt, &mount_opts) else {
         return;
@@ -13279,7 +13352,7 @@ fn btrfs_fuse_xattr_read_only_set_and_remove_report_erofs_without_side_effects()
         drop(setup_session);
     }
 
-    thread::sleep(Duration::from_millis(500));
+    wait_for_fuse_mount_released(&mnt);
 
     let Some(_session) = try_mount_btrfs_ro(&image, &mnt) else {
         return;
