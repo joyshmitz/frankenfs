@@ -7461,15 +7461,13 @@ mod tests {
 
     #[test]
     fn registry_stall_detection() {
-        // Use a very short threshold for testing.
+        // A zero threshold should report any active snapshot as stalled immediately.
         let registry = Arc::new(SnapshotRegistry::with_stall_threshold(0));
         let snap = Snapshot { high: CommitSeq(1) };
 
         let _handle = SnapshotRegistry::acquire(&registry, snap);
-        // Even with threshold=0, the check should detect a stall.
-        std::thread::sleep(std::time::Duration::from_millis(10));
         let stall = registry.check_stalls();
-        assert!(stall.is_some(), "should detect stall with threshold=0");
+        assert_eq!(stall, Some(0), "should detect stall with threshold=0");
     }
 
     #[test]
