@@ -13757,6 +13757,8 @@ CUSTOM("congestion_threshold=3")"#;
         use std::thread;
         use std::time::{Duration, Instant};
 
+        const FUSE_INODE_LOCK_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
         let locks = Arc::new(FuseInodeLocks::default());
         let deadline = Instant::now() + Duration::from_secs(15);
 
@@ -13801,13 +13803,16 @@ CUSTOM("congestion_threshold=3")"#;
         });
 
         while !(worker_a.is_finished() && worker_b.is_finished() && worker_c.is_finished()) {
+            let now = Instant::now();
             assert!(
-                Instant::now() < deadline,
+                now < deadline,
                 "bd-pfv55: FuseInodeLocks lock-ordering watchdog tripped — \
                  acquire/try_acquire/drop workers did not finish within 15s, \
                  indicating a likely AB-BA deadlock"
             );
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(
+                FUSE_INODE_LOCK_WATCHDOG_POLL_INTERVAL.min(deadline.saturating_duration_since(now)),
+            );
         }
 
         worker_a.join().expect("worker A panicked");
