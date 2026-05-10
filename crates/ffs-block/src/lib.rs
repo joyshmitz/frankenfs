@@ -4866,6 +4866,21 @@ mod tests {
         }
     }
 
+    fn wait_until_dirty_count<D: BlockDevice>(
+        cache: &ArcCache<D>,
+        expected: usize,
+        timeout: Duration,
+    ) -> usize {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let current = cache.dirty_count();
+            if current == expected || Instant::now() >= deadline {
+                return current;
+            }
+            std::thread::yield_now();
+        }
+    }
+
     #[cfg(feature = "s3fifo")]
     fn s3_access(state: &mut ArcState, key: BlockNumber) {
         arc_access(state, key);
@@ -6006,15 +6021,13 @@ mod tests {
             })
             .expect("start daemon");
 
-        for _ in 0..80 {
-            if cache.dirty_count() == 0 {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let final_dirty_count = wait_until_dirty_count(&cache, 0, Duration::from_millis(400));
         daemon.shutdown();
 
-        assert_eq!(cache.dirty_count(), 0);
+        assert_eq!(
+            final_dirty_count, 0,
+            "dirty count did not reach zero within 400ms; final dirty count={final_dirty_count}"
+        );
         let writes = cache.inner().write_sequence();
         assert!(writes.starts_with(&[BlockNumber(1), BlockNumber(2), BlockNumber(3)]));
         assert_eq!(cache.inner().write_count(), 3);
@@ -6296,16 +6309,14 @@ mod tests {
             })
             .expect("start daemon");
 
-        let deadline = Instant::now() + interval.saturating_mul(2) + Duration::from_millis(30);
-        while Instant::now() < deadline {
-            if cache.dirty_count() == 0 {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let timeout = interval.saturating_mul(2) + Duration::from_millis(30);
+        let final_dirty_count = wait_until_dirty_count(&cache, 0, timeout);
         daemon.shutdown();
 
-        assert_eq!(cache.dirty_count(), 0);
+        assert_eq!(
+            final_dirty_count, 0,
+            "dirty count did not reach zero within {timeout:?}; final dirty count={final_dirty_count}"
+        );
         assert_eq!(cache.inner().write_count(), 1000);
     }
 
@@ -6452,15 +6463,13 @@ mod tests {
         t2.join().expect("t2 join");
         t3.join().expect("t3 join");
 
-        for _ in 0..120 {
-            if cache.dirty_count() == 0 {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let final_dirty_count = wait_until_dirty_count(&cache, 0, Duration::from_millis(600));
         daemon.shutdown();
 
-        assert_eq!(cache.dirty_count(), 0);
+        assert_eq!(
+            final_dirty_count, 0,
+            "dirty count did not reach zero within 600ms; final dirty count={final_dirty_count}"
+        );
         let writes = cache.inner().write_sequence();
         assert!(writes.contains(&BlockNumber(4)));
         assert!(writes.contains(&BlockNumber(6)));
