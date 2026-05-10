@@ -17,7 +17,7 @@ use crate::permissioned_campaign_broker::{
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -25,6 +25,7 @@ use std::path::Path;
 pub const READINESS_LAB_SCHEMA_VERSION: u32 = 1;
 pub const READINESS_LAB_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const READINESS_LAB_HOST_SIMULATION_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const READINESS_LAB_RCH_LANE_SCHEDULE_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const READINESS_LAB_ADVISORY_NOTICE: &str =
     "advisory readiness-lab material only; not product evidence";
 pub const READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM: &str = "none";
@@ -364,6 +365,124 @@ pub struct ReadinessLabHostSimulationRow {
     pub downgrade_reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadinessLabRchLaneScheduleConfig {
+    pub manifest_path: String,
+    pub reference_epoch_days: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabRchLaneScheduleManifest {
+    pub schema_version: u32,
+    pub plan_id: String,
+    pub generated_at_epoch_days: u32,
+    pub advisory_notice: String,
+    pub source_bead: String,
+    pub artifact_root: String,
+    pub lanes: Vec<ReadinessLabRchValidationLane>,
+    pub evidence: Vec<ReadinessLabRchEvidence>,
+    pub worker_hints: Vec<ReadinessLabRchWorkerHint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabRchValidationLane {
+    pub lane_id: String,
+    pub lane_kind: ReadinessLabRchValidationLaneKind,
+    pub command: String,
+    pub dependencies: Vec<String>,
+    pub target_dir: String,
+    pub artifact_path: String,
+    pub env_allowlist: Vec<String>,
+    pub estimated_cost_units: u32,
+    pub required_evidence_ids: Vec<String>,
+    pub worker_hint: Option<String>,
+    pub executes_cargo: bool,
+    pub local_fallback_allowed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessLabRchValidationLaneKind {
+    CargoCheck,
+    CargoTest,
+    CargoClippy,
+    ReadinessDashboard,
+    Other,
+}
+
+impl ReadinessLabRchValidationLaneKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::CargoCheck => "cargo_check",
+            Self::CargoTest => "cargo_test",
+            Self::CargoClippy => "cargo_clippy",
+            Self::ReadinessDashboard => "readiness_dashboard",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabRchEvidence {
+    pub evidence_id: String,
+    pub observed_at_epoch_days: u32,
+    pub max_age_days: u32,
+    pub worker_identity: String,
+    pub rch_available: bool,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabRchWorkerHint {
+    pub worker_id: String,
+    pub logical_cpus: u32,
+    pub ram_gib: u32,
+    pub max_parallel_lanes: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessLabRchLaneScheduleReport {
+    pub schema_version: u32,
+    pub plan_id: String,
+    pub manifest_path: String,
+    pub valid: bool,
+    pub dry_run_only: bool,
+    pub product_evidence_claim: String,
+    pub release_gate_effect: String,
+    pub source_bead: String,
+    pub artifact_root: String,
+    pub lane_count: usize,
+    pub planned_lane_count: usize,
+    pub coalesced_duplicate_count: usize,
+    pub target_dir_conflict_count: usize,
+    pub missing_evidence_count: usize,
+    pub local_fallback_violation_count: usize,
+    pub rows: Vec<ReadinessLabRchLaneScheduleRow>,
+    pub errors: Vec<ReadinessLabFinding>,
+    pub warnings: Vec<ReadinessLabFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessLabRchLaneScheduleRow {
+    pub ordinal: usize,
+    pub lane_id: String,
+    pub lane_kind: String,
+    pub command: String,
+    pub target_dir: String,
+    pub artifact_path: String,
+    pub env_allowlist: Vec<String>,
+    pub estimated_cost_units: u32,
+    pub dependencies: Vec<String>,
+    pub required_evidence_ids: Vec<String>,
+    pub worker_hint: Option<String>,
+    pub coalesced_from: Vec<String>,
+}
+
 #[must_use]
 pub fn validate_readiness_lab_contract_bundle(
     bundle: &ReadinessLabContractBundle,
@@ -623,6 +742,117 @@ pub fn fail_on_readiness_lab_host_simulation_errors(
     );
     anyhow::bail!(
         "readiness lab host simulation validation failed with {} error(s): {first}",
+        report.errors.len()
+    )
+}
+
+pub fn load_readiness_lab_rch_lane_schedule_manifest(
+    path: impl AsRef<Path>,
+) -> Result<ReadinessLabRchLaneScheduleManifest> {
+    let path = path.as_ref();
+    let text = fs::read_to_string(path).with_context(|| {
+        format!(
+            "failed to read readiness lab RCH lane schedule {}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&text).with_context(|| {
+        format!(
+            "failed to parse readiness lab RCH lane schedule {}",
+            path.display()
+        )
+    })
+}
+
+#[must_use]
+pub fn plan_readiness_lab_rch_lanes(
+    manifest: &ReadinessLabRchLaneScheduleManifest,
+    config: &ReadinessLabRchLaneScheduleConfig,
+) -> ReadinessLabRchLaneScheduleReport {
+    let mut planner = ReadinessLabRchLanePlanner::new(manifest, config);
+    planner.validate_manifest();
+    planner.plan();
+    planner.finish()
+}
+
+#[must_use]
+pub fn render_readiness_lab_rch_lane_schedule_markdown(
+    report: &ReadinessLabRchLaneScheduleReport,
+) -> String {
+    let mut out = String::new();
+    writeln!(&mut out, "# FrankenFS Readiness Lab RCH Lane Schedule").ok();
+    writeln!(&mut out).ok();
+    writeln!(&mut out, "- Plan: `{}`", report.plan_id).ok();
+    writeln!(&mut out, "- Manifest: `{}`", report.manifest_path).ok();
+    writeln!(&mut out, "- Valid: `{}`", report.valid).ok();
+    writeln!(&mut out, "- Dry run only: `{}`", report.dry_run_only).ok();
+    writeln!(
+        &mut out,
+        "- Product evidence claim: `{}`",
+        report.product_evidence_claim
+    )
+    .ok();
+    writeln!(
+        &mut out,
+        "- Release-gate effect: {}",
+        report.release_gate_effect
+    )
+    .ok();
+    writeln!(&mut out, "- Source bead: `{}`", report.source_bead).ok();
+    writeln!(&mut out, "- Lanes: `{}`", report.lane_count).ok();
+    writeln!(&mut out, "- Planned lanes: `{}`", report.planned_lane_count).ok();
+    writeln!(
+        &mut out,
+        "- Coalesced duplicates: `{}`",
+        report.coalesced_duplicate_count
+    )
+    .ok();
+    writeln!(
+        &mut out,
+        "- Local fallback violations: `{}`",
+        report.local_fallback_violation_count
+    )
+    .ok();
+    writeln!(&mut out).ok();
+    writeln!(
+        &mut out,
+        "| order | lane | kind | deps | target_dir | artifact | cost | coalesced |"
+    )
+    .ok();
+    writeln!(&mut out, "|---:|---|---|---:|---|---|---:|---:|").ok();
+    for row in &report.rows {
+        writeln!(
+            &mut out,
+            "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |",
+            row.ordinal,
+            row.lane_id,
+            row.lane_kind,
+            row.dependencies.len(),
+            row.target_dir,
+            row.artifact_path,
+            row.estimated_cost_units,
+            row.coalesced_from.len()
+        )
+        .ok();
+    }
+    writeln!(&mut out).ok();
+    render_findings(&mut out, "Errors", &report.errors);
+    render_findings(&mut out, "Warnings", &report.warnings);
+    out
+}
+
+pub fn fail_on_readiness_lab_rch_lane_schedule_errors(
+    report: &ReadinessLabRchLaneScheduleReport,
+) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    let first = report.errors.first().map_or(
+        "readiness lab RCH lane schedule failed validation",
+        |finding| finding.message.as_str(),
+    );
+    anyhow::bail!(
+        "readiness lab RCH lane schedule validation failed with {} error(s): {first}",
         report.errors.len()
     )
 }
@@ -994,6 +1224,554 @@ impl<'a> ReadinessLabValidator<'a> {
             product_claim_violation_count: self.product_claim_violation_count,
             missing_required_field_count: self.missing_required_field_count,
             duplicate_id_count: self.duplicate_id_count,
+            errors: self.errors,
+            warnings: self.warnings,
+        }
+    }
+
+    fn error(
+        &mut self,
+        finding_id: impl Into<String>,
+        message: impl Into<String>,
+        scope: FindingScope,
+    ) {
+        self.errors.push(scope.into_finding(
+            finding_id.into(),
+            ReadinessLabFindingSeverity::Error,
+            message.into(),
+        ));
+    }
+}
+
+struct ReadinessLabRchLanePlanner<'a> {
+    manifest: &'a ReadinessLabRchLaneScheduleManifest,
+    config: &'a ReadinessLabRchLaneScheduleConfig,
+    errors: Vec<ReadinessLabFinding>,
+    warnings: Vec<ReadinessLabFinding>,
+    coalesced_duplicate_count: usize,
+    target_dir_conflict_count: usize,
+    missing_evidence_count: usize,
+    local_fallback_violation_count: usize,
+    rows: Vec<ReadinessLabRchLaneScheduleRow>,
+}
+
+impl<'a> ReadinessLabRchLanePlanner<'a> {
+    fn new(
+        manifest: &'a ReadinessLabRchLaneScheduleManifest,
+        config: &'a ReadinessLabRchLaneScheduleConfig,
+    ) -> Self {
+        Self {
+            manifest,
+            config,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            coalesced_duplicate_count: 0,
+            target_dir_conflict_count: 0,
+            missing_evidence_count: 0,
+            local_fallback_violation_count: 0,
+            rows: Vec::new(),
+        }
+    }
+
+    fn validate_manifest(&mut self) {
+        self.check_identity();
+        self.check_evidence();
+        self.check_worker_hints();
+        for lane in &self.manifest.lanes {
+            self.validate_lane(lane);
+        }
+    }
+
+    fn check_identity(&mut self) {
+        if self.manifest.schema_version != READINESS_LAB_SCHEMA_VERSION {
+            self.error(
+                "unsupported_schema_version",
+                format!(
+                    "schema_version must be {READINESS_LAB_SCHEMA_VERSION}, got {}",
+                    self.manifest.schema_version
+                ),
+                FindingScope::default().field("schema_version"),
+            );
+        }
+        if self.manifest.plan_id.trim().is_empty() {
+            self.error(
+                "missing_plan_id",
+                "plan_id must be non-empty",
+                FindingScope::default().field("plan_id"),
+            );
+        }
+        if self.manifest.generated_at_epoch_days == 0 {
+            self.error(
+                "missing_generated_at_epoch_days",
+                "generated_at_epoch_days must be non-zero",
+                FindingScope::default().field("generated_at_epoch_days"),
+            );
+        }
+        if self.manifest.advisory_notice.trim() != READINESS_LAB_ADVISORY_NOTICE {
+            self.error(
+                "invalid_advisory_notice",
+                format!("advisory_notice must be exactly {READINESS_LAB_ADVISORY_NOTICE:?}"),
+                FindingScope::default().field("advisory_notice"),
+            );
+        }
+        if !self.manifest.source_bead.starts_with("bd-") {
+            self.error(
+                "malformed_source_bead",
+                "source_bead must look like bd-...",
+                FindingScope::default().field("source_bead"),
+            );
+        }
+        if self.manifest.artifact_root.trim().is_empty() {
+            self.error(
+                "missing_artifact_root",
+                "artifact_root must be non-empty",
+                FindingScope::default().field("artifact_root"),
+            );
+        }
+        if self.manifest.lanes.is_empty() {
+            self.error(
+                "empty_lane_schedule",
+                "lanes must include at least one dry-run validation lane",
+                FindingScope::default().field("lanes"),
+            );
+        }
+    }
+
+    fn check_evidence(&mut self) {
+        if duplicate_count(
+            self.manifest
+                .evidence
+                .iter()
+                .map(|evidence| evidence.evidence_id.as_str()),
+        ) > 0
+        {
+            self.error(
+                "duplicate_evidence_ids",
+                "evidence_id values must be unique",
+                FindingScope::default().field("evidence"),
+            );
+        }
+
+        for evidence in &self.manifest.evidence {
+            if evidence.evidence_id.trim().is_empty() {
+                self.error(
+                    "missing_evidence_id",
+                    "evidence_id must be non-empty",
+                    FindingScope::default().field("evidence_id"),
+                );
+            }
+            if evidence.observed_at_epoch_days == 0 {
+                self.error(
+                    "missing_evidence_observed_at",
+                    "evidence observed_at_epoch_days must be non-zero",
+                    FindingScope::assumption(evidence.evidence_id.as_str())
+                        .field("observed_at_epoch_days"),
+                );
+            }
+            if evidence.max_age_days == 0 {
+                self.error(
+                    "zero_evidence_max_age_days",
+                    "evidence max_age_days must be greater than zero",
+                    FindingScope::assumption(evidence.evidence_id.as_str()).field("max_age_days"),
+                );
+            }
+            if evidence.worker_identity.trim().is_empty() {
+                self.error(
+                    "missing_evidence_worker_identity",
+                    "evidence worker_identity must be non-empty",
+                    FindingScope::assumption(evidence.evidence_id.as_str())
+                        .field("worker_identity"),
+                );
+            }
+            if !evidence.rch_available {
+                self.missing_evidence_count += 1;
+                self.error(
+                    "rch_evidence_unavailable",
+                    "required RCH evidence says rch_available=false",
+                    FindingScope::assumption(evidence.evidence_id.as_str()).field("rch_available"),
+                );
+            }
+            if let Some(reference_epoch_days) = self.config.reference_epoch_days {
+                if evidence.observed_at_epoch_days > reference_epoch_days {
+                    self.error(
+                        "future_rch_evidence",
+                        "RCH evidence timestamp is newer than the reference date",
+                        FindingScope::assumption(evidence.evidence_id.as_str())
+                            .field("observed_at_epoch_days"),
+                    );
+                }
+                if evidence
+                    .observed_at_epoch_days
+                    .saturating_add(evidence.max_age_days)
+                    < reference_epoch_days
+                {
+                    self.error(
+                        "stale_rch_evidence",
+                        "RCH evidence is older than its max_age_days window",
+                        FindingScope::assumption(evidence.evidence_id.as_str())
+                            .field("max_age_days"),
+                    );
+                }
+            }
+        }
+    }
+
+    fn check_worker_hints(&mut self) {
+        if duplicate_count(
+            self.manifest
+                .worker_hints
+                .iter()
+                .map(|worker| worker.worker_id.as_str()),
+        ) > 0
+        {
+            self.error(
+                "duplicate_worker_hints",
+                "worker_id values must be unique",
+                FindingScope::default().field("worker_hints"),
+            );
+        }
+        for worker in &self.manifest.worker_hints {
+            if worker.worker_id.trim().is_empty() {
+                self.error(
+                    "missing_worker_id",
+                    "worker_id must be non-empty",
+                    FindingScope::default().field("worker_id"),
+                );
+            }
+            if worker.logical_cpus == 0 {
+                self.error(
+                    "zero_worker_logical_cpus",
+                    "worker logical_cpus must be greater than zero",
+                    FindingScope::assumption(worker.worker_id.as_str()).field("logical_cpus"),
+                );
+            }
+            if worker.ram_gib == 0 {
+                self.error(
+                    "zero_worker_ram_gib",
+                    "worker ram_gib must be greater than zero",
+                    FindingScope::assumption(worker.worker_id.as_str()).field("ram_gib"),
+                );
+            }
+            if worker.max_parallel_lanes == 0 {
+                self.error(
+                    "zero_worker_max_parallel_lanes",
+                    "worker max_parallel_lanes must be greater than zero",
+                    FindingScope::assumption(worker.worker_id.as_str()).field("max_parallel_lanes"),
+                );
+            }
+        }
+    }
+
+    fn validate_lane(&mut self, lane: &ReadinessLabRchValidationLane) {
+        if lane.lane_id.trim().is_empty() {
+            self.error(
+                "missing_lane_id",
+                "lane_id must be non-empty",
+                FindingScope::default().field("lane_id"),
+            );
+        }
+        if lane.command.trim().is_empty() {
+            self.error(
+                "missing_lane_command",
+                "lane command must be non-empty",
+                FindingScope::lane(lane.lane_id.as_str()).field("command"),
+            );
+        }
+        if lane.target_dir.trim().is_empty() {
+            self.error(
+                "missing_target_dir",
+                "lane target_dir must be non-empty",
+                FindingScope::lane(lane.lane_id.as_str()).field("target_dir"),
+            );
+        }
+        if lane.artifact_path.trim().is_empty() {
+            self.error(
+                "missing_artifact_path",
+                "lane artifact_path must be non-empty",
+                FindingScope::lane(lane.lane_id.as_str()).field("artifact_path"),
+            );
+        }
+        if lane.estimated_cost_units == 0 {
+            self.error(
+                "zero_estimated_cost_units",
+                "estimated_cost_units must be greater than zero",
+                FindingScope::lane(lane.lane_id.as_str()).field("estimated_cost_units"),
+            );
+        }
+        if lane.local_fallback_allowed {
+            self.local_fallback_violation_count += 1;
+            self.error(
+                "local_fallback_allowed",
+                "RCH lane schedules must reject local cargo fallback",
+                FindingScope::lane(lane.lane_id.as_str()).field("local_fallback_allowed"),
+            );
+        }
+        if lane.executes_cargo {
+            if !lane.command.contains("rch exec -- cargo") {
+                self.error(
+                    "cargo_without_rch_exec",
+                    "cargo-executing lanes must route through rch exec",
+                    FindingScope::lane(lane.lane_id.as_str()).field("command"),
+                );
+            }
+            if !lane.command.contains("CARGO_TARGET_DIR=")
+                || !lane.command.contains(lane.target_dir.as_str())
+            {
+                self.error(
+                    "missing_target_dir_env",
+                    "cargo-executing lanes must bind CARGO_TARGET_DIR to the lane target_dir",
+                    FindingScope::lane(lane.lane_id.as_str()).field("command"),
+                );
+            }
+            if !lane
+                .env_allowlist
+                .iter()
+                .any(|entry| entry == "CARGO_TARGET_DIR")
+            {
+                self.error(
+                    "missing_cargo_target_dir_allowlist",
+                    "cargo-executing lanes must allowlist CARGO_TARGET_DIR",
+                    FindingScope::lane(lane.lane_id.as_str()).field("env_allowlist"),
+                );
+            }
+        }
+    }
+
+    fn plan(&mut self) {
+        let evidence_ids = self
+            .manifest
+            .evidence
+            .iter()
+            .map(|evidence| evidence.evidence_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let worker_ids = self
+            .manifest
+            .worker_hints
+            .iter()
+            .map(|worker| worker.worker_id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        let mut work_key_to_canonical = BTreeMap::<String, String>::new();
+        let mut lane_to_canonical = BTreeMap::<String, String>::new();
+        let mut canonical_lanes = Vec::<&ReadinessLabRchValidationLane>::new();
+        let mut coalesced_from = BTreeMap::<String, Vec<String>>::new();
+        let mut duplicate_lane_ids = BTreeSet::new();
+
+        for lane in &self.manifest.lanes {
+            if !lane.lane_id.trim().is_empty()
+                && lane_to_canonical.contains_key(lane.lane_id.as_str())
+            {
+                duplicate_lane_ids.insert(lane.lane_id.clone());
+                continue;
+            }
+
+            let key = lane_work_key(lane);
+            if let Some(canonical) = work_key_to_canonical.get(&key) {
+                self.coalesced_duplicate_count += 1;
+                lane_to_canonical.insert(lane.lane_id.clone(), canonical.clone());
+                coalesced_from
+                    .entry(canonical.clone())
+                    .or_default()
+                    .push(lane.lane_id.clone());
+            } else {
+                let canonical = lane.lane_id.clone();
+                work_key_to_canonical.insert(key, canonical.clone());
+                lane_to_canonical.insert(lane.lane_id.clone(), canonical.clone());
+                coalesced_from.entry(canonical).or_default();
+                canonical_lanes.push(lane);
+            }
+        }
+
+        for duplicate_lane_id in duplicate_lane_ids {
+            self.error(
+                "duplicate_lane_id",
+                format!("duplicate lane_id {duplicate_lane_id:?} is not schedulable"),
+                FindingScope::lane(duplicate_lane_id.as_str()).field("lane_id"),
+            );
+        }
+
+        let canonical_ids = canonical_lanes
+            .iter()
+            .map(|lane| lane.lane_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut canonical_dependencies = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut target_dir_owner = BTreeMap::<String, String>::new();
+
+        for lane in &canonical_lanes {
+            let mut deps = BTreeSet::new();
+            for dependency in &lane.dependencies {
+                match lane_to_canonical.get(dependency) {
+                    Some(canonical) if canonical != &lane.lane_id => {
+                        deps.insert(canonical.clone());
+                    }
+                    Some(_) => {
+                        self.error(
+                            "self_dependency",
+                            "lane depends on itself after duplicate coalescing",
+                            FindingScope::lane(lane.lane_id.as_str()).field("dependencies"),
+                        );
+                    }
+                    None => self.error(
+                        "missing_lane_dependency",
+                        format!("lane depends on unknown lane_id {dependency:?}"),
+                        FindingScope::lane(lane.lane_id.as_str()).field("dependencies"),
+                    ),
+                }
+            }
+            for evidence_id in &lane.required_evidence_ids {
+                if !evidence_ids.contains(evidence_id.as_str()) {
+                    self.missing_evidence_count += 1;
+                    self.error(
+                        "missing_rch_evidence",
+                        format!("lane requires missing evidence_id {evidence_id:?}"),
+                        FindingScope::lane(lane.lane_id.as_str()).field("required_evidence_ids"),
+                    );
+                }
+            }
+            if let Some(worker_hint) = &lane.worker_hint {
+                if !worker_ids.contains(worker_hint.as_str()) {
+                    self.error(
+                        "missing_worker_hint",
+                        format!("lane references unknown worker_hint {worker_hint:?}"),
+                        FindingScope::lane(lane.lane_id.as_str()).field("worker_hint"),
+                    );
+                }
+            }
+            if lane.executes_cargo {
+                if let Some(owner) =
+                    target_dir_owner.insert(lane.target_dir.clone(), lane.lane_id.clone())
+                {
+                    self.target_dir_conflict_count += 1;
+                    self.error(
+                        "target_dir_conflict",
+                        format!(
+                            "cargo lanes {owner:?} and {:?} share target_dir {:?}",
+                            lane.lane_id, lane.target_dir
+                        ),
+                        FindingScope::lane(lane.lane_id.as_str()).field("target_dir"),
+                    );
+                }
+            }
+            canonical_dependencies.insert(lane.lane_id.clone(), deps);
+        }
+
+        self.rows = self.ordered_rows(
+            &canonical_lanes,
+            &canonical_ids,
+            &canonical_dependencies,
+            &coalesced_from,
+        );
+    }
+
+    fn ordered_rows(
+        &mut self,
+        canonical_lanes: &[&'a ReadinessLabRchValidationLane],
+        canonical_ids: &BTreeSet<&str>,
+        canonical_dependencies: &BTreeMap<String, BTreeSet<String>>,
+        coalesced_from: &BTreeMap<String, Vec<String>>,
+    ) -> Vec<ReadinessLabRchLaneScheduleRow> {
+        let mut planned = BTreeSet::<String>::new();
+        let mut rows = Vec::new();
+
+        while planned.len() < canonical_ids.len() {
+            let mut progressed = false;
+            for lane in canonical_lanes {
+                if planned.contains(lane.lane_id.as_str()) {
+                    continue;
+                }
+                let deps = canonical_dependencies
+                    .get(lane.lane_id.as_str())
+                    .cloned()
+                    .unwrap_or_default();
+                if deps.iter().all(|dependency| planned.contains(dependency)) {
+                    rows.push(Self::row_for_lane(
+                        lane,
+                        rows.len() + 1,
+                        &deps,
+                        coalesced_from,
+                    ));
+                    planned.insert(lane.lane_id.clone());
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                let remaining = canonical_lanes
+                    .iter()
+                    .filter(|lane| !planned.contains(lane.lane_id.as_str()))
+                    .map(|lane| lane.lane_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.error(
+                    "lane_dependency_cycle",
+                    format!("lane dependencies could not be ordered: {remaining}"),
+                    FindingScope::default().field("dependencies"),
+                );
+                for lane in canonical_lanes {
+                    if !planned.contains(lane.lane_id.as_str()) {
+                        let deps = canonical_dependencies
+                            .get(lane.lane_id.as_str())
+                            .cloned()
+                            .unwrap_or_default();
+                        rows.push(Self::row_for_lane(
+                            lane,
+                            rows.len() + 1,
+                            &deps,
+                            coalesced_from,
+                        ));
+                        planned.insert(lane.lane_id.clone());
+                    }
+                }
+            }
+        }
+
+        rows
+    }
+
+    fn row_for_lane(
+        lane: &ReadinessLabRchValidationLane,
+        ordinal: usize,
+        deps: &BTreeSet<String>,
+        coalesced_from: &BTreeMap<String, Vec<String>>,
+    ) -> ReadinessLabRchLaneScheduleRow {
+        ReadinessLabRchLaneScheduleRow {
+            ordinal,
+            lane_id: lane.lane_id.clone(),
+            lane_kind: lane.lane_kind.label().to_owned(),
+            command: lane.command.clone(),
+            target_dir: lane.target_dir.clone(),
+            artifact_path: lane.artifact_path.clone(),
+            env_allowlist: lane.env_allowlist.clone(),
+            estimated_cost_units: lane.estimated_cost_units,
+            dependencies: deps.iter().cloned().collect(),
+            required_evidence_ids: lane.required_evidence_ids.clone(),
+            worker_hint: lane.worker_hint.clone(),
+            coalesced_from: coalesced_from
+                .get(lane.lane_id.as_str())
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    fn finish(self) -> ReadinessLabRchLaneScheduleReport {
+        ReadinessLabRchLaneScheduleReport {
+            schema_version: READINESS_LAB_RCH_LANE_SCHEDULE_REPORT_SCHEMA_VERSION,
+            plan_id: self.manifest.plan_id.clone(),
+            manifest_path: self.config.manifest_path.clone(),
+            valid: self.errors.is_empty(),
+            dry_run_only: true,
+            product_evidence_claim: READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM.to_owned(),
+            release_gate_effect:
+                "RCH lane scheduler output is advisory dry-run planning only; it never executes cargo lanes and cannot promote readiness claims"
+                    .to_owned(),
+            source_bead: self.manifest.source_bead.clone(),
+            artifact_root: self.manifest.artifact_root.clone(),
+            lane_count: self.manifest.lanes.len(),
+            planned_lane_count: self.rows.len(),
+            coalesced_duplicate_count: self.coalesced_duplicate_count,
+            target_dir_conflict_count: self.target_dir_conflict_count,
+            missing_evidence_count: self.missing_evidence_count,
+            local_fallback_violation_count: self.local_fallback_violation_count,
+            rows: self.rows,
             errors: self.errors,
             warnings: self.warnings,
         }
@@ -1420,6 +2198,16 @@ fn push_readiness_lab_finding(
     ));
 }
 
+fn lane_work_key(lane: &ReadinessLabRchValidationLane) -> String {
+    format!(
+        "{}\n{}\n{}\n{}",
+        lane.lane_kind.label(),
+        lane.command.trim(),
+        lane.target_dir.trim(),
+        lane.artifact_path.trim()
+    )
+}
+
 fn duplicate_count<'a>(ids: impl Iterator<Item = &'a str>) -> usize {
     let mut seen = BTreeSet::new();
     let mut duplicates = BTreeSet::new();
@@ -1560,6 +2348,134 @@ mod tests {
             manifest,
             &ReadinessLabHostSimulationConfig {
                 manifest_path: "hosts.json".to_owned(),
+                reference_epoch_days: Some(20_001),
+            },
+        )
+    }
+
+    fn sample_rch_lane_schedule_manifest() -> ReadinessLabRchLaneScheduleManifest {
+        let check_command = rch_lane_command(
+            "/data/tmp/rch_target_frankenfs_readiness_lab_check",
+            "cargo check -p ffs-harness --all-targets",
+        );
+        ReadinessLabRchLaneScheduleManifest {
+            schema_version: READINESS_LAB_SCHEMA_VERSION,
+            plan_id: "readiness-lab-rch-plan".to_owned(),
+            generated_at_epoch_days: 20_000,
+            advisory_notice: READINESS_LAB_ADVISORY_NOTICE.to_owned(),
+            source_bead: "bd-hejjl".to_owned(),
+            artifact_root: "artifacts/readiness-lab/rch-schedule".to_owned(),
+            lanes: vec![
+                ReadinessLabRchValidationLane {
+                    lane_id: "check".to_owned(),
+                    lane_kind: ReadinessLabRchValidationLaneKind::CargoCheck,
+                    command: check_command.clone(),
+                    dependencies: vec![],
+                    target_dir: "/data/tmp/rch_target_frankenfs_readiness_lab_check".to_owned(),
+                    artifact_path: "artifacts/readiness-lab/rch-schedule/check.json".to_owned(),
+                    env_allowlist: vec!["CARGO_TARGET_DIR".to_owned()],
+                    estimated_cost_units: 2,
+                    required_evidence_ids: vec!["rch-worker-fresh".to_owned()],
+                    worker_hint: Some("worker-a".to_owned()),
+                    executes_cargo: true,
+                    local_fallback_allowed: false,
+                },
+                ReadinessLabRchValidationLane {
+                    lane_id: "test".to_owned(),
+                    lane_kind: ReadinessLabRchValidationLaneKind::CargoTest,
+                    command: rch_lane_command(
+                        "/data/tmp/rch_target_frankenfs_readiness_lab_test",
+                        "cargo test -p ffs-harness --lib readiness_lab",
+                    ),
+                    dependencies: vec!["check".to_owned()],
+                    target_dir: "/data/tmp/rch_target_frankenfs_readiness_lab_test".to_owned(),
+                    artifact_path: "artifacts/readiness-lab/rch-schedule/test.json".to_owned(),
+                    env_allowlist: vec!["CARGO_TARGET_DIR".to_owned()],
+                    estimated_cost_units: 4,
+                    required_evidence_ids: vec!["rch-worker-fresh".to_owned()],
+                    worker_hint: Some("worker-a".to_owned()),
+                    executes_cargo: true,
+                    local_fallback_allowed: false,
+                },
+                ReadinessLabRchValidationLane {
+                    lane_id: "clippy".to_owned(),
+                    lane_kind: ReadinessLabRchValidationLaneKind::CargoClippy,
+                    command: rch_lane_command(
+                        "/data/tmp/rch_target_frankenfs_readiness_lab_clippy",
+                        "cargo clippy -p ffs-harness --all-targets -- -D warnings",
+                    ),
+                    dependencies: vec!["check".to_owned()],
+                    target_dir: "/data/tmp/rch_target_frankenfs_readiness_lab_clippy".to_owned(),
+                    artifact_path: "artifacts/readiness-lab/rch-schedule/clippy.json".to_owned(),
+                    env_allowlist: vec!["CARGO_TARGET_DIR".to_owned()],
+                    estimated_cost_units: 6,
+                    required_evidence_ids: vec!["rch-worker-fresh".to_owned()],
+                    worker_hint: Some("worker-a".to_owned()),
+                    executes_cargo: true,
+                    local_fallback_allowed: false,
+                },
+                ReadinessLabRchValidationLane {
+                    lane_id: "dashboard".to_owned(),
+                    lane_kind: ReadinessLabRchValidationLaneKind::ReadinessDashboard,
+                    command: rch_lane_command(
+                        "/data/tmp/rch_target_frankenfs_readiness_lab_dashboard",
+                        "cargo run -p ffs-harness -- readiness-dashboard --format json",
+                    ),
+                    dependencies: vec!["test".to_owned(), "clippy".to_owned()],
+                    target_dir: "/data/tmp/rch_target_frankenfs_readiness_lab_dashboard".to_owned(),
+                    artifact_path: "artifacts/readiness-lab/rch-schedule/dashboard.json".to_owned(),
+                    env_allowlist: vec!["CARGO_TARGET_DIR".to_owned()],
+                    estimated_cost_units: 3,
+                    required_evidence_ids: vec!["rch-worker-fresh".to_owned()],
+                    worker_hint: Some("worker-a".to_owned()),
+                    executes_cargo: true,
+                    local_fallback_allowed: false,
+                },
+                ReadinessLabRchValidationLane {
+                    lane_id: "check-duplicate".to_owned(),
+                    lane_kind: ReadinessLabRchValidationLaneKind::CargoCheck,
+                    command: check_command,
+                    dependencies: vec![],
+                    target_dir: "/data/tmp/rch_target_frankenfs_readiness_lab_check".to_owned(),
+                    artifact_path: "artifacts/readiness-lab/rch-schedule/check.json".to_owned(),
+                    env_allowlist: vec!["CARGO_TARGET_DIR".to_owned()],
+                    estimated_cost_units: 2,
+                    required_evidence_ids: vec!["rch-worker-fresh".to_owned()],
+                    worker_hint: Some("worker-a".to_owned()),
+                    executes_cargo: true,
+                    local_fallback_allowed: false,
+                },
+            ],
+            evidence: vec![ReadinessLabRchEvidence {
+                evidence_id: "rch-worker-fresh".to_owned(),
+                observed_at_epoch_days: 20_000,
+                max_age_days: 7,
+                worker_identity: "vmi-sim".to_owned(),
+                rch_available: true,
+                detail: Some("fresh RCH scheduler evidence fixture".to_owned()),
+            }],
+            worker_hints: vec![ReadinessLabRchWorkerHint {
+                worker_id: "worker-a".to_owned(),
+                logical_cpus: 32,
+                ram_gib: 128,
+                max_parallel_lanes: 4,
+            }],
+        }
+    }
+
+    fn rch_lane_command(target_dir: &str, cargo_command: &str) -> String {
+        format!(
+            "CARGO_TARGET_DIR={target_dir} RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- {cargo_command}"
+        )
+    }
+
+    fn plan_rch_lanes(
+        manifest: &ReadinessLabRchLaneScheduleManifest,
+    ) -> ReadinessLabRchLaneScheduleReport {
+        plan_readiness_lab_rch_lanes(
+            manifest,
+            &ReadinessLabRchLaneScheduleConfig {
+                manifest_path: "rch-lanes.json".to_owned(),
                 reference_epoch_days: Some(20_001),
             },
         )
@@ -1828,6 +2744,117 @@ mod tests {
         }"#;
 
         let err = serde_json::from_str::<ReadinessLabHostSimulationManifest>(raw)
+            .expect_err("unknown fields must fail closed");
+
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn rch_lane_scheduler_orders_dependencies_and_coalesces_duplicates() {
+        let report = plan_rch_lanes(&sample_rch_lane_schedule_manifest());
+
+        assert!(report.valid);
+        assert_eq!(report.lane_count, 5);
+        assert_eq!(report.planned_lane_count, 4);
+        assert_eq!(report.coalesced_duplicate_count, 1);
+        assert_eq!(report.product_evidence_claim, "none");
+        assert!(report.dry_run_only);
+        assert_eq!(report.rows[0].lane_id, "check");
+        assert_eq!(report.rows[0].coalesced_from, vec!["check-duplicate"]);
+        let dashboard = report
+            .rows
+            .iter()
+            .find(|row| row.lane_id == "dashboard")
+            .expect("dashboard lane must be scheduled");
+        assert_eq!(
+            dashboard.dependencies,
+            vec!["clippy".to_owned(), "test".to_owned()]
+        );
+        assert!(dashboard.ordinal > report.rows[1].ordinal);
+        assert!(
+            render_readiness_lab_rch_lane_schedule_markdown(&report)
+                .contains("FrankenFS Readiness Lab RCH Lane Schedule")
+        );
+    }
+
+    #[test]
+    fn rch_lane_scheduler_rejects_shared_target_dir_and_missing_evidence() {
+        let mut manifest = sample_rch_lane_schedule_manifest();
+        manifest.lanes[1].target_dir = manifest.lanes[0].target_dir.clone();
+        manifest.lanes[1].command = rch_lane_command(
+            manifest.lanes[1].target_dir.as_str(),
+            "cargo test -p ffs-harness --lib readiness_lab",
+        );
+        manifest.lanes[2]
+            .required_evidence_ids
+            .push("missing-rch-evidence".to_owned());
+
+        let report = plan_rch_lanes(&manifest);
+
+        assert!(!report.valid);
+        assert_eq!(report.target_dir_conflict_count, 1);
+        assert_eq!(report.missing_evidence_count, 1);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.finding_id == "target_dir_conflict")
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.finding_id == "missing_rch_evidence")
+        );
+    }
+
+    #[test]
+    fn rch_lane_scheduler_rejects_local_fallback_and_bare_cargo() {
+        let mut manifest = sample_rch_lane_schedule_manifest();
+        manifest.lanes[0].command = "cargo check -p ffs-harness --all-targets".to_owned();
+        manifest.lanes[0].env_allowlist.clear();
+        manifest.lanes[0].local_fallback_allowed = true;
+
+        let report = plan_rch_lanes(&manifest);
+
+        assert!(!report.valid);
+        assert_eq!(report.local_fallback_violation_count, 1);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.finding_id == "local_fallback_allowed")
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.finding_id == "cargo_without_rch_exec")
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.finding_id == "missing_cargo_target_dir_allowlist")
+        );
+    }
+
+    #[test]
+    fn rch_lane_scheduler_rejects_unknown_manifest_fields() {
+        let raw = r#"{
+            "schema_version": 1,
+            "plan_id": "rch-plan",
+            "generated_at_epoch_days": 20000,
+            "advisory_notice": "advisory readiness-lab material only; not product evidence",
+            "source_bead": "bd-hejjl",
+            "artifact_root": "artifacts/readiness-lab/rch-schedule",
+            "lanes": [],
+            "evidence": [],
+            "worker_hints": [],
+            "unexpected": true
+        }"#;
+
+        let err = serde_json::from_str::<ReadinessLabRchLaneScheduleManifest>(raw)
             .expect_err("unknown fields must fail closed");
 
         assert!(err.to_string().contains("unknown field"));

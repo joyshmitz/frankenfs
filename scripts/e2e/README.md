@@ -1258,6 +1258,11 @@ rch exec -- cargo run -p ffs-harness -- simulate-readiness-lab-hosts \
   --manifest artifacts/readiness-lab/host_matrix.json \
   --reference-epoch-days 20001 \
   --format markdown
+
+rch exec -- cargo run -p ffs-harness -- plan-readiness-lab-rch-lanes \
+  --manifest artifacts/readiness-lab/rch_lanes.json \
+  --reference-epoch-days 20001 \
+  --format markdown
 ```
 
 These artifacts are allowed to drive preflight, rehearsal, dashboard, and
@@ -1266,7 +1271,10 @@ validated; release-gate and proof-bundle promotion still require the real
 permissioned evidence lanes. The E2E suite builds synthetic advisory and
 forbidden product-claim manifests plus a synthetic large-host matrix that
 classifies candidate, small-host, downgraded, and blocked inventories while
-preserving `product_evidence_claim=none`.
+preserving `product_evidence_claim=none`. It also emits a dry-run RCH lane
+schedule for check, test, clippy, and dashboard commands, proving target-dir
+isolation, dependency ordering, duplicate coalescing, and no local cargo
+fallback without executing the planned lanes.
 
 ```bash
 ./scripts/e2e/ffs_readiness_lab_contracts_e2e.sh
