@@ -20,6 +20,8 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 pub const OPERATIONAL_EVIDENCE_INDEX_SCHEMA_VERSION: u32 = 1;
+const LARGE_HOST_MIN_CPU_CORES: u32 = 64;
+const LARGE_HOST_MIN_MEMORY_GIB: u32 = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationalEvidenceIndexConfig {
@@ -570,7 +572,13 @@ fn classify_host_class(row: &ReadinessScenarioRow) -> OperationalEvidenceHostCla
         return OperationalEvidenceHostClass::NotApplicable;
     };
     let host = host.to_ascii_lowercase();
-    if host.contains("permissioned") || host_is_large(&host) {
+    if explicit_large_host_marker(&host) {
+        return OperationalEvidenceHostClass::PermissionedLargeHost;
+    }
+    if let Some(resource_class) = host_resource_class(&host) {
+        return resource_class;
+    }
+    if host.contains("permissioned") {
         return OperationalEvidenceHostClass::PermissionedLargeHost;
     }
     if host.contains("developer") || host.contains("dev-") {
@@ -582,10 +590,47 @@ fn classify_host_class(row: &ReadinessScenarioRow) -> OperationalEvidenceHostCla
     OperationalEvidenceHostClass::Unknown
 }
 
-fn host_is_large(host: &str) -> bool {
-    let cpu_large = parse_number_before_token(host, "cpu").is_some_and(|cpu| cpu >= 32);
-    let memory_large = parse_number_before_token(host, "gib").is_some_and(|memory| memory >= 128);
-    cpu_large || memory_large
+fn explicit_large_host_marker(host: &str) -> bool {
+    host.contains("permissioned_large_host")
+        || host.contains("host_class=large_host")
+        || host.contains("host_class:large_host")
+}
+
+fn host_resource_class(host: &str) -> Option<OperationalEvidenceHostClass> {
+    let cpu_cores = parse_host_cpu_cores(host);
+    let memory_gib = parse_host_memory_gib(host);
+    match (cpu_cores, memory_gib) {
+        (Some(cpu_cores), Some(memory_gib))
+            if cpu_cores >= LARGE_HOST_MIN_CPU_CORES && memory_gib >= LARGE_HOST_MIN_MEMORY_GIB =>
+        {
+            Some(OperationalEvidenceHostClass::PermissionedLargeHost)
+        }
+        (Some(_) | None, Some(_)) | (Some(_), None) => {
+            Some(OperationalEvidenceHostClass::CapabilityDowngraded)
+        }
+        (None, None) => None,
+    }
+}
+
+fn parse_host_cpu_cores(host: &str) -> Option<u32> {
+    parse_number_before_token(host, "cpu")
+        .or_else(|| parse_number_before_token(host, "cpus"))
+        .or_else(|| parse_number_after_label(host, "cpu"))
+        .or_else(|| parse_number_after_label(host, "cpus"))
+        .or_else(|| parse_number_after_label(host, "logical_cpus"))
+        .or_else(|| parse_number_after_label(host, "logical_cpu"))
+        .or_else(|| parse_number_after_label(host, "logical_cpus_count"))
+}
+
+fn parse_host_memory_gib(host: &str) -> Option<u32> {
+    parse_number_before_token(host, "gib")
+        .or_else(|| parse_number_before_token(host, "gb"))
+        .or_else(|| parse_number_after_label(host, "ram_gib"))
+        .or_else(|| parse_number_after_label(host, "memory_gib"))
+        .or_else(|| parse_number_after_label(host, "ram_gb"))
+        .or_else(|| parse_number_after_label(host, "memory_gb"))
+        .or_else(|| parse_number_after_label(host, "ram"))
+        .or_else(|| parse_number_after_label(host, "memory"))
 }
 
 fn parse_number_before_token(text: &str, token: &str) -> Option<u32> {
@@ -600,6 +645,22 @@ fn parse_number_before_token(text: &str, token: &str) -> Option<u32> {
         return None;
     }
     digits.chars().rev().collect::<String>().parse().ok()
+}
+
+fn parse_number_after_label(text: &str, label: &str) -> Option<u32> {
+    text.match_indices(label).find_map(|(index, _)| {
+        let suffix = &text[index + label.len()..];
+        let digits = suffix
+            .chars()
+            .skip_while(|ch| matches!(ch, '=' | ':' | '_' | '-' | ' '))
+            .take_while(char::is_ascii_digit)
+            .collect::<String>();
+        if digits.is_empty() {
+            None
+        } else {
+            digits.parse().ok()
+        }
+    })
 }
 
 fn release_claim_effect(
@@ -906,6 +967,89 @@ mod tests {
         );
         assert!(!record.authoritative);
         assert_eq!(index.host_downgrade_count, 1);
+    }
+
+    #[test]
+    fn undersized_numeric_large_host_fingerprints_are_downgraded() {
+        let cases = [
+            ("permissioned-host|32cpu|128GiB", 32, 128),
+            ("permissioned-host|64cpu|128GiB", 64, 128),
+            ("permissioned-host|32cpu|256GiB", 32, 256),
+            ("permissioned-host|cpu=64|ram_gib=128", 64, 128),
+            ("permissioned-host|logical_cpus=32|memory_gib=256", 32, 256),
+        ];
+
+        for (host_fingerprint, cpu_count, memory_gib) in cases {
+            let fixture = EvidenceFixture::new();
+            let mut manifest = sample_manifest(SampleManifestInput {
+                run_id: "run_undersized_host",
+                scenario_id: "swarm_workload_harness",
+                commit: "abc123",
+                classification: OperationalOutcomeClass::Pass,
+                result: ScenarioResult::Pass,
+                error_class: None,
+                skip_reason: None,
+                created_at: "2026-05-09T00:00:00Z",
+                include_log_artifacts: true,
+                cpu_count,
+                memory_gib,
+            });
+            manifest.readiness_events[0].host_fingerprint = host_fingerprint.to_owned();
+            touch_manifest_logs(&fixture, &manifest);
+            fixture.write_manifest("undersized.json", &manifest);
+
+            let index = fixture.index(Some("abc123"));
+            let record = index.records.first().expect("record");
+
+            assert_eq!(
+                record.host_class,
+                OperationalEvidenceHostClass::CapabilityDowngraded,
+                "host fingerprint {host_fingerprint} must not auto-promote"
+            );
+            assert_eq!(
+                record.release_claim_effect,
+                OperationalEvidenceReleaseClaimEffect::Downgrades,
+                "host fingerprint {host_fingerprint} must not strengthen release claims"
+            );
+            assert!(!record.authoritative);
+            assert_eq!(index.selected_record_count, 0);
+        }
+    }
+
+    #[test]
+    fn numeric_large_host_fingerprint_remains_authoritative() {
+        let fixture = EvidenceFixture::new();
+        let mut manifest = sample_manifest(SampleManifestInput {
+            run_id: "run_large_host",
+            scenario_id: "swarm_workload_harness",
+            commit: "abc123",
+            classification: OperationalOutcomeClass::Pass,
+            result: ScenarioResult::Pass,
+            error_class: None,
+            skip_reason: None,
+            created_at: "2026-05-09T00:00:00Z",
+            include_log_artifacts: true,
+            cpu_count: 64,
+            memory_gib: 256,
+        });
+        manifest.readiness_events[0].host_fingerprint =
+            "permissioned-host|logical_cpus=64|memory_gib=256".to_owned();
+        touch_manifest_logs(&fixture, &manifest);
+        fixture.write_manifest("large.json", &manifest);
+
+        let index = fixture.index(Some("abc123"));
+        let record = index.records.first().expect("record");
+
+        assert_eq!(
+            record.host_class,
+            OperationalEvidenceHostClass::PermissionedLargeHost
+        );
+        assert_eq!(
+            record.release_claim_effect,
+            OperationalEvidenceReleaseClaimEffect::Strengthens
+        );
+        assert!(record.authoritative);
+        assert_eq!(index.selected_record_count, 1);
     }
 
     #[test]
