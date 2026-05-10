@@ -903,13 +903,21 @@ mod tests {
         malformed.write_all(b"{").expect("write malformed payload");
         drop(malformed);
 
-        thread::sleep(Duration::from_millis(100));
-
-        let client = Client::new(addr, Config::default()).expect("client");
-        let cx = Cx::for_testing_with_budget(deadline_after(Duration::from_secs(2)));
-        let fetched = client
-            .get_symbols(&cx, 7, 3)
-            .expect("server should still answer valid requests");
+        let retry_deadline = Instant::now() + Duration::from_secs(2);
+        let fetched = loop {
+            let client = Client::new(addr, Config::default()).expect("client");
+            let cx = Cx::for_testing_with_budget(deadline_after(Duration::from_millis(100)));
+            match client.get_symbols(&cx, 7, 3) {
+                Ok(fetched) => break fetched,
+                Err(_) => {
+                    assert!(
+                        Instant::now() < retry_deadline,
+                        "server did not answer valid request after malformed client"
+                    );
+                    thread::yield_now();
+                }
+            }
+        };
         assert_eq!(
             fetched,
             LookupResult::Found(StoredSymbols {
