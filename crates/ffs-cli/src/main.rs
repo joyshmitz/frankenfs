@@ -10743,7 +10743,7 @@ mod tests {
             runtime,
             true,
             "runtime_mode_unavailable",
-            "managed mode not yet wired",
+            "managed mode denied by operator policy",
         );
 
         let json = parse_first_json_line(&buffer);
@@ -10751,7 +10751,7 @@ mod tests {
         assert_eq!(json["scenario_id"], "cli_mount_runtime_managed_rw");
         assert_eq!(json["outcome"], "runtime_mode_rejected");
         assert_eq!(json["error_class"], "runtime_mode_unavailable");
-        assert_eq!(json["reason"], "managed mode not yet wired");
+        assert_eq!(json["reason"], "managed mode denied by operator policy");
         assert_eq!(json["runtime_mode"], "managed");
     }
 
