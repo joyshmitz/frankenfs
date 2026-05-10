@@ -2554,17 +2554,19 @@ mod tests {
         RemoteBuildFailure,
         RemoteTestFailure,
         RemoteSuccessArtifactRetrievalHang,
+        RequiredArtifactMissing,
         TimeoutBeforeRemoteExit,
         MissingRemoteEvidence,
     }
 
     impl RchFixtureClass {
-        const ALL: [Self; 7] = [
+        const ALL: [Self; 8] = [
             Self::LocalFallback,
             Self::NonCompilationWrapper,
             Self::RemoteBuildFailure,
             Self::RemoteTestFailure,
             Self::RemoteSuccessArtifactRetrievalHang,
+            Self::RequiredArtifactMissing,
             Self::TimeoutBeforeRemoteExit,
             Self::MissingRemoteEvidence,
         ];
@@ -2662,6 +2664,17 @@ mod tests {
             expected_authority: RchDecisionAuthority::RemoteEvidence,
         },
         RchCaptureFixture {
+            name: "required artifact missing after remote success",
+            class: RchFixtureClass::RequiredArtifactMissing,
+            command: "cargo test -p ffs-harness --lib e2e_rch",
+            transcript: "[RCH] remote worker=test-a\ntest result: ok. 7 passed\nRemote command finished: exit=0\nRCH_REQUIRED_ARTIFACT_MISSING|artifact=/tmp/expected-proof.json|log=/tmp/rch.log\n",
+            signal: RchFixtureSignal::WrapperExited(99),
+            expected_marker: "RCH_REQUIRED_ARTIFACT_MISSING",
+            expected_remote_exit: Some(0),
+            expected_exit_code: 99,
+            expected_authority: RchDecisionAuthority::RejectedWrapperEvidence,
+        },
+        RchCaptureFixture {
             name: "timeout before remote exit",
             class: RchFixtureClass::TimeoutBeforeRemoteExit,
             command: "cargo test -p ffs-harness --lib slow_case",
@@ -2743,6 +2756,15 @@ mod tests {
                 remote_exit,
                 exit_code,
                 authority: RchDecisionAuthority::RemoteEvidence,
+            };
+        }
+
+        if fixture.transcript.contains("RCH_REQUIRED_ARTIFACT_MISSING") {
+            return RchCaptureDecision {
+                marker: "RCH_REQUIRED_ARTIFACT_MISSING".to_owned(),
+                remote_exit,
+                exit_code: 99,
+                authority: RchDecisionAuthority::RejectedWrapperEvidence,
             };
         }
 
