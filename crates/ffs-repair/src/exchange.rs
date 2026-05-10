@@ -577,6 +577,16 @@ fn sleep_with_budget(cx: &Cx, fallback: Duration) -> Result<()> {
     let cancel_check_interval = Duration::from_millis(DEFAULT_SLEEP_CHECK_INTERVAL_MS);
     while !remaining.is_zero() {
         let slice = remaining.min(cancel_check_interval);
+        let budget = cx.budget();
+        let now = cx.now();
+        if budget.is_past_deadline(now)
+            || budget
+                .remaining_time(now)
+                .is_some_and(|remaining| remaining <= slice)
+        {
+            return Err(FfsError::Cancelled);
+        }
+
         thread::sleep(slice);
         remaining = remaining.saturating_sub(slice);
         cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
