@@ -2526,6 +2526,8 @@ mod tests {
         use std::thread;
         use std::time::{Duration, Instant};
 
+        const LOCK_ORDERING_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
         let cx = test_cx();
         let tmp = NamedTempFile::new().expect("create temp file");
         let path = tmp.path().to_path_buf();
@@ -2538,17 +2540,22 @@ mod tests {
         // Watchdog: prove no thread is hung after the timeout elapses.
         let watchdog_done = Arc::clone(&done);
         let watchdog = thread::spawn(move || {
-            while Instant::now() < deadline {
+            loop {
                 if watchdog_done.load(AtomicOrdering::Acquire) {
                     return;
                 }
-                thread::sleep(Duration::from_millis(50));
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                thread::sleep(LOCK_ORDERING_WATCHDOG_POLL_INTERVAL.min(remaining));
             }
             // Reaching here means the workers did not finish in time;
             // a lock-ordering violation almost certainly caused a hang.
             assert!(
                 watchdog_done.load(AtomicOrdering::Acquire),
-                "bd-7zd94: PersistentMvccStore lock-ordering watchdog tripped — \
+                "bd-7zd94: PersistentMvccStore lock-ordering watchdog tripped - \
                  commit/truncate_wal workers did not finish within 15s, \
                  indicating a likely AB-BA deadlock"
             );
@@ -2585,8 +2592,13 @@ mod tests {
 
         worker_a.join().expect("worker A panicked");
         worker_b.join().expect("worker B panicked");
+        let watchdog_join_started = Instant::now();
         done.store(true, AtomicOrdering::Release);
         watchdog.join().expect("watchdog panicked");
+        assert!(
+            watchdog_join_started.elapsed() <= LOCK_ORDERING_WATCHDOG_POLL_INTERVAL * 25,
+            "watchdog should observe completion promptly after workers finish"
+        );
 
         std::fs::remove_file(&path).ok();
     }
