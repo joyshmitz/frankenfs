@@ -593,6 +593,17 @@ impl EpochManager {
         }
     }
 
+    #[cfg(test)]
+    fn rewind_last_advance_for_test(&self, elapsed: std::time::Duration) {
+        let mut guard = self
+            .last_advance
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = std::time::Instant::now()
+            .checked_sub(elapsed)
+            .unwrap_or_else(std::time::Instant::now);
+    }
+
     /// Mark an epoch as durably flushed.
     ///
     /// After this call, `is_durable(epoch)` returns `true`.
@@ -1555,8 +1566,7 @@ mod tests {
         // Should not advance immediately.
         assert!(mgr.maybe_advance_by_time().is_none());
 
-        // Wait for interval.
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        mgr.rewind_last_advance_for_test(std::time::Duration::from_millis(5));
         let result = mgr.maybe_advance_by_time();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), 2);
@@ -1595,8 +1605,7 @@ mod tests {
         // No time elapsed yet.
         assert!(mgr.maybe_advance().is_none());
 
-        // Wait for interval.
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        mgr.rewind_last_advance_for_test(std::time::Duration::from_millis(5));
         let result = mgr.maybe_advance();
         assert!(result.is_some());
         assert_eq!(mgr.current_epoch(), 2);
