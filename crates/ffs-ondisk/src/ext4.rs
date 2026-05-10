@@ -6538,6 +6538,85 @@ mod tests {
         assert_eq!(entries[2].file_type, Ext4FileType::RegFile);
     }
 
+    /// bd-mo92w — Kernel-conformance pin for the 6 DX_HASH_*
+    /// hash-version constants + the 4-word DX_HASH_DEFAULT_SEED per
+    /// fs/ext4/ext4.h. These values are read from the superblock @
+    /// s_def_hash_version (0xFC) and from dx_root @ 0x1C, then used
+    /// by dx_hash() on every htree directory lookup. A regression
+    /// that drifted any hash-version value would silently route
+    /// lookups through the wrong hash algorithm — every htree
+    /// directory operation would return wrong results without
+    /// compile error.
+    ///
+    /// Sister pins: bd-eiblh (incompat), bd-up9ff (compat/ro_compat),
+    /// bd-wa27v (xattr), ext4_inode_flag_constants_match_kernel_header.
+    #[test]
+    fn ext4_dx_hash_version_constants_match_ext4_h() {
+        // Per fs/ext4/ext4.h:
+        //   #define DX_HASH_LEGACY              0
+        //   #define DX_HASH_HALF_MD4            1
+        //   #define DX_HASH_TEA                 2
+        //   #define DX_HASH_LEGACY_UNSIGNED     3
+        //   #define DX_HASH_HALF_MD4_UNSIGNED   4
+        //   #define DX_HASH_TEA_UNSIGNED        5
+        let cases: &[(&str, u8, u8)] = &[
+            ("DX_HASH_LEGACY", DX_HASH_LEGACY, 0),
+            ("DX_HASH_HALF_MD4", DX_HASH_HALF_MD4, 1),
+            ("DX_HASH_TEA", DX_HASH_TEA, 2),
+            (
+                "DX_HASH_LEGACY_UNSIGNED",
+                DX_HASH_LEGACY_UNSIGNED,
+                3,
+            ),
+            (
+                "DX_HASH_HALF_MD4_UNSIGNED",
+                DX_HASH_HALF_MD4_UNSIGNED,
+                4,
+            ),
+            ("DX_HASH_TEA_UNSIGNED", DX_HASH_TEA_UNSIGNED, 5),
+        ];
+        for (name, actual, expected) in cases {
+            assert_eq!(
+                actual, expected,
+                "{name} must equal kernel value {expected}"
+            );
+        }
+
+        // Pairwise distinctness — two hash version IDs sharing a
+        // value would silently route both algorithms through the
+        // same path.
+        let values: Vec<u8> = cases.iter().map(|&(_, v, _)| v).collect();
+        let mut sorted = values.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            values.len(),
+            sorted.len(),
+            "DX_HASH_* version IDs must be pairwise distinct"
+        );
+
+        // Ascending across the contract: 0..=5 inclusive, no gaps.
+        // (Kernel reserves 0..=5 for current hash variants; gap-free
+        // ordering helps catch a regression that inserted a new ID
+        // out of order.)
+        for (i, &v) in values.iter().enumerate() {
+            assert_eq!(
+                v as usize, i,
+                "DX_HASH_* values must be sequential 0..=5"
+            );
+        }
+
+        // DX_HASH_DEFAULT_SEED matches MD4 init constants per
+        // fs/ext4/ext4.h `EXT4_HTREE_EOF_*` and dx_hash() init.
+        // A regression that drifted any seed word would change every
+        // computed hash on filesystems lacking a per-fs seed.
+        assert_eq!(
+            DX_HASH_DEFAULT_SEED,
+            [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476],
+            "DX_HASH_DEFAULT_SEED must match the kernel's MD4-init seed"
+        );
+    }
+
     /// bd-up9ff — Kernel-conformance pin for the Ext4CompatFeatures
     /// (10 bits) and Ext4RoCompatFeatures (14 bits) values per
     /// fs/ext4/ext4.h EXT4_FEATURE_COMPAT_* and EXT4_FEATURE_RO_COMPAT_*.
