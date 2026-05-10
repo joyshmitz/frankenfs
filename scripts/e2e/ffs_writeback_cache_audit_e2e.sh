@@ -98,6 +98,36 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+cancel_matching_rch_queue_entry() {
+    local command_text="$*"
+    local rch_bin="${RCH_BIN:-rch}"
+    local queue_json
+    local ids
+
+    if ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! command -v "$rch_bin" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    queue_json="$("$rch_bin" queue --json 2>/dev/null || true)"
+    if [[ -z "$queue_json" ]]; then
+        return 0
+    fi
+    ids="$(jq -r --arg cmd "$command_text" '
+        .data.active_builds[]?
+        | select(.project_id | startswith("frankenfs-"))
+        | select(.command == $cmd)
+        | .id
+    ' <<<"$queue_json" || true)"
+    for id in $ids; do
+        if "$rch_bin" cancel "$id" >/dev/null 2>&1; then
+            log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
+        fi
+    done
+}
+
 run_rch_capture() {
     local log_path="$1"
     shift
@@ -123,6 +153,7 @@ run_rch_capture() {
             else
                 kill -TERM "$pid" 2>/dev/null || true
             fi
+            cancel_matching_rch_queue_entry "$@"
             wait "$pid" 2>/dev/null || true
             return 0
         fi
@@ -132,6 +163,7 @@ run_rch_capture() {
             else
                 kill -TERM "$pid" 2>/dev/null || true
             fi
+            cancel_matching_rch_queue_entry "$@"
             wait "$pid" 2>/dev/null || true
             return 1
         fi
@@ -147,6 +179,7 @@ run_rch_capture() {
         else
             kill -TERM "$pid" 2>/dev/null || true
         fi
+        cancel_matching_rch_queue_entry "$@"
         wait "$pid" 2>/dev/null || true
         status=124
     else
