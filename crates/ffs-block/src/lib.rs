@@ -51,18 +51,26 @@ fn sleep_for_flush_budget_yield(cx: &Cx, duration: Duration) {
         return;
     }
 
-    let budget = cx.budget();
-    let now = cx.now();
-    if budget.is_past_deadline(now)
-        || budget
-            .remaining_time(now)
-            .is_some_and(|remaining| remaining <= duration)
-    {
-        return;
-    }
+    let mut remaining = duration;
+    let cancel_check_interval = Duration::from_millis(10);
+    while !remaining.is_zero() {
+        let slice = remaining.min(cancel_check_interval);
+        let budget = cx.budget();
+        let now = cx.now();
+        if budget.is_past_deadline(now)
+            || budget
+                .remaining_time(now)
+                .is_some_and(|remaining_time| remaining_time <= slice)
+        {
+            return;
+        }
 
-    thread::sleep(duration);
-    let _ = cx_checkpoint(cx);
+        thread::sleep(slice);
+        remaining = remaining.saturating_sub(slice);
+        if cx_checkpoint(cx).is_err() {
+            return;
+        }
+    }
 }
 
 const DEFAULT_BLOCK_ALIGNMENT: usize = 4096;
@@ -6148,6 +6156,61 @@ mod tests {
         );
         assert_eq!(cache.inner().write_count(), 0);
         assert_eq!(cache.dirty_count(), 4);
+    }
+
+    #[test]
+    fn flush_daemon_budget_yield_observes_mid_sleep_cancellation() {
+        use std::thread;
+
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 16);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let counted = CountingBlockDevice::new(dev);
+        let cache =
+            ArcCache::new_with_policy(counted, 8, ArcWritePolicy::WriteBack).expect("cache");
+
+        for i in 0..4_u64 {
+            cache
+                .write_block(&cx, BlockNumber(i), &[0xD4; 4096])
+                .expect("write");
+        }
+        assert_eq!(cache.dirty_count(), 4);
+
+        let low_budget_cx =
+            Cx::for_testing_with_budget(asupersync::Budget::new().with_poll_quota(8));
+        let cancel_cx = low_budget_cx.clone();
+        let yield_sleep = Duration::from_millis(250);
+        let config = FlushDaemonConfig {
+            interval: Duration::from_millis(1),
+            batch_size: 4,
+            reduced_batch_size: 1,
+            budget_poll_quota_threshold: 16,
+            budget_yield_sleep: yield_sleep,
+            high_watermark: 0.99,
+            critical_watermark: 1.0,
+        };
+        let mut daemon_throttled = false;
+
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(15));
+            cancel_cx.set_cancel_requested(true);
+        });
+
+        let start = Instant::now();
+        cache.run_flush_daemon_cycle(&low_budget_cx, &config, 1, &mut daemon_throttled);
+        let elapsed = start.elapsed();
+        canceller.join().expect("canceller thread should finish");
+
+        assert!(daemon_throttled);
+        assert!(
+            elapsed < yield_sleep / 2,
+            "cancelled Cx should interrupt flush yield sleep promptly, elapsed={elapsed:?}"
+        );
+        assert!(
+            cache.inner().write_count() <= 1,
+            "cancelled cycle should not flush more than one reduced batch"
+        );
+        assert!(cache.dirty_count() >= 3);
     }
 
     #[test]
