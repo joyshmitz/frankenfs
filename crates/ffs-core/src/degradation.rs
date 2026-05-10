@@ -606,6 +606,66 @@ mod tests {
         assert_eq!(fsm.current.lock().recovery_count, 0);
     }
 
+    fn spawn_degradation_watchdog(
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        completed: Arc<std::sync::atomic::AtomicBool>,
+        timeout: std::time::Duration,
+    ) -> std::thread::JoinHandle<bool> {
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + timeout;
+            while std::time::Instant::now() < deadline {
+                if completed.load(Ordering::Acquire) {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            stop.store(true, Ordering::Release);
+            true
+        })
+    }
+
+    struct ReentrantCountingPolicy {
+        apply_count: std::sync::atomic::AtomicUsize,
+        fsm: parking_lot::Mutex<Option<Arc<DegradationFsm>>>,
+    }
+
+    impl ReentrantCountingPolicy {
+        fn new(fsm: Arc<DegradationFsm>) -> Self {
+            Self {
+                apply_count: std::sync::atomic::AtomicUsize::new(0),
+                fsm: parking_lot::Mutex::new(Some(fsm)),
+            }
+        }
+    }
+
+    impl DegradationPolicy for ReentrantCountingPolicy {
+        fn apply(&self, _headroom: f32) {
+            self.apply_count.fetch_add(1, Ordering::Relaxed);
+            // Re-enter the FSM from the policy callback. This is
+            // exactly the scenario that would self-deadlock if
+            // tick() held either lock across the apply() call.
+            let maybe_fsm = self.fsm.lock().clone();
+            if let Some(fsm) = maybe_fsm {
+                let _ = fsm.level();
+                let _ = fsm.transition_count();
+            }
+        }
+
+        fn name(&self) -> &'static str {
+            "bd-2rxal-reentrant-counter"
+        }
+    }
+
+    struct NopPolicy;
+
+    impl DegradationPolicy for NopPolicy {
+        fn apply(&self, _: f32) {}
+
+        fn name(&self) -> &'static str {
+            "bd-2rxal-nop"
+        }
+    }
+
     /// bd-2rxal — concurrent regression test for the
     /// never-held-simultaneously invariant on `current` and `policies`.
     /// If a future regression nested either lock under the other, OR
@@ -616,7 +676,7 @@ mod tests {
     /// path that motivated the drain-clone-release pattern.
     #[test]
     fn degradation_fsm_concurrent_tick_and_register_no_hang() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        use std::sync::atomic::AtomicBool;
         use std::time::{Duration, Instant};
 
         const ITERATIONS: usize = 256;
@@ -624,38 +684,13 @@ mod tests {
         const REGISTERERS: usize = 2;
         const WATCHDOG_SECS: u64 = 5;
 
-        struct ReentrantCountingPolicy {
-            apply_count: AtomicUsize,
-            fsm: parking_lot::Mutex<Option<Arc<DegradationFsm>>>,
-        }
-
-        impl DegradationPolicy for ReentrantCountingPolicy {
-            fn apply(&self, _headroom: f32) {
-                self.apply_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // Re-enter the FSM from the policy callback. This is
-                // exactly the scenario that would self-deadlock if
-                // tick() held either lock across the apply() call.
-                let maybe_fsm = self.fsm.lock().clone();
-                if let Some(fsm) = maybe_fsm {
-                    let _ = fsm.level();
-                    let _ = fsm.transition_count();
-                }
-            }
-            fn name(&self) -> &'static str {
-                "bd-2rxal-reentrant-counter"
-            }
-        }
-
         let pressure = Arc::new(SystemPressure::new());
         let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 3));
-        let policy = Arc::new(ReentrantCountingPolicy {
-            apply_count: AtomicUsize::new(0),
-            fsm: parking_lot::Mutex::new(Some(Arc::clone(&fsm))),
-        });
+        let policy = Arc::new(ReentrantCountingPolicy::new(Arc::clone(&fsm)));
         fsm.add_policy(Arc::clone(&policy) as Arc<dyn DegradationPolicy>);
 
         let stop = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(false));
         let mut ticker_handles = Vec::new();
         let mut registerer_handles = Vec::new();
 
@@ -665,7 +700,7 @@ mod tests {
             let stop = Arc::clone(&stop);
             ticker_handles.push(std::thread::spawn(move || {
                 for i in 0..ITERATIONS {
-                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    if stop.load(Ordering::Relaxed) {
                         return;
                     }
                     // Alternate pressure to force escalations + recoveries.
@@ -679,15 +714,8 @@ mod tests {
             let fsm = Arc::clone(&fsm);
             let stop = Arc::clone(&stop);
             registerer_handles.push(std::thread::spawn(move || {
-                struct NopPolicy;
-                impl DegradationPolicy for NopPolicy {
-                    fn apply(&self, _: f32) {}
-                    fn name(&self) -> &'static str {
-                        "bd-2rxal-nop"
-                    }
-                }
                 for _ in 0..ITERATIONS {
-                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    if stop.load(Ordering::Relaxed) {
                         return;
                     }
                     fsm.add_policy(Arc::new(NopPolicy));
@@ -695,16 +723,11 @@ mod tests {
             }));
         }
 
-        let watchdog_handle = {
-            let stop = Arc::clone(&stop);
-            std::thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(WATCHDOG_SECS);
-                while Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            })
-        };
+        let watchdog_handle = spawn_degradation_watchdog(
+            Arc::clone(&stop),
+            Arc::clone(&completed),
+            Duration::from_secs(WATCHDOG_SECS),
+        );
 
         let start = Instant::now();
         for handle in ticker_handles {
@@ -714,19 +737,27 @@ mod tests {
             handle.join().expect("registerer thread joins cleanly");
         }
         let elapsed = start.elapsed();
-        watchdog_handle
+        completed.store(true, Ordering::Release);
+        let watchdog_join_start = Instant::now();
+        let watchdog_timed_out = watchdog_handle
             .join()
             .expect("watchdog thread joins cleanly");
+        let watchdog_join_elapsed = watchdog_join_start.elapsed();
 
         assert!(
             elapsed < Duration::from_secs(WATCHDOG_SECS),
             "concurrent tick + add_policy must not deadlock; elapsed={elapsed:?}"
         );
         assert!(
-            policy
-                .apply_count
-                .load(std::sync::atomic::Ordering::Relaxed)
-                > 0,
+            !watchdog_timed_out,
+            "watchdog should not time out after workers completed successfully"
+        );
+        assert!(
+            watchdog_join_elapsed < Duration::from_millis(250),
+            "watchdog join should observe completion promptly; elapsed={watchdog_join_elapsed:?}"
+        );
+        assert!(
+            policy.apply_count.load(Ordering::Relaxed) > 0,
             "policy.apply() must run at least once across the contention window"
         );
     }
