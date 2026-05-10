@@ -158,6 +158,7 @@ SCHEDULER_RAW_JSON="$REPORT_DIR/rch_lane_schedule_json_command.log"
 SCHEDULER_RAW_MD="$REPORT_DIR/rch_lane_schedule_markdown_command.log"
 TRUTH_GRAPH_RAW_JSON="$REPORT_DIR/truth_graph_json_command.log"
 TRUTH_GRAPH_RAW_MD="$REPORT_DIR/truth_graph_markdown_command.log"
+TRUTH_GRAPH_TOPOLOGY_LOG="$REPORT_DIR/truth_graph_topology_advisor.jsonl"
 NUMA_REPLAY_RAW_JSON="$REPORT_DIR/numa_p99_replay_json_command.log"
 NUMA_REPLAY_RAW_MD="$REPORT_DIR/numa_p99_replay_markdown_command.log"
 NUMA_REPLAY_BAD_RAW="$REPORT_DIR/numa_p99_replay_product_claim_command.log"
@@ -447,6 +448,8 @@ def truth_graph_claim(
     host=None,
     blockers=None,
     permission=None,
+    sha256=None,
+    topology_advisor=None,
 ):
     return {
         "claim_id": claim_id,
@@ -460,6 +463,7 @@ def truth_graph_claim(
                 "artifact_id": artifact_id,
                 "artifact_kind": artifact_kind,
                 "path": f"artifacts/readiness-lab/truth-graph/{artifact_id}.json",
+                "sha256": sha256,
                 "raw_log_required": raw_log_required,
                 "raw_log_present": raw_log_present,
             }
@@ -474,7 +478,33 @@ def truth_graph_claim(
         "blockers": blockers or [],
         "permission": permission,
         "supersedes_claim_ids": [],
+        "topology_advisor": topology_advisor,
     }
+
+topology_advisor_metadata = {
+    "topology_advisor_report_path": "artifacts/topology-advisor/report.json",
+    "score_report_path": "artifacts/topology-advisor/score.json",
+    "structured_log_path": "artifacts/topology-advisor/structured.jsonl",
+    "source_bead": "bd-rchk0.212",
+    "real_campaign_bead": "bd-rchk0.53.8",
+    "manifest_hash": "sha256:topology-manifest-e2e",
+    "recommendation": "managed",
+    "rejected_candidates": [
+        "per_core: awaiting permissioned large-host lane"
+    ],
+    "blocked_claims": [
+        "swarm.responsiveness"
+    ],
+    "advisory_only": True,
+    "product_evidence_claim": "none",
+    "release_gate_effect": "advisory_only",
+    "artifact_root": "artifacts/topology-advisor",
+    "artifact_paths": [
+        "artifacts/topology-advisor/report.json",
+        "artifacts/topology-advisor/score.json",
+        "artifacts/topology-advisor/structured.jsonl",
+    ],
+}
 
 truth_graph_manifest = {
     "schema_version": 1,
@@ -508,7 +538,7 @@ truth_graph_manifest = {
             "valid": True,
             "claims": [
                 truth_graph_claim(
-                    "swarm.responsiveness",
+                    "swarm.responsiveness.advisory_preflight",
                     "validated",
                     "product_pass_fail",
                     "artifacts/proof/fresh-release-gate.json",
@@ -576,6 +606,34 @@ truth_graph_manifest = {
                         "bead_id": "bd-rchk3",
                         "ack_env": "XFSTESTS_REAL_RUN_ACK",
                     },
+                )
+            ],
+        },
+        {
+            "source_id": "topology-advisor",
+            "source_kind": "topology_runtime_advisor_report",
+            "path": "artifacts/topology-advisor/score.json",
+            "valid": True,
+            "claims": [
+                truth_graph_claim(
+                    "swarm.responsiveness",
+                    "blocked",
+                    "none",
+                    "artifacts/topology-advisor/score.json",
+                    "bd-rchk0.212",
+                    20000,
+                    "topology-advisor-score",
+                    "rch_scheduling_plan",
+                    blockers=[
+                        {
+                            "blocker_id": "permissioned-large-host-missing",
+                            "reason": "advisor is preflight only until real large-host swarm lanes execute",
+                            "validator_report_path": "artifacts/topology-advisor/score.json",
+                            "bead_id": "bd-rchk0.53.8",
+                        }
+                    ],
+                    sha256="sha256:topology-score-e2e",
+                    topology_advisor=topology_advisor_metadata,
                 )
             ],
         },
@@ -784,7 +842,9 @@ if run_rch_capture "$TRUTH_GRAPH_RAW_JSON" cargo run --quiet -p ffs-harness -- \
     --reference-epoch-days 20001 \
     --format json \
     && extract_report_json "$TRUTH_GRAPH_RAW_JSON" "$TRUTH_GRAPH_REPORT_JSON" \
-    && jq -e '.valid == true and .dry_run_only == true and .product_evidence_claim == "none" and .source_count == 4 and .stale_claim_count == 1 and .contradictory_claim_count == 0 and .permission_requirement_count == 1 and .simulated_node_count >= 2 and .blocker_edge_count >= 2 and ([.edges[] | select(.edge_kind == "blocks") | ((.validator_report_path // "") != "" or (.bead_id // "") != "")] | all) and ([.edges[] | select(.edge_kind == "supersedes")] | length >= 1)' "$TRUTH_GRAPH_REPORT_JSON" >/dev/null; then
+    && jq -e '.valid == true and .dry_run_only == true and .product_evidence_claim == "none" and .release_gate_effect == "advisory_only" and .source_count == 5 and .stale_claim_count == 1 and .contradictory_claim_count == 0 and .permission_requirement_count == 1 and .simulated_node_count >= 2 and .blocker_edge_count >= 3 and ([.edges[] | select(.edge_kind == "blocks") | ((.validator_report_path // "") != "" or (.bead_id // "") != "")] | all) and ([.edges[] | select(.edge_kind == "supersedes")] | length >= 1) and ([.nodes[] | select(.node_kind == "topology_runtime_advisor" and .metadata.topology_advisor_report_path == "artifacts/topology-advisor/report.json" and .metadata.source_bead == "bd-rchk0.212" and .metadata.real_campaign_bead == "bd-rchk0.53.8" and .metadata.recommendation == "managed" and .metadata.blocked_claims == "swarm.responsiveness" and .metadata.advisory_only == "true")] | length == 1)' "$TRUTH_GRAPH_REPORT_JSON" >/dev/null \
+    && jq -c '.nodes[] | select(.node_kind == "topology_runtime_advisor") | {event:"readiness_lab_topology_advisor_truth_graph_node", topology_advisor_report_path:.metadata.topology_advisor_report_path, source_bead:.metadata.source_bead, real_campaign_bead:.metadata.real_campaign_bead, recommendation:.metadata.recommendation, blocked_claims:.metadata.blocked_claims, advisory_only:(.metadata.advisory_only == "true")}' "$TRUTH_GRAPH_REPORT_JSON" > "$TRUTH_GRAPH_TOPOLOGY_LOG" \
+    && jq -e '.topology_advisor_report_path == "artifacts/topology-advisor/report.json" and .source_bead == "bd-rchk0.212" and .real_campaign_bead == "bd-rchk0.53.8" and .recommendation == "managed" and .blocked_claims == "swarm.responsiveness" and .advisory_only == true' "$TRUTH_GRAPH_TOPOLOGY_LOG" >/dev/null; then
     scenario_result "readiness_lab_truth_graph_json" "PASS" "truth graph emitted linked blocker and supersedes edges"
 else
     scenario_result "readiness_lab_truth_graph_json" "FAIL" "truth graph JSON missing expected provenance edges"
@@ -798,6 +858,7 @@ if run_rch_capture "$TRUTH_GRAPH_RAW_MD" cargo run --quiet -p ffs-harness -- \
     --format markdown \
     && grep -q "FrankenFS Readiness Lab Truth Graph" "$TRUTH_GRAPH_RAW_MD" \
     && grep -q "Product evidence claim: \`none\`" "$TRUTH_GRAPH_RAW_MD" \
+    && grep -q "Release gate effect: \`advisory_only\`" "$TRUTH_GRAPH_RAW_MD" \
     && grep -q "Permission requirements: \`1\`" "$TRUTH_GRAPH_RAW_MD"; then
     cp "$TRUTH_GRAPH_RAW_MD" "$TRUTH_GRAPH_REPORT_MD"
     scenario_result "readiness_lab_truth_graph_markdown" "PASS" "truth graph markdown rendered"

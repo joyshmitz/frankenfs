@@ -33,6 +33,7 @@ pub const DEFAULT_READINESS_LAB_NUMA_P99_REPLAY_MANIFEST: &str =
 pub const READINESS_LAB_ADVISORY_NOTICE: &str =
     "advisory readiness-lab material only; not product evidence";
 pub const READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM: &str = "none";
+pub const READINESS_LAB_ADVISORY_RELEASE_GATE_EFFECT: &str = "advisory_only";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadinessLabValidationConfig {
@@ -522,6 +523,7 @@ pub enum ReadinessLabTruthGraphSourceKind {
     OperationalEvidenceIndex,
     PermissionedCampaignPacket,
     ReadinessLabReport,
+    TopologyRuntimeAdvisorReport,
 }
 
 impl ReadinessLabTruthGraphSourceKind {
@@ -533,6 +535,7 @@ impl ReadinessLabTruthGraphSourceKind {
             Self::OperationalEvidenceIndex => "operational_evidence_index",
             Self::PermissionedCampaignPacket => "permissioned_campaign_packet",
             Self::ReadinessLabReport => "readiness_lab_report",
+            Self::TopologyRuntimeAdvisorReport => "topology_runtime_advisor_report",
         }
     }
 }
@@ -559,6 +562,8 @@ pub struct ReadinessLabTruthGraphClaimInput {
     pub permission: Option<ReadinessLabTruthGraphPermissionRequirement>,
     #[serde(default)]
     pub supersedes_claim_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology_advisor: Option<ReadinessLabTruthGraphTopologyAdvisorInput>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -594,8 +599,33 @@ pub struct ReadinessLabTruthGraphArtifactInput {
     pub artifact_id: String,
     pub artifact_kind: ReadinessLabArtifactKind,
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
     pub raw_log_required: bool,
     pub raw_log_present: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabTruthGraphTopologyAdvisorInput {
+    pub topology_advisor_report_path: String,
+    pub score_report_path: String,
+    pub structured_log_path: String,
+    pub source_bead: String,
+    pub real_campaign_bead: String,
+    pub manifest_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<String>,
+    #[serde(default)]
+    pub rejected_candidates: Vec<String>,
+    #[serde(default)]
+    pub blocked_claims: Vec<String>,
+    pub advisory_only: bool,
+    pub product_evidence_claim: ReadinessLabProductEvidenceClaim,
+    pub release_gate_effect: String,
+    pub artifact_root: String,
+    #[serde(default)]
+    pub artifact_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -639,6 +669,7 @@ pub struct ReadinessLabTruthGraphReport {
     pub valid: bool,
     pub dry_run_only: bool,
     pub product_evidence_claim: String,
+    pub release_gate_effect: String,
     pub source_bead: String,
     pub source_count: usize,
     pub claim_count: usize,
@@ -1297,6 +1328,12 @@ pub fn render_readiness_lab_truth_graph_markdown(report: &ReadinessLabTruthGraph
         &mut out,
         "- Product evidence claim: `{}`",
         report.product_evidence_claim
+    )
+    .ok();
+    writeln!(
+        &mut out,
+        "- Release gate effect: `{}`",
+        report.release_gate_effect
     )
     .ok();
     writeln!(&mut out, "- Sources: `{}`", report.source_count).ok();
@@ -2569,6 +2606,20 @@ impl<'a> ReadinessLabTruthGraphBuilder<'a> {
                 FindingScope::assumption(source.source_id.as_str()).field("claims"),
             );
         }
+        if matches!(
+            source.source_kind,
+            ReadinessLabTruthGraphSourceKind::TopologyRuntimeAdvisorReport
+        ) && source
+            .claims
+            .iter()
+            .any(|claim| claim.topology_advisor.is_none())
+        {
+            self.error(
+                "missing_topology_advisor_metadata",
+                "topology runtime advisor sources must include topology_advisor metadata on each claim",
+                FindingScope::assumption(source.source_id.as_str()).field("claims"),
+            );
+        }
         for claim in &source.claims {
             self.validate_claim(source, claim);
         }
@@ -2628,6 +2679,13 @@ impl<'a> ReadinessLabTruthGraphBuilder<'a> {
                     FindingScope::artifact(artifact.artifact_id.as_str()).field("path"),
                 );
             }
+            if !is_safe_readiness_lab_relative_path(&artifact.path) {
+                self.error(
+                    "unsafe_truth_graph_artifact_path",
+                    "artifact path must be a safe relative path without parent traversal",
+                    FindingScope::artifact(artifact.artifact_id.as_str()).field("path"),
+                );
+            }
         }
         for blocker in &claim.blockers {
             if blocker.blocker_id.trim().is_empty() {
@@ -2675,6 +2733,245 @@ impl<'a> ReadinessLabTruthGraphBuilder<'a> {
                     "missing_permission_ack_env",
                     "permission ack_env must be non-empty",
                     FindingScope::assumption(permission.permission_id.as_str()).field("ack_env"),
+                );
+            }
+        }
+        if let Some(advisor) = &claim.topology_advisor {
+            self.validate_topology_advisor_claim(source, claim, advisor);
+        }
+    }
+
+    fn validate_topology_advisor_claim(
+        &mut self,
+        source: &ReadinessLabTruthGraphSource,
+        claim: &ReadinessLabTruthGraphClaimInput,
+        advisor: &ReadinessLabTruthGraphTopologyAdvisorInput,
+    ) {
+        if !matches!(
+            source.source_kind,
+            ReadinessLabTruthGraphSourceKind::TopologyRuntimeAdvisorReport
+        ) {
+            self.error(
+                "topology_advisor_wrong_source_kind",
+                "topology_advisor metadata is only valid on topology_runtime_advisor_report sources",
+                FindingScope::lane(claim.claim_id.as_str()).field("topology_advisor"),
+            );
+        }
+        if advisor.source_bead != claim.source_bead {
+            self.error(
+                "topology_advisor_source_bead_mismatch",
+                "topology advisor source_bead must match the truth graph claim source_bead",
+                FindingScope::lane(claim.claim_id.as_str()).field("topology_advisor.source_bead"),
+            );
+        }
+        if !advisor.real_campaign_bead.starts_with("bd-") {
+            self.error(
+                "topology_advisor_real_campaign_bead_malformed",
+                "topology advisor real_campaign_bead must look like bd-...",
+                FindingScope::lane(claim.claim_id.as_str())
+                    .field("topology_advisor.real_campaign_bead"),
+            );
+        }
+        if claim.claim_id == "swarm.responsiveness" && advisor.real_campaign_bead != "bd-rchk0.53.8"
+        {
+            self.error(
+                "topology_advisor_real_campaign_bead_mismatch",
+                "swarm.responsiveness topology advisor metadata must point at bd-rchk0.53.8",
+                FindingScope::lane(claim.claim_id.as_str())
+                    .field("topology_advisor.real_campaign_bead"),
+            );
+        }
+        if !advisor.advisory_only {
+            self.error(
+                "topology_advisor_not_advisory_only",
+                "topology advisor metadata must keep advisory_only=true",
+                FindingScope::lane(claim.claim_id.as_str()).field("topology_advisor.advisory_only"),
+            );
+        }
+        if advisor.product_evidence_claim != ReadinessLabProductEvidenceClaim::None {
+            self.error(
+                "topology_advisor_product_evidence_claim",
+                "topology advisor metadata must use product_evidence_claim=none",
+                FindingScope::lane(claim.claim_id.as_str())
+                    .field("topology_advisor.product_evidence_claim"),
+            );
+        }
+        if advisor.release_gate_effect != READINESS_LAB_ADVISORY_RELEASE_GATE_EFFECT {
+            self.error(
+                "topology_advisor_release_gate_effect",
+                "topology advisor metadata must use release_gate_effect=advisory_only",
+                FindingScope::lane(claim.claim_id.as_str())
+                    .field("topology_advisor.release_gate_effect"),
+            );
+        }
+        if claim.product_evidence_claim != ReadinessLabProductEvidenceClaim::None {
+            self.error(
+                "topology_advisor_claim_product_evidence",
+                "topology advisor truth graph claims must use product_evidence_claim=none",
+                FindingScope::lane(claim.claim_id.as_str()).field("product_evidence_claim"),
+            );
+        }
+        if matches!(
+            claim.claim_state,
+            ReadinessLabTruthGraphClaimState::Validated
+        ) {
+            self.error(
+                "topology_advisor_claim_validated",
+                "topology advisor claims must stay blocked, simulated, dry_run_only, or handoff_only",
+                FindingScope::lane(claim.claim_id.as_str()).field("claim_state"),
+            );
+        }
+        if claim.claim_id == "swarm.responsiveness"
+            && !advisor
+                .blocked_claims
+                .iter()
+                .any(|blocked| blocked == "swarm.responsiveness")
+        {
+            self.error(
+                "topology_advisor_missing_swarm_block",
+                "swarm.responsiveness must remain listed in topology advisor blocked_claims",
+                FindingScope::lane(claim.claim_id.as_str())
+                    .field("topology_advisor.blocked_claims"),
+            );
+        }
+        if advisor.manifest_hash.trim().is_empty() {
+            self.error(
+                "topology_advisor_missing_manifest_hash",
+                "topology advisor metadata must include a manifest hash",
+                FindingScope::lane(claim.claim_id.as_str()).field("topology_advisor.manifest_hash"),
+            );
+        }
+        for path_field in [
+            (
+                "topology_advisor.topology_advisor_report_path",
+                advisor.topology_advisor_report_path.as_str(),
+            ),
+            (
+                "topology_advisor.score_report_path",
+                advisor.score_report_path.as_str(),
+            ),
+            (
+                "topology_advisor.structured_log_path",
+                advisor.structured_log_path.as_str(),
+            ),
+            (
+                "topology_advisor.artifact_root",
+                advisor.artifact_root.as_str(),
+            ),
+        ] {
+            if !is_safe_readiness_lab_relative_path(path_field.1) {
+                self.error(
+                    "topology_advisor_unsafe_path",
+                    "topology advisor paths must be safe relative paths without parent traversal",
+                    FindingScope::lane(claim.claim_id.as_str()).field(path_field.0),
+                );
+            }
+        }
+        for (index, artifact_path) in advisor.artifact_paths.iter().enumerate() {
+            if !is_safe_readiness_lab_relative_path(artifact_path) {
+                let field = format!("topology_advisor.artifact_paths[{index}]");
+                self.error(
+                    "topology_advisor_unsafe_artifact_path",
+                    "topology advisor artifact paths must be safe relative paths without parent traversal",
+                    FindingScope::lane(claim.claim_id.as_str()).field(&field),
+                );
+            }
+        }
+        if claim.artifacts.iter().any(|artifact| {
+            artifact
+                .sha256
+                .as_deref()
+                .is_none_or(|hash| hash.trim().is_empty())
+        }) {
+            self.error(
+                "topology_advisor_missing_artifact_hash",
+                "topology advisor graph artifacts must include sha256 hashes",
+                FindingScope::lane(claim.claim_id.as_str()).field("artifacts"),
+            );
+        }
+        if let Some(freshness) = &claim.freshness {
+            let freshness_status = self.freshness_status(freshness);
+            if matches!(freshness_status.as_str(), "stale" | "future") {
+                self.error(
+                    "topology_advisor_stale_report",
+                    "topology advisor reports must be fresh before they enter the truth graph",
+                    FindingScope::lane(claim.claim_id.as_str()).field("freshness"),
+                );
+            }
+        }
+        self.validate_topology_forbidden_wording(claim, advisor);
+    }
+
+    fn validate_topology_forbidden_wording(
+        &mut self,
+        claim: &ReadinessLabTruthGraphClaimInput,
+        advisor: &ReadinessLabTruthGraphTopologyAdvisorInput,
+    ) {
+        for (field, value) in [
+            (
+                "topology_advisor.topology_advisor_report_path",
+                advisor.topology_advisor_report_path.as_str(),
+            ),
+            (
+                "topology_advisor.score_report_path",
+                advisor.score_report_path.as_str(),
+            ),
+            (
+                "topology_advisor.structured_log_path",
+                advisor.structured_log_path.as_str(),
+            ),
+            (
+                "topology_advisor.manifest_hash",
+                advisor.manifest_hash.as_str(),
+            ),
+            (
+                "topology_advisor.recommendation",
+                advisor.recommendation.as_deref().unwrap_or(""),
+            ),
+            (
+                "topology_advisor.artifact_root",
+                advisor.artifact_root.as_str(),
+            ),
+            (
+                "topology_advisor.release_gate_effect",
+                advisor.release_gate_effect.as_str(),
+            ),
+        ] {
+            if contains_forbidden_topology_claim_wording(value) {
+                self.error(
+                    "topology_advisor_forbidden_promotion_wording",
+                    "topology advisor metadata must not contain accepted_large_host or product pass wording",
+                    FindingScope::lane(claim.claim_id.as_str()).field(field),
+                );
+            }
+        }
+        for (index, candidate) in advisor.rejected_candidates.iter().enumerate() {
+            if contains_forbidden_topology_claim_wording(candidate) {
+                let field = format!("topology_advisor.rejected_candidates[{index}]");
+                self.error(
+                    "topology_advisor_forbidden_promotion_wording",
+                    "topology advisor rejected candidates must not contain accepted_large_host or product pass wording",
+                    FindingScope::lane(claim.claim_id.as_str()).field(&field),
+                );
+            }
+        }
+        for (index, blocked_claim) in advisor.blocked_claims.iter().enumerate() {
+            if contains_forbidden_topology_claim_wording(blocked_claim) {
+                let field = format!("topology_advisor.blocked_claims[{index}]");
+                self.error(
+                    "topology_advisor_forbidden_promotion_wording",
+                    "topology advisor blocked claims must not contain accepted_large_host or product pass wording",
+                    FindingScope::lane(claim.claim_id.as_str()).field(&field),
+                );
+            }
+        }
+        for (index, artifact_path) in advisor.artifact_paths.iter().enumerate() {
+            if contains_forbidden_topology_claim_wording(artifact_path) {
+                let field = format!("topology_advisor.artifact_paths[{index}]");
+                self.error(
+                    "topology_advisor_forbidden_promotion_wording",
+                    "topology advisor artifact paths must not contain accepted_large_host or product pass wording",
+                    FindingScope::lane(claim.claim_id.as_str()).field(&field),
                 );
             }
         }
@@ -2807,6 +3104,7 @@ impl<'a> ReadinessLabTruthGraphBuilder<'a> {
         self.build_artifact_nodes(claim, claim_node_id.as_str());
         self.build_host_node(claim, claim_node_id.as_str());
         self.build_freshness_node(claim, claim_node_id.as_str());
+        self.build_topology_advisor_node(claim, claim_node_id.as_str());
         self.build_permission_node(claim, claim_node_id.as_str());
         self.build_blocker_nodes(claim, claim_node_id.as_str());
         for superseded_claim_id in &claim.supersedes_claim_ids {
@@ -2903,6 +3201,9 @@ impl<'a> ReadinessLabTruthGraphBuilder<'a> {
                 "raw_log_present".to_owned(),
                 artifact.raw_log_present.to_string(),
             );
+            if let Some(sha256) = &artifact.sha256 {
+                metadata.insert("sha256".to_owned(), sha256.clone());
+            }
             self.insert_node(ReadinessLabTruthGraphNode {
                 node_id: artifact_node_id.clone(),
                 node_kind: "artifact".to_owned(),
@@ -3071,6 +3372,122 @@ impl<'a> ReadinessLabTruthGraphBuilder<'a> {
                 Some(claim.source_bead.as_str()),
             );
         }
+    }
+
+    fn build_topology_advisor_node(
+        &mut self,
+        claim: &ReadinessLabTruthGraphClaimInput,
+        claim_node_id: &str,
+    ) {
+        let Some(advisor) = &claim.topology_advisor else {
+            return;
+        };
+        let advisor_node_id = truth_node_id(
+            "topology_advisor",
+            &[claim_node_id, advisor.topology_advisor_report_path.as_str()],
+        );
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            "topology_advisor_report_path".to_owned(),
+            advisor.topology_advisor_report_path.clone(),
+        );
+        metadata.insert(
+            "score_report_path".to_owned(),
+            advisor.score_report_path.clone(),
+        );
+        metadata.insert(
+            "structured_log_path".to_owned(),
+            advisor.structured_log_path.clone(),
+        );
+        metadata.insert("source_bead".to_owned(), advisor.source_bead.clone());
+        metadata.insert(
+            "real_campaign_bead".to_owned(),
+            advisor.real_campaign_bead.clone(),
+        );
+        metadata.insert("manifest_hash".to_owned(), advisor.manifest_hash.clone());
+        metadata.insert(
+            "recommendation".to_owned(),
+            advisor
+                .recommendation
+                .clone()
+                .unwrap_or_else(|| "none".to_owned()),
+        );
+        metadata.insert(
+            "rejected_candidates".to_owned(),
+            advisor.rejected_candidates.join(","),
+        );
+        metadata.insert(
+            "blocked_claims".to_owned(),
+            advisor.blocked_claims.join(","),
+        );
+        metadata.insert(
+            "advisory_only".to_owned(),
+            advisor.advisory_only.to_string(),
+        );
+        metadata.insert(
+            "product_evidence_claim".to_owned(),
+            advisor.product_evidence_claim.label().to_owned(),
+        );
+        metadata.insert(
+            "release_gate_effect".to_owned(),
+            advisor.release_gate_effect.clone(),
+        );
+        metadata.insert("artifact_root".to_owned(), advisor.artifact_root.clone());
+        metadata.insert(
+            "artifact_paths".to_owned(),
+            advisor.artifact_paths.join(","),
+        );
+        self.insert_node(ReadinessLabTruthGraphNode {
+            node_id: advisor_node_id.clone(),
+            node_kind: "topology_runtime_advisor".to_owned(),
+            label: advisor
+                .recommendation
+                .as_ref()
+                .map_or_else(|| "topology-runtime-advisor".to_owned(), Clone::clone),
+            source_path: Some(advisor.topology_advisor_report_path.clone()),
+            bead_id: Some(advisor.source_bead.clone()),
+            claim_state: Some(
+                ReadinessLabTruthGraphClaimState::DryRunOnly
+                    .label()
+                    .to_owned(),
+            ),
+            host_class: Some(ReadinessLabHostClass::CandidateLargeHost.label().to_owned()),
+            freshness_status: claim
+                .freshness
+                .as_ref()
+                .map(|freshness| self.freshness_status(freshness)),
+            product_evidence_claim: Some(advisor.product_evidence_claim.label().to_owned()),
+            metadata,
+        });
+        self.edge(
+            claim_node_id,
+            &advisor_node_id,
+            "derives_from",
+            "claim derives from topology runtime advisor report",
+            Some(advisor.topology_advisor_report_path.as_str()),
+            Some(advisor.source_bead.as_str()),
+        );
+        let campaign_node_id = truth_node_id("bead", &[advisor.real_campaign_bead.as_str()]);
+        self.insert_node(ReadinessLabTruthGraphNode {
+            node_id: campaign_node_id.clone(),
+            node_kind: "bead".to_owned(),
+            label: advisor.real_campaign_bead.clone(),
+            source_path: None,
+            bead_id: Some(advisor.real_campaign_bead.clone()),
+            claim_state: None,
+            host_class: None,
+            freshness_status: None,
+            product_evidence_claim: None,
+            metadata: BTreeMap::new(),
+        });
+        self.edge(
+            &advisor_node_id,
+            &campaign_node_id,
+            "preflights",
+            "topology advisor is advisory preflight for real campaign bead",
+            Some(advisor.topology_advisor_report_path.as_str()),
+            Some(advisor.real_campaign_bead.as_str()),
+        );
     }
 
     fn build_permission_node(
@@ -3335,6 +3752,7 @@ impl<'a> ReadinessLabTruthGraphBuilder<'a> {
             valid: self.errors.is_empty(),
             dry_run_only: true,
             product_evidence_claim: READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM.to_owned(),
+            release_gate_effect: READINESS_LAB_ADVISORY_RELEASE_GATE_EFFECT.to_owned(),
             source_bead: self.manifest.source_bead.clone(),
             source_count: self.manifest.sources.len(),
             claim_count: self.claim_count,
@@ -4443,6 +4861,26 @@ fn blocker_link_missing(validator_report_path: Option<&str>, bead_id: Option<&st
     !has_report && !has_bead
 }
 
+fn is_safe_readiness_lab_relative_path(value: &str) -> bool {
+    if value.trim().is_empty() {
+        return false;
+    }
+    let path = Path::new(value);
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+fn contains_forbidden_topology_claim_wording(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    normalized.contains("accepted_large_host")
+        || normalized.contains("product pass")
+        || normalized.contains("product_pass")
+        || normalized.contains("product-pass")
+        || normalized.contains("product evidence pass")
+}
+
 fn required_numa_p99_fixture_shapes() -> [ReadinessLabNumaP99FixtureShape; 6] {
     [
         ReadinessLabNumaP99FixtureShape::BalancedNuma,
@@ -4838,6 +5276,7 @@ mod tests {
                 artifact_id: format!("{claim_id}-raw-log"),
                 artifact_kind: ReadinessLabArtifactKind::PlannedWorkloadLane,
                 path: format!("artifacts/raw/{claim_id}.log"),
+                sha256: Some("sha256:truth-graph-fixture".to_owned()),
                 raw_log_required: true,
                 raw_log_present: true,
             }],
@@ -4851,6 +5290,7 @@ mod tests {
             blockers: Vec::new(),
             permission: None,
             supersedes_claim_ids: Vec::new(),
+            topology_advisor: None,
         }
     }
 
@@ -4866,6 +5306,7 @@ mod tests {
                 artifact_id: "host-simulation".to_owned(),
                 artifact_kind: ReadinessLabArtifactKind::SimulatedHostCapability,
                 path: "artifacts/readiness-lab/host-simulation.json".to_owned(),
+                sha256: None,
                 raw_log_required: false,
                 raw_log_present: false,
             }],
@@ -4885,6 +5326,7 @@ mod tests {
             blockers: Vec::new(),
             permission: None,
             supersedes_claim_ids: Vec::new(),
+            topology_advisor: None,
         }
     }
 
@@ -4900,6 +5342,7 @@ mod tests {
                 artifact_id: "xfstests-handoff-packet".to_owned(),
                 artifact_kind: ReadinessLabArtifactKind::PermissionedRunRehearsal,
                 path: "artifacts/readiness-lab/xfstests-handoff.json".to_owned(),
+                sha256: None,
                 raw_log_required: false,
                 raw_log_present: false,
             }],
@@ -4918,6 +5361,96 @@ mod tests {
                 ack_env: "XFSTESTS_REAL_RUN_ACK".to_owned(),
             }),
             supersedes_claim_ids: Vec::new(),
+            topology_advisor: None,
+        }
+    }
+
+    fn topology_advisor_truth_graph_claim() -> ReadinessLabTruthGraphClaimInput {
+        ReadinessLabTruthGraphClaimInput {
+            claim_id: "swarm.responsiveness".to_owned(),
+            claim_state: ReadinessLabTruthGraphClaimState::Blocked,
+            product_evidence_claim: ReadinessLabProductEvidenceClaim::None,
+            validator_report_path: "artifacts/topology-advisor/score.json".to_owned(),
+            source_bead: "bd-rchk0.212".to_owned(),
+            command: Some(
+                "ffs-harness score-topology-runtime-advisor --manifest docs/topology-runtime-advisor-manifest.json".to_owned(),
+            ),
+            artifacts: vec![
+                ReadinessLabTruthGraphArtifactInput {
+                    artifact_id: "topology-advisor-score".to_owned(),
+                    artifact_kind: ReadinessLabArtifactKind::RchSchedulingPlan,
+                    path: "artifacts/topology-advisor/score.json".to_owned(),
+                    sha256: Some("sha256:topology-score-fixture".to_owned()),
+                    raw_log_required: true,
+                    raw_log_present: true,
+                },
+                ReadinessLabTruthGraphArtifactInput {
+                    artifact_id: "topology-advisor-structured-log".to_owned(),
+                    artifact_kind: ReadinessLabArtifactKind::RchSchedulingPlan,
+                    path: "artifacts/topology-advisor/structured.jsonl".to_owned(),
+                    sha256: Some("sha256:topology-log-fixture".to_owned()),
+                    raw_log_required: true,
+                    raw_log_present: true,
+                },
+            ],
+            host: Some(ReadinessLabTruthGraphHostInput {
+                host_id: "candidate-large-host".to_owned(),
+                host_class: ReadinessLabHostClass::CandidateLargeHost,
+                logical_cpus: Some(96),
+                ram_total_gib: Some(512),
+                numa_topology_visible: Some(true),
+            }),
+            freshness: Some(ReadinessLabFreshnessMetadata {
+                observed_at_epoch_days: 20_000,
+                max_age_days: 7,
+                git_sha: "1234567".to_owned(),
+                host_class: ReadinessLabHostClass::CandidateLargeHost,
+            }),
+            blockers: vec![ReadinessLabTruthGraphBlockerInput {
+                blocker_id: "permissioned-large-host-missing".to_owned(),
+                reason:
+                    "advisor is preflight only until real large-host swarm lanes execute".to_owned(),
+                validator_report_path: Some("artifacts/topology-advisor/score.json".to_owned()),
+                bead_id: Some("bd-rchk0.53.8".to_owned()),
+            }],
+            permission: None,
+            supersedes_claim_ids: Vec::new(),
+            topology_advisor: Some(ReadinessLabTruthGraphTopologyAdvisorInput {
+                topology_advisor_report_path: "artifacts/topology-advisor/report.json".to_owned(),
+                score_report_path: "artifacts/topology-advisor/score.json".to_owned(),
+                structured_log_path: "artifacts/topology-advisor/structured.jsonl".to_owned(),
+                source_bead: "bd-rchk0.212".to_owned(),
+                real_campaign_bead: "bd-rchk0.53.8".to_owned(),
+                manifest_hash: "sha256:topology-manifest-fixture".to_owned(),
+                recommendation: Some("managed".to_owned()),
+                rejected_candidates: vec!["per_core: awaiting permissioned large-host lane".to_owned()],
+                blocked_claims: vec!["swarm.responsiveness".to_owned()],
+                advisory_only: true,
+                product_evidence_claim: ReadinessLabProductEvidenceClaim::None,
+                release_gate_effect: READINESS_LAB_ADVISORY_RELEASE_GATE_EFFECT.to_owned(),
+                artifact_root: "artifacts/topology-advisor".to_owned(),
+                artifact_paths: vec![
+                    "artifacts/topology-advisor/report.json".to_owned(),
+                    "artifacts/topology-advisor/score.json".to_owned(),
+                    "artifacts/topology-advisor/structured.jsonl".to_owned(),
+                ],
+            }),
+        }
+    }
+
+    fn topology_advisor_truth_graph_manifest() -> ReadinessLabTruthGraphManifest {
+        ReadinessLabTruthGraphManifest {
+            schema_version: READINESS_LAB_SCHEMA_VERSION,
+            graph_id: "topology-advisor-truth-graph".to_owned(),
+            generated_at_epoch_days: 20_000,
+            advisory_notice: READINESS_LAB_ADVISORY_NOTICE.to_owned(),
+            source_bead: "bd-rchk0.212.4".to_owned(),
+            sources: vec![truth_graph_source(
+                "topology-advisor",
+                ReadinessLabTruthGraphSourceKind::TopologyRuntimeAdvisorReport,
+                "artifacts/topology-advisor/score.json",
+                topology_advisor_truth_graph_claim(),
+            )],
         }
     }
 
@@ -5587,6 +6120,169 @@ mod tests {
                 .iter()
                 .any(|finding| finding.finding_id == "blocker_without_report_or_bead")
         );
+    }
+
+    #[test]
+    fn truth_graph_renders_topology_advisor_as_advisory_node() {
+        let report = build_truth_graph(&topology_advisor_truth_graph_manifest());
+
+        assert!(report.valid);
+        assert_eq!(
+            report.product_evidence_claim,
+            READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM
+        );
+        assert_eq!(
+            report.release_gate_effect,
+            READINESS_LAB_ADVISORY_RELEASE_GATE_EFFECT
+        );
+        assert!(report.blocker_edge_count >= 1);
+        let node = report
+            .nodes
+            .iter()
+            .find(|node| node.node_kind == "topology_runtime_advisor")
+            .expect("topology advisor node should be rendered");
+        assert_eq!(
+            node.metadata.get("topology_advisor_report_path"),
+            Some(&"artifacts/topology-advisor/report.json".to_owned())
+        );
+        assert_eq!(
+            node.metadata.get("real_campaign_bead"),
+            Some(&"bd-rchk0.53.8".to_owned())
+        );
+        assert_eq!(
+            node.metadata.get("recommendation"),
+            Some(&"managed".to_owned())
+        );
+        assert_eq!(
+            node.metadata.get("blocked_claims"),
+            Some(&"swarm.responsiveness".to_owned())
+        );
+        assert_eq!(node.metadata.get("advisory_only"), Some(&"true".to_owned()));
+        assert!(
+            report.edges.iter().any(|edge| edge.edge_kind == "blocks"
+                && edge.bead_id.as_deref() == Some("bd-rchk0.53.8"))
+        );
+    }
+
+    #[test]
+    fn truth_graph_rejects_stale_topology_advisor_report() {
+        let mut manifest = topology_advisor_truth_graph_manifest();
+        manifest.sources[0].claims[0]
+            .freshness
+            .as_mut()
+            .expect("topology advisor has freshness")
+            .observed_at_epoch_days = 19_990;
+
+        let report = build_truth_graph(&manifest);
+
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| { finding.finding_id == "topology_advisor_stale_report" })
+        );
+    }
+
+    #[test]
+    fn truth_graph_rejects_topology_advisor_bead_mismatches() {
+        let mut manifest = topology_advisor_truth_graph_manifest();
+        let claim = &mut manifest.sources[0].claims[0];
+        claim
+            .topology_advisor
+            .as_mut()
+            .expect("topology advisor metadata")
+            .source_bead = "bd-other".to_owned();
+        claim
+            .topology_advisor
+            .as_mut()
+            .expect("topology advisor metadata")
+            .real_campaign_bead = "bd-wrong-campaign".to_owned();
+
+        let report = build_truth_graph(&manifest);
+
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| { finding.finding_id == "topology_advisor_source_bead_mismatch" })
+        );
+        assert!(report.errors.iter().any(|finding| {
+            finding.finding_id == "topology_advisor_real_campaign_bead_mismatch"
+        }));
+    }
+
+    #[test]
+    fn truth_graph_rejects_topology_advisor_missing_hashes_and_unsafe_paths() {
+        let mut manifest = topology_advisor_truth_graph_manifest();
+        let claim = &mut manifest.sources[0].claims[0];
+        claim.artifacts[0].sha256 = None;
+        claim.artifacts[1].path = "../escape/structured.jsonl".to_owned();
+        claim
+            .topology_advisor
+            .as_mut()
+            .expect("topology advisor metadata")
+            .artifact_paths
+            .push("/tmp/escape/report.json".to_owned());
+
+        let report = build_truth_graph(&manifest);
+
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| { finding.finding_id == "topology_advisor_missing_artifact_hash" })
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| { finding.finding_id == "unsafe_truth_graph_artifact_path" })
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| { finding.finding_id == "topology_advisor_unsafe_artifact_path" })
+        );
+    }
+
+    #[test]
+    fn truth_graph_rejects_topology_advisor_promotion_wording() {
+        let mut manifest = topology_advisor_truth_graph_manifest();
+        let claim = &mut manifest.sources[0].claims[0];
+        claim.claim_state = ReadinessLabTruthGraphClaimState::Validated;
+        claim.product_evidence_claim = ReadinessLabProductEvidenceClaim::ProductPassFail;
+        let advisor = claim
+            .topology_advisor
+            .as_mut()
+            .expect("topology advisor metadata");
+        advisor.advisory_only = false;
+        advisor.product_evidence_claim = ReadinessLabProductEvidenceClaim::ProductPassFail;
+        advisor.release_gate_effect = "strengthens_product_pass".to_owned();
+        advisor.recommendation = Some("accepted_large_host".to_owned());
+
+        let report = build_truth_graph(&manifest);
+
+        assert!(!report.valid);
+        for expected in [
+            "topology_advisor_not_advisory_only",
+            "topology_advisor_product_evidence_claim",
+            "topology_advisor_release_gate_effect",
+            "topology_advisor_claim_product_evidence",
+            "topology_advisor_claim_validated",
+            "topology_advisor_forbidden_promotion_wording",
+        ] {
+            assert!(
+                report
+                    .errors
+                    .iter()
+                    .any(|finding| finding.finding_id == expected),
+                "missing {expected}"
+            );
+        }
     }
 
     #[test]
