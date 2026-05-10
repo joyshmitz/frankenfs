@@ -212,6 +212,71 @@ pub struct TopologyRuntimeAdvisorReport {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopologyRuntimeAdvisorConfidenceTier {
+    High,
+    Medium,
+    Low,
+    NoRecommendation,
+}
+
+impl TopologyRuntimeAdvisorConfidenceTier {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+            Self::NoRecommendation => "no_recommendation",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyRuntimeAdvisorCandidateScore {
+    pub runtime_candidate: String,
+    pub score: i32,
+    pub confidence_tier: String,
+    pub rejection_reason: Option<String>,
+    pub rationale: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyRuntimeAdvisorLossRiskEntry {
+    pub signal: String,
+    pub expected_loss: u32,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyRuntimeAdvisorScoringReport {
+    pub operation_id: String,
+    pub scenario_id: String,
+    pub valid: bool,
+    pub advisory_only: bool,
+    pub product_evidence_claim: String,
+    pub release_gate_effect: String,
+    pub release_claim_state: String,
+    pub recommendation: Option<String>,
+    pub confidence_tier: String,
+    pub candidate_scores: Vec<TopologyRuntimeAdvisorCandidateScore>,
+    pub rejected_candidates: usize,
+    pub loss_risk_ledger: Vec<TopologyRuntimeAdvisorLossRiskEntry>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WorkloadSignals {
+    max_hot_inode_concentration: f64,
+    max_directory_fanout: u32,
+    average_read_ratio: f64,
+    average_write_ratio: f64,
+    max_fsyncs_per_second: f64,
+    max_dirty_pressure: f64,
+    max_queue_pressure: f64,
+}
+
 pub fn load_topology_runtime_advisor_manifest(
     path: &Path,
 ) -> Result<TopologyRuntimeAdvisorManifest> {
@@ -291,6 +356,83 @@ pub fn validate_topology_runtime_advisor_manifest_with_config(
 }
 
 #[must_use]
+pub fn score_topology_runtime_advisor_manifest(
+    manifest: &TopologyRuntimeAdvisorManifest,
+) -> TopologyRuntimeAdvisorScoringReport {
+    score_topology_runtime_advisor_manifest_with_config(
+        manifest,
+        &TopologyRuntimeAdvisorValidationConfig::default(),
+    )
+}
+
+#[must_use]
+pub fn score_topology_runtime_advisor_manifest_with_config(
+    manifest: &TopologyRuntimeAdvisorManifest,
+    config: &TopologyRuntimeAdvisorValidationConfig,
+) -> TopologyRuntimeAdvisorScoringReport {
+    let validation_report =
+        validate_topology_runtime_advisor_manifest_with_config(manifest, config);
+    if !validation_report.valid {
+        return TopologyRuntimeAdvisorScoringReport {
+            operation_id: manifest.operation_id.clone(),
+            scenario_id: manifest.scenario_id.clone(),
+            valid: false,
+            advisory_only: validation_report.advisory_only,
+            product_evidence_claim: manifest.product_evidence_claim.clone(),
+            release_gate_effect: manifest.release_gate_effect.clone(),
+            release_claim_state: "not_product_evidence".to_owned(),
+            recommendation: None,
+            confidence_tier: TopologyRuntimeAdvisorConfidenceTier::NoRecommendation
+                .label()
+                .to_owned(),
+            candidate_scores: Vec::new(),
+            rejected_candidates: 0,
+            loss_risk_ledger: Vec::new(),
+            errors: validation_report.errors,
+        };
+    }
+
+    let signals = derive_workload_signals(manifest);
+    let mut candidate_scores = manifest
+        .runtime_candidates
+        .iter()
+        .map(|candidate| score_runtime_candidate(manifest, &signals, candidate))
+        .collect::<Vec<_>>();
+    sort_candidate_scores_for_recommendation(&mut candidate_scores);
+
+    let rejected_candidates = candidate_scores
+        .iter()
+        .filter(|score| score.rejection_reason.is_some())
+        .count();
+    let recommendation = candidate_scores
+        .iter()
+        .find(|score| score.rejection_reason.is_none())
+        .map(|score| score.runtime_candidate.clone());
+    let confidence_tier = confidence_tier(&candidate_scores);
+    for score in &mut candidate_scores {
+        confidence_tier
+            .label()
+            .clone_into(&mut score.confidence_tier);
+    }
+
+    TopologyRuntimeAdvisorScoringReport {
+        operation_id: manifest.operation_id.clone(),
+        scenario_id: manifest.scenario_id.clone(),
+        valid: true,
+        advisory_only: true,
+        product_evidence_claim: TOPOLOGY_RUNTIME_ADVISOR_PRODUCT_EVIDENCE_CLAIM.to_owned(),
+        release_gate_effect: TOPOLOGY_RUNTIME_ADVISOR_RELEASE_GATE_EFFECT.to_owned(),
+        release_claim_state: "not_product_evidence".to_owned(),
+        recommendation,
+        confidence_tier: confidence_tier.label().to_owned(),
+        candidate_scores,
+        rejected_candidates,
+        loss_risk_ledger: build_loss_risk_ledger(manifest, &signals),
+        errors: Vec::new(),
+    }
+}
+
+#[must_use]
 pub fn render_topology_runtime_advisor_markdown(report: &TopologyRuntimeAdvisorReport) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# Topology Runtime Advisor Report\n");
@@ -341,6 +483,75 @@ pub fn render_topology_runtime_advisor_markdown(report: &TopologyRuntimeAdvisorR
 }
 
 #[must_use]
+pub fn render_topology_runtime_advisor_score_markdown(
+    report: &TopologyRuntimeAdvisorScoringReport,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Topology Runtime Advisor Score\n");
+    let _ = writeln!(out, "- Operation: `{}`", report.operation_id);
+    let _ = writeln!(out, "- Scenario: `{}`", report.scenario_id);
+    let _ = writeln!(out, "- Valid: `{}`", report.valid);
+    let _ = writeln!(out, "- Advisory only: `{}`", report.advisory_only);
+    let _ = writeln!(
+        out,
+        "- Product evidence claim: `{}`",
+        report.product_evidence_claim
+    );
+    let _ = writeln!(
+        out,
+        "- Release gate effect: `{}`",
+        report.release_gate_effect
+    );
+    let _ = writeln!(
+        out,
+        "- Release claim state: `{}`",
+        report.release_claim_state
+    );
+    let _ = writeln!(
+        out,
+        "- Recommendation: `{}`",
+        report.recommendation.as_deref().unwrap_or("none")
+    );
+    let _ = writeln!(out, "- Confidence: `{}`", report.confidence_tier);
+
+    out.push_str("\n## Candidates\n\n");
+    for candidate in &report.candidate_scores {
+        let _ = writeln!(
+            out,
+            "- `{}`: score `{}` rejection `{}`",
+            candidate.runtime_candidate,
+            candidate.score,
+            candidate.rejection_reason.as_deref().unwrap_or("none")
+        );
+        for rationale in &candidate.rationale {
+            let _ = writeln!(out, "  - {rationale}");
+        }
+    }
+
+    if report.loss_risk_ledger.is_empty() {
+        out.push_str("\n## Loss/Risk Ledger\n\nnone\n");
+    } else {
+        out.push_str("\n## Loss/Risk Ledger\n\n");
+        for entry in &report.loss_risk_ledger {
+            let _ = writeln!(
+                out,
+                "- `{}` expected_loss `{}`: {}",
+                entry.signal, entry.expected_loss, entry.rationale
+            );
+        }
+    }
+
+    if !report.errors.is_empty() {
+        out.push_str("\n## Errors\n\n");
+        for error in &report.errors {
+            let _ = writeln!(out, "- {error}");
+        }
+    }
+
+    out
+}
+
+#[must_use]
 pub fn render_topology_runtime_advisor_structured_log(
     report: &TopologyRuntimeAdvisorReport,
 ) -> String {
@@ -373,6 +584,47 @@ pub fn render_topology_runtime_advisor_structured_log(
     out
 }
 
+#[must_use]
+pub fn render_topology_runtime_advisor_score_structured_log(
+    report: &TopologyRuntimeAdvisorScoringReport,
+) -> String {
+    let mut out = String::new();
+    for candidate in &report.candidate_scores {
+        let _ = writeln!(
+            out,
+            "{}",
+            json!({
+                "event": "topology_runtime_advisor_score_candidate",
+                "operation_id": report.operation_id,
+                "scenario_id": report.scenario_id,
+                "runtime_candidate": candidate.runtime_candidate,
+                "score": candidate.score,
+                "confidence_tier": report.confidence_tier,
+                "rejection_reason": candidate.rejection_reason,
+                "advisory_only": report.advisory_only,
+            })
+        );
+    }
+    let _ = writeln!(
+        out,
+        "{}",
+        json!({
+            "event": "topology_runtime_advisor_score_result",
+            "operation_id": report.operation_id,
+            "scenario_id": report.scenario_id,
+            "runtime_candidate": report.recommendation,
+            "confidence_tier": report.confidence_tier,
+            "advisory_only": report.advisory_only,
+            "product_evidence_claim": report.product_evidence_claim,
+            "release_gate_effect": report.release_gate_effect,
+            "release_claim_state": report.release_claim_state,
+            "rejected_candidates": report.rejected_candidates,
+            "error_count": report.errors.len(),
+        })
+    );
+    out
+}
+
 pub fn fail_on_topology_runtime_advisor_errors(
     report: &TopologyRuntimeAdvisorReport,
 ) -> Result<()> {
@@ -383,6 +635,303 @@ pub fn fail_on_topology_runtime_advisor_errors(
         );
     }
     Ok(())
+}
+
+pub fn fail_on_topology_runtime_advisor_score_errors(
+    report: &TopologyRuntimeAdvisorScoringReport,
+) -> Result<()> {
+    if !report.valid {
+        bail!(
+            "topology runtime advisor scoring failed: errors={}",
+            report.errors.len()
+        );
+    }
+    if report.recommendation.is_none() {
+        bail!("topology runtime advisor scoring produced no recommendation");
+    }
+    Ok(())
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn derive_workload_signals(manifest: &TopologyRuntimeAdvisorManifest) -> WorkloadSignals {
+    let workload_count = manifest.workload_shapes.len() as f64;
+    let total_read_ratio = manifest
+        .workload_shapes
+        .iter()
+        .map(|workload| workload.read_ratio)
+        .sum::<f64>();
+    let total_write_ratio = manifest
+        .workload_shapes
+        .iter()
+        .map(|workload| workload.write_ratio)
+        .sum::<f64>();
+    let max_dirty_pressure = manifest
+        .workload_shapes
+        .iter()
+        .map(|workload| {
+            ratio_u64(
+                workload.expected_dirty_bytes,
+                manifest.resource_caps.max_memory_bytes,
+            )
+        })
+        .fold(0.0, f64::max);
+    let max_queue_pressure = manifest
+        .workload_shapes
+        .iter()
+        .map(|workload| ratio_u32(workload.queue_depth, manifest.resource_caps.max_queue_depth))
+        .fold(0.0, f64::max);
+
+    WorkloadSignals {
+        max_hot_inode_concentration: manifest
+            .workload_shapes
+            .iter()
+            .map(|workload| workload.hot_inode_concentration)
+            .fold(0.0, f64::max),
+        max_directory_fanout: manifest
+            .workload_shapes
+            .iter()
+            .map(|workload| workload.directory_fanout)
+            .max()
+            .unwrap_or(0),
+        average_read_ratio: total_read_ratio / workload_count,
+        average_write_ratio: total_write_ratio / workload_count,
+        max_fsyncs_per_second: manifest
+            .workload_shapes
+            .iter()
+            .map(|workload| workload.fsyncs_per_second)
+            .fold(0.0, f64::max),
+        max_dirty_pressure,
+        max_queue_pressure,
+    }
+}
+
+fn score_runtime_candidate(
+    manifest: &TopologyRuntimeAdvisorManifest,
+    signals: &WorkloadSignals,
+    candidate: &TopologyRuntimeCandidate,
+) -> TopologyRuntimeAdvisorCandidateScore {
+    let mut score = match candidate.mode {
+        TopologyRuntimeMode::Standard => 50,
+        TopologyRuntimeMode::Managed => 45,
+        TopologyRuntimeMode::PerCore => 40,
+    };
+    let mut rejection_reason = rejection_reason(manifest, candidate);
+    let mut rationale = Vec::new();
+
+    match candidate.mode {
+        TopologyRuntimeMode::Standard => score_standard(signals, &mut score, &mut rationale),
+        TopologyRuntimeMode::Managed => score_managed(signals, &mut score, &mut rationale),
+        TopologyRuntimeMode::PerCore => {
+            score_per_core(manifest, signals, &mut score, &mut rationale);
+        }
+    }
+    if !candidate.enabled {
+        rejection_reason = Some("candidate disabled by manifest".to_owned());
+    }
+
+    TopologyRuntimeAdvisorCandidateScore {
+        runtime_candidate: candidate.mode.label().to_owned(),
+        score,
+        confidence_tier: TopologyRuntimeAdvisorConfidenceTier::NoRecommendation
+            .label()
+            .to_owned(),
+        rejection_reason,
+        rationale,
+    }
+}
+
+fn score_standard(signals: &WorkloadSignals, score: &mut i32, rationale: &mut Vec<String>) {
+    if signals.max_hot_inode_concentration < 0.45 {
+        *score += 10;
+        rationale.push("low hot-inode concentration keeps standard mode viable".to_owned());
+    }
+    if signals.max_dirty_pressure < 0.15 && signals.max_queue_pressure < 0.20 {
+        *score += 10;
+        rationale.push("low dirty-byte and queue pressure favor the baseline mode".to_owned());
+    }
+    if signals.average_read_ratio >= 0.70 && signals.max_directory_fanout >= 1_024 {
+        *score -= 20;
+        rationale.push("read-heavy sharded fanout needs more parallel routing".to_owned());
+    }
+    if signals.max_dirty_pressure >= 0.25 || signals.max_fsyncs_per_second >= 8.0 {
+        *score -= 15;
+        rationale.push("writeback pressure needs explicit backpressure management".to_owned());
+    }
+}
+
+fn score_managed(signals: &WorkloadSignals, score: &mut i32, rationale: &mut Vec<String>) {
+    if signals.max_hot_inode_concentration >= 0.65 {
+        *score += 30;
+        rationale.push("hot-inode skew favors centralized backpressure".to_owned());
+    }
+    if signals.max_dirty_pressure >= 0.25 {
+        *score += 25;
+        rationale.push("dirty-byte pressure requires backpressure thresholds".to_owned());
+    }
+    if signals.average_write_ratio >= 0.50 || signals.max_fsyncs_per_second >= 8.0 {
+        *score += 10;
+        rationale.push("write-heavy fsync cadence favors managed scheduling".to_owned());
+    }
+    if signals.average_read_ratio >= 0.75 && signals.max_directory_fanout >= 2_048 {
+        *score -= 15;
+        rationale.push("read-heavy sharded fanout can outgrow managed routing".to_owned());
+    }
+}
+
+fn score_per_core(
+    manifest: &TopologyRuntimeAdvisorManifest,
+    signals: &WorkloadSignals,
+    score: &mut i32,
+    rationale: &mut Vec<String>,
+) {
+    if large_host_floor_met(&manifest.host_topology) {
+        *score += 30;
+        rationale.push("CPU/RAM/NUMA floor can support per-core routing".to_owned());
+    }
+    if signals.average_read_ratio >= 0.70 && signals.max_directory_fanout >= 1_024 {
+        *score += 30;
+        rationale.push("read-heavy sharded fanout favors per-core routing".to_owned());
+    }
+    if signals.max_queue_pressure >= 0.10 {
+        *score += 10;
+        rationale.push("queue depth can amortize per-core scheduling overhead".to_owned());
+    }
+    if signals.max_hot_inode_concentration >= 0.65 {
+        *score -= 30;
+        rationale.push("hot-inode skew risks per-core imbalance".to_owned());
+    }
+    if signals.max_dirty_pressure >= 0.25 {
+        *score -= 10;
+        rationale.push("dirty-byte pressure should be managed before sharding".to_owned());
+    }
+}
+
+fn rejection_reason(
+    manifest: &TopologyRuntimeAdvisorManifest,
+    candidate: &TopologyRuntimeCandidate,
+) -> Option<String> {
+    if !candidate.enabled {
+        return Some("candidate disabled by manifest".to_owned());
+    }
+    if candidate.mode != TopologyRuntimeMode::Standard
+        && manifest.fuse_capability.state != TopologyFuseCapabilityState::Available
+    {
+        return Some("requires available FUSE capability".to_owned());
+    }
+    if candidate.mode == TopologyRuntimeMode::PerCore
+        && !large_host_floor_met(&manifest.host_topology)
+    {
+        return Some("requires at least 64 CPUs, 256 GiB RAM, and two NUMA nodes".to_owned());
+    }
+    None
+}
+
+fn sort_candidate_scores_for_recommendation(scores: &mut [TopologyRuntimeAdvisorCandidateScore]) {
+    scores.sort_by(|left, right| {
+        left.rejection_reason
+            .is_some()
+            .cmp(&right.rejection_reason.is_some())
+            .then_with(|| right.score.cmp(&left.score))
+            .then_with(|| {
+                mode_rank(&left.runtime_candidate).cmp(&mode_rank(&right.runtime_candidate))
+            })
+    });
+}
+
+fn confidence_tier(
+    scores: &[TopologyRuntimeAdvisorCandidateScore],
+) -> TopologyRuntimeAdvisorConfidenceTier {
+    let mut viable = scores
+        .iter()
+        .filter(|score| score.rejection_reason.is_none());
+    let Some(best) = viable.next() else {
+        return TopologyRuntimeAdvisorConfidenceTier::NoRecommendation;
+    };
+    let best_score = best.score;
+    let runner_up = viable.next().map_or(0, |score| score.score);
+    match best_score - runner_up {
+        gap if gap >= 20 => TopologyRuntimeAdvisorConfidenceTier::High,
+        gap if gap >= 8 => TopologyRuntimeAdvisorConfidenceTier::Medium,
+        _ => TopologyRuntimeAdvisorConfidenceTier::Low,
+    }
+}
+
+fn build_loss_risk_ledger(
+    manifest: &TopologyRuntimeAdvisorManifest,
+    signals: &WorkloadSignals,
+) -> Vec<TopologyRuntimeAdvisorLossRiskEntry> {
+    let mut ledger = Vec::new();
+    if !large_host_floor_met(&manifest.host_topology) {
+        ledger.push(loss_risk(
+            "small_host_downgrade",
+            80,
+            "per-core recommendations are rejected until the large-host floor is visible",
+        ));
+    }
+    if signals.max_hot_inode_concentration >= 0.65 {
+        ledger.push(loss_risk(
+            "hot_inode_imbalance",
+            70,
+            "per-core sharding risks routing most work to one hot inode shard",
+        ));
+    }
+    if signals.average_read_ratio >= 0.70 && signals.max_directory_fanout >= 1_024 {
+        ledger.push(loss_risk(
+            "sharded_read_fanout",
+            30,
+            "standard mode may underuse host parallelism on read-heavy directory fanout",
+        ));
+    }
+    if signals.max_dirty_pressure >= 0.25 || signals.max_fsyncs_per_second >= 8.0 {
+        ledger.push(loss_risk(
+            "writeback_backpressure",
+            65,
+            "dirty-byte pressure and fsync cadence require explicit backpressure thresholds",
+        ));
+    }
+    ledger
+}
+
+fn loss_risk(
+    signal: impl Into<String>,
+    expected_loss: u32,
+    rationale: impl Into<String>,
+) -> TopologyRuntimeAdvisorLossRiskEntry {
+    TopologyRuntimeAdvisorLossRiskEntry {
+        signal: signal.into(),
+        expected_loss,
+        rationale: rationale.into(),
+    }
+}
+
+fn large_host_floor_met(host: &TopologyHostTopology) -> bool {
+    host.cpu_count >= 64 && host.ram_bytes >= 256 * 1024 * 1024 * 1024 && host.numa_nodes >= 2
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn ratio_u64(value: u64, maximum: u64) -> f64 {
+    if maximum == 0 {
+        0.0
+    } else {
+        value as f64 / maximum as f64
+    }
+}
+
+fn ratio_u32(value: u32, maximum: u32) -> f64 {
+    if maximum == 0 {
+        0.0
+    } else {
+        f64::from(value) / f64::from(maximum)
+    }
+}
+
+fn mode_rank(mode: &str) -> u8 {
+    match mode {
+        "standard" => 0,
+        "managed" => 1,
+        "per_core" => 2,
+        _ => 3,
+    }
 }
 
 fn validate_identity(
@@ -987,8 +1536,163 @@ mod tests {
         assert!(log.contains("\"error_class\":null"));
     }
 
+    #[test]
+    fn small_host_downgrades_per_core_candidate() {
+        let mut manifest = fixture_manifest();
+        manifest.host_topology.cpu_count = 16;
+        manifest.host_topology.numa_nodes = 1;
+        manifest.host_topology.ram_bytes = 32 * 1024 * 1024 * 1024;
+        manifest.resource_caps.max_threads = 64;
+        manifest.resource_caps.max_memory_bytes = 16 * 1024 * 1024 * 1024;
+
+        let report = score_fixture(&manifest);
+
+        assert!(report.valid, "{:?}", report.errors);
+        assert_ne!(report.recommendation.as_deref(), Some("per_core"));
+        assert_candidate_rejected(&report, "per_core", "requires at least 64 CPUs");
+        assert_ledger(&report, "small_host_downgrade");
+    }
+
+    #[test]
+    fn read_heavy_sharded_workload_favors_per_core_on_large_host() {
+        let mut manifest = fixture_manifest();
+        manifest.workload_shapes = vec![TopologyWorkloadShape {
+            workload_id: "wide-read-fanout".to_owned(),
+            hot_inode_concentration: 0.10,
+            directory_fanout: 8_192,
+            read_ratio: 0.90,
+            write_ratio: 0.05,
+            fsyncs_per_second: 1.0,
+            expected_dirty_bytes: 64 * 1024 * 1024,
+            queue_depth: 256,
+        }];
+
+        let report = score_fixture(&manifest);
+
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.recommendation.as_deref(), Some("per_core"));
+        assert_candidate_not_rejected(&report, "per_core");
+        assert_ledger(&report, "sharded_read_fanout");
+    }
+
+    #[test]
+    fn hot_inode_imbalance_favors_managed_over_per_core() {
+        let manifest = fixture_manifest();
+
+        let report = score_fixture(&manifest);
+
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.recommendation.as_deref(), Some("managed"));
+        assert_candidate_score_above(&report, "managed", "per_core");
+        assert_ledger(&report, "hot_inode_imbalance");
+    }
+
+    #[test]
+    fn writeback_pressure_requires_backpressure_thresholds() {
+        let mut manifest = fixture_manifest();
+        manifest.workload_shapes = vec![TopologyWorkloadShape {
+            workload_id: "dirty-writeback".to_owned(),
+            hot_inode_concentration: 0.70,
+            directory_fanout: 256,
+            read_ratio: 0.10,
+            write_ratio: 0.80,
+            fsyncs_per_second: 15.0,
+            expected_dirty_bytes: 80 * 1024 * 1024 * 1024,
+            queue_depth: 128,
+        }];
+
+        let report = score_fixture(&manifest);
+
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.recommendation.as_deref(), Some("managed"));
+        assert_ledger(&report, "writeback_backpressure");
+        let managed = candidate(&report, "managed");
+        assert!(
+            managed
+                .rationale
+                .iter()
+                .any(|reason| reason.contains("backpressure thresholds")),
+            "{:?}",
+            managed.rationale
+        );
+    }
+
+    #[test]
+    fn malformed_numeric_inputs_make_scoring_invalid() {
+        let mut manifest = fixture_manifest();
+        manifest.workload_shapes[0].read_ratio = f64::NAN;
+        manifest.workload_shapes[0].fsyncs_per_second = -1.0;
+
+        let report = score_fixture(&manifest);
+
+        assert!(!report.valid);
+        assert!(report.recommendation.is_none());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("read_ratio"))
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("fsyncs_per_second"))
+        );
+    }
+
+    #[test]
+    fn scoring_tie_breaks_are_deterministic() {
+        let mut scores = vec![
+            score_for_test("per_core", 80),
+            score_for_test("managed", 80),
+            score_for_test("standard", 80),
+        ];
+
+        sort_candidate_scores_for_recommendation(&mut scores);
+
+        assert_eq!(scores[0].runtime_candidate, "standard");
+        assert_eq!(scores[1].runtime_candidate, "managed");
+        assert_eq!(scores[2].runtime_candidate, "per_core");
+        assert_eq!(
+            confidence_tier(&scores),
+            TopologyRuntimeAdvisorConfidenceTier::Low
+        );
+    }
+
+    #[test]
+    fn scoring_structured_log_preserves_required_fields() {
+        let manifest = fixture_manifest();
+        let report = score_fixture(&manifest);
+        let log = render_topology_runtime_advisor_score_structured_log(&report);
+
+        assert!(log.contains("topology_runtime_advisor_score_candidate"));
+        assert!(log.contains("\"operation_id\":\"topology-advisor-op-001\""));
+        assert!(log.contains("\"scenario_id\":\"topology-advisor-valid\""));
+        assert!(log.contains("\"runtime_candidate\":\"managed\""));
+        assert!(log.contains("\"score\":"));
+        assert!(log.contains("\"confidence_tier\":\""));
+        assert!(log.contains("\"rejection_reason\":"));
+        assert!(log.contains("\"advisory_only\":true"));
+        assert!(log.contains("\"product_evidence_claim\":\"none\""));
+        assert!(log.contains("\"release_claim_state\":\"not_product_evidence\""));
+        assert!(!log.contains("accepted_large_host"));
+    }
+
     fn validate_fixture(manifest: &TopologyRuntimeAdvisorManifest) -> TopologyRuntimeAdvisorReport {
         validate_topology_runtime_advisor_manifest_with_config(
+            manifest,
+            &TopologyRuntimeAdvisorValidationConfig {
+                reference_epoch_days: parse_manifest_timestamp_epoch_days(REFERENCE_TIMESTAMP),
+                max_age_days: 14,
+            },
+        )
+    }
+
+    fn score_fixture(
+        manifest: &TopologyRuntimeAdvisorManifest,
+    ) -> TopologyRuntimeAdvisorScoringReport {
+        score_topology_runtime_advisor_manifest_with_config(
             manifest,
             &TopologyRuntimeAdvisorValidationConfig {
                 reference_epoch_days: parse_manifest_timestamp_epoch_days(REFERENCE_TIMESTAMP),
@@ -1003,6 +1707,78 @@ mod tests {
             "{path} missing from {:?}",
             report.issues
         );
+    }
+
+    fn assert_candidate_rejected(
+        report: &TopologyRuntimeAdvisorScoringReport,
+        runtime_candidate: &str,
+        expected_reason: &str,
+    ) {
+        let candidate = candidate(report, runtime_candidate);
+        let rejection = candidate
+            .rejection_reason
+            .as_deref()
+            .expect("candidate should be rejected");
+        assert!(
+            rejection.contains(expected_reason),
+            "{expected_reason} missing from {rejection}"
+        );
+    }
+
+    fn assert_candidate_not_rejected(
+        report: &TopologyRuntimeAdvisorScoringReport,
+        runtime_candidate: &str,
+    ) {
+        assert!(
+            candidate(report, runtime_candidate)
+                .rejection_reason
+                .is_none(),
+            "{runtime_candidate} should not be rejected"
+        );
+    }
+
+    fn assert_candidate_score_above(
+        report: &TopologyRuntimeAdvisorScoringReport,
+        higher: &str,
+        lower: &str,
+    ) {
+        assert!(
+            candidate(report, higher).score > candidate(report, lower).score,
+            "{higher} should score above {lower}: {:?}",
+            report.candidate_scores
+        );
+    }
+
+    fn assert_ledger(report: &TopologyRuntimeAdvisorScoringReport, signal: &str) {
+        assert!(
+            report
+                .loss_risk_ledger
+                .iter()
+                .any(|entry| entry.signal == signal),
+            "{signal} missing from {:?}",
+            report.loss_risk_ledger
+        );
+    }
+
+    fn candidate<'a>(
+        report: &'a TopologyRuntimeAdvisorScoringReport,
+        runtime_candidate: &str,
+    ) -> &'a TopologyRuntimeAdvisorCandidateScore {
+        report
+            .candidate_scores
+            .iter()
+            .find(|candidate| candidate.runtime_candidate == runtime_candidate)
+            .expect("candidate score should exist")
+    }
+
+    fn score_for_test(runtime_candidate: &str, score: i32) -> TopologyRuntimeAdvisorCandidateScore {
+        TopologyRuntimeAdvisorCandidateScore {
+            runtime_candidate: runtime_candidate.to_owned(),
+            score,
+            confidence_tier: "low".to_owned(),
+            rejection_reason: None,
+            rationale: Vec::new(),
+        }
     }
 
     fn fixture_manifest() -> TopologyRuntimeAdvisorManifest {

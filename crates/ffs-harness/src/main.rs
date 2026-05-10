@@ -213,8 +213,11 @@ use ffs_harness::{
     },
     topology_runtime_advisor::{
         TopologyRuntimeAdvisorValidationConfig, fail_on_topology_runtime_advisor_errors,
-        load_topology_runtime_advisor_manifest, render_topology_runtime_advisor_markdown,
+        fail_on_topology_runtime_advisor_score_errors, load_topology_runtime_advisor_manifest,
+        render_topology_runtime_advisor_markdown, render_topology_runtime_advisor_score_markdown,
+        render_topology_runtime_advisor_score_structured_log,
         render_topology_runtime_advisor_structured_log,
+        score_topology_runtime_advisor_manifest_with_config,
         validate_topology_runtime_advisor_manifest_with_config,
     },
     validate_btrfs_fixture, validate_ext4_fixture,
@@ -409,6 +412,7 @@ fn run_manifest_command(command: Option<&str>, args: &[String]) -> Option<Result
         Some("validate-topology-runtime-advisor") => {
             Some(validate_topology_runtime_advisor_cmd(args))
         }
+        Some("score-topology-runtime-advisor") => Some(score_topology_runtime_advisor_cmd(args)),
         Some("validate-permissioned-campaign-broker") => {
             Some(validate_permissioned_campaign_broker_cmd(args))
         }
@@ -3541,6 +3545,64 @@ fn validate_topology_runtime_advisor_cmd(args: &[String]) -> Result<()> {
     fail_on_topology_runtime_advisor_errors(&report)
 }
 
+fn score_topology_runtime_advisor_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_topology_runtime_advisor_cmd_args(args)? else {
+        return Ok(());
+    };
+    let manifest = load_topology_runtime_advisor_manifest(Path::new(&cmd_args.manifest_path))?;
+    let reference_epoch_days = match &cmd_args.reference_timestamp {
+        Some(timestamp) => Some(
+            parse_manifest_timestamp_epoch_days(timestamp)
+                .with_context(|| format!("invalid --reference-timestamp {timestamp}"))?,
+        ),
+        None => TopologyRuntimeAdvisorValidationConfig::default().reference_epoch_days,
+    };
+    let report = score_topology_runtime_advisor_manifest_with_config(
+        &manifest,
+        &TopologyRuntimeAdvisorValidationConfig {
+            reference_epoch_days,
+            max_age_days: cmd_args.max_age_days,
+        },
+    );
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_topology_runtime_advisor_score_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "topology runtime advisor score written: {} valid={} recommendation={}",
+            path,
+            report.valid,
+            report.recommendation.as_deref().unwrap_or("none")
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!(
+                "{}\n",
+                render_topology_runtime_advisor_score_markdown(&report)
+            ),
+        )?;
+        println!("topology runtime advisor score summary written: {path}");
+    }
+
+    if let Some(path) = cmd_args.structured_log_out_path {
+        write_text_file(
+            Path::new(&path),
+            &render_topology_runtime_advisor_score_structured_log(&report),
+        )?;
+        println!("topology runtime advisor score structured log written: {path}");
+    }
+
+    fail_on_topology_runtime_advisor_score_errors(&report)
+}
+
 fn parse_topology_runtime_advisor_cmd_args(
     args: &[String],
 ) -> Result<Option<TopologyRuntimeAdvisorCmdArgs>> {
@@ -3607,7 +3669,7 @@ fn parse_topology_runtime_advisor_cmd_args(
                 print_topology_runtime_advisor_usage();
                 return Ok(None);
             }
-            other => bail!("unknown validate-topology-runtime-advisor argument: {other}"),
+            other => bail!("unknown topology-runtime-advisor argument: {other}"),
         }
         i += 1;
     }
@@ -7121,6 +7183,9 @@ fn print_usage_core_commands() {
         "  ffs-harness validate-topology-runtime-advisor --manifest FILE [--format json|markdown] [--out FILE] [--summary-out FILE] [--structured-log-out FILE]"
     );
     println!(
+        "  ffs-harness score-topology-runtime-advisor --manifest FILE [--format json|markdown] [--out FILE] [--summary-out FILE] [--structured-log-out FILE]"
+    );
+    println!(
         "  ffs-harness validate-permissioned-campaign-broker [--manifest FILE] [--format json|markdown] [--out FILE] [--summary-out FILE] [--reference-timestamp TS]"
     );
     println!(
@@ -7252,6 +7317,9 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness validate-adaptive-runtime-manifest --manifest docs/adaptive-runtime-evidence-manifest.json --out artifacts/adaptive-runtime/report.json --summary-out artifacts/adaptive-runtime/report.md"
+    );
+    println!(
+        "  ffs-harness score-topology-runtime-advisor --manifest docs/topology-runtime-advisor-manifest.json --out artifacts/topology-advisor/score.json --summary-out artifacts/topology-advisor/score.md --structured-log-out artifacts/topology-advisor/score.jsonl"
     );
     print_permissioned_campaign_broker_example();
     print_permissioned_campaign_packet_example();
@@ -7718,7 +7786,9 @@ fn print_adaptive_runtime_manifest_usage() {
 }
 
 fn print_topology_runtime_advisor_usage() {
-    println!("Usage: ffs-harness validate-topology-runtime-advisor [OPTIONS]");
+    println!(
+        "Usage: ffs-harness validate-topology-runtime-advisor|score-topology-runtime-advisor [OPTIONS]"
+    );
     println!();
     println!("Options:");
     println!("  --manifest FILE                    Read topology advisor manifest JSON");
