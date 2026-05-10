@@ -40,26 +40,7 @@ scenario_result() {
 run_rch_capture() {
     local log_path="$1"
     shift
-    local status=0
-
-    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
-        timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 || status=$?
-    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
-        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
-        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
-        return 99
-    fi
-    if [[ "$status" -eq 124 ]] && grep -q "Remote command finished: exit=0" "$log_path"; then
-        e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|log=${log_path}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
-        return 0
-    fi
-    if [[ "$status" -eq 0 ]] && ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
-        e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
-        printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
-        return 99
-    fi
-
-    return "$status"
+    e2e_rch_capture "$log_path" "$@"
 }
 
 log_failure_tail() {
