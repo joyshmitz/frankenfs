@@ -154,6 +154,19 @@ if jq -s \
         };
     def foreign_open_count:
         ([.[] | select(foreign_issue and open_issue)] | length);
+    def local_open_rows_arr:
+        [.[] | select(local_issue and open_issue) | issue_work_row] | sort_by(.priority, .id);
+    def source_aware_ready_rows_arr:
+        [.[] | select(ready_issue) | issue_work_row] | sort_by(.priority, .id);
+    def permission_gated_rows_arr:
+        [.[] | select(local_issue and open_issue and ((.issue_type // "") != "epic") and ((permission_gate // null) != null)) | issue_work_row + {permission_gate: permission_gate}]
+        | sort_by(.priority, .id);
+    def blocked_local_rows_arr:
+        [.[] | select(local_issue and open_issue and ((.issue_type // "") != "epic") and ((permission_gate // null) == null) and ((blocking_dependencies | length) > 0)) | issue_work_row]
+        | sort_by(.priority, .id);
+    def local_epic_rows_arr:
+        [.[] | select(local_issue and open_issue and ((.issue_type // "") == "epic")) | issue_sample]
+        | sort_by(.priority, .id);
     {
         schema_version: 1,
         run_id: $run_id,
@@ -201,30 +214,75 @@ if jq -s \
             | sort_by(.prefix)
         ),
         local_open_ids: ([.[] | select(local_issue and open_issue) | .id] | sort),
-        local_open_rows: ([.[] | select(local_issue and open_issue) | issue_work_row] | sort_by(.priority, .id)),
-        source_aware_ready_rows: ([.[] | select(ready_issue) | issue_work_row] | sort_by(.priority, .id)),
+        local_open_rows: local_open_rows_arr,
+        source_aware_ready_rows: source_aware_ready_rows_arr,
+        source_aware_queue_state: (
+            source_aware_ready_rows_arr as $ready_rows
+            | permission_gated_rows_arr as $permission_gated
+            | blocked_local_rows_arr as $blocked_rows
+            | local_epic_rows_arr as $epic_rows
+            | {
+                schema_version: 1,
+                verdict: (
+                    if ($ready_rows | length) > 0 then
+                        "ready"
+                    elif (($permission_gated | length) > 0 and ($blocked_rows | length) > 0) then
+                        "blocked_or_permission_gated"
+                    elif ($permission_gated | length) > 0 then
+                        "permission_gated"
+                    elif ($blocked_rows | length) > 0 then
+                        "blocked"
+                    elif ($epic_rows | length) > 0 then
+                        "epic_only"
+                    else
+                        "empty"
+                    end
+                ),
+                claimable_count: ($ready_rows | length),
+                local_open_count: (local_open_rows_arr | length),
+                local_epic_count: ($epic_rows | length),
+                blocked_local_count: ($blocked_rows | length),
+                permission_gated_count: ($permission_gated | length),
+                excluded_foreign_open_count: foreign_open_count,
+                claimable_ids: ($ready_rows | map(.id)),
+                local_epic_ids: ($epic_rows | map(.id)),
+                blocked_local_ids: ($blocked_rows | map(.id)),
+                permission_gated_ids: ($permission_gated | map(.id)),
+                next_safe_actions: (
+                    if ($ready_rows | length) > 0 then
+                        ["claim one source_aware_ready row before creating fallback work"]
+                    elif ($permission_gated | length) > 0 then
+                        ["request the exact permission ACK before running permissioned rows", "create or claim only non-mutating fallback work"]
+                    elif ($blocked_rows | length) > 0 then
+                        ["inspect blocked_local_ids and unblock prerequisites first"]
+                    elif ($epic_rows | length) > 0 then
+                        ["create a narrow child bead under the open epic before editing code"]
+                    else
+                        ["run idea-wizard or a testing skill to create a new narrow bead"]
+                    end
+                )
+            }
+        ),
         local_graph_exports: {
             schema_version: 1,
             mutation_policy: "report-only; exports copy matching source rows without editing tracker state",
             local_open: {
                 path: $local_open_jsonl,
                 checksum_path: $local_open_sha256,
-                row_count: ([.[] | select(local_issue and open_issue)] | length),
+                row_count: (local_open_rows_arr | length),
                 id_count: ([.[] | select(local_issue and open_issue) | .id] | unique | length),
                 consumer_hint: "Use this JSONL as a local-only tracker input when br or bv output is polluted by foreign rows."
             },
             source_aware_ready: {
                 path: $source_aware_ready_jsonl,
                 checksum_path: $source_aware_ready_sha256,
-                row_count: ([.[] | select(ready_issue)] | length),
+                row_count: (source_aware_ready_rows_arr | length),
                 id_count: ([.[] | select(ready_issue) | .id] | unique | length),
                 consumer_hint: "Use this JSONL for claimable FrankenFS rows; it excludes epics, blocked rows, foreign rows, and permission-gated rows without the required ACK."
             }
         },
-        permission_gated_rows: (
-            [.[] | select(local_issue and open_issue and ((.issue_type // "") != "epic") and ((permission_gate // null) != null)) | issue_work_row + {permission_gate: permission_gate}]
-            | sort_by(.priority, .id)
-        ),
+        permission_gated_rows: permission_gated_rows_arr,
+        blocked_local_rows: blocked_local_rows_arr,
         foreign_open_samples: ([.[] | select(foreign_issue and open_issue) | issue_sample] | sort_by(.id) | .[0:20]),
         reproduction_commands: [
             "./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
@@ -253,6 +311,13 @@ if jq -e '
     and (.local_open_ids | type == "array")
     and (.local_open_rows | type == "array")
     and (.source_aware_ready_rows | type == "array")
+    and (.source_aware_queue_state.schema_version == 1)
+    and (.source_aware_queue_state.verdict as $verdict | (["ready", "blocked_or_permission_gated", "permission_gated", "blocked", "epic_only", "empty"] | index($verdict)) != null)
+    and (.source_aware_queue_state.claimable_count == (.source_aware_ready_rows | length))
+    and (.source_aware_queue_state.local_open_count == .local_open)
+    and (.source_aware_queue_state.permission_gated_count == (.permission_gated_rows | length))
+    and (.source_aware_queue_state.blocked_local_ids | type == "array")
+    and (.source_aware_queue_state.next_safe_actions | type == "array")
     and (.local_graph_exports.schema_version == 1)
     and (.local_graph_exports.local_open.path | test("tracker_source_hygiene_local_open\\.jsonl$"))
     and (.local_graph_exports.source_aware_ready.path | test("tracker_source_hygiene_source_aware_ready\\.jsonl$"))
@@ -326,9 +391,14 @@ if jq -e '
     (.local_open_rows | type == "array")
     and (.source_aware_ready_rows | type == "array")
     and (.permission_gated_rows | type == "array")
+    and (.blocked_local_rows | type == "array")
     and all(.source_aware_ready_rows[]; (.blocked_by | length) == 0)
     and all(.source_aware_ready_rows[]; has("permission_gate") | not)
     and all(.permission_gated_rows[]; (.permission_gate.present == false))
+    and all(.blocked_local_rows[]; (.blocked_by | length) > 0)
+    and (.source_aware_queue_state.claimable_ids == (.source_aware_ready_rows | map(.id)))
+    and (.source_aware_queue_state.permission_gated_ids == (.permission_gated_rows | map(.id)))
+    and (.source_aware_queue_state.blocked_local_ids == (.blocked_local_rows | map(.id)))
     and any(.reproduction_commands[]; contains("bd|frankenfs"))
 ' "$REPORT_JSON" >/dev/null; then
     scenario_result "tracker_source_hygiene_source_aware_wrapper" "PASS" "ready_rows=${READY_COUNT} excluded_foreign=${FOREIGN_OPEN_COUNT}"

@@ -908,16 +908,18 @@ TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT=1 \
 ```
 
 The report emits `local_open_rows`, `source_aware_ready_rows`,
-`local_graph_exports`, `permission_gated_rows`, `excluded_foreign_open_count`,
-prefix counts, foreign group summaries with owner hints, sample foreign rows,
-and exact reproduction commands. It also writes checksum-validated
+`source_aware_queue_state`, `local_graph_exports`, `permission_gated_rows`,
+`blocked_local_rows`, `excluded_foreign_open_count`, prefix counts, foreign
+group summaries with owner hints, sample foreign rows, and exact reproduction
+commands. It also writes checksum-validated
 `tracker_source_hygiene_local_open.jsonl` and
 `tracker_source_hygiene_source_aware_ready.jsonl` artifacts for source-aware
 graph/triage consumers. `source_aware_ready_rows` excludes real xfstests and
 permissioned large-host swarm rows until their explicit ACK env vars are
-present. Enable `TRACKER_SOURCE_HYGIENE_STRICT=1` only after the criteria in
-[docs/tracker-hygiene.md](../../docs/tracker-hygiene.md) are met; strict mode
-intentionally fails while foreign-looking open rows exist.
+present. `source_aware_queue_state.verdict` gives the safe queue explanation
+before agents create fallback work. Enable `TRACKER_SOURCE_HYGIENE_STRICT=1`
+only after the criteria in [docs/tracker-hygiene.md](../../docs/tracker-hygiene.md)
+are met; strict mode intentionally fails while foreign-looking open rows exist.
 
 ## Release Gate Evaluation
 
