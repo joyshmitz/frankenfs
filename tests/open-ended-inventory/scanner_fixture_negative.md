@@ -8,3 +8,4 @@ and the report must surface "lacks linked bead/artifact" errors.
 
 - We should add more cases here someday.
 - A fake delay can hide incomplete production behavior.
+- This path is not yet implemented.

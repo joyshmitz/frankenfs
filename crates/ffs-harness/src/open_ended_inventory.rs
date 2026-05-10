@@ -372,20 +372,23 @@ const ALLOWED_RISK_CATEGORIES: [&str; 9] = [
 const ALLOWED_SOURCE_STATUSES: [&str; 4] = ["active", "deferred", "sunset", "non_applicable"];
 
 const ALLOWED_FRESHNESS_STATES: [&str; 3] = ["fresh", "stale", "exempt"];
-const NOTE_MATCH_TOKENS: [&str; 9] = [
+const NOTE_MATCH_TOKENS: [&str; 12] = [
     "TODO",
     "FIXME",
     "NOTE",
     "non-goal",
     "bd-",
     "fake",
+    "mock",
+    "dummy",
     "placeholder",
     "stub",
+    "not yet implemented",
     "thread::sleep",
 ];
 pub const OPEN_ENDED_NOTE_SCANNER_VERSION: &str = "bd-mockscan-open-ended-note-scanner-v2";
 
-const OPEN_ENDED_NOTE_PATTERNS: [&str; 12] = [
+const OPEN_ENDED_NOTE_PATTERNS: [&str; 15] = [
     "add more cases",
     "expand corpus",
     "TODO fuzz",
@@ -394,8 +397,11 @@ const OPEN_ENDED_NOTE_PATTERNS: [&str; 12] = [
     "more goldens",
     "known gaps",
     "fake delay",
+    "mock implementation",
+    "dummy implementation",
     "placeholder implementation",
     "stub implementation",
+    "not yet implemented",
     "temporary sleep",
     "thread::sleep",
 ];
@@ -1399,7 +1405,14 @@ fn infer_note_risk_surface(line: &str, matched_phrase: &str) -> &'static str {
         "fuzz"
     } else if lower.contains("sleep") || lower.contains("delay") || lower.contains("backoff") {
         "runtime-liveness"
-    } else if lower.contains("fake") || lower.contains("stub") || lower.contains("placeholder") {
+    } else if lower.contains("fake")
+        || lower.contains("mock")
+        || lower.contains("dummy")
+        || lower.contains("stub")
+        || lower.contains("placeholder")
+        || lower.contains("not yet implemented")
+        || lower.contains("not implemented")
+    {
         "implementation-placeholder"
     } else if lower.contains("golden") {
         "golden-fixture"
@@ -1749,7 +1762,7 @@ mod tests {
             negative.scanner_version
         );
         assert!(!negative.valid);
-        assert_eq!(negative.unresolved_note_count, 2);
+        assert_eq!(negative.unresolved_note_count, 3);
         assert!(
             negative
                 .errors
@@ -1758,6 +1771,10 @@ mod tests {
         );
         assert!(negative.rows.iter().any(|row| {
             row.matched_phrase == "fake delay" && row.risk_surface == "runtime-liveness"
+        }));
+        assert!(negative.rows.iter().any(|row| {
+            row.matched_phrase == "not yet implemented"
+                && row.risk_surface == "implementation-placeholder"
         }));
     }
 

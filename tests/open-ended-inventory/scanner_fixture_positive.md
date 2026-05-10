@@ -11,8 +11,11 @@ classifies each row into a closed lane (no unresolved notes).
 - more goldens is tracked by bd-l7ov7 with artifact tests/open-ended-inventory/more_goldens.json
 - known gaps is tracked by bd-l7ov7 with artifact tests/open-ended-inventory/known_gaps.json
 - fake delay is tracked by bd-mockscan with artifact tests/open-ended-inventory/fake_delay.json
+- mock implementation is tracked by bd-mockscan with artifact tests/open-ended-inventory/mock_implementation.json
+- dummy implementation is tracked by bd-mockscan with artifact tests/open-ended-inventory/dummy_implementation.json
 - placeholder implementation is tracked by bd-mockscan with artifact tests/open-ended-inventory/placeholder_implementation.json
 - stub implementation is tracked by bd-mockscan with artifact tests/open-ended-inventory/stub_implementation.json
+- not yet implemented is tracked by bd-mockscan with artifact tests/open-ended-inventory/not_yet_implemented.json
 - temporary sleep is tracked by bd-mockscan with artifact tests/open-ended-inventory/temporary_sleep.json
 - thread::sleep is tracked by bd-mockscan with artifact tests/open-ended-inventory/thread_sleep.json
 

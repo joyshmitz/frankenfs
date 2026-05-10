@@ -130,8 +130,8 @@ if positive["false_positive_count"] < 2:
     raise SystemExit("positive fixture should include false-positive controls")
 if positive["unresolved_note_count"] != 0:
     raise SystemExit("positive fixture should have no unresolved rows")
-if negative["unresolved_note_count"] != 2:
-    raise SystemExit("negative fixture should have exactly two unresolved rows")
+if negative["unresolved_note_count"] != 3:
+    raise SystemExit("negative fixture should have exactly three unresolved rows")
 if not any("lacks linked bead/artifact" in error for error in negative["errors"]):
     raise SystemExit("negative report missing linkage diagnostic")
 
@@ -144,8 +144,11 @@ required_patterns = {
     "more goldens",
     "known gaps",
     "fake delay",
+    "mock implementation",
+    "dummy implementation",
     "placeholder implementation",
     "stub implementation",
+    "not yet implemented",
     "temporary sleep",
     "thread::sleep",
 }
