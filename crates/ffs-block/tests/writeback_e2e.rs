@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 const BLOCK_SIZE: u32 = 4096;
+const DIRTY_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 #[derive(Clone, Debug)]
 struct SharedMemoryByteDevice {
@@ -138,11 +139,16 @@ fn blake3_hex(bytes: &[u8]) -> String {
 
 fn wait_for_dirty_drain(cache: &Arc<WriteBackCache>, timeout: Duration) {
     let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
+    loop {
         if cache.dirty_count() == 0 {
             return;
         }
-        std::thread::sleep(Duration::from_millis(5));
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        std::thread::sleep(DIRTY_DRAIN_POLL_INTERVAL.min(remaining));
     }
     assert_eq!(cache.dirty_count(), 0, "dirty blocks did not drain in time");
 }
