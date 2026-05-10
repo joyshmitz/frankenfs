@@ -10660,6 +10660,8 @@ write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
         use std::thread;
         use std::time::{Duration, Instant};
 
+        const INJECTOR_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
         struct PassThrough;
         impl BlockDevice for PassThrough {
             fn read_block(&self, _cx: &Cx, _block: BlockNumber) -> Result<BlockBuf> {
@@ -10687,15 +10689,21 @@ write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
         let deadline = Instant::now() + Duration::from_secs(15);
         let watchdog_done = StdArc::clone(&done);
         let watchdog = thread::spawn(move || {
-            while Instant::now() < deadline {
+            loop {
                 if watchdog_done.load(AtomicOrdering::Acquire) {
                     return;
                 }
-                thread::sleep(Duration::from_millis(50));
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                thread::sleep(INJECTOR_WATCHDOG_POLL_INTERVAL.min(remaining));
             }
-            panic!(
-                "bd-6owbg: FaultInjector lock-ordering watchdog tripped — \
-                 inject/reset/log workers did not finish within 15s"
+            assert!(
+                watchdog_done.load(AtomicOrdering::Acquire),
+                "bd-6owbg: FaultInjector lock-ordering watchdog tripped - \
+                 inject/reset/log workers did not finish within 15s",
             );
         });
 
@@ -10736,8 +10744,13 @@ write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
         worker_b.join().expect("worker B panicked");
         worker_c.join().expect("worker C panicked");
         worker_d.join().expect("worker D panicked");
+        let watchdog_join_started = Instant::now();
         done.store(true, AtomicOrdering::Release);
         watchdog.join().expect("watchdog panicked");
+        assert!(
+            watchdog_join_started.elapsed() <= INJECTOR_WATCHDOG_POLL_INTERVAL * 25,
+            "watchdog should observe completion promptly after workers finish"
+        );
     }
 
     /// bd-6owbg — regression guard for the never-hold-both
@@ -10751,6 +10764,8 @@ write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
         use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         use std::thread;
         use std::time::{Duration, Instant};
+
+        const INJECTOR_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
         struct PassThrough;
         impl BlockDevice for PassThrough {
@@ -10787,15 +10802,21 @@ write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
         let deadline = Instant::now() + Duration::from_secs(15);
         let watchdog_done = StdArc::clone(&done);
         let watchdog = thread::spawn(move || {
-            while Instant::now() < deadline {
+            loop {
                 if watchdog_done.load(AtomicOrdering::Acquire) {
                     return;
                 }
-                thread::sleep(Duration::from_millis(50));
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                thread::sleep(INJECTOR_WATCHDOG_POLL_INTERVAL.min(remaining));
             }
-            panic!(
-                "bd-6owbg: ThrottleInjector lock-ordering watchdog tripped — \
-                 apply/update/log/reset workers did not finish within 15s"
+            assert!(
+                watchdog_done.load(AtomicOrdering::Acquire),
+                "bd-6owbg: ThrottleInjector lock-ordering watchdog tripped - \
+                 apply/update/log/reset workers did not finish within 15s",
             );
         });
 
@@ -10843,7 +10864,12 @@ write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
         worker_b.join().expect("worker B panicked");
         worker_c.join().expect("worker C panicked");
         worker_d.join().expect("worker D panicked");
+        let watchdog_join_started = Instant::now();
         done.store(true, AtomicOrdering::Release);
         watchdog.join().expect("watchdog panicked");
+        assert!(
+            watchdog_join_started.elapsed() <= INJECTOR_WATCHDOG_POLL_INTERVAL * 25,
+            "watchdog should observe completion promptly after workers finish"
+        );
     }
 }
