@@ -24,7 +24,7 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, trace, warn};
@@ -3014,14 +3014,14 @@ impl FlushDaemonConfig {
 /// Handle for a running background flush daemon.
 #[derive(Debug)]
 pub struct FlushDaemon {
-    stop: Arc<AtomicBool>,
+    stop: Arc<FlushDaemonStop>,
     join: Option<JoinHandle<()>>,
 }
 
 impl FlushDaemon {
     /// Request shutdown and block until the daemon exits.
     pub fn shutdown(mut self) {
-        self.stop.store(true, Ordering::Release);
+        self.stop.request_stop();
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -3030,10 +3030,44 @@ impl FlushDaemon {
 
 impl Drop for FlushDaemon {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
+        self.stop.request_stop();
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
+    }
+}
+
+struct FlushDaemonStop {
+    stopped: Mutex<bool>,
+    condvar: Condvar,
+}
+
+impl std::fmt::Debug for FlushDaemonStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlushDaemonStop").finish_non_exhaustive()
+    }
+}
+
+impl FlushDaemonStop {
+    fn new() -> Self {
+        Self {
+            stopped: Mutex::new(false),
+            condvar: Condvar::new(),
+        }
+    }
+
+    fn request_stop(&self) {
+        *self.stopped.lock() = true;
+        self.condvar.notify_all();
+    }
+
+    fn wait_interval_or_stopped(&self, interval: Duration) -> bool {
+        let mut stopped = self.stopped.lock();
+        if *stopped {
+            return true;
+        }
+        self.condvar.wait_for(&mut stopped, interval);
+        *stopped
     }
 }
 
@@ -3517,9 +3551,9 @@ impl<D: BlockDevice> ArcCache<D> {
         D: 'static,
     {
         let config = config.validate()?;
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(FlushDaemonStop::new());
         let cache = Arc::clone(self);
-        let stop_flag = Arc::clone(&stop);
+        let stop_signal = Arc::clone(&stop);
 
         let join = thread::Builder::new()
             .name("ffs-flush-daemon".to_owned())
@@ -3530,11 +3564,9 @@ impl<D: BlockDevice> ArcCache<D> {
                 let mut daemon_throttled = false;
 
                 loop {
-                    if stop_flag.load(Ordering::Acquire) {
+                    if stop_signal.wait_interval_or_stopped(config.interval) {
                         break;
                     }
-
-                    thread::sleep(config.interval);
                     cycle_seq = cycle_seq.saturating_add(1);
                     cache.run_flush_daemon_cycle(&cx, &config, cycle_seq, &mut daemon_throttled);
                 }
@@ -5995,6 +6027,49 @@ mod tests {
         daemon.shutdown();
         assert_eq!(cache.dirty_count(), 0);
         assert_eq!(cache.inner().write_count(), 6);
+    }
+
+    #[test]
+    fn flush_daemon_shutdown_wakes_sleeping_interval_promptly() -> Result<()> {
+        use std::sync::Arc as StdArc;
+
+        let mem = MemoryByteDevice::new(4096 * 8);
+        let dev = ByteBlockDevice::new(mem, 4096)?;
+        let counted = CountingBlockDevice::new(dev);
+        let cache = StdArc::new(ArcCache::new_with_policy(
+            counted,
+            8,
+            ArcWritePolicy::WriteBack,
+        )?);
+        let interval = Duration::from_secs(2);
+        let daemon = cache.start_flush_daemon(FlushDaemonConfig {
+            interval,
+            batch_size: 1,
+            ..FlushDaemonConfig::default()
+        })?;
+
+        let started = Instant::now();
+        daemon.shutdown();
+        let elapsed = started.elapsed();
+
+        if elapsed >= interval / 4 {
+            return Err(FfsError::Format(format!(
+                "shutdown should wake the daemon instead of waiting for interval, elapsed={elapsed:?}"
+            )));
+        }
+        if cache.dirty_count() != 0 {
+            return Err(FfsError::Format(format!(
+                "shutdown should leave no dirty blocks, dirty_count={}",
+                cache.dirty_count()
+            )));
+        }
+        if cache.inner().write_count() != 0 {
+            return Err(FfsError::Format(format!(
+                "idle shutdown should not write blocks, write_count={}",
+                cache.inner().write_count()
+            )));
+        }
+        Ok(())
     }
 
     #[test]
