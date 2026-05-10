@@ -8,6 +8,115 @@
 | `managed` | `--runtime-mode managed` | Background mount with graceful Ctrl+C shutdown and metrics. |
 | `per-core` | `--runtime-mode per-core` | Managed mount with thread-per-core dispatch and per-core metrics. |
 
+## Topology Runtime Advisor
+
+The topology runtime advisor is a non-permissioned preflight for choosing a
+runtime mode before a later permissioned `bd-rchk0.53.8` swarm responsiveness
+campaign. It validates and scores `docs/topology-runtime-advisor-manifest.json`,
+emits dry-run artifacts, and preserves `advisory_only` plus
+`product_evidence_claim=none`. It is not xfstests evidence, not
+`swarm.responsiveness` evidence, not an `adaptive_runtime` proof-bundle pass, and
+not a public release readiness upgrade.
+
+Run the validation and scoring lanes through RCH when producing repo evidence:
+
+```bash
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- \
+  env CARGO_TARGET_DIR=/data/projects/.cargo-target-frankenfs-topology-advisor \
+  cargo run --quiet -p ffs-harness -- validate-topology-runtime-advisor \
+    --manifest docs/topology-runtime-advisor-manifest.json \
+    --out artifacts/topology-advisor/report.json \
+    --summary-out artifacts/topology-advisor/summary.md \
+    --structured-log-out artifacts/topology-advisor/structured.jsonl
+
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- \
+  env CARGO_TARGET_DIR=/data/projects/.cargo-target-frankenfs-topology-advisor \
+  cargo run --quiet -p ffs-harness -- score-topology-runtime-advisor \
+    --manifest docs/topology-runtime-advisor-manifest.json \
+    --out artifacts/topology-advisor/score.json \
+    --summary-out artifacts/topology-advisor/score.md \
+    --structured-log-out artifacts/topology-advisor/score.jsonl
+```
+
+### Manifest Fields
+
+| Field | Operator meaning |
+|-------|------------------|
+| `manifest_version` | Schema version; current value is `1`. |
+| `operation_id`, `scenario_id` | Stable identifiers for the advisory run and workload scenario. |
+| `source_bead` | Bead that produced the advisor package; this should remain in the `bd-rchk0.212.*` family. |
+| `real_campaign_bead` | Permissioned campaign handoff target; use `bd-rchk0.53.8` for swarm responsiveness. |
+| `generated_at`, `expires_at` | Freshness window; stale or future manifests fail closed. |
+| `manifest_path`, `artifact_root`, `artifact_paths` | Relative paths for the manifest and emitted artifacts. Use a new artifact root for each run. |
+| `host_topology` | CPU count, NUMA visibility, RAM bytes, and storage profile used for candidate scoring. |
+| `fuse_capability` | FUSE availability used to reject managed/per-core candidates when `/dev/fuse` is absent or denied. |
+| `rch_worker_identity` | Optional worker fingerprint; refresh the manifest if the worker changes before handoff. |
+| `resource_caps` | Duration, thread, memory, temp-storage, and queue-depth limits for the later campaign plan. |
+| `runtime_candidates` | Candidate modes (`standard`, `managed`, `per_core`) and the operator reason each is allowed. |
+| `workload_shapes` | Hot-inode concentration, directory fanout, read/write mix, fsync cadence, dirty bytes, and queue depth. |
+| `command_transcript` | Invocation and stdout/stderr/JSON/Markdown/log destinations for reproducibility. |
+| `product_evidence_claim` | Must be `none`. |
+| `release_gate_effect` | Must be `advisory_only`. |
+
+### Report Interpretation
+
+| Report field | How to use it |
+|--------------|---------------|
+| `valid` / `outcome` | `true` / `pass` means the advisory input is well-formed and fresh; it still is not product evidence. |
+| `host_classification` | `large_host_floor_met` means the manifest describes enough CPU/RAM/NUMA for per-core scoring; it is not a release state. |
+| `fuse_capability_state` | `available` keeps managed/per-core candidates eligible; missing or denied FUSE keeps those candidates rejected. |
+| `recommendation` | Suggested runtime mode for the later campaign command line. `none` means stay on `standard` or refresh inputs. |
+| `confidence_tier` | `high`, `medium`, `low`, or `no_recommendation`; low confidence should trigger another manifest pass before handoff. |
+| `candidate_scores` | Ordered candidate scores with rejection reasons and rationale for mode selection. |
+| `rejected_candidates` | Count of modes rejected by manifest capability or operator configuration. |
+| `loss_risk_ledger` | Expected-loss signals such as `hot_inode_imbalance`, `small_host_downgrade`, and `writeback_backpressure`. |
+| `release_claim_state` | Must remain `not_product_evidence` in score output. |
+
+Use the recommendation only to choose the planned `ffs mount --runtime-mode`
+value for a real campaign. Prefer `managed` when the ledger shows
+`hot_inode_imbalance` or `writeback_backpressure`; prefer `per-core` only when
+the host topology floor is visible, FUSE is available, and read-heavy fanout is
+the dominant signal. Keep `standard` for low confidence, missing capabilities,
+or no recommendation.
+
+### Permissioned Handoff
+
+The handoff target for swarm responsiveness is `bd-rchk0.53.8`. Attach the
+advisor validation report, score report, structured logs, manifest hash, and
+artifact paths to the permissioned campaign packet. The real campaign still
+requires:
+
+```bash
+FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1
+FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host
+FFS_SWARM_WORKLOAD_PERMISSIONED_RUNNER=<configured runner>
+```
+
+The advisor output must not consume those tokens, run the campaign, or mark
+`swarm.responsiveness` complete. xfstests remains under its own explicit
+`XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices` contract
+and is not affected by topology advisor reports.
+
+### Forbidden Promotions
+
+| Do not claim from advisor output | Required wording |
+|----------------------------------|------------------|
+| `swarm.responsiveness` validated | `swarm.responsiveness` remains blocked until `bd-rchk0.53.8` produces raw workload logs, p99 attribution, proof-bundle lanes, cleanup status, and release-gate output. |
+| xfstests pass/fail/not-run baseline | Topology advisor reports are unrelated to xfstests execution evidence. |
+| `adaptive_runtime` proof-bundle pass | Advisor reports can feed planning only; proof-bundle lanes need their own fresh artifacts. |
+| accepted large-host release state | Host topology floor visibility is advisory input, not release acceptance. |
+| public readiness upgrade | `product_evidence_claim=none` and `release_gate_effect=advisory_only`. |
+
+### Troubleshooting
+
+| Symptom | Likely cause | Operator action |
+|---------|--------------|-----------------|
+| High imbalance or `hot_inode_imbalance` | One inode or directory shard dominates request routing. | Plan `managed`, reduce per-core expectations, and capture the hot workload shape for the real campaign. |
+| Low NUMA visibility or `small_host_downgrade` | The worker exposes too few CPUs, too little RAM, or fewer than two NUMA nodes. | Refresh the host probe on a capable worker; keep `per_core` rejected until the large-host floor is visible. |
+| Missing FUSE capability | `/dev/fuse` is absent, denied, or disabled by operator policy. | Fix host capability before managed/per-core campaign planning; do not treat the advisory skip as mount evidence. |
+| Stale RCH worker fingerprint | `generated_at` is too old or `rch_worker_identity` no longer matches the intended worker. | Regenerate the manifest and rerun validation/scoring before handoff. |
+| Overloaded artifact root | Multiple runs share the same `artifact_root` or logs are too large to inspect. | Use a unique artifact root for the next run and preserve the previous artifact paths in the packet. |
+
 ## Hostile-Image Boundary
 
 Mount runtime mode does not upgrade hostile-image readiness by itself. Malformed

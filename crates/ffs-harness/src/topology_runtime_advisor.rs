@@ -1679,6 +1679,50 @@ mod tests {
         assert!(!log.contains("accepted_large_host"));
     }
 
+    #[test]
+    fn operator_docs_preserve_advisory_topology_boundary() {
+        let docs = include_str!("../../../docs/mount-runtime-modes.md");
+        for required in [
+            "validate-topology-runtime-advisor",
+            "score-topology-runtime-advisor",
+            "docs/topology-runtime-advisor-manifest.json",
+            "advisory_only",
+            "product_evidence_claim=none",
+            "release_gate_effect=advisory_only",
+            "bd-rchk0.53.8",
+            "FFS_SWARM_WORKLOAD_REAL_RUN_ACK",
+            "swarm-workload-may-use-permissioned-large-host",
+            "XFSTESTS_REAL_RUN_ACK",
+            "Forbidden Promotions",
+            "High imbalance",
+            "Low NUMA visibility",
+            "Missing FUSE capability",
+            "Stale RCH worker fingerprint",
+            "Overloaded artifact root",
+        ] {
+            assert!(docs.contains(required), "missing docs phrase: {required}");
+        }
+
+        let normalized = docs.to_ascii_lowercase();
+        for forbidden in [
+            "topology advisor validates swarm.responsiveness",
+            "topology advisor validates xfstests",
+            "topology advisor validates adaptive_runtime",
+            "topology advisor produces accepted_large_host",
+            "topology advisor upgrades public readiness",
+            "advisory report validates swarm.responsiveness",
+            "advisory reports validate swarm.responsiveness",
+            "product_evidence_claim=product_pass_fail",
+            "release_gate_effect=accepted_large_host",
+            "release_gate_effect=product_pass",
+        ] {
+            assert!(
+                !normalized.contains(forbidden),
+                "docs contain forbidden promotion wording: {forbidden}"
+            );
+        }
+    }
+
     fn validate_fixture(manifest: &TopologyRuntimeAdvisorManifest) -> TopologyRuntimeAdvisorReport {
         validate_topology_runtime_advisor_manifest_with_config(
             manifest,
