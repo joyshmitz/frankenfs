@@ -2249,6 +2249,141 @@ mod tests {
         );
     }
 
+    /// bd-ormcf — Kernel-conformance pin for the btrfs_super_block
+    /// field offsets per fs/btrfs/btrfs_tree.h. Each field is stamped
+    /// with a UNIQUE non-zero magic at its canonical kernel offset,
+    /// then a single BtrfsSuperblock::parse_superblock_region call
+    /// must round-trip every field. The btrfs superblock is the entry
+    /// point for every mount/probe; a regression that drifted any
+    /// single offset would silently corrupt the bootstrap state and
+    /// either fail to mount or mount with wrong tree pointers.
+    ///
+    /// Sister kernel pins: bd-latwe (BtrfsHeader), bd-na4cc
+    /// (BtrfsDevItem), bd-h117q (size constants), bd-2zmia (slot
+    /// layouts), bd-swwp0 (parse_extent_data), bd-nzs5f
+    /// (parse_inode_item), bd-xbqdw (parse_root_item).
+    #[test]
+    fn btrfs_super_block_kernel_offsets_match_btrfs_tree_h() {
+        // 32-byte csum and 16-byte fsid: distinct first/last bytes so
+        // a slice-direction drift surfaces.
+        let mut csum = [0_u8; 32];
+        csum[0] = 0xC1;
+        csum[31] = 0xC2;
+        let mut fsid = [0_u8; 16];
+        fsid[0] = 0xF1;
+        fsid[15] = 0xF2;
+
+        // Distinct non-zero magics. Constraints:
+        //   bytes_used must be <= total_bytes
+        //   sectorsize / nodesize must be non-zero power-of-two <= 256K
+        //   stripesize must be 0 or power-of-two <= 256K
+        //   root_level / chunk_root_level / log_root_level must be <= 7
+        //   csum_type must be 0..=3
+        //   sys_chunk_array_size must be <= 2048
+        //   magic must equal BTRFS_MAGIC
+        let bytenr = 0x3030_3030_3030_3030_u64;
+        let flags = 0x3838_3838_3838_3838_u64;
+        let generation = 0x4848_4848_4848_4848_u64;
+        let root = 0x5050_5050_5050_5050_u64;
+        let chunk_root = 0x5858_5858_5858_5858_u64;
+        let log_root = 0x6060_6060_6060_6060_u64;
+        let total_bytes = 0x7070_7070_7070_7070_u64;
+        let bytes_used = 0x0000_0000_0000_0010_u64; // small, < total_bytes
+        let root_dir_objectid = 0x8080_8080_8080_8080_u64;
+        let num_devices = 0x8888_8888_8888_8888_u64;
+        let sectorsize: u32 = 0x1000; // 4096
+        let nodesize: u32 = 0x4000; // 16384
+        let stripesize: u32 = 0x10000; // 65536
+        let sys_chunk_array_size: u32 = 0; // no payload to satisfy bounds easily
+        let compat_flags = 0xACAC_ACAC_ACAC_ACAC_u64;
+        let compat_ro_flags = 0xB4B4_B4B4_B4B4_B4B4_u64;
+        let incompat_flags = 0xBCBC_BCBC_BCBC_BCBC_u64;
+        let csum_type: u16 = ffs_types::BTRFS_CSUM_TYPE_CRC32C;
+        let root_level: u8 = 0x05;
+        let chunk_root_level: u8 = 0x06;
+        let log_root_level: u8 = 0x07;
+        let label_seed: &[u8] = b"FRANKEN-PIN";
+
+        let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+        sb[0x00..0x20].copy_from_slice(&csum);
+        sb[0x20..0x30].copy_from_slice(&fsid);
+        sb[0x30..0x38].copy_from_slice(&bytenr.to_le_bytes());
+        sb[0x38..0x40].copy_from_slice(&flags.to_le_bytes());
+        sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+        sb[0x48..0x50].copy_from_slice(&generation.to_le_bytes());
+        sb[0x50..0x58].copy_from_slice(&root.to_le_bytes());
+        sb[0x58..0x60].copy_from_slice(&chunk_root.to_le_bytes());
+        sb[0x60..0x68].copy_from_slice(&log_root.to_le_bytes());
+        sb[0x70..0x78].copy_from_slice(&total_bytes.to_le_bytes());
+        sb[0x78..0x80].copy_from_slice(&bytes_used.to_le_bytes());
+        sb[0x80..0x88].copy_from_slice(&root_dir_objectid.to_le_bytes());
+        sb[0x88..0x90].copy_from_slice(&num_devices.to_le_bytes());
+        sb[0x90..0x94].copy_from_slice(&sectorsize.to_le_bytes());
+        sb[0x94..0x98].copy_from_slice(&nodesize.to_le_bytes());
+        sb[0x9C..0xA0].copy_from_slice(&stripesize.to_le_bytes());
+        sb[0xA0..0xA4].copy_from_slice(&sys_chunk_array_size.to_le_bytes());
+        sb[0xAC..0xB4].copy_from_slice(&compat_flags.to_le_bytes());
+        sb[0xB4..0xBC].copy_from_slice(&compat_ro_flags.to_le_bytes());
+        sb[0xBC..0xC4].copy_from_slice(&incompat_flags.to_le_bytes());
+        sb[0xC4..0xC6].copy_from_slice(&csum_type.to_le_bytes());
+        sb[0xC6] = root_level;
+        sb[0xC7] = chunk_root_level;
+        sb[0xC8] = log_root_level;
+        sb[BTRFS_SUPER_LABEL_OFFSET..BTRFS_SUPER_LABEL_OFFSET + label_seed.len()]
+            .copy_from_slice(label_seed);
+
+        let parsed =
+            BtrfsSuperblock::parse_superblock_region(&sb).expect("kernel-stamped sb must parse");
+
+        assert_eq!(parsed.csum, csum, "csum @ 0x00..0x20");
+        assert_eq!(parsed.fsid, fsid, "fsid @ 0x20..0x30");
+        assert_eq!(parsed.bytenr, bytenr, "bytenr @ 0x30..0x38");
+        assert_eq!(parsed.flags, flags, "flags @ 0x38..0x40");
+        assert_eq!(parsed.magic, BTRFS_MAGIC, "magic @ 0x40..0x48");
+        assert_eq!(parsed.generation, generation, "generation @ 0x48..0x50");
+        assert_eq!(parsed.root, root, "root @ 0x50..0x58");
+        assert_eq!(parsed.chunk_root, chunk_root, "chunk_root @ 0x58..0x60");
+        assert_eq!(parsed.log_root, log_root, "log_root @ 0x60..0x68");
+        assert_eq!(parsed.total_bytes, total_bytes, "total_bytes @ 0x70..0x78");
+        assert_eq!(parsed.bytes_used, bytes_used, "bytes_used @ 0x78..0x80");
+        assert_eq!(
+            parsed.root_dir_objectid, root_dir_objectid,
+            "root_dir_objectid @ 0x80..0x88"
+        );
+        assert_eq!(parsed.num_devices, num_devices, "num_devices @ 0x88..0x90");
+        assert_eq!(parsed.sectorsize, sectorsize, "sectorsize @ 0x90..0x94");
+        assert_eq!(parsed.nodesize, nodesize, "nodesize @ 0x94..0x98");
+        assert_eq!(parsed.stripesize, stripesize, "stripesize @ 0x9C..0xA0");
+        assert_eq!(
+            parsed.sys_chunk_array_size, sys_chunk_array_size,
+            "sys_chunk_array_size @ 0xA0..0xA4"
+        );
+        assert_eq!(parsed.compat_flags, compat_flags, "compat_flags @ 0xAC..0xB4");
+        assert_eq!(
+            parsed.compat_ro_flags, compat_ro_flags,
+            "compat_ro_flags @ 0xB4..0xBC"
+        );
+        assert_eq!(
+            parsed.incompat_flags, incompat_flags,
+            "incompat_flags @ 0xBC..0xC4"
+        );
+        assert_eq!(parsed.csum_type, csum_type, "csum_type @ 0xC4..0xC6");
+        assert_eq!(parsed.root_level, root_level, "root_level @ 0xC6");
+        assert_eq!(
+            parsed.chunk_root_level, chunk_root_level,
+            "chunk_root_level @ 0xC7"
+        );
+        assert_eq!(
+            parsed.log_root_level, log_root_level,
+            "log_root_level @ 0xC8"
+        );
+        assert_eq!(
+            parsed.label,
+            std::str::from_utf8(label_seed).unwrap(),
+            "label @ BTRFS_SUPER_LABEL_OFFSET (0x12B)"
+        );
+    }
+
     /// bd-2zmia — Kernel-conformance pin for the btrfs_key_ptr slot
     /// field offsets per fs/btrfs/ctree.h. parse_internal_items reads
     /// each slot at BTRFS_HEADER_SIZE + idx*BTRFS_KEY_PTR_SIZE with
@@ -2284,8 +2419,8 @@ mod tests {
         block[base + 17..base + 25].copy_from_slice(&blockptr.to_le_bytes());
         block[base + 25..base + 33].copy_from_slice(&generation.to_le_bytes());
 
-        let (_header, ptrs) = parse_internal_items(&block)
-            .expect("kernel-stamped internal node must parse");
+        let (_header, ptrs) =
+            parse_internal_items(&block).expect("kernel-stamped internal node must parse");
 
         assert_eq!(ptrs.len(), 1);
         let ptr = &ptrs[0];
@@ -2330,8 +2465,7 @@ mod tests {
         block[base + 17..base + 21].copy_from_slice(&raw_data_offset.to_le_bytes());
         block[base + 21..base + 25].copy_from_slice(&data_size.to_le_bytes());
 
-        let (_header, items) =
-            parse_leaf_items(&block).expect("kernel-stamped leaf must parse");
+        let (_header, items) = parse_leaf_items(&block).expect("kernel-stamped leaf must parse");
 
         assert_eq!(items.len(), 1);
         let item = &items[0];
@@ -5444,8 +5578,7 @@ mod tests {
         data[66..82].copy_from_slice(&uuid);
         data[82..98].copy_from_slice(&fsid);
 
-        let parsed =
-            parse_dev_item(&data).expect("kernel-stamped dev_item must parse");
+        let parsed = parse_dev_item(&data).expect("kernel-stamped dev_item must parse");
 
         assert_eq!(parsed.devid, devid, "devid @0..8");
         assert_eq!(parsed.total_bytes, total_bytes, "total_bytes @8..16");
