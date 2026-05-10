@@ -710,6 +710,7 @@ mod tests {
     use super::*;
     use ffs_block::BlockBuf;
     use parking_lot::Mutex;
+    use proptest::prelude::*;
     use std::collections::HashMap;
 
     struct MemBlockDevice {
@@ -1343,5 +1344,62 @@ mod tests {
             [BlockNumber(101), BlockNumber(102)]
         );
         assert_eq!(layout.group_end_exclusive(), 103);
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_layout_tail_regions_translate_with_group_start(
+            group in 0_u32..1024,
+            group_start in 0_u64..1_000_000,
+            shift in 0_u64..1_000_000,
+            validation_blocks in 0_u32..512,
+            repair_blocks in 1_u32..512,
+            slack_blocks in 0_u32..512,
+        ) {
+            let blocks_per_group = validation_blocks
+                .saturating_add(repair_blocks)
+                .saturating_add(REPAIR_DESC_SLOT_COUNT)
+                .saturating_add(slack_blocks);
+            let shifted_group_start = group_start + shift;
+
+            let layout = RepairGroupLayout::new(
+                GroupNumber(group),
+                BlockNumber(group_start),
+                blocks_per_group,
+                validation_blocks,
+                repair_blocks,
+            )
+            .expect("generated layout should fit");
+            let shifted = RepairGroupLayout::new(
+                GroupNumber(group),
+                BlockNumber(shifted_group_start),
+                blocks_per_group,
+                validation_blocks,
+                repair_blocks,
+            )
+            .expect("shifted layout should fit");
+
+            let descriptors = layout.descriptor_blocks();
+            prop_assert!(layout.validation_start_block().0 <= layout.repair_start_block().0);
+            prop_assert_eq!(
+                layout.repair_start_block().0 + u64::from(repair_blocks),
+                descriptors[0].0
+            );
+            prop_assert_eq!(descriptors[0].0 + 1, descriptors[1].0);
+            prop_assert_eq!(descriptors[1].0 + 1, layout.group_end_exclusive());
+
+            let shifted_descriptors = shifted.descriptor_blocks();
+            prop_assert_eq!(
+                shifted.validation_start_block().0,
+                layout.validation_start_block().0 + shift
+            );
+            prop_assert_eq!(
+                shifted.repair_start_block().0,
+                layout.repair_start_block().0 + shift
+            );
+            prop_assert_eq!(shifted_descriptors[0].0, descriptors[0].0 + shift);
+            prop_assert_eq!(shifted_descriptors[1].0, descriptors[1].0 + shift);
+            prop_assert_eq!(shifted.group_end_exclusive(), layout.group_end_exclusive() + shift);
+        }
     }
 }
