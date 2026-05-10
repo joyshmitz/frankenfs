@@ -33,6 +33,10 @@ e2e_init "ffs_tracker_source_hygiene"
 
 ISSUES_JSONL="${TRACKER_SOURCE_HYGIENE_ISSUES:-$REPO_ROOT/.beads/issues.jsonl}"
 REPORT_JSON="${E2E_LOG_DIR}/tracker_source_hygiene_report.json"
+LOCAL_OPEN_JSONL="${E2E_LOG_DIR}/tracker_source_hygiene_local_open.jsonl"
+SOURCE_AWARE_READY_JSONL="${E2E_LOG_DIR}/tracker_source_hygiene_source_aware_ready.jsonl"
+LOCAL_OPEN_SHA256="${LOCAL_OPEN_JSONL}.sha256"
+SOURCE_AWARE_READY_SHA256="${SOURCE_AWARE_READY_JSONL}.sha256"
 STRICT_MODE=0
 STRICT_JSON=false
 
@@ -57,6 +61,10 @@ e2e_step "Parse tracker JSONL and emit report"
 if jq -s \
     --arg run_id "$(basename "$E2E_LOG_DIR")" \
     --arg issues_path "$ISSUES_JSONL" \
+    --arg local_open_jsonl "$LOCAL_OPEN_JSONL" \
+    --arg source_aware_ready_jsonl "$SOURCE_AWARE_READY_JSONL" \
+    --arg local_open_sha256 "$LOCAL_OPEN_SHA256" \
+    --arg source_aware_ready_sha256 "$SOURCE_AWARE_READY_SHA256" \
     --arg xfstests_ack "${XFSTESTS_REAL_RUN_ACK:-}" \
     --arg swarm_enable "${FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD:-}" \
     --arg swarm_ack "${FFS_SWARM_WORKLOAD_REAL_RUN_ACK:-}" \
@@ -195,6 +203,24 @@ if jq -s \
         local_open_ids: ([.[] | select(local_issue and open_issue) | .id] | sort),
         local_open_rows: ([.[] | select(local_issue and open_issue) | issue_work_row] | sort_by(.priority, .id)),
         source_aware_ready_rows: ([.[] | select(ready_issue) | issue_work_row] | sort_by(.priority, .id)),
+        local_graph_exports: {
+            schema_version: 1,
+            mutation_policy: "report-only; exports copy matching source rows without editing tracker state",
+            local_open: {
+                path: $local_open_jsonl,
+                checksum_path: $local_open_sha256,
+                row_count: ([.[] | select(local_issue and open_issue)] | length),
+                id_count: ([.[] | select(local_issue and open_issue) | .id] | unique | length),
+                consumer_hint: "Use this JSONL as a local-only tracker input when br or bv output is polluted by foreign rows."
+            },
+            source_aware_ready: {
+                path: $source_aware_ready_jsonl,
+                checksum_path: $source_aware_ready_sha256,
+                row_count: ([.[] | select(ready_issue)] | length),
+                id_count: ([.[] | select(ready_issue) | .id] | unique | length),
+                consumer_hint: "Use this JSONL for claimable FrankenFS rows; it excludes epics, blocked rows, foreign rows, and permission-gated rows without the required ACK."
+            }
+        },
         permission_gated_rows: (
             [.[] | select(local_issue and open_issue and ((.issue_type // "") != "epic") and ((permission_gate // null) != null)) | issue_work_row + {permission_gate: permission_gate}]
             | sort_by(.priority, .id)
@@ -204,6 +230,7 @@ if jq -s \
             "./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
             "jq -s '\''[.[] | select(((.id // \"\") | test(\"^(bd|frankenfs)-\") | not) and ((.status // \"open\") == \"open\")) | {id,title,status,priority,source_repo}]'\'' .beads/issues.jsonl",
             "jq -s '\''[.[] | select(((.id // \"\") | test(\"^(bd|frankenfs)-\")) and ((.status // \"open\") == \"open\")) | {id,title,status,priority,issue_type,assignee,owner}] | sort_by(.priority, .id)'\'' .beads/issues.jsonl",
+            "jq -c '\''select(((.id // \"\") | test(\"^(bd|frankenfs)-\")) and ((.status // \"open\") == \"open\"))'\'' .beads/issues.jsonl > tracker_source_hygiene_local_open.jsonl",
             "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
             "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
             "TRACKER_SOURCE_HYGIENE_STRICT=1 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh"
@@ -226,6 +253,11 @@ if jq -e '
     and (.local_open_ids | type == "array")
     and (.local_open_rows | type == "array")
     and (.source_aware_ready_rows | type == "array")
+    and (.local_graph_exports.schema_version == 1)
+    and (.local_graph_exports.local_open.path | test("tracker_source_hygiene_local_open\\.jsonl$"))
+    and (.local_graph_exports.source_aware_ready.path | test("tracker_source_hygiene_source_aware_ready\\.jsonl$"))
+    and (.local_graph_exports.local_open.checksum_path | test("\\.sha256$"))
+    and (.local_graph_exports.source_aware_ready.checksum_path | test("\\.sha256$"))
     and (.permission_gated_rows | type == "array")
     and (.foreign_open_samples | type == "array")
     and (.excluded_foreign_by_prefix | type == "array")
@@ -238,6 +270,20 @@ else
     scenario_result "tracker_source_hygiene_report_emitted" "FAIL" "report schema check failed"
 fi
 
+e2e_step "Emit local-only tracker graph artifacts"
+if jq -c --slurpfile report "$REPORT_JSON" \
+    '(.id // "") as $issue_id | select(($report[0].local_open_ids | index($issue_id)) != null)' \
+    "$ISSUES_JSONL" >"$LOCAL_OPEN_JSONL" \
+    && jq -c --slurpfile report "$REPORT_JSON" \
+        '(.id // "") as $issue_id | ($report[0].source_aware_ready_rows | map(.id)) as $ready_ids | select(($ready_ids | index($issue_id)) != null)' \
+        "$ISSUES_JSONL" >"$SOURCE_AWARE_READY_JSONL" \
+    && sha256sum "$LOCAL_OPEN_JSONL" >"$LOCAL_OPEN_SHA256" \
+    && sha256sum "$SOURCE_AWARE_READY_JSONL" >"$SOURCE_AWARE_READY_SHA256"; then
+    scenario_result "tracker_source_hygiene_local_graph_exports_written" "PASS" "local_open=$LOCAL_OPEN_JSONL ready=$SOURCE_AWARE_READY_JSONL"
+else
+    scenario_result "tracker_source_hygiene_local_graph_exports_written" "FAIL" "failed to write local graph exports"
+fi
+
 FOREIGN_OPEN_COUNT="$(jq -r '.foreign_open' "$REPORT_JSON")"
 LOCAL_OPEN_COUNT="$(jq -r '.local_open' "$REPORT_JSON")"
 READY_COUNT="$(jq -r '.source_aware_ready_rows | length' "$REPORT_JSON")"
@@ -245,6 +291,35 @@ if [[ "$FOREIGN_OPEN_COUNT" =~ ^[0-9]+$ && "$LOCAL_OPEN_COUNT" =~ ^[0-9]+$ ]]; t
     scenario_result "tracker_source_hygiene_foreign_rows_classified" "PASS" "local_open=${LOCAL_OPEN_COUNT} source_aware_ready=${READY_COUNT} foreign_open=${FOREIGN_OPEN_COUNT}"
 else
     scenario_result "tracker_source_hygiene_foreign_rows_classified" "FAIL" "invalid open counts in $REPORT_JSON"
+fi
+
+if jq -s --slurpfile report "$REPORT_JSON" '
+    def local_issue:
+        ((.id // "") | test("^(bd|frankenfs)-"));
+    def open_issue:
+        ((.status // "open") == "open");
+    def sorted_ids:
+        map(.id // "") | sort;
+    (length == $report[0].local_graph_exports.local_open.row_count)
+    and (sorted_ids == ($report[0].local_open_ids | sort))
+    and all(.[]; local_issue and open_issue)
+' "$LOCAL_OPEN_JSONL" >/dev/null \
+    && jq -s --slurpfile report "$REPORT_JSON" '
+        def local_issue:
+            ((.id // "") | test("^(bd|frankenfs)-"));
+        def open_issue:
+            ((.status // "open") == "open");
+        def sorted_ids:
+            map(.id // "") | sort;
+        (length == $report[0].local_graph_exports.source_aware_ready.row_count)
+        and (sorted_ids == ($report[0].source_aware_ready_rows | map(.id) | sort))
+        and all(.[]; local_issue and open_issue)
+    ' "$SOURCE_AWARE_READY_JSONL" >/dev/null \
+    && sha256sum -c "$LOCAL_OPEN_SHA256" >/dev/null \
+    && sha256sum -c "$SOURCE_AWARE_READY_SHA256" >/dev/null; then
+    scenario_result "tracker_source_hygiene_local_graph_exports_valid" "PASS" "local_open=${LOCAL_OPEN_COUNT} source_aware_ready=${READY_COUNT}"
+else
+    scenario_result "tracker_source_hygiene_local_graph_exports_valid" "FAIL" "local graph export validation failed"
 fi
 
 if jq -e '

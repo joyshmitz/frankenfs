@@ -48,6 +48,7 @@ The report writes `tracker_source_hygiene_report.json` under
 
 - `local_open_rows`
 - `source_aware_ready_rows`
+- `local_graph_exports`
 - `permission_gated_rows`
 - `excluded_foreign_open_count`
 - `excluded_foreign_by_prefix`
@@ -65,6 +66,19 @@ from ordinary ready work. Current gates are:
 |---|---|
 | real xfstests execution | `XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices` |
 | permissioned large-host swarm execution | `FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1` and `FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host` |
+
+The same run writes local-only JSONL graph inputs next to the report:
+
+- `tracker_source_hygiene_local_open.jsonl`
+- `tracker_source_hygiene_source_aware_ready.jsonl`
+- matching `.sha256` checksum files
+
+Use these exports when a graph or ready-work tool reads the contaminated full
+JSONL store. `local_open` contains full original FrankenFS-local open rows,
+including dependencies. `source_aware_ready` contains only claimable local rows:
+it excludes epics, blocked rows, foreign-looking rows, and permission-gated
+rows until the required ACK is present. These artifacts are copies; generating
+them does not close, rewrite, delete, or rename any tracker row.
 
 ## Reconciliation Rules
 
@@ -114,7 +128,7 @@ Strict mode is suitable only after all of these are true:
 - `.beads/issues.jsonl` has no active peer reservation.
 - `br dep cycles --no-db --json` reports zero cycles.
 - A default non-strict report still emits valid `local_open_rows` and
-  `source_aware_ready_rows`.
+  `source_aware_ready_rows`, plus checksum-validated local graph exports.
 
 Run strict mode as:
 
