@@ -124,6 +124,43 @@ JSON
     return "$status"
 }
 
+init_git_clean_probe_repo() {
+    local repo_dir="$1"
+
+    mkdir -p "$repo_dir"
+    git -C "$repo_dir" init -q
+    printf 'tracked\n' >"$repo_dir/tracked.txt"
+    git -C "$repo_dir" add tracked.txt
+    git -C "$repo_dir" \
+        -c user.email=ffs-e2e@example.invalid \
+        -c user.name=ffs-e2e \
+        commit -q -m "initial"
+}
+
+verify_git_context_clean_dirty_states() {
+    if ! command -v git >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local probe_root clean_repo staged_repo untracked_repo
+    probe_root="$E2E_TEMP_DIR/git_context_clean_probe"
+    clean_repo="$probe_root/clean"
+    staged_repo="$probe_root/staged"
+    untracked_repo="$probe_root/untracked"
+
+    init_git_clean_probe_repo "$clean_repo" || return 1
+    init_git_clean_probe_repo "$staged_repo" || return 1
+    init_git_clean_probe_repo "$untracked_repo" || return 1
+
+    printf 'changed\n' >>"$staged_repo/tracked.txt"
+    git -C "$staged_repo" add tracked.txt
+    printf 'untracked\n' >"$untracked_repo/new-file.txt"
+
+    [[ "$(e2e_git_context_clean "$clean_repo")" == "true" ]] \
+        && [[ "$(e2e_git_context_clean "$staged_repo")" == "false" ]] \
+        && [[ "$(e2e_git_context_clean "$untracked_repo")" == "false" ]]
+}
+
 e2e_init "ffs_verification_runner"
 
 RUNNER_SRC="crates/ffs-harness/src/verification_runner.rs"
@@ -206,6 +243,17 @@ if verify_lib_summary_preserves_suite_fields; then
     scenario_result "lib_json_summary_preserves_suite_fields" "PASS" "Suite-specific result fields preserved"
 else
     scenario_result "lib_json_summary_preserves_suite_fields" "FAIL" "Suite-specific result fields were not preserved"
+fi
+
+#######################################
+# Scenario 4c: lib.sh git cleanliness catches dirty states
+#######################################
+e2e_step "Scenario 4c: lib.sh git cleanliness dirty-state detection"
+
+if verify_git_context_clean_dirty_states; then
+    scenario_result "lib_git_context_clean_dirty_states" "PASS" "Clean, staged, and untracked states classified correctly"
+else
+    scenario_result "lib_git_context_clean_dirty_states" "FAIL" "Git cleanliness dirty-state classification failed"
 fi
 
 #######################################
