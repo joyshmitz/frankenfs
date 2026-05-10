@@ -410,6 +410,43 @@ mod tests {
             }
         }
 
+        /// Appending Identical markers preserves existing resolutions and extends the tail.
+        #[test]
+        fn proptest_appended_identical_suffix_resolves_to_original_tail(
+            chain in version_chain_strategy(),
+            suffix_len in 1_usize..8,
+        ) {
+            let mut extended = chain.clone();
+            for _ in 0..suffix_len {
+                extended.push(VersionData::Identical);
+            }
+
+            for i in 0..chain.len() {
+                let before = resolve_data_with(&chain, i, |d| d).map(std::borrow::Cow::into_owned);
+                let after =
+                    resolve_data_with(&extended, i, |d| d).map(std::borrow::Cow::into_owned);
+                prop_assert_eq!(
+                    after.as_deref(),
+                    before.as_deref(),
+                    "prefix index {} changed after appending identical suffix",
+                    i,
+                );
+            }
+
+            let expected_tail = resolve_data_with(&chain, chain.len() - 1, |d| d)
+                .map(std::borrow::Cow::into_owned);
+            for i in chain.len()..extended.len() {
+                let resolved =
+                    resolve_data_with(&extended, i, |d| d).map(std::borrow::Cow::into_owned);
+                prop_assert_eq!(
+                    resolved.as_deref(),
+                    expected_tail.as_deref(),
+                    "suffix index {} did not resolve to original tail",
+                    i,
+                );
+            }
+        }
+
         /// CompressionStats dedup_ratio is always in [0.0, 1.0].
         #[test]
         fn proptest_compression_stats_dedup_ratio_bounded(
