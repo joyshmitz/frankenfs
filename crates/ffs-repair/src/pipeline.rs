@@ -5522,7 +5522,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
         assert_eq!(parsed["tracked_groups"], 1);
         assert_eq!(parsed["dirty_groups"], 0);
-        assert!(parsed["groups"].as_array().expect("groups array").len() == 1);
+        assert_eq!(parsed["groups"].as_array().expect("groups array").len(), 1);
     }
 
     #[test]

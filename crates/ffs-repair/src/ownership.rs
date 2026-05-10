@@ -990,9 +990,14 @@ mod tests {
         let result = mgr.try_acquire(&image).expect("acquire");
         let mut guard = acquired_guard(result).expect("expected acquired");
 
-        let old_time = guard.record().claimed_at.clone();
-        // Sleep > 1s to ensure timestamp changes (ISO 8601 has 1s resolution)
-        std::thread::sleep(Duration::from_millis(1100));
+        let old_time = format_iso8601(
+            SystemTime::now()
+                .checked_sub(Duration::from_secs(2))
+                .expect("test clock should be after Unix epoch"),
+        );
+        guard.record.claimed_at = old_time.clone();
+        write_test_record(guard.record_path(), guard.record());
+
         mgr.renew(&mut guard).expect("renew");
         assert_ne!(
             guard.record().claimed_at,
@@ -1012,7 +1017,7 @@ mod tests {
         let result = mgr_a.try_acquire(&image).expect("acquire");
         let mut guard = acquired_guard(result).expect("expected acquired");
 
-        std::thread::sleep(Duration::from_millis(1100));
+        mark_record_expired(guard.record_path());
         let mgr_b = RepairOwnership::new("host-b".into(), "test-b".into());
         let takeover = mgr_b.try_acquire(&image).expect("takeover");
         assert!(matches!(takeover, AcquireResult::Acquired(_)));
@@ -1050,7 +1055,7 @@ mod tests {
         let result = mgr_a.try_acquire(&image).expect("acquire");
         let guard = acquired_guard(result).expect("expected acquired");
 
-        std::thread::sleep(Duration::from_millis(1100));
+        mark_record_expired(guard.record_path());
         let mgr_b = RepairOwnership::new("host-b".into(), "test-b".into());
         let takeover = mgr_b.try_acquire(&image).expect("takeover");
         assert!(matches!(takeover, AcquireResult::Acquired(_)));
@@ -1180,6 +1185,20 @@ mod tests {
     fn read_test_record(record_path: &Path) -> CoordinationRecord {
         let contents = std::fs::read_to_string(record_path).expect("record remains");
         serde_json::from_str(&contents).expect("parse record")
+    }
+
+    fn write_test_record(record_path: &Path, record: &CoordinationRecord) {
+        std::fs::write(
+            record_path,
+            serde_json::to_string_pretty(record).expect("serialize record"),
+        )
+        .expect("write record");
+    }
+
+    fn mark_record_expired(record_path: &Path) {
+        let mut record = read_test_record(record_path);
+        record.claimed_at = "2020-01-01T00:00:00Z".into();
+        write_test_record(record_path, &record);
     }
 
     fn different_pid() -> u32 {
