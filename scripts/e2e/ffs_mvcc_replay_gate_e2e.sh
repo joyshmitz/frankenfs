@@ -91,12 +91,14 @@ run_rch_cargo_capture() {
             if kill -0 "$pid" >/dev/null 2>&1; then
                 e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}|command=cargo $*"
                 terminate_rch_capture "$pid"
+                e2e_rch_cancel_matching_queue_entry cargo "$@"
             fi
             break
         fi
         if ((SECONDS >= deadline)); then
             e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|log=${log_path}|command=cargo $*"
             terminate_rch_capture "$pid"
+            e2e_rch_cancel_matching_queue_entry cargo "$@"
             status=124
             break
         fi
