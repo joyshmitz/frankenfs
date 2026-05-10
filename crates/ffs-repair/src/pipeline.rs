@@ -2438,6 +2438,15 @@ impl<'a, W: Write> ScrubDaemon<'a, W> {
         let mut remaining = duration;
         while !remaining.is_zero() {
             let slice = remaining.min(self.config.cancel_check_interval);
+            let budget = cx.budget();
+            let now = cx.now();
+            if budget.is_past_deadline(now)
+                || budget
+                    .remaining_time(now)
+                    .is_some_and(|remaining_time| remaining_time <= slice)
+            {
+                return Err(FfsError::Cancelled);
+            }
             std::thread::sleep(slice);
             remaining = remaining.saturating_sub(slice);
             cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
@@ -4836,6 +4845,70 @@ mod tests {
         assert!(
             elapsed < yield_sleep / 2,
             "too-tight Cx should skip scrub-daemon throttle sleep promptly, elapsed={elapsed:?}"
+        );
+        assert_eq!(daemon.metrics().backpressure_yields, 1);
+        assert_eq!(daemon.metrics().blocks_scanned_total, 0);
+    }
+
+    #[test]
+    fn scrub_daemon_backpressure_yield_observes_mid_sleep_cancellation() {
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 8;
+
+        write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+
+        let validator = CorruptBlockValidator::new(vec![]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let mut ledger_buf = Vec::new();
+        let pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        );
+        let pressure = Arc::new(SystemPressure::with_headroom(0.1));
+        let yield_sleep = Duration::from_millis(250);
+        let mut daemon = ScrubDaemon::new(
+            pipeline,
+            ScrubDaemonConfig {
+                interval: Duration::ZERO,
+                cancel_check_interval: Duration::from_millis(10),
+                backpressure_headroom_threshold: 0.5,
+                backpressure_sleep: yield_sleep,
+                ..ScrubDaemonConfig::default()
+            },
+        )
+        .with_pressure(pressure);
+
+        let cancel_cx = cx.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(15));
+            cancel_cx.set_cancel_requested(true);
+        });
+
+        let started = Instant::now();
+        let err = daemon
+            .run_once(&cx)
+            .expect_err("mid-sleep cancellation should stop backpressure yield");
+        let elapsed = started.elapsed();
+        canceller.join().expect("canceller thread should finish");
+
+        assert!(matches!(err, FfsError::Cancelled));
+        assert!(
+            elapsed < yield_sleep / 2,
+            "cancelled Cx should interrupt scrub-daemon throttle sleep promptly, elapsed={elapsed:?}"
         );
         assert_eq!(daemon.metrics().backpressure_yields, 1);
         assert_eq!(daemon.metrics().blocks_scanned_total, 0);
