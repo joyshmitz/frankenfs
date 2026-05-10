@@ -39,6 +39,47 @@ justify opening or prioritizing work, but public readiness claims must remain
 tied to real proof bundles, operational readiness reports, host capability
 artifacts, or xfstests result artifacts.
 
+## Advisory Readiness Lab Handoff
+
+Use the non-permissioned readiness lab when operators or agents need fresh
+advisory context before a destructive xfstests run or a permissioned large-host
+swarm campaign is approved:
+
+```bash
+AGENT_NAME="${AGENT_NAME:-operator}" ./scripts/e2e/ffs_readiness_lab_e2e.sh
+```
+
+The generated package lives under
+`artifacts/e2e/<timestamp>_ffs_readiness_lab/readiness_lab/` and includes
+`readiness_lab_combined_manifest.json`, `command_transcript.tsv`, `logs/`, and
+per-lane directories for contracts, host simulation, RCH scheduling, truth
+graphs, permissioned-campaign handoff packets, NUMA/p99 replay, and dashboard
+rendering. These reports are advisory only: each claim must remain tied to
+`product_evidence_claim=none` and
+`advisory_only_no_public_readiness_change`.
+
+| Advisory artifact type | Allowed use | Forbidden claim effect |
+|---|---|---|
+| readiness-lab contract bundle | verify schema, freshness, and claim-effect fields | mark any proof-bundle lane as `pass` |
+| host capability simulation | preview CPU, RAM, NUMA, storage, runner, and ACK blockers | upgrade `swarm.responsiveness` |
+| RCH lane dry-run schedule | plan command order, target dirs, env allowlist, and artifact destinations | claim cargo check, test, or clippy execution occurred |
+| truth graph | connect advisory reports, blockers, beads, and source paths | override authoritative proof-bundle, release-gate, or operational-evidence decisions |
+| xfstests rehearsal packet | prepare the exact ACK, command plan, cleanup plan, and raw artifact roots | satisfy `xfstests.baseline` |
+| NUMA/p99 replay fixture report | rehearse contention-shape parsing and p99 attribution | satisfy performance or swarm responsiveness readiness |
+| readiness dashboard advisory rows | expose source-linked `advisory_only`, `handoff_only`, or blocked states | set `release_ready=true` |
+
+Transitioning from advisory to authoritative evidence requires a new
+permissioned run, not wording changes. For xfstests, the operator must provide
+`XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices` plus
+scoped `XFSTESTS_DIR`, `TEST_DIR`, `SCRATCH_MNT`, and `RESULT_BASE`. For the
+large-host swarm lane, the operator must provide
+`FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1`,
+`FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host`,
+`FFS_SWARM_WORKLOAD_PERMISSIONED_RUNNER`, and
+`FFS_SWARM_WORKLOAD_ARTIFACT_ROOT`. Preserve raw logs, cleanup status, command
+transcripts, and proof-bundle lane candidates, then let the release gate decide
+whether public readiness wording can change.
+
 ## Permission Boundaries
 
 The following action families stay blocked until the operator provides the

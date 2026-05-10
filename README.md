@@ -1440,6 +1440,69 @@ production failure. Required lanes are `conformance`, `xfstests`, `fuse`,
 `release_gates`, `swarm_workload_harness`, `swarm_tail_latency`, and
 `adaptive_runtime`.
 
+#### Advisory Readiness Lab
+
+The non-permissioned readiness lab is an operator rehearsal surface for swarm
+agents and release managers. It regenerates advisory contracts, host simulation,
+RCH dry-run schedules, truth-graph summaries, xfstests handoff packets,
+NUMA/p99 replay reports, and readiness-dashboard rows without exporting
+permissioned ACK variables or executing xfstests, mounted mutation campaigns, or
+large-host workloads. Every readiness-lab artifact must carry
+`product_evidence_claim=none` and a release-gate effect equivalent to
+`advisory_only_no_public_readiness_change`.
+
+Run the full non-destructive lab package with:
+
+```bash
+AGENT_NAME="${AGENT_NAME:-operator}" ./scripts/e2e/ffs_readiness_lab_e2e.sh
+```
+
+Artifacts are written under
+`artifacts/e2e/<timestamp>_ffs_readiness_lab/readiness_lab/`. The package
+includes `contracts/`, `host_simulation/`, `rch_scheduler/`, `truth_graph/`,
+`permissioned_campaign_broker/`, `numa_p99/`, `dashboard/`, `logs/`,
+`command_transcript.tsv`, and `readiness_lab_combined_manifest.json`.
+
+Individual reports can be regenerated through RCH without local cargo fallback:
+
+```bash
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env \
+  CARGO_TARGET_DIR=/data/projects/.cargo-target-frankenfs-readiness-lab-docs \
+  cargo run -p ffs-harness -- validate-readiness-lab-contracts \
+    --manifest artifacts/readiness-lab/contracts.json \
+    --out artifacts/readiness-lab/contracts/report.json \
+    --summary-out artifacts/readiness-lab/contracts/report.md
+
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env \
+  CARGO_TARGET_DIR=/data/projects/.cargo-target-frankenfs-readiness-lab-docs \
+  cargo run -p ffs-harness -- readiness-dashboard \
+    --readiness-lab-report artifacts/readiness-lab/truth_graph/report.json \
+    --beads .beads/issues.jsonl \
+    --format markdown \
+    --summary-out artifacts/readiness-lab/dashboard.md
+```
+
+Advisory artifacts may guide prioritization and operator handoff, but they have
+strict claim effects:
+
+| Advisory artifact type | Typical path | Allowed use | Forbidden claim effect |
+|---|---|---|---|
+| Contract bundle report | `readiness_lab/contracts/report.json` | verify schema, freshness, and `product_evidence_claim=none` | mark any proof-bundle lane as `pass` |
+| Host simulation report | `readiness_lab/host_simulation/report.json` | preview large-host blockers and required runner state | upgrade `swarm.responsiveness` |
+| RCH scheduler dry run | `readiness_lab/rch_scheduler/report.json` | plan command order, target dirs, env allowlist, and artifact paths | claim a cargo check, test, or clippy lane executed |
+| Truth graph report | `readiness_lab/truth_graph/report.json` | link advisory evidence, blockers, beads, and source reports | supersede authoritative proof-bundle or release-gate decisions |
+| xfstests handoff packet | `permissioned_campaign_broker/packets/xfstests_handoff_packet.json` | prepare the exact ACK, command plan, cleanup, and artifact roots | satisfy `xfstests.baseline` |
+| NUMA/p99 replay report | `readiness_lab/numa_p99/report.json` | rehearse p99 attribution and contention-shape parsing | satisfy `swarm.responsiveness` or performance readiness |
+| Dashboard advisory rows | `readiness_lab/dashboard/readiness_dashboard.json` | show source-linked `advisory_only` or blocked rows | set `release_ready=true` |
+
+The transition to authoritative evidence is explicit: grant the xfstests ACK or
+large-host swarm ACK listed below, run the permissioned command against scoped
+artifact roots, preserve raw logs and cleanup status, validate the resulting
+proof-bundle lanes, then let the release gate decide whether public readiness
+wording may change. Until that chain exists, README, FEATURE_PARITY, dashboard,
+proof-bundle, and release-gate wording must stay blocked, hidden, experimental,
+or advisory-only.
+
 #### Permissioned Campaign Broker
 
 Broker packets are operator handoff material for evidence campaigns that need
