@@ -4,7 +4,6 @@
 //! requesting and publishing repair symbols between hosts.
 
 use asupersync::Cx;
-use asupersync::types::Time;
 use ffs_error::{FfsError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -12,7 +11,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tracing::warn;
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -523,23 +522,14 @@ fn validate_version(version: u32) -> Result<()> {
     }
 }
 
-fn current_time() -> Time {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
-        });
-    Time::from_nanos(nanos)
-}
-
 fn budget_expired(cx: &Cx) -> bool {
-    cx.budget().is_past_deadline(current_time())
+    cx.budget().is_past_deadline(cx.now())
 }
 
 fn effective_timeout(cx: &Cx, fallback: Duration) -> Result<Duration> {
     cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
     let budget = cx.budget();
-    let now = current_time();
+    let now = cx.now();
     if budget.is_past_deadline(now) {
         return Err(FfsError::Cancelled);
     }
@@ -568,8 +558,21 @@ fn configure_stream_timeouts(cx: &Cx, stream: &TcpStream, fallback: Duration) ->
 
 fn sleep_with_budget(cx: &Cx, fallback: Duration) -> Result<()> {
     cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
-    let sleep = effective_timeout(cx, fallback)?;
-    thread::sleep(sleep);
+    if fallback.is_zero() {
+        return Ok(());
+    }
+
+    let budget = cx.budget();
+    let now = cx.now();
+    if budget.is_past_deadline(now)
+        || budget
+            .remaining_time(now)
+            .is_some_and(|remaining| remaining <= fallback)
+    {
+        return Err(FfsError::Cancelled);
+    }
+
+    thread::sleep(fallback);
     cx.checkpoint().map_err(|_| FfsError::Cancelled)
 }
 
@@ -651,7 +654,7 @@ mod tests {
     use super::{
         Client, Config, Envelope, InMemoryStore, LookupResult, Request, Response, Server, Store,
         StoreResult, StoredSymbols, lookup_from_response, read_envelope, response_for_lookup,
-        retry_with_backoff, store_from_response, write_envelope,
+        retry_with_backoff, sleep_with_budget, store_from_response, write_envelope,
     };
     use asupersync::{Budget, Cx};
     use std::io::Cursor;
@@ -659,19 +662,10 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Arc;
     use std::thread;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant};
 
     fn deadline_after(duration: Duration) -> Budget {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock after epoch");
-        let deadline_nanos = now
-            .as_nanos()
-            .saturating_add(duration.as_nanos())
-            .min(u128::from(u64::MAX));
-        Budget::new().with_deadline(asupersync::types::Time::from_nanos(
-            u64::try_from(deadline_nanos).expect("deadline fits u64"),
-        ))
+        Budget::new().with_deadline(Cx::for_testing().now() + duration)
     }
 
     #[test]
@@ -744,6 +738,23 @@ mod tests {
 
         assert_eq!(result, "ok");
         assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn exchange_backoff_rejects_deadline_that_cannot_fit() {
+        let backoff = Duration::from_millis(250);
+        let cx = Cx::for_testing_with_budget(deadline_after(Duration::from_millis(150)));
+
+        let started = Instant::now();
+        let err = sleep_with_budget(&cx, backoff)
+            .expect_err("too-tight deadline should reject backoff admission");
+        let elapsed = started.elapsed();
+
+        assert!(matches!(err, ffs_error::FfsError::Cancelled));
+        assert!(
+            elapsed < backoff / 4,
+            "too-tight Cx should skip exchange backoff sleep promptly, elapsed={elapsed:?}"
+        );
     }
 
     #[test]
