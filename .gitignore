@@ -177,3 +177,6 @@ unwraps*.txt
 /*.json
 !package.json
 .env
+
+# beads compliance audit (separate .git/, hand-built due to swarm DB churn)
+/beads_compliance_audit/
