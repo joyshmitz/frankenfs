@@ -46,6 +46,25 @@ fn saturating_fetch_increment(counter: &std::sync::atomic::AtomicU64) -> u64 {
     }
 }
 
+fn sleep_for_flush_budget_yield(cx: &Cx, duration: Duration) {
+    if duration.is_zero() || cx_checkpoint(cx).is_err() {
+        return;
+    }
+
+    let budget = cx.budget();
+    let now = cx.now();
+    if budget.is_past_deadline(now)
+        || budget
+            .remaining_time(now)
+            .is_some_and(|remaining| remaining <= duration)
+    {
+        return;
+    }
+
+    thread::sleep(duration);
+    let _ = cx_checkpoint(cx);
+}
+
 const DEFAULT_BLOCK_ALIGNMENT: usize = 4096;
 // AlignedVec over-allocates by alignment - 1, so the public alignment input
 // must stay bounded even when callers pass extreme usize values.
@@ -3638,9 +3657,7 @@ impl<D: BlockDevice> ArcCache<D> {
                 pressure_level = "budget"
             );
             *daemon_throttled = true;
-            if !config.budget_yield_sleep.is_zero() {
-                thread::sleep(config.budget_yield_sleep);
-            }
+            sleep_for_flush_budget_yield(cx, config.budget_yield_sleep);
             reduced
         } else {
             Self::maybe_log_daemon_resumed(daemon_throttled, budget.poll_quota);
@@ -6013,6 +6030,49 @@ mod tests {
         assert!(daemon_throttled);
         assert_eq!(cache.inner().write_count(), 1);
         assert_eq!(cache.dirty_count(), 3);
+    }
+
+    #[test]
+    fn flush_daemon_budget_yield_honors_expired_cx_without_sleeping() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 16);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let counted = CountingBlockDevice::new(dev);
+        let cache =
+            ArcCache::new_with_policy(counted, 8, ArcWritePolicy::WriteBack).expect("cache");
+
+        for i in 0..4_u64 {
+            cache
+                .write_block(&cx, BlockNumber(i), &[0xC3; 4096])
+                .expect("write");
+        }
+        assert_eq!(cache.dirty_count(), 4);
+
+        let expired = asupersync::Budget::new().with_deadline(asupersync::types::Time::ZERO);
+        let expired_cx = Cx::for_testing_with_budget(expired);
+        let yield_sleep = Duration::from_millis(250);
+        let config = FlushDaemonConfig {
+            interval: Duration::from_millis(1),
+            batch_size: 4,
+            reduced_batch_size: 1,
+            budget_poll_quota_threshold: u32::MAX,
+            budget_yield_sleep: yield_sleep,
+            high_watermark: 0.99,
+            critical_watermark: 1.0,
+        };
+        let mut daemon_throttled = false;
+
+        let start = Instant::now();
+        cache.run_flush_daemon_cycle(&expired_cx, &config, 1, &mut daemon_throttled);
+        let elapsed = start.elapsed();
+
+        assert!(daemon_throttled);
+        assert!(
+            elapsed < yield_sleep / 2,
+            "expired Cx should skip flush yield sleep promptly, elapsed={elapsed:?}"
+        );
+        assert_eq!(cache.inner().write_count(), 0);
+        assert_eq!(cache.dirty_count(), 4);
     }
 
     #[test]
