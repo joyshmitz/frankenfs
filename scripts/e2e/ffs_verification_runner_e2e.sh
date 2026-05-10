@@ -57,6 +57,73 @@ run_rch_capture() {
     e2e_rch_capture "$@"
 }
 
+verify_lib_summary_preserves_suite_fields() {
+    if ! command -v jq >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local saved_log_dir="$E2E_LOG_DIR"
+    local saved_log_file="$E2E_LOG_FILE"
+    local saved_start_time="$E2E_START_TIME"
+    local saved_test_name="$E2E_TEST_NAME"
+
+    local probe_dir expected_command expected_artifact status
+    probe_dir="$E2E_TEMP_DIR/result_summary_merge_probe"
+    expected_command="$probe_dir/command_transcript.tsv"
+    expected_artifact="$probe_dir/artifact.json"
+    status=1
+
+    mkdir -p "$probe_dir"
+    E2E_LOG_DIR="$probe_dir"
+    E2E_LOG_FILE="$probe_dir/run.log"
+    E2E_START_TIME="$(date +%s)"
+    E2E_TEST_NAME="summary_merge_probe"
+
+    printf 'SCENARIO_RESULT|scenario_id=summary_merge_probe|outcome=PASS|detail=merge ok\n' \
+        >"$E2E_LOG_FILE"
+    cat >"$probe_dir/result.json" <<JSON
+{
+  "verdict": "STALE",
+  "exit_code": 99,
+  "command_transcript": "$expected_command",
+  "worker_identity": "summary-worker",
+  "cleanup_status": "partial_artifacts_preserved",
+  "artifact_paths": ["$expected_artifact"],
+  "scenarios": [
+    {
+      "scenario_id": "stale_scenario",
+      "outcome": "FAIL"
+    }
+  ]
+}
+JSON
+
+    if e2e_emit_json_summary 0 >/dev/null 2>&1 \
+        && jq -e \
+            --arg command_transcript "$expected_command" \
+            --arg artifact_path "$expected_artifact" '
+                .verdict == "PASS"
+                and .exit_code == 0
+                and .gate_id == "summary_merge_probe"
+                and .command_transcript == $command_transcript
+                and .worker_identity == "summary-worker"
+                and .cleanup_status == "partial_artifacts_preserved"
+                and .artifact_paths == [$artifact_path]
+                and (.scenarios | length == 1)
+                and .scenarios[0].scenario_id == "summary_merge_probe"
+                and .scenarios[0].outcome == "PASS"
+            ' "$probe_dir/result.json" >/dev/null; then
+        status=0
+    fi
+
+    E2E_LOG_DIR="$saved_log_dir"
+    E2E_LOG_FILE="$saved_log_file"
+    E2E_START_TIME="$saved_start_time"
+    E2E_TEST_NAME="$saved_test_name"
+
+    return "$status"
+}
+
 e2e_init "ffs_verification_runner"
 
 RUNNER_SRC="crates/ffs-harness/src/verification_runner.rs"
@@ -128,6 +195,17 @@ if [[ $LIB_FEATURES -eq 4 ]]; then
     scenario_result "lib_json_emission" "PASS" "All 4 lib.sh features present"
 else
     scenario_result "lib_json_emission" "FAIL" "Only ${LIB_FEATURES}/4 features found"
+fi
+
+#######################################
+# Scenario 4b: lib.sh preserves suite result fields
+#######################################
+e2e_step "Scenario 4b: lib.sh JSON summary preserves suite fields"
+
+if verify_lib_summary_preserves_suite_fields; then
+    scenario_result "lib_json_summary_preserves_suite_fields" "PASS" "Suite-specific result fields preserved"
+else
+    scenario_result "lib_json_summary_preserves_suite_fields" "FAIL" "Suite-specific result fields were not preserved"
 fi
 
 #######################################
