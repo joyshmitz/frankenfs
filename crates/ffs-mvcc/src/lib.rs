@@ -3661,6 +3661,8 @@ mod tests {
         Cx::for_testing()
     }
 
+    const SNAPSHOT_REGISTRY_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
     fn spawn_snapshot_registry_watchdog(
         stop: Arc<AtomicBool>,
         workers_complete: Arc<AtomicBool>,
@@ -3668,11 +3670,18 @@ mod tests {
     ) -> std::thread::JoinHandle<bool> {
         std::thread::spawn(move || {
             let deadline = Instant::now() + timeout;
-            while Instant::now() < deadline {
+            loop {
                 if workers_complete.load(Ordering::Acquire) {
                     return false;
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let sleep_for = deadline
+                    .saturating_duration_since(now)
+                    .min(SNAPSHOT_REGISTRY_WATCHDOG_POLL_INTERVAL);
+                std::thread::sleep(sleep_for);
             }
             stop.store(true, Ordering::Release);
             true
@@ -10030,6 +10039,7 @@ mod tests {
             .join()
             .expect("watchdog thread joins cleanly");
         let watchdog_join_elapsed = watchdog_join_started_at.elapsed();
+        let watchdog_join_limit = SNAPSHOT_REGISTRY_WATCHDOG_POLL_INTERVAL.saturating_mul(25);
 
         assert!(
             elapsed < Duration::from_secs(WATCHDOG_SECS),
@@ -10040,8 +10050,8 @@ mod tests {
             "watchdog timed out even though all workers joined; elapsed={elapsed:?}"
         );
         assert!(
-            watchdog_join_elapsed < Duration::from_millis(250),
-            "watchdog should return promptly after worker completion; join elapsed={watchdog_join_elapsed:?}"
+            watchdog_join_elapsed < watchdog_join_limit,
+            "watchdog should return within {watchdog_join_limit:?} after worker completion; join elapsed={watchdog_join_elapsed:?}"
         );
     }
 }
