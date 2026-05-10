@@ -51,6 +51,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 # Run release-gate policy evaluator smoke
 ./scripts/e2e/ffs_release_gate_e2e.sh
 
+# Run the V1.2 program gate rollup and emit the release recommendation manifest
+./scripts/e2e/ffs_v12_program_gate_e2e.sh
+
 # Run invariant-oracle replay/minimization and consumer-validation smoke
 ./scripts/e2e/ffs_invariant_oracle_e2e.sh
 
@@ -115,6 +118,27 @@ failure-triage artifacts under the run's `xfstests/` artifact directory:
 The triage step is intentionally dry-run only. It records `DRY_RUN br create`
 commands for operator review and never creates live Beads entries from an E2E
 run.
+
+## V1.2 Program Gate
+
+`./scripts/e2e/ffs_v12_program_gate_e2e.sh` rolls the V1.2 child verification
+gates, workspace gates, CLI ergonomics check, and structured logging check into
+a single release manifest. Any cargo-bearing command is routed through `rch`.
+
+Artifacts are written to `artifacts/release_gate/v12/`:
+
+- `program_gate_manifest.json` gives the final `PROCEED`, `NO-PROCEED`, or
+  `PASS-WITH-WAIVERS` recommendation.
+- `scenarios/scenario_<n>.jsonl` contains one structured JSON record per
+  scenario run.
+- `command_transcript.tsv` records commands, stdout/stderr paths, and exit
+  status for replay.
+
+Use `FFS_V12_PROGRAM_GATE_SCENARIO_TIMEOUT_SECS=<seconds>` to adjust the
+per-scenario budget. Use `FFS_V12_PROGRAM_GATE_SMOKE=1` for the two-scenario
+synthetic smoke path that validates manifest and exit-code semantics without
+running the full gate. Release notes and waiver handling are documented in
+`docs/release/V1.2_release_notes.md` and `docs/release/V1.2_test_waivers.md`.
 
 ## Scenario Catalog Contract
 

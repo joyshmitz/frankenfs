@@ -1,0 +1,47 @@
+name: V1.2 Program Gate
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v1.2.*"
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: /data/projects/.cargo-target-frankenfs-github-v12-program-gate
+  RCH_ENV_ALLOWLIST: CARGO_TARGET_DIR,RUST_LOG,RUST_BACKTRACE
+  RUST_BACKTRACE: "1"
+  RUST_LOG: info
+
+jobs:
+  v12-program-gate:
+    name: V1.2 Program Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - name: Verify rch availability
+        run: |
+          set -euo pipefail
+          command -v rch
+          rch check
+
+      - name: Run V1.2 program gate
+        run: ./scripts/e2e/ffs_v12_program_gate_e2e.sh
+
+      - name: Upload V1.2 program gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v12-program-gate
+          retention-days: 90
+          if-no-files-found: warn
+          path: |
+            artifacts/release_gate/v12/**
+            artifacts/e2e/**/*ffs_v12_program_gate*/**
