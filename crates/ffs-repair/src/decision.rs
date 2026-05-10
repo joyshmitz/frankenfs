@@ -345,6 +345,15 @@ mod tests {
         ]
     }
 
+    fn severity_rank(state: RepairState) -> u8 {
+        match state {
+            RepairState::Clean => 0,
+            RepairState::MinorCorruption => 1,
+            RepairState::SevereCorruption => 2,
+            RepairState::IoStall => 3,
+        }
+    }
+
     proptest! {
         /// `classify()` always returns IoStall when io_errors is true.
         #[test]
@@ -417,6 +426,47 @@ mod tests {
             // Clean should have the lowest DeferRepair loss
             let clean_loss = loss(RepairState::Clean, RepairAction::DeferRepair);
             prop_assert!(defer_loss >= clean_loss - f64::EPSILON);
+        }
+
+        /// MR: with I/O errors fixed false and total blocks fixed, increasing
+        /// observed corruption must not lower the classified repair severity.
+        #[test]
+        fn proptest_classify_corruption_severity_monotonic(
+            low in 0_u64..100_000,
+            delta in 0_u64..100_000,
+            total in 1_u64..100_000,
+        ) {
+            let low = low.min(total);
+            let high = low.saturating_add(delta).min(total);
+            let low_state = RepairState::classify(low, total, false);
+            let high_state = RepairState::classify(high, total, false);
+
+            prop_assert!(
+                severity_rank(high_state) >= severity_rank(low_state),
+                "classification severity decreased: {low}/{total} -> {low_state:?}, \
+                 {high}/{total} -> {high_state:?}"
+            );
+        }
+
+        /// Safety override is a hard envelope: when it fires, the selected
+        /// action and reported loss must match the forced action exactly.
+        #[test]
+        fn proptest_safety_override_selects_forced_action_and_loss(
+            state in arb_state(),
+            posterior in (SAFETY_POSTERIOR_THRESHOLD + f64::EPSILON)..1.0_f64,
+            sufficient in any::<bool>(),
+        ) {
+            let expected_action = if sufficient {
+                RepairAction::RepairLocal
+            } else {
+                RepairAction::DegradeReadonly
+            };
+            let decision = select_action(state, posterior, sufficient);
+
+            prop_assert!(decision.safety_override);
+            prop_assert_eq!(decision.action, expected_action);
+            prop_assert_eq!(decision.loss, loss(state, expected_action));
+            prop_assert_eq!(decision.corruption_posterior, posterior);
         }
     }
 }
