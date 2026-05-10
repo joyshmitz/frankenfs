@@ -751,6 +751,13 @@ impl DurabilityNotifier {
     ///
     /// Returns immediately if the epoch is already durable.
     pub fn await_epoch(&self, epoch: u64) -> DurabilityOutcome {
+        self.await_epoch_with_observer(epoch, || {})
+    }
+
+    fn await_epoch_with_observer<F>(&self, epoch: u64, mut before_wait: F) -> DurabilityOutcome
+    where
+        F: FnMut(),
+    {
         let mut state = self
             .state
             .lock()
@@ -766,6 +773,7 @@ impl DurabilityNotifier {
             if epoch <= state.durable_epoch {
                 return DurabilityOutcome::Durable;
             }
+            before_wait();
             state = self
                 .condvar
                 .wait(state)
@@ -781,6 +789,18 @@ impl DurabilityNotifier {
         epoch: u64,
         timeout: std::time::Duration,
     ) -> Option<DurabilityOutcome> {
+        self.await_epoch_timeout_with_observer(epoch, timeout, || {})
+    }
+
+    fn await_epoch_timeout_with_observer<F>(
+        &self,
+        epoch: u64,
+        timeout: std::time::Duration,
+        mut before_wait: F,
+    ) -> Option<DurabilityOutcome>
+    where
+        F: FnMut(),
+    {
         let mut state = self
             .state
             .lock()
@@ -799,6 +819,7 @@ impl DurabilityNotifier {
             if remaining.is_zero() {
                 return None;
             }
+            before_wait();
             let (new_state, timeout_result) = self
                 .condvar
                 .wait_timeout(state, remaining)
@@ -1091,7 +1112,48 @@ impl<W: WalWriter> GroupCommitCoordinator<W> {
 #[allow(clippy::cast_possible_truncation)]
 mod tests {
     use super::*;
+    use std::sync::mpsc::{Receiver, sync_channel};
     use std::sync::{Arc, Barrier};
+    use std::thread::JoinHandle;
+
+    fn spawn_observed_epoch_waiter(
+        notifier: &Arc<DurabilityNotifier>,
+        epoch: u64,
+    ) -> (Receiver<()>, JoinHandle<DurabilityOutcome>) {
+        let (before_wait_tx, before_wait_rx) = sync_channel(1);
+        let notifier = Arc::clone(notifier);
+        let handle = std::thread::spawn(move || {
+            notifier.await_epoch_with_observer(epoch, || {
+                before_wait_tx
+                    .send(())
+                    .expect("test receiver should observe waiter parking");
+            })
+        });
+        (before_wait_rx, handle)
+    }
+
+    fn spawn_observed_epoch_timeout_waiter(
+        notifier: &Arc<DurabilityNotifier>,
+        epoch: u64,
+        timeout: std::time::Duration,
+    ) -> (Receiver<()>, JoinHandle<Option<DurabilityOutcome>>) {
+        let (before_wait_tx, before_wait_rx) = sync_channel(1);
+        let notifier = Arc::clone(notifier);
+        let handle = std::thread::spawn(move || {
+            notifier.await_epoch_timeout_with_observer(epoch, timeout, || {
+                before_wait_tx
+                    .send(())
+                    .expect("test receiver should observe waiter parking");
+            })
+        });
+        (before_wait_rx, handle)
+    }
+
+    fn observe_waiter_parking(before_wait: &Receiver<()>) {
+        before_wait
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("waiter should reach the condvar wait point");
+    }
 
     fn make_config(max_entries: usize, max_bytes: usize) -> WalBufferConfig {
         WalBufferConfig {
@@ -1758,10 +1820,8 @@ mod tests {
     #[test]
     fn durability_notifier_waiter_woken_on_notify() {
         let notifier = Arc::new(DurabilityNotifier::new());
-        let n2 = Arc::clone(&notifier);
-        let handle = std::thread::spawn(move || n2.await_epoch(1));
-        // Give the thread time to block.
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        let (before_wait, handle) = spawn_observed_epoch_waiter(&notifier, 1);
+        observe_waiter_parking(&before_wait);
         notifier.notify_durable(1);
         let outcome = handle.join().expect("no panic");
         assert_eq!(outcome, DurabilityOutcome::Durable);
@@ -1770,9 +1830,8 @@ mod tests {
     #[test]
     fn durability_notifier_failure_wakes_waiters() {
         let notifier = Arc::new(DurabilityNotifier::new());
-        let n2 = Arc::clone(&notifier);
-        let handle = std::thread::spawn(move || n2.await_epoch(1));
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        let (before_wait, handle) = spawn_observed_epoch_waiter(&notifier, 1);
+        observe_waiter_parking(&before_wait);
         notifier.notify_failed(1, "disk on fire".to_string());
         let outcome = handle.join().expect("no panic");
         assert_eq!(
@@ -1800,11 +1859,9 @@ mod tests {
     #[test]
     fn durability_notifier_timeout_returns_failure_for_later_epoch() {
         let notifier = Arc::new(DurabilityNotifier::new());
-        let n2 = Arc::clone(&notifier);
-        let handle = std::thread::spawn(move || {
-            n2.await_epoch_timeout(5, std::time::Duration::from_secs(1))
-        });
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        let (before_wait, handle) =
+            spawn_observed_epoch_timeout_waiter(&notifier, 5, std::time::Duration::from_secs(1));
+        observe_waiter_parking(&before_wait);
         notifier.notify_failed(3, "disk on fire".to_string());
         let outcome = handle.join().expect("no panic");
         assert_eq!(
@@ -1823,11 +1880,9 @@ mod tests {
     #[test]
     fn durability_notifier_timeout_returns_result_if_resolved_in_time() {
         let notifier = Arc::new(DurabilityNotifier::new());
-        let n2 = Arc::clone(&notifier);
-        let handle = std::thread::spawn(move || {
-            n2.await_epoch_timeout(1, std::time::Duration::from_secs(5))
-        });
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        let (before_wait, handle) =
+            spawn_observed_epoch_timeout_waiter(&notifier, 1, std::time::Duration::from_secs(5));
+        observe_waiter_parking(&before_wait);
         notifier.notify_durable(1);
         let result = handle.join().expect("no panic");
         assert_eq!(result, Some(DurabilityOutcome::Durable));
@@ -1837,13 +1892,17 @@ mod tests {
     fn durability_notifier_multiple_waiters() {
         let notifier = Arc::new(DurabilityNotifier::new());
         let mut handles = Vec::new();
+        let mut before_waits = Vec::new();
 
         for epoch in 1..=3_u64 {
-            let n = Arc::clone(&notifier);
-            handles.push(std::thread::spawn(move || n.await_epoch(epoch)));
+            let (before_wait, handle) = spawn_observed_epoch_waiter(&notifier, epoch);
+            before_waits.push(before_wait);
+            handles.push(handle);
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        for before_wait in &before_waits {
+            observe_waiter_parking(before_wait);
+        }
         // Flush epoch 3 — wakes all waiters (1, 2, 3).
         notifier.notify_durable(3);
 
@@ -1874,18 +1933,15 @@ mod tests {
     #[test]
     fn durability_notifier_lower_epoch_notification_does_not_wake_higher_epoch_waiter() {
         let notifier = Arc::new(DurabilityNotifier::new());
-        let n2 = Arc::clone(&notifier);
-        let handle = std::thread::spawn(move || n2.await_epoch(5));
+        let (before_wait, handle) = spawn_observed_epoch_waiter(&notifier, 5);
 
-        // Let the waiter park on the condvar.
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        observe_waiter_parking(&before_wait);
 
         // Fire a lower-epoch notification. Predicate (5 <= durable_epoch=2)
         // is FALSE, so the loop must re-wait.
         notifier.notify_durable(2);
 
-        // Settle. If the loop is intact, the waiter stays parked.
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        observe_waiter_parking(&before_wait);
         assert!(
             !handle.is_finished(),
             "waiter for epoch 5 must NOT exit on notify_durable(2) — \
@@ -2146,13 +2202,16 @@ mod tests {
 
         // Spawn waiters for epoch 1.
         let mut handles = Vec::new();
+        let mut before_waits = Vec::new();
         for _ in 0..4 {
-            let n = Arc::clone(&notifier);
-            handles.push(std::thread::spawn(move || n.await_epoch(1)));
+            let (before_wait, handle) = spawn_observed_epoch_waiter(&notifier, 1);
+            before_waits.push(before_wait);
+            handles.push(handle);
         }
 
-        // Give waiters time to block.
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        for before_wait in &before_waits {
+            observe_waiter_parking(before_wait);
+        }
 
         // Flush epoch 1.
         let entries = make_entries(1, 3);
