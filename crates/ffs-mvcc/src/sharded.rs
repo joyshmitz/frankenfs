@@ -1696,6 +1696,8 @@ mod tests {
         use std::thread;
         use std::time::{Duration, Instant};
 
+        const LOCK_ORDERING_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
         let store = Arc::new(make_store(4));
 
         let done = Arc::new(AtomicBool::new(false));
@@ -1704,16 +1706,22 @@ mod tests {
         // Watchdog: prove no worker is stuck after the timeout elapses.
         let watchdog_done = Arc::clone(&done);
         let watchdog = thread::spawn(move || {
-            while Instant::now() < deadline {
+            loop {
                 if watchdog_done.load(AtomicOrdering::Acquire) {
                     return;
                 }
-                thread::sleep(Duration::from_millis(50));
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                thread::sleep(LOCK_ORDERING_WATCHDOG_POLL_INTERVAL.min(remaining));
             }
-            panic!(
-                "bd-bky2f: ShardedMvccStore lock-ordering watchdog tripped — \
+            assert!(
+                watchdog_done.load(AtomicOrdering::Acquire),
+                "bd-bky2f: ShardedMvccStore lock-ordering watchdog tripped - \
                  commit/prune/register workers did not finish within 15s, \
-                 indicating a likely AB-BA deadlock"
+                 indicating a likely AB-BA deadlock",
             );
         });
 
@@ -1748,7 +1756,12 @@ mod tests {
         worker_a.join().expect("worker A panicked");
         worker_b.join().expect("worker B panicked");
         worker_c.join().expect("worker C panicked");
+        let watchdog_join_started = Instant::now();
         done.store(true, AtomicOrdering::Release);
         watchdog.join().expect("watchdog panicked");
+        assert!(
+            watchdog_join_started.elapsed() <= LOCK_ORDERING_WATCHDOG_POLL_INTERVAL * 25,
+            "watchdog should observe completion promptly after workers finish"
+        );
     }
 }
