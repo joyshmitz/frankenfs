@@ -958,18 +958,26 @@ fn sleep_for_gc_throttle(cx: &Cx, duration: Duration) {
         return;
     }
 
-    let budget = cx.budget();
-    let now = cx.now();
-    if budget.is_past_deadline(now)
-        || budget
-            .remaining_time(now)
-            .is_some_and(|remaining| remaining <= duration)
-    {
-        return;
-    }
+    let mut remaining = duration;
+    let cancel_check_interval = Duration::from_millis(10);
+    while !remaining.is_zero() {
+        let slice = remaining.min(cancel_check_interval);
+        let budget = cx.budget();
+        let now = cx.now();
+        if budget.is_past_deadline(now)
+            || budget
+                .remaining_time(now)
+                .is_some_and(|remaining_time| remaining_time <= slice)
+        {
+            return;
+        }
 
-    std::thread::sleep(duration);
-    let _ = cx.checkpoint();
+        std::thread::sleep(slice);
+        remaining = remaining.saturating_sub(slice);
+        if cx.checkpoint().is_err() {
+            return;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -5682,6 +5690,53 @@ mod tests {
             store.ebr_stats().pending_versions(),
             pending_before,
             "expired Cx should not reclaim retired versions"
+        );
+    }
+
+    #[test]
+    fn gc_batch_throttle_observes_mid_sleep_cancellation() {
+        let mut store = MvccStore::new();
+        let block = BlockNumber(780);
+        for v in 1_u8..=16 {
+            let mut txn = store.begin();
+            txn.stage_write(block, vec![v; 32]);
+            store.commit(txn).expect("commit");
+        }
+
+        let _ = store.prune_safe();
+        let pending_before = store.ebr_stats().pending_versions();
+        assert!(pending_before > 0, "expected pending retired versions");
+
+        let low_budget_cx =
+            Cx::for_testing_with_budget(asupersync::Budget::new().with_poll_quota(8));
+        let cancel_cx = low_budget_cx.clone();
+        let throttle_sleep = Duration::from_millis(250);
+
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(15));
+            cancel_cx.set_cancel_requested(true);
+        });
+
+        let started = Instant::now();
+        let result = store.run_gc_batch(
+            &low_budget_cx,
+            GcBackpressureConfig {
+                min_poll_quota: 16,
+                throttle_sleep,
+            },
+        );
+        let elapsed = started.elapsed();
+        canceller.join().expect("canceller thread should finish");
+
+        assert!(result.is_none(), "expected GC batch to be skipped");
+        assert!(
+            elapsed < throttle_sleep / 2,
+            "cancelled Cx should interrupt GC throttle sleep promptly, elapsed={elapsed:?}"
+        );
+        assert_eq!(
+            store.ebr_stats().pending_versions(),
+            pending_before,
+            "cancelled Cx should not reclaim retired versions"
         );
     }
 
