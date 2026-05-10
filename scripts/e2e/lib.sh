@@ -35,15 +35,18 @@ E2E_CLEANUP_ITEMS=()
 #######################################
 e2e_init() {
     local test_name="${1:-e2e}"
-    local timestamp
+    local artifact_root log_template timestamp
     timestamp=$(date +%Y%m%d_%H%M%S)
 
     E2E_START_TIME=$(date +%s)
     E2E_TEST_NAME="$test_name"
 
-    # Create log directory
-    E2E_LOG_DIR="${REPO_ROOT:-$(pwd)}/artifacts/e2e/${timestamp}_${test_name}"
-    mkdir -p "$E2E_LOG_DIR"
+    # Create a collision-resistant log directory. Concurrent agents can start
+    # the same E2E script in the same second.
+    artifact_root="${REPO_ROOT:-$(pwd)}/artifacts/e2e"
+    mkdir -p "$artifact_root"
+    log_template="${artifact_root}/${timestamp}_${test_name}_XXXXXX"
+    E2E_LOG_DIR=$(mktemp -d "$log_template")
     E2E_LOG_FILE="$E2E_LOG_DIR/run.log"
 
     # Create temp directory

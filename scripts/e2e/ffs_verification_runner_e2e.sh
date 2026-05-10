@@ -13,6 +13,7 @@
 # 9. Existing E2E scripts pass conformance check
 # 10. Permissioned FUSE lane artifacts and docs are wired
 # 11. Mounted ext4/btrfs scenario matrix artifacts are wired
+# 12. Shared E2E artifact directories are unique under concurrent starts
 #
 # Usage: ./scripts/e2e/ffs_verification_runner_e2e.sh
 #
@@ -161,6 +162,68 @@ verify_git_context_clean_dirty_states() {
         && [[ "$(e2e_git_context_clean "$untracked_repo")" == "false" ]]
 }
 
+verify_e2e_init_artifact_dirs_unique() {
+    local probe_name probe_root attempt
+    probe_name="artifact_dir_unique_probe"
+    probe_root="$E2E_TEMP_DIR/e2e_init_artifact_dir_probe"
+    mkdir -p "$probe_root"
+
+    for attempt in 1 2 3; do
+        local first_out second_out first_pid second_pid first_dir second_dir
+        local first_base second_base first_prefix second_prefix
+        first_out="$probe_root/first_${attempt}.out"
+        second_out="$probe_root/second_${attempt}.out"
+
+        (
+            set -euo pipefail
+            cd "$REPO_ROOT"
+            export REPO_ROOT
+            export FFS_E2E_DISABLE_TEMP_CLEANUP=1
+            source "$REPO_ROOT/scripts/e2e/lib.sh"
+            e2e_init "$probe_name"
+            printf 'E2E_PROBE_LOG_DIR=%s\n' "$E2E_LOG_DIR"
+        ) >"$first_out" 2>&1 &
+        first_pid=$!
+
+        (
+            set -euo pipefail
+            cd "$REPO_ROOT"
+            export REPO_ROOT
+            export FFS_E2E_DISABLE_TEMP_CLEANUP=1
+            source "$REPO_ROOT/scripts/e2e/lib.sh"
+            e2e_init "$probe_name"
+            printf 'E2E_PROBE_LOG_DIR=%s\n' "$E2E_LOG_DIR"
+        ) >"$second_out" 2>&1 &
+        second_pid=$!
+
+        if ! wait "$first_pid"; then
+            return 1
+        fi
+        if ! wait "$second_pid"; then
+            return 1
+        fi
+
+        first_dir=$(sed -n 's/^E2E_PROBE_LOG_DIR=//p' "$first_out" | tail -n 1)
+        second_dir=$(sed -n 's/^E2E_PROBE_LOG_DIR=//p' "$second_out" | tail -n 1)
+        [[ -n "$first_dir" && -n "$second_dir" ]] || return 1
+        [[ "$first_dir" != "$second_dir" ]] || return 1
+        [[ -d "$first_dir" && -d "$second_dir" ]] || return 1
+
+        first_base=$(basename "$first_dir")
+        second_base=$(basename "$second_dir")
+        first_prefix="${first_base%_*}"
+        second_prefix="${second_base%_*}"
+
+        if [[ "$first_prefix" == "$second_prefix" ]] \
+            && [[ "$first_base" == *"${probe_name}_"* ]] \
+            && [[ "$second_base" == *"${probe_name}_"* ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 e2e_init "ffs_verification_runner"
 
 RUNNER_SRC="crates/ffs-harness/src/verification_runner.rs"
@@ -254,6 +317,17 @@ if verify_git_context_clean_dirty_states; then
     scenario_result "lib_git_context_clean_dirty_states" "PASS" "Clean, staged, and untracked states classified correctly"
 else
     scenario_result "lib_git_context_clean_dirty_states" "FAIL" "Git cleanliness dirty-state classification failed"
+fi
+
+#######################################
+# Scenario 4d: lib.sh E2E artifact directories are collision-resistant
+#######################################
+e2e_step "Scenario 4d: lib.sh E2E artifact directory uniqueness"
+
+if verify_e2e_init_artifact_dirs_unique; then
+    scenario_result "lib_e2e_artifact_dirs_unique" "PASS" "Concurrent E2E starts received distinct log directories"
+else
+    scenario_result "lib_e2e_artifact_dirs_unique" "FAIL" "Concurrent E2E starts shared or malformed log directories"
 fi
 
 #######################################
