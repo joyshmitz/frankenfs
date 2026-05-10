@@ -70,6 +70,7 @@ run_rch_capture() {
             if kill -0 "$pid" >/dev/null 2>&1; then
                 e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REQUIRED_ARTIFACT|exit=${remote_exit}|output=${output_path}|command=$*"
                 kill -TERM "$pid" >/dev/null 2>&1 || true
+                e2e_rch_cancel_matching_queue_entry "$@"
             fi
             break
         fi
@@ -80,6 +81,7 @@ run_rch_capture() {
             && ((SECONDS >= required_artifact_deadline)); then
             e2e_log "RCH_REQUIRED_ARTIFACT_MISSING|artifact=${required_artifact}|output=${output_path}|command=$*"
             kill -TERM "$pid" >/dev/null 2>&1 || true
+            e2e_rch_cancel_matching_queue_entry "$@"
             status=99
             break
         fi
@@ -88,12 +90,14 @@ run_rch_capture() {
             if kill -0 "$pid" >/dev/null 2>&1; then
                 e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=$*"
                 kill -TERM "$pid" >/dev/null 2>&1 || true
+                e2e_rch_cancel_matching_queue_entry "$@"
             fi
             break
         fi
         if ((SECONDS >= deadline)); then
             e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=$*"
             kill -TERM "$pid" >/dev/null 2>&1 || true
+            e2e_rch_cancel_matching_queue_entry "$@"
             status=124
             break
         fi
