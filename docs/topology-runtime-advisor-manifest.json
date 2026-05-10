@@ -1,0 +1,83 @@
+{
+  "manifest_version": 1,
+  "operation_id": "topology-advisor-sample-001",
+  "scenario_id": "topology-advisor-sample",
+  "source_bead": "bd-rchk0.212.1",
+  "real_campaign_bead": "bd-rchk0.53.8",
+  "generated_at": "2026-05-09T00:00:00Z",
+  "expires_at": "2026-05-16T00:00:00Z",
+  "manifest_path": "docs/topology-runtime-advisor-manifest.json",
+  "artifact_root": "artifacts/topology-advisor/sample",
+  "host_topology": {
+    "cpu_count": 64,
+    "numa_nodes": 2,
+    "ram_bytes": 274877906944,
+    "storage_profile": "local_nvme"
+  },
+  "fuse_capability": {
+    "state": "available",
+    "detail": "sample advisory fixture only; not product evidence"
+  },
+  "rch_worker_identity": "sample-rch-worker",
+  "resource_caps": {
+    "max_duration_secs": 900,
+    "max_threads": 256,
+    "max_memory_bytes": 137438953472,
+    "max_temp_bytes": 17179869184,
+    "max_queue_depth": 1024
+  },
+  "runtime_candidates": [
+    {
+      "mode": "standard",
+      "enabled": true,
+      "reason": "baseline candidate for comparison"
+    },
+    {
+      "mode": "managed",
+      "enabled": true,
+      "reason": "candidate when writeback pressure dominates"
+    },
+    {
+      "mode": "per_core",
+      "enabled": true,
+      "reason": "candidate for large-host sharded read-heavy workloads"
+    }
+  ],
+  "workload_shapes": [
+    {
+      "workload_id": "hot-inode-writeback",
+      "hot_inode_concentration": 0.82,
+      "directory_fanout": 64,
+      "read_ratio": 0.25,
+      "write_ratio": 0.65,
+      "fsyncs_per_second": 12.0,
+      "expected_dirty_bytes": 536870912,
+      "queue_depth": 128
+    },
+    {
+      "workload_id": "sharded-read-heavy",
+      "hot_inode_concentration": 0.12,
+      "directory_fanout": 4096,
+      "read_ratio": 0.85,
+      "write_ratio": 0.1,
+      "fsyncs_per_second": 2.0,
+      "expected_dirty_bytes": 67108864,
+      "queue_depth": 64
+    }
+  ],
+  "artifact_paths": [
+    "artifacts/topology-advisor/sample/report.json",
+    "artifacts/topology-advisor/sample/summary.md",
+    "artifacts/topology-advisor/sample/structured.jsonl"
+  ],
+  "command_transcript": {
+    "invocation": "ffs-harness validate-topology-runtime-advisor --manifest docs/topology-runtime-advisor-manifest.json",
+    "stdout_path": "artifacts/topology-advisor/sample/stdout.log",
+    "stderr_path": "artifacts/topology-advisor/sample/stderr.log",
+    "structured_log_path": "artifacts/topology-advisor/sample/structured.jsonl",
+    "report_path": "artifacts/topology-advisor/sample/report.json",
+    "summary_path": "artifacts/topology-advisor/sample/summary.md"
+  },
+  "product_evidence_claim": "none",
+  "release_gate_effect": "advisory_only"
+}

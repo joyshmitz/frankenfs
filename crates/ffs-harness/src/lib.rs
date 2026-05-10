@@ -70,6 +70,7 @@ pub mod swarm_operator_report;
 pub mod swarm_tail_latency;
 pub mod swarm_workload_harness;
 pub mod tabletop_drill;
+pub mod topology_runtime_advisor;
 pub mod verification_runner;
 pub mod wal_group_commit_gate;
 pub mod workload_corpus;

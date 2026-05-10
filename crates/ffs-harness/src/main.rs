@@ -211,6 +211,12 @@ use ffs_harness::{
         load_swarm_workload_harness_manifest, render_swarm_workload_harness_markdown,
         validate_swarm_workload_harness_manifest_with_config,
     },
+    topology_runtime_advisor::{
+        TopologyRuntimeAdvisorValidationConfig, fail_on_topology_runtime_advisor_errors,
+        load_topology_runtime_advisor_manifest, render_topology_runtime_advisor_markdown,
+        render_topology_runtime_advisor_structured_log,
+        validate_topology_runtime_advisor_manifest_with_config,
+    },
     validate_btrfs_fixture, validate_ext4_fixture,
     verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
     wal_group_commit_gate::{
@@ -316,6 +322,17 @@ struct AdaptiveRuntimeManifestCmdArgs {
 }
 
 #[derive(Debug)]
+struct TopologyRuntimeAdvisorCmdArgs {
+    manifest_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    structured_log_out_path: Option<String>,
+    format: ProofBundleFormat,
+    reference_timestamp: Option<String>,
+    max_age_days: u32,
+}
+
+#[derive(Debug)]
 struct PermissionedCampaignBrokerCmdArgs {
     manifest_path: String,
     out_path: Option<String>,
@@ -388,6 +405,9 @@ fn run_manifest_command(command: Option<&str>, args: &[String]) -> Option<Result
     match command {
         Some("validate-adaptive-runtime-manifest") => {
             Some(validate_adaptive_runtime_manifest_cmd(args))
+        }
+        Some("validate-topology-runtime-advisor") => {
+            Some(validate_topology_runtime_advisor_cmd(args))
         }
         Some("validate-permissioned-campaign-broker") => {
             Some(validate_permissioned_campaign_broker_cmd(args))
@@ -3465,6 +3485,141 @@ fn parse_adaptive_runtime_manifest_cmd_args(
         format,
         reference_timestamp,
         current_git_sha,
+    }))
+}
+
+fn validate_topology_runtime_advisor_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_topology_runtime_advisor_cmd_args(args)? else {
+        return Ok(());
+    };
+    let manifest = load_topology_runtime_advisor_manifest(Path::new(&cmd_args.manifest_path))?;
+    let reference_epoch_days = match &cmd_args.reference_timestamp {
+        Some(timestamp) => Some(
+            parse_manifest_timestamp_epoch_days(timestamp)
+                .with_context(|| format!("invalid --reference-timestamp {timestamp}"))?,
+        ),
+        None => TopologyRuntimeAdvisorValidationConfig::default().reference_epoch_days,
+    };
+    let report = validate_topology_runtime_advisor_manifest_with_config(
+        &manifest,
+        &TopologyRuntimeAdvisorValidationConfig {
+            reference_epoch_days,
+            max_age_days: cmd_args.max_age_days,
+        },
+    );
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_topology_runtime_advisor_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "topology runtime advisor report written: {} valid={} advisory_only={}",
+            path, report.valid, report.advisory_only
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_topology_runtime_advisor_markdown(&report)),
+        )?;
+        println!("topology runtime advisor summary written: {path}");
+    }
+
+    if let Some(path) = cmd_args.structured_log_out_path {
+        write_text_file(
+            Path::new(&path),
+            &render_topology_runtime_advisor_structured_log(&report),
+        )?;
+        println!("topology runtime advisor structured log written: {path}");
+    }
+
+    fail_on_topology_runtime_advisor_errors(&report)
+}
+
+fn parse_topology_runtime_advisor_cmd_args(
+    args: &[String],
+) -> Result<Option<TopologyRuntimeAdvisorCmdArgs>> {
+    let mut manifest_path: Option<String> = None;
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut structured_log_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut reference_timestamp: Option<String> = None;
+    let mut max_age_days = TopologyRuntimeAdvisorValidationConfig::default().max_age_days;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                manifest_path = Some(
+                    args.get(i)
+                        .context("--manifest requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--structured-log-out" => {
+                i += 1;
+                structured_log_out_path = Some(
+                    args.get(i)
+                        .context("--structured-log-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--reference-timestamp" => {
+                i += 1;
+                reference_timestamp = Some(
+                    args.get(i)
+                        .context("--reference-timestamp requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--max-age-days" => {
+                i += 1;
+                let raw = args.get(i).context("--max-age-days requires a value")?;
+                max_age_days = raw
+                    .parse::<u32>()
+                    .with_context(|| format!("invalid --max-age-days {raw}"))?;
+            }
+            "--help" | "-h" => {
+                print_topology_runtime_advisor_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-topology-runtime-advisor argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(TopologyRuntimeAdvisorCmdArgs {
+        manifest_path: manifest_path.context("--manifest is required")?,
+        out_path,
+        summary_out_path,
+        structured_log_out_path,
+        format,
+        reference_timestamp,
+        max_age_days,
     }))
 }
 
@@ -6963,6 +7118,9 @@ fn print_usage_core_commands() {
         "  ffs-harness validate-adaptive-runtime-manifest [--manifest FILE] [--current-git-sha SHA] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
+        "  ffs-harness validate-topology-runtime-advisor --manifest FILE [--format json|markdown] [--out FILE] [--summary-out FILE] [--structured-log-out FILE]"
+    );
+    println!(
         "  ffs-harness validate-permissioned-campaign-broker [--manifest FILE] [--format json|markdown] [--out FILE] [--summary-out FILE] [--reference-timestamp TS]"
     );
     println!(
@@ -7557,6 +7715,19 @@ fn print_adaptive_runtime_manifest_usage() {
     println!("  --summary-out FILE                 Write Markdown inspection summary");
     println!("  --reference-timestamp RFC3339      Freshness reference timestamp (default: now)");
     println!("  --current-git-sha SHA              Strictly require manifest git_sha to match SHA");
+}
+
+fn print_topology_runtime_advisor_usage() {
+    println!("Usage: ffs-harness validate-topology-runtime-advisor [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --manifest FILE                    Read topology advisor manifest JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write selected-format validation report");
+    println!("  --summary-out FILE                 Write Markdown inspection summary");
+    println!("  --structured-log-out FILE          Write structured JSONL validation log");
+    println!("  --reference-timestamp RFC3339      Freshness reference timestamp (default: now)");
+    println!("  --max-age-days N                   Maximum manifest age in days (default: 14)");
 }
 
 fn print_permissioned_campaign_broker_usage() {
