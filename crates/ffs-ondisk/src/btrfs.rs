@@ -4811,6 +4811,35 @@ mod tests {
             let b = parse_sys_chunk_array(&data);
             prop_assert_eq!(a, b);
         }
+
+        // bd-hlrcn — Determinism MR for
+        // BtrfsSuperblock::parse_superblock_region. The btrfs superblock
+        // is the entry point for every mount/probe; non-determinism
+        // here would silently corrupt mount-time bootstrap state.
+        // Sized at BTRFS_SUPER_INFO_SIZE..=BTRFS_SUPER_INFO_SIZE so the
+        // proptest fuzzes only the byte content, not the buffer length.
+        // Sister parsers all have determinism MRs.
+        #[test]
+        fn btrfs_proptest_btrfs_superblock_parse_superblock_region_determinism(
+            region in proptest::collection::vec(any::<u8>(), BTRFS_SUPER_INFO_SIZE..=BTRFS_SUPER_INFO_SIZE),
+        ) {
+            let a = BtrfsSuperblock::parse_superblock_region(&region);
+            let b = BtrfsSuperblock::parse_superblock_region(&region);
+            prop_assert_eq!(a, b);
+        }
+
+        // bd-hlrcn — Determinism MR for BtrfsHeader::parse_from_block.
+        // BtrfsHeader is parsed at the start of every btrfs btree node
+        // (every walk_tree call, every leaf_items / internal_items
+        // parse, every checksum verification).
+        #[test]
+        fn btrfs_proptest_btrfs_header_parse_from_block_determinism(
+            block in proptest::collection::vec(any::<u8>(), 0..=4096),
+        ) {
+            let a = BtrfsHeader::parse_from_block(&block);
+            let b = BtrfsHeader::parse_from_block(&block);
+            prop_assert_eq!(a, b);
+        }
     }
 
     // ── RAID profile identification ────────────────────────────────
