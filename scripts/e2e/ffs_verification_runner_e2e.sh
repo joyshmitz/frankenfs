@@ -224,6 +224,48 @@ verify_e2e_init_artifact_dirs_unique() {
     return 1
 }
 
+verify_e2e_artifact_roots_are_collision_resistant() {
+    local offenders
+    offenders="$(
+        grep -R -n -F \
+            --include='*.sh' \
+            --exclude='ffs_verification_runner_e2e.sh' \
+            'artifacts/e2e/$(date +%Y%m%d_%H%M%S)' \
+            "$REPO_ROOT/scripts/e2e" \
+            2>/dev/null || true
+    )"
+
+    if [[ -n "$offenders" ]]; then
+        printf '%s\n' "$offenders"
+        return 1
+    fi
+
+    offenders="$(
+        grep -R -n -E \
+            --include='*.sh' \
+            --exclude='ffs_verification_runner_e2e.sh' \
+            'RUN_ID="\$\(date \+%Y%m%d_%H%M%S\)_' \
+            "$REPO_ROOT/scripts/e2e" \
+            2>/dev/null || true
+    )"
+
+    if [[ -n "$offenders" ]]; then
+        printf '%s\n' "$offenders"
+        return 1
+    fi
+
+    for required in \
+        'mktemp -d "$LOG_ROOT/$(date +%Y%m%d_%H%M%S)_ffs_log_contract_XXXXXX"' \
+        'mktemp -d "$E2E_LOG_ROOT/$(date +%Y%m%d_%H%M%S)_ffs_swarm_tail_latency_XXXXXX"' \
+        'mktemp -d "$LOG_ROOT/$(date +%Y%m%d_%H%M%S)_ffs_writeback_cache_audit_XXXXXX"' \
+        'mktemp -d "$artifact_root/${timestamp}_xfstests_preflight_XXXXXX"'; do
+        if ! grep -R -Fq "$required" "$REPO_ROOT/scripts/e2e"; then
+            printf 'missing required unique artifact allocation: %s\n' "$required"
+            return 1
+        fi
+    done
+}
+
 e2e_init "ffs_verification_runner"
 
 RUNNER_SRC="crates/ffs-harness/src/verification_runner.rs"
@@ -328,6 +370,17 @@ if verify_e2e_init_artifact_dirs_unique; then
     scenario_result "lib_e2e_artifact_dirs_unique" "PASS" "Concurrent E2E starts received distinct log directories"
 else
     scenario_result "lib_e2e_artifact_dirs_unique" "FAIL" "Concurrent E2E starts shared or malformed log directories"
+fi
+
+#######################################
+# Scenario 4e: standalone E2E artifact roots are collision-resistant
+#######################################
+e2e_step "Scenario 4e: standalone E2E artifact root uniqueness"
+
+if verify_e2e_artifact_roots_are_collision_resistant; then
+    scenario_result "standalone_e2e_artifact_roots_unique" "PASS" "Standalone E2E scripts use unique artifact roots"
+else
+    scenario_result "standalone_e2e_artifact_roots_unique" "FAIL" "Standalone E2E scripts still use collision-prone artifact roots"
 fi
 
 #######################################

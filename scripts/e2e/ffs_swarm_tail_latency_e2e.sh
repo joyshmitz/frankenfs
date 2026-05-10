@@ -21,10 +21,10 @@ PASS_COUNT=0
 FAIL_COUNT=0
 TOTAL=0
 E2E_START_TIME="$(date +%s)"
-E2E_LOG_DIR="${REPO_ROOT}/artifacts/e2e/$(date +%Y%m%d_%H%M%S)_ffs_swarm_tail_latency"
+E2E_LOG_ROOT="${REPO_ROOT}/artifacts/e2e"
+mkdir -p "$E2E_LOG_ROOT"
+E2E_LOG_DIR="$(mktemp -d "$E2E_LOG_ROOT/$(date +%Y%m%d_%H%M%S)_ffs_swarm_tail_latency_XXXXXX")"
 E2E_LOG_FILE="${E2E_LOG_DIR}/run.log"
-
-mkdir -p "$E2E_LOG_DIR"
 
 e2e_log() {
     local message="$*"

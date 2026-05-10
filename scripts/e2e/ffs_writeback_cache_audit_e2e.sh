@@ -14,8 +14,15 @@ export REPO_ROOT
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_writeback_cache_audit}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR,FFS_WRITEBACK_CACHE_KILL_SWITCH"
 
-RUN_ID="$(date +%Y%m%d_%H%M%S)_ffs_writeback_cache_audit"
-LOG_DIR="${FFS_E2E_LOG_DIR:-$REPO_ROOT/artifacts/e2e/$RUN_ID}"
+if [[ -n "${FFS_E2E_LOG_DIR:-}" ]]; then
+    LOG_DIR="$FFS_E2E_LOG_DIR"
+    RUN_ID="$(basename "$LOG_DIR")"
+else
+    LOG_ROOT="$REPO_ROOT/artifacts/e2e"
+    mkdir -p "$LOG_ROOT"
+    LOG_DIR="$(mktemp -d "$LOG_ROOT/$(date +%Y%m%d_%H%M%S)_ffs_writeback_cache_audit_XXXXXX")"
+    RUN_ID="$(basename "$LOG_DIR")"
+fi
 INPUT_DIR="${FFS_E2E_INPUT_DIR:-$REPO_ROOT/artifacts/e2e_inputs/$RUN_ID}"
 mkdir -p "$LOG_DIR" "$INPUT_DIR"
 LOG_FILE="$LOG_DIR/run.log"

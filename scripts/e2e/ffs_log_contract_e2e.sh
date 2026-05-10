@@ -51,8 +51,9 @@ case ",${RCH_ENV_ALLOWLIST:-}," in
 esac
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
-LOG_DIR="${REPO_ROOT}/artifacts/e2e/$(date +%Y%m%d_%H%M%S)_ffs_log_contract"
-mkdir -p "$LOG_DIR"
+LOG_ROOT="${REPO_ROOT}/artifacts/e2e"
+mkdir -p "$LOG_ROOT"
+LOG_DIR="$(mktemp -d "$LOG_ROOT/$(date +%Y%m%d_%H%M%S)_ffs_log_contract_XXXXXX")"
 
 SCENARIO_RESULTS=()
 PASS_COUNT=0
