@@ -906,6 +906,7 @@ TRACKER_SOURCE_HYGIENE_EXPECT_IN_PROGRESS=2 \
 TRACKER_SOURCE_HYGIENE_EXPECT_STALE_IN_PROGRESS=1 \
 TRACKER_SOURCE_HYGIENE_NOW_EPOCH=2000000000 \
 TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS=3600 \
+TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN=tests/fixtures/tracker_source_hygiene_report.golden.json \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT=20 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT=1 \
 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
@@ -924,9 +925,11 @@ permissioned large-host swarm rows until their explicit ACK env vars are
 present. `source_aware_queue_state.verdict` gives the safe queue explanation
 before agents create fallback work, and its stale in-progress fields identify
 claimed local rows that require Agent Mail/worktree verification before any
-reopen. Enable `TRACKER_SOURCE_HYGIENE_STRICT=1` only after the criteria in
-[docs/tracker-hygiene.md](../../docs/tracker-hygiene.md) are met; strict mode
-intentionally fails while foreign-looking open rows exist.
+reopen. `TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN` compares the deterministic
+fixture report against the scrubbed committed golden so report-shape drift is a
+reviewed diff. Enable `TRACKER_SOURCE_HYGIENE_STRICT=1` only after the criteria
+in [docs/tracker-hygiene.md](../../docs/tracker-hygiene.md) are met; strict
+mode intentionally fails while foreign-looking open rows exist.
 
 ## Release Gate Evaluation
 

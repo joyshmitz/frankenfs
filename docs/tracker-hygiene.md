@@ -85,6 +85,12 @@ timestamp is older than `TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS`
 as stale. A stale row is only a reclaim candidate after checking Agent Mail and
 the worktree; the report does not reopen or mutate it.
 
+For deterministic fixture runs, `TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN` compares
+a canonicalized report against a checked-in JSON golden. Canonicalization scrubs
+the run ID, timestamp, input path, and generated artifact paths, but keeps queue
+state, local rows, stale rows, permission gates, foreign summaries, export
+metadata, and reproduction commands exact.
+
 The same run writes local-only JSONL graph inputs next to the report:
 
 - `tracker_source_hygiene_local_open.jsonl`
@@ -175,6 +181,7 @@ TRACKER_SOURCE_HYGIENE_EXPECT_IN_PROGRESS=2 \
 TRACKER_SOURCE_HYGIENE_EXPECT_STALE_IN_PROGRESS=1 \
 TRACKER_SOURCE_HYGIENE_NOW_EPOCH=2000000000 \
 TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS=3600 \
+TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN=tests/fixtures/tracker_source_hygiene_report.golden.json \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT=20 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT=1 \
 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh

@@ -1,0 +1,451 @@
+{
+  "blocked_local_rows": [
+    {
+      "assignee": null,
+      "blocked_by": [
+        {
+          "id": "bd-fixture-blocker",
+          "status": "open"
+        }
+      ],
+      "id": "bd-fixture-blocked",
+      "issue_type": "task",
+      "priority": 2,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture local blocked row"
+    }
+  ],
+  "classifier": {
+    "foreign_rule": "Rows with other issue ID prefixes are reported as foreign-looking",
+    "local_id_regex": "^(bd|frankenfs)-",
+    "local_rule": "FrankenFS-local rows use bd-* or frankenfs-* issue IDs"
+  },
+  "created_at": "[TIMESTAMP]",
+  "excluded_foreign_by_prefix": [
+    {
+      "count": 22,
+      "prefix": "br-r37"
+    }
+  ],
+  "excluded_foreign_open_count": 22,
+  "foreign_group_summaries": [
+    {
+      "count": 22,
+      "owner_hints": [
+        "franken_networkx"
+      ],
+      "prefix": "br-r37",
+      "sample_ids": [
+        "br-r37-c1-foreign01",
+        "br-r37-c1-foreign02",
+        "br-r37-c1-foreign03",
+        "br-r37-c1-foreign04",
+        "br-r37-c1-foreign05",
+        "br-r37-c1-foreign06",
+        "br-r37-c1-foreign07",
+        "br-r37-c1-foreign08",
+        "br-r37-c1-foreign09",
+        "br-r37-c1-foreign10"
+      ],
+      "sample_titles": [
+        "Fixture foreign open row 01",
+        "Fixture foreign open row 02",
+        "Fixture foreign open row 03"
+      ]
+    }
+  ],
+  "foreign_open": 22,
+  "foreign_open_samples": [
+    {
+      "id": "br-r37-c1-foreign01",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 01"
+    },
+    {
+      "id": "br-r37-c1-foreign02",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 02"
+    },
+    {
+      "id": "br-r37-c1-foreign03",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 03"
+    },
+    {
+      "id": "br-r37-c1-foreign04",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 04"
+    },
+    {
+      "id": "br-r37-c1-foreign05",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 05"
+    },
+    {
+      "id": "br-r37-c1-foreign06",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 06"
+    },
+    {
+      "id": "br-r37-c1-foreign07",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 07"
+    },
+    {
+      "id": "br-r37-c1-foreign08",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 08"
+    },
+    {
+      "id": "br-r37-c1-foreign09",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 09"
+    },
+    {
+      "id": "br-r37-c1-foreign10",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 10"
+    },
+    {
+      "id": "br-r37-c1-foreign11",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 11"
+    },
+    {
+      "id": "br-r37-c1-foreign12",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 12"
+    },
+    {
+      "id": "br-r37-c1-foreign13",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 13"
+    },
+    {
+      "id": "br-r37-c1-foreign14",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 14"
+    },
+    {
+      "id": "br-r37-c1-foreign15",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 15"
+    },
+    {
+      "id": "br-r37-c1-foreign16",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 16"
+    },
+    {
+      "id": "br-r37-c1-foreign17",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 17"
+    },
+    {
+      "id": "br-r37-c1-foreign18",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 18"
+    },
+    {
+      "id": "br-r37-c1-foreign19",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 19"
+    },
+    {
+      "id": "br-r37-c1-foreign20",
+      "issue_type": "bug",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture foreign open row 20"
+    }
+  ],
+  "foreign_total": 23,
+  "issues_path": "[ISSUES_JSONL]",
+  "local_graph_exports": {
+    "local_open": {
+      "checksum_path": "[LOCAL_OPEN_SHA256]",
+      "consumer_hint": "Use this JSONL as a local-only tracker input when br or bv output is polluted by foreign rows.",
+      "id_count": 5,
+      "path": "[LOCAL_OPEN_JSONL]",
+      "row_count": 5
+    },
+    "mutation_policy": "report-only; exports copy matching source rows without editing tracker state",
+    "schema_version": 1,
+    "source_aware_ready": {
+      "checksum_path": "[SOURCE_AWARE_READY_SHA256]",
+      "consumer_hint": "Use this JSONL for claimable FrankenFS rows; it excludes epics, blocked rows, foreign rows, and permission-gated rows without the required ACK.",
+      "id_count": 2,
+      "path": "[SOURCE_AWARE_READY_JSONL]",
+      "row_count": 2
+    }
+  },
+  "local_in_progress_rows": [
+    {
+      "age_seconds": 800,
+      "assignee": "fixture-agent",
+      "blocked_by": [],
+      "created_at": "2033-05-18T03:00:00Z",
+      "id": "bd-fixture-in-progress-fresh",
+      "issue_type": "task",
+      "last_activity_epoch": 1999999200,
+      "priority": 2,
+      "source_repo": ".",
+      "stale": false,
+      "stale_after_seconds": 3600,
+      "status": "in_progress",
+      "title": "Fixture fresh in-progress row",
+      "updated_at": "2033-05-18T03:20:00Z"
+    },
+    {
+      "age_seconds": 5600,
+      "assignee": "stale-fixture-agent",
+      "blocked_by": [],
+      "created_at": "2033-05-18T00:00:00Z",
+      "id": "bd-fixture-in-progress-stale",
+      "issue_type": "task",
+      "last_activity_epoch": 1999994400,
+      "priority": 2,
+      "source_repo": ".",
+      "stale": true,
+      "stale_after_seconds": 3600,
+      "status": "in_progress",
+      "title": "Fixture stale in-progress row",
+      "updated_at": "2033-05-18T02:00:00Z"
+    }
+  ],
+  "local_open": 5,
+  "local_open_ids": [
+    "bd-fixture-blocked",
+    "bd-fixture-blocker",
+    "bd-fixture-epic",
+    "bd-fixture-permissioned",
+    "bd-fixture-ready"
+  ],
+  "local_open_rows": [
+    {
+      "assignee": null,
+      "blocked_by": [],
+      "id": "bd-fixture-epic",
+      "issue_type": "epic",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture local hygiene epic"
+    },
+    {
+      "assignee": null,
+      "blocked_by": [],
+      "id": "bd-fixture-permissioned",
+      "issue_type": "task",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture permission-gated xfstests row"
+    },
+    {
+      "assignee": null,
+      "blocked_by": [],
+      "id": "bd-fixture-ready",
+      "issue_type": "task",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture local ready row"
+    },
+    {
+      "assignee": null,
+      "blocked_by": [
+        {
+          "id": "bd-fixture-blocker",
+          "status": "open"
+        }
+      ],
+      "id": "bd-fixture-blocked",
+      "issue_type": "task",
+      "priority": 2,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture local blocked row"
+    },
+    {
+      "assignee": null,
+      "blocked_by": [],
+      "id": "bd-fixture-blocker",
+      "issue_type": "task",
+      "priority": 2,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture local blocker row"
+    }
+  ],
+  "local_total": 8,
+  "mutation_policy": "report-only; this command never deletes, rewrites, closes, or edits tracker rows",
+  "open_total": 27,
+  "permission_gated_rows": [
+    {
+      "assignee": null,
+      "blocked_by": [],
+      "id": "bd-fixture-permissioned",
+      "issue_type": "task",
+      "permission_gate": {
+        "gate_kind": "xfstests_real_run",
+        "present": false,
+        "required_env": "XFSTESTS_REAL_RUN_ACK",
+        "required_value": "xfstests-may-mutate-test-and-scratch-devices"
+      },
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture permission-gated xfstests row"
+    }
+  ],
+  "report_now_epoch": 2000000000,
+  "reproduction_commands": [
+    "./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
+    "jq -s '[.[] | select(((.id // \"\") | test(\"^(bd|frankenfs)-\") | not) and ((.status // \"open\") == \"open\")) | {id,title,status,priority,source_repo}]' .beads/issues.jsonl",
+    "jq -s '[.[] | select(((.id // \"\") | test(\"^(bd|frankenfs)-\")) and ((.status // \"open\") == \"open\")) | {id,title,status,priority,issue_type,assignee,owner}] | sort_by(.priority, .id)' .beads/issues.jsonl",
+    "jq -c 'select(((.id // \"\") | test(\"^(bd|frankenfs)-\")) and ((.status // \"open\") == \"open\"))' .beads/issues.jsonl > tracker_source_hygiene_local_open.jsonl",
+    "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
+    "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
+    "TRACKER_SOURCE_HYGIENE_STRICT=1 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh"
+  ],
+  "run_id": "[RUN_ID]",
+  "schema_version": 1,
+  "source_aware_queue_state": {
+    "blocked_local_count": 1,
+    "blocked_local_ids": [
+      "bd-fixture-blocked"
+    ],
+    "claimable_count": 2,
+    "claimable_ids": [
+      "bd-fixture-ready",
+      "bd-fixture-blocker"
+    ],
+    "excluded_foreign_open_count": 22,
+    "local_epic_count": 1,
+    "local_epic_ids": [
+      "bd-fixture-epic"
+    ],
+    "local_in_progress_count": 2,
+    "local_in_progress_ids": [
+      "bd-fixture-in-progress-fresh",
+      "bd-fixture-in-progress-stale"
+    ],
+    "local_open_count": 5,
+    "next_safe_actions": [
+      "claim one source_aware_ready row before creating fallback work"
+    ],
+    "permission_gated_count": 1,
+    "permission_gated_ids": [
+      "bd-fixture-permissioned"
+    ],
+    "schema_version": 1,
+    "stale_in_progress_count": 1,
+    "stale_in_progress_ids": [
+      "bd-fixture-in-progress-stale"
+    ],
+    "verdict": "ready"
+  },
+  "source_aware_ready_rows": [
+    {
+      "assignee": null,
+      "blocked_by": [],
+      "id": "bd-fixture-ready",
+      "issue_type": "task",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture local ready row"
+    },
+    {
+      "assignee": null,
+      "blocked_by": [],
+      "id": "bd-fixture-blocker",
+      "issue_type": "task",
+      "priority": 2,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture local blocker row"
+    }
+  ],
+  "stale_in_progress_rows": [
+    {
+      "age_seconds": 5600,
+      "assignee": "stale-fixture-agent",
+      "blocked_by": [],
+      "created_at": "2033-05-18T00:00:00Z",
+      "id": "bd-fixture-in-progress-stale",
+      "issue_type": "task",
+      "last_activity_epoch": 1999994400,
+      "priority": 2,
+      "source_repo": ".",
+      "stale": true,
+      "stale_after_seconds": 3600,
+      "status": "in_progress",
+      "title": "Fixture stale in-progress row",
+      "updated_at": "2033-05-18T02:00:00Z"
+    }
+  ],
+  "status": "pass",
+  "strict": false,
+  "total_rows": 31
+}

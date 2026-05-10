@@ -33,6 +33,7 @@ e2e_init "ffs_tracker_source_hygiene"
 
 ISSUES_JSONL="${TRACKER_SOURCE_HYGIENE_ISSUES:-$REPO_ROOT/.beads/issues.jsonl}"
 REPORT_JSON="${E2E_LOG_DIR}/tracker_source_hygiene_report.json"
+REPORT_CANONICAL_JSON="${E2E_LOG_DIR}/tracker_source_hygiene_report.canonical.json"
 LOCAL_OPEN_JSONL="${E2E_LOG_DIR}/tracker_source_hygiene_local_open.jsonl"
 SOURCE_AWARE_READY_JSONL="${E2E_LOG_DIR}/tracker_source_hygiene_source_aware_ready.jsonl"
 LOCAL_OPEN_SHA256="${LOCAL_OPEN_JSONL}.sha256"
@@ -41,6 +42,7 @@ STRICT_MODE=0
 STRICT_JSON=false
 STALE_IN_PROGRESS_SECONDS="${TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS:-21600}"
 REPORT_NOW_EPOCH="${TRACKER_SOURCE_HYGIENE_NOW_EPOCH:-$(date -u +%s)}"
+EXPECTED_GOLDEN="${TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN:-}"
 
 case "${TRACKER_SOURCE_HYGIENE_STRICT:-0}" in
     1|true|TRUE|yes|YES)
@@ -65,6 +67,10 @@ fi
 if [[ ! "$REPORT_NOW_EPOCH" =~ ^[0-9]+$ ]]; then
     scenario_result "tracker_source_hygiene_jsonl_parses" "FAIL" "invalid report epoch: $REPORT_NOW_EPOCH"
     e2e_fail "TRACKER_SOURCE_HYGIENE_NOW_EPOCH must be a non-negative integer"
+fi
+if [[ -n "$EXPECTED_GOLDEN" && ! -f "$EXPECTED_GOLDEN" ]]; then
+    scenario_result "tracker_source_hygiene_jsonl_parses" "FAIL" "golden missing: $EXPECTED_GOLDEN"
+    e2e_fail "TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN does not exist: $EXPECTED_GOLDEN"
 fi
 
 e2e_step "Parse tracker JSONL and emit report"
@@ -476,6 +482,23 @@ if jq -e '
     scenario_result "tracker_source_hygiene_source_aware_wrapper" "PASS" "ready_rows=${READY_COUNT} excluded_foreign=${FOREIGN_OPEN_COUNT}"
 else
     scenario_result "tracker_source_hygiene_source_aware_wrapper" "FAIL" "source-aware wrapper fields missing or inconsistent"
+fi
+
+if [[ -n "$EXPECTED_GOLDEN" ]]; then
+    if jq -S '
+        .run_id = "[RUN_ID]"
+        | .created_at = "[TIMESTAMP]"
+        | .issues_path = "[ISSUES_JSONL]"
+        | .local_graph_exports.local_open.path = "[LOCAL_OPEN_JSONL]"
+        | .local_graph_exports.local_open.checksum_path = "[LOCAL_OPEN_SHA256]"
+        | .local_graph_exports.source_aware_ready.path = "[SOURCE_AWARE_READY_JSONL]"
+        | .local_graph_exports.source_aware_ready.checksum_path = "[SOURCE_AWARE_READY_SHA256]"
+    ' "$REPORT_JSON" >"$REPORT_CANONICAL_JSON" \
+        && diff -u "$EXPECTED_GOLDEN" "$REPORT_CANONICAL_JSON" >"${REPORT_CANONICAL_JSON}.diff"; then
+        scenario_result "tracker_source_hygiene_golden_report_matches" "PASS" "golden=$EXPECTED_GOLDEN"
+    else
+        scenario_result "tracker_source_hygiene_golden_report_matches" "FAIL" "golden mismatch diff=${REPORT_CANONICAL_JSON}.diff"
+    fi
 fi
 
 EXPECTATION_DETAIL=""
