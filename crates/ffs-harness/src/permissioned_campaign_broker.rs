@@ -50,6 +50,21 @@ const ALLOWED_DESTRUCTIVE_OPERATIONS: [&str; 9] = [
     "consume_large_temp_storage",
     "kill_replay_worker",
 ];
+const XFSTESTS_REQUIRED_RUNNER_ENVS: [&str; 4] =
+    ["XFSTESTS_DIR", "TEST_DIR", "SCRATCH_MNT", "RESULT_BASE"];
+const XFSTESTS_REQUIRED_HOST_FACTS: [&str; 2] =
+    ["xfstests_helpers", "explicit_test_and_scratch_paths"];
+const XFSTESTS_REQUIRED_ARTIFACT_SUFFIXES: [&str; 9] = [
+    "summary.json",
+    "results.json",
+    "junit.xml",
+    "artifact_manifest.json",
+    "command_transcript.tsv",
+    "raw-results",
+    "failure_to_beads.json",
+    "stdout.log",
+    "stderr.log",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionedCampaignBrokerManifest {
@@ -927,6 +942,7 @@ pub fn validate_permissioned_campaign_broker_manifest(
     validate_preflight_references(manifest, config, &mut issues);
     validate_operator_risks(manifest, &mut issues);
     validate_exact_commands(manifest, &mut issues);
+    validate_lane_specific_contracts(manifest, &mut issues);
 
     PermissionedCampaignBrokerReport {
         schema_version: manifest.schema_version,
@@ -1415,6 +1431,16 @@ pub fn build_xfstests_broker_manifest(
                     shell_single_quote(&input.result_base)
                 ),
                 command_role: PermissionedCampaignCommandRole::PermissionedRun,
+            },
+            PermissionedCampaignCommand {
+                command_id: "xfstests_preserve_artifacts".to_owned(),
+                exact_command: format!(
+                    "RESULT_BASE={} find {} -maxdepth 3 -type f -print | sort > {}/artifact_file_list.txt",
+                    shell_single_quote(&input.result_base),
+                    shell_single_quote(&input.result_base),
+                    shell_single_quote(&input.result_base)
+                ),
+                command_role: PermissionedCampaignCommandRole::Cleanup,
             },
         ],
     })
@@ -2289,7 +2315,11 @@ fn validate_adapter_safe_path(field: &str, value: &str) -> Result<()> {
 
 fn xfstests_expected_artifact_paths(result_base: &str) -> Vec<String> {
     [
-        "report.json",
+        "summary.json",
+        "results.json",
+        "junit.xml",
+        "artifact_manifest.json",
+        "command_transcript.tsv",
         "stdout.log",
         "stderr.log",
         "raw-results",
@@ -2815,6 +2845,167 @@ fn validate_exact_commands(
             &command.exact_command,
         );
     }
+}
+
+fn validate_lane_specific_contracts(
+    manifest: &PermissionedCampaignBrokerManifest,
+    issues: &mut Vec<PermissionedCampaignBrokerIssue>,
+) {
+    match manifest.lane_kind {
+        PermissionedCampaignLaneKind::XfstestsRealBaseline => {
+            validate_xfstests_rehearsal_contract(manifest, issues);
+        }
+        PermissionedCampaignLaneKind::LargeHostSwarmResponsiveness => {}
+    }
+}
+
+fn validate_xfstests_rehearsal_contract(
+    manifest: &PermissionedCampaignBrokerManifest,
+    issues: &mut Vec<PermissionedCampaignBrokerIssue>,
+) {
+    for env_var in XFSTESTS_REQUIRED_RUNNER_ENVS {
+        if !manifest
+            .required_runner_env
+            .iter()
+            .any(|entry| entry.env_var == env_var)
+        {
+            push_issue(
+                issues,
+                "required_runner_env",
+                "missing_xfstests_runner_env",
+                "xfstests rehearsal packets must declare XFSTESTS_DIR, TEST_DIR, SCRATCH_MNT, and RESULT_BASE",
+            );
+        }
+    }
+
+    for fact_id in XFSTESTS_REQUIRED_HOST_FACTS {
+        if !manifest
+            .host_capability_facts
+            .iter()
+            .any(|fact| fact.fact_id == fact_id)
+        {
+            push_issue(
+                issues,
+                "host_capability_facts",
+                "missing_xfstests_helper_fact",
+                "xfstests rehearsal packets must preserve helper and explicit-path preflight facts",
+            );
+        }
+    }
+
+    for purpose in [
+        PermissionedCampaignPathPurpose::TestData,
+        PermissionedCampaignPathPurpose::Scratch,
+        PermissionedCampaignPathPurpose::ArtifactRoot,
+    ] {
+        if !manifest
+            .safe_path_roots
+            .iter()
+            .any(|root| root.purpose == purpose)
+        {
+            push_issue(
+                issues,
+                "safe_path_roots",
+                "missing_xfstests_path_root",
+                "xfstests rehearsal packets must declare test, scratch, and artifact roots",
+            );
+        }
+    }
+
+    for suffix in XFSTESTS_REQUIRED_ARTIFACT_SUFFIXES {
+        if !manifest
+            .expected_artifact_paths
+            .iter()
+            .any(|path| path.ends_with(suffix))
+        {
+            push_issue(
+                issues,
+                "expected_artifact_paths",
+                "missing_xfstests_artifact_manifest",
+                "xfstests rehearsal packets must name summary, raw log, command transcript, artifact manifest, and failure-to-bead outputs",
+            );
+        }
+    }
+
+    let Some(permissioned_run) = manifest
+        .exact_commands
+        .iter()
+        .find(|command| command.command_role == PermissionedCampaignCommandRole::PermissionedRun)
+    else {
+        push_issue(
+            issues,
+            "exact_commands",
+            "missing_xfstests_permissioned_run_command",
+            "xfstests rehearsal packets must include the exact permissioned run command",
+        );
+        return;
+    };
+
+    let command_text = &permissioned_run.exact_command;
+    for token in [
+        XFSTESTS_REAL_RUN_ACK_ENV,
+        XFSTESTS_REAL_RUN_ACK_VALUE,
+        "XFSTESTS_DIR",
+        "TEST_DIR",
+        "SCRATCH_MNT",
+        "RESULT_BASE",
+    ] {
+        if !command_text.contains(token) {
+            push_issue(
+                issues,
+                "exact_commands",
+                "incomplete_xfstests_permissioned_run_command",
+                "permissioned xfstests command must include the ACK and all scoped path environment variables",
+            );
+        }
+    }
+
+    if !manifest
+        .exact_commands
+        .iter()
+        .any(|command| command.command_role == PermissionedCampaignCommandRole::Cleanup)
+    {
+        push_issue(
+            issues,
+            "exact_commands",
+            "missing_xfstests_cleanup_command",
+            "xfstests rehearsal packets must include a cleanup or artifact-preservation command",
+        );
+    }
+
+    for (index, command) in manifest.exact_commands.iter().enumerate() {
+        if command_invokes_auto_install(&command.exact_command) {
+            push_issue(
+                issues,
+                &format!("exact_commands[{index}].exact_command"),
+                "auto_install_forbidden",
+                "xfstests rehearsal packets must not install packages or mutate the host setup automatically",
+            );
+        }
+    }
+}
+
+fn command_invokes_auto_install(command: &str) -> bool {
+    let normalized = command
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    tokens.windows(2).any(|pair| {
+        matches!(
+            pair,
+            [
+                "apt" | "apt-get" | "dnf" | "yum" | "brew" | "cargo" | "pip" | "pip3",
+                "install",
+            ] | ["pacman", "s"]
+        )
+    })
 }
 
 fn validate_ledger_top_level(
@@ -3969,6 +4160,60 @@ mod tests {
     }
 
     #[test]
+    fn xfstests_rehearsal_requires_helper_fact() {
+        let mut manifest = valid_xfstests_manifest();
+        manifest
+            .host_capability_facts
+            .retain(|fact| fact.fact_id != "xfstests_helpers");
+        assert_issue(&manifest, "missing_xfstests_helper_fact");
+    }
+
+    #[test]
+    fn xfstests_rehearsal_requires_cleanup_command() {
+        let mut manifest = valid_xfstests_manifest();
+        manifest
+            .exact_commands
+            .retain(|command| command.command_role != PermissionedCampaignCommandRole::Cleanup);
+        assert_issue(&manifest, "missing_xfstests_cleanup_command");
+    }
+
+    #[test]
+    fn xfstests_rehearsal_requires_artifact_manifest_outputs() {
+        let mut manifest = valid_xfstests_manifest();
+        manifest
+            .expected_artifact_paths
+            .retain(|path| !path.ends_with("artifact_manifest.json"));
+        assert_issue(&manifest, "missing_xfstests_artifact_manifest");
+    }
+
+    #[test]
+    fn xfstests_rehearsal_refuses_auto_install_commands() {
+        let mut manifest = valid_xfstests_manifest();
+        manifest.exact_commands.push(command(
+            "xfstests_install_missing_helpers",
+            "sudo apt-get install -y xfsprogs libaio-dev",
+            PermissionedCampaignCommandRole::Preflight,
+        ));
+        assert_issue(&manifest, "auto_install_forbidden");
+    }
+
+    #[test]
+    fn xfstests_rehearsal_permissioned_run_must_name_scoped_env() {
+        let mut manifest = valid_xfstests_manifest();
+        let permissioned_run = manifest
+            .exact_commands
+            .iter_mut()
+            .find(|command| {
+                command.command_role == PermissionedCampaignCommandRole::PermissionedRun
+            })
+            .expect("permissioned run command");
+        permissioned_run.exact_command = format!(
+            "{XFSTESTS_REAL_RUN_ACK_ENV}={XFSTESTS_REAL_RUN_ACK_VALUE} scripts/e2e/ffs_xfstests_e2e.sh"
+        );
+        assert_issue(&manifest, "incomplete_xfstests_permissioned_run_command");
+    }
+
+    #[test]
     fn swarm_adapter_renders_ready_handoff_packet_for_capable_host() -> Result<()> {
         let input = swarm_adapter_input();
         let manifest = build_swarm_broker_manifest(&input)?;
@@ -4770,6 +5015,7 @@ mod tests {
                         .to_owned(),
             },
             required_runner_env: vec![
+                runner_env("XFSTESTS_DIR", "xfstests source tree with built helpers"),
                 runner_env("TEST_DIR", "scoped xfstests test mount root"),
                 runner_env("SCRATCH_MNT", "scoped xfstests scratch mount root"),
                 runner_env("RESULT_BASE", "artifact root for raw xfstests results"),
@@ -4780,6 +5026,12 @@ mod tests {
                     "present",
                     "present",
                     "artifacts/xfstests/preflight/helpers.json",
+                ),
+                host_fact(
+                    "explicit_test_and_scratch_paths",
+                    "provided",
+                    "provided",
+                    "artifacts/xfstests/preflight/paths.json",
                 ),
                 host_fact(
                     "fuse_access",
@@ -4813,6 +5065,13 @@ mod tests {
             ],
             expected_artifact_paths: vec![
                 "artifacts/xfstests/real-run/report.json".to_owned(),
+                "artifacts/xfstests/real-run/summary.json".to_owned(),
+                "artifacts/xfstests/real-run/results.json".to_owned(),
+                "artifacts/xfstests/real-run/junit.xml".to_owned(),
+                "artifacts/xfstests/real-run/artifact_manifest.json".to_owned(),
+                "artifacts/xfstests/real-run/command_transcript.tsv".to_owned(),
+                "artifacts/xfstests/real-run/raw-results".to_owned(),
+                "artifacts/xfstests/real-run/failure_to_beads.json".to_owned(),
                 "artifacts/xfstests/real-run/stdout.log".to_owned(),
                 "artifacts/xfstests/real-run/stderr.log".to_owned(),
             ],
@@ -4838,8 +5097,13 @@ mod tests {
                 ),
                 command(
                     "xfstests_permissioned_run",
-                    "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/ffs_xfstests_e2e.sh",
+                    "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices XFSTESTS_DIR=third_party/xfstests-dev TEST_DIR=artifacts/xfstests/test-dir SCRATCH_MNT=artifacts/xfstests/scratch RESULT_BASE=artifacts/xfstests/real-run scripts/e2e/ffs_xfstests_e2e.sh",
                     PermissionedCampaignCommandRole::PermissionedRun,
+                ),
+                command(
+                    "xfstests_preserve_artifacts",
+                    "RESULT_BASE=artifacts/xfstests/real-run find artifacts/xfstests/real-run -maxdepth 3 -type f -print | sort > artifacts/xfstests/real-run/artifact_manifest.txt",
+                    PermissionedCampaignCommandRole::Cleanup,
                 ),
             ],
         }

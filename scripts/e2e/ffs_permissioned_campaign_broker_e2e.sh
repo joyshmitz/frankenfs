@@ -615,6 +615,9 @@ xfstests_manifest = {
     "expected_artifact_paths": [
         f"{xfstests_root}/summary.json",
         f"{xfstests_root}/results.json",
+        f"{xfstests_root}/junit.xml",
+        f"{xfstests_root}/artifact_manifest.json",
+        f"{xfstests_root}/command_transcript.tsv",
         f"{xfstests_root}/raw-results",
         f"{xfstests_root}/failure_to_beads.json",
         f"{xfstests_root}/stdout.log",
@@ -642,6 +645,11 @@ xfstests_manifest = {
             "xfstests_permissioned_run",
             "permissioned_run",
             f"XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices XFSTESTS_DIR='third_party/xfstests-dev' TEST_DIR='{rel('xfstests', 'test-dir')}' SCRATCH_MNT='{rel('xfstests', 'scratch')}' RESULT_BASE='{xfstests_root}' scripts/e2e/ffs_xfstests_e2e.sh",
+        ),
+        command(
+            "xfstests_preserve_artifacts",
+            "cleanup",
+            f"RESULT_BASE='{xfstests_root}' find '{xfstests_root}' -maxdepth 3 -type f -print | sort > '{xfstests_root}/artifact_file_list.txt'",
         ),
     ],
 }
@@ -1191,12 +1199,17 @@ if run_harness "permissioned_broker_xfstests_validate" "$XFSTESTS_VALIDATE_STDOU
         and .product_evidence_claim == "none"
         and .packet_status == "ready_for_operator_approval"
         and .ack_env == "XFSTESTS_REAL_RUN_ACK"
+        and (.expected_artifact_paths | any(endswith("artifact_manifest.json")))
+        and (.expected_artifact_paths | any(endswith("command_transcript.tsv")))
+        and (.exact_commands | any(.command_role == "cleanup" and .command_id == "xfstests_preserve_artifacts"))
     ' "$XFSTESTS_REPORT_JSON" >/dev/null \
     && jq -e '
         .product_evidence_claim == "none"
         and .packet_status == "ready_for_operator_approval"
         and (.authorization_notice | contains("not executed evidence"))
         and .required_ack.env_var == "XFSTESTS_REAL_RUN_ACK"
+        and (.expected_artifact_paths | any(endswith("artifact_manifest.json")))
+        and (.exact_commands | any(.command_role == "cleanup" and .command_id == "xfstests_preserve_artifacts"))
     ' "$XFSTESTS_PACKET_JSON" >/dev/null \
     && grep -q "not executed evidence" "$XFSTESTS_PACKET_MD"; then
     scenario_result "permissioned_broker_xfstests_packet" "PASS" "xfstests validator report and handoff packet emitted"
