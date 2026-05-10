@@ -414,6 +414,29 @@ e2e_rch_add_env_allowlist() {
 }
 
 #######################################
+# Return result.json-compatible git cleanliness for a repository.
+# Uses porcelain status so staged index changes and untracked files are not
+# mistaken for clean artifacts.
+# Arguments:
+#   $1 - Repository root (default: $REPO_ROOT or current directory)
+#######################################
+e2e_git_context_clean() {
+    local repo_root="${1:-${REPO_ROOT:-.}}"
+    local git_status
+
+    if ! git_status=$(git -C "$repo_root" status --porcelain --untracked-files=normal 2>/dev/null); then
+        printf 'false\n'
+        return 0
+    fi
+
+    if [[ -z "$git_status" ]]; then
+        printf 'true\n'
+    else
+        printf 'false\n'
+    fi
+}
+
+#######################################
 # Cancel stale RCH queue entries matching a command.
 # Arguments:
 #   $@ - Command previously passed to rch exec
@@ -920,11 +943,7 @@ e2e_emit_json_summary() {
     local git_commit git_branch git_clean
     git_commit=$(git -C "${REPO_ROOT:-.}" rev-parse --short HEAD 2>/dev/null || echo "unknown")
     git_branch=$(git -C "${REPO_ROOT:-.}" branch --show-current 2>/dev/null || echo "unknown")
-    if git -C "${REPO_ROOT:-.}" diff --quiet 2>/dev/null; then
-        git_clean="true"
-    else
-        git_clean="false"
-    fi
+    git_clean=$(e2e_git_context_clean "${REPO_ROOT:-.}")
 
     # Extract scenario results from log
     local scenarios_json="["
