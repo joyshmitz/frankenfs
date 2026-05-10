@@ -54,6 +54,7 @@ const MAX_PENDING_READAHEAD_ENTRIES: usize = 64;
 const MAX_ACCESS_PREDICTOR_ENTRIES: usize = 4096;
 const BACKPRESSURE_THROTTLE_DELAY: Duration = Duration::from_millis(5);
 const BACKPRESSURE_SLEEP_CHECK_INTERVAL: Duration = Duration::from_millis(10);
+const MOUNT_HANDLE_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const XATTR_FLAG_CREATE: i32 = 0x1;
 const XATTR_FLAG_REPLACE: i32 = 0x2;
 const FS_IOC_FIEMAP: u32 = 0xC020_660B;
@@ -5294,7 +5295,7 @@ impl MountHandle {
                     break;
                 }
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(MOUNT_HANDLE_WAIT_POLL_INTERVAL);
         }
         self.do_unmount()
     }
@@ -12254,17 +12255,25 @@ mod tests {
             config: MountConfig::default(),
         };
 
-        // Set the shutdown flag from another thread after a short delay.
+        // Set the shutdown flag from another thread after one poll interval.
+        let trigger_delay = MOUNT_HANDLE_WAIT_POLL_INTERVAL;
+        let max_wait = MOUNT_HANDLE_WAIT_POLL_INTERVAL.saturating_mul(6);
         let shutdown_thread = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(trigger_delay);
             shutdown_trigger.store(true, Ordering::Relaxed);
         });
 
+        let started = std::time::Instant::now();
         let snap = handle.wait();
+        let elapsed = started.elapsed();
         shutdown_thread
             .join()
             .expect("shutdown trigger thread should not panic");
         assert_eq!(snap.requests_ok, 1);
+        assert!(
+            elapsed < max_wait,
+            "MountHandle::wait should observe shutdown within {max_wait:?}, elapsed={elapsed:?}"
+        );
     }
 
     #[test]
