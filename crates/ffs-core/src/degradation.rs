@@ -611,13 +611,22 @@ mod tests {
         completed: Arc<std::sync::atomic::AtomicBool>,
         timeout: std::time::Duration,
     ) -> std::thread::JoinHandle<bool> {
+        const DEGRADATION_WATCHDOG_POLL_INTERVAL: std::time::Duration =
+            std::time::Duration::from_millis(10);
+
         std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + timeout;
-            while std::time::Instant::now() < deadline {
+            loop {
                 if completed.load(Ordering::Acquire) {
                     return false;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                std::thread::sleep(
+                    DEGRADATION_WATCHDOG_POLL_INTERVAL.min(deadline.saturating_duration_since(now)),
+                );
             }
             stop.store(true, Ordering::Release);
             true
