@@ -1268,6 +1268,11 @@ rch exec -- cargo run -p ffs-harness -- build-readiness-lab-truth-graph \
   --manifest artifacts/readiness-lab/truth_graph.json \
   --reference-epoch-days 20001 \
   --format markdown
+
+rch exec -- cargo run -p ffs-harness -- validate-readiness-lab-numa-p99-replay \
+  --manifest tests/readiness-lab/numa_p99_replay_fixtures.json \
+  --reference-epoch-days 20001 \
+  --format markdown
 ```
 
 These artifacts are allowed to drive preflight, rehearsal, dashboard, and
@@ -1283,6 +1288,12 @@ fallback without executing the planned lanes. The truth-graph fixture links
 reports, claims, commands, artifacts, beads, host capabilities, freshness
 windows, blockers, superseded stale evidence, and permission requirements while
 proving every blocker edge points at a validator report path or bead id.
+The NUMA/p99 replay fixture suite is a committed advisory manifest covering
+balanced NUMA, skewed NUMA, metadata-read hot shards, repair/scrub
+interference, RCH worker contention, and memory pressure. Its rollup emits
+p50/p95/p99 attribution summaries and fails closed on malformed histograms,
+missing p99 buckets, impossible CPU counts, or negative durations while keeping
+`product_evidence_claim=none`.
 
 ```bash
 ./scripts/e2e/ffs_readiness_lab_contracts_e2e.sh

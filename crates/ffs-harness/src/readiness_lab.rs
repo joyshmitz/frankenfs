@@ -27,6 +27,9 @@ pub const READINESS_LAB_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const READINESS_LAB_HOST_SIMULATION_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const READINESS_LAB_RCH_LANE_SCHEDULE_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const READINESS_LAB_TRUTH_GRAPH_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const READINESS_LAB_NUMA_P99_REPLAY_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const DEFAULT_READINESS_LAB_NUMA_P99_REPLAY_MANIFEST: &str =
+    "tests/readiness-lab/numa_p99_replay_fixtures.json";
 pub const READINESS_LAB_ADVISORY_NOTICE: &str =
     "advisory readiness-lab material only; not product evidence";
 pub const READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM: &str = "none";
@@ -685,6 +688,199 @@ pub struct ReadinessLabTruthGraphContradiction {
     pub claim_node_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadinessLabNumaP99ReplayConfig {
+    pub manifest_path: String,
+    pub reference_epoch_days: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabNumaP99ReplayManifest {
+    pub schema_version: u32,
+    pub replay_id: String,
+    pub generated_at_epoch_days: u32,
+    pub advisory_notice: String,
+    pub source_bead: String,
+    pub product_evidence_claim: ReadinessLabProductEvidenceClaim,
+    pub fixtures: Vec<ReadinessLabNumaP99ReplayFixture>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabNumaP99ReplayFixture {
+    pub fixture_id: String,
+    pub fixture_shape: ReadinessLabNumaP99FixtureShape,
+    pub source_bead: String,
+    pub observed_at_epoch_days: u32,
+    pub max_age_days: u32,
+    pub host: ReadinessLabNumaP99HostShape,
+    pub workload: ReadinessLabNumaP99WorkloadShape,
+    pub latency: ReadinessLabNumaP99LatencyHistogram,
+    pub queue_depth: ReadinessLabNumaP99QueueDepth,
+    pub raw_log_path: String,
+    pub reproduction_command: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessLabNumaP99FixtureShape {
+    BalancedNuma,
+    SkewedNuma,
+    MetadataReadHotShards,
+    RepairScrubInterference,
+    RchWorkerContention,
+    MemoryPressure,
+}
+
+impl ReadinessLabNumaP99FixtureShape {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::BalancedNuma => "balanced_numa",
+            Self::SkewedNuma => "skewed_numa",
+            Self::MetadataReadHotShards => "metadata_read_hot_shards",
+            Self::RepairScrubInterference => "repair_scrub_interference",
+            Self::RchWorkerContention => "rch_worker_contention",
+            Self::MemoryPressure => "memory_pressure",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabNumaP99HostShape {
+    pub logical_cpus: u32,
+    pub numa_nodes: Option<u32>,
+    pub ram_total_gib: f64,
+    pub ram_available_gib: f64,
+    pub storage_class: String,
+    pub rch_worker_identity: String,
+    pub queue_isolation: ReadinessLabSimulationQueueIsolation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabNumaP99WorkloadShape {
+    pub operation_count: u64,
+    pub duration_ms: i64,
+    pub worker_count: u32,
+    pub hot_shard_count: u32,
+    pub repair_scrub_active: bool,
+    pub memory_pressure_percent: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabNumaP99LatencyHistogram {
+    pub p50_latency_us: Option<f64>,
+    pub p95_latency_us: Option<f64>,
+    pub p99_latency_us: Option<f64>,
+    pub attribution: Vec<ReadinessLabNumaP99AttributionBucket>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabNumaP99AttributionBucket {
+    pub component: ReadinessLabNumaP99Component,
+    pub p50_us: Option<f64>,
+    pub p95_us: Option<f64>,
+    pub p99_us: Option<f64>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessLabNumaP99Component {
+    Queueing,
+    Service,
+    Io,
+    Synchronization,
+    Allocator,
+    RepairBacklog,
+    CachePressure,
+    RchWorkerContention,
+    NumaRemoteAccess,
+    MemoryReclaim,
+}
+
+impl ReadinessLabNumaP99Component {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Queueing => "queueing",
+            Self::Service => "service",
+            Self::Io => "io",
+            Self::Synchronization => "synchronization",
+            Self::Allocator => "allocator",
+            Self::RepairBacklog => "repair_backlog",
+            Self::CachePressure => "cache_pressure",
+            Self::RchWorkerContention => "rch_worker_contention",
+            Self::NumaRemoteAccess => "numa_remote_access",
+            Self::MemoryReclaim => "memory_reclaim",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessLabNumaP99QueueDepth {
+    pub average: f64,
+    pub p99: Option<f64>,
+    pub max: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReadinessLabNumaP99ReplayReport {
+    pub schema_version: u32,
+    pub replay_id: String,
+    pub manifest_path: String,
+    pub valid: bool,
+    pub replay_only: bool,
+    pub product_evidence_claim: String,
+    pub release_gate_effect: String,
+    pub source_bead: String,
+    pub fixture_count: usize,
+    pub row_count: usize,
+    pub invalid_fixture_count: usize,
+    pub missing_shape_count: usize,
+    pub missing_p99_bucket_count: usize,
+    pub malformed_histogram_count: usize,
+    pub impossible_cpu_count: usize,
+    pub negative_duration_count: usize,
+    pub stale_fixture_count: usize,
+    pub future_fixture_count: usize,
+    pub shape_counts: BTreeMap<String, usize>,
+    pub rows: Vec<ReadinessLabNumaP99ReplayRow>,
+    pub errors: Vec<ReadinessLabFinding>,
+    pub warnings: Vec<ReadinessLabFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReadinessLabNumaP99ReplayRow {
+    pub fixture_id: String,
+    pub fixture_shape: String,
+    pub classification: String,
+    pub product_evidence_claim: String,
+    pub release_gate_effect: String,
+    pub logical_cpus: u32,
+    pub numa_nodes: Option<u32>,
+    pub worker_count: u32,
+    pub hot_shard_count: u32,
+    pub memory_pressure_percent: u32,
+    pub duration_ms: i64,
+    pub p50_latency_us: Option<f64>,
+    pub p95_latency_us: Option<f64>,
+    pub p99_latency_us: Option<f64>,
+    pub component_p99_sum_us: f64,
+    pub dominant_component: String,
+    pub dominant_component_p99_us: f64,
+    pub queue_depth_p99: Option<f64>,
+    pub raw_log_path: String,
+    pub reproduction_command: String,
+    pub finding_count: usize,
+}
+
 #[must_use]
 pub fn validate_readiness_lab_contract_bundle(
     bundle: &ReadinessLabContractBundle,
@@ -1167,6 +1363,129 @@ pub fn fail_on_readiness_lab_truth_graph_errors(
         });
     anyhow::bail!(
         "readiness lab truth graph validation failed with {} error(s): {first}",
+        report.errors.len()
+    )
+}
+
+pub fn load_readiness_lab_numa_p99_replay_manifest(
+    path: impl AsRef<Path>,
+) -> Result<ReadinessLabNumaP99ReplayManifest> {
+    let path = path.as_ref();
+    let text = fs::read_to_string(path).with_context(|| {
+        format!(
+            "failed to read readiness lab NUMA/p99 replay {}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&text).with_context(|| {
+        format!(
+            "failed to parse readiness lab NUMA/p99 replay {}",
+            path.display()
+        )
+    })
+}
+
+#[must_use]
+pub fn validate_readiness_lab_numa_p99_replay(
+    manifest: &ReadinessLabNumaP99ReplayManifest,
+    config: &ReadinessLabNumaP99ReplayConfig,
+) -> ReadinessLabNumaP99ReplayReport {
+    let mut validator = ReadinessLabNumaP99ReplayValidator::new(manifest, config);
+    validator.validate_manifest();
+    validator.finish()
+}
+
+#[must_use]
+pub fn render_readiness_lab_numa_p99_replay_markdown(
+    report: &ReadinessLabNumaP99ReplayReport,
+) -> String {
+    let mut out = String::new();
+    writeln!(&mut out, "# FrankenFS Readiness Lab NUMA/p99 Replay").ok();
+    writeln!(&mut out).ok();
+    writeln!(&mut out, "- Replay: `{}`", report.replay_id).ok();
+    writeln!(&mut out, "- Manifest: `{}`", report.manifest_path).ok();
+    writeln!(&mut out, "- Valid: `{}`", report.valid).ok();
+    writeln!(&mut out, "- Replay only: `{}`", report.replay_only).ok();
+    writeln!(
+        &mut out,
+        "- Product evidence claim: `{}`",
+        report.product_evidence_claim
+    )
+    .ok();
+    writeln!(
+        &mut out,
+        "- Release-gate effect: {}",
+        report.release_gate_effect
+    )
+    .ok();
+    writeln!(&mut out, "- Fixtures: `{}`", report.fixture_count).ok();
+    writeln!(
+        &mut out,
+        "- Missing fixture shapes: `{}`",
+        report.missing_shape_count
+    )
+    .ok();
+    writeln!(
+        &mut out,
+        "- Missing p99 buckets: `{}`",
+        report.missing_p99_bucket_count
+    )
+    .ok();
+    writeln!(
+        &mut out,
+        "- Malformed histograms: `{}`",
+        report.malformed_histogram_count
+    )
+    .ok();
+    writeln!(&mut out).ok();
+    writeln!(
+        &mut out,
+        "| fixture | shape | class | cpu | numa | workers | p50 | p95 | p99 | dominant | component_sum | findings |"
+    )
+    .ok();
+    writeln!(
+        &mut out,
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---|---:|---:|"
+    )
+    .ok();
+    for row in &report.rows {
+        writeln!(
+            &mut out,
+            "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{:.1}` | `{}` |",
+            row.fixture_id,
+            row.fixture_shape,
+            row.classification,
+            row.logical_cpus,
+            row.numa_nodes
+                .map_or_else(|| "missing".to_owned(), |nodes| nodes.to_string()),
+            row.worker_count,
+            format_optional_f64(row.p50_latency_us),
+            format_optional_f64(row.p95_latency_us),
+            format_optional_f64(row.p99_latency_us),
+            row.dominant_component,
+            row.component_p99_sum_us,
+            row.finding_count
+        )
+        .ok();
+    }
+    writeln!(&mut out).ok();
+    render_findings(&mut out, "Errors", &report.errors);
+    render_findings(&mut out, "Warnings", &report.warnings);
+    out
+}
+
+pub fn fail_on_readiness_lab_numa_p99_replay_errors(
+    report: &ReadinessLabNumaP99ReplayReport,
+) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    let first = report.errors.first().map_or(
+        "readiness lab NUMA/p99 replay failed validation",
+        |finding| finding.message.as_str(),
+    );
+    anyhow::bail!(
+        "readiness lab NUMA/p99 replay validation failed with {} error(s): {first}",
         report.errors.len()
     )
 }
@@ -3062,6 +3381,616 @@ impl<'a> ReadinessLabTruthGraphBuilder<'a> {
     }
 }
 
+struct ReadinessLabNumaP99ReplayValidator<'a> {
+    manifest: &'a ReadinessLabNumaP99ReplayManifest,
+    config: &'a ReadinessLabNumaP99ReplayConfig,
+    errors: Vec<ReadinessLabFinding>,
+    warnings: Vec<ReadinessLabFinding>,
+    rows: Vec<ReadinessLabNumaP99ReplayRow>,
+    shape_counts: BTreeMap<String, usize>,
+    invalid_fixture_ids: BTreeSet<String>,
+    missing_p99_bucket_count: usize,
+    malformed_histogram_count: usize,
+    impossible_cpu_count: usize,
+    negative_duration_count: usize,
+    stale_fixture_count: usize,
+    future_fixture_count: usize,
+}
+
+impl<'a> ReadinessLabNumaP99ReplayValidator<'a> {
+    fn new(
+        manifest: &'a ReadinessLabNumaP99ReplayManifest,
+        config: &'a ReadinessLabNumaP99ReplayConfig,
+    ) -> Self {
+        Self {
+            manifest,
+            config,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            rows: Vec::new(),
+            shape_counts: BTreeMap::new(),
+            invalid_fixture_ids: BTreeSet::new(),
+            missing_p99_bucket_count: 0,
+            malformed_histogram_count: 0,
+            impossible_cpu_count: 0,
+            negative_duration_count: 0,
+            stale_fixture_count: 0,
+            future_fixture_count: 0,
+        }
+    }
+
+    fn validate_manifest(&mut self) {
+        self.check_manifest_identity();
+        self.check_shape_coverage();
+        if duplicate_count(
+            self.manifest
+                .fixtures
+                .iter()
+                .map(|fixture| fixture.fixture_id.as_str()),
+        ) > 0
+        {
+            self.error(
+                "duplicate_replay_fixture_ids",
+                "fixture_id values must be unique",
+                FindingScope::default().field("fixtures"),
+            );
+        }
+        for fixture in &self.manifest.fixtures {
+            self.validate_fixture(fixture);
+        }
+    }
+
+    fn check_manifest_identity(&mut self) {
+        if self.manifest.schema_version != READINESS_LAB_SCHEMA_VERSION {
+            self.error(
+                "unsupported_schema_version",
+                format!(
+                    "schema_version must be {READINESS_LAB_SCHEMA_VERSION}, got {}",
+                    self.manifest.schema_version
+                ),
+                FindingScope::default().field("schema_version"),
+            );
+        }
+        if self.manifest.replay_id.trim().is_empty() {
+            self.error(
+                "missing_replay_id",
+                "replay_id must be non-empty",
+                FindingScope::default().field("replay_id"),
+            );
+        }
+        if self.manifest.generated_at_epoch_days == 0 {
+            self.error(
+                "missing_generated_at_epoch_days",
+                "generated_at_epoch_days must be non-zero",
+                FindingScope::default().field("generated_at_epoch_days"),
+            );
+        }
+        if self.manifest.advisory_notice.trim() != READINESS_LAB_ADVISORY_NOTICE {
+            self.error(
+                "invalid_advisory_notice",
+                format!("advisory_notice must be exactly {READINESS_LAB_ADVISORY_NOTICE:?}"),
+                FindingScope::default().field("advisory_notice"),
+            );
+        }
+        if !self.manifest.source_bead.starts_with("bd-") {
+            self.error(
+                "malformed_source_bead",
+                "source_bead must look like bd-...",
+                FindingScope::default().field("source_bead"),
+            );
+        }
+        if !matches!(
+            self.manifest.product_evidence_claim,
+            ReadinessLabProductEvidenceClaim::None
+        ) {
+            self.error(
+                "product_evidence_claim_violation",
+                "NUMA/p99 replay manifests must keep product_evidence_claim=none",
+                FindingScope::default().field("product_evidence_claim"),
+            );
+        }
+        if self.manifest.fixtures.is_empty() {
+            self.error(
+                "empty_replay_fixture_matrix",
+                "fixtures must include every required contention shape",
+                FindingScope::default().field("fixtures"),
+            );
+        }
+    }
+
+    fn check_shape_coverage(&mut self) {
+        for fixture in &self.manifest.fixtures {
+            *self
+                .shape_counts
+                .entry(fixture.fixture_shape.label().to_owned())
+                .or_default() += 1;
+        }
+        for shape in required_numa_p99_fixture_shapes() {
+            if !self.shape_counts.contains_key(shape.label()) {
+                self.error(
+                    "missing_replay_fixture_shape",
+                    format!("fixtures must include shape {}", shape.label()),
+                    FindingScope::default().field("fixtures"),
+                );
+            }
+        }
+    }
+
+    fn validate_fixture(&mut self, fixture: &ReadinessLabNumaP99ReplayFixture) {
+        let before = self.errors.len();
+        if fixture.fixture_id.trim().is_empty() {
+            self.error(
+                "missing_replay_fixture_id",
+                "fixture_id must be non-empty",
+                FindingScope::default().field("fixture_id"),
+            );
+        }
+        if !fixture.source_bead.starts_with("bd-") {
+            self.error(
+                "malformed_fixture_source_bead",
+                "fixture source_bead must look like bd-...",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("source_bead"),
+            );
+        }
+        self.validate_freshness(fixture);
+        self.validate_host(fixture);
+        self.validate_workload(fixture);
+        self.validate_queue_depth(fixture);
+        self.validate_latency(fixture);
+        if fixture.raw_log_path.trim().is_empty() {
+            self.error(
+                "missing_raw_log_path",
+                "fixture raw_log_path must be non-empty",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("raw_log_path"),
+            );
+        }
+        if fixture.reproduction_command.trim().is_empty() {
+            self.error(
+                "missing_reproduction_command",
+                "fixture reproduction_command must be non-empty",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("reproduction_command"),
+            );
+        }
+        let finding_count = self.errors.len().saturating_sub(before);
+        if finding_count > 0 {
+            self.invalid_fixture_ids.insert(fixture.fixture_id.clone());
+        }
+        self.rows.push(self.row_for_fixture(fixture, finding_count));
+    }
+
+    fn validate_freshness(&mut self, fixture: &ReadinessLabNumaP99ReplayFixture) {
+        if fixture.observed_at_epoch_days == 0 {
+            self.error(
+                "missing_observed_at_epoch_days",
+                "fixture observed_at_epoch_days must be non-zero",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("observed_at_epoch_days"),
+            );
+        }
+        if fixture.max_age_days == 0 {
+            self.error(
+                "zero_max_age_days",
+                "fixture max_age_days must be greater than zero",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("max_age_days"),
+            );
+        }
+        let Some(reference_epoch_days) = self.config.reference_epoch_days else {
+            return;
+        };
+        if fixture.observed_at_epoch_days > reference_epoch_days {
+            self.future_fixture_count += 1;
+            self.error(
+                "future_replay_fixture",
+                "fixture observed_at_epoch_days is newer than the reference date",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("observed_at_epoch_days"),
+            );
+        }
+        if fixture
+            .observed_at_epoch_days
+            .saturating_add(fixture.max_age_days)
+            < reference_epoch_days
+        {
+            self.stale_fixture_count += 1;
+            self.error(
+                "stale_replay_fixture",
+                "fixture is older than max_age_days",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("max_age_days"),
+            );
+        }
+    }
+
+    fn validate_host(&mut self, fixture: &ReadinessLabNumaP99ReplayFixture) {
+        let host = &fixture.host;
+        if host.logical_cpus == 0 || host.logical_cpus > 4096 {
+            self.impossible_cpu_count += 1;
+            self.error(
+                "impossible_logical_cpu_count",
+                "logical_cpus must be within 1..=4096 for replay fixtures",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("host.logical_cpus"),
+            );
+        }
+        match host.numa_nodes {
+            Some(nodes) if nodes > 0 && nodes <= host.logical_cpus => {}
+            _ => {
+                self.error(
+                    "invalid_numa_nodes",
+                    "numa_nodes must be present, positive, and no larger than logical_cpus",
+                    FindingScope::artifact(fixture.fixture_id.as_str()).field("host.numa_nodes"),
+                );
+            }
+        }
+        if host.ram_total_gib <= 0.0 || host.ram_available_gib <= 0.0 {
+            self.error(
+                "invalid_ram_shape",
+                "ram_total_gib and ram_available_gib must be positive",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("host"),
+            );
+        }
+        if host.ram_available_gib > host.ram_total_gib {
+            self.error(
+                "available_ram_exceeds_total",
+                "ram_available_gib must not exceed ram_total_gib",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("host.ram_available_gib"),
+            );
+        }
+        if host.storage_class.trim().is_empty() {
+            self.error(
+                "missing_storage_class",
+                "host.storage_class must be non-empty",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("host.storage_class"),
+            );
+        }
+        if host.rch_worker_identity.trim().is_empty() {
+            self.error(
+                "missing_rch_worker_identity",
+                "host.rch_worker_identity must be non-empty",
+                FindingScope::artifact(fixture.fixture_id.as_str())
+                    .field("host.rch_worker_identity"),
+            );
+        }
+    }
+
+    fn validate_workload(&mut self, fixture: &ReadinessLabNumaP99ReplayFixture) {
+        let workload = &fixture.workload;
+        if workload.operation_count == 0 {
+            self.error(
+                "zero_operation_count",
+                "workload.operation_count must be positive",
+                FindingScope::artifact(fixture.fixture_id.as_str())
+                    .field("workload.operation_count"),
+            );
+        }
+        if workload.duration_ms <= 0 {
+            if workload.duration_ms < 0 {
+                self.negative_duration_count += 1;
+            }
+            self.error(
+                "non_positive_duration_ms",
+                "workload.duration_ms must be positive",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("workload.duration_ms"),
+            );
+        }
+        if workload.worker_count == 0 || workload.worker_count > fixture.host.logical_cpus {
+            self.error(
+                "invalid_worker_count",
+                "workload.worker_count must be positive and no larger than logical_cpus",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("workload.worker_count"),
+            );
+        }
+        if workload.hot_shard_count == 0 {
+            self.error(
+                "zero_hot_shard_count",
+                "workload.hot_shard_count must be positive",
+                FindingScope::artifact(fixture.fixture_id.as_str())
+                    .field("workload.hot_shard_count"),
+            );
+        }
+        if workload.memory_pressure_percent > 100 {
+            self.error(
+                "invalid_memory_pressure_percent",
+                "memory_pressure_percent must be <= 100",
+                FindingScope::artifact(fixture.fixture_id.as_str())
+                    .field("workload.memory_pressure_percent"),
+            );
+        }
+    }
+
+    fn validate_queue_depth(&mut self, fixture: &ReadinessLabNumaP99ReplayFixture) {
+        let queue = &fixture.queue_depth;
+        if queue.average < 0.0 {
+            self.error(
+                "negative_queue_depth_average",
+                "queue_depth.average must be non-negative",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("queue_depth.average"),
+            );
+        }
+        match queue.p99 {
+            Some(p99) if p99 >= 0.0 && p99 >= queue.average && p99 <= f64::from(queue.max) => {}
+            Some(_) => self.error(
+                "malformed_queue_depth_p99",
+                "queue_depth.p99 must be non-negative, >= average, and <= max",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("queue_depth.p99"),
+            ),
+            None => {
+                self.missing_p99_bucket_count += 1;
+                self.error(
+                    "missing_queue_depth_p99",
+                    "queue_depth.p99 is required",
+                    FindingScope::artifact(fixture.fixture_id.as_str()).field("queue_depth.p99"),
+                );
+            }
+        }
+    }
+
+    fn validate_latency(&mut self, fixture: &ReadinessLabNumaP99ReplayFixture) {
+        let latency = &fixture.latency;
+        let p50 = self.require_positive_bucket(
+            fixture.fixture_id.as_str(),
+            "latency.p50_latency_us",
+            latency.p50_latency_us,
+        );
+        let p95 = self.require_positive_bucket(
+            fixture.fixture_id.as_str(),
+            "latency.p95_latency_us",
+            latency.p95_latency_us,
+        );
+        let p99 = self.require_p99_bucket(
+            fixture.fixture_id.as_str(),
+            "latency.p99_latency_us",
+            latency.p99_latency_us,
+        );
+        if let (Some(p50), Some(p95), Some(p99)) = (p50, p95, p99)
+            && (p50 > p95 || p95 > p99)
+        {
+            self.malformed_histogram_count += 1;
+            self.error(
+                "malformed_latency_histogram_order",
+                "latency buckets must satisfy p50 <= p95 <= p99",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("latency"),
+            );
+        }
+        if latency.attribution.is_empty() {
+            self.malformed_histogram_count += 1;
+            self.error(
+                "empty_latency_attribution",
+                "latency.attribution must include at least one component bucket",
+                FindingScope::artifact(fixture.fixture_id.as_str()).field("latency.attribution"),
+            );
+        }
+
+        let mut seen_components = BTreeSet::new();
+        for bucket in &latency.attribution {
+            let component = bucket.component.label();
+            if !seen_components.insert(component) {
+                self.malformed_histogram_count += 1;
+                self.error(
+                    "duplicate_latency_component",
+                    format!("duplicate attribution component {component}"),
+                    FindingScope::artifact(fixture.fixture_id.as_str())
+                        .field("latency.attribution"),
+                );
+            }
+            let p50 = self.require_non_negative_component_bucket(
+                fixture.fixture_id.as_str(),
+                component,
+                "p50_us",
+                bucket.p50_us,
+            );
+            let p95 = self.require_non_negative_component_bucket(
+                fixture.fixture_id.as_str(),
+                component,
+                "p95_us",
+                bucket.p95_us,
+            );
+            let p99 = self.require_p99_bucket(
+                fixture.fixture_id.as_str(),
+                &format!("latency.attribution.{component}.p99_us"),
+                bucket.p99_us,
+            );
+            if let (Some(p50), Some(p95), Some(p99)) = (p50, p95, p99)
+                && (p50 > p95 || p95 > p99)
+            {
+                self.malformed_histogram_count += 1;
+                self.error(
+                    "malformed_component_histogram_order",
+                    format!("component {component} buckets must satisfy p50 <= p95 <= p99"),
+                    FindingScope::artifact(fixture.fixture_id.as_str())
+                        .field("latency.attribution"),
+                );
+            }
+            if let (Some(component_p99), Some(row_p99)) = (bucket.p99_us, latency.p99_latency_us)
+                && component_p99 > row_p99
+            {
+                self.malformed_histogram_count += 1;
+                self.error(
+                    "component_p99_exceeds_row_p99",
+                    format!("component {component} p99_us exceeds row p99_latency_us"),
+                    FindingScope::artifact(fixture.fixture_id.as_str())
+                        .field("latency.attribution"),
+                );
+            }
+            if bucket.detail.trim().is_empty() {
+                self.error(
+                    "missing_component_detail",
+                    format!("component {component} must include detail"),
+                    FindingScope::artifact(fixture.fixture_id.as_str())
+                        .field("latency.attribution.detail"),
+                );
+            }
+        }
+    }
+
+    fn require_positive_bucket(
+        &mut self,
+        fixture_id: &str,
+        field: &str,
+        value: Option<f64>,
+    ) -> Option<f64> {
+        match value {
+            Some(value) if value.is_finite() && value > 0.0 => Some(value),
+            Some(_) => {
+                self.malformed_histogram_count += 1;
+                self.error(
+                    "malformed_latency_bucket",
+                    format!("{field} must be finite and positive"),
+                    FindingScope::artifact(fixture_id).field(field),
+                );
+                None
+            }
+            None => {
+                self.malformed_histogram_count += 1;
+                self.error(
+                    "missing_latency_bucket",
+                    format!("{field} is required"),
+                    FindingScope::artifact(fixture_id).field(field),
+                );
+                None
+            }
+        }
+    }
+
+    fn require_non_negative_component_bucket(
+        &mut self,
+        fixture_id: &str,
+        component: &str,
+        field: &str,
+        value: Option<f64>,
+    ) -> Option<f64> {
+        match value {
+            Some(value) if value.is_finite() && value >= 0.0 => Some(value),
+            Some(_) => {
+                self.malformed_histogram_count += 1;
+                self.error(
+                    "malformed_component_bucket",
+                    format!("component {component} {field} must be finite and non-negative"),
+                    FindingScope::artifact(fixture_id).field("latency.attribution"),
+                );
+                None
+            }
+            None => {
+                self.malformed_histogram_count += 1;
+                self.error(
+                    "missing_component_bucket",
+                    format!("component {component} {field} is required"),
+                    FindingScope::artifact(fixture_id).field("latency.attribution"),
+                );
+                None
+            }
+        }
+    }
+
+    fn require_p99_bucket(
+        &mut self,
+        fixture_id: &str,
+        field: &str,
+        value: Option<f64>,
+    ) -> Option<f64> {
+        match value {
+            Some(value) if value.is_finite() && value > 0.0 => Some(value),
+            Some(_) => {
+                self.malformed_histogram_count += 1;
+                self.error(
+                    "malformed_p99_bucket",
+                    format!("{field} must be finite and positive"),
+                    FindingScope::artifact(fixture_id).field(field),
+                );
+                None
+            }
+            None => {
+                self.missing_p99_bucket_count += 1;
+                self.error(
+                    "missing_p99_bucket",
+                    format!("{field} is required"),
+                    FindingScope::artifact(fixture_id).field(field),
+                );
+                None
+            }
+        }
+    }
+
+    fn row_for_fixture(
+        &self,
+        fixture: &ReadinessLabNumaP99ReplayFixture,
+        finding_count: usize,
+    ) -> ReadinessLabNumaP99ReplayRow {
+        let (dominant_component, dominant_component_p99_us) =
+            dominant_numa_p99_component(&fixture.latency);
+        ReadinessLabNumaP99ReplayRow {
+            fixture_id: fixture.fixture_id.clone(),
+            fixture_shape: fixture.fixture_shape.label().to_owned(),
+            classification: if finding_count == 0 {
+                "advisory_replay_fixture".to_owned()
+            } else {
+                "invalid_replay_fixture".to_owned()
+            },
+            product_evidence_claim: READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM.to_owned(),
+            release_gate_effect: "replay fixture is advisory only; public readiness unchanged"
+                .to_owned(),
+            logical_cpus: fixture.host.logical_cpus,
+            numa_nodes: fixture.host.numa_nodes,
+            worker_count: fixture.workload.worker_count,
+            hot_shard_count: fixture.workload.hot_shard_count,
+            memory_pressure_percent: fixture.workload.memory_pressure_percent,
+            duration_ms: fixture.workload.duration_ms,
+            p50_latency_us: fixture.latency.p50_latency_us,
+            p95_latency_us: fixture.latency.p95_latency_us,
+            p99_latency_us: fixture.latency.p99_latency_us,
+            component_p99_sum_us: component_p99_sum_us(&fixture.latency),
+            dominant_component,
+            dominant_component_p99_us,
+            queue_depth_p99: fixture.queue_depth.p99,
+            raw_log_path: fixture.raw_log_path.clone(),
+            reproduction_command: fixture.reproduction_command.clone(),
+            finding_count,
+        }
+    }
+
+    fn finish(self) -> ReadinessLabNumaP99ReplayReport {
+        let missing_shape_count = required_numa_p99_fixture_shapes()
+            .iter()
+            .filter(|shape| !self.shape_counts.contains_key(shape.label()))
+            .count();
+        ReadinessLabNumaP99ReplayReport {
+            schema_version: READINESS_LAB_NUMA_P99_REPLAY_REPORT_SCHEMA_VERSION,
+            replay_id: self.manifest.replay_id.clone(),
+            manifest_path: self.config.manifest_path.clone(),
+            valid: self.errors.is_empty(),
+            replay_only: true,
+            product_evidence_claim: READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM.to_owned(),
+            release_gate_effect:
+                "NUMA/p99 replay fixtures are simulation artifacts; public readiness unchanged until permissioned large-host evidence records raw workload logs, p99 attribution, proof-bundle lanes, and release-gate output"
+                    .to_owned(),
+            source_bead: self.manifest.source_bead.clone(),
+            fixture_count: self.manifest.fixtures.len(),
+            row_count: self.rows.len(),
+            invalid_fixture_count: self.invalid_fixture_ids.len(),
+            missing_shape_count,
+            missing_p99_bucket_count: self.missing_p99_bucket_count,
+            malformed_histogram_count: self.malformed_histogram_count,
+            impossible_cpu_count: self.impossible_cpu_count,
+            negative_duration_count: self.negative_duration_count,
+            stale_fixture_count: self.stale_fixture_count,
+            future_fixture_count: self.future_fixture_count,
+            shape_counts: self.shape_counts,
+            rows: self.rows,
+            errors: self.errors,
+            warnings: self.warnings,
+        }
+    }
+
+    fn error(
+        &mut self,
+        finding_id: impl Into<String>,
+        message: impl Into<String>,
+        scope: FindingScope,
+    ) {
+        self.errors.push(scope.into_finding(
+            finding_id.into(),
+            ReadinessLabFindingSeverity::Error,
+            message.into(),
+        ));
+    }
+}
+
 #[derive(Debug, Clone)]
 struct TruthGraphClaimObservation {
     node_id: String,
@@ -3514,6 +4443,42 @@ fn blocker_link_missing(validator_report_path: Option<&str>, bead_id: Option<&st
     !has_report && !has_bead
 }
 
+fn required_numa_p99_fixture_shapes() -> [ReadinessLabNumaP99FixtureShape; 6] {
+    [
+        ReadinessLabNumaP99FixtureShape::BalancedNuma,
+        ReadinessLabNumaP99FixtureShape::SkewedNuma,
+        ReadinessLabNumaP99FixtureShape::MetadataReadHotShards,
+        ReadinessLabNumaP99FixtureShape::RepairScrubInterference,
+        ReadinessLabNumaP99FixtureShape::RchWorkerContention,
+        ReadinessLabNumaP99FixtureShape::MemoryPressure,
+    ]
+}
+
+fn component_p99_sum_us(latency: &ReadinessLabNumaP99LatencyHistogram) -> f64 {
+    latency
+        .attribution
+        .iter()
+        .filter_map(|bucket| bucket.p99_us)
+        .sum()
+}
+
+fn dominant_numa_p99_component(latency: &ReadinessLabNumaP99LatencyHistogram) -> (String, f64) {
+    latency
+        .attribution
+        .iter()
+        .filter_map(|bucket| {
+            bucket
+                .p99_us
+                .map(|p99| (bucket.component.label().to_owned(), p99))
+        })
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+        .unwrap_or_else(|| ("missing".to_owned(), 0.0))
+}
+
+fn format_optional_f64(value: Option<f64>) -> String {
+    value.map_or_else(|| "missing".to_owned(), |value| format!("{value:.1}"))
+}
+
 fn duplicate_count<'a>(ids: impl Iterator<Item = &'a str>) -> usize {
     let mut seen = BTreeSet::new();
     let mut duplicates = BTreeSet::new();
@@ -3963,6 +4928,165 @@ mod tests {
             manifest,
             &ReadinessLabTruthGraphConfig {
                 manifest_path: "truth-graph.json".to_owned(),
+                reference_epoch_days: Some(20_001),
+            },
+        )
+    }
+
+    fn sample_numa_p99_replay_manifest() -> ReadinessLabNumaP99ReplayManifest {
+        ReadinessLabNumaP99ReplayManifest {
+            schema_version: READINESS_LAB_SCHEMA_VERSION,
+            replay_id: "readiness-lab-numa-p99-fixtures".to_owned(),
+            generated_at_epoch_days: 20_000,
+            advisory_notice: READINESS_LAB_ADVISORY_NOTICE.to_owned(),
+            source_bead: "bd-w6nuy".to_owned(),
+            product_evidence_claim: ReadinessLabProductEvidenceClaim::None,
+            fixtures: required_numa_p99_fixture_shapes()
+                .into_iter()
+                .map(replay_fixture)
+                .collect(),
+        }
+    }
+
+    fn replay_fixture(shape: ReadinessLabNumaP99FixtureShape) -> ReadinessLabNumaP99ReplayFixture {
+        let (suffix, dominant, p99, workers, hot_shards, repair, memory_pressure) = match shape {
+            ReadinessLabNumaP99FixtureShape::BalancedNuma => (
+                "balanced",
+                ReadinessLabNumaP99Component::Service,
+                9_000.0,
+                64,
+                16,
+                false,
+                45,
+            ),
+            ReadinessLabNumaP99FixtureShape::SkewedNuma => (
+                "skewed",
+                ReadinessLabNumaP99Component::NumaRemoteAccess,
+                15_000.0,
+                64,
+                8,
+                false,
+                50,
+            ),
+            ReadinessLabNumaP99FixtureShape::MetadataReadHotShards => (
+                "metadata-hot",
+                ReadinessLabNumaP99Component::Synchronization,
+                18_000.0,
+                72,
+                2,
+                false,
+                55,
+            ),
+            ReadinessLabNumaP99FixtureShape::RepairScrubInterference => (
+                "repair-scrub",
+                ReadinessLabNumaP99Component::RepairBacklog,
+                21_000.0,
+                64,
+                12,
+                true,
+                60,
+            ),
+            ReadinessLabNumaP99FixtureShape::RchWorkerContention => (
+                "rch-contention",
+                ReadinessLabNumaP99Component::RchWorkerContention,
+                24_000.0,
+                48,
+                12,
+                false,
+                62,
+            ),
+            ReadinessLabNumaP99FixtureShape::MemoryPressure => (
+                "memory-pressure",
+                ReadinessLabNumaP99Component::MemoryReclaim,
+                27_000.0,
+                56,
+                10,
+                true,
+                88,
+            ),
+        };
+        ReadinessLabNumaP99ReplayFixture {
+            fixture_id: format!("fixture-{suffix}"),
+            fixture_shape: shape,
+            source_bead: "bd-w6nuy".to_owned(),
+            observed_at_epoch_days: 20_000,
+            max_age_days: 7,
+            host: ReadinessLabNumaP99HostShape {
+                logical_cpus: 96,
+                numa_nodes: Some(4),
+                ram_total_gib: 384.0,
+                ram_available_gib: 300.0,
+                storage_class: "local-nvme".to_owned(),
+                rch_worker_identity: "synthetic-rch-large-host".to_owned(),
+                queue_isolation: ReadinessLabSimulationQueueIsolation::Dedicated,
+            },
+            workload: ReadinessLabNumaP99WorkloadShape {
+                operation_count: 250_000,
+                duration_ms: 90_000,
+                worker_count: workers,
+                hot_shard_count: hot_shards,
+                repair_scrub_active: repair,
+                memory_pressure_percent: memory_pressure,
+            },
+            latency: ReadinessLabNumaP99LatencyHistogram {
+                p50_latency_us: Some(p99 / 4.0),
+                p95_latency_us: Some(p99 / 2.0),
+                p99_latency_us: Some(p99),
+                attribution: replay_components(dominant, p99),
+            },
+            queue_depth: ReadinessLabNumaP99QueueDepth {
+                average: 8.0,
+                p99: Some(28.0),
+                max: 64,
+            },
+            raw_log_path: format!("artifacts/readiness-lab/numa-p99/{suffix}.log"),
+            reproduction_command: format!(
+                "cargo run -p ffs-harness -- validate-readiness-lab-numa-p99-replay --select {suffix}"
+            ),
+        }
+    }
+
+    fn replay_components(
+        dominant: ReadinessLabNumaP99Component,
+        row_p99: f64,
+    ) -> Vec<ReadinessLabNumaP99AttributionBucket> {
+        [
+            ReadinessLabNumaP99Component::Queueing,
+            ReadinessLabNumaP99Component::Service,
+            ReadinessLabNumaP99Component::Io,
+            ReadinessLabNumaP99Component::Synchronization,
+            ReadinessLabNumaP99Component::Allocator,
+            ReadinessLabNumaP99Component::RepairBacklog,
+            ReadinessLabNumaP99Component::CachePressure,
+            ReadinessLabNumaP99Component::RchWorkerContention,
+            ReadinessLabNumaP99Component::NumaRemoteAccess,
+            ReadinessLabNumaP99Component::MemoryReclaim,
+        ]
+        .into_iter()
+        .map(|component| {
+            let p99 = if component == dominant {
+                row_p99 * 0.32
+            } else {
+                row_p99 * 0.06
+            };
+            ReadinessLabNumaP99AttributionBucket {
+                component,
+                p50_us: Some(p99 / 4.0),
+                p95_us: Some(p99 / 2.0),
+                p99_us: Some(p99),
+                detail: format!("synthetic {} attribution", component.label()),
+            }
+        })
+        .collect()
+    }
+
+    fn validate_numa_p99_replay(
+        manifest: &ReadinessLabNumaP99ReplayManifest,
+    ) -> ReadinessLabNumaP99ReplayReport {
+        validate_readiness_lab_numa_p99_replay(
+            manifest,
+            &ReadinessLabNumaP99ReplayConfig {
+                manifest_path: "numa-p99-replay.json".to_owned(),
                 reference_epoch_days: Some(20_001),
             },
         )
@@ -4462,6 +5586,133 @@ mod tests {
                 .errors
                 .iter()
                 .any(|finding| finding.finding_id == "blocker_without_report_or_bead")
+        );
+    }
+
+    #[test]
+    fn numa_p99_replay_covers_all_shapes_and_preserves_advisory_claims() {
+        let report = validate_numa_p99_replay(&sample_numa_p99_replay_manifest());
+
+        assert!(report.valid);
+        assert!(report.replay_only);
+        assert_eq!(report.fixture_count, 6);
+        assert_eq!(report.row_count, 6);
+        assert_eq!(report.missing_shape_count, 0);
+        assert_eq!(
+            report.product_evidence_claim,
+            READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM
+        );
+        assert!(
+            report
+                .release_gate_effect
+                .contains("public readiness unchanged")
+        );
+        for shape in required_numa_p99_fixture_shapes() {
+            assert_eq!(report.shape_counts.get(shape.label()), Some(&1));
+        }
+        assert!(
+            report
+                .rows
+                .iter()
+                .any(|row| row.fixture_shape == "skewed_numa"
+                    && row.dominant_component == "numa_remote_access")
+        );
+        assert!(
+            render_readiness_lab_numa_p99_replay_markdown(&report)
+                .contains("FrankenFS Readiness Lab NUMA/p99 Replay")
+        );
+    }
+
+    #[test]
+    fn checked_in_numa_p99_replay_fixture_manifest_validates() {
+        let manifest = serde_json::from_str::<ReadinessLabNumaP99ReplayManifest>(include_str!(
+            "../../../tests/readiness-lab/numa_p99_replay_fixtures.json"
+        ))
+        .expect("checked-in replay fixture parses");
+
+        let report = validate_readiness_lab_numa_p99_replay(
+            &manifest,
+            &ReadinessLabNumaP99ReplayConfig {
+                manifest_path: DEFAULT_READINESS_LAB_NUMA_P99_REPLAY_MANIFEST.to_owned(),
+                reference_epoch_days: Some(20_001),
+            },
+        );
+
+        assert!(
+            report.valid,
+            "checked-in replay fixture errors: {:?}",
+            report.errors
+        );
+        assert_eq!(report.fixture_count, 6);
+        assert_eq!(report.missing_shape_count, 0);
+    }
+
+    #[test]
+    fn numa_p99_replay_rejects_malformed_histograms_missing_p99_cpu_and_duration() {
+        let mut manifest = sample_numa_p99_replay_manifest();
+        manifest.fixtures[0].latency.p95_latency_us = Some(20_000.0);
+        manifest.fixtures[0].latency.p99_latency_us = Some(10_000.0);
+        manifest.fixtures[1].latency.p99_latency_us = None;
+        manifest.fixtures[2].host.logical_cpus = 0;
+        manifest.fixtures[3].workload.duration_ms = -1;
+        manifest.fixtures[4].latency.attribution[0].p99_us = None;
+
+        let report = validate_numa_p99_replay(&manifest);
+
+        assert!(!report.valid);
+        assert_eq!(report.missing_p99_bucket_count, 2);
+        assert!(report.malformed_histogram_count >= 1);
+        assert_eq!(report.impossible_cpu_count, 1);
+        assert_eq!(report.negative_duration_count, 1);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.finding_id == "malformed_latency_histogram_order")
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.finding_id == "missing_p99_bucket")
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.finding_id == "impossible_logical_cpu_count")
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.finding_id == "non_positive_duration_ms")
+        );
+    }
+
+    #[test]
+    fn numa_p99_replay_rejects_missing_shapes_and_product_claims() {
+        let mut manifest = sample_numa_p99_replay_manifest();
+        manifest.product_evidence_claim = ReadinessLabProductEvidenceClaim::ProductPassFail;
+        manifest.fixtures.retain(|fixture| {
+            fixture.fixture_shape != ReadinessLabNumaP99FixtureShape::MemoryPressure
+        });
+
+        let report = validate_numa_p99_replay(&manifest);
+
+        assert!(!report.valid);
+        assert_eq!(report.missing_shape_count, 1);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.finding_id == "product_evidence_claim_violation")
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.finding_id == "missing_replay_fixture_shape")
         );
     }
 }

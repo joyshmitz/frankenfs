@@ -138,16 +138,20 @@ use ffs_harness::{
         ReadinessDashboardConfig, build_readiness_dashboard, render_readiness_dashboard_markdown,
     },
     readiness_lab::{
-        ReadinessLabHostSimulationConfig, ReadinessLabRchLaneScheduleConfig,
+        DEFAULT_READINESS_LAB_NUMA_P99_REPLAY_MANIFEST, ReadinessLabHostSimulationConfig,
+        ReadinessLabNumaP99ReplayConfig, ReadinessLabRchLaneScheduleConfig,
         ReadinessLabTruthGraphConfig, ReadinessLabValidationConfig,
         fail_on_readiness_lab_contract_errors, fail_on_readiness_lab_host_simulation_errors,
+        fail_on_readiness_lab_numa_p99_replay_errors,
         fail_on_readiness_lab_rch_lane_schedule_errors, fail_on_readiness_lab_truth_graph_errors,
         load_readiness_lab_contract_bundle, load_readiness_lab_host_simulation_manifest,
-        load_readiness_lab_rch_lane_schedule_manifest, load_readiness_lab_truth_graph_manifest,
-        plan_readiness_lab_rch_lanes, render_readiness_lab_contract_markdown,
-        render_readiness_lab_host_simulation_markdown,
+        load_readiness_lab_numa_p99_replay_manifest, load_readiness_lab_rch_lane_schedule_manifest,
+        load_readiness_lab_truth_graph_manifest, plan_readiness_lab_rch_lanes,
+        render_readiness_lab_contract_markdown, render_readiness_lab_host_simulation_markdown,
+        render_readiness_lab_numa_p99_replay_markdown,
         render_readiness_lab_rch_lane_schedule_markdown, render_readiness_lab_truth_graph_markdown,
         simulate_readiness_lab_hosts, validate_readiness_lab_contract_bundle,
+        validate_readiness_lab_numa_p99_replay,
     },
     release_gate::{
         evaluate_release_gates, fail_on_release_gate_errors, load_release_gate_policy,
@@ -486,6 +490,9 @@ fn run() -> Result<()> {
         Some("simulate-readiness-lab-hosts") => simulate_readiness_lab_hosts_cmd(&args[1..]),
         Some("plan-readiness-lab-rch-lanes") => plan_readiness_lab_rch_lanes_cmd(&args[1..]),
         Some("build-readiness-lab-truth-graph") => build_readiness_lab_truth_graph_cmd(&args[1..]),
+        Some("validate-readiness-lab-numa-p99-replay") => {
+            validate_readiness_lab_numa_p99_replay_cmd(&args[1..])
+        }
         Some("validate-mounted-write-error-classes") => {
             validate_mounted_write_error_classes_cmd(&args[1..])
         }
@@ -1632,6 +1639,110 @@ fn print_readiness_lab_truth_graph_usage() {
         "ffs-harness build-readiness-lab-truth-graph --manifest FILE [--reference-epoch-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!("  Emits a read-only evidence truth graph over readiness/proof/lab summaries.");
+}
+
+fn validate_readiness_lab_numa_p99_replay_cmd(args: &[String]) -> Result<()> {
+    let mut manifest_path: Option<String> = None;
+    let mut reference_epoch_days: Option<u32> = None;
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ReadinessReportFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                manifest_path = Some(
+                    args.get(i)
+                        .context("--manifest requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--reference-epoch-days" => {
+                i += 1;
+                reference_epoch_days = Some(
+                    args.get(i)
+                        .context("--reference-epoch-days requires a value")?
+                        .parse()
+                        .context("invalid --reference-epoch-days value")?,
+                );
+            }
+            "--format" => {
+                i += 1;
+                format = parse_readiness_report_format(
+                    args.get(i).context("--format requires json or markdown")?,
+                )?;
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--select" => {
+                i += 1;
+                let _ = args.get(i).context("--select requires a fixture id")?;
+            }
+            "--help" | "-h" => {
+                print_readiness_lab_numa_p99_replay_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-readiness-lab-numa-p99-replay argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let manifest_path =
+        manifest_path.unwrap_or_else(|| DEFAULT_READINESS_LAB_NUMA_P99_REPLAY_MANIFEST.to_owned());
+    let manifest = load_readiness_lab_numa_p99_replay_manifest(&manifest_path)?;
+    let config = ReadinessLabNumaP99ReplayConfig {
+        manifest_path: manifest_path.clone(),
+        reference_epoch_days,
+    };
+    let report = validate_readiness_lab_numa_p99_replay(&manifest, &config);
+    let json = serde_json::to_string_pretty(&report)?;
+    let markdown = render_readiness_lab_numa_p99_replay_markdown(&report);
+    let output = match format {
+        ReadinessReportFormat::Json => json.as_str(),
+        ReadinessReportFormat::Markdown => markdown.as_str(),
+    };
+
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "readiness lab NUMA/p99 replay report written: {path} valid={} fixtures={} invalid={} missing_p99={}",
+            report.valid,
+            report.fixture_count,
+            report.invalid_fixture_count,
+            report.missing_p99_bucket_count
+        );
+    } else {
+        println!("{output}");
+        std::io::stdout().flush().ok();
+    }
+
+    if let Some(path) = summary_out_path {
+        write_text_file(Path::new(&path), &format!("{markdown}\n"))?;
+        println!("readiness lab NUMA/p99 replay summary written: {path}");
+    }
+
+    fail_on_readiness_lab_numa_p99_replay_errors(&report)
+}
+
+fn print_readiness_lab_numa_p99_replay_usage() {
+    println!(
+        "ffs-harness validate-readiness-lab-numa-p99-replay [--manifest FILE] [--reference-epoch-days N] [--format json|markdown] [--out FILE] [--summary-out FILE] [--select FIXTURE_ID]"
+    );
+    println!(
+        "  Validates advisory NUMA/p99 replay fixtures; it never executes workload lanes or changes public readiness."
+    );
 }
 
 fn print_readiness_dashboard_usage() {
@@ -6604,6 +6715,9 @@ fn print_usage_core_commands() {
         "  ffs-harness build-readiness-lab-truth-graph --manifest FILE [--reference-epoch-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
+        "  ffs-harness validate-readiness-lab-numa-p99-replay [--manifest FILE] [--reference-epoch-days N] [--format json|markdown] [--out FILE] [--summary-out FILE] [--select FIXTURE_ID]"
+    );
+    println!(
         "  ffs-harness fuse-capability-probe [--out FILE] [--require-mount-probe] [--mount-probe-exit N] [--unmount-probe-exit N] [--user-disabled] [--default-permissions-eacces]"
     );
     println!("  ffs-harness validate-open-ended-inventory [--out FILE]");
@@ -6731,6 +6845,9 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness build-readiness-lab-truth-graph --manifest artifacts/readiness-lab/truth_graph.json --reference-epoch-days 20001 --format markdown"
+    );
+    println!(
+        "  ffs-harness validate-readiness-lab-numa-p99-replay --manifest tests/readiness-lab/numa_p99_replay_fixtures.json --reference-epoch-days 20001 --format markdown"
     );
     println!("  ffs-harness fuse-capability-probe --out artifacts/e2e/run/fuse_capability.json");
     println!(

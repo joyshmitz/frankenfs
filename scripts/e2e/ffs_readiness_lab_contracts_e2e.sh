@@ -120,7 +120,11 @@ for index, char in enumerate(text):
     except json.JSONDecodeError:
         continue
     if isinstance(obj, dict) and obj.get("schema_version") == 1 and (
-        "lab_id" in obj or "simulation_id" in obj or "plan_id" in obj or "graph_id" in obj
+        "lab_id" in obj
+        or "simulation_id" in obj
+        or "plan_id" in obj
+        or "graph_id" in obj
+        or "replay_id" in obj
     ):
         pathlib.Path(report_path).write_text(
             json.dumps(obj, indent=2, sort_keys=True) + "\n",
@@ -141,6 +145,8 @@ BAD_MANIFEST="$FIXTURE_DIR/product_claim_contracts.json"
 HOST_MANIFEST="$FIXTURE_DIR/host_simulation.json"
 SCHEDULER_MANIFEST="$FIXTURE_DIR/rch_lane_schedule.json"
 TRUTH_GRAPH_MANIFEST="$FIXTURE_DIR/truth_graph.json"
+NUMA_REPLAY_MANIFEST="$FIXTURE_DIR/numa_p99_replay.json"
+NUMA_REPLAY_BAD_MANIFEST="$FIXTURE_DIR/numa_p99_replay_product_claim.json"
 RAW_JSON="$REPORT_DIR/valid_json_command.log"
 RAW_MD="$REPORT_DIR/valid_markdown_command.log"
 BAD_RAW="$REPORT_DIR/product_claim_command.log"
@@ -150,6 +156,9 @@ SCHEDULER_RAW_JSON="$REPORT_DIR/rch_lane_schedule_json_command.log"
 SCHEDULER_RAW_MD="$REPORT_DIR/rch_lane_schedule_markdown_command.log"
 TRUTH_GRAPH_RAW_JSON="$REPORT_DIR/truth_graph_json_command.log"
 TRUTH_GRAPH_RAW_MD="$REPORT_DIR/truth_graph_markdown_command.log"
+NUMA_REPLAY_RAW_JSON="$REPORT_DIR/numa_p99_replay_json_command.log"
+NUMA_REPLAY_RAW_MD="$REPORT_DIR/numa_p99_replay_markdown_command.log"
+NUMA_REPLAY_BAD_RAW="$REPORT_DIR/numa_p99_replay_product_claim_command.log"
 UNIT_LOG="$REPORT_DIR/unit_tests.log"
 REPORT_JSON="$REPORT_DIR/report.json"
 REPORT_MD="$REPORT_DIR/report.md"
@@ -159,6 +168,8 @@ SCHEDULER_REPORT_JSON="$REPORT_DIR/rch_lane_schedule_report.json"
 SCHEDULER_REPORT_MD="$REPORT_DIR/rch_lane_schedule_report.md"
 TRUTH_GRAPH_REPORT_JSON="$REPORT_DIR/truth_graph_report.json"
 TRUTH_GRAPH_REPORT_MD="$REPORT_DIR/truth_graph_report.md"
+NUMA_REPLAY_REPORT_JSON="$REPORT_DIR/numa_p99_replay_report.json"
+NUMA_REPLAY_REPORT_MD="$REPORT_DIR/numa_p99_replay_report.md"
 
 mkdir -p "$FIXTURE_DIR" "$REPORT_DIR"
 
@@ -167,6 +178,7 @@ if grep -q 'Some("validate-readiness-lab-contracts")' crates/ffs-harness/src/mai
     && grep -q 'Some("simulate-readiness-lab-hosts")' crates/ffs-harness/src/main.rs \
     && grep -q 'Some("plan-readiness-lab-rch-lanes")' crates/ffs-harness/src/main.rs \
     && grep -q 'Some("build-readiness-lab-truth-graph")' crates/ffs-harness/src/main.rs \
+    && grep -q 'Some("validate-readiness-lab-numa-p99-replay")' crates/ffs-harness/src/main.rs \
     && grep -q "pub mod readiness_lab" crates/ffs-harness/src/lib.rs; then
     scenario_result "readiness_lab_cli_wired" "PASS" "CLI command and module export found"
 else
@@ -174,13 +186,21 @@ else
 fi
 
 e2e_step "Scenario 2: synthetic advisory manifests are written"
-if python3 - "$VALID_MANIFEST" "$BAD_MANIFEST" "$HOST_MANIFEST" "$SCHEDULER_MANIFEST" "$TRUTH_GRAPH_MANIFEST" <<'PY'
+if python3 - "$VALID_MANIFEST" "$BAD_MANIFEST" "$HOST_MANIFEST" "$SCHEDULER_MANIFEST" "$TRUTH_GRAPH_MANIFEST" "$NUMA_REPLAY_MANIFEST" "$NUMA_REPLAY_BAD_MANIFEST" <<'PY'
 import copy
 import json
 import pathlib
 import sys
 
-valid_path, bad_path, host_path, scheduler_path, truth_graph_path = map(pathlib.Path, sys.argv[1:])
+(
+    valid_path,
+    bad_path,
+    host_path,
+    scheduler_path,
+    truth_graph_path,
+    numa_replay_path,
+    numa_replay_bad_path,
+) = map(pathlib.Path, sys.argv[1:])
 valid_path.parent.mkdir(parents=True, exist_ok=True)
 manifest = {
     "schema_version": 1,
@@ -563,6 +583,95 @@ truth_graph_path.write_text(
     json.dumps(truth_graph_manifest, indent=2, sort_keys=True) + "\n",
     encoding="utf-8",
 )
+
+def replay_components(dominant, p99):
+    components = [
+        "queueing",
+        "service",
+        "io",
+        "synchronization",
+        "allocator",
+        "repair_backlog",
+        "cache_pressure",
+        "rch_worker_contention",
+        "numa_remote_access",
+        "memory_reclaim",
+    ]
+    rows = []
+    for component in components:
+        component_p99 = p99 * (0.32 if component == dominant else 0.06)
+        rows.append(
+            {
+                "component": component,
+                "p50_us": component_p99 / 4,
+                "p95_us": component_p99 / 2,
+                "p99_us": component_p99,
+                "detail": f"synthetic {component} replay attribution",
+            }
+        )
+    return rows
+
+def replay_fixture(shape, dominant, p99, workers, hot_shards, repair, memory_pressure, queue_isolation="dedicated"):
+    return {
+        "fixture_id": f"fixture-{shape}",
+        "fixture_shape": shape,
+        "source_bead": "bd-w6nuy",
+        "observed_at_epoch_days": 20000,
+        "max_age_days": 7,
+        "host": {
+            "logical_cpus": 96,
+            "numa_nodes": 4,
+            "ram_total_gib": 384.0,
+            "ram_available_gib": 300.0,
+            "storage_class": "local-nvme",
+            "rch_worker_identity": "synthetic-rch-large-host",
+            "queue_isolation": queue_isolation,
+        },
+        "workload": {
+            "operation_count": 250000,
+            "duration_ms": 90000,
+            "worker_count": workers,
+            "hot_shard_count": hot_shards,
+            "repair_scrub_active": repair,
+            "memory_pressure_percent": memory_pressure,
+        },
+        "latency": {
+            "p50_latency_us": p99 / 4,
+            "p95_latency_us": p99 / 2,
+            "p99_latency_us": p99,
+            "attribution": replay_components(dominant, p99),
+        },
+        "queue_depth": {"average": 8.0, "p99": 28.0, "max": 64},
+        "raw_log_path": f"artifacts/readiness-lab/numa-p99/{shape}.log",
+        "reproduction_command": f"cargo run -p ffs-harness -- validate-readiness-lab-numa-p99-replay --select {shape}",
+    }
+
+numa_replay_manifest = {
+    "schema_version": 1,
+    "replay_id": "readiness-lab-numa-p99-e2e",
+    "generated_at_epoch_days": 20000,
+    "advisory_notice": "advisory readiness-lab material only; not product evidence",
+    "source_bead": "bd-w6nuy",
+    "product_evidence_claim": "none",
+    "fixtures": [
+        replay_fixture("balanced_numa", "service", 9000.0, 64, 16, False, 45),
+        replay_fixture("skewed_numa", "numa_remote_access", 15000.0, 64, 8, False, 50),
+        replay_fixture("metadata_read_hot_shards", "synchronization", 18000.0, 72, 2, False, 55),
+        replay_fixture("repair_scrub_interference", "repair_backlog", 21000.0, 64, 12, True, 60),
+        replay_fixture("rch_worker_contention", "rch_worker_contention", 24000.0, 48, 12, False, 62, "shared"),
+        replay_fixture("memory_pressure", "memory_reclaim", 27000.0, 56, 10, True, 88),
+    ],
+}
+numa_replay_path.write_text(
+    json.dumps(numa_replay_manifest, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+numa_bad = copy.deepcopy(numa_replay_manifest)
+numa_bad["product_evidence_claim"] = "product_pass_fail"
+numa_replay_bad_path.write_text(
+    json.dumps(numa_bad, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
 PY
 then
     scenario_result "readiness_lab_fixtures_written" "PASS" "valid and invalid manifests generated"
@@ -694,7 +803,48 @@ else
     scenario_result "readiness_lab_truth_graph_markdown" "FAIL" "truth graph markdown missing expected content"
 fi
 
-e2e_step "Scenario 12: readiness_lab unit tests pass through RCH"
+e2e_step "Scenario 12: NUMA/p99 replay fixture rollup renders JSON"
+if run_rch_capture "$NUMA_REPLAY_RAW_JSON" cargo run --quiet -p ffs-harness -- \
+    validate-readiness-lab-numa-p99-replay \
+    --manifest "$NUMA_REPLAY_MANIFEST" \
+    --reference-epoch-days 20001 \
+    --format json \
+    && extract_report_json "$NUMA_REPLAY_RAW_JSON" "$NUMA_REPLAY_REPORT_JSON" \
+    && jq -e '.valid == true and .replay_only == true and .product_evidence_claim == "none" and .fixture_count == 6 and .missing_shape_count == 0 and (.shape_counts | length == 6) and (.release_gate_effect | test("public readiness unchanged"))' "$NUMA_REPLAY_REPORT_JSON" >/dev/null; then
+    scenario_result "readiness_lab_numa_p99_replay_json" "PASS" "NUMA/p99 replay JSON kept advisory-only claim state"
+else
+    scenario_result "readiness_lab_numa_p99_replay_json" "FAIL" "NUMA/p99 replay JSON missing advisory rollup"
+fi
+
+e2e_step "Scenario 13: NUMA/p99 replay fixture rollup renders Markdown"
+if run_rch_capture "$NUMA_REPLAY_RAW_MD" cargo run --quiet -p ffs-harness -- \
+    validate-readiness-lab-numa-p99-replay \
+    --manifest "$NUMA_REPLAY_MANIFEST" \
+    --reference-epoch-days 20001 \
+    --format markdown \
+    && grep -q "FrankenFS Readiness Lab NUMA/p99 Replay" "$NUMA_REPLAY_RAW_MD" \
+    && grep -q "Product evidence claim: \`none\`" "$NUMA_REPLAY_RAW_MD" \
+    && grep -q "public readiness unchanged" "$NUMA_REPLAY_RAW_MD"; then
+    cp "$NUMA_REPLAY_RAW_MD" "$NUMA_REPLAY_REPORT_MD"
+    scenario_result "readiness_lab_numa_p99_replay_markdown" "PASS" "NUMA/p99 replay markdown rendered"
+else
+    scenario_result "readiness_lab_numa_p99_replay_markdown" "FAIL" "NUMA/p99 replay markdown missing advisory boundary"
+fi
+
+e2e_step "Scenario 14: NUMA/p99 replay rejects product evidence claims"
+if run_rch_capture "$NUMA_REPLAY_BAD_RAW" cargo run --quiet -p ffs-harness -- \
+    validate-readiness-lab-numa-p99-replay \
+    --manifest "$NUMA_REPLAY_BAD_MANIFEST" \
+    --reference-epoch-days 20001 \
+    --format json; then
+    scenario_result "readiness_lab_numa_p99_product_claim_rejected" "FAIL" "NUMA/p99 product evidence claim was accepted"
+elif grep -q "product_evidence_claim_violation" "$NUMA_REPLAY_BAD_RAW"; then
+    scenario_result "readiness_lab_numa_p99_product_claim_rejected" "PASS" "NUMA/p99 product evidence claim rejected"
+else
+    scenario_result "readiness_lab_numa_p99_product_claim_rejected" "FAIL" "expected NUMA/p99 product-claim diagnostic missing"
+fi
+
+e2e_step "Scenario 15: readiness_lab unit tests pass through RCH"
 if run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib readiness_lab -- --nocapture; then
     scenario_result "readiness_lab_unit_tests" "PASS" "unit tests passed"
 else
