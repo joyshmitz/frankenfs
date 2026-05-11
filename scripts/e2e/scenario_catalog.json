@@ -1841,6 +1841,21 @@
       ]
     },
     {
+      "suite_id": "ffs_writeback",
+      "script": "scripts/e2e/ffs_writeback_e2e.sh",
+      "required_categories": [
+        "happy"
+      ],
+      "scenarios": [
+        {
+          "id": "writeback_durability_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_durability_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_refresh_policy",
       "script": "scripts/e2e/ffs_refresh_policy_e2e.sh",
       "required_categories": [
