@@ -1438,6 +1438,138 @@
       ]
     },
     {
+      "suite_id": "ffs_verification_runner",
+      "script": "scripts/e2e/ffs_verification_runner_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "runner_module_exists",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=runner_module_exists|outcome=PASS"
+        },
+        {
+          "id": "runner_core_types",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=runner_core_types|outcome=PASS"
+        },
+        {
+          "id": "runner_api_functions",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=runner_api_functions|outcome=PASS"
+        },
+        {
+          "id": "lib_json_emission",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=lib_json_emission|outcome=PASS"
+        },
+        {
+          "id": "lib_json_summary_preserves_suite_fields",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=lib_json_summary_preserves_suite_fields|outcome=PASS"
+        },
+        {
+          "id": "lib_git_context_clean_dirty_states",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=lib_git_context_clean_dirty_states|outcome=PASS"
+        },
+        {
+          "id": "lib_e2e_artifact_dirs_unique",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=lib_e2e_artifact_dirs_unique|outcome=PASS"
+        },
+        {
+          "id": "standalone_e2e_artifact_roots_unique",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=standalone_e2e_artifact_roots_unique|outcome=PASS"
+        },
+        {
+          "id": "lib_rch_required_artifact_missing_fails_fast",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=lib_rch_required_artifact_missing_fails_fast|outcome=PASS"
+        },
+        {
+          "id": "gate_runner_features",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_runner_features|outcome=PASS"
+        },
+        {
+          "id": "runner_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=runner_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "runner_logging_markers",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=runner_logging_markers|outcome=PASS"
+        },
+        {
+          "id": "conformance_violation_tests",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=conformance_violation_tests|outcome=PASS"
+        },
+        {
+          "id": "exit_code_conventions",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=exit_code_conventions|outcome=PASS"
+        },
+        {
+          "id": "permissioned_fuse_lane_artifacts",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=permissioned_fuse_lane_artifacts|outcome=PASS"
+        },
+        {
+          "id": "permissioned_btrfs_lane_controls",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=permissioned_btrfs_lane_controls|outcome=PASS"
+        },
+        {
+          "id": "permissioned_fuse_lane_docs",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=permissioned_fuse_lane_docs|outcome=PASS"
+        },
+        {
+          "id": "mounted_scenario_matrix_artifacts",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_scenario_matrix_artifacts|outcome=PASS"
+        },
+        {
+          "id": "mounted_btrfs_production_rows",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_btrfs_production_rows|outcome=PASS"
+        },
+        {
+          "id": "catalog_production_fuse_matrix",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=catalog_production_fuse_matrix|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_refresh_policy",
       "script": "scripts/e2e/ffs_refresh_policy_e2e.sh",
       "required_categories": [
