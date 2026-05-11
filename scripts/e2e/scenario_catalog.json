@@ -197,6 +197,58 @@
       ]
     },
     {
+      "suite_id": "ffs_baseline_validation",
+      "script": "scripts/e2e/ffs_baseline_validation_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "baseline_validation_bench_compile",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT bench_compile_${bench}=pass"
+        },
+        {
+          "id": "baseline_validation_json_contract",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT baseline_json_valid=pass"
+        },
+        {
+          "id": "baseline_validation_taxonomy_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT taxonomy_tests=pass"
+        },
+        {
+          "id": "baseline_validation_thresholds_parse",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT thresholds_valid=pass"
+        },
+        {
+          "id": "baseline_validation_flamegraph_script",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT flamegraph_script=pass"
+        },
+        {
+          "id": "baseline_validation_extent_bench",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT extent_bench=pass"
+        },
+        {
+          "id": "baseline_validation_record_script",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT record_script=pass"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_artifact_schema_fixtures",
       "script": "scripts/e2e/ffs_artifact_schema_fixtures_e2e.sh",
       "required_categories": [
