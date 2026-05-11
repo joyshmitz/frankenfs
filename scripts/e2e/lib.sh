@@ -268,9 +268,19 @@ e2e_validate_scenario_catalog() {
 
     local missing_scripts=()
     local script_path script_rel
-    for script_path in "$repo_root"/scripts/e2e/*_e2e.sh; do
+    local -A expected_script_seen=()
+    local catalog_script_globs=(
+        "$repo_root"/scripts/e2e/*_e2e.sh
+        "$repo_root"/scripts/e2e/ffs_*.sh
+        "$repo_root"/scripts/e2e/validate_br_dotted_id_roundtrip.sh
+    )
+    for script_path in "${catalog_script_globs[@]}"; do
         [[ -f "$script_path" ]] || continue
         script_rel="${script_path#$repo_root/}"
+        if [[ -n "${expected_script_seen[$script_rel]:-}" ]]; then
+            continue
+        fi
+        expected_script_seen["$script_rel"]=1
         if [[ -z "${catalog_scripts[$script_rel]:-}" ]]; then
             missing_scripts+=("$script_rel")
         fi

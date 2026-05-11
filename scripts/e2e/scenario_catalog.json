@@ -5168,6 +5168,360 @@
       ]
     },
     {
+      "suite_id": "ffs_btrfs_ro_smoke",
+      "script": "scripts/e2e/ffs_btrfs_ro_smoke.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "btrfs_ro_cli_build",
+          "category": "happy",
+          "status": "active",
+          "evidence": "btrfs_ro_cli_build"
+        },
+        {
+          "id": "btrfs_ro_fixture_generated",
+          "category": "happy",
+          "status": "active",
+          "evidence": "btrfs_ro_fixture_generated"
+        },
+        {
+          "id": "btrfs_ro_inspect_geometry",
+          "category": "happy",
+          "status": "active",
+          "evidence": "btrfs_ro_inspect_geometry"
+        },
+        {
+          "id": "btrfs_ro_mount_start",
+          "category": "edge",
+          "status": "active",
+          "evidence": "btrfs_ro_mount_start"
+        },
+        {
+          "id": "btrfs_ro_list_root",
+          "category": "happy",
+          "status": "active",
+          "evidence": "btrfs_ro_list_root"
+        },
+        {
+          "id": "btrfs_ro_stat_root",
+          "category": "happy",
+          "status": "active",
+          "evidence": "btrfs_ro_stat_root"
+        },
+        {
+          "id": "btrfs_ro_known_file_read",
+          "category": "edge",
+          "status": "active",
+          "evidence": "btrfs_ro_known_file_read"
+        },
+        {
+          "id": "btrfs_ro_unmount",
+          "category": "happy",
+          "status": "active",
+          "evidence": "btrfs_ro_unmount"
+        }
+      ]
+    },
+    {
+      "suite_id": "ffs_degradation_stress",
+      "script": "scripts/e2e/ffs_degradation_stress.sh",
+      "required_categories": [
+        "happy",
+        "degradation"
+      ],
+      "scenarios": [
+        {
+          "id": "degradation_stress_cli_build",
+          "category": "happy",
+          "status": "active",
+          "evidence": "degradation_stress_cli_build"
+        },
+        {
+          "id": "degradation_stress_core_degradation_levels",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "degradation_stress_core_degradation_levels"
+        },
+        {
+          "id": "degradation_stress_core_fsm",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "degradation_stress_core_fsm"
+        },
+        {
+          "id": "degradation_stress_core_backpressure_gate",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "degradation_stress_core_backpressure_gate"
+        },
+        {
+          "id": "degradation_stress_core_pressure_monitor",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "degradation_stress_core_pressure_monitor"
+        },
+        {
+          "id": "degradation_stress_fuse_surface",
+          "category": "happy",
+          "status": "active",
+          "evidence": "degradation_stress_fuse_surface"
+        },
+        {
+          "id": "degradation_stress_host_pressure_probe",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "degradation_stress_host_pressure_probe"
+        },
+        {
+          "id": "degradation_stress_optional_mount_probe",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "degradation_stress_optional_mount_probe"
+        }
+      ]
+    },
+    {
+      "suite_id": "ffs_ext4_ro_roundtrip",
+      "script": "scripts/e2e/ffs_ext4_ro_roundtrip.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "ext4_ro_roundtrip_cli_build",
+          "category": "happy",
+          "status": "active",
+          "evidence": "ext4_ro_roundtrip_cli_build"
+        },
+        {
+          "id": "ext4_ro_roundtrip_fixture_prepared",
+          "category": "happy",
+          "status": "active",
+          "evidence": "ext4_ro_roundtrip_fixture_prepared"
+        },
+        {
+          "id": "ext4_ro_roundtrip_reference_manifest",
+          "category": "happy",
+          "status": "active",
+          "evidence": "ext4_ro_roundtrip_reference_manifest"
+        },
+        {
+          "id": "ext4_ro_roundtrip_inspect_metadata",
+          "category": "happy",
+          "status": "active",
+          "evidence": "ext4_ro_roundtrip_inspect_metadata"
+        },
+        {
+          "id": "ext4_ro_roundtrip_mount_manifest",
+          "category": "happy",
+          "status": "active",
+          "evidence": "ext4_ro_roundtrip_mount_manifest"
+        },
+        {
+          "id": "ext4_ro_roundtrip_runtime_bound",
+          "category": "edge",
+          "status": "active",
+          "evidence": "ext4_ro_roundtrip_runtime_bound"
+        }
+      ]
+    },
+    {
+      "suite_id": "ffs_ext4_rw_smoke",
+      "script": "scripts/e2e/ffs_ext4_rw_smoke.sh",
+      "required_categories": [
+        "happy",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "ext4_rw_smoke_build_cli",
+          "category": "happy",
+          "status": "active",
+          "evidence": "Phase 1: Build ffs-cli"
+        },
+        {
+          "id": "ext4_rw_smoke_create_work_images",
+          "category": "happy",
+          "status": "active",
+          "evidence": "Phase 2: Create base/work ext4 images"
+        },
+        {
+          "id": "ext4_rw_smoke_write_operations",
+          "category": "happy",
+          "status": "active",
+          "evidence": "Phase 3.1: create/write/overwrite"
+        },
+        {
+          "id": "ext4_rw_smoke_clean_remount",
+          "category": "happy",
+          "status": "active",
+          "evidence": "Phase 4: remount read-only and verify persistence"
+        },
+        {
+          "id": "ext4_rw_smoke_sigkill_recovery",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "Phase 5: deterministic SIGKILL crash/recovery harness"
+        }
+      ]
+    },
+    {
+      "suite_id": "ffs_mounted_write_workload_matrix",
+      "script": "scripts/e2e/ffs_mounted_write_workload_matrix.sh",
+      "required_categories": [
+        "happy",
+        "recovery",
+        "unsupported_op"
+      ],
+      "scenarios": [
+        {
+          "id": "mounted_write_matrix_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "validate-mounted-write-matrix"
+        },
+        {
+          "id_pattern": "^mounted_write_[a-z0-9_]+$",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id={scenario_id}|outcome={actual_outcome}"
+        },
+        {
+          "id": "mounted_write_read_only_probe_unsupported",
+          "category": "unsupported_op",
+          "status": "active",
+          "evidence": "read_only_write_probe_deferred_to_unsupported_contract"
+        },
+        {
+          "id_pattern": "^mounted_multihandle_[a-z0-9_]+$",
+          "category": "edge",
+          "status": "active",
+          "evidence": "MULTIHANDLE_RESULT|scenario_id={scenario_id}|kind={kind}|outcome={actual_outcome}"
+        },
+        {
+          "id_pattern": "^mounted_namespace_[a-z0-9_]+$",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "NAMESPACE_RESULT|scenario_id={scenario_id}|kind={namespace_operation_kind}|outcome={actual_outcome}"
+        }
+      ]
+    },
+    {
+      "suite_id": "ffs_repair_recovery_smoke",
+      "script": "scripts/e2e/ffs_repair_recovery_smoke.sh",
+      "required_categories": [
+        "happy",
+        "corruption",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "repair_recovery_fixture_image_prepared",
+          "category": "happy",
+          "status": "active",
+          "evidence": "repair_recovery_fixture_image_prepared"
+        },
+        {
+          "id": "repair_recovery_rch_test_passed",
+          "category": "corruption",
+          "status": "active",
+          "evidence": "repair_recovery_rch_test_passed"
+        },
+        {
+          "id": "repair_recovery_rch_artifacts_materialized",
+          "category": "happy",
+          "status": "active",
+          "evidence": "repair_recovery_rch_artifacts_materialized"
+        },
+        {
+          "id": "repair_recovery_checksums_match",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "repair_recovery_checksums_match"
+        },
+        {
+          "id": "repair_recovery_evidence_ledger_valid",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "repair_recovery_evidence_ledger_valid"
+        }
+      ]
+    },
+    {
+      "suite_id": "ffs_self_healing_demo",
+      "script": "scripts/e2e/ffs_self_healing_demo.sh",
+      "required_categories": [
+        "happy",
+        "corruption",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "self_healing_demo_e2e_suite",
+          "category": "corruption",
+          "status": "active",
+          "evidence": "self_healing_demo_e2e_suite"
+        },
+        {
+          "id": "self_healing_demo_binary_command",
+          "category": "happy",
+          "status": "active",
+          "evidence": "self_healing_demo_binary_command"
+        },
+        {
+          "id": "self_healing_demo_unit_shape",
+          "category": "happy",
+          "status": "active",
+          "evidence": "self_healing_demo_unit_shape"
+        },
+        {
+          "id": "self_healing_demo_basic_integration",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "self_healing_demo_basic_integration"
+        }
+      ]
+    },
+    {
+      "suite_id": "ffs_xfstests_regression_gate",
+      "script": "scripts/e2e/ffs_xfstests_regression_gate.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "xfstests_regression_existing_results",
+          "category": "happy",
+          "status": "active",
+          "evidence": "Using existing xfstests results"
+        },
+        {
+          "id": "xfstests_regression_missing_input",
+          "category": "edge",
+          "status": "active",
+          "evidence": "no results to compare"
+        },
+        {
+          "id": "xfstests_regression_unexpected_regression",
+          "category": "error",
+          "status": "active",
+          "evidence": "unexpected_regression_count"
+        },
+        {
+          "id": "xfstests_regression_strict_child_failure",
+          "category": "error",
+          "status": "active",
+          "evidence": "Strict mode treats the xfstests child failure as blocking."
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_crash_replay_refinement",
       "script": "scripts/e2e/ffs_crash_replay_refinement_e2e.sh",
       "required_categories": [

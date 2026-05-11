@@ -146,7 +146,7 @@ Deterministic scenario IDs are centrally defined in:
 
 - `scripts/e2e/scenario_catalog.json`
 
-The catalog is machine-validated by `e2e_validate_scenario_catalog` (in `scripts/e2e/lib.sh`) and runs automatically in CI via `./scripts/e2e/ffs_smoke.sh` Phase 0.
+The catalog is machine-validated by `e2e_validate_scenario_catalog` (in `scripts/e2e/lib.sh`) and runs automatically in CI via `./scripts/e2e/ffs_smoke.sh` Phase 0. The validator treats every `scripts/e2e/ffs_*.sh` runner, including legacy names that do not end in `_e2e.sh`, as catalog-required.
 
 ### `scenario_id` Format
 
