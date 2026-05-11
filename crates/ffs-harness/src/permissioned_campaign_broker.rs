@@ -4033,6 +4033,31 @@ mod tests {
         Ok(())
     }
 
+    /// bd-rchk0.222 - exact-output snapshot for the permissioned campaign
+    /// handoff markdown renderer.
+    ///
+    /// The field checks above prove the packet has the expected ACK and
+    /// transcript shape. This snapshot pins the full operator handoff packet:
+    /// generation identity, authorization notice, ACK export command, required
+    /// evidence, runner/host/path sections, cleanup expectations, preflight
+    /// summaries, risks, and transcript command templates.
+    #[test]
+    fn render_permissioned_campaign_handoff_markdown_xfstests_snapshot() -> Result<()> {
+        let packet = generate_permissioned_campaign_handoff_packet(
+            &valid_xfstests_manifest(),
+            &config(),
+            generation(),
+        )?;
+        let markdown = render_permissioned_campaign_handoff_markdown(&packet);
+
+        insta::assert_snapshot!(
+            "render_permissioned_campaign_handoff_markdown_xfstests",
+            markdown
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn swarm_handoff_packet_matches_golden_fields() -> Result<()> {
         let packet = generate_permissioned_campaign_handoff_packet(
