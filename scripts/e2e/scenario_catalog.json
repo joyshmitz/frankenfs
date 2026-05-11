@@ -1684,6 +1684,84 @@
       ]
     },
     {
+      "suite_id": "ffs_wal_replay",
+      "script": "scripts/e2e/ffs_wal_replay_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "wal_replay_engine_types",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=replay_engine_types|outcome=PASS"
+        },
+        {
+          "id": "wal_replay_tail_policy",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=replay_tail_policy|outcome=PASS"
+        },
+        {
+          "id": "wal_replay_outcome_variants",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=replay_outcome_variants|outcome=PASS"
+        },
+        {
+          "id": "wal_replay_engine_unit",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=replay_engine_unit|outcome=PASS"
+        },
+        {
+          "id": "wal_replay_truncated_tail",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=replay_truncated_tail|outcome=PASS"
+        },
+        {
+          "id": "wal_replay_fail_fast",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=replay_fail_fast|outcome=PASS"
+        },
+        {
+          "id": "wal_replay_monotonicity",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=replay_monotonicity|outcome=PASS"
+        },
+        {
+          "id": "wal_replay_idempotent",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=replay_idempotent|outcome=PASS"
+        },
+        {
+          "id": "wal_replay_persist_integration",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=replay_persist_integration|outcome=PASS"
+        },
+        {
+          "id": "wal_replay_logging_markers",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=replay_logging|outcome=PASS"
+        },
+        {
+          "id": "wal_replay_outcome_report",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=replay_outcome_in_report|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_refresh_policy",
       "script": "scripts/e2e/ffs_refresh_policy_e2e.sh",
       "required_categories": [
