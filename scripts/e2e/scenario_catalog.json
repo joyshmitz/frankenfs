@@ -353,6 +353,77 @@
       ]
     },
     {
+      "suite_id": "ffs_crash_matrix",
+      "script": "scripts/e2e/ffs_crash_matrix_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "crash_matrix_module_exists",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_matrix_module_exists|outcome=PASS"
+        },
+        {
+          "id": "crash_point_classes",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_point_classes|outcome=PASS"
+        },
+        {
+          "id": "matrix_report_fields",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=matrix_report_fields|outcome=PASS"
+        },
+        {
+          "id": "crash_matrix_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_matrix_tests|outcome=PASS"
+        },
+        {
+          "id": "crash_matrix_structured_logging",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=structured_logging|outcome=PASS"
+        },
+        {
+          "id": "crash_matrix_oracle_validation",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=oracle_validation|outcome=PASS"
+        },
+        {
+          "id": "wal_replay_tests",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_replay_tests|outcome=PASS"
+        },
+        {
+          "id": "crash_matrix_persist_tests",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=persist_tests|outcome=PASS"
+        },
+        {
+          "id": "crash_matrix_report_serializable",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=report_serializable|outcome=PASS"
+        },
+        {
+          "id": "crash_matrix_deterministic_seed",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=deterministic_seed|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_fuse_production",
       "script": "scripts/e2e/ffs_fuse_production.sh",
       "required_categories": [
