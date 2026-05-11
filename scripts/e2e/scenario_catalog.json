@@ -650,6 +650,53 @@
       ]
     },
     {
+      "suite_id": "ffs_operator_recovery_drill",
+      "script": "scripts/e2e/ffs_operator_recovery_drill_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "operator_recovery_drill_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=operator_recovery_drill_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "operator_recovery_drill_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=operator_recovery_drill_validates|outcome=PASS"
+        },
+        {
+          "id": "operator_recovery_drill_decision_coverage",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=operator_recovery_drill_decision_coverage|outcome=PASS"
+        },
+        {
+          "id": "operator_recovery_drill_invalid_variants_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=operator_recovery_drill_invalid_variants_rejected|outcome=PASS"
+        },
+        {
+          "id": "operator_recovery_drill_docs_contract",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=operator_recovery_drill_docs_contract|outcome=PASS"
+        },
+        {
+          "id": "operator_recovery_drill_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=operator_recovery_drill_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_performance_manifest",
       "script": "scripts/e2e/ffs_performance_manifest_e2e.sh",
       "required_categories": [
