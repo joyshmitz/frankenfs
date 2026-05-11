@@ -93,6 +93,34 @@ impl TrackerLocalGraphExportPaths {
             local_nonclaimable_jsonl,
         }
     }
+
+    fn export_dir_for_command(&self) -> Option<&Path> {
+        let dir = self.local_open_jsonl.parent()?;
+        if self
+            .local_open_jsonl
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some("tracker_source_hygiene_local_open.jsonl")
+            || self
+                .source_aware_ready_jsonl
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some("tracker_source_hygiene_source_aware_ready.jsonl")
+            || self
+                .local_nonclaimable_jsonl
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some("tracker_source_hygiene_local_nonclaimable.jsonl")
+            || self.source_aware_ready_jsonl.parent() != Some(dir)
+            || self.local_nonclaimable_jsonl.parent() != Some(dir)
+            || self.local_open_sha256 != checksum_path(&self.local_open_jsonl)
+            || self.source_aware_ready_sha256 != checksum_path(&self.source_aware_ready_jsonl)
+            || self.local_nonclaimable_sha256 != checksum_path(&self.local_nonclaimable_jsonl)
+        {
+            return None;
+        }
+        Some(dir)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -746,7 +774,7 @@ fn build_report(
         foreign_open_samples,
         foreign_in_progress_samples,
         foreign_stale_in_progress_samples,
-        reproduction_commands: reproduction_commands(),
+        reproduction_commands: reproduction_commands(config),
         errors: Vec::new(),
     }
 }
@@ -1158,14 +1186,51 @@ fn next_safe_actions(verdict: &str) -> Vec<String> {
     }
 }
 
-fn reproduction_commands() -> Vec<String> {
-    vec![
+fn reproduction_commands(config: &TrackerSourceHygieneAnalysisConfig) -> Vec<String> {
+    let mut commands = vec![
         "ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl".to_owned(),
         "./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh".to_owned(),
         "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl".to_owned(),
         "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl".to_owned(),
         "TRACKER_SOURCE_HYGIENE_STRICT=1 ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl --strict".to_owned(),
-    ]
+    ];
+    if let Some(export_dir) = config
+        .local_graph_export_paths
+        .as_ref()
+        .and_then(TrackerLocalGraphExportPaths::export_dir_for_command)
+    {
+        commands.insert(
+            1,
+            format!(
+                "ffs-harness validate-tracker-source-hygiene --issues {} --export-dir {} --out {}",
+                shell_arg(&config.issues_path),
+                shell_arg(&export_dir.to_string_lossy()),
+                shell_arg(&export_dir.join("report.json").to_string_lossy())
+            ),
+        );
+    }
+    commands
+}
+
+fn shell_arg(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '/' | '_' | '-' | ':'))
+    {
+        return value.to_owned();
+    }
+
+    let mut quoted = String::from("'");
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 fn string_field(value: &Value, field: &str) -> String {
@@ -1578,6 +1643,40 @@ mod tests {
                 format!("{}  {path}\n", sha256_hex(text.as_bytes()))
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn reproduction_commands_include_export_dir_for_standard_layout() -> Result<(), String> {
+        let mut config = config();
+        config.issues_path = ".beads/issues.jsonl".to_owned();
+        config.local_graph_export_paths = Some(TrackerLocalGraphExportPaths::for_dir(Path::new(
+            "artifacts/tracker/source_hygiene",
+        )));
+        let report = analyze_tracker_source_hygiene(COMMITTED_FIXTURE_ISSUES, &config)
+            .map_err(|err| err.to_string())?;
+
+        let expected = "ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl --export-dir artifacts/tracker/source_hygiene --out artifacts/tracker/source_hygiene/report.json";
+        assert!(
+            report
+                .reproduction_commands
+                .iter()
+                .any(|command| command == expected)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reproduction_commands_skip_export_dir_for_custom_layout() -> Result<(), String> {
+        let report = analyze_tracker_source_hygiene(COMMITTED_FIXTURE_ISSUES, &config())
+            .map_err(|err| err.to_string())?;
+
+        assert!(
+            !report
+                .reproduction_commands
+                .iter()
+                .any(|command| command.contains("--export-dir"))
+        );
         Ok(())
     }
 
