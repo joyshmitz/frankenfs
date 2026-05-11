@@ -1570,6 +1570,73 @@
       ]
     },
     {
+      "suite_id": "ffs_version_store_format",
+      "script": "scripts/e2e/ffs_version_store_format_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "corruption",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "vs_format_header",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=vs_format_header|outcome=PASS"
+        },
+        {
+          "id": "vs_format_commit_roundtrip",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=vs_format_commit_roundtrip|outcome=PASS"
+        },
+        {
+          "id": "vs_format_truncated_tail",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=vs_format_truncated_tail|outcome=PASS"
+        },
+        {
+          "id": "vs_format_corrupt_crc",
+          "category": "corruption",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=vs_format_corrupt_crc|outcome=PASS"
+        },
+        {
+          "id": "vs_format_monotonic",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=vs_format_monotonic|outcome=PASS"
+        },
+        {
+          "id": "vs_format_checkpoint_replay",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=vs_format_checkpoint_replay|outcome=PASS"
+        },
+        {
+          "id": "vs_format_sentinels",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=vs_format_sentinels|outcome=PASS"
+        },
+        {
+          "id": "vs_decision_record",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=vs_decision_record|outcome=PASS"
+        },
+        {
+          "id": "vs_format_sync_required",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=vs_format_sync_required|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_refresh_policy",
       "script": "scripts/e2e/ffs_refresh_policy_e2e.sh",
       "required_categories": [
