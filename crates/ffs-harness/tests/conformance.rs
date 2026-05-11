@@ -5009,6 +5009,52 @@ fn tracked_extension_message(tracked_extensions: &[&str]) -> String {
         .join(" or ")
 }
 
+fn assert_panics_with<F>(case: F, expected: &str)
+where
+    F: FnOnce() + std::panic::UnwindSafe,
+{
+    let panic = match std::panic::catch_unwind(case) {
+        Ok(()) => panic!("expected panic containing {expected:?}"),
+        Err(panic) => panic,
+    };
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("<non-string panic>");
+    assert!(
+        message.contains(expected),
+        "expected panic containing {expected:?}, got {message:?}"
+    );
+}
+
+fn checksum_manifest_negative_cases_fail_closed() {
+    assert_panics_with(
+        checksum_manifest_requires_tracked_text_artifacts,
+        "golden btrfs_item_payloads.txt exists but is not listed in",
+    );
+    assert_panics_with(
+        checksum_manifest_rejects_malformed_digest,
+        "digest should be 64 lowercase hex characters",
+    );
+    assert_panics_with(
+        checksum_manifest_rejects_duplicate_entries,
+        "duplicate file entry: listed.json",
+    );
+    assert_panics_with(
+        checksum_manifest_rejects_parent_directory_escape,
+        "top-level relative artifact path",
+    );
+    assert_panics_with(
+        checksum_manifest_rejects_absolute_paths,
+        "top-level relative artifact path",
+    );
+    assert_panics_with(
+        checksum_manifest_rejects_nested_paths,
+        "top-level relative artifact path",
+    );
+}
+
 #[test]
 #[should_panic(expected = "golden btrfs_item_payloads.txt exists but is not listed in")]
 fn checksum_manifest_requires_tracked_text_artifacts() {
@@ -5205,6 +5251,7 @@ fn full_conformance_gate_pass() {
     conformance_golden_provenance_covers_committed_artifacts();
     fixture_checksum_manifest_is_complete();
     golden_checksum_manifest_is_complete();
+    checksum_manifest_negative_cases_fail_closed();
 
     // 3) Conformance and legacy goldens deserialize successfully and satisfy basic invariants.
     let workspace = workspace_root();
