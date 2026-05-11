@@ -1506,6 +1506,47 @@
       ]
     },
     {
+      "suite_id": "ffs_swarm_cache_controller",
+      "script": "scripts/e2e/ffs_swarm_cache_controller_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "swarm_cache_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_cache_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "swarm_cache_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_cache_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "swarm_cache_default_contract",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_cache_default_contract|outcome=PASS"
+        },
+        {
+          "id": "swarm_cache_markdown",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_cache_markdown|outcome=PASS"
+        },
+        {
+          "id": "swarm_cache_small_host_fail_closed",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_cache_small_host_fail_closed|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_taxonomy",
       "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
       "required_categories": [
