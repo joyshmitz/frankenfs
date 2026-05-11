@@ -164,6 +164,31 @@ e2e_validate_scenario_catalog() {
         e2e_fail "Duplicate taxonomy categories in scenario catalog: $duplicate_taxonomy"
     fi
 
+    local missing_suite_identity
+    missing_suite_identity="$(
+        jq -r '
+            .suites
+            | to_entries[]
+            | select(((.value.suite_id // "") == "") or ((.value.script // "") == ""))
+            | "index=\(.key) suite_id=\(.value.suite_id // "<missing>") script=\(.value.script // "<missing>")"
+        ' "$catalog_path"
+    )"
+    if [[ -n "$missing_suite_identity" ]]; then
+        e2e_fail "Scenario catalog suite missing suite_id or script: $missing_suite_identity"
+    fi
+
+    local duplicate_suite_ids
+    duplicate_suite_ids="$(jq -r '.suites[].suite_id' "$catalog_path" | sort | uniq -d || true)"
+    if [[ -n "$duplicate_suite_ids" ]]; then
+        e2e_fail "Duplicate suite IDs in scenario catalog: $duplicate_suite_ids"
+    fi
+
+    local duplicate_suite_scripts
+    duplicate_suite_scripts="$(jq -r '.suites[].script' "$catalog_path" | sort | uniq -d || true)"
+    if [[ -n "$duplicate_suite_scripts" ]]; then
+        e2e_fail "Duplicate suite scripts in scenario catalog: $duplicate_suite_scripts"
+    fi
+
     local duplicate_ids
     duplicate_ids="$(
         jq -r '
