@@ -1,0 +1,93 @@
+---
+source: crates/ffs-harness/src/permissioned_campaign_broker.rs
+expression: markdown
+---
+# Permissioned Campaign Broker
+
+- Campaign: `bd-rchk3.3-xfstests-real-20260507`
+- Lane: `xfstests_real_baseline`
+- Valid: `true`
+- Packet status: `ready_for_operator_approval`
+- Product evidence claim: `none`
+- Claim boundary: This packet is operator approval material only; it is not pass/fail evidence.
+- ACK env: `XFSTESTS_REAL_RUN_ACK`
+- ACK value: `xfstests-may-mutate-test-and-scratch-devices`
+
+## Required Executed Evidence
+
+- raw xfstests logs
+- pass/fail/not-run summary
+- failure-to-bead extraction report
+
+## Target Beads
+
+- `bd-rchk3.3`
+- `bd-rchk3`
+
+## Runner Environment
+
+| Env var | Purpose | Expected shape |
+|---|---|---|
+| `XFSTESTS_DIR` | xfstests source tree with built helpers | non-empty operator-provided value |
+| `TEST_DIR` | scoped xfstests test mount root | non-empty operator-provided value |
+| `SCRATCH_MNT` | scoped xfstests scratch mount root | non-empty operator-provided value |
+| `RESULT_BASE` | artifact root for raw xfstests results | non-empty operator-provided value |
+
+## Host Facts
+
+| Fact | Observed | Required | Proof |
+|---|---|---|---|
+| `xfstests_helpers` | `present` | `present` | `artifacts/xfstests/preflight/helpers.json` |
+| `explicit_test_and_scratch_paths` | `provided` | `provided` | `artifacts/xfstests/preflight/paths.json` |
+| `fuse_access` | `available` | `available` | `artifacts/xfstests/preflight/fuse.json` |
+
+## Safe Path Roots
+
+| Root | Purpose | Path |
+|---|---|---|
+| `test_dir` | `test_data` | `artifacts/xfstests/test-dir` |
+| `scratch` | `scratch` | `artifacts/xfstests/scratch` |
+| `results` | `artifact_root` | `artifacts/xfstests/real-run` |
+
+## Destructive Operations
+
+- `mount_test_device`
+- `mount_scratch_device`
+- `mutate_test_device`
+- `mutate_scratch_device`
+
+## Expected Artifacts
+
+- `artifacts/xfstests/real-run/report.json`
+- `artifacts/xfstests/real-run/summary.json`
+- `artifacts/xfstests/real-run/results.json`
+- `artifacts/xfstests/real-run/junit.xml`
+- `artifacts/xfstests/real-run/artifact_manifest.json`
+- `artifacts/xfstests/real-run/command_transcript.tsv`
+- `artifacts/xfstests/real-run/raw-results`
+- `artifacts/xfstests/real-run/failure_to_beads.json`
+- `artifacts/xfstests/real-run/stdout.log`
+- `artifacts/xfstests/real-run/stderr.log`
+
+## Preflight References
+
+| Preflight | Age days | Max age days | Stale | Artifact |
+|---|---:|---:|---|---|
+| `xfstests-explicit-path-preflight` | 0 | 14 | `false` | `artifacts/xfstests/preflight/report.json` |
+
+## Operator Risks
+
+- xfstests may mutate the scoped test and scratch devices
+- partial runs must preserve raw logs before cleanup
+
+## Exact Commands
+
+| Command | Role | Exact command |
+|---|---|---|
+| `xfstests_preflight` | `preflight` | `cargo run -p ffs-harness -- xfstests-preflight --xfstests-dir third_party/xfstests-dev` |
+| `xfstests_permissioned_run` | `permissioned_run` | `XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices XFSTESTS_DIR=third_party/xfstests-dev TEST_DIR=artifacts/xfstests/test-dir SCRATCH_MNT=artifacts/xfstests/scratch RESULT_BASE=artifacts/xfstests/real-run scripts/e2e/ffs_xfstests_e2e.sh` |
+| `xfstests_preserve_artifacts` | `cleanup` | `RESULT_BASE=artifacts/xfstests/real-run find artifacts/xfstests/real-run -maxdepth 3 -type f -print | sort > artifacts/xfstests/real-run/artifact_manifest.txt` |
+
+## Issues
+
+none

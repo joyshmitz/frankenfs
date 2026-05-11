@@ -3970,6 +3970,27 @@ mod tests {
         assert!(markdown.contains("operator approval material"));
     }
 
+    /// bd-rchk0.221 - exact-output snapshot for the permissioned campaign
+    /// broker markdown renderer.
+    ///
+    /// The substring smoke above proves the ACK and approval boundary are
+    /// present. This snapshot pins the full operator handoff packet: evidence
+    /// requirements, target beads, runner env, host facts, safe paths,
+    /// destructive operations, expected artifacts, preflight references, risks,
+    /// commands, and empty issues.
+    #[test]
+    fn render_permissioned_campaign_broker_markdown_xfstests_snapshot() {
+        let report =
+            validate_permissioned_campaign_broker_manifest(&valid_xfstests_manifest(), &config());
+        assert!(report.valid, "{:?}", report.issues);
+        let markdown = render_permissioned_campaign_broker_markdown(&report);
+
+        insta::assert_snapshot!(
+            "render_permissioned_campaign_broker_markdown_xfstests",
+            markdown
+        );
+    }
+
     #[test]
     fn invalid_report_fails_close_gate() {
         let mut manifest = valid_swarm_manifest();
