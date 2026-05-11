@@ -1082,6 +1082,71 @@
       ]
     },
     {
+      "suite_id": "ffs_oq_decision_integration",
+      "script": "scripts/e2e/ffs_oq_decision_integration_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "oq_matrix_module_exists",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=oq_matrix_module_exists|outcome=PASS"
+        },
+        {
+          "id": "oq_all_seven_tracked",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=oq_all_seven_tracked|outcome=PASS"
+        },
+        {
+          "id": "oq_decision_docs_exist",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=oq_decision_docs_exist|outcome=PASS"
+        },
+        {
+          "id": "oq_e2e_scripts_exist",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=oq_e2e_scripts_exist|outcome=PASS"
+        },
+        {
+          "id": "oq_impl_crates_exist",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=oq_impl_crates_exist|outcome=PASS"
+        },
+        {
+          "id": "oq_parity_references",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=oq_parity_references|outcome=PASS"
+        },
+        {
+          "id": "oq_no_stale_markers",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=oq_no_stale_markers|outcome=PASS"
+        },
+        {
+          "id": "oq_matrix_json_roundtrip",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=oq_matrix_json_roundtrip|outcome=PASS"
+        },
+        {
+          "id": "oq_matrix_unit_tests_pass",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=oq_matrix_unit_tests_pass|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_taxonomy",
       "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
       "required_categories": [
