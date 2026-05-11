@@ -69,6 +69,180 @@ fn fixture_path(name: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn root_conformance_discrepancies_follow_policy() {
+    let docs = include_str!("../../../conformance/DISCREPANCIES.md");
+    let sections = active_discrepancy_sections(docs);
+    assert!(
+        !sections.is_empty(),
+        "root DISCREPANCIES.md should document active DISC-NNN divergences"
+    );
+
+    for section in sections {
+        assert!(
+            valid_active_discrepancy_id(section.id),
+            "active root divergence id must use DISC-NNN form: {}",
+            section.id
+        );
+        assert!(
+            section.has(DISC_FIELD_REFERENCE),
+            "{} missing non-empty Reference field",
+            section.id
+        );
+        assert!(
+            section.has(DISC_FIELD_OUR_IMPL),
+            "{} missing non-empty Our impl field",
+            section.id
+        );
+        assert!(
+            section.has(DISC_FIELD_IMPACT),
+            "{} missing non-empty Impact field",
+            section.id
+        );
+        assert!(
+            section.has(DISC_FIELD_ACCEPTED_RESOLUTION),
+            "{} missing ACCEPTED Resolution field",
+            section.id
+        );
+        assert!(
+            section.has(DISC_FIELD_TESTS_AFFECTED),
+            "{} missing non-empty Tests affected field",
+            section.id
+        );
+        assert!(
+            section.has(DISC_FIELD_VALID_REVIEW_DATE),
+            "{} missing YYYY-MM-DD Review date field",
+            section.id
+        );
+    }
+}
+
+struct DiscrepancySection<'a> {
+    id: &'a str,
+    fields: u8,
+}
+
+const DISC_FIELD_REFERENCE: u8 = 1 << 0;
+const DISC_FIELD_OUR_IMPL: u8 = 1 << 1;
+const DISC_FIELD_IMPACT: u8 = 1 << 2;
+const DISC_FIELD_ACCEPTED_RESOLUTION: u8 = 1 << 3;
+const DISC_FIELD_TESTS_AFFECTED: u8 = 1 << 4;
+const DISC_FIELD_VALID_REVIEW_DATE: u8 = 1 << 5;
+
+impl<'a> DiscrepancySection<'a> {
+    fn new(id: &'a str) -> Self {
+        Self { id, fields: 0 }
+    }
+
+    fn record_line(&mut self, line: &str) {
+        self.mark_if(
+            DISC_FIELD_REFERENCE,
+            line_has_nonempty_field(line, "- **Reference:**"),
+        );
+        self.mark_if(
+            DISC_FIELD_OUR_IMPL,
+            line_has_nonempty_field(line, "- **Our impl:**"),
+        );
+        self.mark_if(
+            DISC_FIELD_IMPACT,
+            line_has_nonempty_field(line, "- **Impact:**"),
+        );
+        self.mark_if(
+            DISC_FIELD_ACCEPTED_RESOLUTION,
+            line.strip_prefix("- **Resolution:**")
+                .is_some_and(|value| value.trim_start().starts_with("ACCEPTED")),
+        );
+        self.mark_if(
+            DISC_FIELD_TESTS_AFFECTED,
+            line_has_nonempty_field(line, "- **Tests affected:**"),
+        );
+        self.mark_if(
+            DISC_FIELD_VALID_REVIEW_DATE,
+            line.strip_prefix("- **Review date:**")
+                .is_some_and(|value| valid_yyyy_mm_dd(value.trim())),
+        );
+    }
+
+    fn mark_if(&mut self, field: u8, condition: bool) {
+        if condition {
+            self.fields |= field;
+        }
+    }
+
+    fn has(&self, field: u8) -> bool {
+        self.fields & field != 0
+    }
+}
+
+fn active_discrepancy_sections<'a>(markdown: &'a str) -> Vec<DiscrepancySection<'a>> {
+    let mut sections = Vec::new();
+    let mut current: Option<DiscrepancySection<'a>> = None;
+
+    for line in markdown.lines() {
+        if let Some(header) = line.strip_prefix("### ") {
+            let id = header.split_once(':').map_or(header, |(id, _)| id).trim();
+            if id.starts_with("DISC-") {
+                push_discrepancy_section(&mut sections, current.take());
+                current = Some(DiscrepancySection::new(id));
+                continue;
+            }
+        }
+
+        if let Some(section) = current.as_mut() {
+            section.record_line(line.trim_start());
+        }
+    }
+
+    push_discrepancy_section(&mut sections, current);
+    sections
+}
+
+fn push_discrepancy_section<'a>(
+    sections: &mut Vec<DiscrepancySection<'a>>,
+    section: Option<DiscrepancySection<'a>>,
+) {
+    if let Some(section) = section
+        && !section.id.starts_with("DISC-R")
+    {
+        sections.push(section);
+    }
+}
+
+fn valid_active_discrepancy_id(id: &str) -> bool {
+    id.strip_prefix("DISC-")
+        .is_some_and(|suffix| suffix.len() == 3 && suffix.as_bytes().iter().all(u8::is_ascii_digit))
+}
+
+fn line_has_nonempty_field(line: &str, field: &str) -> bool {
+    line.strip_prefix(field)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn valid_yyyy_mm_dd(value: &str) -> bool {
+    let Some((year, month_day)) = value.split_once('-') else {
+        return false;
+    };
+    let Some((month, day)) = month_day.split_once('-') else {
+        return false;
+    };
+
+    let year_is_valid = year.len() == 4 && year.as_bytes().iter().all(u8::is_ascii_digit);
+    let month_is_valid = month.len() == 2 && month.as_bytes().iter().all(u8::is_ascii_digit);
+    let day_is_valid = day.len() == 2 && day.as_bytes().iter().all(u8::is_ascii_digit);
+
+    if !year_is_valid || !month_is_valid || !day_is_valid {
+        return false;
+    }
+
+    let Ok(month) = month.parse::<u8>() else {
+        return false;
+    };
+    let Ok(day) = day.parse::<u8>() else {
+        return false;
+    };
+    (1..=12).contains(&month) && (1..=31).contains(&day)
+}
+
+#[test]
 fn ext4_and_btrfs_fixtures_conform() {
     let ext4_sparse = validate_ext4_fixture(&fixture_path("ext4_superblock_sparse.json"))
         .expect("ext4 sparse fixture");
