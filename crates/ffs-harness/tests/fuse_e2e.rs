@@ -9289,18 +9289,29 @@ fn fuse_spec_i7_reader_sees_pre_modification_version_during_write() {
         let path = mnt.join("i7_snapshot.txt");
         fs::write(&path, b"old-version\n").expect("write old snapshot version");
         let writer_path = path.clone();
+        let (replacement_ready_tx, replacement_ready_rx) = std::sync::mpsc::channel();
+        let (reader_captured_tx, reader_captured_rx) = std::sync::mpsc::channel();
 
         let writer = thread::spawn(move || {
             let replacement = writer_path.with_extension("tmp");
-            let payload = "new-version\n".repeat(8_192);
-            fs::write(&replacement, payload.as_bytes()).expect("write replacement payload");
-            thread::sleep(Duration::from_millis(100));
+            fs::write(&replacement, b"new-version\n").expect("write replacement payload");
+            replacement_ready_tx
+                .send(())
+                .expect("signal replacement payload is prepared");
+            reader_captured_rx
+                .recv()
+                .expect("wait for reader to capture pre-rename view");
             fs::rename(&replacement, &writer_path).expect("atomic replace for snapshot check");
         });
 
         // While writer prepares replacement data, readers should still see the old version.
-        thread::sleep(Duration::from_millis(20));
+        replacement_ready_rx
+            .recv()
+            .expect("wait for replacement payload to be prepared");
         let observed = fs::read_to_string(&path).expect("read pre-commit path view");
+        reader_captured_tx
+            .send(())
+            .expect("signal reader captured pre-rename view");
 
         writer.join().expect("writer thread should succeed");
 

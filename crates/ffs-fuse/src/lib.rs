@@ -3714,8 +3714,6 @@ impl FrankenFuse {
             error,
             offset: None,
         })?;
-        self.notify_entry_invalidation(parent, name);
-        self.notify_entry_invalidation(newparent, newname);
         Ok(())
     }
 
@@ -4606,7 +4604,11 @@ impl Filesystem for FrankenFuse {
         // (see OpenFs::rename2). RENAME_WHITEOUT still returns EINVAL inside
         // FsOps::rename2; we no longer pre-reject every non-zero flag.
         match self.dispatch_rename(parent, name, newparent, newname, flags) {
-            Ok(()) => reply.ok(),
+            Ok(()) => {
+                reply.ok();
+                self.notify_entry_invalidation(parent, name);
+                self.notify_entry_invalidation(newparent, newname);
+            }
             Err(MutationDispatchError::Errno(errno)) => reply.error(errno),
             Err(MutationDispatchError::Operation { error, offset }) => {
                 Self::reply_error_empty(
