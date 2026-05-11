@@ -1453,6 +1453,59 @@
       ]
     },
     {
+      "suite_id": "ffs_support_state_accounting",
+      "script": "scripts/e2e/ffs_support_state_accounting_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "support_state_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=support_state_wired|outcome=PASS"
+        },
+        {
+          "id": "support_state_report_writes",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=support_state_report_writes|outcome=PASS"
+        },
+        {
+          "id": "support_state_grouping",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=support_state_grouping|outcome=PASS"
+        },
+        {
+          "id": "support_state_log_tokens",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=support_state_log_tokens|outcome=PASS"
+        },
+        {
+          "id": "support_state_rejects_flat_wording",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=support_state_rejects_flat_wording|outcome=PASS"
+        },
+        {
+          "id": "support_state_rejects_missing_owner",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=support_state_rejects_missing_owner|outcome=PASS"
+        },
+        {
+          "id": "support_state_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=support_state_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_taxonomy",
       "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
       "required_categories": [
