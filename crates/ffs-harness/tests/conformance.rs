@@ -5113,6 +5113,8 @@ fn full_conformance_gate_pass() {
     // 1) All fixture parsers + spot checks (21 total fixture JSONs).
     ext4_and_btrfs_fixtures_conform();
     ext4_group_desc_fixtures_conform();
+    ext4_group_desc_32byte_fixture_re_encodes_byte_identical();
+    ext4_group_desc_64byte_fixture_re_encodes_byte_identical();
     ext4_inode_fixtures_conform();
     ext4_dir_block_fixture_conforms();
     ext4_dir_block_with_tail_fixture_conforms();
