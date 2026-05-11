@@ -43,6 +43,8 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering as AtomicOrdering},
     },
+    thread,
+    time::{Duration, Instant},
 };
 
 const FS_IOC_GET_ENCRYPTION_POLICY_CMD: u32 = 0x400C_6615;
@@ -53,6 +55,8 @@ const EXT4_ENCRYPT_INODE_FL: u32 = 0x0000_0800;
 const EXT4_ENCRYPTION_XATTR_NAME: &[u8] = b"c";
 const EXT4_FALLOC_FL_COLLAPSE_RANGE: i32 = 0x08;
 const EXT4_FALLOC_FL_INSERT_RANGE: i32 = 0x20;
+const FUSE_MOUNT_STATE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const FUSE_MOUNT_READY_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1148,6 +1152,58 @@ fn fuse_available() -> bool {
         && command_available("debugfs")
 }
 
+fn mountinfo_unescape(field: &str) -> Vec<u8> {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+    while let Some(byte) = bytes.get(idx) {
+        if *byte == b'\\' {
+            if let Some(octal) = idx
+                .checked_add(1)
+                .zip(idx.checked_add(4))
+                .and_then(|(start, end)| bytes.get(start..end))
+            {
+                if octal.iter().all(|byte| matches!(*byte, b'0'..=b'7')) {
+                    let value = octal
+                        .iter()
+                        .fold(0_u16, |acc, byte| acc * 8 + u16::from(byte - b'0'));
+                    if let Ok(byte) = u8::try_from(value) {
+                        out.push(byte);
+                        idx += 4;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(*byte);
+        idx += 1;
+    }
+    out
+}
+
+fn mountinfo_has_mountpoint(mountpoint: &Path) -> bool {
+    let target = mountpoint.as_os_str().as_bytes();
+    fs::read_to_string("/proc/self/mountinfo").is_ok_and(|mountinfo| {
+        mountinfo.lines().any(|line| {
+            line.split(' ')
+                .nth(4)
+                .is_some_and(|field| mountinfo_unescape(field) == target)
+        })
+    })
+}
+
+fn wait_for_fuse_mount_ready(mountpoint: &Path) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < FUSE_MOUNT_READY_TIMEOUT {
+        if mountinfo_has_mountpoint(mountpoint) {
+            return true;
+        }
+        let remaining = FUSE_MOUNT_READY_TIMEOUT.saturating_sub(start.elapsed());
+        thread::sleep(FUSE_MOUNT_STATE_POLL_INTERVAL.min(remaining));
+    }
+    mountinfo_has_mountpoint(mountpoint)
+}
+
 fn try_mount_ffs_with_options(
     image: &Path,
     mountpoint: &Path,
@@ -1162,8 +1218,16 @@ fn try_mount_ffs_with_options(
     let fs = OpenFs::open_with_options(&cx, image, &opts).expect("open ext4 image");
     match mount_background(Box::new(fs), mountpoint, mount_opts) {
         Ok(session) => {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            Some(session)
+            if wait_for_fuse_mount_ready(mountpoint) {
+                Some(session)
+            } else {
+                eprintln!(
+                    "FUSE mount did not become visible after {:?} (skipping conformance mount probe): {}",
+                    FUSE_MOUNT_READY_TIMEOUT,
+                    mountpoint.display()
+                );
+                None
+            }
         }
         Err(err) => {
             eprintln!("FUSE mount failed (skipping conformance mount probe): {err}");
