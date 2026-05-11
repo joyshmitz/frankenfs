@@ -289,6 +289,70 @@
       ]
     },
     {
+      "suite_id": "ffs_cli_wal_telemetry",
+      "script": "scripts/e2e/ffs_cli_wal_telemetry_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "wal_replay_info_fields",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_replay_info_fields|outcome=PASS"
+        },
+        {
+          "id": "mvcc_stats_wal_replay",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mvcc_stats_wal_replay|outcome=PASS"
+        },
+        {
+          "id": "mvcc_info_wal_replay",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mvcc_info_wal_replay|outcome=PASS"
+        },
+        {
+          "id": "cli_wal_helpers",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_helpers|outcome=PASS"
+        },
+        {
+          "id": "cli_wal_structured_logging",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=structured_logging|outcome=PASS"
+        },
+        {
+          "id": "wal_telemetry_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_telemetry_tests|outcome=PASS"
+        },
+        {
+          "id": "json_schema_stability",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=json_schema_stability|outcome=PASS"
+        },
+        {
+          "id": "cli_wal_evidence_alignment",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_alignment|outcome=PASS"
+        },
+        {
+          "id": "core_wal_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=core_wal_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_fuse_production",
       "script": "scripts/e2e/ffs_fuse_production.sh",
       "required_categories": [
