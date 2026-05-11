@@ -1374,6 +1374,70 @@
       ]
     },
     {
+      "suite_id": "ffs_verification_gate",
+      "script": "scripts/e2e/ffs_verification_gate_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "artifact_manifest_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=artifact_manifest_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "log_contract_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "verification_runner_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=verification_runner_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "scenario_catalog_valid",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=scenario_catalog_valid|outcome=PASS"
+        },
+        {
+          "id": "cross_epic_conformance",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=cross_epic_conformance|outcome=PASS"
+        },
+        {
+          "id": "structured_logging_fields",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=structured_logging_fields|outcome=PASS"
+        },
+        {
+          "id": "schema_version_consistency",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=schema_version_consistency|outcome=PASS"
+        },
+        {
+          "id": "e2e_marker_format_sync",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=e2e_marker_format_sync|outcome=PASS"
+        },
+        {
+          "id": "full_harness_suite",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=full_harness_suite|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_refresh_policy",
       "script": "scripts/e2e/ffs_refresh_policy_e2e.sh",
       "required_categories": [
