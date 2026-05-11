@@ -2016,6 +2016,46 @@
       ]
     },
     {
+      "suite_id": "ffs_operational_readiness_report",
+      "script": "scripts/e2e/ffs_operational_readiness_report_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "readiness_report_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_report_wired|outcome=PASS"
+        },
+        {
+          "id": "readiness_report_fixture",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_report_fixture|outcome=PASS"
+        },
+        {
+          "id": "readiness_report_json",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_report_json|outcome=PASS"
+        },
+        {
+          "id": "readiness_report_markdown",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_report_markdown|outcome=PASS"
+        },
+        {
+          "id": "readiness_report_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_report_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_proof_overhead_budget",
       "script": "scripts/e2e/ffs_proof_overhead_budget_e2e.sh",
       "required_categories": [
