@@ -896,6 +896,73 @@
       ]
     },
     {
+      "suite_id": "ffs_mount_runtime_gate",
+      "script": "scripts/e2e/ffs_mount_runtime_gate_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "degradation",
+        "unsupported_op"
+      ],
+      "scenarios": [
+        {
+          "id": "cli_mount_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=cli_mount_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "fuse_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuse_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "degradation_backpressure_tests",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=degradation_backpressure_tests|outcome=PASS"
+        },
+        {
+          "id": "mode_boundary_enforcement",
+          "category": "unsupported_op",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mode_boundary_enforcement|outcome=PASS"
+        },
+        {
+          "id": "mode_selection_logging",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mode_selection_logging|outcome=PASS"
+        },
+        {
+          "id": "mode_rejection_logging",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mode_rejection_logging|outcome=PASS"
+        },
+        {
+          "id": "boundary_violation_logging",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=boundary_violation_logging|outcome=PASS"
+        },
+        {
+          "id": "all_runtime_modes_covered",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=all_runtime_modes_covered|outcome=PASS"
+        },
+        {
+          "id": "dual_observability_surfaces",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=dual_observability_surfaces|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_taxonomy",
       "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
       "required_categories": [
