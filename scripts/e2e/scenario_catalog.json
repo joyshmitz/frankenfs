@@ -1278,6 +1278,71 @@
       ]
     },
     {
+      "suite_id": "ffs_refresh_policy",
+      "script": "scripts/e2e/ffs_refresh_policy_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "refresh_policy_variants",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=refresh_policy_variants|outcome=PASS"
+        },
+        {
+          "id": "refresh_policy_modes",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=refresh_modes|outcome=PASS"
+        },
+        {
+          "id": "refresh_policy_group_state",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=group_refresh_state|outcome=PASS"
+        },
+        {
+          "id": "refresh_policy_telemetry_types",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=telemetry_types|outcome=PASS"
+        },
+        {
+          "id": "refresh_policy_staleness_timeout",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=staleness_timeout|outcome=PASS"
+        },
+        {
+          "id": "refresh_policy_structured_logging",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=structured_logging|outcome=PASS"
+        },
+        {
+          "id": "refresh_policy_pipeline_tests",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=pipeline_tests|outcome=PASS"
+        },
+        {
+          "id": "refresh_policy_evidence_alignment",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_alignment|outcome=PASS"
+        },
+        {
+          "id": "refresh_policy_churn_policy_tests",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=churn_policy_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_taxonomy",
       "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
       "required_categories": [
