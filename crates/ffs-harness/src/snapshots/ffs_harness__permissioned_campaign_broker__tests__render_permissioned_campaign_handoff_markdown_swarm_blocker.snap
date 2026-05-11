@@ -1,0 +1,106 @@
+---
+source: crates/ffs-harness/src/permissioned_campaign_broker.rs
+expression: markdown
+---
+# Permissioned Campaign Handoff
+
+- Packet: `bd-rchk0.53.8-large-host-swarm-20260507-operator-handoff`
+- Campaign: `bd-rchk0.53.8-large-host-swarm-20260507`
+- Lane: `large_host_swarm_responsiveness`
+- Generated: `2026-05-07T00:00:00Z` by `FrostyRobin` at `abcdef123456`
+- Notice: authorization handoff material only; not executed evidence and not a product pass/fail claim
+- Packet status: `ready_for_operator_approval`
+- Product evidence claim: `none`
+- Claim boundary: capability blocker: logical_cpus=16 below required >=64; ram_gib=64 below required >=256; numa_topology_visible=false; numa_nodes=0 below required >=2; cannot upgrade swarm.responsiveness from this broker packet
+
+## Required ACK
+
+- Env var: `FFS_SWARM_WORKLOAD_REAL_RUN_ACK`
+- Exact value: `swarm-workload-may-use-permissioned-large-host`
+- Export: `FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host`
+- Operator prompt: Approve permissioned large-host swarm workload execution after host proof review
+
+## Target Beads
+
+- `bd-rchk0.53.8`
+- `bd-rchk0.53`
+
+## Required Executed Evidence After Approval
+
+- swarm workload harness report with measured_authoritative permissioned_large_host row
+- p99 attribution ledger for swarm_tail_latency
+- proof-bundle lanes: swarm_workload_harness, swarm_tail_latency, adaptive_runtime
+- release-gate output preserving the swarm.responsiveness decision
+- raw command transcript, stdout, and stderr logs
+
+## Runner Environment
+
+| Env var | Purpose | Expected shape |
+|---|---|---|
+| `FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD` | default-off opt-in that allows the permissioned swarm runner gate | 1 |
+| `FFS_SWARM_WORKLOAD_PERMISSIONED_RUNNER` | operator-provided runner that writes authoritative large-host artifacts | tools/permissioned/swarm-large-host-runner |
+| `FFS_SWARM_WORKLOAD_ARTIFACT_ROOT` | artifact root for workload reports, p99 attribution, proof-bundle lanes, and logs | artifacts/swarm/large-host |
+
+## Host Capability Requirements
+
+| Fact | Observed | Required | Proof |
+|---|---|---|---|
+| `logical_cpus` | `16` | `>=64` | `artifacts/swarm/preflight/host.json` |
+| `ram_gib` | `64` | `>=256` | `artifacts/swarm/preflight/host.json` |
+| `numa_topology_visible` | `false` | `true` | `artifacts/swarm/preflight/numa.json` |
+| `numa_nodes` | `0` | `>=2` | `artifacts/swarm/preflight/numa.json` |
+| `release_claim_classification` | `authoritative_large_host` | `authoritative_large_host` | `artifacts/swarm/preflight/report.json` |
+
+## Path Effects
+
+| Root | Purpose | Path |
+|---|---|---|
+| `runner_workspace` | `runner_workspace` | `artifacts/swarm/workspace` |
+| `swarm_artifacts` | `artifact_root` | `artifacts/swarm/large-host` |
+
+## Destructive Operations Requiring Approval
+
+- `generate_filesystem_load`
+- `spawn_large_host_workers`
+- `consume_large_temp_storage`
+- `kill_replay_worker`
+
+## Expected Artifact Destinations
+
+- `artifacts/swarm/large-host/resource_caps.json`
+- `artifacts/swarm/large-host/p99_attribution.json`
+- `artifacts/swarm/large-host/proof/bundle.json`
+- `artifacts/swarm/large-host/raw.log`
+- `artifacts/swarm/large-host/release_gate.json`
+- `artifacts/swarm/large-host/proof/swarm_workload_harness.json`
+- `artifacts/swarm/large-host/proof/swarm_tail_latency.json`
+- `artifacts/swarm/large-host/proof/adaptive_runtime.json`
+
+## Cleanup Expectations
+
+- Policy: `swarm_preserve_permissioned_artifacts`
+- Expected status: `preserved_artifacts`
+- Partial artifact policy: preserve resource caps, p99 attribution, proof-bundle lanes, raw logs, release-gate output, stdout, and stderr
+
+## Preflight References
+
+| Preflight | Age days | Max age days | Stale | Artifact | Summary |
+|---|---:|---:|---|---|---|
+| `swarm-large-host-capability-preflight` | 0 | 14 | `false` | `artifacts/swarm/preflight/report.json` | large-host preflight is blocked: logical_cpus=16 below required >=64; ram_gib=64 below required >=256; numa_topology_visible=false; numa_nodes=0 below required >=2; permissioned execution must not be treated as authoritative |
+
+## Operator Risks
+
+- permissioned swarm execution may consume >=64 CPUs and large temporary storage
+- raw logs, p99 attribution, proof-bundle lanes, and release-gate output must be preserved before cleanup
+- small_host_smoke and capability_downgraded_smoke are blocker evidence and cannot upgrade swarm.responsiveness
+
+## Command Transcript Template
+
+| Command | Role | Transcript path | Exact command |
+|---|---|---|---|
+| `swarm_workload_preflight` | `preflight` | `artifacts/permissioned/bd-rchk0.53.8-large-host-swarm-20260507/commands/swarm_workload_preflight.log` | `cargo run -p ffs-harness -- validate-swarm-workload-harness --manifest 'benchmarks/swarm_workload_harness_manifest.json'` |
+| `swarm_tail_latency_preflight` | `preflight` | `artifacts/permissioned/bd-rchk0.53.8-large-host-swarm-20260507/commands/swarm_tail_latency_preflight.log` | `cargo run -p ffs-harness -- validate-swarm-tail-latency --ledger 'artifacts/swarm/large-host/p99_attribution.json'` |
+| `adaptive_runtime_preflight` | `preflight` | `artifacts/permissioned/bd-rchk0.53.8-large-host-swarm-20260507/commands/adaptive_runtime_preflight.log` | `cargo run -p ffs-harness -- validate-adaptive-runtime-manifest --manifest 'docs/adaptive-runtime-evidence-manifest.json'` |
+| `proof_bundle_preflight` | `preflight` | `artifacts/permissioned/bd-rchk0.53.8-large-host-swarm-20260507/commands/proof_bundle_preflight.log` | `cargo run -p ffs-harness -- validate-proof-bundle --bundle 'artifacts/swarm/large-host/proof/bundle.json'` |
+| `release_gate_preflight` | `preflight` | `artifacts/permissioned/bd-rchk0.53.8-large-host-swarm-20260507/commands/release_gate_preflight.log` | `cargo run -p ffs-harness -- evaluate-release-gates --bundle 'artifacts/swarm/large-host/proof/bundle.json' --policy 'artifacts/swarm/large-host/release_gate_policy.json' --out 'artifacts/swarm/large-host/release_gate.json'` |
+| `swarm_permissioned_run` | `permissioned_run` | `artifacts/permissioned/bd-rchk0.53.8-large-host-swarm-20260507/commands/swarm_permissioned_run.log` | `FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host FFS_SWARM_WORKLOAD_PERMISSIONED_RUNNER='tools/permissioned/swarm-large-host-runner' FFS_SWARM_WORKLOAD_ARTIFACT_ROOT='artifacts/swarm/large-host' scripts/e2e/ffs_swarm_workload_harness_e2e.sh` |

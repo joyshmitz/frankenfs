@@ -4369,6 +4369,30 @@ mod tests {
         Ok(())
     }
 
+    /// bd-rchk0.224 - exact-output snapshot for the swarm handoff blocker
+    /// packet when large-host capability proof is insufficient.
+    ///
+    /// The field checks above prove the packet stays non-authoritative. This
+    /// snapshot pins the complete operator handoff text for the blocker path.
+    #[test]
+    fn render_permissioned_campaign_handoff_markdown_swarm_blocker_snapshot() -> Result<()> {
+        let mut input = swarm_adapter_input();
+        input.logical_cpu_count = 16;
+        input.ram_gib = 64;
+        input.numa_node_count = 0;
+        input.numa_topology_visible = false;
+
+        let packet = generate_swarm_handoff_packet(&input, &config(), generation())?;
+        let markdown = render_permissioned_campaign_handoff_markdown(&packet);
+
+        insta::assert_snapshot!(
+            "render_permissioned_campaign_handoff_markdown_swarm_blocker",
+            markdown
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn swarm_adapter_rejects_small_host_smoke_as_authoritative() {
         let mut input = swarm_adapter_input();
