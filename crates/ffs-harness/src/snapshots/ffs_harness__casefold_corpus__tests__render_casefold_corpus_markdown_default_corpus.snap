@@ -1,0 +1,29 @@
+---
+source: crates/ffs-harness/src/casefold_corpus.rs
+expression: markdown
+---
+# Ext4 Casefold Corpus
+
+- corpus: `frankenfs_ext4_casefold_corpus_v1`
+- schema version: `1`
+- bead: `bd-9er6s`
+- valid: `true`
+- cases: `10`
+- kernel-compared cases: `9`
+
+## Operations
+- `create`
+- `cross_directory_rename`
+- `lookup`
+- `mount_feature_check`
+- `rename`
+
+## Outcomes
+- `create_collision_refused`
+- `create_success`
+- `invalid_encoding_refused`
+- `lookup_hit`
+- `lookup_miss`
+- `mount_feature_accepted`
+- `rename_collision_refused`
+- `rename_success`

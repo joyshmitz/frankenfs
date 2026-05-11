@@ -257,6 +257,29 @@ Rows that require real multi-image assembly, mounted writes, scrub/repair, or
 host-specific btrfs behavior remain metadata-only until a permissioned lane
 records authoritative artifacts.
 
+## Ext4 Casefold Corpus Contract
+
+The ext4 casefold corpus lives in:
+
+- `tests/casefold-corpus/casefold_corpus.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-casefold-corpus \
+  --corpus tests/casefold-corpus/casefold_corpus.json \
+  --out artifacts/casefold/report.json \
+  --summary-out artifacts/casefold/summary.md
+```
+
+This corpus is a support-envelope contract, not permission to claim mounted
+casefold parity. It must keep lookup, create, rename, cross-directory rename,
+and mount-feature validation rows visible, and it must preserve explicit
+collision-refusal, invalid-encoding-refusal, and mount-feature-accepted
+outcomes. Rows that require real ext4 images, mounted writes, kernel feature
+negotiation, or host-specific unicode behavior remain metadata-only until a
+permissioned lane records authoritative artifacts.
+
 ## Swarm Workload Harness Contract
 
 The 64-core/256GB swarm workload harness plan lives in:

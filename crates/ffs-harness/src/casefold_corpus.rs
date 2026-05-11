@@ -12,7 +12,7 @@
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write as _, fs, path::Path};
 
 pub const CASEFOLD_CORPUS_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_CASEFOLD_CORPUS_PATH: &str = "tests/casefold-corpus/casefold_corpus.json";
@@ -121,6 +121,12 @@ pub fn parse_casefold_corpus(text: &str) -> Result<CasefoldCorpus> {
         .map_err(|err| anyhow::anyhow!("failed to parse casefold corpus JSON: {err}"))
 }
 
+pub fn load_casefold_corpus(path: &Path) -> Result<CasefoldCorpus> {
+    let text = fs::read_to_string(path)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
+    parse_casefold_corpus(&text)
+}
+
 pub fn validate_default_casefold_corpus() -> Result<CasefoldCorpusReport> {
     let corpus = parse_casefold_corpus(DEFAULT_CASEFOLD_CORPUS_JSON)?;
     let report = validate_casefold_corpus(&corpus);
@@ -132,6 +138,51 @@ pub fn validate_default_casefold_corpus() -> Result<CasefoldCorpusReport> {
         );
     }
     Ok(report)
+}
+
+pub fn fail_on_casefold_corpus_errors(report: &CasefoldCorpusReport) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    bail!(
+        "casefold corpus validation failed: {}",
+        report.errors.join("; ")
+    )
+}
+
+#[must_use]
+pub fn render_casefold_corpus_markdown(report: &CasefoldCorpusReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Ext4 Casefold Corpus");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "- corpus: `{}`", report.corpus_id);
+    let _ = writeln!(out, "- schema version: `{}`", report.schema_version);
+    let _ = writeln!(out, "- bead: `{}`", report.bead_id);
+    let _ = writeln!(out, "- valid: `{}`", report.valid);
+    let _ = writeln!(out, "- cases: `{}`", report.case_count);
+    let _ = writeln!(
+        out,
+        "- kernel-compared cases: `{}`",
+        report.kernel_compared_count
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Operations");
+    for operation in &report.operations_seen {
+        let _ = writeln!(out, "- `{operation}`");
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Outcomes");
+    for outcome in &report.outcomes_seen {
+        let _ = writeln!(out, "- `{outcome}`");
+    }
+    if !report.errors.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "## Errors");
+        for error in &report.errors {
+            let _ = writeln!(out, "- {error}");
+        }
+    }
+    out
 }
 
 #[must_use]
@@ -471,6 +522,28 @@ mod tests {
                 "missing outcome {outcome}"
             );
         }
+    }
+
+    #[test]
+    fn render_markdown_summarizes_default_corpus() {
+        let report = validate_default_casefold_corpus().expect("default casefold corpus validates");
+        let markdown = render_casefold_corpus_markdown(&report);
+        assert!(markdown.contains("# Ext4 Casefold Corpus"));
+        assert!(markdown.contains("`cross_directory_rename`"));
+        assert!(markdown.contains("`invalid_encoding_refused`"));
+        insta::assert_snapshot!("render_casefold_corpus_markdown_default_corpus", markdown);
+    }
+
+    #[test]
+    fn fail_on_errors_rejects_invalid_report() {
+        let mut corpus = fixture_corpus();
+        corpus.cases.clear();
+        let report = validate_casefold_corpus(&corpus);
+        let err = fail_on_casefold_corpus_errors(&report).expect_err("invalid report should fail");
+        assert!(
+            err.to_string()
+                .contains("casefold corpus validation failed")
+        );
     }
 
     #[test]

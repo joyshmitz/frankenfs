@@ -41,6 +41,10 @@ use ffs_harness::{
         load_btrfs_send_receive_corpus, render_btrfs_send_receive_corpus_markdown,
         validate_btrfs_send_receive_corpus,
     },
+    casefold_corpus::{
+        DEFAULT_CASEFOLD_CORPUS_PATH, fail_on_casefold_corpus_errors, load_casefold_corpus,
+        render_casefold_corpus_markdown, validate_casefold_corpus,
+    },
     cross_oracle_arbitration::{
         DEFAULT_CROSS_ORACLE_ARBITRATION_REPORT, fail_on_cross_oracle_arbitration_errors,
         load_cross_oracle_arbitration_report, render_cross_oracle_arbitration_markdown,
@@ -531,6 +535,7 @@ fn run() -> Result<()> {
         Some("validate-btrfs-multidevice-corpus") => {
             validate_btrfs_multidevice_corpus_cmd(&args[1..])
         }
+        Some("validate-casefold-corpus") => validate_casefold_corpus_cmd(&args[1..]),
         Some("validate-metamorphic-workload-seeds") => {
             validate_metamorphic_workload_seed_catalog_cmd(&args[1..])
         }
@@ -932,6 +937,14 @@ struct BtrfsMultideviceCorpusCmdArgs {
 }
 
 #[derive(Debug)]
+struct CasefoldCorpusCmdArgs {
+    corpus_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
 struct MetamorphicWorkloadSeedCatalogCmdArgs {
     catalog_path: String,
     out_path: Option<String>,
@@ -1242,6 +1255,87 @@ fn parse_btrfs_multidevice_corpus_cmd_args(
     }
 
     Ok(Some(BtrfsMultideviceCorpusCmdArgs {
+        corpus_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
+fn validate_casefold_corpus_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_casefold_corpus_cmd_args(args)? else {
+        return Ok(());
+    };
+    let corpus = load_casefold_corpus(Path::new(&cmd_args.corpus_path))?;
+    let report = validate_casefold_corpus(&corpus);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_casefold_corpus_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "casefold corpus report written: {} valid={} cases={}",
+            path, report.valid, report.case_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_casefold_corpus_markdown(&report)),
+        )?;
+        println!("casefold corpus summary written: {path}");
+    }
+
+    fail_on_casefold_corpus_errors(&report)
+}
+
+fn parse_casefold_corpus_cmd_args(args: &[String]) -> Result<Option<CasefoldCorpusCmdArgs>> {
+    let mut corpus_path = DEFAULT_CASEFOLD_CORPUS_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--corpus" => {
+                i += 1;
+                args.get(i)
+                    .context("--corpus requires a path")?
+                    .clone_into(&mut corpus_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_casefold_corpus_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-casefold-corpus argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(CasefoldCorpusCmdArgs {
         corpus_path,
         out_path,
         summary_out_path,
@@ -7555,6 +7649,7 @@ fn print_usage_commands() {
     print_workload_corpus_usage_summary();
     print_btrfs_send_receive_corpus_usage_summary();
     print_btrfs_multidevice_corpus_usage_summary();
+    print_casefold_corpus_usage_summary();
     print_metamorphic_workload_seed_catalog_usage_summary();
     println!(
         "  ffs-harness validate-mounted-write-error-classes [--catalog FILE] [--matrix FILE] [--out FILE]"
@@ -7684,6 +7779,7 @@ fn print_usage_examples() {
     print_workload_corpus_example();
     print_btrfs_send_receive_corpus_example();
     print_btrfs_multidevice_corpus_example();
+    print_casefold_corpus_example();
     print_metamorphic_workload_seed_catalog_example();
     println!(
         "  ffs-harness validate-mounted-write-error-classes --out artifacts/e2e/mounted_write_error_classes.json"
@@ -7964,6 +8060,18 @@ fn print_btrfs_multidevice_corpus_usage_summary() {
 fn print_btrfs_multidevice_corpus_example() {
     println!(
         "  ffs-harness validate-btrfs-multidevice-corpus --corpus tests/btrfs-multidevice-corpus/btrfs_multidevice_corpus.json --out artifacts/btrfs-multidevice/report.json --summary-out artifacts/btrfs-multidevice/summary.md"
+    );
+}
+
+fn print_casefold_corpus_usage_summary() {
+    println!(
+        "  ffs-harness validate-casefold-corpus [--corpus FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_casefold_corpus_example() {
+    println!(
+        "  ffs-harness validate-casefold-corpus --corpus tests/casefold-corpus/casefold_corpus.json --out artifacts/casefold/report.json --summary-out artifacts/casefold/summary.md"
     );
 }
 
@@ -8516,6 +8624,16 @@ fn print_btrfs_multidevice_corpus_usage() {
     println!();
     println!("Options:");
     println!("  --corpus FILE                      Read btrfs multi-device corpus JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report");
+    println!("  --summary-out FILE                 Write Markdown corpus summary");
+}
+
+fn print_casefold_corpus_usage() {
+    println!("Usage: ffs-harness validate-casefold-corpus [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --corpus FILE                      Read ext4 casefold corpus JSON");
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write validation report");
     println!("  --summary-out FILE                 Write Markdown corpus summary");
