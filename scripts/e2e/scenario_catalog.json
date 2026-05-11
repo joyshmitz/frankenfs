@@ -1406,6 +1406,53 @@
       ]
     },
     {
+      "suite_id": "ffs_scrub_repair_scheduler",
+      "script": "scripts/e2e/ffs_scrub_repair_scheduler_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "scrub_repair_scheduler_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=scrub_repair_scheduler_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "scrub_repair_scheduler_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=scrub_repair_scheduler_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "scrub_repair_scheduler_default_manifest",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=scrub_repair_scheduler_default_manifest|outcome=PASS"
+        },
+        {
+          "id": "scrub_repair_scheduler_markdown",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=scrub_repair_scheduler_markdown|outcome=PASS"
+        },
+        {
+          "id": "scrub_repair_scheduler_bypass_fail_closed",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=scrub_repair_scheduler_bypass_fail_closed|outcome=PASS"
+        },
+        {
+          "id": "scrub_repair_scheduler_p99_fail_closed",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=scrub_repair_scheduler_p99_fail_closed|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_taxonomy",
       "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
       "required_categories": [
