@@ -5,7 +5,7 @@
 #   1. The log_contract module builds and all unit tests pass
 #   2. Canonical field names are used in key crate tracing call sites
 #   3. Outcome vocabulary matches what crates actually emit
-#   4. E2E marker format in existing scripts is contract-compliant
+#   4. E2E scenario catalog evidence and script coverage are contract-compliant
 #   5. Duration fields use the canonical _us (microsecond) convention
 #   6. Writeback cache mode remains disabled in mount option construction
 #   7. Sync/flush log branches include required contract fields
@@ -21,7 +21,7 @@
 #   log_contract_builds_clean         - cargo check + test pass for log_contract
 #   log_contract_field_coverage       - key crates use canonical field names
 #   log_contract_outcome_vocabulary   - outcome values match the closed vocabulary
-#   log_contract_e2e_markers_valid    - E2E scripts use SCENARIO_RESULT format
+#   log_contract_e2e_markers_valid    - E2E catalog evidence and script coverage validate
 #   log_contract_duration_convention  - duration fields use _us convention
 #   log_contract_writeback_cache_disabled - mount options reject writeback cache mode
 #   log_contract_sync_flush_fields    - flush/sync log branches emit required fields
@@ -245,26 +245,14 @@ fi
 # ── Scenario: log_contract_e2e_markers_valid ──────────────────────────
 
 echo "=== Scenario: log_contract_e2e_markers_valid ==="
-# Check that catalog-listed E2E scripts use SCENARIO_RESULT marker format.
-# This avoids failing on legacy scripts not part of the active shared catalog.
-INVALID_MARKERS=""
-while IFS= read -r script; do
-    [ -z "$script" ] && continue
-    if [ ! -f "$script" ]; then
-        INVALID_MARKERS="${INVALID_MARKERS}$(basename "$script")(missing_file) "
-        continue
-    fi
-    if grep -q 'SCENARIO_RESULT' "$script"; then
-        :
-    else
-        INVALID_MARKERS="${INVALID_MARKERS}$(basename "$script") "
-    fi
-done < <(jq -r '.suites[].script' scripts/e2e/scenario_catalog.json)
-
-if [ -z "$INVALID_MARKERS" ]; then
-    log_scenario "log_contract_e2e_markers_valid" "PASS"
+# Validate the same source-backed evidence contract used by ffs_smoke. Some
+# cataloged suites intentionally use literal source evidence instead of runtime
+# SCENARIO_RESULT markers because they are planning or permission-gated runners.
+CATALOG_VALIDATION_LOG="$LOG_DIR/scenario_catalog_validation.log"
+if ( E2E_LOG_FILE="$CATALOG_VALIDATION_LOG" e2e_validate_scenario_catalog scripts/e2e/scenario_catalog.json ); then
+    log_scenario "log_contract_e2e_markers_valid" "PASS" "log=${CATALOG_VALIDATION_LOG}"
 else
-    log_scenario "log_contract_e2e_markers_valid" "FAIL" "missing_markers=${INVALID_MARKERS}"
+    log_scenario "log_contract_e2e_markers_valid" "FAIL" "log=${CATALOG_VALIDATION_LOG}"
 fi
 
 # ── Scenario: log_contract_duration_convention ────────────────────────

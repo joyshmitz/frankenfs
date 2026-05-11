@@ -176,9 +176,27 @@ e2e_validate_scenario_catalog() {
         e2e_fail "Duplicate active scenario IDs in scenario catalog: $duplicate_ids"
     fi
 
+    local -A catalog_scripts=()
+    while IFS= read -r script_rel; do
+        [[ -n "$script_rel" ]] || continue
+        catalog_scripts["$script_rel"]=1
+    done < <(jq -r '.suites[].script' "$catalog_path")
+
+    local missing_scripts=()
+    local script_path script_rel
+    for script_path in "$repo_root"/scripts/e2e/*_e2e.sh; do
+        [[ -f "$script_path" ]] || continue
+        script_rel="${script_path#$repo_root/}"
+        if [[ -z "${catalog_scripts[$script_rel]:-}" ]]; then
+            missing_scripts+=("$script_rel")
+        fi
+    done
+    if ((${#missing_scripts[@]} > 0)); then
+        e2e_fail "Scenario catalog missing E2E scripts: ${missing_scripts[*]}"
+    fi
+
     while IFS=$'\t' read -r suite_id script_rel; do
         [[ -n "$suite_id" ]] || continue
-        local script_path
         script_path="$repo_root/$script_rel"
         if [[ ! -f "$script_path" ]]; then
             e2e_fail "Scenario catalog suite '$suite_id' references missing script: $script_rel"
