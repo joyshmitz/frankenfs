@@ -586,6 +586,70 @@
       ]
     },
     {
+      "suite_id": "ffs_tabletop_drill",
+      "script": "scripts/e2e/ffs_tabletop_drill_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "drill_module_exists",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=drill_module_exists|outcome=PASS"
+        },
+        {
+          "id": "drill_three_scenarios",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=drill_three_scenarios|outcome=PASS"
+        },
+        {
+          "id": "drill_replay_chain",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=drill_replay_chain|outcome=PASS"
+        },
+        {
+          "id": "drill_corruption_chain",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=drill_corruption_chain|outcome=PASS"
+        },
+        {
+          "id": "drill_pressure_chain",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=drill_pressure_chain|outcome=PASS"
+        },
+        {
+          "id": "drill_zero_gaps",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=drill_zero_gaps|outcome=PASS"
+        },
+        {
+          "id": "drill_runbook_presets",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=drill_runbook_presets|outcome=PASS"
+        },
+        {
+          "id": "drill_json_serialization",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=drill_json_serialization|outcome=PASS"
+        },
+        {
+          "id": "drill_unit_tests_pass",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=drill_unit_tests_pass|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_performance_manifest",
       "script": "scripts/e2e/ffs_performance_manifest_e2e.sh",
       "required_categories": [
