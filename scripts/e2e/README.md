@@ -915,6 +915,7 @@ TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=5 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=22 \
 TRACKER_SOURCE_HYGIENE_EXPECT_READY=2 \
 TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED=1 \
+TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_NONCLAIMABLE=3 \
 TRACKER_SOURCE_HYGIENE_EXPECT_IN_PROGRESS=2 \
 TRACKER_SOURCE_HYGIENE_EXPECT_STALE_IN_PROGRESS=1 \
 TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_IN_PROGRESS=2 \
@@ -929,20 +930,25 @@ TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT=1 \
 
 The report emits `local_open_rows`, `source_aware_ready_rows`,
 `source_aware_queue_state`, `local_graph_exports`, `permission_gated_rows`,
-`blocked_local_rows`, `local_in_progress_rows`, `stale_in_progress_rows`,
+`blocked_local_rows`, `local_nonclaimable_rows`, `local_in_progress_rows`,
+`stale_in_progress_rows`,
 foreign in-progress/stale samples, `excluded_foreign_open_count`,
 `excluded_foreign_in_progress_count`, prefix counts, foreign group summaries with
 owner hints, sample foreign rows, and exact reproduction commands. It also writes
 checksum-validated
 `tracker_source_hygiene_local_open.jsonl` and
 `tracker_source_hygiene_source_aware_ready.jsonl` artifacts for source-aware
-graph/triage consumers. `source_aware_ready_rows` excludes real xfstests and
-permissioned large-host swarm rows until their explicit ACK env vars are
-present. `source_aware_queue_state.verdict` gives the safe queue explanation
-before agents create fallback work, and its stale in-progress fields identify
-claimed local rows that require Agent Mail/worktree verification before any
-reopen. Foreign in-progress rows are reported only as excluded diagnostics and do
-not affect the local stale-claim verdict. `TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN`
+graph/triage consumers, plus
+`tracker_source_hygiene_local_nonclaimable.jsonl` for the local open rows that
+are not safe to claim. Nonclaimable rows carry a stable `reason` of `epic`,
+`permission_gated`, or `blocked`, with permission-gate or dependency details
+attached. `source_aware_ready_rows` excludes real xfstests and permissioned
+large-host swarm rows until their explicit ACK env vars are present.
+`source_aware_queue_state.verdict` gives the safe queue explanation before
+agents create fallback work, and its stale in-progress fields identify claimed
+local rows that require Agent Mail/worktree verification before any reopen.
+Foreign in-progress rows are reported only as excluded diagnostics and do not
+affect the local stale-claim verdict. `TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN`
 compares the deterministic
 fixture report against the scrubbed committed golden so report-shape drift is a
 reviewed diff. `TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN_MISMATCH=1` proves the

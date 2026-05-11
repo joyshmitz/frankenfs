@@ -37,8 +37,10 @@ REPORT_CANONICAL_JSON="${E2E_LOG_DIR}/tracker_source_hygiene_report.canonical.js
 REPORT_MISMATCH_GOLDEN_JSON="${E2E_LOG_DIR}/tracker_source_hygiene_report.mismatched_golden.json"
 LOCAL_OPEN_JSONL="${E2E_LOG_DIR}/tracker_source_hygiene_local_open.jsonl"
 SOURCE_AWARE_READY_JSONL="${E2E_LOG_DIR}/tracker_source_hygiene_source_aware_ready.jsonl"
+LOCAL_NONCLAIMABLE_JSONL="${E2E_LOG_DIR}/tracker_source_hygiene_local_nonclaimable.jsonl"
 LOCAL_OPEN_SHA256="${LOCAL_OPEN_JSONL}.sha256"
 SOURCE_AWARE_READY_SHA256="${SOURCE_AWARE_READY_JSONL}.sha256"
+LOCAL_NONCLAIMABLE_SHA256="${LOCAL_NONCLAIMABLE_JSONL}.sha256"
 STRICT_MODE=0
 STRICT_JSON=false
 STALE_IN_PROGRESS_SECONDS="${TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS:-21600}"
@@ -99,8 +101,10 @@ if jq -s \
     --arg issues_path "$ISSUES_JSONL" \
     --arg local_open_jsonl "$LOCAL_OPEN_JSONL" \
     --arg source_aware_ready_jsonl "$SOURCE_AWARE_READY_JSONL" \
+    --arg local_nonclaimable_jsonl "$LOCAL_NONCLAIMABLE_JSONL" \
     --arg local_open_sha256 "$LOCAL_OPEN_SHA256" \
     --arg source_aware_ready_sha256 "$SOURCE_AWARE_READY_SHA256" \
+    --arg local_nonclaimable_sha256 "$LOCAL_NONCLAIMABLE_SHA256" \
     --arg xfstests_ack "${XFSTESTS_REAL_RUN_ACK:-}" \
     --arg swarm_enable "${FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD:-}" \
     --arg swarm_ack "${FFS_SWARM_WORKLOAD_REAL_RUN_ACK:-}" \
@@ -195,6 +199,11 @@ if jq -s \
             assignee: (.assignee // .owner // null),
             blocked_by: blocking_dependencies
         };
+    def nonclaimable_row($reason; $gate):
+        issue_work_row + {
+            reason: $reason,
+            permission_gate: $gate
+        };
     def issue_progress_row:
         activity_epoch as $activity_epoch
         | issue_work_row + {
@@ -236,6 +245,19 @@ if jq -s \
         | sort_by(.priority, .id);
     def local_epic_rows_arr:
         [.[] | select(local_issue and open_issue and ((.issue_type // "") == "epic")) | issue_sample]
+        | sort_by(.priority, .id);
+    def local_nonclaimable_rows_arr:
+        [.[] | select(local_issue and open_issue) |
+            if ((.issue_type // "") == "epic") then
+                nonclaimable_row("epic"; null)
+            elif ((permission_gate // null) != null) then
+                nonclaimable_row("permission_gated"; permission_gate)
+            elif ((blocking_dependencies | length) > 0) then
+                nonclaimable_row("blocked"; null)
+            else
+                empty
+            end
+        ]
         | sort_by(.priority, .id);
     def local_in_progress_rows_arr:
         [.[] | select(local_issue and in_progress_issue) | issue_progress_row]
@@ -307,6 +329,7 @@ if jq -s \
             | permission_gated_rows_arr as $permission_gated
             | blocked_local_rows_arr as $blocked_rows
             | local_epic_rows_arr as $epic_rows
+            | local_nonclaimable_rows_arr as $nonclaimable_rows
             | local_in_progress_rows_arr as $in_progress_rows
             | stale_in_progress_rows_arr as $stale_rows
             | foreign_in_progress_rows_arr as $foreign_in_progress_rows
@@ -335,6 +358,7 @@ if jq -s \
                 local_epic_count: ($epic_rows | length),
                 blocked_local_count: ($blocked_rows | length),
                 permission_gated_count: ($permission_gated | length),
+                local_nonclaimable_count: ($nonclaimable_rows | length),
                 local_in_progress_count: ($in_progress_rows | length),
                 stale_in_progress_count: ($stale_rows | length),
                 excluded_foreign_open_count: foreign_open_count,
@@ -344,6 +368,7 @@ if jq -s \
                 local_epic_ids: ($epic_rows | map(.id)),
                 blocked_local_ids: ($blocked_rows | map(.id)),
                 permission_gated_ids: ($permission_gated | map(.id)),
+                local_nonclaimable_ids: ($nonclaimable_rows | map(.id)),
                 local_in_progress_ids: ($in_progress_rows | map(.id)),
                 stale_in_progress_ids: ($stale_rows | map(.id)),
                 next_safe_actions: (
@@ -379,10 +404,18 @@ if jq -s \
                 row_count: (source_aware_ready_rows_arr | length),
                 id_count: ([.[] | select(ready_issue) | .id] | unique | length),
                 consumer_hint: "Use this JSONL for claimable FrankenFS rows; it excludes epics, blocked rows, foreign rows, and permission-gated rows without the required ACK."
+            },
+            local_nonclaimable: {
+                path: $local_nonclaimable_jsonl,
+                checksum_path: $local_nonclaimable_sha256,
+                row_count: (local_nonclaimable_rows_arr | length),
+                id_count: (local_nonclaimable_rows_arr | map(.id) | unique | length),
+                consumer_hint: "Use this JSONL to explain why local open rows are not claimable; reasons are epic, permission_gated, or blocked."
             }
         },
         permission_gated_rows: permission_gated_rows_arr,
         blocked_local_rows: blocked_local_rows_arr,
+        local_nonclaimable_rows: local_nonclaimable_rows_arr,
         local_in_progress_rows: local_in_progress_rows_arr,
         stale_in_progress_rows: stale_in_progress_rows_arr,
         foreign_open_samples: ([.[] | select(foreign_issue and open_issue) | issue_sample] | sort_by(.id) | .[0:20]),
@@ -423,19 +456,24 @@ if jq -e '
     and (.source_aware_queue_state.claimable_count == (.source_aware_ready_rows | length))
     and (.source_aware_queue_state.local_open_count == .local_open)
     and (.source_aware_queue_state.permission_gated_count == (.permission_gated_rows | length))
+    and (.source_aware_queue_state.local_nonclaimable_count == (.local_nonclaimable_rows | length))
     and (.source_aware_queue_state.local_in_progress_count == (.local_in_progress_rows | length))
     and (.source_aware_queue_state.stale_in_progress_count == (.stale_in_progress_rows | length))
     and (.source_aware_queue_state.excluded_foreign_in_progress_count == .excluded_foreign_in_progress_count)
     and (.source_aware_queue_state.excluded_foreign_stale_in_progress_count == .excluded_foreign_stale_in_progress_count)
     and (.source_aware_queue_state.blocked_local_ids | type == "array")
+    and (.source_aware_queue_state.local_nonclaimable_ids | type == "array")
     and (.source_aware_queue_state.stale_in_progress_ids | type == "array")
     and (.source_aware_queue_state.next_safe_actions | type == "array")
     and (.local_graph_exports.schema_version == 1)
     and (.local_graph_exports.local_open.path | test("tracker_source_hygiene_local_open\\.jsonl$"))
     and (.local_graph_exports.source_aware_ready.path | test("tracker_source_hygiene_source_aware_ready\\.jsonl$"))
+    and (.local_graph_exports.local_nonclaimable.path | test("tracker_source_hygiene_local_nonclaimable\\.jsonl$"))
     and (.local_graph_exports.local_open.checksum_path | test("\\.sha256$"))
     and (.local_graph_exports.source_aware_ready.checksum_path | test("\\.sha256$"))
+    and (.local_graph_exports.local_nonclaimable.checksum_path | test("\\.sha256$"))
     and (.permission_gated_rows | type == "array")
+    and (.local_nonclaimable_rows | type == "array")
     and (.foreign_open_samples | type == "array")
     and (.foreign_in_progress_samples | type == "array")
     and (.foreign_stale_in_progress_samples | type == "array")
@@ -456,8 +494,10 @@ if jq -c --slurpfile report "$REPORT_JSON" \
     && jq -c --slurpfile report "$REPORT_JSON" \
         '(.id // "") as $issue_id | ($report[0].source_aware_ready_rows | map(.id)) as $ready_ids | select(($ready_ids | index($issue_id)) != null)' \
         "$ISSUES_JSONL" >"$SOURCE_AWARE_READY_JSONL" \
+    && jq -c '.local_nonclaimable_rows[]' "$REPORT_JSON" >"$LOCAL_NONCLAIMABLE_JSONL" \
     && sha256sum "$LOCAL_OPEN_JSONL" >"$LOCAL_OPEN_SHA256" \
-    && sha256sum "$SOURCE_AWARE_READY_JSONL" >"$SOURCE_AWARE_READY_SHA256"; then
+    && sha256sum "$SOURCE_AWARE_READY_JSONL" >"$SOURCE_AWARE_READY_SHA256" \
+    && sha256sum "$LOCAL_NONCLAIMABLE_JSONL" >"$LOCAL_NONCLAIMABLE_SHA256"; then
     scenario_result "tracker_source_hygiene_local_graph_exports_written" "PASS" "local_open=$LOCAL_OPEN_JSONL ready=$SOURCE_AWARE_READY_JSONL"
 else
     scenario_result "tracker_source_hygiene_local_graph_exports_written" "FAIL" "failed to write local graph exports"
@@ -468,6 +508,7 @@ FOREIGN_IN_PROGRESS_COUNT="$(jq -r '.foreign_in_progress' "$REPORT_JSON")"
 FOREIGN_STALE_IN_PROGRESS_COUNT="$(jq -r '.excluded_foreign_stale_in_progress_count' "$REPORT_JSON")"
 LOCAL_OPEN_COUNT="$(jq -r '.local_open' "$REPORT_JSON")"
 READY_COUNT="$(jq -r '.source_aware_ready_rows | length' "$REPORT_JSON")"
+LOCAL_NONCLAIMABLE_COUNT="$(jq -r '.local_nonclaimable_rows | length' "$REPORT_JSON")"
 if [[ "$FOREIGN_OPEN_COUNT" =~ ^[0-9]+$ && "$LOCAL_OPEN_COUNT" =~ ^[0-9]+$ ]]; then
     scenario_result "tracker_source_hygiene_foreign_rows_classified" "PASS" "local_open=${LOCAL_OPEN_COUNT} source_aware_ready=${READY_COUNT} foreign_open=${FOREIGN_OPEN_COUNT}"
 else
@@ -502,10 +543,26 @@ if jq -s --slurpfile report "$REPORT_JSON" '
         and all(.[]; local_issue and open_issue)
     ' "$SOURCE_AWARE_READY_JSONL" >/dev/null \
     && sha256sum -c "$LOCAL_OPEN_SHA256" >/dev/null \
-    && sha256sum -c "$SOURCE_AWARE_READY_SHA256" >/dev/null; then
+    && sha256sum -c "$SOURCE_AWARE_READY_SHA256" >/dev/null \
+    && sha256sum -c "$LOCAL_NONCLAIMABLE_SHA256" >/dev/null; then
     scenario_result "tracker_source_hygiene_local_graph_exports_valid" "PASS" "local_open=${LOCAL_OPEN_COUNT} source_aware_ready=${READY_COUNT}"
 else
     scenario_result "tracker_source_hygiene_local_graph_exports_valid" "FAIL" "local graph export validation failed"
+fi
+
+if jq -s --slurpfile report "$REPORT_JSON" '
+    def sorted_ids:
+        map(.id // "") | sort;
+    (length == $report[0].local_graph_exports.local_nonclaimable.row_count)
+    and (sorted_ids == ($report[0].local_nonclaimable_rows | map(.id) | sort))
+    and all(.[]; (.reason as $reason | (["epic", "permission_gated", "blocked"] | index($reason)) != null))
+    and all(.[] | select(.reason == "permission_gated"); (.permission_gate.present == false))
+    and all(.[] | select(.reason == "blocked"); (.blocked_by | length) > 0)
+    and all(.[] | select(.reason == "epic"); ((.issue_type // "") == "epic"))
+' "$LOCAL_NONCLAIMABLE_JSONL" >/dev/null; then
+    scenario_result "tracker_source_hygiene_local_nonclaimable_exports_valid" "PASS" "local_nonclaimable=${LOCAL_NONCLAIMABLE_COUNT}"
+else
+    scenario_result "tracker_source_hygiene_local_nonclaimable_exports_valid" "FAIL" "local nonclaimable export validation failed"
 fi
 
 if jq -e '
@@ -513,6 +570,7 @@ if jq -e '
     and (.source_aware_ready_rows | type == "array")
     and (.permission_gated_rows | type == "array")
     and (.blocked_local_rows | type == "array")
+    and (.local_nonclaimable_rows | type == "array")
     and (.local_in_progress_rows | type == "array")
     and (.stale_in_progress_rows | type == "array")
     and (.foreign_in_progress_samples | type == "array")
@@ -521,6 +579,7 @@ if jq -e '
     and all(.source_aware_ready_rows[]; has("permission_gate") | not)
     and all(.permission_gated_rows[]; (.permission_gate.present == false))
     and all(.blocked_local_rows[]; (.blocked_by | length) > 0)
+    and all(.local_nonclaimable_rows[]; (.reason as $reason | (["epic", "permission_gated", "blocked"] | index($reason)) != null))
     and all(.local_in_progress_rows[]; .status == "in_progress")
     and all(.stale_in_progress_rows[]; .status == "in_progress" and .stale == true)
     and all(.foreign_in_progress_samples[]; .status == "in_progress")
@@ -528,6 +587,7 @@ if jq -e '
     and (.source_aware_queue_state.claimable_ids == (.source_aware_ready_rows | map(.id)))
     and (.source_aware_queue_state.permission_gated_ids == (.permission_gated_rows | map(.id)))
     and (.source_aware_queue_state.blocked_local_ids == (.blocked_local_rows | map(.id)))
+    and (.source_aware_queue_state.local_nonclaimable_ids == (.local_nonclaimable_rows | map(.id)))
     and (.source_aware_queue_state.local_in_progress_ids == (.local_in_progress_rows | map(.id)))
     and (.source_aware_queue_state.stale_in_progress_ids == (.stale_in_progress_rows | map(.id)))
     and any(.reproduction_commands[]; contains("bd|frankenfs"))
@@ -546,6 +606,8 @@ if [[ -n "$EXPECTED_GOLDEN" ]]; then
         | .local_graph_exports.local_open.checksum_path = "[LOCAL_OPEN_SHA256]"
         | .local_graph_exports.source_aware_ready.path = "[SOURCE_AWARE_READY_JSONL]"
         | .local_graph_exports.source_aware_ready.checksum_path = "[SOURCE_AWARE_READY_SHA256]"
+        | .local_graph_exports.local_nonclaimable.path = "[LOCAL_NONCLAIMABLE_JSONL]"
+        | .local_graph_exports.local_nonclaimable.checksum_path = "[LOCAL_NONCLAIMABLE_SHA256]"
     ' "$REPORT_JSON" >"$REPORT_CANONICAL_JSON" \
         && diff -u "$EXPECTED_GOLDEN" "$REPORT_CANONICAL_JSON" >"${REPORT_CANONICAL_JSON}.diff"; then
         scenario_result "tracker_source_hygiene_golden_report_matches" "PASS" "golden=$EXPECTED_GOLDEN"
@@ -586,6 +648,7 @@ EXPECTED_LOCAL_OPEN="${TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN:-}"
 EXPECTED_FOREIGN_OPEN="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN:-}"
 EXPECTED_READY="${TRACKER_SOURCE_HYGIENE_EXPECT_READY:-}"
 EXPECTED_PERMISSION_GATED="${TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED:-}"
+EXPECTED_LOCAL_NONCLAIMABLE="${TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_NONCLAIMABLE:-}"
 EXPECTED_IN_PROGRESS="${TRACKER_SOURCE_HYGIENE_EXPECT_IN_PROGRESS:-}"
 EXPECTED_STALE_IN_PROGRESS="${TRACKER_SOURCE_HYGIENE_EXPECT_STALE_IN_PROGRESS:-}"
 EXPECTED_FOREIGN_IN_PROGRESS="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_IN_PROGRESS:-}"
@@ -602,6 +665,7 @@ check_expected_count "local_open" "$LOCAL_OPEN_COUNT" "$EXPECTED_LOCAL_OPEN"
 check_expected_count "foreign_open" "$FOREIGN_OPEN_COUNT" "$EXPECTED_FOREIGN_OPEN"
 check_expected_count "source_aware_ready" "$READY_COUNT" "$EXPECTED_READY"
 check_expected_count "permission_gated" "$PERMISSION_GATED_COUNT" "$EXPECTED_PERMISSION_GATED"
+check_expected_count "local_nonclaimable" "$LOCAL_NONCLAIMABLE_COUNT" "$EXPECTED_LOCAL_NONCLAIMABLE"
 check_expected_count "local_in_progress" "$IN_PROGRESS_COUNT" "$EXPECTED_IN_PROGRESS"
 check_expected_count "stale_in_progress" "$STALE_IN_PROGRESS_COUNT" "$EXPECTED_STALE_IN_PROGRESS"
 check_expected_count "foreign_in_progress" "$FOREIGN_IN_PROGRESS_COUNT" "$EXPECTED_FOREIGN_IN_PROGRESS"
@@ -628,6 +692,7 @@ if [[ "$DEFAULT_FIXTURE_SELF_CHECK" -eq 1 \
         TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=22 \
         TRACKER_SOURCE_HYGIENE_EXPECT_READY=2 \
         TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED=1 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_NONCLAIMABLE=3 \
         TRACKER_SOURCE_HYGIENE_EXPECT_IN_PROGRESS=2 \
         TRACKER_SOURCE_HYGIENE_EXPECT_STALE_IN_PROGRESS=1 \
         TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_IN_PROGRESS=2 \

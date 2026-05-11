@@ -90,6 +90,7 @@ pub struct TrackerSourceHygieneReport {
     pub source_aware_queue_state: TrackerSourceAwareQueueState,
     pub permission_gated_rows: Vec<TrackerPermissionGatedRow>,
     pub blocked_local_rows: Vec<TrackerIssueWorkRow>,
+    pub local_nonclaimable_rows: Vec<TrackerLocalNonclaimableRow>,
     pub local_in_progress_rows: Vec<TrackerIssueProgressRow>,
     pub stale_in_progress_rows: Vec<TrackerIssueProgressRow>,
     pub foreign_open_samples: Vec<TrackerIssueSample>,
@@ -175,6 +176,20 @@ pub struct TrackerPermissionGatedRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerLocalNonclaimableRow {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub priority: Option<i64>,
+    pub issue_type: Option<String>,
+    pub source_repo: Option<String>,
+    pub assignee: Option<String>,
+    pub reason: String,
+    pub blocked_by: Vec<TrackerDependencyStatus>,
+    pub permission_gate: Option<TrackerPermissionGate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackerDependencyStatus {
     pub id: String,
     pub status: String,
@@ -197,6 +212,7 @@ pub struct TrackerSourceAwareQueueState {
     pub local_epic_count: usize,
     pub blocked_local_count: usize,
     pub permission_gated_count: usize,
+    pub local_nonclaimable_count: usize,
     pub local_in_progress_count: usize,
     pub stale_in_progress_count: usize,
     pub excluded_foreign_open_count: usize,
@@ -206,6 +222,7 @@ pub struct TrackerSourceAwareQueueState {
     pub local_epic_ids: Vec<String>,
     pub blocked_local_ids: Vec<String>,
     pub permission_gated_ids: Vec<String>,
+    pub local_nonclaimable_ids: Vec<String>,
     pub local_in_progress_ids: Vec<String>,
     pub stale_in_progress_ids: Vec<String>,
     pub next_safe_actions: Vec<String>,
@@ -345,6 +362,26 @@ impl<'a> TrackerIssue<'a> {
             assignee: self.assignee(),
             blocked_by: self.blocking_dependencies(statuses),
             permission_gate: gate,
+        }
+    }
+
+    fn nonclaimable_row(
+        &self,
+        statuses: &BTreeMap<String, String>,
+        reason: &str,
+        permission_gate: Option<TrackerPermissionGate>,
+    ) -> TrackerLocalNonclaimableRow {
+        TrackerLocalNonclaimableRow {
+            id: self.id(),
+            title: self.title(),
+            status: self.status(),
+            priority: self.priority(),
+            issue_type: self.issue_type(),
+            source_repo: self.source_repo(),
+            assignee: self.assignee(),
+            reason: reason.to_owned(),
+            blocked_by: self.blocking_dependencies(statuses),
+            permission_gate,
         }
     }
 
@@ -507,6 +544,23 @@ fn build_report(
         .collect();
     sort_samples(&mut local_epic_rows);
 
+    let mut local_nonclaimable_rows: Vec<TrackerLocalNonclaimableRow> = wrapped
+        .iter()
+        .filter(|issue| issue.is_local() && issue.is_open())
+        .filter_map(|issue| {
+            if issue.is_epic() {
+                Some(issue.nonclaimable_row(&statuses, "epic", None))
+            } else if let Some(gate) = permission_gate(issue, config) {
+                Some(issue.nonclaimable_row(&statuses, "permission_gated", Some(gate)))
+            } else if !issue.blocking_dependencies(&statuses).is_empty() {
+                Some(issue.nonclaimable_row(&statuses, "blocked", None))
+            } else {
+                None
+            }
+        })
+        .collect();
+    sort_nonclaimable_rows(&mut local_nonclaimable_rows);
+
     let mut local_in_progress_rows: Vec<TrackerIssueProgressRow> = wrapped
         .iter()
         .filter(|issue| issue.is_local() && issue.is_in_progress())
@@ -537,6 +591,7 @@ fn build_report(
         &local_epic_rows,
         &blocked_local_rows,
         &permission_gated_rows,
+        &local_nonclaimable_rows,
         &local_in_progress_rows,
         &stale_in_progress_rows,
         foreign_open,
@@ -585,6 +640,7 @@ fn build_report(
         source_aware_queue_state: queue_state,
         permission_gated_rows,
         blocked_local_rows,
+        local_nonclaimable_rows,
         local_in_progress_rows,
         stale_in_progress_rows,
         foreign_open_samples,
@@ -601,6 +657,7 @@ fn build_queue_state(
     epic_rows: &[TrackerIssueSample],
     blocked_rows: &[TrackerIssueWorkRow],
     permission_gated_rows: &[TrackerPermissionGatedRow],
+    nonclaimable_rows: &[TrackerLocalNonclaimableRow],
     in_progress_rows: &[TrackerIssueProgressRow],
     stale_rows: &[TrackerIssueProgressRow],
     foreign_open: usize,
@@ -634,6 +691,7 @@ fn build_queue_state(
         local_epic_count: epic_rows.len(),
         blocked_local_count: blocked_rows.len(),
         permission_gated_count: permission_gated_rows.len(),
+        local_nonclaimable_count: nonclaimable_rows.len(),
         local_in_progress_count: in_progress_rows.len(),
         stale_in_progress_count: stale_rows.len(),
         excluded_foreign_open_count: foreign_open,
@@ -646,6 +704,7 @@ fn build_queue_state(
             .iter()
             .map(|row| row.id.clone())
             .collect(),
+        local_nonclaimable_ids: nonclaimable_rows.iter().map(|row| row.id.clone()).collect(),
         local_in_progress_ids: in_progress_rows.iter().map(|row| row.id.clone()).collect(),
         stale_in_progress_ids: stale_rows.iter().map(|row| row.id.clone()).collect(),
         next_safe_actions: next_safe_actions(verdict),
@@ -824,6 +883,14 @@ fn sort_work_rows(rows: &mut [TrackerIssueWorkRow]) {
 }
 
 fn sort_progress_rows(rows: &mut [TrackerIssueProgressRow]) {
+    rows.sort_by(|left, right| {
+        left.priority
+            .cmp(&right.priority)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn sort_nonclaimable_rows(rows: &mut [TrackerLocalNonclaimableRow]) {
     rows.sort_by(|left, right| {
         left.priority
             .cmp(&right.priority)
@@ -1050,6 +1117,10 @@ mod tests {
             (report.permission_gated_rows.len(), "permission_gated_rows"),
             (report.blocked_local_rows.len(), "blocked_local_rows"),
             (
+                report.local_nonclaimable_rows.len(),
+                "local_nonclaimable_rows",
+            ),
+            (
                 report.local_in_progress_rows.len(),
                 "local_in_progress_rows",
             ),
@@ -1092,6 +1163,10 @@ mod tests {
                 "permission_gated_ids",
             ),
             (
+                &report.source_aware_queue_state.local_nonclaimable_ids,
+                "local_nonclaimable_ids",
+            ),
+            (
                 &report.source_aware_queue_state.blocked_local_ids,
                 "blocked_local_ids",
             ),
@@ -1108,6 +1183,10 @@ mod tests {
             assert_eq!(actual, &expected, "{field}");
         }
         for (actual, field) in [
+            (
+                report.source_aware_queue_state.local_nonclaimable_count,
+                "local_nonclaimable_count",
+            ),
             (
                 report
                     .source_aware_queue_state
@@ -1161,6 +1240,67 @@ mod tests {
             "xfstests_real_run",
         );
         Ok(())
+    }
+
+    fn assert_classification_report(report: &TrackerSourceHygieneReport) {
+        assert_eq!(report.status, "pass");
+        assert_eq!(report.local_open, 5);
+        assert_eq!(report.foreign_open, 1);
+        assert_eq!(report.foreign_in_progress, 1);
+        assert_eq!(report.excluded_foreign_in_progress_count, 1);
+        assert_eq!(report.excluded_foreign_stale_in_progress_count, 1);
+        assert_eq!(
+            report.foreign_stale_in_progress_samples[0].id,
+            "frankenscipy-foreign-stale"
+        );
+        assert_eq!(
+            report
+                .source_aware_ready_rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bd-prereq", "bd-ready"]
+        );
+        assert_eq!(
+            report
+                .blocked_local_rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bd-blocked"]
+        );
+        assert_eq!(report.permission_gated_rows[0].id, "bd-xfstests");
+        assert_eq!(
+            report.permission_gated_rows[0].permission_gate.gate_kind,
+            "xfstests_real_run"
+        );
+        assert_eq!(
+            report
+                .local_nonclaimable_rows
+                .iter()
+                .map(|row| (row.id.as_str(), row.reason.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("bd-epic", "epic"),
+                ("bd-blocked", "blocked"),
+                ("bd-xfstests", "permission_gated"),
+            ]
+        );
+        assert_eq!(
+            report
+                .source_aware_queue_state
+                .local_nonclaimable_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["bd-epic", "bd-blocked", "bd-xfstests"]
+        );
+        assert_eq!(report.source_aware_queue_state.verdict, "ready");
+        assert_eq!(report.foreign_group_summaries[0].prefix, "br-r37");
+        assert_eq!(
+            report.foreign_group_summaries[0].owner_hints,
+            vec!["franken_networkx"]
+        );
     }
 
     #[test]
@@ -1219,43 +1359,7 @@ mod tests {
 
         let report = analyze_tracker_source_hygiene(&issues, &config()).expect("analyze");
 
-        assert_eq!(report.status, "pass");
-        assert_eq!(report.local_open, 5);
-        assert_eq!(report.foreign_open, 1);
-        assert_eq!(report.foreign_in_progress, 1);
-        assert_eq!(report.excluded_foreign_in_progress_count, 1);
-        assert_eq!(report.excluded_foreign_stale_in_progress_count, 1);
-        assert_eq!(
-            report.foreign_stale_in_progress_samples[0].id,
-            "frankenscipy-foreign-stale"
-        );
-        assert_eq!(
-            report
-                .source_aware_ready_rows
-                .iter()
-                .map(|row| row.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["bd-prereq", "bd-ready"]
-        );
-        assert_eq!(
-            report
-                .blocked_local_rows
-                .iter()
-                .map(|row| row.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["bd-blocked"]
-        );
-        assert_eq!(report.permission_gated_rows[0].id, "bd-xfstests");
-        assert_eq!(
-            report.permission_gated_rows[0].permission_gate.gate_kind,
-            "xfstests_real_run"
-        );
-        assert_eq!(report.source_aware_queue_state.verdict, "ready");
-        assert_eq!(report.foreign_group_summaries[0].prefix, "br-r37");
-        assert_eq!(
-            report.foreign_group_summaries[0].owner_hints,
-            vec!["franken_networkx"]
-        );
+        assert_classification_report(&report);
     }
 
     #[test]
