@@ -201,6 +201,21 @@ e2e_validate_scenario_catalog() {
         e2e_fail "Duplicate active scenario IDs in scenario catalog: $duplicate_ids"
     fi
 
+    local unknown_statuses
+    unknown_statuses="$(
+        jq -r '
+            .suites[] as $suite
+            | ($suite.scenarios // [])
+            | to_entries[]
+            | (.value.status // "active") as $status
+            | select($status != "active" and $status != "inactive")
+            | "suite=\($suite.suite_id // "<missing>") index=\(.key) status=\($status)"
+        ' "$catalog_path"
+    )"
+    if [[ -n "$unknown_statuses" ]]; then
+        e2e_fail "Scenario catalog uses unknown scenario status (expected active or inactive): $unknown_statuses"
+    fi
+
     local -A catalog_scripts=()
     while IFS= read -r script_rel; do
         [[ -n "$script_rel" ]] || continue
