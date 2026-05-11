@@ -5180,7 +5180,7 @@ fn golden_checksum_manifest_is_complete() {
 fn full_conformance_gate_pass() {
     let start = std::time::Instant::now();
 
-    // 1) All fixture parsers + spot checks (21 total fixture JSONs).
+    // 1) All committed fixture parsers + spot checks.
     ext4_and_btrfs_fixtures_conform();
     ext4_group_desc_fixtures_conform();
     ext4_group_desc_32byte_fixture_re_encodes_byte_identical();
@@ -5195,6 +5195,10 @@ fn full_conformance_gate_pass() {
     ext4_inline_data_vfs_lookup_readdir_conforms();
     ext4_inline_data_write_rejects_without_mutating_contents();
     ext4_inline_data_fallocate_rejects_without_mutating_contents();
+    ext4_extent_tree_leaf_fixture_conforms();
+    ext4_extent_tree_index_fixture_conforms();
+    ext4_htree_dx_root_fixture_conforms();
+    ext4_xattr_block_fixture_conforms();
     ext4_dir_block_fixture_conforms();
     ext4_dir_block_with_tail_fixture_conforms();
     ext4_dir_block_deleted_entry_fixture_conforms();
