@@ -894,6 +894,13 @@ Run the live report with:
 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
 ```
 
+The E2E wrapper remains the artifact-producing gate. Tooling that only needs the
+Rust queue-state classifier can call:
+
+```bash
+ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl
+```
+
 Run the deterministic fixture check with:
 
 ```bash

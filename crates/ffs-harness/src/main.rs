@@ -220,6 +220,10 @@ use ffs_harness::{
         score_topology_runtime_advisor_manifest_with_config,
         validate_topology_runtime_advisor_manifest_with_config,
     },
+    tracker_source_hygiene::{
+        TrackerSourceHygieneConfig, fail_on_tracker_source_hygiene_errors,
+        run_tracker_source_hygiene,
+    },
     validate_btrfs_fixture, validate_ext4_fixture,
     verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
     wal_group_commit_gate::{
@@ -464,6 +468,7 @@ fn run() -> Result<()> {
             validate_support_state_accounting_cmd(&args[1..])
         }
         Some("validate-docs-status-drift") => validate_docs_status_drift_cmd(&args[1..]),
+        Some("validate-tracker-source-hygiene") => validate_tracker_source_hygiene_cmd(&args[1..]),
         Some("validate-fuzz-smoke") => validate_fuzz_smoke_cmd(&args[1..]),
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
         Some("adaptive-runtime-runner") => adaptive_runtime_runner_cmd(&args[1..]),
@@ -6543,6 +6548,108 @@ fn validate_docs_status_drift_cmd(args: &[String]) -> Result<()> {
     fail_on_docs_status_drift_errors(&report)
 }
 
+fn validate_tracker_source_hygiene_cmd(args: &[String]) -> Result<()> {
+    let mut config = tracker_source_hygiene_config_from_env()?;
+    let mut out_path: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--issues" => {
+                config.issues_jsonl = Path::new(require_value(args, i, "--issues")?).to_path_buf();
+                i += 2;
+            }
+            "--out" => {
+                out_path = Some(require_value(args, i, "--out")?.to_owned());
+                i += 2;
+            }
+            "--strict" => {
+                config.strict = true;
+                i += 1;
+            }
+            "--now-epoch" => {
+                config.report_now_epoch = require_value(args, i, "--now-epoch")?
+                    .parse()
+                    .context("invalid --now-epoch value")?;
+                i += 2;
+            }
+            "--stale-in-progress-seconds" => {
+                config.stale_in_progress_seconds =
+                    require_value(args, i, "--stale-in-progress-seconds")?
+                        .parse()
+                        .context("invalid --stale-in-progress-seconds value")?;
+                i += 2;
+            }
+            "--xfstests-real-run-ack" => {
+                config.xfstests_real_run_ack =
+                    Some(require_value(args, i, "--xfstests-real-run-ack")?.to_owned());
+                i += 2;
+            }
+            "--swarm-workload-enabled" => {
+                config.swarm_workload_enabled = true;
+                i += 1;
+            }
+            "--swarm-workload-real-run-ack" => {
+                config.swarm_workload_real_run_ack =
+                    Some(require_value(args, i, "--swarm-workload-real-run-ack")?.to_owned());
+                i += 2;
+            }
+            "--help" | "-h" => {
+                print_tracker_source_hygiene_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-tracker-source-hygiene argument: {other}"),
+        }
+    }
+
+    let report = run_tracker_source_hygiene(&config)?;
+    let json = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{json}\n"))?;
+        println!(
+            "tracker source hygiene report written: {} local_open={} ready={} foreign_open={}",
+            path,
+            report.local_open,
+            report.source_aware_ready_rows.len(),
+            report.foreign_open
+        );
+    } else {
+        println!("{json}");
+    }
+    fail_on_tracker_source_hygiene_errors(&report)
+}
+
+fn tracker_source_hygiene_config_from_env() -> Result<TrackerSourceHygieneConfig> {
+    let mut config = TrackerSourceHygieneConfig {
+        xfstests_real_run_ack: env::var("XFSTESTS_REAL_RUN_ACK").ok(),
+        swarm_workload_enabled: env::var("FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD")
+            .is_ok_and(|value| value == "1"),
+        swarm_workload_real_run_ack: env::var("FFS_SWARM_WORKLOAD_REAL_RUN_ACK").ok(),
+        ..TrackerSourceHygieneConfig::default()
+    };
+
+    if env::var("TRACKER_SOURCE_HYGIENE_STRICT").is_ok_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    }) {
+        config.strict = true;
+    }
+    if let Ok(value) = env::var("TRACKER_SOURCE_HYGIENE_NOW_EPOCH") {
+        config.report_now_epoch = value
+            .parse()
+            .context("invalid TRACKER_SOURCE_HYGIENE_NOW_EPOCH value")?;
+    }
+    if let Ok(value) = env::var("TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS") {
+        config.stale_in_progress_seconds = value
+            .parse()
+            .context("invalid TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS value")?;
+    }
+
+    Ok(config)
+}
+
 fn validate_fuzz_smoke_cmd(args: &[String]) -> Result<()> {
     let mut manifest_path = DEFAULT_FUZZ_SMOKE_MANIFEST_PATH.to_owned();
     let mut workspace_root = ".".to_owned();
@@ -7168,6 +7275,9 @@ fn print_usage_core_commands() {
         "  ffs-harness validate-docs-status-drift [--issues FILE] [--feature-parity FILE] [--snippets FILE] [--out FILE] [--summary-out FILE]"
     );
     println!(
+        "  ffs-harness validate-tracker-source-hygiene [--issues FILE] [--strict] [--out FILE]"
+    );
+    println!(
         "  ffs-harness validate-fuzz-smoke [--manifest FILE] [--workspace-root DIR] [--out FILE]"
     );
     println!(
@@ -7307,6 +7417,9 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness validate-docs-status-drift --out artifacts/docs-status/docs_status_drift.json --summary-out artifacts/docs-status/docs_status_drift.md"
+    );
+    println!(
+        "  ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl --out artifacts/tracker/source_hygiene.json"
     );
     println!("  ffs-harness validate-fuzz-smoke --out artifacts/fuzz-smoke/fuzz_smoke_report.json");
     println!(
@@ -7762,6 +7875,20 @@ fn print_docs_status_drift_usage() {
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write selected-format drift report to FILE");
     println!("  --summary-out FILE                 Write Markdown docs-status summary");
+}
+
+fn print_tracker_source_hygiene_usage() {
+    println!("Usage: ffs-harness validate-tracker-source-hygiene [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --issues FILE                      Read bead JSONL from FILE");
+    println!("  --strict                           Fail when foreign-looking open rows exist");
+    println!("  --now-epoch SECONDS                Use deterministic Unix epoch seconds");
+    println!("  --stale-in-progress-seconds N      Stale threshold for claimed local rows");
+    println!("  --xfstests-real-run-ack VALUE      Override XFSTESTS_REAL_RUN_ACK");
+    println!("  --swarm-workload-enabled           Treat large-host swarm permission as enabled");
+    println!("  --swarm-workload-real-run-ack VALUE Override FFS_SWARM_WORKLOAD_REAL_RUN_ACK");
+    println!("  --out FILE                         Write JSON report to FILE");
 }
 
 fn print_proof_overhead_budget_usage() {

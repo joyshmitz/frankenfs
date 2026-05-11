@@ -43,6 +43,13 @@ Emit the structured report:
 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
 ```
 
+Run the reusable Rust classifier directly when a tool wants the queue-state JSON
+without the E2E wrapper artifacts:
+
+```bash
+ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl
+```
+
 The report writes `tracker_source_hygiene_report.json` under
 `artifacts/e2e/<run>_ffs_tracker_source_hygiene/` and includes:
 
