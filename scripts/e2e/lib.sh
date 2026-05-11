@@ -233,6 +233,9 @@ e2e_validate_scenario_catalog() {
     local pattern_suite literal_pattern literal_id regex_status
     while IFS=$'\t' read -r pattern_suite literal_pattern; do
         [[ -n "$literal_pattern" ]] || continue
+        if [[ "$literal_pattern" != \^* || "$literal_pattern" != *\$ ]]; then
+            e2e_fail "Suite '$pattern_suite' id_pattern must be anchored with ^ and $: $literal_pattern"
+        fi
         if [[ "__ffs_catalog_regex_probe__" =~ $literal_pattern ]] 2>/dev/null; then
             :
         else
