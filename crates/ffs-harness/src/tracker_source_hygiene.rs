@@ -858,6 +858,8 @@ fn owner_hint(issue: &TrackerIssue<'_>) -> String {
         || issue.id().starts_with("franken_networkx-")
     {
         "franken_networkx".to_owned()
+    } else if text.contains("frankenscipy") || issue.id().starts_with("frankenscipy-") {
+        "frankenscipy".to_owned()
     } else if text.contains("frankenfs") || issue.is_local() {
         "frankenfs".to_owned()
     } else {
@@ -1378,6 +1380,26 @@ mod tests {
         let report = analyze_tracker_source_hygiene(&issues, &config()).expect("analyze");
 
         assert_classification_report(&report);
+    }
+
+    #[test]
+    fn foreign_group_owner_hints_include_frankenscipy_ids() {
+        let issues = line(&serde_json::json!({
+            "id": "frankenscipy-vsas0",
+            "title": "foreign SciPy coverage row",
+            "status": "open"
+        }));
+
+        let report = analyze_tracker_source_hygiene(&issues, &config()).expect("analyze");
+
+        assert_eq!(
+            report.foreign_group_summaries[0].prefix,
+            "frankenscipy-vsas0"
+        );
+        assert_eq!(
+            report.foreign_group_summaries[0].owner_hints,
+            vec!["frankenscipy"]
+        );
     }
 
     #[test]

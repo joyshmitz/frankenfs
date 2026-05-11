@@ -137,6 +137,8 @@ if jq -s \
         ([(.id // ""), (.title // ""), (.description // "")] | join(" ")) as $text
         | if (($text | test("franken_networkx|networkx"; "i")) or ((.id // "") | startswith("franken_networkx-"))) then
             "franken_networkx"
+        elif (($text | test("frankenscipy"; "i")) or ((.id // "") | startswith("frankenscipy-"))) then
+            "frankenscipy"
         elif (($text | test("frankenfs"; "i")) or ((.id // "") | test("^(bd|frankenfs)-"))) then
             "frankenfs"
         else
