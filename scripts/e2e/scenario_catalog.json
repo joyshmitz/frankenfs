@@ -3417,6 +3417,90 @@
       ]
     },
     {
+      "suite_id": "ffs_xfstests",
+      "script": "scripts/e2e/ffs_xfstests_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "xfstests_mode_contract",
+          "category": "happy",
+          "status": "active",
+          "evidence": "XFSTESTS_MODE=\"${XFSTESTS_MODE:-auto}\""
+        },
+        {
+          "id": "xfstests_curated_subsets",
+          "category": "happy",
+          "status": "active",
+          "evidence": "XFSTESTS_GENERIC_LIST=\"${XFSTESTS_GENERIC_LIST:-$REPO_ROOT/scripts/e2e/xfstests_generic.list}\""
+        },
+        {
+          "id": "xfstests_policy_plan_artifacts",
+          "category": "happy",
+          "status": "active",
+          "evidence": "write_policy_plan"
+        },
+        {
+          "id": "xfstests_summary_artifacts",
+          "category": "happy",
+          "status": "active",
+          "evidence": "write_summary()"
+        },
+        {
+          "id": "xfstests_baseline_manifest",
+          "category": "happy",
+          "status": "active",
+          "evidence": "write_baseline_manifest_artifacts"
+        },
+        {
+          "id": "xfstests_preflight_gate",
+          "category": "edge",
+          "status": "active",
+          "evidence": "ensure_xfstests_preflight()"
+        },
+        {
+          "id": "xfstests_safe_dry_run",
+          "category": "edge",
+          "status": "active",
+          "evidence": "safe_dry_run_no_xfstests_check_no_mount_no_mkfs"
+        },
+        {
+          "id": "xfstests_real_run_ack",
+          "category": "error",
+          "status": "active",
+          "evidence": "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices"
+        },
+        {
+          "id": "xfstests_failure_triage",
+          "category": "error",
+          "status": "active",
+          "evidence": "write_failure_triage_artifacts"
+        },
+        {
+          "id": "xfstests_synthetic_triage_fixture",
+          "category": "edge",
+          "status": "active",
+          "evidence": "XFSTESTS_SYNTHETIC_TRIAGE_FIXTURE"
+        },
+        {
+          "id": "xfstests_regression_guard",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "XFSTESTS_REGRESSION_GUARD_JSON"
+        },
+        {
+          "id": "xfstests_junit_results",
+          "category": "happy",
+          "status": "active",
+          "evidence": "junit.xml"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_xfstests_preflight",
       "script": "scripts/e2e/ffs_xfstests_preflight_e2e.sh",
       "required_categories": [
