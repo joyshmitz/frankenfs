@@ -818,6 +818,84 @@
       ]
     },
     {
+      "suite_id": "ffs_mount_mode",
+      "script": "scripts/e2e/ffs_mount_mode_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "unsupported_op"
+      ],
+      "scenarios": [
+        {
+          "id": "mode_type_exists",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mode_type_exists|outcome=PASS"
+        },
+        {
+          "id": "mode_default_compat",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mode_default_compat|outcome=PASS"
+        },
+        {
+          "id": "mode_open_options",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mode_open_options|outcome=PASS"
+        },
+        {
+          "id": "mode_open_fs",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mode_open_fs|outcome=PASS"
+        },
+        {
+          "id": "mode_native_opt_in",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mode_native_opt_in|outcome=PASS"
+        },
+        {
+          "id": "mode_compat_blocks_repair",
+          "category": "unsupported_op",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mode_compat_blocks_repair|outcome=PASS"
+        },
+        {
+          "id": "mode_violation_errno",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mode_violation_errno|outcome=PASS"
+        },
+        {
+          "id": "mode_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mode_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "mode_boundary_log_emission",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mode_boundary_log_emission|outcome=PASS"
+        },
+        {
+          "id": "mode_violation_log",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mode_violation_log|outcome=PASS"
+        },
+        {
+          "id": "mode_decision_record",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mode_decision_record|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_taxonomy",
       "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
       "required_categories": [
