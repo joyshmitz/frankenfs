@@ -1343,6 +1343,47 @@
       ]
     },
     {
+      "suite_id": "ffs_repair_5pct",
+      "script": "scripts/e2e/ffs_repair_5pct_e2e.sh",
+      "required_categories": [
+        "happy",
+        "corruption",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "repair_5pct_remote_cargo_test",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_5pct_remote_cargo_test|outcome=PASS"
+        },
+        {
+          "id": "repair_5pct_artifacts_present",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_5pct_artifacts_present|outcome=PASS"
+        },
+        {
+          "id": "repair_5pct_checksum_equality",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_5pct_checksum_equality|outcome=PASS"
+        },
+        {
+          "id": "repair_5pct_corruption_plan",
+          "category": "corruption",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_5pct_corruption_plan|outcome=PASS"
+        },
+        {
+          "id": "repair_5pct_recovery_evidence",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_5pct_recovery_evidence|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_taxonomy",
       "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
       "required_categories": [
