@@ -201,6 +201,20 @@ e2e_validate_scenario_catalog() {
         e2e_fail "Duplicate active scenario IDs in scenario catalog: $duplicate_ids"
     fi
 
+    local ambiguous_active_ids
+    ambiguous_active_ids="$(
+        jq -r '
+            .suites[] as $suite
+            | ($suite.scenarios // [])
+            | to_entries[]
+            | select((.value.status // "active") == "active" and (.value | has("id")) and (.value | has("id_pattern")))
+            | "suite=\($suite.suite_id // "<missing>") index=\(.key) id=\(.value.id) id_pattern=\(.value.id_pattern)"
+        ' "$catalog_path"
+    )"
+    if [[ -n "$ambiguous_active_ids" ]]; then
+        e2e_fail "Scenario catalog active scenario defines both id and id_pattern: $ambiguous_active_ids"
+    fi
+
     local unknown_statuses
     unknown_statuses="$(
         jq -r '
