@@ -359,6 +359,40 @@
       ]
     },
     {
+      "suite_id": "ffs_evidence_metrics_presets",
+      "script": "scripts/e2e/ffs_evidence_metrics_presets_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "evidence_metrics_bundle",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_metrics_bundle|outcome=PASS"
+        },
+        {
+          "id": "evidence_metrics_cache",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_metrics_cache|outcome=PASS"
+        },
+        {
+          "id": "evidence_metrics_mvcc",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_metrics_mvcc|outcome=PASS"
+        },
+        {
+          "id": "evidence_metrics_repair_live",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_metrics_repair_live|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_performance_manifest",
       "script": "scripts/e2e/ffs_performance_manifest_e2e.sh",
       "required_categories": [
