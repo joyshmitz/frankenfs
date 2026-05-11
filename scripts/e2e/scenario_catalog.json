@@ -1547,6 +1547,77 @@
       ]
     },
     {
+      "suite_id": "ffs_topology_runtime_advisor",
+      "script": "scripts/e2e/ffs_topology_runtime_advisor_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "topology_advisor_permission_boundary",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=topology_advisor_permission_boundary|outcome=PASS"
+        },
+        {
+          "id": "topology_advisor_validation_dry_run",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=topology_advisor_validation_dry_run|outcome=PASS"
+        },
+        {
+          "id": "topology_advisor_scoring_dry_run",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=topology_advisor_scoring_dry_run|outcome=PASS"
+        },
+        {
+          "id": "topology_advisor_advisory_output_contract",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=topology_advisor_advisory_output_contract|outcome=PASS"
+        },
+        {
+          "id": "topology_advisor_missing_artifact_fails_closed",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=topology_advisor_missing_artifact_fails_closed|outcome=PASS"
+        },
+        {
+          "id": "topology_advisor_stale_manifest_fails_closed",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=topology_advisor_stale_manifest_fails_closed|outcome=PASS"
+        },
+        {
+          "id": "topology_advisor_invalid_jsonl_fails_closed",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=topology_advisor_invalid_jsonl_fails_closed|outcome=PASS"
+        },
+        {
+          "id": "topology_advisor_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=topology_advisor_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "topology_advisor_cargo_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=topology_advisor_cargo_check|outcome=PASS"
+        },
+        {
+          "id": "topology_advisor_cargo_clippy",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=topology_advisor_cargo_clippy|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_taxonomy",
       "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
       "required_categories": [
