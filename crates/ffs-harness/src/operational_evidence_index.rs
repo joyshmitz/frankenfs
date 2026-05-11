@@ -1110,6 +1110,191 @@ mod tests {
         assert!(markdown.contains("Strengthens"));
     }
 
+    /// bd-rchk0.53.20 - exact-output snapshot for the latest-truth
+    /// operational evidence renderer.
+    ///
+    /// The smoke test above proves headline fields exist. This snapshot pins
+    /// the summary diagnostics, selected latest-truth row, conflict formatting,
+    /// duplicate-run section, and raw-log rendering used in operator handoffs.
+    #[test]
+    fn render_operational_evidence_index_markdown_mixed_diagnostics_snapshot() {
+        let markdown =
+            render_operational_evidence_index_markdown(&sample_markdown_evidence_index());
+
+        insta::assert_snapshot!(
+            "render_operational_evidence_index_markdown_mixed_diagnostics",
+            markdown
+        );
+    }
+
+    fn sample_markdown_evidence_index() -> OperationalEvidenceIndex {
+        let selected_record_id =
+            "swarm.responsiveness:p99_authoritative:bd-rchk0.53.8:run-large-host:0";
+        let superseded_record_id =
+            "swarm.responsiveness:p99_authoritative:bd-rchk0.53.8:run-smoke:1";
+        let duplicate_one = "xfstests:generic_001:bd-rchk3.3:run-duplicate:2";
+        let duplicate_two = "xfstests:generic_002:bd-rchk3.3:run-duplicate:3";
+
+        OperationalEvidenceIndex {
+            schema_version: OPERATIONAL_EVIDENCE_INDEX_SCHEMA_VERSION,
+            index_id: "frankenfs-operational-evidence-index:v1".to_owned(),
+            source_root: "artifacts/readiness".to_owned(),
+            readiness_report_id: "operational-readiness:fixture".to_owned(),
+            source_record_count: 4,
+            selected_record_count: 1,
+            authoritative_record_count: 2,
+            stale_record_count: 1,
+            missing_raw_log_record_count: 1,
+            conflict_count: 1,
+            duplicate_run_id_count: 1,
+            host_downgrade_count: 1,
+            records: vec![
+                evidence_record(
+                    selected_record_id,
+                    "run-large-host",
+                    OperationalEvidenceOutcome::Pass,
+                    OperationalEvidenceReleaseClaimEffect::Strengthens,
+                    OperationalEvidenceHostClass::PermissionedLargeHost,
+                    true,
+                    &[
+                        "artifacts/swarm/large-host/raw.log",
+                        "artifacts/swarm/large-host/stderr.log",
+                    ],
+                ),
+                evidence_record(
+                    superseded_record_id,
+                    "run-smoke",
+                    OperationalEvidenceOutcome::Fail,
+                    OperationalEvidenceReleaseClaimEffect::Blocks,
+                    OperationalEvidenceHostClass::CapabilityDowngraded,
+                    false,
+                    &["artifacts/swarm/smoke/raw.log"],
+                ),
+                duplicate_record(duplicate_one, "generic_001", true),
+                duplicate_record(duplicate_two, "generic_002", false),
+            ],
+            selections: vec![OperationalEvidenceSelection {
+                lane_id: "swarm.responsiveness".to_owned(),
+                scenario_id: "p99_authoritative".to_owned(),
+                bead_id: Some("bd-rchk0.53.8".to_owned()),
+                selected_record_id: selected_record_id.to_owned(),
+                selected_run_id: "run-large-host".to_owned(),
+                selected_source_path: "artifacts/swarm/large-host/operational.json".to_owned(),
+                selected_outcome: OperationalEvidenceOutcome::Pass,
+                selected_release_claim_effect: OperationalEvidenceReleaseClaimEffect::Strengthens,
+                superseded_record_ids: vec![superseded_record_id.to_owned()],
+            }],
+            conflicts: vec![OperationalEvidenceConflict {
+                lane_id: "swarm.responsiveness".to_owned(),
+                scenario_id: "p99_authoritative".to_owned(),
+                bead_id: Some("bd-rchk0.53.8".to_owned()),
+                outcomes: vec![
+                    OperationalEvidenceOutcome::Pass,
+                    OperationalEvidenceOutcome::Fail,
+                ],
+                record_ids: vec![
+                    selected_record_id.to_owned(),
+                    superseded_record_id.to_owned(),
+                ],
+                source_paths: vec![
+                    "artifacts/swarm/large-host/operational.json".to_owned(),
+                    "artifacts/swarm/smoke/operational.json".to_owned(),
+                ],
+            }],
+            duplicate_run_ids: vec![OperationalEvidenceDuplicateRunId {
+                run_id: "run-duplicate".to_owned(),
+                record_ids: vec![duplicate_one.to_owned(), duplicate_two.to_owned()],
+                source_paths: vec![
+                    "artifacts/xfstests/generic_001.json".to_owned(),
+                    "artifacts/xfstests/generic_002.json".to_owned(),
+                ],
+            }],
+        }
+    }
+
+    fn evidence_record(
+        record_id: &str,
+        run_id: &str,
+        outcome: OperationalEvidenceOutcome,
+        release_claim_effect: OperationalEvidenceReleaseClaimEffect,
+        host_class: OperationalEvidenceHostClass,
+        selected: bool,
+        raw_log_paths: &[&str],
+    ) -> OperationalEvidenceRecord {
+        OperationalEvidenceRecord {
+            record_id: record_id.to_owned(),
+            lane_id: "swarm.responsiveness".to_owned(),
+            scenario_id: "p99_authoritative".to_owned(),
+            bead_id: Some("bd-rchk0.53.8".to_owned()),
+            git_sha: "abc123".to_owned(),
+            run_id: run_id.to_owned(),
+            gate_id: "release_gate".to_owned(),
+            source_path: format!("artifacts/swarm/{run_id}/operational.json"),
+            source_kind: "artifact_manifest".to_owned(),
+            host_class,
+            freshness: OperationalEvidenceFreshness::Fresh,
+            outcome,
+            taxonomy_class: "product_behavior".to_owned(),
+            release_claim_effect,
+            raw_log_paths: raw_log_paths
+                .iter()
+                .map(|path| (*path).to_owned())
+                .collect(),
+            artifact_refs: Vec::new(),
+            missing_raw_logs: raw_log_paths.is_empty(),
+            authoritative: matches!(
+                release_claim_effect,
+                OperationalEvidenceReleaseClaimEffect::Strengthens
+                    | OperationalEvidenceReleaseClaimEffect::Blocks
+            ),
+            selected,
+            stale_git_sha: false,
+            stale_artifact: false,
+            reproduction_command: None,
+            cleanup_status: Some("preserved_artifacts".to_owned()),
+            remediation_hint: None,
+            detail: None,
+        }
+    }
+
+    fn duplicate_record(
+        record_id: &str,
+        scenario_id: &str,
+        stale_artifact: bool,
+    ) -> OperationalEvidenceRecord {
+        OperationalEvidenceRecord {
+            record_id: record_id.to_owned(),
+            lane_id: "xfstests".to_owned(),
+            scenario_id: scenario_id.to_owned(),
+            bead_id: Some("bd-rchk3.3".to_owned()),
+            git_sha: "abc123".to_owned(),
+            run_id: "run-duplicate".to_owned(),
+            gate_id: "xfstests".to_owned(),
+            source_path: format!("artifacts/xfstests/{scenario_id}.json"),
+            source_kind: "artifact_manifest".to_owned(),
+            host_class: OperationalEvidenceHostClass::DeveloperSmoke,
+            freshness: if stale_artifact {
+                OperationalEvidenceFreshness::Stale
+            } else {
+                OperationalEvidenceFreshness::Fresh
+            },
+            outcome: OperationalEvidenceOutcome::Skip,
+            taxonomy_class: "host_capability_skip".to_owned(),
+            release_claim_effect: OperationalEvidenceReleaseClaimEffect::FollowUpOnly,
+            raw_log_paths: Vec::new(),
+            artifact_refs: Vec::new(),
+            missing_raw_logs: true,
+            authoritative: false,
+            selected: false,
+            stale_git_sha: false,
+            stale_artifact,
+            reproduction_command: None,
+            cleanup_status: None,
+            remediation_hint: Some("rerun permissioned xfstests lane".to_owned()),
+            detail: None,
+        }
+    }
+
     #[derive(Clone, Copy)]
     struct SampleManifestInput<'a> {
         run_id: &'a str,

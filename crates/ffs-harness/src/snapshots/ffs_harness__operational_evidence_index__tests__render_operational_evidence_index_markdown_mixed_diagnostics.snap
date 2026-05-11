@@ -1,0 +1,20 @@
+---
+source: crates/ffs-harness/src/operational_evidence_index.rs
+expression: markdown
+---
+# FrankenFS Operational Evidence Index
+
+- Source root: `artifacts/readiness`
+- Records: source=4 authoritative=2 selected=1
+- Diagnostics: stale=1 missing_raw_logs=1 conflicts=1 duplicate_run_ids=1 host_downgrades=1
+
+## Latest Truth
+| Lane | Scenario | Bead | Outcome | Effect | Host | Run | Source | Logs |
+|---|---|---|---:|---|---|---|---|---|
+| `swarm.responsiveness` | `p99_authoritative` | `bd-rchk0.53.8` | `Pass` | `Strengthens` | `PermissionedLargeHost` | `run-large-host` | `artifacts/swarm/large-host/operational.json` | `artifacts/swarm/large-host/raw.log`<br>`artifacts/swarm/large-host/stderr.log` |
+
+## Conflicts
+- `swarm.responsiveness` `p99_authoritative` bead=`bd-rchk0.53.8` outcomes=Pass,Fail records=swarm.responsiveness:p99_authoritative:bd-rchk0.53.8:run-large-host:0,swarm.responsiveness:p99_authoritative:bd-rchk0.53.8:run-smoke:1
+
+## Duplicate Run IDs
+- `run-duplicate` records=xfstests:generic_001:bd-rchk3.3:run-duplicate:2,xfstests:generic_002:bd-rchk3.3:run-duplicate:3 sources=artifacts/xfstests/generic_001.json,artifacts/xfstests/generic_002.json
