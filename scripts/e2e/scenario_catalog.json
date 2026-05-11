@@ -1278,6 +1278,102 @@
       ]
     },
     {
+      "suite_id": "ffs_v12_program_gate",
+      "script": "scripts/e2e/ffs_v12_program_gate_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id_pattern": "^v12_program_gate_1$",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_${number}|outcome=${status}"
+        },
+        {
+          "id_pattern": "^v12_program_gate_2$",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_${number}|outcome=${status}"
+        },
+        {
+          "id_pattern": "^v12_program_gate_3$",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_${number}|outcome=${status}"
+        },
+        {
+          "id_pattern": "^v12_program_gate_4$",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_${number}|outcome=${status}"
+        },
+        {
+          "id_pattern": "^v12_program_gate_5$",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_${number}|outcome=${status}"
+        },
+        {
+          "id_pattern": "^v12_program_gate_6$",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_${number}|outcome=${status}"
+        },
+        {
+          "id_pattern": "^v12_program_gate_7$",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_${number}|outcome=${status}"
+        },
+        {
+          "id_pattern": "^v12_program_gate_8$",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_${number}|outcome=${status}"
+        },
+        {
+          "id_pattern": "^v12_program_gate_9$",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_${number}|outcome=${status}"
+        },
+        {
+          "id_pattern": "^v12_program_gate_10$",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_${number}|outcome=${status}"
+        },
+        {
+          "id_pattern": "^v12_program_gate_11$",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_${number}|outcome=${status}"
+        },
+        {
+          "id_pattern": "^v12_program_gate_12$",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_${number}|outcome=${status}"
+        },
+        {
+          "id_pattern": "^v12_program_gate_13$",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_${number}|outcome=${status}"
+        },
+        {
+          "id_pattern": "^v12_program_gate_14$",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_${number}|outcome=${status}"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_refresh_policy",
       "script": "scripts/e2e/ffs_refresh_policy_e2e.sh",
       "required_categories": [
