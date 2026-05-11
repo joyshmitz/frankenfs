@@ -1599,6 +1599,30 @@ fn assert_mounted_fscrypt_legacy_policy(golden: &Value, tmp_path: &Path, image_p
         &mnt.join(golden["path"].as_str().expect("golden policy path")),
     );
     let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+    if matches!(
+        report["errno"].as_i64(),
+        Some(errno) if errno == i64::from(libc::ENOTTY) || errno == i64::from(libc::EOPNOTSUPP)
+    ) {
+        assert!(
+            !trace_contains_cmd(
+                &ioctl_trace,
+                u32::from_str_radix(
+                    golden["command_hex"]
+                        .as_str()
+                        .expect("golden command_hex")
+                        .trim_start_matches("0x"),
+                    16,
+                )
+                .expect("parse golden command_hex"),
+            ),
+            "mounted-path unsupported errno should happen before ffs-fuse::ioctl dispatch: \
+             trace={ioctl_trace}; report={report}"
+        );
+        eprintln!(
+            "Skipping mounted-path fscrypt transport probe: kernel/VFS returned unsupported errno before ffs-fuse::ioctl: {report}"
+        );
+        return;
+    }
     assert!(
         trace_contains_cmd(
             &ioctl_trace,
@@ -1611,7 +1635,7 @@ fn assert_mounted_fscrypt_legacy_policy(golden: &Value, tmp_path: &Path, image_p
             )
             .expect("parse golden command_hex"),
         ),
-        "mounted-path ioctl should reach ffs-fuse::ioctl: {ioctl_trace}"
+        "mounted-path ioctl should reach ffs-fuse::ioctl: trace={ioctl_trace}; report={report}"
     );
     assert!(
         ioctl_trace.contains(
@@ -5116,6 +5140,15 @@ fn full_conformance_gate_pass() {
     ext4_group_desc_32byte_fixture_re_encodes_byte_identical();
     ext4_group_desc_64byte_fixture_re_encodes_byte_identical();
     ext4_inode_fixtures_conform();
+    ext4_inline_data_fixture_conforms();
+    ext4_inline_data_with_continuation_fixture_conforms();
+    ext4_inline_data_openfs_read_conforms();
+    ext4_inline_data_xattr_continuation_openfs_read_conforms();
+    ext4_inline_data_openfs_read_boundaries_conform();
+    ext4_inline_data_zero_size_and_extreme_read_bounds_conform();
+    ext4_inline_data_vfs_lookup_readdir_conforms();
+    ext4_inline_data_write_rejects_without_mutating_contents();
+    ext4_inline_data_fallocate_rejects_without_mutating_contents();
     ext4_dir_block_fixture_conforms();
     ext4_dir_block_with_tail_fixture_conforms();
     ext4_dir_block_deleted_entry_fixture_conforms();
