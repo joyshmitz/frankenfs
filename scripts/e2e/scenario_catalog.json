@@ -1859,6 +1859,46 @@
       ]
     },
     {
+      "suite_id": "ffs_readiness_dashboard",
+      "script": "scripts/e2e/ffs_readiness_dashboard_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "readiness_dashboard_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_dashboard_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "readiness_dashboard_fixtures_written",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_dashboard_fixtures_written|outcome=PASS"
+        },
+        {
+          "id": "readiness_dashboard_json",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_dashboard_json|outcome=PASS"
+        },
+        {
+          "id": "readiness_dashboard_markdown",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_dashboard_markdown|outcome=PASS"
+        },
+        {
+          "id": "readiness_dashboard_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_dashboard_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_proof_overhead_budget",
       "script": "scripts/e2e/ffs_proof_overhead_budget_e2e.sh",
       "required_categories": [
