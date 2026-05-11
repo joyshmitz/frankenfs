@@ -1594,6 +1594,82 @@
       ]
     },
     {
+      "suite_id": "ffs_tracker_source_hygiene",
+      "script": "scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "tracker_source_hygiene_jsonl_parses",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_jsonl_parses|outcome=PASS"
+        },
+        {
+          "id": "tracker_source_hygiene_report_emitted",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_report_emitted|outcome=PASS"
+        },
+        {
+          "id": "tracker_source_hygiene_local_graph_exports_written",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_local_graph_exports_written|outcome=PASS"
+        },
+        {
+          "id": "tracker_source_hygiene_foreign_rows_classified",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_foreign_rows_classified|outcome=PASS"
+        },
+        {
+          "id": "tracker_source_hygiene_local_graph_exports_valid",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_local_graph_exports_valid|outcome=PASS"
+        },
+        {
+          "id": "tracker_source_hygiene_source_aware_wrapper",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_source_aware_wrapper|outcome=PASS"
+        },
+        {
+          "id": "tracker_source_hygiene_golden_report_matches",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_golden_report_matches|outcome=PASS"
+        },
+        {
+          "id": "tracker_source_hygiene_golden_mismatch_fails_closed",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_golden_mismatch_fails_closed|outcome=PASS"
+        },
+        {
+          "id": "tracker_source_hygiene_expected_fixture_counts",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_expected_fixture_counts|outcome=PASS"
+        },
+        {
+          "id": "tracker_source_hygiene_default_fixture_golden_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_default_fixture_golden_self_check|outcome=PASS"
+        },
+        {
+          "id": "tracker_source_hygiene_strict_mode",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_strict_mode|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_proof_overhead_budget",
       "script": "scripts/e2e/ffs_proof_overhead_budget_e2e.sh",
       "required_categories": [
