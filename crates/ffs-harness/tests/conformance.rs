@@ -243,6 +243,182 @@ fn valid_yyyy_mm_dd(value: &str) -> bool {
 }
 
 #[test]
+fn conformance_fixture_provenance_covers_committed_fixtures() {
+    let workspace = workspace_root();
+    let fixtures = parse_checksum_inventory(
+        &workspace
+            .join("conformance")
+            .join("fixtures")
+            .join("checksums.sha256"),
+    )
+    .keys()
+    .cloned()
+    .collect::<HashSet<_>>();
+    let sections = fixture_provenance_sections(include_str!("../../../conformance/PROVENANCE.md"));
+
+    assert!(
+        !sections.is_empty(),
+        "conformance/PROVENANCE.md should document fixture provenance sections"
+    );
+
+    for section in &sections {
+        assert!(
+            section.has(FIXTURE_PROVENANCE_CREATED),
+            "{} missing non-empty Created field",
+            section.header
+        );
+        assert!(
+            section.has(FIXTURE_PROVENANCE_AUTHOR),
+            "{} missing non-empty Author field",
+            section.header
+        );
+        assert!(
+            section.has(FIXTURE_PROVENANCE_REFERENCE),
+            "{} missing non-empty Reference field",
+            section.header
+        );
+        assert!(
+            section.has(FIXTURE_PROVENANCE_DESCRIPTION),
+            "{} missing non-empty Description field",
+            section.header
+        );
+        assert!(
+            section.has(FIXTURE_PROVENANCE_VERIFICATION),
+            "{} missing non-empty Verification field",
+            section.header
+        );
+        assert!(
+            fixtures.iter().any(|fixture| section.covers(fixture)),
+            "{} does not match any committed fixture",
+            section.header
+        );
+    }
+
+    let missing = sorted_names(
+        fixtures
+            .iter()
+            .filter(|fixture| !sections.iter().any(|section| section.covers(fixture)))
+            .cloned(),
+    );
+    assert!(
+        missing.is_empty(),
+        "conformance/PROVENANCE.md is missing fixture provenance for: {}",
+        missing.join(", ")
+    );
+}
+
+struct FixtureProvenanceSection<'a> {
+    header: &'a str,
+    fields: u8,
+}
+
+const FIXTURE_PROVENANCE_CREATED: u8 = 1 << 0;
+const FIXTURE_PROVENANCE_AUTHOR: u8 = 1 << 1;
+const FIXTURE_PROVENANCE_REFERENCE: u8 = 1 << 2;
+const FIXTURE_PROVENANCE_DESCRIPTION: u8 = 1 << 3;
+const FIXTURE_PROVENANCE_VERIFICATION: u8 = 1 << 4;
+
+impl<'a> FixtureProvenanceSection<'a> {
+    fn new(header: &'a str) -> Self {
+        Self { header, fields: 0 }
+    }
+
+    fn record_line(&mut self, line: &str) {
+        self.mark_if(
+            FIXTURE_PROVENANCE_CREATED,
+            line_has_nonempty_field(line, "- **Created:**"),
+        );
+        self.mark_if(
+            FIXTURE_PROVENANCE_AUTHOR,
+            line_has_nonempty_field(line, "- **Author:**"),
+        );
+        self.mark_if(
+            FIXTURE_PROVENANCE_REFERENCE,
+            line_has_nonempty_field(line, "- **Reference:**"),
+        );
+        self.mark_if(
+            FIXTURE_PROVENANCE_DESCRIPTION,
+            line_has_nonempty_field(line, "- **Description:**"),
+        );
+        self.mark_if(
+            FIXTURE_PROVENANCE_VERIFICATION,
+            line_has_nonempty_field(line, "- **Verification:**"),
+        );
+    }
+
+    fn mark_if(&mut self, field: u8, condition: bool) {
+        if condition {
+            self.fields |= field;
+        }
+    }
+
+    fn has(&self, field: u8) -> bool {
+        self.fields & field != 0
+    }
+
+    fn covers(&self, fixture: &str) -> bool {
+        self.header
+            .split('/')
+            .map(str::trim)
+            .map(|token| token.split_whitespace().next().unwrap_or(""))
+            .any(|pattern| fixture_provenance_pattern_matches(pattern, fixture))
+    }
+}
+
+fn fixture_provenance_sections(markdown: &str) -> Vec<FixtureProvenanceSection<'_>> {
+    let mut sections = Vec::new();
+    let mut current = None;
+    let mut in_fixture_block = false;
+
+    for line in markdown.lines() {
+        if let Some(header) = line.strip_prefix("## ") {
+            push_fixture_provenance_section(&mut sections, current.take());
+            in_fixture_block = matches!(header.trim(), "ext4 Fixtures" | "btrfs Fixtures");
+            continue;
+        }
+
+        if !in_fixture_block {
+            continue;
+        }
+
+        if let Some(header) = line.strip_prefix("### ") {
+            push_fixture_provenance_section(&mut sections, current.take());
+            current = Some(FixtureProvenanceSection::new(header.trim()));
+            continue;
+        }
+
+        if let Some(section) = current.as_mut() {
+            section.record_line(line.trim_start());
+        }
+    }
+
+    push_fixture_provenance_section(&mut sections, current);
+    sections
+}
+
+fn push_fixture_provenance_section<'a>(
+    sections: &mut Vec<FixtureProvenanceSection<'a>>,
+    section: Option<FixtureProvenanceSection<'a>>,
+) {
+    if let Some(section) = section {
+        sections.push(section);
+    }
+}
+
+fn fixture_provenance_pattern_matches(pattern: &str, fixture: &str) -> bool {
+    if pattern == fixture {
+        return true;
+    }
+    let Some((prefix, suffix)) = pattern.split_once('*') else {
+        return false;
+    };
+    !prefix.is_empty()
+        && !suffix.is_empty()
+        && fixture.starts_with(prefix)
+        && fixture.ends_with(suffix)
+}
+
+#[test]
 fn ext4_and_btrfs_fixtures_conform() {
     let ext4_sparse = validate_ext4_fixture(&fixture_path("ext4_superblock_sparse.json"))
         .expect("ext4 sparse fixture");
