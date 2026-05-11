@@ -1,0 +1,35 @@
+---
+source: crates/ffs-harness/src/readiness_lab.rs
+expression: markdown
+---
+# FrankenFS Readiness Lab Truth Graph
+
+- Graph: `readiness-lab-truth-graph`
+- Manifest: `truth-graph.json`
+- Valid: `true`
+- Dry run only: `true`
+- Product evidence claim: `none`
+- Release gate effect: `advisory_only`
+- Sources: `4`
+- Claims: `4`
+- Nodes: `28`
+- Edges: `26`
+- Stale claims: `1`
+- Contradictory claims: `0`
+- Missing raw logs: `0`
+- Permission requirements: `1`
+
+## Blocker Edges
+
+| from | to | validator_report | bead | reason |
+|---|---|---|---|---|
+| `blocker:claim:proof-old:swarm.responsiveness:stale` | `claim:proof-old:swarm.responsiveness` | `artifacts/proof/old-report.json` | `bd-rchk0.53.8` | claim freshness is stale |
+| `blocker:claim:xfstests-handoff:xfstests.baseline:operator-ack-missing` | `claim:xfstests-handoff:xfstests.baseline` | `` | `bd-rchk3` | real xfstests run requires explicit operator ack |
+
+## Errors
+
+- none
+
+## Warnings
+
+- none

@@ -6073,6 +6073,20 @@ mod tests {
         );
     }
 
+    /// bd-rchk0.53.24 - exact-output snapshot for the readiness-lab
+    /// truth-graph markdown consumed by operator handoffs.
+    ///
+    /// The graph tests prove stale-claim and permission-boundary behavior.
+    /// This snapshot pins the advisory/product-evidence wording, graph
+    /// counters, blocker edge table, and empty findings sections.
+    #[test]
+    fn render_readiness_lab_truth_graph_markdown_sample_snapshot() {
+        let report = build_truth_graph(&sample_truth_graph_manifest());
+        let markdown = render_readiness_lab_truth_graph_markdown(&report);
+
+        insta::assert_snapshot!("render_readiness_lab_truth_graph_markdown_sample", markdown);
+    }
+
     #[test]
     fn truth_graph_exposes_contradictory_non_stale_claims() {
         let mut manifest = sample_truth_graph_manifest();
