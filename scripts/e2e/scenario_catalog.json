@@ -458,6 +458,70 @@
       ]
     },
     {
+      "suite_id": "ffs_operator_tooling_gate",
+      "script": "scripts/e2e/ffs_operator_tooling_gate_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "gate_subgate_scripts",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_subgate_scripts|outcome=PASS"
+        },
+        {
+          "id": "gate_modules_exported",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_modules_exported|outcome=PASS"
+        },
+        {
+          "id_pattern": "^gate_runbooks$",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_runbooks|outcome=PASS"
+        },
+        {
+          "id": "gate_evidence_presets",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_evidence_presets|outcome=PASS"
+        },
+        {
+          "id": "gate_health_consistency",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_health_consistency|outcome=PASS"
+        },
+        {
+          "id": "gate_tabletop_drills",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_tabletop_drills|outcome=PASS"
+        },
+        {
+          "id": "gate_error_taxonomy",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_error_taxonomy|outcome=PASS"
+        },
+        {
+          "id": "gate_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "gate_log_audit",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_log_audit|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_performance_manifest",
       "script": "scripts/e2e/ffs_performance_manifest_e2e.sh",
       "required_categories": [
