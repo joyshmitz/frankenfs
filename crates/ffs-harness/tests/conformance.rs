@@ -5212,6 +5212,7 @@ fn full_conformance_gate_pass() {
     ext4_dir_block_tail_padding_nonzero_fixture_rejected();
     ext4_dir_block_tail_bad_header_fixture_rejected();
     ext4_dir_block_casefold_lookup_conforms();
+    ext4_casefold_openfs_lookup_is_case_insensitive();
     ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes();
     ext4_fscrypt_legacy_policy_transport_discrepancy_conforms();
     btrfs_tree_block_checksum_tamper_detection_conforms();
