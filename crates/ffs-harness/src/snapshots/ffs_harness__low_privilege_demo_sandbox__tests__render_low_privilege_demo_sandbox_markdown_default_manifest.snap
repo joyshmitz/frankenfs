@@ -1,0 +1,13 @@
+---
+source: crates/ffs-harness/src/low_privilege_demo_sandbox.rs
+expression: markdown
+---
+# Low-Privilege Demo Sandbox
+
+- manifest: `frankenfs_low_privilege_demo_sandbox_v1`
+- schema version: `1`
+- bead: `bd-3crxf`
+- valid: `true`
+- fixtures: `4`
+- lanes: `4`
+- host-skipped lanes: `1`

@@ -353,6 +353,31 @@ policies, and unsafe process-control refusals. Rows that require real FUSE
 mounts or process termination remain metadata-only until a permissioned lane
 records authoritative survivor artifacts.
 
+## Low-Privilege Demo Sandbox Contract
+
+The low-privilege demo sandbox manifest lives in:
+
+- `tests/low-privilege-demo-sandbox/low_privilege_demo_sandbox.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-low-privilege-demo-sandbox \
+  --manifest tests/low-privilege-demo-sandbox/low_privilege_demo_sandbox.json \
+  --out artifacts/low-privilege-demo-sandbox/report.json \
+  --summary-out artifacts/low-privilege-demo-sandbox/summary.md
+```
+
+This manifest is a support-envelope contract for safe local demonstration
+lanes, not permission to mutate host filesystems, load kernel modules, make
+network egress claims, or claim mounted readiness. It must keep parser,
+invariant-oracle, repair-dry-run, and mounted-smoke-host-skipped lanes visible,
+and it must preserve fixture provenance, immutable committed fixtures,
+allowed-workspace-root sandboxing, required forbidden side effects, proof-bundle
+schema ids, README wording ids, cleanup policy, and explicit host-skip reasons.
+Rows that require real FUSE mounts remain host-skipped until a permissioned
+lane records authoritative mounted artifacts.
+
 ## Swarm Workload Harness Contract
 
 The 64-core/256GB swarm workload harness plan lives in:

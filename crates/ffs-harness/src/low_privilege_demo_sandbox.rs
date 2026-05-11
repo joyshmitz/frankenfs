@@ -11,7 +11,7 @@
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write as _, fs, path::Path};
 
 pub const LOW_PRIVILEGE_DEMO_SANDBOX_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_LOW_PRIVILEGE_DEMO_SANDBOX_PATH: &str =
@@ -98,17 +98,34 @@ pub fn parse_low_privilege_demo_sandbox(text: &str) -> Result<LowPrivilegeDemoSa
         .map_err(|err| anyhow::anyhow!("failed to parse low-privilege demo sandbox JSON: {err}"))
 }
 
+pub fn load_low_privilege_demo_sandbox(path: &Path) -> Result<LowPrivilegeDemoSandbox> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to read low-privilege demo sandbox manifest `{}`: {err}",
+            path.display()
+        )
+    })?;
+    parse_low_privilege_demo_sandbox(&text)
+}
+
 pub fn validate_default_low_privilege_demo_sandbox() -> Result<LowPrivilegeDemoSandboxReport> {
     let manifest = parse_low_privilege_demo_sandbox(DEFAULT_LOW_PRIVILEGE_DEMO_SANDBOX_JSON)?;
     let report = validate_low_privilege_demo_sandbox(&manifest);
-    if !report.valid {
-        bail!(
-            "low-privilege demo sandbox failed with {} error(s): {}",
-            report.errors.len(),
-            report.errors.join("; ")
-        );
-    }
+    fail_on_low_privilege_demo_sandbox_errors(&report)?;
     Ok(report)
+}
+
+pub fn fail_on_low_privilege_demo_sandbox_errors(
+    report: &LowPrivilegeDemoSandboxReport,
+) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    bail!(
+        "low-privilege demo sandbox failed with {} error(s): {}",
+        report.errors.len(),
+        report.errors.join("; ")
+    );
 }
 
 #[must_use]
@@ -360,6 +377,35 @@ fn is_valid_sha256(value: &str) -> bool {
         return false;
     };
     suffix.len() == 64 && suffix.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+#[must_use]
+pub fn render_low_privilege_demo_sandbox_markdown(
+    report: &LowPrivilegeDemoSandboxReport,
+) -> String {
+    let mut out = String::new();
+    writeln!(&mut out, "# Low-Privilege Demo Sandbox").expect("write to string");
+    writeln!(&mut out).expect("write to string");
+    writeln!(&mut out, "- manifest: `{}`", report.manifest_id).expect("write to string");
+    writeln!(&mut out, "- schema version: `{}`", report.schema_version).expect("write to string");
+    writeln!(&mut out, "- bead: `{}`", report.bead_id).expect("write to string");
+    writeln!(&mut out, "- valid: `{}`", report.valid).expect("write to string");
+    writeln!(&mut out, "- fixtures: `{}`", report.fixture_count).expect("write to string");
+    writeln!(&mut out, "- lanes: `{}`", report.lane_count).expect("write to string");
+    writeln!(
+        &mut out,
+        "- host-skipped lanes: `{}`",
+        report.host_skipped_lanes
+    )
+    .expect("write to string");
+    if !report.errors.is_empty() {
+        writeln!(&mut out).expect("write to string");
+        writeln!(&mut out, "## Errors").expect("write to string");
+        for error in &report.errors {
+            writeln!(&mut out, "- {error}").expect("write to string");
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -656,6 +702,34 @@ mod tests {
                 .errors
                 .iter()
                 .any(|err| err.contains("at least one lane"))
+        );
+    }
+
+    #[test]
+    fn render_low_privilege_demo_sandbox_markdown_default_manifest() {
+        let report = validate_default_low_privilege_demo_sandbox()
+            .expect("default low-privilege demo sandbox validates");
+        let markdown = render_low_privilege_demo_sandbox_markdown(&report);
+        insta::assert_snapshot!(
+            "render_low_privilege_demo_sandbox_markdown_default_manifest",
+            markdown
+        );
+    }
+
+    #[test]
+    fn fail_on_errors_rejects_invalid_report() {
+        let mut manifest = fixture_manifest();
+        manifest.allowed_workspace_root = "/etc/frankenfs-demo".to_owned();
+        let report = validate_low_privilege_demo_sandbox(&manifest);
+        let err = fail_on_low_privilege_demo_sandbox_errors(&report)
+            .expect_err("invalid report fails closed");
+        assert!(
+            err.to_string()
+                .contains("low-privilege demo sandbox failed")
+        );
+        assert!(
+            err.to_string()
+                .contains("must not begin under a forbidden host root")
         );
     }
 }
