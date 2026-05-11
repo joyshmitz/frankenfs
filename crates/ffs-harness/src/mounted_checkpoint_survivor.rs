@@ -11,7 +11,7 @@
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write as _, fs, path::Path};
 
 pub const MOUNTED_CHECKPOINT_SURVIVOR_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_MOUNTED_CHECKPOINT_SURVIVOR_PATH: &str =
@@ -122,17 +122,34 @@ pub fn parse_mounted_checkpoint_survivor(text: &str) -> Result<MountedCheckpoint
         .map_err(|err| anyhow::anyhow!("failed to parse mounted checkpoint survivor JSON: {err}"))
 }
 
+pub fn load_mounted_checkpoint_survivor(path: &Path) -> Result<MountedCheckpointSurvivorMatrix> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to read mounted checkpoint survivor matrix `{}`: {err}",
+            path.display()
+        )
+    })?;
+    parse_mounted_checkpoint_survivor(&text)
+}
+
 pub fn validate_default_mounted_checkpoint_survivor() -> Result<MountedCheckpointSurvivorReport> {
     let matrix = parse_mounted_checkpoint_survivor(DEFAULT_MOUNTED_CHECKPOINT_SURVIVOR_JSON)?;
     let report = validate_mounted_checkpoint_survivor(&matrix);
-    if !report.valid {
-        bail!(
-            "mounted checkpoint survivor matrix failed with {} error(s): {}",
-            report.errors.len(),
-            report.errors.join("; ")
-        );
-    }
+    fail_on_mounted_checkpoint_survivor_errors(&report)?;
     Ok(report)
+}
+
+pub fn fail_on_mounted_checkpoint_survivor_errors(
+    report: &MountedCheckpointSurvivorReport,
+) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    bail!(
+        "mounted checkpoint survivor matrix failed with {} error(s): {}",
+        report.errors.len(),
+        report.errors.join("; ")
+    );
 }
 
 #[must_use]
@@ -431,6 +448,33 @@ fn is_expected_survivor_set_classification(value: &str) -> bool {
     matches!(value, "expected_survivor_set")
 }
 
+#[must_use]
+pub fn render_mounted_checkpoint_survivor_markdown(
+    report: &MountedCheckpointSurvivorReport,
+) -> String {
+    let mut out = String::new();
+    writeln!(&mut out, "# Mounted Checkpoint Survivor").expect("write to string");
+    writeln!(&mut out).expect("write to string");
+    writeln!(&mut out, "- matrix: `{}`", report.matrix_id).expect("write to string");
+    writeln!(&mut out, "- schema version: `{}`", report.schema_version).expect("write to string");
+    writeln!(&mut out, "- bead: `{}`", report.bead_id).expect("write to string");
+    writeln!(&mut out, "- valid: `{}`", report.valid).expect("write to string");
+    writeln!(&mut out, "- scenarios: `{}`", report.scenario_count).expect("write to string");
+    writeln!(&mut out).expect("write to string");
+    writeln!(&mut out, "## Lifecycle Kinds").expect("write to string");
+    for kind in &report.kinds_seen {
+        writeln!(&mut out, "- `{kind}`").expect("write to string");
+    }
+    if !report.errors.is_empty() {
+        writeln!(&mut out).expect("write to string");
+        writeln!(&mut out, "## Errors").expect("write to string");
+        for error in &report.errors {
+            writeln!(&mut out, "- {error}").expect("write to string");
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +491,31 @@ mod tests {
         let json = serde_json::to_string_pretty(&report)
             .expect("default mounted checkpoint survivor report serializes");
         insta::assert_snapshot!("default_matrix_report_snapshot", json);
+    }
+
+    #[test]
+    fn render_mounted_checkpoint_survivor_markdown_default_matrix() {
+        let report = validate_default_mounted_checkpoint_survivor()
+            .expect("default mounted checkpoint survivor validates");
+        let markdown = render_mounted_checkpoint_survivor_markdown(&report);
+        insta::assert_snapshot!(
+            "render_mounted_checkpoint_survivor_markdown_default_matrix",
+            markdown
+        );
+    }
+
+    #[test]
+    fn fail_on_errors_rejects_invalid_report() {
+        let mut matrix = fixture_matrix();
+        matrix.scenarios[0].artifact_paths.clear();
+        let report = validate_mounted_checkpoint_survivor(&matrix);
+        let err = fail_on_mounted_checkpoint_survivor_errors(&report)
+            .expect_err("invalid report fails closed");
+        assert!(
+            err.to_string()
+                .contains("mounted checkpoint survivor matrix failed")
+        );
+        assert!(err.to_string().contains("artifact_path"));
     }
 
     #[test]

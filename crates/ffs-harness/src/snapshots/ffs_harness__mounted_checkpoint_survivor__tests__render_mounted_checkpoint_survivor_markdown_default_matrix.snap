@@ -1,0 +1,19 @@
+---
+source: crates/ffs-harness/src/mounted_checkpoint_survivor.rs
+expression: markdown
+---
+# Mounted Checkpoint Survivor
+
+- matrix: `frankenfs_mounted_checkpoint_survivor_v1`
+- schema version: `1`
+- bead: `bd-zm0wr`
+- valid: `true`
+- scenarios: `6`
+
+## Lifecycle Kinds
+- `clean_unmount`
+- `forced_unmount`
+- `fsyncdir_boundary`
+- `process_termination_post_fsync`
+- `process_termination_pre_fsync`
+- `reopen_after_write`

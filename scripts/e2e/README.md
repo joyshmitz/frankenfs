@@ -328,6 +328,31 @@ artifact hash fields. Refusal rows remain metadata-only until a permissioned
 repair lane records authoritative artifacts for the same image, ledger, and
 symbol generation.
 
+## Mounted Checkpoint Survivor Contract
+
+The mounted crash/unmount/reopen survivor matrix lives in:
+
+- `tests/mounted-checkpoint-survivor/mounted_checkpoint_survivor.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-mounted-checkpoint-survivor \
+  --matrix tests/mounted-checkpoint-survivor/mounted_checkpoint_survivor.json \
+  --out artifacts/mounted-checkpoint-survivor/report.json \
+  --summary-out artifacts/mounted-checkpoint-survivor/summary.md
+```
+
+This matrix is a support-envelope contract for mounted lifecycle evidence, not
+permission to kill mounted writers or claim crash-recovery parity. It must keep
+clean unmount, pre-fsync termination, post-fsync termination, fsyncdir
+boundary, forced-unmount, and reopen-after-write rows visible, and it must
+preserve checkpoint ids, image hashes, operation traces, crash/unmount points,
+expected survivor sets, recovery commands, partial artifact paths, cleanup
+policies, and unsafe process-control refusals. Rows that require real FUSE
+mounts or process termination remain metadata-only until a permissioned lane
+records authoritative survivor artifacts.
+
 ## Swarm Workload Harness Contract
 
 The 64-core/256GB swarm workload harness plan lives in:

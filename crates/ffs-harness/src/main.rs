@@ -79,6 +79,11 @@ use ffs_harness::{
         render_metamorphic_workload_seed_catalog_markdown,
         validate_metamorphic_workload_seed_catalog,
     },
+    mounted_checkpoint_survivor::{
+        DEFAULT_MOUNTED_CHECKPOINT_SURVIVOR_PATH, fail_on_mounted_checkpoint_survivor_errors,
+        load_mounted_checkpoint_survivor, render_mounted_checkpoint_survivor_markdown,
+        validate_mounted_checkpoint_survivor,
+    },
     mounted_differential_oracle::{
         DEFAULT_MOUNTED_DIFFERENTIAL_REPORT, fail_on_mounted_differential_oracle_errors,
         load_mounted_differential_oracle_report, render_mounted_differential_oracle_markdown,
@@ -547,6 +552,9 @@ fn run() -> Result<()> {
         Some("validate-casefold-corpus") => validate_casefold_corpus_cmd(&args[1..]),
         Some("validate-fault-injection-corpus") => validate_fault_injection_corpus_cmd(&args[1..]),
         Some("validate-repair-corpus") => validate_repair_corpus_cmd(&args[1..]),
+        Some("validate-mounted-checkpoint-survivor") => {
+            validate_mounted_checkpoint_survivor_cmd(&args[1..])
+        }
         Some("validate-metamorphic-workload-seeds") => {
             validate_metamorphic_workload_seed_catalog_cmd(&args[1..])
         }
@@ -966,6 +974,14 @@ struct FaultInjectionCorpusCmdArgs {
 #[derive(Debug)]
 struct RepairCorpusCmdArgs {
     corpus_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
+struct MountedCheckpointSurvivorCmdArgs {
+    matrix_path: String,
     out_path: Option<String>,
     summary_out_path: Option<String>,
     format: ProofBundleFormat,
@@ -1528,6 +1544,89 @@ fn parse_repair_corpus_cmd_args(args: &[String]) -> Result<Option<RepairCorpusCm
 
     Ok(Some(RepairCorpusCmdArgs {
         corpus_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
+fn validate_mounted_checkpoint_survivor_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_mounted_checkpoint_survivor_cmd_args(args)? else {
+        return Ok(());
+    };
+    let matrix = load_mounted_checkpoint_survivor(Path::new(&cmd_args.matrix_path))?;
+    let report = validate_mounted_checkpoint_survivor(&matrix);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_mounted_checkpoint_survivor_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "mounted checkpoint survivor report written: {} valid={} scenarios={}",
+            path, report.valid, report.scenario_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_mounted_checkpoint_survivor_markdown(&report)),
+        )?;
+        println!("mounted checkpoint survivor summary written: {path}");
+    }
+
+    fail_on_mounted_checkpoint_survivor_errors(&report)
+}
+
+fn parse_mounted_checkpoint_survivor_cmd_args(
+    args: &[String],
+) -> Result<Option<MountedCheckpointSurvivorCmdArgs>> {
+    let mut matrix_path = DEFAULT_MOUNTED_CHECKPOINT_SURVIVOR_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--matrix" => {
+                i += 1;
+                args.get(i)
+                    .context("--matrix requires a path")?
+                    .clone_into(&mut matrix_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_mounted_checkpoint_survivor_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-mounted-checkpoint-survivor argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(MountedCheckpointSurvivorCmdArgs {
+        matrix_path,
         out_path,
         summary_out_path,
         format,
@@ -7843,6 +7942,7 @@ fn print_usage_commands() {
     print_casefold_corpus_usage_summary();
     print_fault_injection_corpus_usage_summary();
     print_repair_corpus_usage_summary();
+    print_mounted_checkpoint_survivor_usage_summary();
     print_metamorphic_workload_seed_catalog_usage_summary();
     println!(
         "  ffs-harness validate-mounted-write-error-classes [--catalog FILE] [--matrix FILE] [--out FILE]"
@@ -7975,6 +8075,7 @@ fn print_usage_examples() {
     print_casefold_corpus_example();
     print_fault_injection_corpus_example();
     print_repair_corpus_example();
+    print_mounted_checkpoint_survivor_example();
     print_metamorphic_workload_seed_catalog_example();
     println!(
         "  ffs-harness validate-mounted-write-error-classes --out artifacts/e2e/mounted_write_error_classes.json"
@@ -8291,6 +8392,18 @@ fn print_repair_corpus_usage_summary() {
 fn print_repair_corpus_example() {
     println!(
         "  ffs-harness validate-repair-corpus --corpus tests/repair-corpus/repair_corpus.json --out artifacts/repair-corpus/report.json --summary-out artifacts/repair-corpus/summary.md"
+    );
+}
+
+fn print_mounted_checkpoint_survivor_usage_summary() {
+    println!(
+        "  ffs-harness validate-mounted-checkpoint-survivor [--matrix FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_mounted_checkpoint_survivor_example() {
+    println!(
+        "  ffs-harness validate-mounted-checkpoint-survivor --matrix tests/mounted-checkpoint-survivor/mounted_checkpoint_survivor.json --out artifacts/mounted-checkpoint-survivor/report.json --summary-out artifacts/mounted-checkpoint-survivor/summary.md"
     );
 }
 
@@ -8876,6 +8989,16 @@ fn print_repair_corpus_usage() {
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write validation report");
     println!("  --summary-out FILE                 Write Markdown corpus summary");
+}
+
+fn print_mounted_checkpoint_survivor_usage() {
+    println!("Usage: ffs-harness validate-mounted-checkpoint-survivor [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --matrix FILE                      Read mounted checkpoint survivor JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report");
+    println!("  --summary-out FILE                 Write Markdown survivor summary");
 }
 
 fn print_metamorphic_workload_seed_catalog_usage() {

@@ -524,6 +524,53 @@
       ]
     },
     {
+      "suite_id": "ffs_mounted_checkpoint_survivor",
+      "script": "scripts/e2e/ffs_mounted_checkpoint_survivor_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "mounted_checkpoint_survivor_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_checkpoint_survivor_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "mounted_checkpoint_survivor_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_checkpoint_survivor_validates|outcome=PASS"
+        },
+        {
+          "id": "mounted_checkpoint_survivor_coverage",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_checkpoint_survivor_coverage|outcome=PASS"
+        },
+        {
+          "id": "mounted_checkpoint_survivor_invalid_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_checkpoint_survivor_invalid_rejected|outcome=PASS"
+        },
+        {
+          "id": "mounted_checkpoint_survivor_markdown_docs",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_checkpoint_survivor_markdown_docs|outcome=PASS"
+        },
+        {
+          "id": "mounted_checkpoint_survivor_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_checkpoint_survivor_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_cli_wal_telemetry",
       "script": "scripts/e2e/ffs_cli_wal_telemetry_e2e.sh",
       "required_categories": [
