@@ -249,6 +249,70 @@
       ]
     },
     {
+      "suite_id": "ffs_benchmark_governance",
+      "script": "scripts/e2e/ffs_benchmark_governance_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "governance_comparator_log_fields",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=governance_comparator_log_fields|outcome=PASS"
+        },
+        {
+          "id": "governance_triage_followup_field",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=governance_triage_followup_field|outcome=PASS"
+        },
+        {
+          "id": "governance_followup_references_record",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=governance_followup_references_record|outcome=PASS"
+        },
+        {
+          "id": "governance_hysteresis_log_fields",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=governance_hysteresis_log_fields|outcome=PASS"
+        },
+        {
+          "id": "governance_all_actions_mapped",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=governance_all_actions_mapped|outcome=PASS"
+        },
+        {
+          "id": "governance_context_struct",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=governance_context_struct|outcome=PASS"
+        },
+        {
+          "id": "governance_log_has_followup",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=governance_log_has_followup|outcome=PASS"
+        },
+        {
+          "id": "governance_modules_build",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=governance_modules_build|outcome=PASS"
+        },
+        {
+          "id": "governance_unit_tests_pass",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=governance_unit_tests_pass|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_artifact_schema_fixtures",
       "script": "scripts/e2e/ffs_artifact_schema_fixtures_e2e.sh",
       "required_categories": [
