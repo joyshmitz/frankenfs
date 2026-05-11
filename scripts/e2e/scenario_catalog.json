@@ -622,6 +622,72 @@
       ]
     },
     {
+      "suite_id": "ffs_fuzz_targets",
+      "script": "scripts/e2e/ffs_fuzz_targets_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "fuzz_list_all",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuzz_list_all|outcome=PASS"
+        },
+        {
+          "id": "fuzz_targets_build",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuzz_build|outcome=PASS"
+        },
+        {
+          "id_pattern": "^fuzz_smoke_[a-z0-9_]+$",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"fuzz_smoke_${target}\" \"PASS\""
+        },
+        {
+          "id_pattern": "^fuzz_corpus_[a-z0-9_]+$",
+          "category": "edge",
+          "status": "active",
+          "evidence": "scenario_result \"fuzz_corpus_${target}\" \"PASS\""
+        },
+        {
+          "id_pattern": "^fuzz_dict_[a-z0-9]+$",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"fuzz_dict_${dict%.dict}\" \"PASS\""
+        },
+        {
+          "id": "fuzz_seed_pipeline",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuzz_seed_pipeline|outcome=PASS"
+        },
+        {
+          "id": "fuzz_dict_coverage",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuzz_dict_coverage|outcome=PASS"
+        },
+        {
+          "id": "fuzz_nightly_campaign",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuzz_nightly_campaign|outcome=PASS"
+        },
+        {
+          "id": "fuzz_targets_remote_evidence",
+          "category": "error",
+          "status": "active",
+          "evidence": "RCH_REMOTE_EVIDENCE_MISSING"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_fuse_production",
       "script": "scripts/e2e/ffs_fuse_production.sh",
       "required_categories": [
