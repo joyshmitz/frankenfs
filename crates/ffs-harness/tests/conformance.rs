@@ -5222,6 +5222,9 @@ fn full_conformance_gate_pass() {
     ext4_fallocate_collapse_range_shifts_tail_and_shrinks_file();
     ext4_fallocate_collapse_range_reaching_eof_rejects_without_mutation();
     ext4_fallocate_insert_range_inserts_hole_and_grows_file();
+    ext4_generic_112_preallocation_contract_conforms();
+    btrfs_generic_112_preallocation_contract_conforms();
+    btrfs_fallocate_does_not_prealloc_over_live_data_conforms();
     ext4_e2compr_write_readback_conforms_for_gzip_and_lzo();
     ext4_indirect_block_addressing_conforms();
     ext4_fast_commit_replay_openfs_evidence_conforms();
