@@ -1188,6 +1188,96 @@
       ]
     },
     {
+      "suite_id": "ffs_program_gate",
+      "script": "scripts/e2e/ffs_program_gate_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "pgat_gate_scripts_exist",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=pgat_gate_scripts_exist|outcome=PASS"
+        },
+        {
+          "id": "pgat_workspace_clippy",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=pgat_workspace_clippy|outcome=PASS"
+        },
+        {
+          "id": "pgat_workspace_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=pgat_workspace_tests|outcome=PASS"
+        },
+        {
+          "id": "pgat_mvcc_replay",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=pgat_mvcc_replay|outcome=PASS"
+        },
+        {
+          "id": "pgat_mount_modes",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=pgat_mount_modes|outcome=PASS"
+        },
+        {
+          "id": "pgat_btrfs_hardening",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=pgat_btrfs_hardening|outcome=PASS"
+        },
+        {
+          "id": "pgat_fuzzing_infrastructure",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=pgat_fuzzing|outcome=PASS"
+        },
+        {
+          "id": "pgat_benchmark_governance",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=pgat_benchmarks|outcome=PASS"
+        },
+        {
+          "id": "pgat_oq_decisions",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=pgat_oq_decisions|outcome=PASS"
+        },
+        {
+          "id": "pgat_operator_tooling",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=pgat_operator_tooling|outcome=PASS"
+        },
+        {
+          "id": "pgat_verification_toolchain",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=pgat_verification_toolchain|outcome=PASS"
+        },
+        {
+          "id": "pgat_cli_ergonomics",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=pgat_cli_ergonomics|outcome=PASS"
+        },
+        {
+          "id": "pgat_logging_traceability",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=pgat_logging_traceability|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_taxonomy",
       "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
       "required_categories": [
