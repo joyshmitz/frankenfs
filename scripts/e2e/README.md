@@ -894,6 +894,12 @@ Run the live report with:
 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
 ```
 
+By default, the live report also runs a guarded deterministic fixture self-check
+against `tests/fixtures/tracker_source_hygiene_report.golden.json`, including the
+intentional mismatch guard. Set
+`TRACKER_SOURCE_HYGIENE_DEFAULT_FIXTURE_SELF_CHECK=0` only when debugging the live
+tracker report in isolation.
+
 The E2E wrapper remains the artifact-producing gate. Tooling that only needs the
 Rust queue-state classifier can call:
 

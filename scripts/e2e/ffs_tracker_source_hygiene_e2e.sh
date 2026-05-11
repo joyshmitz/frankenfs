@@ -45,6 +45,10 @@ STALE_IN_PROGRESS_SECONDS="${TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS:-2
 REPORT_NOW_EPOCH="${TRACKER_SOURCE_HYGIENE_NOW_EPOCH:-$(date -u +%s)}"
 EXPECTED_GOLDEN="${TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN:-}"
 EXPECT_GOLDEN_MISMATCH=0
+DEFAULT_FIXTURE_SELF_CHECK=1
+DEFAULT_FIXTURE_ISSUES="$REPO_ROOT/tests/fixtures/tracker_source_hygiene.jsonl"
+DEFAULT_FIXTURE_GOLDEN="$REPO_ROOT/tests/fixtures/tracker_source_hygiene_report.golden.json"
+FIXTURE_SELF_CHECK_LOG="${E2E_LOG_DIR}/tracker_source_hygiene_fixture_self_check.log"
 
 case "${TRACKER_SOURCE_HYGIENE_STRICT:-0}" in
     1|true|TRUE|yes|YES)
@@ -55,6 +59,11 @@ esac
 case "${TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN_MISMATCH:-0}" in
     1|true|TRUE|yes|YES)
         EXPECT_GOLDEN_MISMATCH=1
+        ;;
+esac
+case "${TRACKER_SOURCE_HYGIENE_DEFAULT_FIXTURE_SELF_CHECK:-1}" in
+    0|false|FALSE|no|NO)
+        DEFAULT_FIXTURE_SELF_CHECK=0
         ;;
 esac
 
@@ -568,6 +577,33 @@ if [[ -n "$EXPECTATION_DETAIL" ]]; then
         scenario_result "tracker_source_hygiene_expected_fixture_counts" "PASS" "${EXPECTATION_DETAIL% }"
     else
         scenario_result "tracker_source_hygiene_expected_fixture_counts" "FAIL" "${EXPECTATION_DETAIL% }"
+    fi
+fi
+
+if [[ "$DEFAULT_FIXTURE_SELF_CHECK" -eq 1 \
+    && -z "${TRACKER_SOURCE_HYGIENE_ISSUES:-}" \
+    && -z "$EXPECTED_GOLDEN" \
+    && "$STRICT_MODE" -eq 0 ]]; then
+    e2e_step "Default fixture/golden self-check"
+    if TRACKER_SOURCE_HYGIENE_DEFAULT_FIXTURE_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_ISSUES="$DEFAULT_FIXTURE_ISSUES" \
+        TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=5 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=22 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_READY=2 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED=1 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_IN_PROGRESS=2 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_STALE_IN_PROGRESS=1 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT=20 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT=1 \
+        TRACKER_SOURCE_HYGIENE_NOW_EPOCH=2000000000 \
+        TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS=3600 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN="$DEFAULT_FIXTURE_GOLDEN" \
+        TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN_MISMATCH=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_tracker_source_hygiene_e2e.sh" \
+        >"$FIXTURE_SELF_CHECK_LOG" 2>&1; then
+        scenario_result "tracker_source_hygiene_default_fixture_golden_self_check" "PASS" "log=$FIXTURE_SELF_CHECK_LOG"
+    else
+        scenario_result "tracker_source_hygiene_default_fixture_golden_self_check" "FAIL" "log=$FIXTURE_SELF_CHECK_LOG"
     fi
 fi
 
