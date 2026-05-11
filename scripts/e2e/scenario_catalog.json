@@ -424,6 +424,72 @@
       ]
     },
     {
+      "suite_id": "ffs_crash_promotion",
+      "script": "scripts/e2e/ffs_crash_promotion_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "promo_module_exists",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=promo_module_exists|outcome=PASS"
+        },
+        {
+          "id": "promo_fuzz_targets",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=promo_fuzz_targets|outcome=PASS"
+        },
+        {
+          "id": "promo_corpus_seeds",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=promo_corpus_seeds|outcome=PASS"
+        },
+        {
+          "id": "promo_minimize_script",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=promo_minimize_script|outcome=PASS"
+        },
+        {
+          "id": "promo_promote_script",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=promo_promote_script|outcome=PASS"
+        },
+        {
+          "id": "crash_promotion_dictionaries",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=promo_dictionaries|outcome=PASS"
+        },
+        {
+          "id": "promo_adversarial_corpus",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=promo_adversarial_corpus|outcome=PASS"
+        },
+        {
+          "id": "promo_pipeline_checks",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=promo_pipeline_checks|outcome=PASS"
+        },
+        {
+          "id": "promo_unit_tests_pass",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=promo_unit_tests_pass|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_fuse_production",
       "script": "scripts/e2e/ffs_fuse_production.sh",
       "required_categories": [
