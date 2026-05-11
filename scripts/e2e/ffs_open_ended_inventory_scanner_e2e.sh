@@ -21,17 +21,29 @@ FIXTURE_DIR="$REPO_ROOT/tests/open-ended-inventory"
 POSITIVE_FIXTURE="$FIXTURE_DIR/scanner_fixture_positive.md"
 NEGATIVE_FIXTURE="$FIXTURE_DIR/scanner_fixture_negative.md"
 REAL_INVENTORY="$REPO_ROOT/docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md"
+SOURCE_SCOPE_MANIFEST="$REPO_ROOT/tests/source-scope-manifest/source_scope_manifest.json"
 POSITIVE_REPORT="$E2E_LOG_DIR/open_ended_note_positive.json"
 NEGATIVE_REPORT="$E2E_LOG_DIR/open_ended_note_negative.json"
 REAL_REPORT="$E2E_LOG_DIR/open_ended_note_real_inventory.json"
+SOURCE_SCOPE_REPORT="$E2E_LOG_DIR/source_scope_manifest_real_workspace.json"
 POSITIVE_LOG="$E2E_LOG_DIR/open_ended_note_positive.log"
 NEGATIVE_LOG="$E2E_LOG_DIR/open_ended_note_negative.log"
 REAL_LOG="$E2E_LOG_DIR/open_ended_note_real_inventory.log"
+SOURCE_SCOPE_LOG="$E2E_LOG_DIR/source_scope_manifest_real_workspace.log"
+SOURCE_SCOPE_NEGATIVE_LOG="$E2E_LOG_DIR/source_scope_manifest_missing_tests.log"
 POSITIVE_REPRO_COMMAND="cargo run -p ffs-harness -- open-ended-note-scanner --source tests/open-ended-inventory/scanner_fixture_positive.md"
 NEGATIVE_REPRO_COMMAND="cargo run -p ffs-harness -- open-ended-note-scanner --source tests/open-ended-inventory/scanner_fixture_negative.md"
 REAL_REPRO_COMMAND="cargo run -p ffs-harness -- open-ended-note-scanner --source docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md"
 
-HARNESS_CMD=("${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness --)
+HARNESS_CMD=(env "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" cargo run --quiet -p ffs-harness --)
+
+run_harness() {
+    local log_path="$1"
+    shift
+    RCH_VISIBILITY=summary \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-2}" \
+        e2e_rch_capture "$log_path" "${HARNESS_CMD[@]}" "$@"
+}
 
 extract_note_scan_json() {
     local raw_path="$1"
@@ -62,21 +74,56 @@ else:
 PY
 }
 
+extract_source_scope_json() {
+    local raw_path="$1"
+    local report_path="$2"
+    python3 - "$raw_path" "$report_path" <<'PY'
+import json
+import pathlib
+import sys
+
+raw_path, report_path = sys.argv[1:]
+text = pathlib.Path(raw_path).read_text(encoding="utf-8", errors="replace")
+decoder = json.JSONDecoder()
+for index, char in enumerate(text):
+    if char != "{":
+        continue
+    try:
+        obj, _ = decoder.raw_decode(text[index:])
+    except json.JSONDecodeError:
+        continue
+    if (
+        isinstance(obj, dict)
+        and obj.get("source_manifest_version") == 1
+        and "scanned_sources" in obj
+    ):
+        pathlib.Path(report_path).write_text(
+            json.dumps(obj, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        break
+else:
+    raise SystemExit("source scope manifest JSON report not found")
+PY
+}
+
 e2e_step "Scenario 1: scanner fixtures and CLI wiring are present"
 e2e_assert_file "$POSITIVE_FIXTURE"
 e2e_assert_file "$NEGATIVE_FIXTURE"
 e2e_assert_file "$REAL_INVENTORY"
-if grep -q "open-ended-note-scanner" "$REPO_ROOT/crates/ffs-harness/src/main.rs"; then
-    scenario_result "open_ended_note_scanner_inputs_present" "PASS" "fixtures, inventory doc, and CLI command are present"
+e2e_assert_file "$SOURCE_SCOPE_MANIFEST"
+if grep -q "open-ended-note-scanner" "$REPO_ROOT/crates/ffs-harness/src/main.rs" \
+    && grep -q "validate-source-scope-manifest" "$REPO_ROOT/crates/ffs-harness/src/main.rs"; then
+    scenario_result "open_ended_note_scanner_inputs_present" "PASS" "fixtures, inventory doc, source-scope manifest, and CLI commands are present"
 else
     scenario_result "open_ended_note_scanner_inputs_present" "FAIL" "CLI command missing"
-    e2e_fail "open-ended note scanner command is not wired"
+    e2e_fail "open-ended inventory scanner/source-scope commands are not wired"
 fi
 
 e2e_step "Scenario 2: positive fixture emits a valid classified report"
-if RCH_VISIBILITY=none "${HARNESS_CMD[@]}" open-ended-note-scanner \
+if run_harness "$POSITIVE_LOG" open-ended-note-scanner \
     --source "$POSITIVE_FIXTURE" \
-    --reproduction-command "$POSITIVE_REPRO_COMMAND" >"$POSITIVE_LOG" 2>&1; then
+    --reproduction-command "$POSITIVE_REPRO_COMMAND"; then
     extract_note_scan_json "$POSITIVE_LOG" "$POSITIVE_REPORT"
     scenario_result "open_ended_note_scanner_positive_fixture" "PASS" "positive fixture accepted"
 else
@@ -89,9 +136,9 @@ fi
 
 e2e_step "Scenario 3: negative fixture fails closed but still writes diagnostics"
 set +e
-RCH_VISIBILITY=none "${HARNESS_CMD[@]}" open-ended-note-scanner \
+run_harness "$NEGATIVE_LOG" open-ended-note-scanner \
     --source "$NEGATIVE_FIXTURE" \
-    --reproduction-command "$NEGATIVE_REPRO_COMMAND" >"$NEGATIVE_LOG" 2>&1
+    --reproduction-command "$NEGATIVE_REPRO_COMMAND"
 NEGATIVE_STATUS=$?
 set -e
 if [[ "$NEGATIVE_STATUS" -ne 0 ]] && extract_note_scan_json "$NEGATIVE_LOG" "$NEGATIVE_REPORT"; then
@@ -205,9 +252,9 @@ PY
 scenario_result "open_ended_note_scanner_report_contract" "PASS" "pattern vocabulary, row fields, proof types, and diagnostics verified"
 
 e2e_step "Scenario 5: current inventory document has no unresolved open-ended notes"
-if RCH_VISIBILITY=none "${HARNESS_CMD[@]}" open-ended-note-scanner \
+if run_harness "$REAL_LOG" open-ended-note-scanner \
     --source "$REAL_INVENTORY" \
-    --reproduction-command "$REAL_REPRO_COMMAND" >"$REAL_LOG" 2>&1; then
+    --reproduction-command "$REAL_REPRO_COMMAND"; then
     extract_note_scan_json "$REAL_LOG" "$REAL_REPORT"
     python3 - "$REAL_REPORT" <<'PY'
 import json
@@ -229,6 +276,96 @@ else
     done
     scenario_result "open_ended_note_scanner_real_inventory" "FAIL" "current inventory scan rejected"
     e2e_fail "open-ended note scanner rejected the current inventory"
+fi
+
+e2e_step "Scenario 6: source-scope manifest scans the real workspace"
+if run_harness "$SOURCE_SCOPE_LOG" validate-source-scope-manifest \
+    --manifest "$SOURCE_SCOPE_MANIFEST" \
+    --workspace-root "$REPO_ROOT"; then
+    extract_source_scope_json "$SOURCE_SCOPE_LOG" "$SOURCE_SCOPE_REPORT"
+    python3 - "$SOURCE_SCOPE_REPORT" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+required_families = {
+    "readme_status_docs",
+    "feature_parity_doc",
+    "conformance_docs",
+    "fixture_manifests",
+    "tests",
+    "fuzz_corpus_notes",
+    "harness_scripts",
+    "mounted_lane_docs",
+    "repair_docs",
+    "performance_xfstests_notes",
+}
+if not report["valid"]:
+    raise SystemExit(report["errors"])
+if report["schema_version"] != 1 or report["source_manifest_version"] != 1:
+    raise SystemExit("source-scope schema version drifted")
+if report["source_count"] != len(required_families):
+    raise SystemExit("source-scope report should scan every required family")
+families = {source["source_family"] for source in report["scanned_sources"]}
+if families != required_families:
+    raise SystemExit(f"source-scope families drifted: {sorted(families)}")
+if not report["reproduction_command"].startswith("cargo run -p ffs-harness -- validate-source-scope-manifest"):
+    raise SystemExit("source-scope report did not preserve reproduction command")
+for source in report["scanned_sources"]:
+    for field in [
+        "id",
+        "source_family",
+        "included_globs",
+        "excluded_globs",
+        "inclusion_decision",
+        "file_or_directory_hash",
+        "matched_note_count",
+        "linked_bead_or_artifact_count",
+        "stale_allowance",
+        "output_path",
+        "reproduction_command",
+        "matched_paths",
+    ]:
+        if field not in source:
+            raise SystemExit(f"source-scope row missing {field}")
+    if source["inclusion_decision"] != "included":
+        raise SystemExit(f"unexpected source inclusion decision: {source}")
+    if not source["file_or_directory_hash"].startswith("sha256:"):
+        raise SystemExit(f"source {source['id']} missing aggregate hash")
+    if not source["included_globs"]:
+        raise SystemExit(f"source {source['id']} missing included globs")
+tests_source = next(source for source in report["scanned_sources"] if source["source_family"] == "tests")
+if any(path["source_path"].startswith("vendor/") for path in tests_source["matched_paths"]):
+    raise SystemExit("source-scope tests scan should not include vendored paths")
+PY
+    scenario_result "source_scope_manifest_real_workspace" "PASS" "real workspace source-scope scan is valid"
+else
+    sed -n '1,160p' "$SOURCE_SCOPE_LOG" | while IFS= read -r line; do
+        e2e_log "  $line"
+    done
+    scenario_result "source_scope_manifest_real_workspace" "FAIL" "real workspace source-scope scan rejected"
+    e2e_fail "source-scope manifest rejected the real workspace"
+fi
+
+e2e_step "Scenario 7: source-scope manifest fails closed when a required family is removed"
+set +e
+run_harness "$SOURCE_SCOPE_NEGATIVE_LOG" validate-source-scope-manifest \
+    --manifest "$SOURCE_SCOPE_MANIFEST" \
+    --workspace-root "$REPO_ROOT" \
+    --remove-source-family tests
+SOURCE_SCOPE_NEGATIVE_STATUS=$?
+set -e
+if [[ "$SOURCE_SCOPE_NEGATIVE_STATUS" -ne 0 ]] \
+    && grep -Fq "Remote command finished: exit=1" "$SOURCE_SCOPE_NEGATIVE_LOG" \
+    && grep -Fq 'source scope manifest missing required family `tests`' "$SOURCE_SCOPE_NEGATIVE_LOG"; then
+    scenario_result "source_scope_manifest_missing_family" "PASS" "required source family omission rejected"
+else
+    sed -n '1,160p' "$SOURCE_SCOPE_NEGATIVE_LOG" | while IFS= read -r line; do
+        e2e_log "  $line"
+    done
+    scenario_result "source_scope_manifest_missing_family" "FAIL" "required source family omission did not fail closed"
+    e2e_fail "source-scope manifest accepted a missing required source family"
 fi
 
 e2e_pass
