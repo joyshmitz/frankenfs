@@ -211,6 +211,29 @@ Every new corpus scenario must include:
 
 Unsupported behavior must use `status: "unsupported"` with `unsupported_reason` plus either `follow_up_bead` or `non_goal_reason`. Host-only blockers must use `status: "host_skip"` with `host_skip_reason`; the required capabilities must include a host or FUSE capability so the skip cannot be mistaken for product success. The initial corpus intentionally includes the btrfs DefaultPermissions root-owned image-ownership diagnostic and a generic missing-FUSE host skip so mounted proof consumers keep host limitations separate from FrankenFS failures.
 
+## Btrfs Send/Receive Corpus Contract
+
+The btrfs send/receive parity corpus lives in:
+
+- `tests/btrfs-send-receive-corpus/btrfs_send_receive_corpus.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-btrfs-send-receive-corpus \
+  --corpus tests/btrfs-send-receive-corpus/btrfs_send_receive_corpus.json \
+  --out artifacts/btrfs-send-receive/report.json \
+  --summary-out artifacts/btrfs-send-receive/summary.md
+```
+
+This corpus is a support-envelope contract, not permission to claim full
+send/receive parity. It must keep `parse_only`, `export_only`,
+`receive_only`, `roundtrip_supported`, and `unsupported` rows visible, and it
+must include refusal cases for unsupported stream records and incremental
+parent mismatches. Rows that require loop devices, `btrfs-progs`, long
+campaigns, or host-specific behavior remain metadata-only until a permissioned
+lane records authoritative artifacts.
+
 ## Swarm Workload Harness Contract
 
 The 64-core/256GB swarm workload harness plan lives in:

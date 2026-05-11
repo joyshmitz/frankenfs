@@ -13,7 +13,7 @@
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write as _, fs, path::Path};
 
 pub const BTRFS_SEND_RECEIVE_CORPUS_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_BTRFS_SEND_RECEIVE_CORPUS_PATH: &str =
@@ -136,6 +136,12 @@ pub fn parse_btrfs_send_receive_corpus(text: &str) -> Result<BtrfsSendReceiveCor
         .map_err(|err| anyhow::anyhow!("failed to parse btrfs send/receive corpus JSON: {err}"))
 }
 
+pub fn load_btrfs_send_receive_corpus(path: &Path) -> Result<BtrfsSendReceiveCorpus> {
+    let text = fs::read_to_string(path)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
+    parse_btrfs_send_receive_corpus(&text)
+}
+
 pub fn validate_default_btrfs_send_receive_corpus() -> Result<BtrfsSendReceiveCorpusReport> {
     let corpus = parse_btrfs_send_receive_corpus(DEFAULT_BTRFS_SEND_RECEIVE_CORPUS_JSON)?;
     let report = validate_btrfs_send_receive_corpus(&corpus);
@@ -147,6 +153,48 @@ pub fn validate_default_btrfs_send_receive_corpus() -> Result<BtrfsSendReceiveCo
         );
     }
     Ok(report)
+}
+
+pub fn fail_on_btrfs_send_receive_corpus_errors(
+    report: &BtrfsSendReceiveCorpusReport,
+) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    bail!(
+        "btrfs send/receive corpus validation failed: {}",
+        report.errors.join("; ")
+    )
+}
+
+#[must_use]
+pub fn render_btrfs_send_receive_corpus_markdown(report: &BtrfsSendReceiveCorpusReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Btrfs Send/Receive Corpus");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "- corpus: `{}`", report.corpus_id);
+    let _ = writeln!(out, "- schema version: `{}`", report.schema_version);
+    let _ = writeln!(out, "- bead: `{}`", report.bead_id);
+    let _ = writeln!(out, "- valid: `{}`", report.valid);
+    let _ = writeln!(out, "- cases: `{}`", report.case_count);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Supported Subsets");
+    for subset in &report.supported_subsets {
+        let _ = writeln!(out, "- `{subset}`");
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Refusal Kinds");
+    for refusal in &report.refusal_kinds {
+        let _ = writeln!(out, "- `{refusal}`");
+    }
+    if !report.errors.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "## Errors");
+        for error in &report.errors {
+            let _ = writeln!(out, "- {error}");
+        }
+    }
+    out
 }
 
 #[must_use]
@@ -520,6 +568,33 @@ mod tests {
                 "missing required refusal {refusal}"
             );
         }
+    }
+
+    #[test]
+    fn render_markdown_summarizes_default_corpus() {
+        let report = validate_default_btrfs_send_receive_corpus()
+            .expect("default btrfs send/receive corpus validates");
+        let markdown = render_btrfs_send_receive_corpus_markdown(&report);
+        assert!(markdown.contains("# Btrfs Send/Receive Corpus"));
+        assert!(markdown.contains("`roundtrip_supported`"));
+        assert!(markdown.contains("`refused_unsupported_record`"));
+        insta::assert_snapshot!(
+            "render_btrfs_send_receive_corpus_markdown_default_corpus",
+            markdown
+        );
+    }
+
+    #[test]
+    fn fail_on_errors_rejects_invalid_report() {
+        let mut corpus = fixture_corpus();
+        corpus.cases.clear();
+        let report = validate_btrfs_send_receive_corpus(&corpus);
+        let err = fail_on_btrfs_send_receive_corpus_errors(&report)
+            .expect_err("invalid report should fail");
+        assert!(
+            err.to_string()
+                .contains("btrfs send/receive corpus validation failed")
+        );
     }
 
     #[test]

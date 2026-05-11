@@ -1,0 +1,22 @@
+---
+source: crates/ffs-harness/src/btrfs_send_receive_corpus.rs
+expression: markdown
+---
+# Btrfs Send/Receive Corpus
+
+- corpus: `frankenfs_btrfs_send_recv_v1`
+- schema version: `1`
+- bead: `bd-naww5`
+- valid: `true`
+- cases: `6`
+
+## Supported Subsets
+- `export_only`
+- `parse_only`
+- `receive_only`
+- `roundtrip_supported`
+- `unsupported`
+
+## Refusal Kinds
+- `refused_incremental_parent_mismatch`
+- `refused_unsupported_record`
