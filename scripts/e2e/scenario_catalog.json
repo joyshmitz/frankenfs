@@ -393,6 +393,71 @@
       ]
     },
     {
+      "suite_id": "ffs_evidence_presets",
+      "script": "scripts/e2e/ffs_evidence_presets_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "evidence_presets_all_defined",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_presets_all_defined|outcome=PASS"
+        },
+        {
+          "id": "evidence_summary_struct_fields",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_summary_struct_fields|outcome=PASS"
+        },
+        {
+          "id": "evidence_cli_preset_flag",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_cli_preset_flag|outcome=PASS"
+        },
+        {
+          "id": "evidence_cli_summary_flag",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_cli_summary_flag|outcome=PASS"
+        },
+        {
+          "id": "evidence_unit_tests_pass",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_unit_tests_pass|outcome=PASS"
+        },
+        {
+          "id": "evidence_structured_logging",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_structured_logging|outcome=PASS"
+        },
+        {
+          "id": "evidence_preset_rejection_logging",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_preset_rejection_logging|outcome=PASS"
+        },
+        {
+          "id": "evidence_preset_event_type_exclusive",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_preset_event_type_exclusive|outcome=PASS"
+        },
+        {
+          "id": "evidence_logging_correlation_fields",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_logging_correlation_fields|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_performance_manifest",
       "script": "scripts/e2e/ffs_performance_manifest_e2e.sh",
       "required_categories": [
