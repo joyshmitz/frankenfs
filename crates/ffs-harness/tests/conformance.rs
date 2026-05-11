@@ -5252,6 +5252,7 @@ fn full_conformance_gate_pass() {
     btrfs_roottree_leaf_fixture_conforms();
     btrfs_devitem_fixture_conforms();
     ext4_mmp_block_fixture_conforms();
+    ext4_active_mmp_write_open_is_rejected();
 
     // 2) Policy docs and checksum manifests are bidirectionally complete.
     root_conformance_discrepancies_follow_policy();
