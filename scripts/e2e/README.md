@@ -404,6 +404,30 @@ non-goal rationale for every entry. Rows with unrecoverable data loss must
 block release, while host-capability skips and experimental caveats must not
 masquerade as product failures.
 
+## Inventory Closeout Gate Contract
+
+The inventory closeout gate lives in:
+
+- `tests/inventory-closeout-gate/inventory_closeout_gate.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-inventory-closeout-gate \
+  --gate tests/inventory-closeout-gate/inventory_closeout_gate.json \
+  --out artifacts/inventory-closeout/gate_report.json \
+  --summary-out artifacts/inventory-closeout/gate_summary.md
+```
+
+This gate is a closeout contract for stale fuzz/conformance inventory notes,
+not proof that any mounted, xfstests, repair, fuzz, or performance campaign has
+run. It must keep parser, mounted-path, repair, fuzz, golden, xfstests,
+performance, and README/feature-parity risk surfaces visible. Every row must
+carry source provenance, a snippet hash, a supported state, and the state-owned
+evidence needed to prevent vague high-risk notes from being silently treated as
+done. Stale-allowed rows require a future expiry, owner, user-risk rationale,
+and linked bead or non-goal artifact; duplicates must point at another row.
+
 ## Swarm Workload Harness Contract
 
 The 64-core/256GB swarm workload harness plan lives in:

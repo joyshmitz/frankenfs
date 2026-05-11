@@ -73,6 +73,11 @@ use ffs_harness::{
         render_invariant_oracle_markdown, validate_invariant_oracle_report,
         validate_invariant_trace,
     },
+    inventory_closeout_gate::{
+        DEFAULT_INVENTORY_CLOSEOUT_GATE_PATH, fail_on_inventory_closeout_gate_errors,
+        load_inventory_closeout_gate, render_inventory_closeout_gate_markdown,
+        validate_inventory_closeout_gate,
+    },
     low_privilege_demo_sandbox::{
         DEFAULT_LOW_PRIVILEGE_DEMO_SANDBOX_PATH, fail_on_low_privilege_demo_sandbox_errors,
         load_low_privilege_demo_sandbox, render_low_privilege_demo_sandbox_markdown,
@@ -544,6 +549,9 @@ fn run() -> Result<()> {
         Some("validate-repair-writeback-serialization") => {
             validate_repair_writeback_serialization_cmd(&args[1..])
         }
+        Some("validate-inventory-closeout-gate") => {
+            validate_inventory_closeout_gate_cmd(&args[1..])
+        }
         Some("validate-remediation-catalog") => validate_remediation_catalog_cmd(&args[1..]),
         Some("validate-remediation-severity-gate") => {
             validate_remediation_severity_gate_cmd(&args[1..])
@@ -990,6 +998,14 @@ struct FaultInjectionCorpusCmdArgs {
 #[derive(Debug)]
 struct RepairCorpusCmdArgs {
     corpus_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
+struct InventoryCloseoutGateCmdArgs {
+    gate_path: String,
     out_path: Option<String>,
     summary_out_path: Option<String>,
     format: ProofBundleFormat,
@@ -7559,6 +7575,89 @@ fn validate_mounted_repair_mutation_boundary_cmd(args: &[String]) -> Result<()> 
     Ok(())
 }
 
+fn validate_inventory_closeout_gate_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_inventory_closeout_gate_cmd_args(args)? else {
+        return Ok(());
+    };
+    let gate = load_inventory_closeout_gate(Path::new(&cmd_args.gate_path))?;
+    let report = validate_inventory_closeout_gate(&gate);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_inventory_closeout_gate_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "inventory closeout gate report written: {} valid={} rows={}",
+            path, report.valid, report.total_rows
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_inventory_closeout_gate_markdown(&report)),
+        )?;
+        println!("inventory closeout gate summary written: {path}");
+    }
+
+    fail_on_inventory_closeout_gate_errors(&report)
+}
+
+fn parse_inventory_closeout_gate_cmd_args(
+    args: &[String],
+) -> Result<Option<InventoryCloseoutGateCmdArgs>> {
+    let mut gate_path = DEFAULT_INVENTORY_CLOSEOUT_GATE_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--gate" => {
+                i += 1;
+                args.get(i)
+                    .context("--gate requires a path")?
+                    .clone_into(&mut gate_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_inventory_closeout_gate_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-inventory-closeout-gate argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(InventoryCloseoutGateCmdArgs {
+        gate_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
 fn validate_remediation_catalog_cmd(args: &[String]) -> Result<()> {
     let mut catalog_path = DEFAULT_REMEDIATION_CATALOG_PATH.to_owned();
     let mut out_path: Option<String> = None;
@@ -8130,6 +8229,7 @@ fn print_usage_commands() {
     print_repair_confidence_lab_usage_summary();
     print_operator_recovery_drill_usage_summary();
     print_repair_writeback_serialization_usage_summary();
+    print_inventory_closeout_gate_usage_summary();
     println!("  ffs-harness validate-remediation-catalog [--catalog FILE] [--out FILE]");
     print_remediation_severity_gate_usage_summary();
     print_writeback_cache_audit_usage_summary();
@@ -8266,6 +8366,7 @@ fn print_usage_examples() {
     println!(
         "  ffs-harness validate-remediation-catalog --out artifacts/remediation/catalog_report.json"
     );
+    print_inventory_closeout_gate_example();
     print_remediation_severity_gate_example();
     print_writeback_cache_audit_example();
     print_writeback_cache_ordering_example();
@@ -9275,6 +9376,28 @@ fn print_remediation_catalog_usage() {
     println!("Options:");
     println!("  --catalog FILE                     Read remediation catalog JSON");
     println!("  --out FILE                         Write JSON validation report to FILE");
+}
+
+fn print_inventory_closeout_gate_usage_summary() {
+    println!(
+        "  ffs-harness validate-inventory-closeout-gate [--gate FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_inventory_closeout_gate_example() {
+    println!(
+        "  ffs-harness validate-inventory-closeout-gate --gate tests/inventory-closeout-gate/inventory_closeout_gate.json --out artifacts/inventory-closeout/gate_report.json --summary-out artifacts/inventory-closeout/gate_summary.md"
+    );
+}
+
+fn print_inventory_closeout_gate_usage() {
+    println!("Usage: ffs-harness validate-inventory-closeout-gate [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --gate FILE                        Read inventory closeout gate JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report");
+    println!("  --summary-out FILE                 Write Markdown inventory summary");
 }
 
 fn print_remediation_severity_gate_usage_summary() {

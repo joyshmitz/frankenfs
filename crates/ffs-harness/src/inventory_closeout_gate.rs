@@ -12,7 +12,7 @@
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fs, path::Path};
 
 pub const INVENTORY_CLOSEOUT_GATE_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_INVENTORY_CLOSEOUT_GATE_PATH: &str =
@@ -91,17 +91,32 @@ pub fn parse_inventory_closeout_gate(text: &str) -> Result<InventoryCloseoutGate
         .map_err(|err| anyhow::anyhow!("failed to parse inventory closeout gate JSON: {err}"))
 }
 
+pub fn load_inventory_closeout_gate(path: &Path) -> Result<InventoryCloseoutGate> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to read inventory closeout gate `{}`: {err}",
+            path.display()
+        )
+    })?;
+    parse_inventory_closeout_gate(&text)
+}
+
 pub fn validate_default_inventory_closeout_gate() -> Result<InventoryCloseoutReport> {
     let gate = parse_inventory_closeout_gate(DEFAULT_INVENTORY_CLOSEOUT_GATE_JSON)?;
     let report = validate_inventory_closeout_gate(&gate);
-    if !report.valid {
-        bail!(
-            "inventory closeout gate failed with {} error(s): {}",
-            report.errors.len(),
-            report.errors.join("; ")
-        );
-    }
+    fail_on_inventory_closeout_gate_errors(&report)?;
     Ok(report)
+}
+
+pub fn fail_on_inventory_closeout_gate_errors(report: &InventoryCloseoutReport) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    bail!(
+        "inventory closeout gate failed with {} error(s): {}",
+        report.errors.len(),
+        report.errors.join("; ")
+    );
 }
 
 #[must_use]
@@ -375,6 +390,51 @@ fn validate_high_risk_coverage(high_risk_surfaces: &BTreeSet<String>, errors: &m
             ));
         }
     }
+}
+
+#[must_use]
+pub fn render_inventory_closeout_gate_markdown(report: &InventoryCloseoutReport) -> String {
+    let mut out = String::new();
+    out.push_str("# Inventory Closeout Gate\n\n");
+    out.push_str("- gate: `");
+    out.push_str(&report.gate_id);
+    out.push_str("`\n");
+    out.push_str("- schema version: `");
+    out.push_str(&report.schema_version.to_string());
+    out.push_str("`\n");
+    out.push_str("- bead: `");
+    out.push_str(&report.bead_id);
+    out.push_str("`\n");
+    out.push_str("- valid: `");
+    out.push_str(if report.valid { "true" } else { "false" });
+    out.push_str("`\n");
+    out.push_str("- rows: `");
+    out.push_str(&report.total_rows.to_string());
+    out.push_str("`\n");
+    out.push_str("- completed rows: `");
+    out.push_str(&report.completed_rows.to_string());
+    out.push_str("`\n");
+    out.push_str("- stale-allowed rows: `");
+    out.push_str(&report.stale_allowed_rows.to_string());
+    out.push_str("`\n");
+    out.push_str("- false-positive rows: `");
+    out.push_str(&report.false_positive_rows.to_string());
+    out.push_str("`\n\n");
+    out.push_str("## High-Risk Surfaces\n");
+    for surface in &report.high_risk_surfaces_seen {
+        out.push_str("- `");
+        out.push_str(surface);
+        out.push_str("`\n");
+    }
+    if !report.errors.is_empty() {
+        out.push_str("\n## Errors\n");
+        for error in &report.errors {
+            out.push_str("- ");
+            out.push_str(error);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -698,5 +758,27 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("now_unix must be positive"))
         );
+    }
+
+    #[test]
+    fn render_inventory_closeout_gate_markdown_default_gate() {
+        let report = validate_default_inventory_closeout_gate()
+            .expect("default inventory closeout gate validates");
+        let markdown = render_inventory_closeout_gate_markdown(&report);
+        insta::assert_snapshot!(
+            "render_inventory_closeout_gate_markdown_default_gate",
+            markdown
+        );
+    }
+
+    #[test]
+    fn fail_on_errors_rejects_invalid_report() {
+        let mut gate = fixture_gate();
+        gate.rows[0].risk_surface = "telepathy".to_owned();
+        let report = validate_inventory_closeout_gate(&gate);
+        let err = fail_on_inventory_closeout_gate_errors(&report)
+            .expect_err("invalid report fails closed");
+        assert!(err.to_string().contains("inventory closeout gate failed"));
+        assert!(err.to_string().contains("unsupported risk_surface"));
     }
 }
