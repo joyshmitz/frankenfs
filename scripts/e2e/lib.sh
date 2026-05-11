@@ -297,6 +297,25 @@ e2e_validate_scenario_catalog() {
         e2e_log "Scenario catalog suite validated: $suite_id (active_scenarios=$active_count)"
     done < <(jq -r '.suites[] | [.suite_id, .script] | @tsv' "$catalog_path")
 
+    local missing_gate_minimum_identity
+    missing_gate_minimum_identity="$(
+        jq -r '
+            (.gate_minimums // [])
+            | to_entries[]
+            | select(((.value.gate_id // "") == "") or (((.value.required_categories // []) | length) == 0))
+            | "index=\(.key) gate_id=\(.value.gate_id // "<missing>") required_category_count=\((.value.required_categories // []) | length)"
+        ' "$catalog_path"
+    )"
+    if [[ -n "$missing_gate_minimum_identity" ]]; then
+        e2e_fail "Scenario catalog gate minimum missing gate_id or required_categories: $missing_gate_minimum_identity"
+    fi
+
+    local duplicate_gate_ids
+    duplicate_gate_ids="$(jq -r '.gate_minimums[]?.gate_id // empty' "$catalog_path" | sort | uniq -d || true)"
+    if [[ -n "$duplicate_gate_ids" ]]; then
+        e2e_fail "Duplicate gate minimum IDs in scenario catalog: $duplicate_gate_ids"
+    fi
+
     while IFS=$'\t' read -r gate_id category; do
         [[ -n "$gate_id" && -n "$category" ]] || continue
         if ! jq -e --arg category "$category" '.taxonomy | index($category)' "$catalog_path" >/dev/null; then
