@@ -78,7 +78,10 @@ pub struct TrackerSourceHygieneReport {
     pub open_total: usize,
     pub local_open: usize,
     pub foreign_open: usize,
+    pub foreign_in_progress: usize,
     pub excluded_foreign_open_count: usize,
+    pub excluded_foreign_in_progress_count: usize,
+    pub excluded_foreign_stale_in_progress_count: usize,
     pub excluded_foreign_by_prefix: Vec<TrackerPrefixCount>,
     pub foreign_group_summaries: Vec<TrackerForeignGroupSummary>,
     pub local_open_ids: Vec<String>,
@@ -90,6 +93,8 @@ pub struct TrackerSourceHygieneReport {
     pub local_in_progress_rows: Vec<TrackerIssueProgressRow>,
     pub stale_in_progress_rows: Vec<TrackerIssueProgressRow>,
     pub foreign_open_samples: Vec<TrackerIssueSample>,
+    pub foreign_in_progress_samples: Vec<TrackerIssueProgressRow>,
+    pub foreign_stale_in_progress_samples: Vec<TrackerIssueProgressRow>,
     pub reproduction_commands: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -195,6 +200,8 @@ pub struct TrackerSourceAwareQueueState {
     pub local_in_progress_count: usize,
     pub stale_in_progress_count: usize,
     pub excluded_foreign_open_count: usize,
+    pub excluded_foreign_in_progress_count: usize,
+    pub excluded_foreign_stale_in_progress_count: usize,
     pub claimable_ids: Vec<String>,
     pub local_epic_ids: Vec<String>,
     pub blocked_local_ids: Vec<String>,
@@ -435,6 +442,19 @@ fn build_report(
         .iter()
         .filter(|issue| !issue.is_local() && issue.is_open())
         .count();
+    let mut foreign_in_progress_rows: Vec<TrackerIssueProgressRow> = wrapped
+        .iter()
+        .filter(|issue| !issue.is_local() && issue.is_in_progress())
+        .map(|issue| issue.progress_row(&statuses, config))
+        .collect();
+    sort_progress_rows(&mut foreign_in_progress_rows);
+    let foreign_in_progress = foreign_in_progress_rows.len();
+    let foreign_stale_in_progress_rows: Vec<TrackerIssueProgressRow> = foreign_in_progress_rows
+        .iter()
+        .filter(|row| row.stale)
+        .cloned()
+        .collect();
+    let foreign_stale_in_progress = foreign_stale_in_progress_rows.len();
 
     let mut local_open_rows: Vec<TrackerIssueWorkRow> = wrapped
         .iter()
@@ -492,11 +512,7 @@ fn build_report(
         .filter(|issue| issue.is_local() && issue.is_in_progress())
         .map(|issue| issue.progress_row(&statuses, config))
         .collect();
-    local_in_progress_rows.sort_by(|left, right| {
-        left.priority
-            .cmp(&right.priority)
-            .then_with(|| left.id.cmp(&right.id))
-    });
+    sort_progress_rows(&mut local_in_progress_rows);
 
     let stale_in_progress_rows: Vec<TrackerIssueProgressRow> = local_in_progress_rows
         .iter()
@@ -511,6 +527,10 @@ fn build_report(
         .collect();
     foreign_open_samples.sort_by(|left, right| left.id.cmp(&right.id));
     foreign_open_samples.truncate(20);
+    let mut foreign_in_progress_samples = foreign_in_progress_rows.clone();
+    foreign_in_progress_samples.truncate(20);
+    let mut foreign_stale_in_progress_samples = foreign_stale_in_progress_rows;
+    foreign_stale_in_progress_samples.truncate(20);
 
     let queue_state = build_queue_state(
         &source_aware_ready_rows,
@@ -520,6 +540,8 @@ fn build_report(
         &local_in_progress_rows,
         &stale_in_progress_rows,
         foreign_open,
+        foreign_in_progress,
+        foreign_stale_in_progress,
     );
 
     TrackerSourceHygieneReport {
@@ -547,7 +569,10 @@ fn build_report(
         open_total,
         local_open,
         foreign_open,
+        foreign_in_progress,
         excluded_foreign_open_count: foreign_open,
+        excluded_foreign_in_progress_count: foreign_in_progress,
+        excluded_foreign_stale_in_progress_count: foreign_stale_in_progress,
         excluded_foreign_by_prefix: excluded_foreign_by_prefix(&wrapped),
         foreign_group_summaries: foreign_group_summaries(&wrapped),
         local_open_ids: sorted_ids(
@@ -563,6 +588,8 @@ fn build_report(
         local_in_progress_rows,
         stale_in_progress_rows,
         foreign_open_samples,
+        foreign_in_progress_samples,
+        foreign_stale_in_progress_samples,
         reproduction_commands: reproduction_commands(),
         errors: Vec::new(),
     }
@@ -577,6 +604,8 @@ fn build_queue_state(
     in_progress_rows: &[TrackerIssueProgressRow],
     stale_rows: &[TrackerIssueProgressRow],
     foreign_open: usize,
+    foreign_in_progress: usize,
+    foreign_stale_in_progress: usize,
 ) -> TrackerSourceAwareQueueState {
     let verdict = if !ready_rows.is_empty() {
         "ready"
@@ -608,6 +637,8 @@ fn build_queue_state(
         local_in_progress_count: in_progress_rows.len(),
         stale_in_progress_count: stale_rows.len(),
         excluded_foreign_open_count: foreign_open,
+        excluded_foreign_in_progress_count: foreign_in_progress,
+        excluded_foreign_stale_in_progress_count: foreign_stale_in_progress,
         claimable_ids: ready_rows.iter().map(|row| row.id.clone()).collect(),
         local_epic_ids: epic_rows.iter().map(|row| row.id.clone()).collect(),
         blocked_local_ids: blocked_rows.iter().map(|row| row.id.clone()).collect(),
@@ -785,6 +816,14 @@ fn sorted_ids<'a>(issues: impl Iterator<Item = &'a TrackerIssue<'a>>) -> Vec<Str
 }
 
 fn sort_work_rows(rows: &mut [TrackerIssueWorkRow]) {
+    rows.sort_by(|left, right| {
+        left.priority
+            .cmp(&right.priority)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn sort_progress_rows(rows: &mut [TrackerIssueProgressRow]) {
     rows.sort_by(|left, right| {
         left.priority
             .cmp(&right.priority)
@@ -980,6 +1019,128 @@ mod tests {
             .collect()
     }
 
+    fn assert_golden_core_counts(
+        report: &TrackerSourceHygieneReport,
+        golden: &Value,
+    ) -> Result<(), String> {
+        for (actual, field) in [
+            (report.local_open, "local_open"),
+            (report.foreign_open, "foreign_open"),
+            (report.foreign_in_progress, "foreign_in_progress"),
+            (
+                report.excluded_foreign_open_count,
+                "excluded_foreign_open_count",
+            ),
+            (
+                report.excluded_foreign_in_progress_count,
+                "excluded_foreign_in_progress_count",
+            ),
+            (
+                report.excluded_foreign_stale_in_progress_count,
+                "excluded_foreign_stale_in_progress_count",
+            ),
+        ] {
+            assert_eq!(actual, golden_usize(golden, field)?, "{field}");
+        }
+        for (actual, field) in [
+            (
+                report.source_aware_ready_rows.len(),
+                "source_aware_ready_rows",
+            ),
+            (report.permission_gated_rows.len(), "permission_gated_rows"),
+            (report.blocked_local_rows.len(), "blocked_local_rows"),
+            (
+                report.local_in_progress_rows.len(),
+                "local_in_progress_rows",
+            ),
+            (
+                report.stale_in_progress_rows.len(),
+                "stale_in_progress_rows",
+            ),
+            (
+                report.foreign_in_progress_samples.len(),
+                "foreign_in_progress_samples",
+            ),
+            (
+                report.foreign_stale_in_progress_samples.len(),
+                "foreign_stale_in_progress_samples",
+            ),
+        ] {
+            assert_eq!(actual, golden_array_len(golden, field)?, "{field}");
+        }
+        Ok(())
+    }
+
+    fn assert_golden_queue_state(
+        report: &TrackerSourceHygieneReport,
+        golden_queue: &Value,
+    ) -> Result<(), String> {
+        assert_eq!(
+            report.source_aware_queue_state.verdict,
+            golden_queue
+                .get("verdict")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "golden verdict must be a string".to_owned())?
+        );
+        for (actual, field) in [
+            (
+                &report.source_aware_queue_state.claimable_ids,
+                "claimable_ids",
+            ),
+            (
+                &report.source_aware_queue_state.permission_gated_ids,
+                "permission_gated_ids",
+            ),
+            (
+                &report.source_aware_queue_state.blocked_local_ids,
+                "blocked_local_ids",
+            ),
+            (
+                &report.source_aware_queue_state.local_in_progress_ids,
+                "local_in_progress_ids",
+            ),
+            (
+                &report.source_aware_queue_state.stale_in_progress_ids,
+                "stale_in_progress_ids",
+            ),
+        ] {
+            let expected = golden_string_array(golden_field(golden_queue, field)?)?;
+            assert_eq!(actual, &expected, "{field}");
+        }
+        for (actual, field) in [
+            (
+                report
+                    .source_aware_queue_state
+                    .excluded_foreign_in_progress_count,
+                "excluded_foreign_in_progress_count",
+            ),
+            (
+                report
+                    .source_aware_queue_state
+                    .excluded_foreign_stale_in_progress_count,
+                "excluded_foreign_stale_in_progress_count",
+            ),
+        ] {
+            assert_eq!(actual, golden_usize(golden_queue, field)?, "{field}");
+        }
+        Ok(())
+    }
+
+    fn assert_golden_foreign_groups(
+        report: &TrackerSourceHygieneReport,
+        golden: &Value,
+    ) -> Result<(), String> {
+        let golden_prefixes: Vec<TrackerPrefixCount> =
+            serde_json::from_value(golden_field(golden, "excluded_foreign_by_prefix")?.clone())
+                .map_err(|err| err.to_string())?;
+        let golden_groups: Vec<TrackerForeignGroupSummary> =
+            serde_json::from_value(golden_field(golden, "foreign_group_summaries")?.clone())
+                .map_err(|err| err.to_string())?;
+        assert_eq!(report.excluded_foreign_by_prefix, golden_prefixes);
+        assert_eq!(report.foreign_group_summaries, golden_groups);
+        Ok(())
+    }
+
     #[test]
     fn committed_fixture_matches_shell_golden_core_queue_state() -> Result<(), String> {
         let report = analyze_tracker_source_hygiene(COMMITTED_FIXTURE_ISSUES, &config())
@@ -988,68 +1149,9 @@ mod tests {
             serde_json::from_str(COMMITTED_FIXTURE_GOLDEN).map_err(|err| err.to_string())?;
         let golden_queue = golden_field(&golden, "source_aware_queue_state")?;
 
-        assert_eq!(report.local_open, golden_usize(&golden, "local_open")?);
-        assert_eq!(report.foreign_open, golden_usize(&golden, "foreign_open")?);
-        assert_eq!(
-            report.excluded_foreign_open_count,
-            golden_usize(&golden, "excluded_foreign_open_count")?
-        );
-        assert_eq!(
-            report.source_aware_ready_rows.len(),
-            golden_array_len(&golden, "source_aware_ready_rows")?
-        );
-        assert_eq!(
-            report.permission_gated_rows.len(),
-            golden_array_len(&golden, "permission_gated_rows")?
-        );
-        assert_eq!(
-            report.blocked_local_rows.len(),
-            golden_array_len(&golden, "blocked_local_rows")?
-        );
-        assert_eq!(
-            report.local_in_progress_rows.len(),
-            golden_array_len(&golden, "local_in_progress_rows")?
-        );
-        assert_eq!(
-            report.stale_in_progress_rows.len(),
-            golden_array_len(&golden, "stale_in_progress_rows")?
-        );
-        assert_eq!(
-            report.source_aware_queue_state.verdict,
-            golden_queue
-                .get("verdict")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "golden verdict must be a string".to_owned())?
-        );
-        assert_eq!(
-            report.source_aware_queue_state.claimable_ids,
-            golden_string_array(golden_field(golden_queue, "claimable_ids")?)?
-        );
-        assert_eq!(
-            report.source_aware_queue_state.permission_gated_ids,
-            golden_string_array(golden_field(golden_queue, "permission_gated_ids")?)?
-        );
-        assert_eq!(
-            report.source_aware_queue_state.blocked_local_ids,
-            golden_string_array(golden_field(golden_queue, "blocked_local_ids")?)?
-        );
-        assert_eq!(
-            report.source_aware_queue_state.local_in_progress_ids,
-            golden_string_array(golden_field(golden_queue, "local_in_progress_ids")?)?
-        );
-        assert_eq!(
-            report.source_aware_queue_state.stale_in_progress_ids,
-            golden_string_array(golden_field(golden_queue, "stale_in_progress_ids")?)?
-        );
-
-        let golden_prefixes: Vec<TrackerPrefixCount> =
-            serde_json::from_value(golden_field(&golden, "excluded_foreign_by_prefix")?.clone())
-                .map_err(|err| err.to_string())?;
-        let golden_groups: Vec<TrackerForeignGroupSummary> =
-            serde_json::from_value(golden_field(&golden, "foreign_group_summaries")?.clone())
-                .map_err(|err| err.to_string())?;
-        assert_eq!(report.excluded_foreign_by_prefix, golden_prefixes);
-        assert_eq!(report.foreign_group_summaries, golden_groups);
+        assert_golden_core_counts(&report, &golden)?;
+        assert_golden_queue_state(&report, golden_queue)?;
+        assert_golden_foreign_groups(&report, &golden)?;
         let permission_gate = report
             .permission_gated_rows
             .first()
@@ -1100,6 +1202,13 @@ mod tests {
                 "priority": 0
             })),
             line(&serde_json::json!({
+                "id": "frankenscipy-foreign-stale",
+                "title": "stale foreign claim",
+                "status": "in_progress",
+                "priority": 1,
+                "updated_at": "2033-05-18T02:00:00Z"
+            })),
+            line(&serde_json::json!({
                 "id": "bd-epic",
                 "title": "open epic",
                 "issue_type": "epic",
@@ -1113,6 +1222,13 @@ mod tests {
         assert_eq!(report.status, "pass");
         assert_eq!(report.local_open, 5);
         assert_eq!(report.foreign_open, 1);
+        assert_eq!(report.foreign_in_progress, 1);
+        assert_eq!(report.excluded_foreign_in_progress_count, 1);
+        assert_eq!(report.excluded_foreign_stale_in_progress_count, 1);
+        assert_eq!(
+            report.foreign_stale_in_progress_samples[0].id,
+            "frankenscipy-foreign-stale"
+        );
         assert_eq!(
             report
                 .source_aware_ready_rows

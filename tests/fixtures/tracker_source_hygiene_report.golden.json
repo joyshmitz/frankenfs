@@ -28,7 +28,9 @@
       "prefix": "br-r37"
     }
   ],
+  "excluded_foreign_in_progress_count": 2,
   "excluded_foreign_open_count": 22,
+  "excluded_foreign_stale_in_progress_count": 1,
   "foreign_group_summaries": [
     {
       "count": 22,
@@ -53,6 +55,41 @@
         "Fixture foreign open row 02",
         "Fixture foreign open row 03"
       ]
+    }
+  ],
+  "foreign_in_progress": 2,
+  "foreign_in_progress_samples": [
+    {
+      "age_seconds": 800,
+      "assignee": null,
+      "blocked_by": [],
+      "created_at": "2033-05-18T03:00:00Z",
+      "id": "frankenscipy-foreign-in-progress-fresh",
+      "issue_type": "feature",
+      "last_activity_epoch": 1999999200,
+      "priority": 2,
+      "source_repo": ".",
+      "stale": false,
+      "stale_after_seconds": 3600,
+      "status": "in_progress",
+      "title": "Fixture fresh foreign in-progress row",
+      "updated_at": "2033-05-18T03:20:00Z"
+    },
+    {
+      "age_seconds": 5600,
+      "assignee": null,
+      "blocked_by": [],
+      "created_at": "2033-05-18T00:00:00Z",
+      "id": "frankenscipy-foreign-in-progress-stale",
+      "issue_type": "feature",
+      "last_activity_epoch": 1999994400,
+      "priority": 2,
+      "source_repo": ".",
+      "stale": true,
+      "stale_after_seconds": 3600,
+      "status": "in_progress",
+      "title": "Fixture stale foreign in-progress row",
+      "updated_at": "2033-05-18T02:00:00Z"
     }
   ],
   "foreign_open": 22,
@@ -218,7 +255,25 @@
       "title": "Fixture foreign open row 20"
     }
   ],
-  "foreign_total": 23,
+  "foreign_stale_in_progress_samples": [
+    {
+      "age_seconds": 5600,
+      "assignee": null,
+      "blocked_by": [],
+      "created_at": "2033-05-18T00:00:00Z",
+      "id": "frankenscipy-foreign-in-progress-stale",
+      "issue_type": "feature",
+      "last_activity_epoch": 1999994400,
+      "priority": 2,
+      "source_repo": ".",
+      "stale": true,
+      "stale_after_seconds": 3600,
+      "status": "in_progress",
+      "title": "Fixture stale foreign in-progress row",
+      "updated_at": "2033-05-18T02:00:00Z"
+    }
+  ],
+  "foreign_total": 25,
   "issues_path": "[ISSUES_JSONL]",
   "local_graph_exports": {
     "local_open": {
@@ -380,7 +435,9 @@
       "bd-fixture-ready",
       "bd-fixture-blocker"
     ],
+    "excluded_foreign_in_progress_count": 2,
     "excluded_foreign_open_count": 22,
+    "excluded_foreign_stale_in_progress_count": 1,
     "local_epic_count": 1,
     "local_epic_ids": [
       "bd-fixture-epic"
@@ -447,5 +504,5 @@
   ],
   "status": "pass",
   "strict": false,
-  "total_rows": 31
+  "total_rows": 33
 }

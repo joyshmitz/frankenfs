@@ -243,6 +243,12 @@ if jq -s \
     def stale_in_progress_rows_arr:
         [local_in_progress_rows_arr[] | select(.stale)]
         | sort_by(.priority, .id);
+    def foreign_in_progress_rows_arr:
+        [.[] | select(foreign_issue and in_progress_issue) | issue_progress_row]
+        | sort_by(.priority, .id);
+    def foreign_stale_in_progress_rows_arr:
+        [foreign_in_progress_rows_arr[] | select(.stale)]
+        | sort_by(.priority, .id);
     {
         schema_version: 1,
         run_id: $run_id,
@@ -263,7 +269,10 @@ if jq -s \
         open_total: ([.[] | select(open_issue)] | length),
         local_open: ([.[] | select(local_issue and open_issue)] | length),
         foreign_open: foreign_open_count,
+        foreign_in_progress: (foreign_in_progress_rows_arr | length),
         excluded_foreign_open_count: foreign_open_count,
+        excluded_foreign_in_progress_count: (foreign_in_progress_rows_arr | length),
+        excluded_foreign_stale_in_progress_count: (foreign_stale_in_progress_rows_arr | length),
         excluded_foreign_by_prefix: (
             [.[] | select(foreign_issue and open_issue) | issue_prefix]
             | group_by(.)
@@ -300,6 +309,8 @@ if jq -s \
             | local_epic_rows_arr as $epic_rows
             | local_in_progress_rows_arr as $in_progress_rows
             | stale_in_progress_rows_arr as $stale_rows
+            | foreign_in_progress_rows_arr as $foreign_in_progress_rows
+            | foreign_stale_in_progress_rows_arr as $foreign_stale_rows
             | {
                 schema_version: 1,
                 verdict: (
@@ -327,6 +338,8 @@ if jq -s \
                 local_in_progress_count: ($in_progress_rows | length),
                 stale_in_progress_count: ($stale_rows | length),
                 excluded_foreign_open_count: foreign_open_count,
+                excluded_foreign_in_progress_count: ($foreign_in_progress_rows | length),
+                excluded_foreign_stale_in_progress_count: ($foreign_stale_rows | length),
                 claimable_ids: ($ready_rows | map(.id)),
                 local_epic_ids: ($epic_rows | map(.id)),
                 blocked_local_ids: ($blocked_rows | map(.id)),
@@ -373,6 +386,8 @@ if jq -s \
         local_in_progress_rows: local_in_progress_rows_arr,
         stale_in_progress_rows: stale_in_progress_rows_arr,
         foreign_open_samples: ([.[] | select(foreign_issue and open_issue) | issue_sample] | sort_by(.id) | .[0:20]),
+        foreign_in_progress_samples: (foreign_in_progress_rows_arr | .[0:20]),
+        foreign_stale_in_progress_samples: (foreign_stale_in_progress_rows_arr | .[0:20]),
         reproduction_commands: [
             "./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
             "jq -s '\''[.[] | select(((.id // \"\") | test(\"^(bd|frankenfs)-\") | not) and ((.status // \"open\") == \"open\")) | {id,title,status,priority,source_repo}]'\'' .beads/issues.jsonl",
@@ -396,7 +411,10 @@ if jq -e '
     and (.open_total | type == "number")
     and (.local_open | type == "number")
     and (.foreign_open | type == "number")
+    and (.foreign_in_progress | type == "number")
     and (.excluded_foreign_open_count | type == "number")
+    and (.excluded_foreign_in_progress_count | type == "number")
+    and (.excluded_foreign_stale_in_progress_count | type == "number")
     and (.local_open_ids | type == "array")
     and (.local_open_rows | type == "array")
     and (.source_aware_ready_rows | type == "array")
@@ -407,6 +425,8 @@ if jq -e '
     and (.source_aware_queue_state.permission_gated_count == (.permission_gated_rows | length))
     and (.source_aware_queue_state.local_in_progress_count == (.local_in_progress_rows | length))
     and (.source_aware_queue_state.stale_in_progress_count == (.stale_in_progress_rows | length))
+    and (.source_aware_queue_state.excluded_foreign_in_progress_count == .excluded_foreign_in_progress_count)
+    and (.source_aware_queue_state.excluded_foreign_stale_in_progress_count == .excluded_foreign_stale_in_progress_count)
     and (.source_aware_queue_state.blocked_local_ids | type == "array")
     and (.source_aware_queue_state.stale_in_progress_ids | type == "array")
     and (.source_aware_queue_state.next_safe_actions | type == "array")
@@ -417,6 +437,8 @@ if jq -e '
     and (.local_graph_exports.source_aware_ready.checksum_path | test("\\.sha256$"))
     and (.permission_gated_rows | type == "array")
     and (.foreign_open_samples | type == "array")
+    and (.foreign_in_progress_samples | type == "array")
+    and (.foreign_stale_in_progress_samples | type == "array")
     and (.excluded_foreign_by_prefix | type == "array")
     and (.foreign_group_summaries | type == "array")
     and (.reproduction_commands | type == "array")
@@ -442,12 +464,19 @@ else
 fi
 
 FOREIGN_OPEN_COUNT="$(jq -r '.foreign_open' "$REPORT_JSON")"
+FOREIGN_IN_PROGRESS_COUNT="$(jq -r '.foreign_in_progress' "$REPORT_JSON")"
+FOREIGN_STALE_IN_PROGRESS_COUNT="$(jq -r '.excluded_foreign_stale_in_progress_count' "$REPORT_JSON")"
 LOCAL_OPEN_COUNT="$(jq -r '.local_open' "$REPORT_JSON")"
 READY_COUNT="$(jq -r '.source_aware_ready_rows | length' "$REPORT_JSON")"
 if [[ "$FOREIGN_OPEN_COUNT" =~ ^[0-9]+$ && "$LOCAL_OPEN_COUNT" =~ ^[0-9]+$ ]]; then
     scenario_result "tracker_source_hygiene_foreign_rows_classified" "PASS" "local_open=${LOCAL_OPEN_COUNT} source_aware_ready=${READY_COUNT} foreign_open=${FOREIGN_OPEN_COUNT}"
 else
     scenario_result "tracker_source_hygiene_foreign_rows_classified" "FAIL" "invalid open counts in $REPORT_JSON"
+fi
+if [[ "$FOREIGN_IN_PROGRESS_COUNT" =~ ^[0-9]+$ && "$FOREIGN_STALE_IN_PROGRESS_COUNT" =~ ^[0-9]+$ ]]; then
+    scenario_result "tracker_source_hygiene_foreign_in_progress_classified" "PASS" "foreign_in_progress=${FOREIGN_IN_PROGRESS_COUNT} foreign_stale_in_progress=${FOREIGN_STALE_IN_PROGRESS_COUNT}"
+else
+    scenario_result "tracker_source_hygiene_foreign_in_progress_classified" "FAIL" "invalid foreign in-progress counts in $REPORT_JSON"
 fi
 
 if jq -s --slurpfile report "$REPORT_JSON" '
@@ -486,12 +515,16 @@ if jq -e '
     and (.blocked_local_rows | type == "array")
     and (.local_in_progress_rows | type == "array")
     and (.stale_in_progress_rows | type == "array")
+    and (.foreign_in_progress_samples | type == "array")
+    and (.foreign_stale_in_progress_samples | type == "array")
     and all(.source_aware_ready_rows[]; (.blocked_by | length) == 0)
     and all(.source_aware_ready_rows[]; has("permission_gate") | not)
     and all(.permission_gated_rows[]; (.permission_gate.present == false))
     and all(.blocked_local_rows[]; (.blocked_by | length) > 0)
     and all(.local_in_progress_rows[]; .status == "in_progress")
     and all(.stale_in_progress_rows[]; .status == "in_progress" and .stale == true)
+    and all(.foreign_in_progress_samples[]; .status == "in_progress")
+    and all(.foreign_stale_in_progress_samples[]; .status == "in_progress" and .stale == true)
     and (.source_aware_queue_state.claimable_ids == (.source_aware_ready_rows | map(.id)))
     and (.source_aware_queue_state.permission_gated_ids == (.permission_gated_rows | map(.id)))
     and (.source_aware_queue_state.blocked_local_ids == (.blocked_local_rows | map(.id)))
@@ -555,6 +588,8 @@ EXPECTED_READY="${TRACKER_SOURCE_HYGIENE_EXPECT_READY:-}"
 EXPECTED_PERMISSION_GATED="${TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED:-}"
 EXPECTED_IN_PROGRESS="${TRACKER_SOURCE_HYGIENE_EXPECT_IN_PROGRESS:-}"
 EXPECTED_STALE_IN_PROGRESS="${TRACKER_SOURCE_HYGIENE_EXPECT_STALE_IN_PROGRESS:-}"
+EXPECTED_FOREIGN_IN_PROGRESS="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_IN_PROGRESS:-}"
+EXPECTED_FOREIGN_STALE_IN_PROGRESS="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_STALE_IN_PROGRESS:-}"
 EXPECTED_FOREIGN_SAMPLE_COUNT="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT:-}"
 EXPECTED_FOREIGN_GROUP_COUNT="${TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT:-}"
 FOREIGN_SAMPLE_COUNT="$(jq -r '.foreign_open_samples | length' "$REPORT_JSON")"
@@ -569,6 +604,8 @@ check_expected_count "source_aware_ready" "$READY_COUNT" "$EXPECTED_READY"
 check_expected_count "permission_gated" "$PERMISSION_GATED_COUNT" "$EXPECTED_PERMISSION_GATED"
 check_expected_count "local_in_progress" "$IN_PROGRESS_COUNT" "$EXPECTED_IN_PROGRESS"
 check_expected_count "stale_in_progress" "$STALE_IN_PROGRESS_COUNT" "$EXPECTED_STALE_IN_PROGRESS"
+check_expected_count "foreign_in_progress" "$FOREIGN_IN_PROGRESS_COUNT" "$EXPECTED_FOREIGN_IN_PROGRESS"
+check_expected_count "foreign_stale_in_progress" "$FOREIGN_STALE_IN_PROGRESS_COUNT" "$EXPECTED_FOREIGN_STALE_IN_PROGRESS"
 check_expected_count "foreign_sample_count" "$FOREIGN_SAMPLE_COUNT" "$EXPECTED_FOREIGN_SAMPLE_COUNT"
 check_expected_count "foreign_group_count" "$FOREIGN_GROUP_COUNT" "$EXPECTED_FOREIGN_GROUP_COUNT"
 
@@ -593,6 +630,8 @@ if [[ "$DEFAULT_FIXTURE_SELF_CHECK" -eq 1 \
         TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED=1 \
         TRACKER_SOURCE_HYGIENE_EXPECT_IN_PROGRESS=2 \
         TRACKER_SOURCE_HYGIENE_EXPECT_STALE_IN_PROGRESS=1 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_IN_PROGRESS=2 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_STALE_IN_PROGRESS=1 \
         TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_SAMPLE_COUNT=20 \
         TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT=1 \
         TRACKER_SOURCE_HYGIENE_NOW_EPOCH=2000000000 \

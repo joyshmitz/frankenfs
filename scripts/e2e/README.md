@@ -917,6 +917,8 @@ TRACKER_SOURCE_HYGIENE_EXPECT_READY=2 \
 TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED=1 \
 TRACKER_SOURCE_HYGIENE_EXPECT_IN_PROGRESS=2 \
 TRACKER_SOURCE_HYGIENE_EXPECT_STALE_IN_PROGRESS=1 \
+TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_IN_PROGRESS=2 \
+TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_STALE_IN_PROGRESS=1 \
 TRACKER_SOURCE_HYGIENE_NOW_EPOCH=2000000000 \
 TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS=3600 \
 TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN=tests/fixtures/tracker_source_hygiene_report.golden.json \
@@ -928,8 +930,9 @@ TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_GROUP_COUNT=1 \
 The report emits `local_open_rows`, `source_aware_ready_rows`,
 `source_aware_queue_state`, `local_graph_exports`, `permission_gated_rows`,
 `blocked_local_rows`, `local_in_progress_rows`, `stale_in_progress_rows`,
-`excluded_foreign_open_count`, prefix counts, foreign group summaries with owner
-hints, sample foreign rows, and exact reproduction commands. It also writes
+foreign in-progress/stale samples, `excluded_foreign_open_count`,
+`excluded_foreign_in_progress_count`, prefix counts, foreign group summaries with
+owner hints, sample foreign rows, and exact reproduction commands. It also writes
 checksum-validated
 `tracker_source_hygiene_local_open.jsonl` and
 `tracker_source_hygiene_source_aware_ready.jsonl` artifacts for source-aware
@@ -938,7 +941,9 @@ permissioned large-host swarm rows until their explicit ACK env vars are
 present. `source_aware_queue_state.verdict` gives the safe queue explanation
 before agents create fallback work, and its stale in-progress fields identify
 claimed local rows that require Agent Mail/worktree verification before any
-reopen. `TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN` compares the deterministic
+reopen. Foreign in-progress rows are reported only as excluded diagnostics and do
+not affect the local stale-claim verdict. `TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN`
+compares the deterministic
 fixture report against the scrubbed committed golden so report-shape drift is a
 reviewed diff. `TRACKER_SOURCE_HYGIENE_EXPECT_GOLDEN_MISMATCH=1` proves the
 golden guard fails closed by diffing against an artifact-local corrupted golden

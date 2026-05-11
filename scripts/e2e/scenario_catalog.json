@@ -4412,6 +4412,12 @@
           "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_foreign_rows_classified|outcome=PASS"
         },
         {
+          "id": "tracker_source_hygiene_foreign_in_progress_classified",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_foreign_in_progress_classified|outcome=PASS"
+        },
+        {
           "id": "tracker_source_hygiene_local_graph_exports_valid",
           "category": "happy",
           "status": "active",
