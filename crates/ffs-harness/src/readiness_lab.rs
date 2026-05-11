@@ -5798,6 +5798,23 @@ mod tests {
         );
     }
 
+    /// bd-rchk0.53.23 - exact-output snapshot for the readiness-lab
+    /// host-simulation markdown consumed by operator handoffs.
+    ///
+    /// The simulator tests prove classification behavior. This snapshot pins
+    /// the rendered advisory/product-evidence wording, release-gate effect,
+    /// host counters, classification table, and empty findings sections.
+    #[test]
+    fn render_readiness_lab_host_simulation_markdown_sample_snapshot() {
+        let report = simulate_hosts(&sample_host_simulation_manifest());
+        let markdown = render_readiness_lab_host_simulation_markdown(&report);
+
+        insta::assert_snapshot!(
+            "render_readiness_lab_host_simulation_markdown_sample",
+            markdown
+        );
+    }
+
     #[test]
     fn host_simulator_classifies_small_cpu_or_ram_as_smoke_only() {
         let mut manifest = sample_host_simulation_manifest();

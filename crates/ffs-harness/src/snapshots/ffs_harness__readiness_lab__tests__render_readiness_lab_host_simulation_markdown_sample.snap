@@ -1,0 +1,28 @@
+---
+source: crates/ffs-harness/src/readiness_lab.rs
+expression: markdown
+---
+# FrankenFS Readiness Lab Host Simulation
+
+- Simulation: `host-matrix`
+- Manifest: `hosts.json`
+- Valid: `true`
+- Product evidence claim: `none`
+- Release-gate effect: simulator output is advisory only; swarm.responsiveness remains hidden or blocked until bd-rchk0.53.8 records executed large-host proof-bundle lanes and release-gate output
+- Hosts: `1`
+- Candidates: `1`
+- Small-host smoke: `0`
+- Capability downgrades: `0`
+- Blocked: `0`
+
+| host | classification | candidate | cpu | ram_gib | numa | runner | ack | blockers | downgrades |
+|---|---|---:|---:|---:|---|---|---|---:|---:|
+| `candidate` | `authoritative_large_host_candidate` | `true` | `64` | `256` | `2` | `true` | `true` | `0` | `0` |
+
+## Errors
+
+- none
+
+## Warnings
+
+- none
