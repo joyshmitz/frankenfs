@@ -957,6 +957,22 @@ copy. Enable `TRACKER_SOURCE_HYGIENE_STRICT=1` only after the criteria in
 [docs/tracker-hygiene.md](../../docs/tracker-hygiene.md) are met; strict mode
 intentionally fails while foreign-looking open rows exist.
 
+The Rust harness path can emit the same local graph export contract without the
+shell wrapper when an export directory is supplied:
+
+```bash
+ffs-harness validate-tracker-source-hygiene \
+  --issues .beads/issues.jsonl \
+  --export-dir artifacts/tracker/source_hygiene \
+  --out artifacts/tracker/source_hygiene/report.json
+```
+
+This writes `tracker_source_hygiene_local_open.jsonl`,
+`tracker_source_hygiene_source_aware_ready.jsonl`,
+`tracker_source_hygiene_local_nonclaimable.jsonl`, and matching `.sha256`
+files under the export directory while keeping the tracker mutation policy
+report-only.
+
 ## Release Gate Evaluation
 
 Release gates are executable policy files that consume a validated proof bundle

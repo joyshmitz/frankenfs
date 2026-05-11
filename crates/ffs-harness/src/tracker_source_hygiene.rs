@@ -1,9 +1,10 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_TRACKER_SOURCE_HYGIENE_ISSUES: &str = ".beads/issues.jsonl";
@@ -21,6 +22,7 @@ pub struct TrackerSourceHygieneConfig {
     pub xfstests_real_run_ack: Option<String>,
     pub swarm_workload_enabled: bool,
     pub swarm_workload_real_run_ack: Option<String>,
+    pub local_graph_export_paths: Option<TrackerLocalGraphExportPaths>,
 }
 
 impl Default for TrackerSourceHygieneConfig {
@@ -33,6 +35,7 @@ impl Default for TrackerSourceHygieneConfig {
             xfstests_real_run_ack: None,
             swarm_workload_enabled: false,
             swarm_workload_real_run_ack: None,
+            local_graph_export_paths: None,
         }
     }
 }
@@ -46,6 +49,7 @@ pub struct TrackerSourceHygieneAnalysisConfig {
     pub xfstests_real_run_ack: Option<String>,
     pub swarm_workload_enabled: bool,
     pub swarm_workload_real_run_ack: Option<String>,
+    pub local_graph_export_paths: Option<TrackerLocalGraphExportPaths>,
 }
 
 impl TrackerSourceHygieneAnalysisConfig {
@@ -59,6 +63,34 @@ impl TrackerSourceHygieneAnalysisConfig {
             xfstests_real_run_ack: config.xfstests_real_run_ack.clone(),
             swarm_workload_enabled: config.swarm_workload_enabled,
             swarm_workload_real_run_ack: config.swarm_workload_real_run_ack.clone(),
+            local_graph_export_paths: config.local_graph_export_paths.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackerLocalGraphExportPaths {
+    pub local_open_jsonl: PathBuf,
+    pub local_open_sha256: PathBuf,
+    pub source_aware_ready_jsonl: PathBuf,
+    pub source_aware_ready_sha256: PathBuf,
+    pub local_nonclaimable_jsonl: PathBuf,
+    pub local_nonclaimable_sha256: PathBuf,
+}
+
+impl TrackerLocalGraphExportPaths {
+    #[must_use]
+    pub fn for_dir(dir: &Path) -> Self {
+        let local_open_jsonl = dir.join("tracker_source_hygiene_local_open.jsonl");
+        let source_aware_ready_jsonl = dir.join("tracker_source_hygiene_source_aware_ready.jsonl");
+        let local_nonclaimable_jsonl = dir.join("tracker_source_hygiene_local_nonclaimable.jsonl");
+        Self {
+            local_open_sha256: checksum_path(&local_open_jsonl),
+            source_aware_ready_sha256: checksum_path(&source_aware_ready_jsonl),
+            local_nonclaimable_sha256: checksum_path(&local_nonclaimable_jsonl),
+            local_open_jsonl,
+            source_aware_ready_jsonl,
+            local_nonclaimable_jsonl,
         }
     }
 }
@@ -88,6 +120,8 @@ pub struct TrackerSourceHygieneReport {
     pub local_open_rows: Vec<TrackerIssueWorkRow>,
     pub source_aware_ready_rows: Vec<TrackerIssueWorkRow>,
     pub source_aware_queue_state: TrackerSourceAwareQueueState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_graph_exports: Option<TrackerLocalGraphExports>,
     pub permission_gated_rows: Vec<TrackerPermissionGatedRow>,
     pub blocked_local_rows: Vec<TrackerIssueWorkRow>,
     pub local_nonclaimable_rows: Vec<TrackerLocalNonclaimableRow>,
@@ -105,6 +139,24 @@ pub struct TrackerSourceHygieneClassifier {
     pub local_id_regex: String,
     pub local_rule: String,
     pub foreign_rule: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerLocalGraphExports {
+    pub schema_version: u32,
+    pub mutation_policy: String,
+    pub local_open: TrackerLocalGraphExport,
+    pub source_aware_ready: TrackerLocalGraphExport,
+    pub local_nonclaimable: TrackerLocalGraphExport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerLocalGraphExport {
+    pub path: String,
+    pub checksum_path: String,
+    pub row_count: usize,
+    pub id_count: usize,
+    pub consumer_hint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -461,6 +513,44 @@ pub fn fail_on_tracker_source_hygiene_errors(report: &TrackerSourceHygieneReport
     Ok(())
 }
 
+pub fn write_tracker_source_hygiene_local_graph_exports(
+    config: &TrackerSourceHygieneConfig,
+    report: &TrackerSourceHygieneReport,
+) -> Result<()> {
+    let Some(paths) = &config.local_graph_export_paths else {
+        return Ok(());
+    };
+    let issues_jsonl = fs::read_to_string(&config.issues_jsonl)
+        .with_context(|| format!("failed to read {}", config.issues_jsonl.display()))?;
+    let local_open_ids: BTreeSet<&str> = report.local_open_ids.iter().map(String::as_str).collect();
+    let source_aware_ready_ids: BTreeSet<&str> = report
+        .source_aware_ready_rows
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect();
+
+    let local_open_jsonl = selected_source_rows_jsonl(&issues_jsonl, &local_open_ids)?;
+    let source_aware_ready_jsonl =
+        selected_source_rows_jsonl(&issues_jsonl, &source_aware_ready_ids)?;
+    let local_nonclaimable_jsonl = derived_rows_jsonl(&report.local_nonclaimable_rows)?;
+
+    write_export_with_checksum(
+        &paths.local_open_jsonl,
+        &paths.local_open_sha256,
+        &local_open_jsonl,
+    )?;
+    write_export_with_checksum(
+        &paths.source_aware_ready_jsonl,
+        &paths.source_aware_ready_sha256,
+        &source_aware_ready_jsonl,
+    )?;
+    write_export_with_checksum(
+        &paths.local_nonclaimable_jsonl,
+        &paths.local_nonclaimable_sha256,
+        &local_nonclaimable_jsonl,
+    )
+}
+
 #[allow(clippy::too_many_lines)]
 fn build_report(
     issues: &[Value],
@@ -587,6 +677,14 @@ fn build_report(
         foreign_in_progress,
         &foreign_stale_in_progress_rows,
     );
+    let local_graph_exports = config.local_graph_export_paths.as_ref().map(|paths| {
+        build_local_graph_exports(
+            paths,
+            &local_open_rows,
+            &source_aware_ready_rows,
+            &local_nonclaimable_rows,
+        )
+    });
 
     let mut foreign_open_samples: Vec<TrackerIssueSample> = wrapped
         .iter()
@@ -639,6 +737,7 @@ fn build_report(
         local_open_rows,
         source_aware_ready_rows,
         source_aware_queue_state: queue_state,
+        local_graph_exports,
         permission_gated_rows,
         blocked_local_rows,
         local_nonclaimable_rows,
@@ -717,6 +816,122 @@ fn build_queue_state(
         stale_in_progress_ids: stale_rows.iter().map(|row| row.id.clone()).collect(),
         next_safe_actions: next_safe_actions(verdict),
     }
+}
+
+fn build_local_graph_exports(
+    paths: &TrackerLocalGraphExportPaths,
+    local_open_rows: &[TrackerIssueWorkRow],
+    source_aware_ready_rows: &[TrackerIssueWorkRow],
+    local_nonclaimable_rows: &[TrackerLocalNonclaimableRow],
+) -> TrackerLocalGraphExports {
+    TrackerLocalGraphExports {
+        schema_version: 1,
+        mutation_policy: "report-only; exports copy matching source rows without editing tracker state"
+            .to_owned(),
+        local_open: TrackerLocalGraphExport {
+            path: paths.local_open_jsonl.display().to_string(),
+            checksum_path: paths.local_open_sha256.display().to_string(),
+            row_count: local_open_rows.len(),
+            id_count: unique_work_row_id_count(local_open_rows),
+            consumer_hint:
+                "Use this JSONL as a local-only tracker input when br or bv output is polluted by foreign rows."
+                    .to_owned(),
+        },
+        source_aware_ready: TrackerLocalGraphExport {
+            path: paths.source_aware_ready_jsonl.display().to_string(),
+            checksum_path: paths.source_aware_ready_sha256.display().to_string(),
+            row_count: source_aware_ready_rows.len(),
+            id_count: unique_work_row_id_count(source_aware_ready_rows),
+            consumer_hint:
+                "Use this JSONL for claimable FrankenFS rows; it excludes epics, blocked rows, foreign rows, and permission-gated rows without the required ACK."
+                    .to_owned(),
+        },
+        local_nonclaimable: TrackerLocalGraphExport {
+            path: paths.local_nonclaimable_jsonl.display().to_string(),
+            checksum_path: paths.local_nonclaimable_sha256.display().to_string(),
+            row_count: local_nonclaimable_rows.len(),
+            id_count: unique_nonclaimable_row_id_count(local_nonclaimable_rows),
+            consumer_hint:
+                "Use this JSONL to explain why local open rows are not claimable; reasons are epic, permission_gated, or blocked."
+                    .to_owned(),
+        },
+    }
+}
+
+fn unique_work_row_id_count(rows: &[TrackerIssueWorkRow]) -> usize {
+    rows.iter()
+        .map(|row| row.id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+fn unique_nonclaimable_row_id_count(rows: &[TrackerLocalNonclaimableRow]) -> usize {
+    rows.iter()
+        .map(|row| row.id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+fn selected_source_rows_jsonl(issues_jsonl: &str, ids: &BTreeSet<&str>) -> Result<String> {
+    let mut lines = Vec::new();
+    for (line_index, raw_line) in issues_jsonl.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(line)
+            .with_context(|| format!("invalid issue JSONL at line {}", line_index + 1))?;
+        let id = string_field(&value, "id");
+        if ids.contains(id.as_str()) {
+            lines.push(line.to_owned());
+        }
+    }
+    Ok(jsonl_from_lines(&lines))
+}
+
+fn derived_rows_jsonl<T: Serialize>(rows: &[T]) -> Result<String> {
+    rows.iter()
+        .map(|row| serde_json::to_string(row).map_err(Into::into))
+        .collect::<Result<Vec<_>>>()
+        .map(|lines| jsonl_from_lines(&lines))
+}
+
+fn jsonl_from_lines(lines: &[String]) -> String {
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    }
+}
+
+fn write_export_with_checksum(path: &Path, checksum_path: &Path, text: &str) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))?;
+
+    if let Some(parent) = checksum_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let checksum_text = format!("{}  {}\n", sha256_hex(text.as_bytes()), path.display());
+    fs::write(checksum_path, checksum_text)
+        .with_context(|| format!("failed to write {}", checksum_path.display()))
+}
+
+fn checksum_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.sha256", path.display()))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn parse_issues_jsonl(issues_jsonl: &str) -> Result<Vec<Value>> {
@@ -1058,6 +1273,14 @@ mod tests {
             xfstests_real_run_ack: None,
             swarm_workload_enabled: false,
             swarm_workload_real_run_ack: None,
+            local_graph_export_paths: Some(TrackerLocalGraphExportPaths {
+                local_open_jsonl: PathBuf::from("[LOCAL_OPEN_JSONL]"),
+                local_open_sha256: PathBuf::from("[LOCAL_OPEN_SHA256]"),
+                source_aware_ready_jsonl: PathBuf::from("[SOURCE_AWARE_READY_JSONL]"),
+                source_aware_ready_sha256: PathBuf::from("[SOURCE_AWARE_READY_SHA256]"),
+                local_nonclaimable_jsonl: PathBuf::from("[LOCAL_NONCLAIMABLE_JSONL]"),
+                local_nonclaimable_sha256: PathBuf::from("[LOCAL_NONCLAIMABLE_SHA256]"),
+            }),
         }
     }
 
@@ -1240,6 +1463,21 @@ mod tests {
         Ok(())
     }
 
+    fn assert_golden_local_graph_exports(
+        report: &TrackerSourceHygieneReport,
+        golden: &Value,
+    ) -> Result<(), String> {
+        let actual = report
+            .local_graph_exports
+            .as_ref()
+            .ok_or_else(|| "report must include local_graph_exports".to_owned())?;
+        let expected: TrackerLocalGraphExports =
+            serde_json::from_value(golden_field(golden, "local_graph_exports")?.clone())
+                .map_err(|err| err.to_string())?;
+        assert_eq!(actual, &expected);
+        Ok(())
+    }
+
     #[test]
     fn committed_fixture_matches_shell_golden_core_queue_state() -> Result<(), String> {
         let report = analyze_tracker_source_hygiene(COMMITTED_FIXTURE_ISSUES, &config())
@@ -1251,6 +1489,7 @@ mod tests {
         assert_golden_core_counts(&report, &golden)?;
         assert_golden_queue_state(&report, golden_queue)?;
         assert_golden_foreign_groups(&report, &golden)?;
+        assert_golden_local_graph_exports(&report, &golden)?;
         let permission_gate = report
             .permission_gated_rows
             .first()
@@ -1259,6 +1498,86 @@ mod tests {
             permission_gate.permission_gate.gate_kind,
             "xfstests_real_run",
         );
+        Ok(())
+    }
+
+    #[test]
+    fn writes_local_graph_exports_with_checksum_files() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| err.to_string())?;
+        let issues_path = temp.path().join("issues.jsonl");
+        let export_dir = temp.path().join("exports");
+        let issues = [
+            line(&serde_json::json!({
+                "id": "bd-ready",
+                "title": "safe local work",
+                "status": "open",
+                "priority": 1
+            })),
+            line(&serde_json::json!({
+                "id": "bd-epic",
+                "title": "local epic",
+                "status": "open",
+                "issue_type": "epic"
+            })),
+            line(&serde_json::json!({
+                "id": "br-r37-foreign",
+                "title": "foreign row",
+                "status": "open"
+            })),
+        ]
+        .join("\n");
+        fs::write(&issues_path, format!("{issues}\n")).map_err(|err| err.to_string())?;
+        let config = TrackerSourceHygieneConfig {
+            issues_jsonl: issues_path,
+            report_now_epoch: NOW,
+            stale_in_progress_seconds: 3_600,
+            local_graph_export_paths: Some(TrackerLocalGraphExportPaths::for_dir(&export_dir)),
+            ..TrackerSourceHygieneConfig::default()
+        };
+
+        let report = run_tracker_source_hygiene(&config).map_err(|err| err.to_string())?;
+        write_tracker_source_hygiene_local_graph_exports(&config, &report)
+            .map_err(|err| err.to_string())?;
+        let exports = report
+            .local_graph_exports
+            .as_ref()
+            .ok_or_else(|| "exports metadata missing".to_owned())?;
+        let local_open =
+            fs::read_to_string(&exports.local_open.path).map_err(|err| err.to_string())?;
+        let ready =
+            fs::read_to_string(&exports.source_aware_ready.path).map_err(|err| err.to_string())?;
+        let nonclaimable =
+            fs::read_to_string(&exports.local_nonclaimable.path).map_err(|err| err.to_string())?;
+
+        assert!(local_open.contains("\"bd-ready\""));
+        assert!(local_open.contains("\"bd-epic\""));
+        assert!(!local_open.contains("br-r37-foreign"));
+        assert!(ready.contains("\"bd-ready\""));
+        assert!(!ready.contains("\"bd-epic\""));
+        assert!(nonclaimable.contains("\"reason\":\"epic\""));
+        for (path, checksum_path, text) in [
+            (
+                &exports.local_open.path,
+                &exports.local_open.checksum_path,
+                &local_open,
+            ),
+            (
+                &exports.source_aware_ready.path,
+                &exports.source_aware_ready.checksum_path,
+                &ready,
+            ),
+            (
+                &exports.local_nonclaimable.path,
+                &exports.local_nonclaimable.checksum_path,
+                &nonclaimable,
+            ),
+        ] {
+            let checksum = fs::read_to_string(checksum_path).map_err(|err| err.to_string())?;
+            assert_eq!(
+                checksum,
+                format!("{}  {path}\n", sha256_hex(text.as_bytes()))
+            );
+        }
         Ok(())
     }
 

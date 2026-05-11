@@ -221,8 +221,9 @@ use ffs_harness::{
         validate_topology_runtime_advisor_manifest_with_config,
     },
     tracker_source_hygiene::{
-        TrackerSourceHygieneConfig, fail_on_tracker_source_hygiene_errors,
-        run_tracker_source_hygiene,
+        TrackerLocalGraphExportPaths, TrackerSourceHygieneConfig,
+        fail_on_tracker_source_hygiene_errors, run_tracker_source_hygiene,
+        write_tracker_source_hygiene_local_graph_exports,
     },
     validate_btrfs_fixture, validate_ext4_fixture,
     verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
@@ -6594,6 +6595,12 @@ fn validate_tracker_source_hygiene_cmd(args: &[String]) -> Result<()> {
                     Some(require_value(args, i, "--swarm-workload-real-run-ack")?.to_owned());
                 i += 2;
             }
+            "--export-dir" => {
+                config.local_graph_export_paths = Some(TrackerLocalGraphExportPaths::for_dir(
+                    Path::new(require_value(args, i, "--export-dir")?),
+                ));
+                i += 2;
+            }
             "--help" | "-h" => {
                 print_tracker_source_hygiene_usage();
                 return Ok(());
@@ -6603,6 +6610,7 @@ fn validate_tracker_source_hygiene_cmd(args: &[String]) -> Result<()> {
     }
 
     let report = run_tracker_source_hygiene(&config)?;
+    write_tracker_source_hygiene_local_graph_exports(&config, &report)?;
     let json = serde_json::to_string_pretty(&report)?;
     if let Some(path) = out_path {
         write_text_file(Path::new(&path), &format!("{json}\n"))?;
@@ -7888,6 +7896,9 @@ fn print_tracker_source_hygiene_usage() {
     println!("  --xfstests-real-run-ack VALUE      Override XFSTESTS_REAL_RUN_ACK");
     println!("  --swarm-workload-enabled           Treat large-host swarm permission as enabled");
     println!("  --swarm-workload-real-run-ack VALUE Override FFS_SWARM_WORKLOAD_REAL_RUN_ACK");
+    println!(
+        "  --export-dir DIR                   Write local graph JSONL exports and .sha256 files"
+    );
     println!("  --out FILE                         Write JSON report to FILE");
 }
 
