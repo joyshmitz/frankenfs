@@ -1147,6 +1147,47 @@
       ]
     },
     {
+      "suite_id": "ffs_performance_delta_closeout",
+      "script": "scripts/e2e/ffs_performance_delta_closeout_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "performance_delta_closeout_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_delta_closeout_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "performance_delta_closeout_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_delta_closeout_validates|outcome=PASS"
+        },
+        {
+          "id": "performance_delta_closeout_followups",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_delta_closeout_followups|outcome=PASS"
+        },
+        {
+          "id": "performance_delta_closeout_missing_followup_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_delta_closeout_missing_followup_rejected|outcome=PASS"
+        },
+        {
+          "id": "performance_delta_closeout_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_delta_closeout_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_taxonomy",
       "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
       "required_categories": [
