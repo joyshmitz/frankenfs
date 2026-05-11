@@ -1637,6 +1637,53 @@
       ]
     },
     {
+      "suite_id": "ffs_wal_group_commit_gate",
+      "script": "scripts/e2e/ffs_wal_group_commit_gate_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "wal_group_commit_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_group_commit_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "wal_group_commit_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_group_commit_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "wal_group_commit_default_manifest",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_group_commit_default_manifest|outcome=PASS"
+        },
+        {
+          "id": "wal_group_commit_markdown",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_group_commit_markdown|outcome=PASS"
+        },
+        {
+          "id": "wal_group_commit_missing_raw_logs",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_group_commit_missing_raw_logs|outcome=PASS"
+        },
+        {
+          "id": "wal_group_commit_missing_reference_claim",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_group_commit_missing_reference_claim|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_refresh_policy",
       "script": "scripts/e2e/ffs_refresh_policy_e2e.sh",
       "required_categories": [
