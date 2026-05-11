@@ -522,6 +522,70 @@
       ]
     },
     {
+      "suite_id": "ffs_runbooks",
+      "script": "scripts/e2e/ffs_runbooks_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "runbooks_all_present",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=runbooks_all_present|outcome=PASS"
+        },
+        {
+          "id": "runbooks_have_prerequisites",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=runbooks_have_prerequisites|outcome=PASS"
+        },
+        {
+          "id": "runbooks_have_exit_criteria",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=runbooks_have_exit_criteria|outcome=PASS"
+        },
+        {
+          "id": "runbooks_have_bash_commands",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=runbooks_have_bash_commands|outcome=PASS"
+        },
+        {
+          "id": "runbooks_have_decision_trees",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=runbooks_have_decision_trees|outcome=PASS"
+        },
+        {
+          "id": "replay_runbook_ffs_commands",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=replay_runbook_ffs_commands|outcome=PASS"
+        },
+        {
+          "id": "corruption_runbook_scrub_repair",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=corruption_runbook_scrub_repair|outcome=PASS"
+        },
+        {
+          "id": "backpressure_runbook_degradation_levels",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=backpressure_runbook_degradation_levels|outcome=PASS"
+        },
+        {
+          "id": "backpressure_runbook_runtime_modes",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=backpressure_runbook_runtime_modes|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_performance_manifest",
       "script": "scripts/e2e/ffs_performance_manifest_e2e.sh",
       "required_categories": [
