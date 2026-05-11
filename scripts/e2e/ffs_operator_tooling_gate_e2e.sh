@@ -198,9 +198,9 @@ done
 [[ -f "docs/runbooks/perf-regression-triage.md" ]] && RUNBOOK_CHECKS=$((RUNBOOK_CHECKS + 1))
 
 if [[ $RUNBOOK_CHECKS -eq 4 ]]; then
-    scenario_result "gate_runbooks" "PASS" "All 4 runbooks complete with decision trees and bash commands"
+    scenario_result "gate_runbooks_complete" "PASS" "All 4 runbooks complete with decision trees and bash commands"
 else
-    scenario_result "gate_runbooks" "FAIL" "Only ${RUNBOOK_CHECKS}/4 runbooks pass validation"
+    scenario_result "gate_runbooks_complete" "FAIL" "Only ${RUNBOOK_CHECKS}/4 runbooks pass validation"
 fi
 
 #######################################

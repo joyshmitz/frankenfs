@@ -2633,10 +2633,10 @@
           "evidence": "SCENARIO_RESULT|scenario_id=gate_modules_exported|outcome=PASS"
         },
         {
-          "id_pattern": "^gate_runbooks$",
+          "id": "gate_runbooks_complete",
           "category": "happy",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=gate_runbooks|outcome=PASS"
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_runbooks_complete|outcome=PASS"
         },
         {
           "id": "gate_evidence_presets",

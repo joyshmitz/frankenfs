@@ -216,6 +216,25 @@ e2e_validate_scenario_catalog() {
         e2e_fail "Scenario catalog uses unknown scenario status (expected active or inactive): $unknown_statuses"
     fi
 
+    local pattern_suite literal_pattern literal_id
+    while IFS=$'\t' read -r pattern_suite literal_pattern; do
+        [[ -n "$literal_pattern" ]] || continue
+        if [[ "$literal_pattern" =~ ^\^([A-Za-z0-9_]+)\$$ ]]; then
+            literal_id="${BASH_REMATCH[1]}"
+            if [[ ! "$literal_id" =~ $id_regex ]]; then
+                e2e_fail "Suite '$pattern_suite' literal id_pattern does not match scenario_id_regex: $literal_pattern"
+            fi
+        fi
+    done < <(
+        jq -r '
+            .suites[] as $suite
+            | ($suite.scenarios // [])[]
+            | select((.status // "active") == "active" and has("id_pattern"))
+            | [$suite.suite_id, .id_pattern]
+            | @tsv
+        ' "$catalog_path"
+    )
+
     local -A catalog_scripts=()
     while IFS= read -r script_rel; do
         [[ -n "$script_rel" ]] || continue
