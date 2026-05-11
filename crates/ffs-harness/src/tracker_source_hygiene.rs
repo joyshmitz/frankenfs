@@ -1172,6 +1172,79 @@ mod tests {
     }
 
     #[test]
+    fn swarm_permission_gate_requires_enable_flag_and_exact_ack() -> Result<(), String> {
+        let issues = line(&serde_json::json!({
+            "id": "bd-swarm",
+            "title": "permissioned large-host swarm campaign",
+            "description": "requires FFS_SWARM_WORKLOAD_REAL_RUN_ACK before using a large host",
+            "status": "open",
+            "priority": 1
+        }));
+        let cases = [
+            ("disabled_without_ack", false, None, true),
+            (
+                "disabled_with_exact_ack",
+                false,
+                Some(SWARM_WORKLOAD_REAL_RUN_ACK_VALUE),
+                true,
+            ),
+            ("enabled_without_ack", true, None, true),
+            ("enabled_with_wrong_ack", true, Some("wrong-ack"), true),
+            (
+                "enabled_with_exact_ack",
+                true,
+                Some(SWARM_WORKLOAD_REAL_RUN_ACK_VALUE),
+                false,
+            ),
+        ];
+
+        for (case_name, enabled, ack, expect_gated) in cases {
+            let mut cfg = config();
+            cfg.swarm_workload_enabled = enabled;
+            cfg.swarm_workload_real_run_ack = ack.map(str::to_owned);
+
+            let report =
+                analyze_tracker_source_hygiene(&issues, &cfg).map_err(|err| err.to_string())?;
+            let gated_row = report.permission_gated_rows.first();
+
+            if expect_gated {
+                let row =
+                    gated_row.ok_or_else(|| format!("{case_name} should be permission-gated"))?;
+                assert_eq!(row.id, "bd-swarm", "{case_name}");
+                assert_eq!(
+                    row.permission_gate.gate_kind, "large_host_swarm_real_run",
+                    "{case_name}"
+                );
+                assert_eq!(
+                    row.permission_gate.required_env,
+                    "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD,FFS_SWARM_WORKLOAD_REAL_RUN_ACK",
+                    "{case_name}"
+                );
+                assert!(
+                    report
+                        .source_aware_queue_state
+                        .claimable_ids
+                        .iter()
+                        .all(|id| id != "bd-swarm"),
+                    "{case_name}"
+                );
+            } else {
+                assert!(
+                    gated_row.is_none(),
+                    "{case_name} should not be permission-gated"
+                );
+                assert_eq!(
+                    report.source_aware_queue_state.claimable_ids,
+                    vec!["bd-swarm"],
+                    "{case_name}"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn stale_in_progress_takes_precedence_when_no_ready_rows() {
         let issues = line(&serde_json::json!({
             "id": "bd-active",
