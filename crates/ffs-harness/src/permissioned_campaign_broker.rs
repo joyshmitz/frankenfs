@@ -4479,6 +4479,26 @@ mod tests {
         assert!(markdown.contains("swarm.responsiveness remains hidden"));
     }
 
+    /// bd-rchk0.220 - exact-output snapshot for the swarm capability
+    /// calibration markdown consumed before permissioned large-host campaigns.
+    ///
+    /// The smoke test above proves the handoff boundary is named. This
+    /// snapshot pins the operator-facing packet identity, release-gate effect,
+    /// host facts, resource caps, and artifact-root wording.
+    #[test]
+    fn render_swarm_capability_calibration_markdown_candidate_snapshot() {
+        let manifest = valid_swarm_calibration_manifest();
+        let report =
+            validate_swarm_capability_calibration_manifest(&manifest, &swarm_calibration_config());
+        assert!(report.valid, "{:?}", report.issues);
+        let markdown = render_swarm_capability_calibration_markdown(&report);
+
+        insta::assert_snapshot!(
+            "render_swarm_capability_calibration_markdown_candidate",
+            markdown
+        );
+    }
+
     #[test]
     fn execution_ledger_accepts_supported_state_lifecycle_points() {
         let cases = [
