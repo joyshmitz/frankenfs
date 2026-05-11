@@ -697,6 +697,53 @@
       ]
     },
     {
+      "suite_id": "ffs_adaptive_runtime_runner",
+      "script": "scripts/e2e/ffs_adaptive_runtime_runner_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "adaptive_runtime_runner_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_runner_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "adaptive_runtime_runner_dry_run_writes_artifacts",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_runner_dry_run_writes_artifacts|outcome=PASS"
+        },
+        {
+          "id": "adaptive_runtime_runner_dry_run_contract",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_runner_dry_run_contract|outcome=PASS"
+        },
+        {
+          "id": "adaptive_runtime_runner_refuses_missing_ack",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_runner_refuses_missing_ack|outcome=PASS"
+        },
+        {
+          "id": "adaptive_runtime_runner_refuses_unsafe_paths",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_runner_refuses_unsafe_paths|outcome=PASS"
+        },
+        {
+          "id": "adaptive_runtime_runner_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_runner_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_performance_manifest",
       "script": "scripts/e2e/ffs_performance_manifest_e2e.sh",
       "required_categories": [
