@@ -1111,6 +1111,15 @@ fn owner_hint(issue: &TrackerIssue<'_>) -> String {
 }
 
 fn issue_prefix(id: &str) -> String {
+    for project_prefix in ["frankenscipy", "franken_networkx"] {
+        if id
+            .strip_prefix(project_prefix)
+            .is_some_and(|suffix| suffix.starts_with('-'))
+        {
+            return project_prefix.to_owned();
+        }
+    }
+
     let mut segments = id.split('-');
     let Some(first) = segments.next().filter(|segment| !segment.is_empty()) else {
         return "unknown".to_owned();
@@ -1802,18 +1811,31 @@ mod tests {
 
     #[test]
     fn foreign_group_owner_hints_include_frankenscipy_ids() {
-        let issues = line(&serde_json::json!({
-            "id": "frankenscipy-vsas0",
-            "title": "foreign SciPy coverage row",
-            "status": "open"
-        }));
+        let issues = [
+            line(&serde_json::json!({
+                "id": "frankenscipy-4703g",
+                "title": "foreign SciPy milestone row",
+                "status": "open"
+            })),
+            line(&serde_json::json!({
+                "id": "frankenscipy-vsas0",
+                "title": "foreign SciPy coverage row",
+                "status": "open"
+            })),
+        ]
+        .join("\n");
 
         let report = analyze_tracker_source_hygiene(&issues, &config()).expect("analyze");
 
         assert_eq!(
-            report.foreign_group_summaries[0].prefix,
-            "frankenscipy-vsas0"
+            report.excluded_foreign_by_prefix,
+            vec![TrackerPrefixCount {
+                prefix: "frankenscipy".to_owned(),
+                count: 2,
+            }]
         );
+        assert_eq!(report.foreign_group_summaries[0].count, 2);
+        assert_eq!(report.foreign_group_summaries[0].prefix, "frankenscipy");
         assert_eq!(
             report.foreign_group_summaries[0].owner_hints,
             vec!["frankenscipy"]

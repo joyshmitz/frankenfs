@@ -132,7 +132,14 @@ if jq -s \
     def activity_epoch:
         ((.updated_at // .created_at // null) | normalized_iso8601 | fromdateiso8601?);
     def issue_prefix:
-        ((.id // "") | capture("^(?<prefix>[^-]+(?:-[^-]+)?)").prefix // "unknown");
+        (.id // "") as $id
+        | if ($id | startswith("frankenscipy-")) then
+            "frankenscipy"
+        elif ($id | startswith("franken_networkx-")) then
+            "franken_networkx"
+        else
+            ($id | capture("^(?<prefix>[^-]+(?:-[^-]+)?)").prefix // "unknown")
+        end;
     def owner_hint:
         ([(.id // ""), (.title // ""), (.description // "")] | join(" ")) as $text
         | if (($text | test("franken_networkx|networkx"; "i")) or ((.id // "") | startswith("franken_networkx-"))) then
