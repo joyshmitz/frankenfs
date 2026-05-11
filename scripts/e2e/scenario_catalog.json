@@ -1988,6 +1988,34 @@
       ]
     },
     {
+      "suite_id": "ffs_operational_evidence_index",
+      "script": "scripts/e2e/ffs_operational_evidence_index_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "evidence_fixture_conflict_tree",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_fixture_conflict_tree|outcome=PASS"
+        },
+        {
+          "id": "evidence_index_selects_latest_authoritative",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_index_selects_latest_authoritative|outcome=PASS"
+        },
+        {
+          "id": "evidence_index_markdown_summary",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_index_markdown_summary|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_proof_overhead_budget",
       "script": "scripts/e2e/ffs_proof_overhead_budget_e2e.sh",
       "required_categories": [
