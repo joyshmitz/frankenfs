@@ -556,6 +556,72 @@
       ]
     },
     {
+      "suite_id": "ffs_fuzz_smoke",
+      "script": "scripts/e2e/ffs_fuzz_smoke_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "fuzz_smoke_manifest_path",
+          "category": "happy",
+          "status": "active",
+          "evidence": "FFS_FUZZ_SMOKE_MANIFEST"
+        },
+        {
+          "id": "fuzz_smoke_rch_command",
+          "category": "happy",
+          "status": "active",
+          "evidence": "validate-fuzz-smoke"
+        },
+        {
+          "id": "fuzz_smoke_report_extraction",
+          "category": "edge",
+          "status": "active",
+          "evidence": "extract_report_json"
+        },
+        {
+          "id": "fuzz_smoke_qa_artifact",
+          "category": "happy",
+          "status": "active",
+          "evidence": "FUZZ_SMOKE_QA|valid={valid}|seeds={seed_count}|checksum={checksum}|artifact={artifact}"
+        },
+        {
+          "id": "fuzz_smoke_unowned_failures",
+          "category": "error",
+          "status": "active",
+          "evidence": "unowned fuzz-smoke failures"
+        },
+        {
+          "id": "fuzz_smoke_command_failure",
+          "category": "error",
+          "status": "active",
+          "evidence": "fuzz-smoke command failed; stdout=$STDOUT_PATH stderr=$STDERR_PATH"
+        },
+        {
+          "id": "fuzz_smoke_pass_artifacts",
+          "category": "happy",
+          "status": "active",
+          "evidence": "fuzz-smoke report=$REPORT_JSON qa_artifact=$QA_ARTIFACT_JSON"
+        },
+        {
+          "id": "fuzz_smoke_quarantine_status",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "quarantine_status"
+        },
+        {
+          "id": "fuzz_smoke_minimization_status",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "minimization_status"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_fuse_production",
       "script": "scripts/e2e/ffs_fuse_production.sh",
       "required_categories": [
