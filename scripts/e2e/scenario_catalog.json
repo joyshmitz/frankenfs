@@ -1542,6 +1542,58 @@
       ]
     },
     {
+      "suite_id": "ffs_open_ended_inventory_scanner",
+      "script": "scripts/e2e/ffs_open_ended_inventory_scanner_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "open_ended_note_scanner_inputs_present",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=open_ended_note_scanner_inputs_present|outcome=PASS"
+        },
+        {
+          "id": "open_ended_note_scanner_positive_fixture",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=open_ended_note_scanner_positive_fixture|outcome=PASS"
+        },
+        {
+          "id": "open_ended_note_scanner_negative_fixture",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=open_ended_note_scanner_negative_fixture|outcome=PASS"
+        },
+        {
+          "id": "open_ended_note_scanner_report_contract",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=open_ended_note_scanner_report_contract|outcome=PASS"
+        },
+        {
+          "id": "open_ended_note_scanner_real_inventory",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=open_ended_note_scanner_real_inventory|outcome=PASS"
+        },
+        {
+          "id": "source_scope_manifest_real_workspace",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=source_scope_manifest_real_workspace|outcome=PASS"
+        },
+        {
+          "id": "source_scope_manifest_missing_family",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=source_scope_manifest_missing_family|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_proof_overhead_budget",
       "script": "scripts/e2e/ffs_proof_overhead_budget_e2e.sh",
       "required_categories": [
