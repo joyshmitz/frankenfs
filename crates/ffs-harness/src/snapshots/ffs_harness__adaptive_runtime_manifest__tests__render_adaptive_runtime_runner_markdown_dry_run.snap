@@ -1,0 +1,37 @@
+---
+source: crates/ffs-harness/src/adaptive_runtime_manifest.rs
+expression: markdown
+---
+# Adaptive Runtime Runner
+
+- Valid: `true`
+- Mode: `dry_run`
+- Classification: `small_host_smoke`
+- Permissioned real allowed: `false`
+- ACK env: `FFS_ADAPTIVE_RUNTIME_REAL_RUN_ACK`
+- ACK present: `false`
+- ACK matches: `false`
+- Cleanup: `not_started_dry_run`
+- Artifact root: `artifacts/adaptive-runtime/runner`
+- CPU count: `16`
+- RAM bytes: `68719476736`
+- NUMA nodes: `1`
+- FUSE capability: `available`
+
+## Capability Downgrades
+
+- host below large-host floor: cpu_count=16 ram_bytes=68719476736 numa_nodes=1
+- dry-run mode does not mount or generate adaptive runtime load
+
+## Refusals
+
+none
+
+## Artifacts
+
+- `artifacts/adaptive-runtime/runner/stdout.log`
+- `artifacts/adaptive-runtime/runner/stderr.log`
+- `artifacts/adaptive-runtime/runner/structured.jsonl`
+- `artifacts/adaptive-runtime/runner/runner_manifest.json`
+- `artifacts/adaptive-runtime/runner/cleanup_report.json`
+- `artifacts/adaptive-runtime/runner/host_facts.json`

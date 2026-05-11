@@ -1714,6 +1714,22 @@ mod tests {
         );
     }
 
+    /// bd-rchk0.219 - exact-output snapshot for the adaptive runtime runner
+    /// markdown consumed by operator dry-run handoffs.
+    ///
+    /// Existing tests prove the dry-run runner stays side-effect free. This
+    /// snapshot pins the report's host facts, ACK/refusal state, downgrade
+    /// explanation, and artifact ordering.
+    #[test]
+    fn render_adaptive_runtime_runner_markdown_dry_run_snapshot() {
+        let artifacts = build_adaptive_runtime_runner_artifacts(fixture_runner_config(
+            AdaptiveRuntimeRunnerMode::DryRun,
+        ));
+        let markdown = render_adaptive_runtime_runner_markdown(&artifacts.report);
+
+        insta::assert_snapshot!("render_adaptive_runtime_runner_markdown_dry_run", markdown);
+    }
+
     #[test]
     fn adaptive_runtime_runner_capability_probe_stays_downgraded() {
         let artifacts = build_adaptive_runtime_runner_artifacts(fixture_runner_config(
