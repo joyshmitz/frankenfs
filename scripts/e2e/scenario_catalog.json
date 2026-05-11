@@ -490,6 +490,72 @@
       ]
     },
     {
+      "suite_id": "ffs_fuzz_dashboard",
+      "script": "scripts/e2e/ffs_fuzz_dashboard_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "degradation",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "dashboard_module_exists",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=dashboard_module_exists|outcome=PASS"
+        },
+        {
+          "id": "dashboard_campaign_schema",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=dashboard_campaign_schema|outcome=PASS"
+        },
+        {
+          "id": "dashboard_health_states",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=dashboard_health_states|outcome=PASS"
+        },
+        {
+          "id": "dashboard_health_assessment",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=dashboard_health_assessment|outcome=PASS"
+        },
+        {
+          "id": "dashboard_regression_detection",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=dashboard_regression_detection|outcome=PASS"
+        },
+        {
+          "id": "dashboard_nightly_script",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=dashboard_nightly_script|outcome=PASS"
+        },
+        {
+          "id": "dashboard_schema_validation",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=dashboard_schema_validation|outcome=PASS"
+        },
+        {
+          "id": "dashboard_alert_severity",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=dashboard_alert_severity|outcome=PASS"
+        },
+        {
+          "id": "dashboard_unit_tests_pass",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=dashboard_unit_tests_pass|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_fuse_production",
       "script": "scripts/e2e/ffs_fuse_production.sh",
       "required_categories": [
