@@ -4652,6 +4652,35 @@ mod tests {
         assert!(markdown.contains("resume_checkpoint"));
     }
 
+    /// bd-rchk0.53.19 - exact-output snapshot for the permissioned execution
+    /// ledger markdown renderer.
+    ///
+    /// The substring smoke above proves the resume wording is present. This
+    /// snapshot pins summary bullets, target-bead ordering, proof-bundle lane
+    /// candidate formatting, and the empty-issues section consumed by
+    /// permissioned campaign handoffs.
+    #[test]
+    fn render_permissioned_campaign_execution_ledger_markdown_resume_snapshot() {
+        let manifest = valid_xfstests_manifest();
+        let ledger = valid_execution_ledger(
+            &manifest,
+            &[
+                PermissionedCampaignLedgerStepStatus::Running,
+                PermissionedCampaignLedgerStepStatus::Interrupted,
+                PermissionedCampaignLedgerStepStatus::Resumed,
+            ],
+        );
+        let report =
+            validate_permissioned_campaign_execution_ledger(&manifest, &ledger, &ledger_config());
+        assert!(report.valid, "{:?}", report.issues);
+        let markdown = render_permissioned_campaign_execution_ledger_markdown(&report);
+
+        insta::assert_snapshot!(
+            "render_permissioned_campaign_execution_ledger_markdown_resume",
+            markdown
+        );
+    }
+
     fn assert_valid(manifest: &PermissionedCampaignBrokerManifest) {
         let report = validate_permissioned_campaign_broker_manifest(manifest, &config());
         assert!(report.valid, "{:?}", report.issues);
