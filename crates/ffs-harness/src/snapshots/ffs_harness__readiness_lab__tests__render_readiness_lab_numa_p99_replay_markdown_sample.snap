@@ -1,0 +1,33 @@
+---
+source: crates/ffs-harness/src/readiness_lab.rs
+expression: markdown
+---
+# FrankenFS Readiness Lab NUMA/p99 Replay
+
+- Replay: `readiness-lab-numa-p99-fixtures`
+- Manifest: `numa-p99-replay.json`
+- Valid: `true`
+- Replay only: `true`
+- Product evidence claim: `none`
+- Release-gate effect: NUMA/p99 replay fixtures are simulation artifacts; public readiness unchanged until permissioned large-host evidence records raw workload logs, p99 attribution, proof-bundle lanes, and release-gate output
+- Fixtures: `6`
+- Missing fixture shapes: `0`
+- Missing p99 buckets: `0`
+- Malformed histograms: `0`
+
+| fixture | shape | class | cpu | numa | workers | p50 | p95 | p99 | dominant | component_sum | findings |
+|---|---|---|---:|---:|---:|---:|---:|---:|---|---:|---:|
+| `fixture-balanced` | `balanced_numa` | `advisory_replay_fixture` | `96` | `4` | `64` | `2250.0` | `4500.0` | `9000.0` | `service` | `7740.0` | `0` |
+| `fixture-skewed` | `skewed_numa` | `advisory_replay_fixture` | `96` | `4` | `64` | `3750.0` | `7500.0` | `15000.0` | `numa_remote_access` | `12900.0` | `0` |
+| `fixture-metadata-hot` | `metadata_read_hot_shards` | `advisory_replay_fixture` | `96` | `4` | `72` | `4500.0` | `9000.0` | `18000.0` | `synchronization` | `15480.0` | `0` |
+| `fixture-repair-scrub` | `repair_scrub_interference` | `advisory_replay_fixture` | `96` | `4` | `64` | `5250.0` | `10500.0` | `21000.0` | `repair_backlog` | `18060.0` | `0` |
+| `fixture-rch-contention` | `rch_worker_contention` | `advisory_replay_fixture` | `96` | `4` | `48` | `6000.0` | `12000.0` | `24000.0` | `rch_worker_contention` | `20640.0` | `0` |
+| `fixture-memory-pressure` | `memory_pressure` | `advisory_replay_fixture` | `96` | `4` | `56` | `6750.0` | `13500.0` | `27000.0` | `memory_reclaim` | `23220.0` | `0` |
+
+## Errors
+
+- none
+
+## Warnings
+
+- none

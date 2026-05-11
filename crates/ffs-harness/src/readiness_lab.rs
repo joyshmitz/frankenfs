@@ -6382,6 +6382,23 @@ mod tests {
         );
     }
 
+    /// bd-rchk0.53.25 - exact-output snapshot for the readiness-lab
+    /// NUMA/p99 replay markdown consumed by operator handoffs.
+    ///
+    /// The replay tests prove fixture coverage and advisory-only semantics.
+    /// This snapshot pins the rendered release-gate wording, fixture counters,
+    /// replay rows, dominant components, component sums, and empty findings.
+    #[test]
+    fn render_readiness_lab_numa_p99_replay_markdown_sample_snapshot() {
+        let report = validate_numa_p99_replay(&sample_numa_p99_replay_manifest());
+        let markdown = render_readiness_lab_numa_p99_replay_markdown(&report);
+
+        insta::assert_snapshot!(
+            "render_readiness_lab_numa_p99_replay_markdown_sample",
+            markdown
+        );
+    }
+
     #[test]
     fn checked_in_numa_p99_replay_fixture_manifest_validates() {
         let manifest = serde_json::from_str::<ReadinessLabNumaP99ReplayManifest>(include_str!(
