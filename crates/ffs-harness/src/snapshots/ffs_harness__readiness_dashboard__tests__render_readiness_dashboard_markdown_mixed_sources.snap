@@ -1,0 +1,38 @@
+---
+source: crates/ffs-harness/src/readiness_dashboard.rs
+expression: markdown
+---
+# FrankenFS Operator Readiness Dashboard
+
+- Dashboard valid: `false`
+- Sources: `2` validator_failures=`1`
+- Claims: `3` recommendations=`2`
+
+## Sources
+| Kind | Valid | Path | Claims | Beads |
+|---|---:|---|---|---|
+| `release_gate` | `false` | `artifacts/readiness/release_gate.json` | `release_gate:mount.rw.ext4`, `release_gate:xfstests.baseline` | `bd-rchk3.3` |
+| `readiness_lab_host_simulation` | `true` | `artifacts/readiness/lab/hosts.json` | `readiness_lab:host_simulation:large-a` | `bd-919xg` |
+
+## Claims
+| Claim | State | Lane | Freshness | Host | Missing Artifacts | Next Safe Command |
+|---|---|---|---|---|---|---|
+| `release_gate:mount.rw.ext4` | `validated` | `release_gate` | `validator_reported_fresh_or_unchecked` | `` |  | `cargo run -p ffs-harness -- evaluate-release-gates --bundle bundle.json --policy policy.json` |
+| `release_gate:xfstests.baseline` | `blocked` | `xfstests` | `proof_bundle_invalid` | `` | `fresh permissioned xfstests baseline proof lane`, `raw xfstests log archive` | `br show bd-rchk3.3 --no-db --json` |
+| `readiness_lab:host_simulation:large-a` | `advisory_only` | `readiness_lab` | `advisory_simulation_only` | `permissioned_large_host` |  | `br show bd-919xg --no-db --json` |
+
+## Recommendations
+- `readiness-dashboard:release_gate-xfstests-baseline` `blocker` claim=`release_gate:xfstests.baseline` validator=`artifacts/readiness/release_gate.json` bead=`bd-rchk3.3` command=`br show bd-rchk3.3 --no-db --json`
+  - fresh permissioned xfstests baseline proof lane is missing
+- `readiness-dashboard:readiness_lab-host-simulation-large-a` `follow_up` claim=`readiness_lab:host_simulation:large-a` validator=`artifacts/readiness/lab/hosts.json` bead=`bd-919xg` command=`br show bd-919xg --no-db --json`
+  - advisory lab result cannot upgrade public readiness
+
+## Tracker Follow-Up Beads
+| Bead | Status | Priority | Title |
+|---|---|---|---|
+| `bd-rchk3.3` | `open` | `P1` | Execute permissioned xfstests baseline |
+| `bd-919xg` | `in_progress` | `P2` | Integrate advisory lab state into readiness dashboard |
+
+## Warnings
+- readiness lab reports are advisory only
+- permissioned xfstests lane requires explicit ACK

@@ -1866,6 +1866,152 @@ mod tests {
         );
     }
 
+    /// bd-rchk0.53.18 - exact-output snapshot for the operator-facing
+    /// readiness dashboard markdown renderer.
+    ///
+    /// Field-level tests above pin claim classification and recommendation
+    /// wiring. This snapshot guards the rendered title, summary counters,
+    /// source/claim tables, recommendation wording, tracker follow-up table,
+    /// warning section, and stable row ordering consumed by operators.
+    #[test]
+    fn render_readiness_dashboard_markdown_mixed_sources_snapshot() {
+        let report = ReadinessDashboardReport {
+            schema_version: READINESS_DASHBOARD_SCHEMA_VERSION,
+            dashboard_id: "frankenfs-readiness-dashboard:v1".to_owned(),
+            valid: false,
+            source_report_count: 2,
+            claim_count: 3,
+            recommendation_count: 2,
+            source_validator_failure_count: 1,
+            sources: vec![
+                ReadinessDashboardSourceReport {
+                    source_kind: "release_gate".to_owned(),
+                    path: "artifacts/readiness/release_gate.json".to_owned(),
+                    valid: false,
+                    summary: "policy=policy-a bundle=bundle-a release_ready=false findings=1"
+                        .to_owned(),
+                    referenced_beads: vec!["bd-rchk3.3".to_owned()],
+                    produced_claim_ids: vec![
+                        "release_gate:mount.rw.ext4".to_owned(),
+                        "release_gate:xfstests.baseline".to_owned(),
+                    ],
+                },
+                ReadinessDashboardSourceReport {
+                    source_kind: "readiness_lab_host_simulation".to_owned(),
+                    path: "artifacts/readiness/lab/hosts.json".to_owned(),
+                    valid: true,
+                    summary: "valid=true product_evidence_claim=none".to_owned(),
+                    referenced_beads: vec!["bd-919xg".to_owned()],
+                    produced_claim_ids: vec![
+                        "readiness_lab:host_simulation:large-a".to_owned(),
+                    ],
+                },
+            ],
+            claims: vec![
+                ReadinessDashboardClaimReport {
+                    claim_id: "release_gate:mount.rw.ext4".to_owned(),
+                    claim_state: ReadinessDashboardClaimState::Validated,
+                    source_kind: "release_gate".to_owned(),
+                    source_path: "artifacts/readiness/release_gate.json".to_owned(),
+                    validator_report: "artifacts/readiness/release_gate.json".to_owned(),
+                    controlling_lane: Some("release_gate".to_owned()),
+                    freshness: Some("validator_reported_fresh_or_unchecked".to_owned()),
+                    host_class: None,
+                    missing_artifacts: Vec::new(),
+                    remediation_bead: None,
+                    next_safe_command: "cargo run -p ffs-harness -- evaluate-release-gates --bundle bundle.json --policy policy.json".to_owned(),
+                    evidence_basis: vec!["release_gate:validated".to_owned()],
+                },
+                ReadinessDashboardClaimReport {
+                    claim_id: "release_gate:xfstests.baseline".to_owned(),
+                    claim_state: ReadinessDashboardClaimState::Blocked,
+                    source_kind: "release_gate".to_owned(),
+                    source_path: "artifacts/readiness/release_gate.json".to_owned(),
+                    validator_report: "artifacts/readiness/release_gate.json".to_owned(),
+                    controlling_lane: Some("xfstests".to_owned()),
+                    freshness: Some("proof_bundle_invalid".to_owned()),
+                    host_class: None,
+                    missing_artifacts: vec![
+                        "fresh permissioned xfstests baseline proof lane".to_owned(),
+                        "raw xfstests log archive".to_owned(),
+                    ],
+                    remediation_bead: Some("bd-rchk3.3".to_owned()),
+                    next_safe_command: "br show bd-rchk3.3 --no-db --json".to_owned(),
+                    evidence_basis: vec!["finding:missing-xfstests".to_owned()],
+                },
+                ReadinessDashboardClaimReport {
+                    claim_id: "readiness_lab:host_simulation:large-a".to_owned(),
+                    claim_state: ReadinessDashboardClaimState::AdvisoryOnly,
+                    source_kind: "readiness_lab_host_simulation".to_owned(),
+                    source_path: "artifacts/readiness/lab/hosts.json".to_owned(),
+                    validator_report: "artifacts/readiness/lab/hosts.json".to_owned(),
+                    controlling_lane: Some("readiness_lab".to_owned()),
+                    freshness: Some("advisory_simulation_only".to_owned()),
+                    host_class: Some("permissioned_large_host".to_owned()),
+                    missing_artifacts: Vec::new(),
+                    remediation_bead: Some("bd-919xg".to_owned()),
+                    next_safe_command: "br show bd-919xg --no-db --json".to_owned(),
+                    evidence_basis: vec!["product_evidence_claim:none".to_owned()],
+                },
+            ],
+            recommendations: vec![
+                ReadinessDashboardRecommendation {
+                    action_id: "readiness-dashboard:release_gate-xfstests-baseline".to_owned(),
+                    claim_id: "release_gate:xfstests.baseline".to_owned(),
+                    severity: ReadinessDashboardRecommendationSeverity::Blocker,
+                    title: "Re-run permissioned xfstests evidence lane".to_owned(),
+                    validator_report: Some("artifacts/readiness/release_gate.json".to_owned()),
+                    bead_id: Some("bd-rchk3.3".to_owned()),
+                    next_safe_command: "br show bd-rchk3.3 --no-db --json".to_owned(),
+                    rationale: "fresh permissioned xfstests baseline proof lane is missing"
+                        .to_owned(),
+                    missing_artifacts: vec!["raw xfstests log archive".to_owned()],
+                    controlling_lane: Some("xfstests".to_owned()),
+                },
+                ReadinessDashboardRecommendation {
+                    action_id: "readiness-dashboard:readiness_lab-host-simulation-large-a"
+                        .to_owned(),
+                    claim_id: "readiness_lab:host_simulation:large-a".to_owned(),
+                    severity: ReadinessDashboardRecommendationSeverity::FollowUp,
+                    title: "Keep readiness lab evidence advisory".to_owned(),
+                    validator_report: Some("artifacts/readiness/lab/hosts.json".to_owned()),
+                    bead_id: Some("bd-919xg".to_owned()),
+                    next_safe_command: "br show bd-919xg --no-db --json".to_owned(),
+                    rationale: "advisory lab result cannot upgrade public readiness".to_owned(),
+                    missing_artifacts: Vec::new(),
+                    controlling_lane: Some("readiness_lab".to_owned()),
+                },
+            ],
+            tracker_follow_up_beads: vec![
+                ReadinessDashboardTrackerBead {
+                    issue_id: "bd-rchk3.3".to_owned(),
+                    status: "open".to_owned(),
+                    title: "Execute permissioned xfstests baseline".to_owned(),
+                    priority: Some("P1".to_owned()),
+                },
+                ReadinessDashboardTrackerBead {
+                    issue_id: "bd-919xg".to_owned(),
+                    status: "in_progress".to_owned(),
+                    title: "Integrate advisory lab state into readiness dashboard".to_owned(),
+                    priority: Some("P2".to_owned()),
+                },
+            ],
+            warnings: vec![
+                "readiness lab reports are advisory only".to_owned(),
+                "permissioned xfstests lane requires explicit ACK".to_owned(),
+            ],
+            errors: Vec::new(),
+        };
+        let markdown = render_readiness_dashboard_markdown(&report);
+
+        assert!(markdown.contains("# FrankenFS Operator Readiness Dashboard"));
+        assert!(markdown.contains("## Tracker Follow-Up Beads"));
+        insta::assert_snapshot!(
+            "render_readiness_dashboard_markdown_mixed_sources",
+            markdown
+        );
+    }
+
     #[test]
     fn tracker_jsonl_filters_local_follow_up_beads() {
         let dir = tempfile::tempdir().expect("tempdir");
