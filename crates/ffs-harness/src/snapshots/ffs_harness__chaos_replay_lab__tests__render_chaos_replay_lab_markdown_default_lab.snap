@@ -1,0 +1,21 @@
+---
+source: crates/ffs-harness/src/chaos_replay_lab.rs
+expression: markdown
+---
+# Chaos Replay Lab
+
+- lab: `frankenfs_chaos_replay_lab_v1`
+- schema version: `1`
+- bead: `bd-rchk0.5.5`
+- valid: `true`
+- schedules: `7`
+- minimized schedules: `3`
+
+## Crash Taxonomies
+- `concurrent_writer_conflict`
+- `metadata_data_ordering_boundary`
+- `mount_teardown_race`
+- `post_commit_pre_flush_crash`
+- `pre_commit_crash`
+- `repair_interruption`
+- `replay_interruption`

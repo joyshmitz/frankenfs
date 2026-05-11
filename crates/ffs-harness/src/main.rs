@@ -45,6 +45,10 @@ use ffs_harness::{
         DEFAULT_CASEFOLD_CORPUS_PATH, fail_on_casefold_corpus_errors, load_casefold_corpus,
         render_casefold_corpus_markdown, validate_casefold_corpus,
     },
+    chaos_replay_lab::{
+        DEFAULT_CHAOS_REPLAY_LAB_PATH, fail_on_chaos_replay_lab_errors, load_chaos_replay_lab,
+        render_chaos_replay_lab_markdown, validate_chaos_replay_lab,
+    },
     cross_oracle_arbitration::{
         DEFAULT_CROSS_ORACLE_ARBITRATION_REPORT, fail_on_cross_oracle_arbitration_errors,
         load_cross_oracle_arbitration_report, render_cross_oracle_arbitration_markdown,
@@ -549,6 +553,7 @@ fn run() -> Result<()> {
         Some("validate-repair-writeback-serialization") => {
             validate_repair_writeback_serialization_cmd(&args[1..])
         }
+        Some("validate-chaos-replay-lab") => validate_chaos_replay_lab_cmd(&args[1..]),
         Some("validate-inventory-closeout-gate") => {
             validate_inventory_closeout_gate_cmd(&args[1..])
         }
@@ -998,6 +1003,14 @@ struct FaultInjectionCorpusCmdArgs {
 #[derive(Debug)]
 struct RepairCorpusCmdArgs {
     corpus_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
+struct ChaosReplayLabCmdArgs {
+    lab_path: String,
     out_path: Option<String>,
     summary_out_path: Option<String>,
     format: ProofBundleFormat,
@@ -7575,6 +7588,87 @@ fn validate_mounted_repair_mutation_boundary_cmd(args: &[String]) -> Result<()> 
     Ok(())
 }
 
+fn validate_chaos_replay_lab_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_chaos_replay_lab_cmd_args(args)? else {
+        return Ok(());
+    };
+    let lab = load_chaos_replay_lab(Path::new(&cmd_args.lab_path))?;
+    let report = validate_chaos_replay_lab(&lab);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_chaos_replay_lab_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "chaos replay lab report written: {} valid={} schedules={}",
+            path, report.valid, report.schedule_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_chaos_replay_lab_markdown(&report)),
+        )?;
+        println!("chaos replay lab summary written: {path}");
+    }
+
+    fail_on_chaos_replay_lab_errors(&report)
+}
+
+fn parse_chaos_replay_lab_cmd_args(args: &[String]) -> Result<Option<ChaosReplayLabCmdArgs>> {
+    let mut lab_path = DEFAULT_CHAOS_REPLAY_LAB_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--lab" => {
+                i += 1;
+                args.get(i)
+                    .context("--lab requires a path")?
+                    .clone_into(&mut lab_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_chaos_replay_lab_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-chaos-replay-lab argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(ChaosReplayLabCmdArgs {
+        lab_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
 fn validate_inventory_closeout_gate_cmd(args: &[String]) -> Result<()> {
     let Some(cmd_args) = parse_inventory_closeout_gate_cmd_args(args)? else {
         return Ok(());
@@ -8229,6 +8323,7 @@ fn print_usage_commands() {
     print_repair_confidence_lab_usage_summary();
     print_operator_recovery_drill_usage_summary();
     print_repair_writeback_serialization_usage_summary();
+    print_chaos_replay_lab_usage_summary();
     print_inventory_closeout_gate_usage_summary();
     println!("  ffs-harness validate-remediation-catalog [--catalog FILE] [--out FILE]");
     print_remediation_severity_gate_usage_summary();
@@ -8363,6 +8458,7 @@ fn print_usage_examples() {
     print_repair_confidence_lab_example();
     print_operator_recovery_drill_example();
     print_repair_writeback_serialization_example();
+    print_chaos_replay_lab_example();
     println!(
         "  ffs-harness validate-remediation-catalog --out artifacts/remediation/catalog_report.json"
     );
@@ -8587,6 +8683,18 @@ fn print_repair_writeback_serialization_usage_summary() {
 fn print_repair_writeback_serialization_example() {
     println!(
         "  ffs-harness validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --out artifacts/repair-writeback/contract_report.json --artifact-out artifacts/repair-writeback/sample_artifact_manifest.json --summary-out artifacts/repair-writeback/contract_summary.md"
+    );
+}
+
+fn print_chaos_replay_lab_usage_summary() {
+    println!(
+        "  ffs-harness validate-chaos-replay-lab [--lab FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_chaos_replay_lab_example() {
+    println!(
+        "  ffs-harness validate-chaos-replay-lab --lab tests/chaos-replay-lab/chaos_replay_lab.json --out artifacts/chaos-replay/lab_report.json --summary-out artifacts/chaos-replay/lab_summary.md"
     );
 }
 
@@ -9368,6 +9476,16 @@ fn print_mounted_repair_mutation_boundary_usage() {
     println!("Options:");
     println!("  --matrix FILE                      Read mounted repair mutation boundary JSON");
     println!("  --out FILE                         Write JSON validation report to FILE");
+}
+
+fn print_chaos_replay_lab_usage() {
+    println!("Usage: ffs-harness validate-chaos-replay-lab [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --lab FILE                         Read chaos replay lab JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report");
+    println!("  --summary-out FILE                 Write Markdown lab summary");
 }
 
 fn print_remediation_catalog_usage() {

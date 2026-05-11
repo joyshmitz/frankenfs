@@ -14,7 +14,7 @@
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write as _, fs, path::Path};
 
 pub const CHAOS_REPLAY_LAB_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_CHAOS_REPLAY_LAB_PATH: &str = "tests/chaos-replay-lab/chaos_replay_lab.json";
@@ -135,17 +135,29 @@ pub fn parse_chaos_replay_lab(text: &str) -> Result<ChaosReplayLab> {
         .map_err(|err| anyhow::anyhow!("failed to parse chaos replay lab JSON: {err}"))
 }
 
+pub fn load_chaos_replay_lab(path: &Path) -> Result<ChaosReplayLab> {
+    let text = fs::read_to_string(path)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
+    parse_chaos_replay_lab(&text)
+        .map_err(|err| anyhow::anyhow!("invalid chaos replay lab {}: {err}", path.display()))
+}
+
 pub fn validate_default_chaos_replay_lab() -> Result<ChaosReplayLabReport> {
     let lab = parse_chaos_replay_lab(DEFAULT_CHAOS_REPLAY_LAB_JSON)?;
     let report = validate_chaos_replay_lab(&lab);
-    if !report.valid {
-        bail!(
-            "chaos replay lab failed with {} error(s): {}",
-            report.errors.len(),
-            report.errors.join("; ")
-        );
-    }
+    fail_on_chaos_replay_lab_errors(&report)?;
     Ok(report)
+}
+
+pub fn fail_on_chaos_replay_lab_errors(report: &ChaosReplayLabReport) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    bail!(
+        "chaos replay lab failed with {} error(s): {}",
+        report.errors.len(),
+        report.errors.join("; ")
+    );
 }
 
 #[must_use]
@@ -414,6 +426,33 @@ fn validate_required_taxonomy_coverage(seen: &BTreeSet<String>, errors: &mut Vec
             ));
         }
     }
+}
+
+#[must_use]
+pub fn render_chaos_replay_lab_markdown(report: &ChaosReplayLabReport) -> String {
+    let mut output = String::new();
+    output.push_str("# Chaos Replay Lab\n\n");
+    let _ = writeln!(output, "- lab: `{}`", report.lab_id);
+    let _ = writeln!(output, "- schema version: `{}`", report.schema_version);
+    let _ = writeln!(output, "- bead: `{}`", report.bead_id);
+    let _ = writeln!(output, "- valid: `{}`", report.valid);
+    let _ = writeln!(output, "- schedules: `{}`", report.schedule_count);
+    let _ = writeln!(
+        output,
+        "- minimized schedules: `{}`",
+        report.minimized_count
+    );
+    output.push_str("\n## Crash Taxonomies\n");
+    for taxonomy in &report.crash_taxonomies_seen {
+        let _ = writeln!(output, "- `{taxonomy}`");
+    }
+    if !report.errors.is_empty() {
+        output.push_str("\n## Errors\n");
+        for error in &report.errors {
+            let _ = writeln!(output, "- {error}");
+        }
+    }
+    output
 }
 
 #[cfg(test)]
@@ -786,5 +825,26 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one schedule"))
         );
+    }
+
+    #[test]
+    fn render_chaos_replay_lab_markdown_default_lab() {
+        let report =
+            validate_default_chaos_replay_lab().expect("default chaos replay lab validates");
+        let markdown = render_chaos_replay_lab_markdown(&report);
+        insta::assert_snapshot!("render_chaos_replay_lab_markdown_default_lab", markdown);
+    }
+
+    #[test]
+    fn fail_on_errors_rejects_invalid_report() {
+        let mut report = validate_default_chaos_replay_lab()
+            .expect("default chaos replay lab validates before mutation");
+        report.valid = false;
+        report
+            .errors
+            .push("fixture mutation erased replay command".to_owned());
+        let err =
+            fail_on_chaos_replay_lab_errors(&report).expect_err("invalid report must fail closed");
+        assert!(err.to_string().contains("chaos replay lab failed"));
     }
 }

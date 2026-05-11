@@ -428,6 +428,29 @@ evidence needed to prevent vague high-risk notes from being silently treated as
 done. Stale-allowed rows require a future expiry, owner, user-risk rationale,
 and linked bead or non-goal artifact; duplicates must point at another row.
 
+## Chaos Replay Lab Contract
+
+The chaos replay lab lives in:
+
+- `tests/chaos-replay-lab/chaos_replay_lab.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-chaos-replay-lab \
+  --lab tests/chaos-replay-lab/chaos_replay_lab.json \
+  --out artifacts/chaos-replay/lab_report.json \
+  --summary-out artifacts/chaos-replay/lab_summary.md
+```
+
+This lab is a non-permissioned crash/replay schedule contract, not proof that a
+mounted daemon, destructive replay, or permissioned host lane has executed. It
+must keep required crash taxonomies, deterministic seeds, replay commands, raw
+log paths, survivor expectations, repair policy, minimization status, and
+host-skip rationale visible. Replay commands are recorded as RCH cargo-test
+commands for reproducibility; permissioned mounted mutation remains outside
+this gate until an explicit operator-approved lane produces real artifacts.
+
 ## Swarm Workload Harness Contract
 
 The 64-core/256GB swarm workload harness plan lives in:

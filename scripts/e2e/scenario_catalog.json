@@ -712,6 +712,53 @@
       ]
     },
     {
+      "suite_id": "ffs_chaos_replay_lab",
+      "script": "scripts/e2e/ffs_chaos_replay_lab_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "chaos_replay_lab_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=chaos_replay_lab_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "chaos_replay_lab_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=chaos_replay_lab_validates|outcome=PASS"
+        },
+        {
+          "id": "chaos_replay_lab_coverage",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=chaos_replay_lab_coverage|outcome=PASS"
+        },
+        {
+          "id": "chaos_replay_lab_invalid_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=chaos_replay_lab_invalid_rejected|outcome=PASS"
+        },
+        {
+          "id": "chaos_replay_lab_markdown_docs",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=chaos_replay_lab_markdown_docs|outcome=PASS"
+        },
+        {
+          "id": "chaos_replay_lab_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=chaos_replay_lab_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_cli_wal_telemetry",
       "script": "scripts/e2e/ffs_cli_wal_telemetry_e2e.sh",
       "required_categories": [
