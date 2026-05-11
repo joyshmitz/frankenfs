@@ -234,6 +234,29 @@ parent mismatches. Rows that require loop devices, `btrfs-progs`, long
 campaigns, or host-specific behavior remain metadata-only until a permissioned
 lane records authoritative artifacts.
 
+## Btrfs Multi-Device Corpus Contract
+
+The btrfs multi-device RAID corpus lives in:
+
+- `tests/btrfs-multidevice-corpus/btrfs_multidevice_corpus.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-btrfs-multidevice-corpus \
+  --corpus tests/btrfs-multidevice-corpus/btrfs_multidevice_corpus.json \
+  --out artifacts/btrfs-multidevice/report.json \
+  --summary-out artifacts/btrfs-multidevice/summary.md
+```
+
+This corpus is a support-envelope contract, not permission to claim full btrfs
+RAID parity. It must keep healthy assembly, device-order permutation, missing
+device, duplicate-device-id, stale-superblock, and unsupported-profile rows
+visible, and it must preserve explicit `raid1` and `raid5` profile coverage.
+Rows that require real multi-image assembly, mounted writes, scrub/repair, or
+host-specific btrfs behavior remain metadata-only until a permissioned lane
+records authoritative artifacts.
+
 ## Swarm Workload Harness Contract
 
 The 64-core/256GB swarm workload harness plan lives in:

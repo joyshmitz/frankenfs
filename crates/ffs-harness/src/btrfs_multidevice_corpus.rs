@@ -11,7 +11,7 @@
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write as _, fs, path::Path};
 
 pub const BTRFS_MULTIDEV_CORPUS_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_BTRFS_MULTIDEV_CORPUS_PATH: &str =
@@ -126,6 +126,12 @@ pub fn parse_btrfs_multidev_corpus(text: &str) -> Result<BtrfsMultidevCorpus> {
         .map_err(|err| anyhow::anyhow!("failed to parse btrfs multi-device corpus JSON: {err}"))
 }
 
+pub fn load_btrfs_multidev_corpus(path: &Path) -> Result<BtrfsMultidevCorpus> {
+    let text = fs::read_to_string(path)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
+    parse_btrfs_multidev_corpus(&text)
+}
+
 pub fn validate_default_btrfs_multidev_corpus() -> Result<BtrfsMultidevCorpusReport> {
     let corpus = parse_btrfs_multidev_corpus(DEFAULT_BTRFS_MULTIDEV_CORPUS_JSON)?;
     let report = validate_btrfs_multidev_corpus(&corpus);
@@ -137,6 +143,46 @@ pub fn validate_default_btrfs_multidev_corpus() -> Result<BtrfsMultidevCorpusRep
         );
     }
     Ok(report)
+}
+
+pub fn fail_on_btrfs_multidev_corpus_errors(report: &BtrfsMultidevCorpusReport) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    bail!(
+        "btrfs multi-device corpus validation failed: {}",
+        report.errors.join("; ")
+    )
+}
+
+#[must_use]
+pub fn render_btrfs_multidev_corpus_markdown(report: &BtrfsMultidevCorpusReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Btrfs Multi-Device Corpus");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "- corpus: `{}`", report.corpus_id);
+    let _ = writeln!(out, "- schema version: `{}`", report.schema_version);
+    let _ = writeln!(out, "- bead: `{}`", report.bead_id);
+    let _ = writeln!(out, "- valid: `{}`", report.valid);
+    let _ = writeln!(out, "- scenarios: `{}`", report.scenario_count);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Scenario Kinds");
+    for kind in &report.scenario_kinds {
+        let _ = writeln!(out, "- `{kind}`");
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Profiles");
+    for profile in &report.profiles {
+        let _ = writeln!(out, "- `{profile}`");
+    }
+    if !report.errors.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "## Errors");
+        for error in &report.errors {
+            let _ = writeln!(out, "- {error}");
+        }
+    }
+    out
 }
 
 #[must_use]
@@ -468,6 +514,33 @@ mod tests {
                 "missing required kind {kind}"
             );
         }
+    }
+
+    #[test]
+    fn render_markdown_summarizes_default_corpus() {
+        let report = validate_default_btrfs_multidev_corpus()
+            .expect("default btrfs multi-device corpus validates");
+        let markdown = render_btrfs_multidev_corpus_markdown(&report);
+        assert!(markdown.contains("# Btrfs Multi-Device Corpus"));
+        assert!(markdown.contains("`healthy_assembly`"));
+        assert!(markdown.contains("`raid1`"));
+        insta::assert_snapshot!(
+            "render_btrfs_multidev_corpus_markdown_default_corpus",
+            markdown
+        );
+    }
+
+    #[test]
+    fn fail_on_errors_rejects_invalid_report() {
+        let mut corpus = fixture_corpus();
+        corpus.scenarios.clear();
+        let report = validate_btrfs_multidev_corpus(&corpus);
+        let err =
+            fail_on_btrfs_multidev_corpus_errors(&report).expect_err("invalid report should fail");
+        assert!(
+            err.to_string()
+                .contains("btrfs multi-device corpus validation failed")
+        );
     }
 
     #[test]

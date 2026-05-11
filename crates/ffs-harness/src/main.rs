@@ -31,6 +31,11 @@ use ffs_harness::{
         render_artifact_schema_fixture_markdown, validate_artifact_schema_fixture_dir,
         validate_operational_manifest,
     },
+    btrfs_multidevice_corpus::{
+        DEFAULT_BTRFS_MULTIDEV_CORPUS_PATH, fail_on_btrfs_multidev_corpus_errors,
+        load_btrfs_multidev_corpus, render_btrfs_multidev_corpus_markdown,
+        validate_btrfs_multidev_corpus,
+    },
     btrfs_send_receive_corpus::{
         DEFAULT_BTRFS_SEND_RECEIVE_CORPUS_PATH, fail_on_btrfs_send_receive_corpus_errors,
         load_btrfs_send_receive_corpus, render_btrfs_send_receive_corpus_markdown,
@@ -523,6 +528,9 @@ fn run() -> Result<()> {
         Some("validate-btrfs-send-receive-corpus") => {
             validate_btrfs_send_receive_corpus_cmd(&args[1..])
         }
+        Some("validate-btrfs-multidevice-corpus") => {
+            validate_btrfs_multidevice_corpus_cmd(&args[1..])
+        }
         Some("validate-metamorphic-workload-seeds") => {
             validate_metamorphic_workload_seed_catalog_cmd(&args[1..])
         }
@@ -916,6 +924,14 @@ struct BtrfsSendReceiveCorpusCmdArgs {
 }
 
 #[derive(Debug)]
+struct BtrfsMultideviceCorpusCmdArgs {
+    corpus_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
 struct MetamorphicWorkloadSeedCatalogCmdArgs {
     catalog_path: String,
     out_path: Option<String>,
@@ -1143,6 +1159,89 @@ fn parse_btrfs_send_receive_corpus_cmd_args(
     }
 
     Ok(Some(BtrfsSendReceiveCorpusCmdArgs {
+        corpus_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
+fn validate_btrfs_multidevice_corpus_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_btrfs_multidevice_corpus_cmd_args(args)? else {
+        return Ok(());
+    };
+    let corpus = load_btrfs_multidev_corpus(Path::new(&cmd_args.corpus_path))?;
+    let report = validate_btrfs_multidev_corpus(&corpus);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_btrfs_multidev_corpus_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "btrfs multi-device corpus report written: {} valid={} scenarios={}",
+            path, report.valid, report.scenario_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_btrfs_multidev_corpus_markdown(&report)),
+        )?;
+        println!("btrfs multi-device corpus summary written: {path}");
+    }
+
+    fail_on_btrfs_multidev_corpus_errors(&report)
+}
+
+fn parse_btrfs_multidevice_corpus_cmd_args(
+    args: &[String],
+) -> Result<Option<BtrfsMultideviceCorpusCmdArgs>> {
+    let mut corpus_path = DEFAULT_BTRFS_MULTIDEV_CORPUS_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--corpus" => {
+                i += 1;
+                args.get(i)
+                    .context("--corpus requires a path")?
+                    .clone_into(&mut corpus_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_btrfs_multidevice_corpus_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-btrfs-multidevice-corpus argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(BtrfsMultideviceCorpusCmdArgs {
         corpus_path,
         out_path,
         summary_out_path,
@@ -7455,6 +7554,7 @@ fn print_usage_commands() {
     print_writeback_cache_crash_replay_usage_summary();
     print_workload_corpus_usage_summary();
     print_btrfs_send_receive_corpus_usage_summary();
+    print_btrfs_multidevice_corpus_usage_summary();
     print_metamorphic_workload_seed_catalog_usage_summary();
     println!(
         "  ffs-harness validate-mounted-write-error-classes [--catalog FILE] [--matrix FILE] [--out FILE]"
@@ -7583,6 +7683,7 @@ fn print_usage_examples() {
     print_writeback_cache_crash_replay_example();
     print_workload_corpus_example();
     print_btrfs_send_receive_corpus_example();
+    print_btrfs_multidevice_corpus_example();
     print_metamorphic_workload_seed_catalog_example();
     println!(
         "  ffs-harness validate-mounted-write-error-classes --out artifacts/e2e/mounted_write_error_classes.json"
@@ -7851,6 +7952,18 @@ fn print_btrfs_send_receive_corpus_usage_summary() {
 fn print_btrfs_send_receive_corpus_example() {
     println!(
         "  ffs-harness validate-btrfs-send-receive-corpus --corpus tests/btrfs-send-receive-corpus/btrfs_send_receive_corpus.json --out artifacts/btrfs-send-receive/report.json --summary-out artifacts/btrfs-send-receive/summary.md"
+    );
+}
+
+fn print_btrfs_multidevice_corpus_usage_summary() {
+    println!(
+        "  ffs-harness validate-btrfs-multidevice-corpus [--corpus FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_btrfs_multidevice_corpus_example() {
+    println!(
+        "  ffs-harness validate-btrfs-multidevice-corpus --corpus tests/btrfs-multidevice-corpus/btrfs_multidevice_corpus.json --out artifacts/btrfs-multidevice/report.json --summary-out artifacts/btrfs-multidevice/summary.md"
     );
 }
 
@@ -8393,6 +8506,16 @@ fn print_btrfs_send_receive_corpus_usage() {
     println!();
     println!("Options:");
     println!("  --corpus FILE                      Read btrfs send/receive corpus JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report");
+    println!("  --summary-out FILE                 Write Markdown corpus summary");
+}
+
+fn print_btrfs_multidevice_corpus_usage() {
+    println!("Usage: ffs-harness validate-btrfs-multidevice-corpus [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --corpus FILE                      Read btrfs multi-device corpus JSON");
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write validation report");
     println!("  --summary-out FILE                 Write Markdown corpus summary");
