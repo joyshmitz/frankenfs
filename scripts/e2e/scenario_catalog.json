@@ -963,6 +963,59 @@
       ]
     },
     {
+      "suite_id": "ffs_mvcc_lifecycle",
+      "script": "scripts/e2e/ffs_mvcc_lifecycle_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "open_options_wal_fields",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=open_options_wal_fields|outcome=PASS"
+        },
+        {
+          "id": "openfs_wal_recovery",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=openfs_wal_recovery|outcome=PASS"
+        },
+        {
+          "id": "init_mvcc_store",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=init_mvcc_store|outcome=PASS"
+        },
+        {
+          "id": "mvcc_wal_integration",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mvcc_wal_integration|outcome=PASS"
+        },
+        {
+          "id": "replay_engine_unit",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=replay_engine_unit|outcome=PASS"
+        },
+        {
+          "id": "mvcc_lifecycle_logging",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=lifecycle_logging|outcome=PASS"
+        },
+        {
+          "id": "mvcc_lifecycle_persist_tests",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=persist_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_taxonomy",
       "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
       "required_categories": [
