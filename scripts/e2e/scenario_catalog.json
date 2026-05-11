@@ -1016,6 +1016,72 @@
       ]
     },
     {
+      "suite_id": "ffs_mvcc_replay_gate",
+      "script": "scripts/e2e/ffs_mvcc_replay_gate_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "corruption",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "mvcc_replay_full_suite",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mvcc_full_suite|outcome=PASS"
+        },
+        {
+          "id": "mvcc_replay_wal_tests",
+          "category": "corruption",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_replay_tests|outcome=PASS"
+        },
+        {
+          "id": "mvcc_replay_crash_matrix_tests",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_matrix_tests|outcome=PASS"
+        },
+        {
+          "id": "mvcc_replay_persist_layer_tests",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=persist_layer_tests|outcome=PASS"
+        },
+        {
+          "id": "mvcc_replay_cli_wal_telemetry_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=cli_wal_telemetry_tests|outcome=PASS"
+        },
+        {
+          "id": "mvcc_replay_core_wal_recovery",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=core_wal_recovery|outcome=PASS"
+        },
+        {
+          "id": "mvcc_replay_wal_logging",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_replay_logging|outcome=PASS"
+        },
+        {
+          "id": "mvcc_replay_crash_matrix_logging",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_matrix_logging|outcome=PASS"
+        },
+        {
+          "id": "mvcc_replay_e2e_scripts",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mvcc_e2e_scripts|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_taxonomy",
       "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
       "required_categories": [
