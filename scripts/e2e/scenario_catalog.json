@@ -1762,6 +1762,85 @@
       ]
     },
     {
+      "suite_id": "ffs_wal_writer",
+      "script": "scripts/e2e/ffs_wal_writer_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "recovery",
+        "degradation"
+      ],
+      "scenarios": [
+        {
+          "id": "wal_writer_types",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_writer_types|outcome=PASS"
+        },
+        {
+          "id": "wal_writer_unit",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_writer_unit|outcome=PASS"
+        },
+        {
+          "id": "wal_writer_monotonic",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_writer_monotonic|outcome=PASS"
+        },
+        {
+          "id": "wal_writer_sentinel",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_writer_sentinel|outcome=PASS"
+        },
+        {
+          "id": "wal_writer_backpressure",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_writer_backpressure|outcome=PASS"
+        },
+        {
+          "id": "wal_writer_sync_policy",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_writer_sync_policy|outcome=PASS"
+        },
+        {
+          "id": "wal_writer_error_class",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_writer_error_class|outcome=PASS"
+        },
+        {
+          "id": "wal_writer_proptest_monotonic",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_writer_proptest_monotonic|outcome=PASS"
+        },
+        {
+          "id": "wal_writer_persist_integration",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_writer_persist_integration|outcome=PASS"
+        },
+        {
+          "id": "wal_writer_logging",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_writer_logging|outcome=PASS"
+        },
+        {
+          "id": "wal_writer_verify",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_writer_verify|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_refresh_policy",
       "script": "scripts/e2e/ffs_refresh_policy_e2e.sh",
       "required_categories": [
