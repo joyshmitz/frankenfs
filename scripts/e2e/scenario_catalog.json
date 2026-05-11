@@ -197,6 +197,40 @@
       ]
     },
     {
+      "suite_id": "ffs_artifact_schema_fixtures",
+      "script": "scripts/e2e/ffs_artifact_schema_fixtures_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "artifact_schema_fixture_files_present",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=artifact_schema_fixture_files_present|outcome=PASS"
+        },
+        {
+          "id": "artifact_schema_fixture_validator_exact",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=artifact_schema_fixture_validator_exact|outcome=PASS"
+        },
+        {
+          "id": "artifact_schema_fixture_report_contract",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=artifact_schema_fixture_report_contract|outcome=PASS"
+        },
+        {
+          "id": "artifact_schema_fixture_markdown_summary",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=artifact_schema_fixture_markdown_summary|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_performance_manifest",
       "script": "scripts/e2e/ffs_performance_manifest_e2e.sh",
       "required_categories": [
