@@ -10,7 +10,7 @@
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write as _, fs, path::Path};
 
 pub const REPAIR_CORPUS_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_REPAIR_CORPUS_PATH: &str = "tests/repair-corpus/repair_corpus.json";
@@ -119,6 +119,12 @@ pub fn parse_repair_corpus(text: &str) -> Result<RepairCorpus> {
         .map_err(|err| anyhow::anyhow!("failed to parse repair corpus JSON: {err}"))
 }
 
+pub fn load_repair_corpus(path: &Path) -> Result<RepairCorpus> {
+    let text = fs::read_to_string(path)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
+    parse_repair_corpus(&text)
+}
+
 pub fn validate_default_repair_corpus() -> Result<RepairCorpusReport> {
     let corpus = parse_repair_corpus(DEFAULT_REPAIR_CORPUS_JSON)?;
     let report = validate_repair_corpus(&corpus);
@@ -130,6 +136,46 @@ pub fn validate_default_repair_corpus() -> Result<RepairCorpusReport> {
         );
     }
     Ok(report)
+}
+
+pub fn fail_on_repair_corpus_errors(report: &RepairCorpusReport) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    bail!(
+        "repair corpus validation failed: {}",
+        report.errors.join("; ")
+    )
+}
+
+#[must_use]
+pub fn render_repair_corpus_markdown(report: &RepairCorpusReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Repair Corpus");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "- corpus: `{}`", report.corpus_id);
+    let _ = writeln!(out, "- schema version: `{}`", report.schema_version);
+    let _ = writeln!(out, "- bead: `{}`", report.bead_id);
+    let _ = writeln!(out, "- valid: `{}`", report.valid);
+    let _ = writeln!(out, "- cases: `{}`", report.case_count);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Outcome Classes");
+    for class in &report.outcome_classes {
+        let _ = writeln!(out, "- `{class}`");
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Refusal Reasons");
+    for reason in &report.refusal_reasons {
+        let _ = writeln!(out, "- `{reason}`");
+    }
+    if !report.errors.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "## Errors");
+        for error in &report.errors {
+            let _ = writeln!(out, "- {error}");
+        }
+    }
+    out
 }
 
 #[must_use]
@@ -477,6 +523,25 @@ mod tests {
             );
         }
         assert!(report.outcome_classes.iter().any(|o| o == "recovered"));
+    }
+
+    #[test]
+    fn render_markdown_summarizes_default_corpus() {
+        let report = validate_default_repair_corpus().expect("default corpus validates");
+        let markdown = render_repair_corpus_markdown(&report);
+        assert!(markdown.contains("# Repair Corpus"));
+        assert!(markdown.contains("wrong_image_ledger"));
+        assert!(markdown.contains("refused_stale_ledger"));
+        insta::assert_snapshot!("render_repair_corpus_markdown_default_corpus", markdown);
+    }
+
+    #[test]
+    fn fail_on_errors_rejects_invalid_report() {
+        let mut corpus = fixture_corpus();
+        corpus.cases.clear();
+        let report = validate_repair_corpus(&corpus);
+        let err = fail_on_repair_corpus_errors(&report).expect_err("invalid report rejects");
+        assert!(err.to_string().contains("repair corpus validation failed"));
     }
 
     #[test]

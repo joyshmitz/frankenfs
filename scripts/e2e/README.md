@@ -304,6 +304,30 @@ unsafe-to-repair classifications. Adversarial and unsafe-to-repair rows must
 stay explicit until a permissioned calibration lane records authoritative
 recovery evidence.
 
+## Repair Corpus Contract
+
+The repair chain-of-custody corpus lives in:
+
+- `tests/repair-corpus/repair_corpus.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-repair-corpus \
+  --corpus tests/repair-corpus/repair_corpus.json \
+  --out artifacts/repair-corpus/report.json \
+  --summary-out artifacts/repair-corpus/summary.md
+```
+
+This corpus is a support-envelope contract for repair refusal and
+chain-of-custody evidence, not permission to mutate mounted images or claim
+automatic repair success. It must keep recovered, wrong-image-ledger,
+stale-ledger, truncated-ledger, and post-repair-refresh-mismatch rows visible,
+and it must preserve ledger binding, repair-symbol budget, verification, and
+artifact hash fields. Refusal rows remain metadata-only until a permissioned
+repair lane records authoritative artifacts for the same image, ledger, and
+symbol generation.
+
 ## Swarm Workload Harness Contract
 
 The 64-core/256GB swarm workload harness plan lives in:
