@@ -349,6 +349,8 @@ if jq -s \
                         "blocked"
                     elif ($epic_rows | length) > 0 then
                         "epic_only"
+                    elif ($foreign_stale_rows | length) > 0 then
+                        "foreign_stale_in_progress"
                     else
                         "empty"
                     end
@@ -364,6 +366,7 @@ if jq -s \
                 excluded_foreign_open_count: foreign_open_count,
                 excluded_foreign_in_progress_count: ($foreign_in_progress_rows | length),
                 excluded_foreign_stale_in_progress_count: ($foreign_stale_rows | length),
+                excluded_foreign_stale_in_progress_ids: ($foreign_stale_rows | map(.id)),
                 claimable_ids: ($ready_rows | map(.id)),
                 local_epic_ids: ($epic_rows | map(.id)),
                 blocked_local_ids: ($blocked_rows | map(.id)),
@@ -382,6 +385,8 @@ if jq -s \
                         ["inspect blocked_local_ids and unblock prerequisites first"]
                     elif ($epic_rows | length) > 0 then
                         ["create a narrow child bead under the open epic before editing code"]
+                    elif ($foreign_stale_rows | length) > 0 then
+                        ["inspect excluded_foreign_stale_in_progress_ids and Agent Mail before reopening stale foreign claims", "avoid claiming foreign rows as FrankenFS work"]
                     else
                         ["run idea-wizard or a testing skill to create a new narrow bead"]
                     end
@@ -452,7 +457,7 @@ if jq -e '
     and (.local_open_rows | type == "array")
     and (.source_aware_ready_rows | type == "array")
     and (.source_aware_queue_state.schema_version == 1)
-    and (.source_aware_queue_state.verdict as $verdict | (["ready", "stale_in_progress", "blocked_or_permission_gated", "permission_gated", "blocked", "epic_only", "empty"] | index($verdict)) != null)
+    and (.source_aware_queue_state.verdict as $verdict | (["ready", "stale_in_progress", "blocked_or_permission_gated", "permission_gated", "blocked", "epic_only", "foreign_stale_in_progress", "empty"] | index($verdict)) != null)
     and (.source_aware_queue_state.claimable_count == (.source_aware_ready_rows | length))
     and (.source_aware_queue_state.local_open_count == .local_open)
     and (.source_aware_queue_state.permission_gated_count == (.permission_gated_rows | length))
@@ -461,6 +466,7 @@ if jq -e '
     and (.source_aware_queue_state.stale_in_progress_count == (.stale_in_progress_rows | length))
     and (.source_aware_queue_state.excluded_foreign_in_progress_count == .excluded_foreign_in_progress_count)
     and (.source_aware_queue_state.excluded_foreign_stale_in_progress_count == .excluded_foreign_stale_in_progress_count)
+    and (.source_aware_queue_state.excluded_foreign_stale_in_progress_ids | type == "array")
     and (.source_aware_queue_state.blocked_local_ids | type == "array")
     and (.source_aware_queue_state.local_nonclaimable_ids | type == "array")
     and (.source_aware_queue_state.stale_in_progress_ids | type == "array")

@@ -218,6 +218,7 @@ pub struct TrackerSourceAwareQueueState {
     pub excluded_foreign_open_count: usize,
     pub excluded_foreign_in_progress_count: usize,
     pub excluded_foreign_stale_in_progress_count: usize,
+    pub excluded_foreign_stale_in_progress_ids: Vec<String>,
     pub claimable_ids: Vec<String>,
     pub local_epic_ids: Vec<String>,
     pub blocked_local_ids: Vec<String>,
@@ -574,6 +575,19 @@ fn build_report(
         .cloned()
         .collect();
 
+    let queue_state = build_queue_state(
+        &source_aware_ready_rows,
+        &local_epic_rows,
+        &blocked_local_rows,
+        &permission_gated_rows,
+        &local_nonclaimable_rows,
+        &local_in_progress_rows,
+        &stale_in_progress_rows,
+        foreign_open,
+        foreign_in_progress,
+        &foreign_stale_in_progress_rows,
+    );
+
     let mut foreign_open_samples: Vec<TrackerIssueSample> = wrapped
         .iter()
         .filter(|issue| !issue.is_local() && issue.is_open())
@@ -585,19 +599,6 @@ fn build_report(
     foreign_in_progress_samples.truncate(20);
     let mut foreign_stale_in_progress_samples = foreign_stale_in_progress_rows;
     foreign_stale_in_progress_samples.truncate(20);
-
-    let queue_state = build_queue_state(
-        &source_aware_ready_rows,
-        &local_epic_rows,
-        &blocked_local_rows,
-        &permission_gated_rows,
-        &local_nonclaimable_rows,
-        &local_in_progress_rows,
-        &stale_in_progress_rows,
-        foreign_open,
-        foreign_in_progress,
-        foreign_stale_in_progress,
-    );
 
     TrackerSourceHygieneReport {
         schema_version: 1,
@@ -662,8 +663,9 @@ fn build_queue_state(
     stale_rows: &[TrackerIssueProgressRow],
     foreign_open: usize,
     foreign_in_progress: usize,
-    foreign_stale_in_progress: usize,
+    foreign_stale_in_progress_rows: &[TrackerIssueProgressRow],
 ) -> TrackerSourceAwareQueueState {
+    let foreign_stale_in_progress = foreign_stale_in_progress_rows.len();
     let verdict = if !ready_rows.is_empty() {
         "ready"
     } else if !stale_rows.is_empty() {
@@ -676,6 +678,8 @@ fn build_queue_state(
         "blocked"
     } else if !epic_rows.is_empty() {
         "epic_only"
+    } else if foreign_stale_in_progress > 0 {
+        "foreign_stale_in_progress"
     } else {
         "empty"
     };
@@ -697,6 +701,10 @@ fn build_queue_state(
         excluded_foreign_open_count: foreign_open,
         excluded_foreign_in_progress_count: foreign_in_progress,
         excluded_foreign_stale_in_progress_count: foreign_stale_in_progress,
+        excluded_foreign_stale_in_progress_ids: foreign_stale_in_progress_rows
+            .iter()
+            .map(|row| row.id.clone())
+            .collect(),
         claimable_ids: ready_rows.iter().map(|row| row.id.clone()).collect(),
         local_epic_ids: epic_rows.iter().map(|row| row.id.clone()).collect(),
         blocked_local_ids: blocked_rows.iter().map(|row| row.id.clone()).collect(),
@@ -925,6 +933,10 @@ fn next_safe_actions(verdict: &str) -> Vec<String> {
         "epic_only" => {
             vec!["create a narrow child bead under the open epic before editing code".to_owned()]
         }
+        "foreign_stale_in_progress" => vec![
+            "inspect excluded_foreign_stale_in_progress_ids and Agent Mail before reopening stale foreign claims".to_owned(),
+            "avoid claiming foreign rows as FrankenFS work".to_owned(),
+        ],
         _ => vec!["run idea-wizard or a testing skill to create a new narrow bead".to_owned()],
     }
 }
@@ -1177,6 +1189,12 @@ mod tests {
             (
                 &report.source_aware_queue_state.stale_in_progress_ids,
                 "stale_in_progress_ids",
+            ),
+            (
+                &report
+                    .source_aware_queue_state
+                    .excluded_foreign_stale_in_progress_ids,
+                "excluded_foreign_stale_in_progress_ids",
             ),
         ] {
             let expected = golden_string_array(golden_field(golden_queue, field)?)?;
@@ -1481,6 +1499,33 @@ mod tests {
             vec!["bd-active"]
         );
         assert_eq!(report.local_in_progress_rows[0].age_seconds, Some(3_601));
+    }
+
+    #[test]
+    fn foreign_stale_in_progress_guides_reopen_when_no_local_work() {
+        let issues = line(&serde_json::json!({
+            "id": "frankenscipy-stale",
+            "title": "foreign stale claim",
+            "status": "in_progress",
+            "updated_at": "2033-05-18T02:00:00Z"
+        }));
+
+        let report = analyze_tracker_source_hygiene(&issues, &config()).expect("analyze");
+
+        assert_eq!(
+            report.source_aware_queue_state.verdict,
+            "foreign_stale_in_progress"
+        );
+        assert_eq!(
+            report
+                .source_aware_queue_state
+                .excluded_foreign_stale_in_progress_ids,
+            vec!["frankenscipy-stale"]
+        );
+        assert!(
+            report.source_aware_queue_state.next_safe_actions[0]
+                .contains("excluded_foreign_stale_in_progress_ids")
+        );
     }
 
     #[test]

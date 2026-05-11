@@ -493,6 +493,9 @@
     "excluded_foreign_in_progress_count": 2,
     "excluded_foreign_open_count": 22,
     "excluded_foreign_stale_in_progress_count": 1,
+    "excluded_foreign_stale_in_progress_ids": [
+      "frankenscipy-foreign-in-progress-stale"
+    ],
     "local_epic_count": 1,
     "local_epic_ids": [
       "bd-fixture-epic"
