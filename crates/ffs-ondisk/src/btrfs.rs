@@ -2263,6 +2263,7 @@ mod tests {
     /// layouts), bd-swwp0 (parse_extent_data), bd-nzs5f
     /// (parse_inode_item), bd-xbqdw (parse_root_item).
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn btrfs_super_block_kernel_offsets_match_btrfs_tree_h() {
         // 32-byte csum and 16-byte fsid: distinct first/last bytes so
         // a slice-direction drift surfaces.
@@ -2358,7 +2359,10 @@ mod tests {
             parsed.sys_chunk_array_size, sys_chunk_array_size,
             "sys_chunk_array_size @ 0xA0..0xA4"
         );
-        assert_eq!(parsed.compat_flags, compat_flags, "compat_flags @ 0xAC..0xB4");
+        assert_eq!(
+            parsed.compat_flags, compat_flags,
+            "compat_flags @ 0xAC..0xB4"
+        );
         assert_eq!(
             parsed.compat_ro_flags, compat_ro_flags,
             "compat_ro_flags @ 0xB4..0xBC"
@@ -2437,8 +2441,8 @@ mod tests {
     /// (objectid u64@0, type u8@8, offset u64@9) + payload_offset
     /// u32@17 (relative to leaf header — parser normalizes to absolute)
     /// + payload_size u32@21. Each field is stamped with a UNIQUE
-    /// non-zero magic. parse_leaf_items runs on every walk_tree
-    /// leaf-node read — the most heavily-trafficked btrfs parser.
+    ///   non-zero magic. parse_leaf_items runs on every walk_tree
+    ///   leaf-node read — the most heavily-trafficked btrfs parser.
     ///
     /// Companion to parse_internal_items_kernel_slot_offsets_match_ctree_h.
     #[test]

@@ -907,16 +907,14 @@ mod tests {
         let fetched = loop {
             let client = Client::new(addr, Config::default()).expect("client");
             let cx = Cx::for_testing_with_budget(deadline_after(Duration::from_millis(100)));
-            match client.get_symbols(&cx, 7, 3) {
-                Ok(fetched) => break fetched,
-                Err(_) => {
-                    assert!(
-                        Instant::now() < retry_deadline,
-                        "server did not answer valid request after malformed client"
-                    );
-                    thread::yield_now();
-                }
+            if let Ok(fetched) = client.get_symbols(&cx, 7, 3) {
+                break fetched;
             }
+            assert!(
+                Instant::now() < retry_deadline,
+                "server did not answer valid request after malformed client"
+            );
+            thread::yield_now();
         };
         assert_eq!(
             fetched,

@@ -1158,6 +1158,17 @@ mod tests {
     /// flags), bd-jbilz (magic+state), bd-k62ym (ext4 size limits).
     #[test]
     fn encode_extra_timestamp_kernel_bit_layout() {
+        // (d) Max-nsec boundary: 999_999_999 < 2^30 = 1_073_741_824
+        // so it fits in 30 bits without overflowing into bits 0..2.
+        const MAX_VALID_NSEC: u32 = 999_999_999;
+        const NSEC_FIELD_CAPACITY: u32 = 1 << 30;
+        const _: () = assert!(
+            MAX_VALID_NSEC < NSEC_FIELD_CAPACITY,
+            "max nsec must fit in the 30-bit field"
+        );
+        const EXT4_EPOCH_BITS: u32 = 2;
+        const EXT4_EPOCH_MASK: u32 = (1 << EXT4_EPOCH_BITS) - 1;
+
         // (a) Low 2 bits hold ONLY the epoch (upper bits of secs).
         // For secs < (1 << 32), the epoch should be 0 → low 2 bits
         // of the encoded value are 0 regardless of nsec.
@@ -1195,19 +1206,8 @@ mod tests {
         assert_eq!(extra & 0x3, 3, "epoch=3 (bits 0..2)");
         assert_eq!(extra >> 2, 999_999_999, "nsec=999_999_999 (bits 2..32)");
 
-        // (d) Max-nsec boundary: 999_999_999 < 2^30 = 1_073_741_824
-        // so it fits in 30 bits without overflowing into bits 0..2.
-        const MAX_VALID_NSEC: u32 = 999_999_999;
-        const NSEC_FIELD_CAPACITY: u32 = 1 << 30;
-        const _: () = assert!(
-            MAX_VALID_NSEC < NSEC_FIELD_CAPACITY,
-            "max nsec must fit in the 30-bit field"
-        );
-
         // (e) The mask invariants from the kernel header must hold
         // arithmetically.
-        const EXT4_EPOCH_BITS: u32 = 2;
-        const EXT4_EPOCH_MASK: u32 = (1 << EXT4_EPOCH_BITS) - 1;
         assert_eq!(EXT4_EPOCH_MASK, 0x3, "EXT4_EPOCH_MASK per kernel header");
         assert_eq!(
             !EXT4_EPOCH_MASK, !0x3_u32,

@@ -6606,16 +6606,8 @@ mod tests {
             ("DX_HASH_LEGACY", DX_HASH_LEGACY, 0),
             ("DX_HASH_HALF_MD4", DX_HASH_HALF_MD4, 1),
             ("DX_HASH_TEA", DX_HASH_TEA, 2),
-            (
-                "DX_HASH_LEGACY_UNSIGNED",
-                DX_HASH_LEGACY_UNSIGNED,
-                3,
-            ),
-            (
-                "DX_HASH_HALF_MD4_UNSIGNED",
-                DX_HASH_HALF_MD4_UNSIGNED,
-                4,
-            ),
+            ("DX_HASH_LEGACY_UNSIGNED", DX_HASH_LEGACY_UNSIGNED, 3),
+            ("DX_HASH_HALF_MD4_UNSIGNED", DX_HASH_HALF_MD4_UNSIGNED, 4),
             ("DX_HASH_TEA_UNSIGNED", DX_HASH_TEA_UNSIGNED, 5),
         ];
         for (name, actual, expected) in cases {
@@ -6643,10 +6635,7 @@ mod tests {
         // ordering helps catch a regression that inserted a new ID
         // out of order.)
         for (i, &v) in values.iter().enumerate() {
-            assert_eq!(
-                v as usize, i,
-                "DX_HASH_* values must be sequential 0..=5"
-            );
+            assert_eq!(v as usize, i, "DX_HASH_* values must be sequential 0..=5");
         }
 
         // DX_HASH_DEFAULT_SEED matches MD4 init constants per
@@ -6674,38 +6663,19 @@ mod tests {
     /// bd-wa27v (xattr constants),
     /// ext4_inode_flag_constants_match_kernel_header.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn ext4_compat_and_ro_compat_features_match_ext4_h() {
         // Per fs/ext4/ext4.h — EXT4_FEATURE_COMPAT_*:
         let compat_cases: &[(&str, Ext4CompatFeatures, u32)] = &[
-            (
-                "DIR_PREALLOC",
-                Ext4CompatFeatures::DIR_PREALLOC,
-                0x0001,
-            ),
-            (
-                "IMAGIC_INODES",
-                Ext4CompatFeatures::IMAGIC_INODES,
-                0x0002,
-            ),
+            ("DIR_PREALLOC", Ext4CompatFeatures::DIR_PREALLOC, 0x0001),
+            ("IMAGIC_INODES", Ext4CompatFeatures::IMAGIC_INODES, 0x0002),
             ("HAS_JOURNAL", Ext4CompatFeatures::HAS_JOURNAL, 0x0004),
             ("EXT_ATTR", Ext4CompatFeatures::EXT_ATTR, 0x0008),
-            (
-                "RESIZE_INODE",
-                Ext4CompatFeatures::RESIZE_INODE,
-                0x0010,
-            ),
+            ("RESIZE_INODE", Ext4CompatFeatures::RESIZE_INODE, 0x0010),
             ("DIR_INDEX", Ext4CompatFeatures::DIR_INDEX, 0x0020),
-            (
-                "SPARSE_SUPER2",
-                Ext4CompatFeatures::SPARSE_SUPER2,
-                0x0200,
-            ),
+            ("SPARSE_SUPER2", Ext4CompatFeatures::SPARSE_SUPER2, 0x0200),
             ("FAST_COMMIT", Ext4CompatFeatures::FAST_COMMIT, 0x0400),
-            (
-                "STABLE_INODES",
-                Ext4CompatFeatures::STABLE_INODES,
-                0x0800,
-            ),
+            ("STABLE_INODES", Ext4CompatFeatures::STABLE_INODES, 0x0800),
             ("ORPHAN_FILE", Ext4CompatFeatures::ORPHAN_FILE, 0x1000),
         ];
         for (name, actual, expected) in compat_cases {
@@ -6722,28 +6692,16 @@ mod tests {
 
         // Per fs/ext4/ext4.h — EXT4_FEATURE_RO_COMPAT_*:
         let ro_compat_cases: &[(&str, Ext4RoCompatFeatures, u32)] = &[
-            (
-                "SPARSE_SUPER",
-                Ext4RoCompatFeatures::SPARSE_SUPER,
-                0x0001,
-            ),
+            ("SPARSE_SUPER", Ext4RoCompatFeatures::SPARSE_SUPER, 0x0001),
             ("LARGE_FILE", Ext4RoCompatFeatures::LARGE_FILE, 0x0002),
             ("BTREE_DIR", Ext4RoCompatFeatures::BTREE_DIR, 0x0004),
             ("HUGE_FILE", Ext4RoCompatFeatures::HUGE_FILE, 0x0008),
             ("GDT_CSUM", Ext4RoCompatFeatures::GDT_CSUM, 0x0010),
             ("DIR_NLINK", Ext4RoCompatFeatures::DIR_NLINK, 0x0020),
-            (
-                "EXTRA_ISIZE",
-                Ext4RoCompatFeatures::EXTRA_ISIZE,
-                0x0040,
-            ),
+            ("EXTRA_ISIZE", Ext4RoCompatFeatures::EXTRA_ISIZE, 0x0040),
             ("QUOTA", Ext4RoCompatFeatures::QUOTA, 0x0100),
             ("BIGALLOC", Ext4RoCompatFeatures::BIGALLOC, 0x0200),
-            (
-                "METADATA_CSUM",
-                Ext4RoCompatFeatures::METADATA_CSUM,
-                0x0400,
-            ),
+            ("METADATA_CSUM", Ext4RoCompatFeatures::METADATA_CSUM, 0x0400),
             ("READONLY", Ext4RoCompatFeatures::READONLY, 0x1000),
             ("PROJECT", Ext4RoCompatFeatures::PROJECT, 0x2000),
             ("VERITY", Ext4RoCompatFeatures::VERITY, 0x8000),
@@ -6777,8 +6735,7 @@ mod tests {
         );
 
         // Pairwise distinctness across ro_compat values.
-        let ro_compat_bits: Vec<u32> =
-            ro_compat_cases.iter().map(|&(_, f, _)| f.0).collect();
+        let ro_compat_bits: Vec<u32> = ro_compat_cases.iter().map(|&(_, f, _)| f.0).collect();
         let mut sorted = ro_compat_bits.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -7107,8 +7064,8 @@ mod tests {
         // 128 ≥ 0x70, mode encodes S_IFREG, so it's read.
         bytes[0x6C..0x70].copy_from_slice(&size_hi.to_le_bytes());
 
-        let inode = Ext4Inode::parse_from_bytes(&bytes)
-            .expect("kernel-stamped ext4_inode must parse");
+        let inode =
+            Ext4Inode::parse_from_bytes(&bytes).expect("kernel-stamped ext4_inode must parse");
 
         assert_eq!(inode.mode, mode, "mode @ 0x00..0x02");
         // uid is recombined from uid_lo (0x02) and uid_hi (0x78); we
@@ -7125,10 +7082,7 @@ mod tests {
         assert_eq!(inode.mtime, mtime, "mtime @ 0x10..0x14");
         assert_eq!(inode.dtime, dtime, "dtime @ 0x14..0x18");
         assert_eq!(inode.gid, u32::from(gid_lo), "gid_lo @ 0x18..0x1A");
-        assert_eq!(
-            inode.links_count, links_count,
-            "links_count @ 0x1A..0x1C"
-        );
+        assert_eq!(inode.links_count, links_count, "links_count @ 0x1A..0x1C");
         assert_eq!(
             inode.blocks,
             u64::from(blocks_lo),

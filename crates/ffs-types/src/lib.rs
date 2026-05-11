@@ -2606,10 +2606,14 @@ mod tests {
         // Strict-monotonic ascending across the 4-element set —
         // catches any future renumbering that would silently misroute
         // checksum dispatch.
+        let csum_type_order = [
+            BTRFS_CSUM_TYPE_CRC32C,
+            BTRFS_CSUM_TYPE_XXHASH64,
+            BTRFS_CSUM_TYPE_SHA256,
+            BTRFS_CSUM_TYPE_BLAKE2B,
+        ];
         assert!(
-            BTRFS_CSUM_TYPE_CRC32C < BTRFS_CSUM_TYPE_XXHASH64
-                && BTRFS_CSUM_TYPE_XXHASH64 < BTRFS_CSUM_TYPE_SHA256
-                && BTRFS_CSUM_TYPE_SHA256 < BTRFS_CSUM_TYPE_BLAKE2B,
+            csum_type_order.windows(2).all(|pair| pair[0] < pair[1]),
             "btrfs csum-type constants must be strict-monotonic ascending"
         );
 
