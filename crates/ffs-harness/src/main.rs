@@ -108,7 +108,9 @@ use ffs_harness::{
         load_mounted_recovery_matrix, validate_mounted_recovery_matrix,
     },
     mounted_repair_mutation_boundary::{
-        DEFAULT_MOUNTED_REPAIR_MUTATION_BOUNDARY_PATH, parse_mounted_repair_mutation_boundary,
+        DEFAULT_MOUNTED_REPAIR_MUTATION_BOUNDARY_PATH,
+        fail_on_mounted_repair_mutation_boundary_errors, load_mounted_repair_mutation_boundary,
+        render_mounted_repair_mutation_boundary_markdown,
         validate_mounted_repair_mutation_boundary,
     },
     mounted_write_error_classes::{
@@ -1034,6 +1036,14 @@ struct RemediationSeverityGateCmdArgs {
 
 #[derive(Debug)]
 struct MountedCheckpointSurvivorCmdArgs {
+    matrix_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
+struct MountedRepairMutationBoundaryCmdArgs {
     matrix_path: String,
     out_path: Option<String>,
     summary_out_path: Option<String>,
@@ -7538,8 +7548,47 @@ fn validate_mounted_write_error_classes_cmd(args: &[String]) -> Result<()> {
 }
 
 fn validate_mounted_repair_mutation_boundary_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_mounted_repair_mutation_boundary_cmd_args(args)? else {
+        return Ok(());
+    };
+    let matrix = load_mounted_repair_mutation_boundary(Path::new(&cmd_args.matrix_path))?;
+    let report = validate_mounted_repair_mutation_boundary(&matrix);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_mounted_repair_mutation_boundary_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "mounted repair mutation boundary report written: {} valid={} scenarios={}",
+            path, report.valid, report.scenario_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!(
+                "{}\n",
+                render_mounted_repair_mutation_boundary_markdown(&report)
+            ),
+        )?;
+        println!("mounted repair mutation boundary summary written: {path}");
+    }
+
+    fail_on_mounted_repair_mutation_boundary_errors(&report)
+}
+
+fn parse_mounted_repair_mutation_boundary_cmd_args(
+    args: &[String],
+) -> Result<Option<MountedRepairMutationBoundaryCmdArgs>> {
     let mut matrix_path = DEFAULT_MOUNTED_REPAIR_MUTATION_BOUNDARY_PATH.to_owned();
     let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
     let mut i = 0;
 
     while i < args.len() {
@@ -7554,38 +7603,34 @@ fn validate_mounted_repair_mutation_boundary_cmd(args: &[String]) -> Result<()> 
                 i += 1;
                 out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
             }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
             "--help" | "-h" => {
                 print_mounted_repair_mutation_boundary_usage();
-                return Ok(());
+                return Ok(None);
             }
             other => bail!("unknown validate-mounted-repair-mutation-boundary argument: {other}"),
         }
         i += 1;
     }
 
-    let text = fs::read_to_string(&matrix_path).with_context(|| {
-        format!("failed to read mounted repair mutation boundary {matrix_path}")
-    })?;
-    let matrix = parse_mounted_repair_mutation_boundary(&text)?;
-    let report = validate_mounted_repair_mutation_boundary(&matrix);
-    if !report.valid {
-        bail!(
-            "mounted repair mutation boundary failed with {} error(s): {}",
-            report.errors.len(),
-            report.errors.join("; ")
-        );
-    }
-    let json = serde_json::to_string_pretty(&report)?;
-    if let Some(path) = out_path {
-        write_text_file(Path::new(&path), &format!("{json}\n"))?;
-        println!(
-            "mounted repair mutation boundary report written: {} scenarios={}",
-            path, report.scenario_count
-        );
-    } else {
-        println!("{json}");
-    }
-    Ok(())
+    Ok(Some(MountedRepairMutationBoundaryCmdArgs {
+        matrix_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
 }
 
 fn validate_chaos_replay_lab_cmd(args: &[String]) -> Result<()> {
@@ -9475,7 +9520,9 @@ fn print_mounted_repair_mutation_boundary_usage() {
     println!();
     println!("Options:");
     println!("  --matrix FILE                      Read mounted repair mutation boundary JSON");
-    println!("  --out FILE                         Write JSON validation report to FILE");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report to FILE");
+    println!("  --summary-out FILE                 Write Markdown mutation-boundary summary");
 }
 
 fn print_chaos_replay_lab_usage() {

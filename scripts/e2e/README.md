@@ -353,6 +353,31 @@ policies, and unsafe process-control refusals. Rows that require real FUSE
 mounts or process termination remain metadata-only until a permissioned lane
 records authoritative survivor artifacts.
 
+## Mounted Repair Mutation Boundary Contract
+
+The mounted repair mutation-boundary matrix lives in:
+
+- `tests/mounted-repair-mutation-boundary/mounted_repair_mutation_boundary.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-mounted-repair-mutation-boundary \
+  --matrix tests/mounted-repair-mutation-boundary/mounted_repair_mutation_boundary.json \
+  --out artifacts/mounted-repair-mutation-boundary/report.json \
+  --summary-out artifacts/mounted-repair-mutation-boundary/summary.md
+```
+
+This matrix is a support-envelope contract for repair mutation scope, not
+permission to repair mounted images or claim writeback repair readiness. It
+must keep default read-only detection, read-only repair-with-ledger,
+read-write refusal, missing/stale ledger refusal, and host-capability skip rows
+visible. It also preserves before/after image hashes, expected mutation scope,
+ledger row counts, visible namespace expectations, host paths touched, cleanup
+status, artifact paths, reproduction commands, follow-up beads for refusals,
+and explicit host-skip rationale. Rows that require real mounted mutation
+remain metadata-only until a permissioned lane records authoritative artifacts.
+
 ## Low-Privilege Demo Sandbox Contract
 
 The low-privilege demo sandbox manifest lives in:

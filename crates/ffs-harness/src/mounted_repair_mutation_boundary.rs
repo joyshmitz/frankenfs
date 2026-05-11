@@ -14,8 +14,7 @@
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::{collections::BTreeSet, fmt::Write as _, fs, path::Path};
 
 pub const MOUNTED_REPAIR_MUTATION_BOUNDARY_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_MOUNTED_REPAIR_MUTATION_BOUNDARY_PATH: &str =
@@ -120,19 +119,37 @@ pub fn parse_mounted_repair_mutation_boundary(text: &str) -> Result<MountedRepai
     })
 }
 
+pub fn load_mounted_repair_mutation_boundary(path: &Path) -> Result<MountedRepairMutationBoundary> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to read mounted repair mutation boundary {}: {err}",
+            path.display()
+        )
+    })?;
+    parse_mounted_repair_mutation_boundary(&text)
+}
+
 pub fn validate_default_mounted_repair_mutation_boundary()
 -> Result<MountedRepairMutationBoundaryReport> {
     let matrix =
         parse_mounted_repair_mutation_boundary(DEFAULT_MOUNTED_REPAIR_MUTATION_BOUNDARY_JSON)?;
     let report = validate_mounted_repair_mutation_boundary(&matrix);
-    if !report.valid {
+    fail_on_mounted_repair_mutation_boundary_errors(&report)?;
+    Ok(report)
+}
+
+pub fn fail_on_mounted_repair_mutation_boundary_errors(
+    report: &MountedRepairMutationBoundaryReport,
+) -> Result<()> {
+    if report.valid {
+        Ok(())
+    } else {
         bail!(
             "mounted repair mutation boundary failed with {} error(s): {}",
             report.errors.len(),
             report.errors.join("; ")
         );
     }
-    Ok(report)
 }
 
 #[must_use]
@@ -158,6 +175,32 @@ pub fn validate_mounted_repair_mutation_boundary(
         valid: errors.is_empty(),
         errors,
     }
+}
+
+#[must_use]
+pub fn render_mounted_repair_mutation_boundary_markdown(
+    report: &MountedRepairMutationBoundaryReport,
+) -> String {
+    let mut out = String::new();
+    out.push_str("# Mounted Repair Mutation Boundary\n\n");
+    writeln!(&mut out, "- matrix: `{}`", report.matrix_id).expect("write string");
+    writeln!(&mut out, "- schema version: `{}`", report.schema_version).expect("write string");
+    writeln!(&mut out, "- bead: `{}`", report.bead_id).expect("write string");
+    writeln!(&mut out, "- valid: `{}`", report.valid).expect("write string");
+    writeln!(&mut out, "- scenarios: `{}`", report.scenario_count).expect("write string");
+    out.push('\n');
+    out.push_str("## Scenario Kinds\n");
+    for kind in &report.kinds_seen {
+        writeln!(&mut out, "- `{kind}`").expect("write string");
+    }
+    if !report.errors.is_empty() {
+        out.push('\n');
+        out.push_str("## Errors\n");
+        for error in &report.errors {
+            writeln!(&mut out, "- {error}").expect("write string");
+        }
+    }
+    out
 }
 
 fn validate_top_level(matrix: &MountedRepairMutationBoundary, errors: &mut Vec<String>) {
@@ -819,6 +862,30 @@ mod tests {
             err.contains("references missing script")
                 && err.contains("ffs_missing_mounted_repair_boundary_runner.sh")
         }));
+    }
+
+    #[test]
+    fn render_mounted_repair_mutation_boundary_markdown_default_matrix() {
+        let report = validate_default_mounted_repair_mutation_boundary()
+            .expect("default mounted repair mutation boundary validates");
+        let markdown = render_mounted_repair_mutation_boundary_markdown(&report);
+        insta::assert_snapshot!(
+            "render_mounted_repair_mutation_boundary_markdown_default_matrix",
+            markdown
+        );
+    }
+
+    #[test]
+    fn fail_on_errors_rejects_invalid_report() {
+        let mut matrix = fixture_matrix();
+        matrix.scenarios[0].expected_mutation_scope = "wild_write".to_owned();
+        let report = validate_mounted_repair_mutation_boundary(&matrix);
+        let err = fail_on_mounted_repair_mutation_boundary_errors(&report)
+            .expect_err("invalid report is rejected");
+        assert!(
+            err.to_string()
+                .contains("mounted repair mutation boundary failed")
+        );
     }
 
     #[test]
