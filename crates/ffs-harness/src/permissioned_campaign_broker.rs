@@ -4093,6 +4093,29 @@ mod tests {
         Ok(())
     }
 
+    /// bd-rchk0.223 - exact-output snapshot for the swarm-flavored
+    /// permissioned campaign handoff markdown renderer.
+    ///
+    /// The field checks above prove the swarm packet carries the expected
+    /// runner, host, destructive-operation, and ACK shape. This snapshot pins
+    /// the complete operator handoff packet for the large-host swarm path.
+    #[test]
+    fn render_permissioned_campaign_handoff_markdown_swarm_snapshot() -> Result<()> {
+        let packet = generate_permissioned_campaign_handoff_packet(
+            &valid_swarm_manifest(),
+            &config(),
+            generation(),
+        )?;
+        let markdown = render_permissioned_campaign_handoff_markdown(&packet);
+
+        insta::assert_snapshot!(
+            "render_permissioned_campaign_handoff_markdown_swarm",
+            markdown
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn invalid_manifest_cannot_render_handoff_packet() {
         let mut manifest = valid_xfstests_manifest();
