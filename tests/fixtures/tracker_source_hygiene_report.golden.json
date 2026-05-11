@@ -26,10 +26,22 @@
     {
       "count": 22,
       "prefix": "br-r37"
+    },
+    {
+      "count": 2,
+      "prefix": "franken_numpy"
+    },
+    {
+      "count": 1,
+      "prefix": "frankenredis"
+    },
+    {
+      "count": 2,
+      "prefix": "frankentorch"
     }
   ],
   "excluded_foreign_in_progress_count": 2,
-  "excluded_foreign_open_count": 22,
+  "excluded_foreign_open_count": 27,
   "excluded_foreign_stale_in_progress_count": 1,
   "foreign_group_summaries": [
     {
@@ -54,6 +66,49 @@
         "Fixture foreign open row 01",
         "Fixture foreign open row 02",
         "Fixture foreign open row 03"
+      ]
+    },
+    {
+      "count": 2,
+      "owner_hints": [
+        "franken_numpy"
+      ],
+      "prefix": "franken_numpy",
+      "sample_ids": [
+        "franken_numpy-fixture01",
+        "franken_numpy-fixture02"
+      ],
+      "sample_titles": [
+        "Fixture foreign NumPy diagnostics row",
+        "Fixture foreign NumPy profiling row"
+      ]
+    },
+    {
+      "count": 1,
+      "owner_hints": [
+        "frankenredis"
+      ],
+      "prefix": "frankenredis",
+      "sample_ids": [
+        "frankenredis-fixture01"
+      ],
+      "sample_titles": [
+        "Fixture foreign Redis parity row"
+      ]
+    },
+    {
+      "count": 2,
+      "owner_hints": [
+        "frankentorch"
+      ],
+      "prefix": "frankentorch",
+      "sample_ids": [
+        "frankentorch-fixture01",
+        "frankentorch-fixture02"
+      ],
+      "sample_titles": [
+        "Fixture foreign Torch API row",
+        "Fixture foreign Torch nanmean row"
       ]
     }
   ],
@@ -92,7 +147,7 @@
       "updated_at": "2033-05-18T02:00:00Z"
     }
   ],
-  "foreign_open": 22,
+  "foreign_open": 27,
   "foreign_open_samples": [
     {
       "id": "br-r37-c1-foreign01",
@@ -273,7 +328,7 @@
       "updated_at": "2033-05-18T02:00:00Z"
     }
   ],
-  "foreign_total": 25,
+  "foreign_total": 30,
   "issues_path": "[ISSUES_JSONL]",
   "local_graph_exports": {
     "local_nonclaimable": {
@@ -449,7 +504,7 @@
   ],
   "local_total": 8,
   "mutation_policy": "report-only; this command never deletes, rewrites, closes, or edits tracker rows",
-  "open_total": 27,
+  "open_total": 32,
   "permission_gated_rows": [
     {
       "assignee": null,
@@ -491,7 +546,7 @@
       "bd-fixture-blocker"
     ],
     "excluded_foreign_in_progress_count": 2,
-    "excluded_foreign_open_count": 22,
+    "excluded_foreign_open_count": 27,
     "excluded_foreign_stale_in_progress_count": 1,
     "excluded_foreign_stale_in_progress_ids": [
       "frankenscipy-foreign-in-progress-stale"
@@ -568,5 +623,5 @@
   ],
   "status": "pass",
   "strict": false,
-  "total_rows": 33
+  "total_rows": 38
 }
