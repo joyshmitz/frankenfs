@@ -1384,6 +1384,28 @@
       ]
     },
     {
+      "suite_id": "ffs_repair_exchange_loopback",
+      "script": "scripts/e2e/ffs_repair_exchange_loopback_e2e.sh",
+      "required_categories": [
+        "happy",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "repair_exchange_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_exchange_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "repair_exchange_loopback",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_exchange_loopback|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_taxonomy",
       "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
       "required_categories": [
