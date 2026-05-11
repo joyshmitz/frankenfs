@@ -157,6 +157,72 @@
       ]
     },
     {
+      "suite_id": "ffs_btrfs_rw_hardening_gate",
+      "script": "scripts/e2e/ffs_btrfs_rw_hardening_gate_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "corruption"
+      ],
+      "scenarios": [
+        {
+          "id": "hardening_eopnotsupp_contract",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=hardening_eopnotsupp_contract|outcome=PASS"
+        },
+        {
+          "id": "hardening_write_test_coverage",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=hardening_write_test_coverage|outcome=PASS"
+        },
+        {
+          "id": "hardening_log_contracts",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=hardening_log_contracts|outcome=PASS"
+        },
+        {
+          "id": "hardening_crash_matrix",
+          "category": "corruption",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=hardening_crash_matrix|outcome=PASS"
+        },
+        {
+          "id": "hardening_capability_matrix",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=hardening_capability_matrix|outcome=PASS"
+        },
+        {
+          "id": "hardening_drift_detection",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=hardening_drift_detection|outcome=PASS"
+        },
+        {
+          "id": "hardening_e2e_script_coverage",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=hardening_e2e_script_coverage|outcome=PASS"
+        },
+        {
+          "id": "hardening_errno_exhaustive",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=hardening_errno_exhaustive|outcome=PASS"
+        },
+        {
+          "id": "hardening_btrfs_write_tests_pass",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=hardening_btrfs_write_tests_pass|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_fuse_production",
       "script": "scripts/e2e/ffs_fuse_production.sh",
       "required_categories": [
