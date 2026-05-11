@@ -430,6 +430,53 @@
       ]
     },
     {
+      "suite_id": "ffs_fault_injection_corpus",
+      "script": "scripts/e2e/ffs_fault_injection_corpus_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "fault_injection_corpus_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fault_injection_corpus_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "fault_injection_corpus_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fault_injection_corpus_validates|outcome=PASS"
+        },
+        {
+          "id": "fault_injection_corpus_coverage",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fault_injection_corpus_coverage|outcome=PASS"
+        },
+        {
+          "id": "fault_injection_corpus_invalid_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fault_injection_corpus_invalid_rejected|outcome=PASS"
+        },
+        {
+          "id": "fault_injection_corpus_markdown_docs",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fault_injection_corpus_markdown_docs|outcome=PASS"
+        },
+        {
+          "id": "fault_injection_corpus_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fault_injection_corpus_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_cli_wal_telemetry",
       "script": "scripts/e2e/ffs_cli_wal_telemetry_e2e.sh",
       "required_categories": [

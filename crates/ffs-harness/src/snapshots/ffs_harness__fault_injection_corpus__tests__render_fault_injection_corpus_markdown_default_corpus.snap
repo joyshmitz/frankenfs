@@ -1,0 +1,27 @@
+---
+source: crates/ffs-harness/src/fault_injection_corpus.rs
+expression: markdown
+---
+# Fault Injection Corpus
+
+- corpus: `frankenfs_fault_injection_corpus_v1`
+- schema version: `1`
+- bead: `bd-rchk0.5.3`
+- valid: `true`
+- cases: `7`
+- adversarial cases: `2`
+
+## Fault Kinds
+- `adversarial_seed`
+- `bit_flip`
+- `block_erasure`
+- `mismatched_symbol_set`
+- `reordered_blocks`
+- `truncated_repair_metadata`
+
+## Repair Classes
+- `clean_repair`
+- `detection_only`
+- `false_positive`
+- `partial_repair`
+- `unsafe_to_repair`

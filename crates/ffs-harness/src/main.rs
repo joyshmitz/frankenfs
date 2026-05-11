@@ -59,6 +59,11 @@ use ffs_harness::{
     },
     e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
     extract_btrfs_superblock, extract_ext4_superblock, extract_region,
+    fault_injection_corpus::{
+        DEFAULT_FAULT_INJECTION_CORPUS_PATH, fail_on_fault_injection_corpus_errors,
+        load_fault_injection_corpus, render_fault_injection_corpus_markdown,
+        validate_fault_injection_corpus,
+    },
     fuzz_smoke::{
         DEFAULT_FUZZ_SMOKE_MANIFEST_PATH, fail_on_fuzz_smoke_errors, load_fuzz_smoke_manifest,
         run_fuzz_smoke_manifest,
@@ -536,6 +541,7 @@ fn run() -> Result<()> {
             validate_btrfs_multidevice_corpus_cmd(&args[1..])
         }
         Some("validate-casefold-corpus") => validate_casefold_corpus_cmd(&args[1..]),
+        Some("validate-fault-injection-corpus") => validate_fault_injection_corpus_cmd(&args[1..]),
         Some("validate-metamorphic-workload-seeds") => {
             validate_metamorphic_workload_seed_catalog_cmd(&args[1..])
         }
@@ -945,6 +951,14 @@ struct CasefoldCorpusCmdArgs {
 }
 
 #[derive(Debug)]
+struct FaultInjectionCorpusCmdArgs {
+    corpus_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
 struct MetamorphicWorkloadSeedCatalogCmdArgs {
     catalog_path: String,
     out_path: Option<String>,
@@ -1336,6 +1350,89 @@ fn parse_casefold_corpus_cmd_args(args: &[String]) -> Result<Option<CasefoldCorp
     }
 
     Ok(Some(CasefoldCorpusCmdArgs {
+        corpus_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
+fn validate_fault_injection_corpus_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_fault_injection_corpus_cmd_args(args)? else {
+        return Ok(());
+    };
+    let corpus = load_fault_injection_corpus(Path::new(&cmd_args.corpus_path))?;
+    let report = validate_fault_injection_corpus(&corpus);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_fault_injection_corpus_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "fault injection corpus report written: {} valid={} cases={}",
+            path, report.valid, report.case_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_fault_injection_corpus_markdown(&report)),
+        )?;
+        println!("fault injection corpus summary written: {path}");
+    }
+
+    fail_on_fault_injection_corpus_errors(&report)
+}
+
+fn parse_fault_injection_corpus_cmd_args(
+    args: &[String],
+) -> Result<Option<FaultInjectionCorpusCmdArgs>> {
+    let mut corpus_path = DEFAULT_FAULT_INJECTION_CORPUS_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--corpus" => {
+                i += 1;
+                args.get(i)
+                    .context("--corpus requires a path")?
+                    .clone_into(&mut corpus_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_fault_injection_corpus_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-fault-injection-corpus argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(FaultInjectionCorpusCmdArgs {
         corpus_path,
         out_path,
         summary_out_path,
@@ -7650,6 +7747,7 @@ fn print_usage_commands() {
     print_btrfs_send_receive_corpus_usage_summary();
     print_btrfs_multidevice_corpus_usage_summary();
     print_casefold_corpus_usage_summary();
+    print_fault_injection_corpus_usage_summary();
     print_metamorphic_workload_seed_catalog_usage_summary();
     println!(
         "  ffs-harness validate-mounted-write-error-classes [--catalog FILE] [--matrix FILE] [--out FILE]"
@@ -7780,6 +7878,7 @@ fn print_usage_examples() {
     print_btrfs_send_receive_corpus_example();
     print_btrfs_multidevice_corpus_example();
     print_casefold_corpus_example();
+    print_fault_injection_corpus_example();
     print_metamorphic_workload_seed_catalog_example();
     println!(
         "  ffs-harness validate-mounted-write-error-classes --out artifacts/e2e/mounted_write_error_classes.json"
@@ -8072,6 +8171,18 @@ fn print_casefold_corpus_usage_summary() {
 fn print_casefold_corpus_example() {
     println!(
         "  ffs-harness validate-casefold-corpus --corpus tests/casefold-corpus/casefold_corpus.json --out artifacts/casefold/report.json --summary-out artifacts/casefold/summary.md"
+    );
+}
+
+fn print_fault_injection_corpus_usage_summary() {
+    println!(
+        "  ffs-harness validate-fault-injection-corpus [--corpus FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_fault_injection_corpus_example() {
+    println!(
+        "  ffs-harness validate-fault-injection-corpus --corpus tests/fault-injection-corpus/fault_injection_corpus.json --out artifacts/fault-injection/report.json --summary-out artifacts/fault-injection/summary.md"
     );
 }
 
@@ -8634,6 +8745,16 @@ fn print_casefold_corpus_usage() {
     println!();
     println!("Options:");
     println!("  --corpus FILE                      Read ext4 casefold corpus JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report");
+    println!("  --summary-out FILE                 Write Markdown corpus summary");
+}
+
+fn print_fault_injection_corpus_usage() {
+    println!("Usage: ffs-harness validate-fault-injection-corpus [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --corpus FILE                      Read fault injection corpus JSON");
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write validation report");
     println!("  --summary-out FILE                 Write Markdown corpus summary");

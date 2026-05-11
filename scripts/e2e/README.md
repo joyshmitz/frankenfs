@@ -280,6 +280,30 @@ outcomes. Rows that require real ext4 images, mounted writes, kernel feature
 negotiation, or host-specific unicode behavior remain metadata-only until a
 permissioned lane records authoritative artifacts.
 
+## Fault Injection Corpus Contract
+
+The deterministic fault-injection corpus lives in:
+
+- `tests/fault-injection-corpus/fault_injection_corpus.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-fault-injection-corpus \
+  --corpus tests/fault-injection-corpus/fault_injection_corpus.json \
+  --out artifacts/fault-injection/report.json \
+  --summary-out artifacts/fault-injection/summary.md
+```
+
+This corpus is a support-envelope contract for repair-confidence evidence, not
+permission to mutate mounted images or claim automatic repair success. It must
+keep bit-flip, block-erasure, reordered-block, truncated-metadata,
+mismatched-symbol-set, and adversarial-seed rows visible, and it must preserve
+clean-repair, partial-repair, detection-only, false-positive, and
+unsafe-to-repair classifications. Adversarial and unsafe-to-repair rows must
+stay explicit until a permissioned calibration lane records authoritative
+recovery evidence.
+
 ## Swarm Workload Harness Contract
 
 The 64-core/256GB swarm workload harness plan lives in:

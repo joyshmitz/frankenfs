@@ -15,7 +15,7 @@
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write as _, fs, path::Path};
 
 pub const FAULT_INJECTION_CORPUS_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_FAULT_INJECTION_CORPUS_PATH: &str =
@@ -115,6 +115,12 @@ pub fn parse_fault_injection_corpus(text: &str) -> Result<FaultInjectionCorpus> 
         .map_err(|err| anyhow::anyhow!("failed to parse fault injection corpus JSON: {err}"))
 }
 
+pub fn load_fault_injection_corpus(path: &Path) -> Result<FaultInjectionCorpus> {
+    let text = fs::read_to_string(path)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
+    parse_fault_injection_corpus(&text)
+}
+
 pub fn validate_default_fault_injection_corpus() -> Result<FaultInjectionCorpusReport> {
     let corpus = parse_fault_injection_corpus(DEFAULT_FAULT_INJECTION_CORPUS_JSON)?;
     let report = validate_fault_injection_corpus(&corpus);
@@ -126,6 +132,47 @@ pub fn validate_default_fault_injection_corpus() -> Result<FaultInjectionCorpusR
         );
     }
     Ok(report)
+}
+
+pub fn fail_on_fault_injection_corpus_errors(report: &FaultInjectionCorpusReport) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    bail!(
+        "fault injection corpus validation failed: {}",
+        report.errors.join("; ")
+    )
+}
+
+#[must_use]
+pub fn render_fault_injection_corpus_markdown(report: &FaultInjectionCorpusReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Fault Injection Corpus");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "- corpus: `{}`", report.corpus_id);
+    let _ = writeln!(out, "- schema version: `{}`", report.schema_version);
+    let _ = writeln!(out, "- bead: `{}`", report.bead_id);
+    let _ = writeln!(out, "- valid: `{}`", report.valid);
+    let _ = writeln!(out, "- cases: `{}`", report.case_count);
+    let _ = writeln!(out, "- adversarial cases: `{}`", report.adversarial_count);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Fault Kinds");
+    for kind in &report.fault_kinds_seen {
+        let _ = writeln!(out, "- `{kind}`");
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Repair Classes");
+    for class in &report.repair_classes_seen {
+        let _ = writeln!(out, "- `{class}`");
+    }
+    if !report.errors.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "## Errors");
+        for error in &report.errors {
+            let _ = writeln!(out, "- {error}");
+        }
+    }
+    out
 }
 
 #[must_use]
@@ -466,6 +513,33 @@ mod tests {
             );
         }
         assert!(report.adversarial_count >= 1);
+    }
+
+    #[test]
+    fn render_markdown_summarizes_default_corpus() {
+        let report = validate_default_fault_injection_corpus()
+            .expect("default fault injection corpus validates");
+        let markdown = render_fault_injection_corpus_markdown(&report);
+        assert!(markdown.contains("# Fault Injection Corpus"));
+        assert!(markdown.contains("`adversarial_seed`"));
+        assert!(markdown.contains("`unsafe_to_repair`"));
+        insta::assert_snapshot!(
+            "render_fault_injection_corpus_markdown_default_corpus",
+            markdown
+        );
+    }
+
+    #[test]
+    fn fail_on_errors_rejects_invalid_report() {
+        let mut corpus = fixture_corpus();
+        corpus.cases.clear();
+        let report = validate_fault_injection_corpus(&corpus);
+        let err =
+            fail_on_fault_injection_corpus_errors(&report).expect_err("invalid report should fail");
+        assert!(
+            err.to_string()
+                .contains("fault injection corpus validation failed")
+        );
     }
 
     #[test]
