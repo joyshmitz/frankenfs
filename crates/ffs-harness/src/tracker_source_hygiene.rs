@@ -924,6 +924,10 @@ mod tests {
     use super::*;
 
     const NOW: i64 = 2_000_000_000;
+    const COMMITTED_FIXTURE_ISSUES: &str =
+        include_str!("../../../tests/fixtures/tracker_source_hygiene.jsonl");
+    const COMMITTED_FIXTURE_GOLDEN: &str =
+        include_str!("../../../tests/fixtures/tracker_source_hygiene_report.golden.json");
 
     fn config() -> TrackerSourceHygieneAnalysisConfig {
         TrackerSourceHygieneAnalysisConfig {
@@ -939,6 +943,122 @@ mod tests {
 
     fn line(value: &serde_json::Value) -> String {
         serde_json::to_string(value).expect("serialize fixture")
+    }
+
+    fn golden_field<'a>(golden: &'a Value, field: &str) -> Result<&'a Value, String> {
+        golden
+            .get(field)
+            .ok_or_else(|| format!("golden field {field} is missing"))
+    }
+
+    fn golden_array_len(golden: &Value, field: &str) -> Result<usize, String> {
+        Ok(golden_field(golden, field)?
+            .as_array()
+            .ok_or_else(|| format!("golden field {field} must be an array"))?
+            .len())
+    }
+
+    fn golden_usize(golden: &Value, field: &str) -> Result<usize, String> {
+        let value = golden_field(golden, field)?
+            .as_u64()
+            .ok_or_else(|| format!("golden field {field} must be an unsigned integer"))?;
+        usize::try_from(value).map_err(|_| format!("golden field {field} must fit usize"))
+    }
+
+    fn golden_string_array(value: &Value) -> Result<Vec<String>, String> {
+        value
+            .as_array()
+            .ok_or_else(|| "golden field must be an array".to_owned())?
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                entry
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("golden array entry {index} must be a string"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn committed_fixture_matches_shell_golden_core_queue_state() -> Result<(), String> {
+        let report = analyze_tracker_source_hygiene(COMMITTED_FIXTURE_ISSUES, &config())
+            .map_err(|err| err.to_string())?;
+        let golden: Value =
+            serde_json::from_str(COMMITTED_FIXTURE_GOLDEN).map_err(|err| err.to_string())?;
+        let golden_queue = golden_field(&golden, "source_aware_queue_state")?;
+
+        assert_eq!(report.local_open, golden_usize(&golden, "local_open")?);
+        assert_eq!(report.foreign_open, golden_usize(&golden, "foreign_open")?);
+        assert_eq!(
+            report.excluded_foreign_open_count,
+            golden_usize(&golden, "excluded_foreign_open_count")?
+        );
+        assert_eq!(
+            report.source_aware_ready_rows.len(),
+            golden_array_len(&golden, "source_aware_ready_rows")?
+        );
+        assert_eq!(
+            report.permission_gated_rows.len(),
+            golden_array_len(&golden, "permission_gated_rows")?
+        );
+        assert_eq!(
+            report.blocked_local_rows.len(),
+            golden_array_len(&golden, "blocked_local_rows")?
+        );
+        assert_eq!(
+            report.local_in_progress_rows.len(),
+            golden_array_len(&golden, "local_in_progress_rows")?
+        );
+        assert_eq!(
+            report.stale_in_progress_rows.len(),
+            golden_array_len(&golden, "stale_in_progress_rows")?
+        );
+        assert_eq!(
+            report.source_aware_queue_state.verdict,
+            golden_queue
+                .get("verdict")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "golden verdict must be a string".to_owned())?
+        );
+        assert_eq!(
+            report.source_aware_queue_state.claimable_ids,
+            golden_string_array(golden_field(golden_queue, "claimable_ids")?)?
+        );
+        assert_eq!(
+            report.source_aware_queue_state.permission_gated_ids,
+            golden_string_array(golden_field(golden_queue, "permission_gated_ids")?)?
+        );
+        assert_eq!(
+            report.source_aware_queue_state.blocked_local_ids,
+            golden_string_array(golden_field(golden_queue, "blocked_local_ids")?)?
+        );
+        assert_eq!(
+            report.source_aware_queue_state.local_in_progress_ids,
+            golden_string_array(golden_field(golden_queue, "local_in_progress_ids")?)?
+        );
+        assert_eq!(
+            report.source_aware_queue_state.stale_in_progress_ids,
+            golden_string_array(golden_field(golden_queue, "stale_in_progress_ids")?)?
+        );
+
+        let golden_prefixes: Vec<TrackerPrefixCount> =
+            serde_json::from_value(golden_field(&golden, "excluded_foreign_by_prefix")?.clone())
+                .map_err(|err| err.to_string())?;
+        let golden_groups: Vec<TrackerForeignGroupSummary> =
+            serde_json::from_value(golden_field(&golden, "foreign_group_summaries")?.clone())
+                .map_err(|err| err.to_string())?;
+        assert_eq!(report.excluded_foreign_by_prefix, golden_prefixes);
+        assert_eq!(report.foreign_group_summaries, golden_groups);
+        let permission_gate = report
+            .permission_gated_rows
+            .first()
+            .ok_or_else(|| "fixture must include one permission-gated row".to_owned())?;
+        assert_eq!(
+            permission_gate.permission_gate.gate_kind,
+            "xfstests_real_run",
+        );
+        Ok(())
     }
 
     #[test]
