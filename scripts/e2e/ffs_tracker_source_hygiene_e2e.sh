@@ -129,24 +129,56 @@ if jq -s \
         else
             null
         end;
+    def foreign_franken_project_prefix:
+        (.id // "") as $id
+        | [
+            "franken_networkx",
+            "franken_numpy",
+            "frankenjax",
+            "frankenlibc",
+            "frankenpandas",
+            "frankenredis",
+            "frankenscipy",
+            "frankentorch"
+        ]
+        | map(. as $prefix | select($id | startswith($prefix + "-")))
+        | .[0] // null;
+    def foreign_franken_project_text_hint($text):
+        [
+            "franken_networkx",
+            "franken_numpy",
+            "frankenjax",
+            "frankenlibc",
+            "frankenpandas",
+            "frankenredis",
+            "frankenscipy",
+            "frankentorch"
+        ]
+        | map(. as $prefix | select($text | contains($prefix)))
+        | .[0] // null;
     def activity_epoch:
         ((.updated_at // .created_at // null) | normalized_iso8601 | fromdateiso8601?);
     def issue_prefix:
-        (.id // "") as $id
-        | if ($id | startswith("frankenscipy-")) then
-            "frankenscipy"
-        elif ($id | startswith("franken_networkx-")) then
-            "franken_networkx"
+        foreign_franken_project_prefix as $project_prefix
+        | (.id // "") as $id
+        | if $project_prefix != null then
+            $project_prefix
         else
             ($id | capture("^(?<prefix>[^-]+(?:-[^-]+)?)").prefix // "unknown")
         end;
     def owner_hint:
-        ([(.id // ""), (.title // ""), (.description // "")] | join(" ")) as $text
-        | if (($text | test("franken_networkx|networkx"; "i")) or ((.id // "") | startswith("franken_networkx-"))) then
+        ([(.id // ""), (.title // ""), (.description // "")] | join(" ") | ascii_downcase) as $text
+        | foreign_franken_project_prefix as $project_prefix
+        | foreign_franken_project_text_hint($text) as $project_hint
+        | if $project_prefix != null then
+            $project_prefix
+        elif $project_hint != null then
+            $project_hint
+        elif ($text | contains("networkx")) then
             "franken_networkx"
-        elif (($text | test("frankenscipy"; "i")) or ((.id // "") | startswith("frankenscipy-"))) then
+        elif ($text | contains("scipy")) then
             "frankenscipy"
-        elif (($text | test("frankenfs"; "i")) or ((.id // "") | test("^(bd|frankenfs)-"))) then
+        elif (($text | contains("frankenfs")) or ((.id // "") | test("^(bd|frankenfs)-"))) then
             "frankenfs"
         else
             "unknown"

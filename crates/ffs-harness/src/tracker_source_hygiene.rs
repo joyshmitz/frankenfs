@@ -12,6 +12,16 @@ pub const DEFAULT_STALE_IN_PROGRESS_SECONDS: u64 = 21_600;
 pub const XFSTESTS_REAL_RUN_ACK_VALUE: &str = "xfstests-may-mutate-test-and-scratch-devices";
 pub const SWARM_WORKLOAD_REAL_RUN_ACK_VALUE: &str =
     "swarm-workload-may-use-permissioned-large-host";
+const FOREIGN_FRANKEN_PROJECT_PREFIXES: &[&str] = &[
+    "franken_networkx",
+    "franken_numpy",
+    "frankenjax",
+    "frankenlibc",
+    "frankenpandas",
+    "frankenredis",
+    "frankenscipy",
+    "frankentorch",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackerSourceHygieneConfig {
@@ -1095,29 +1105,29 @@ fn owner_hints_for_rows(rows: &[&TrackerIssue<'_>]) -> Vec<String> {
 }
 
 fn owner_hint(issue: &TrackerIssue<'_>) -> String {
+    let id = issue.id();
     let text = issue.text_for_classification().to_ascii_lowercase();
-    if text.contains("franken_networkx")
-        || text.contains("networkx")
-        || issue.id().starts_with("franken_networkx-")
-    {
-        "franken_networkx".to_owned()
-    } else if text.contains("frankenscipy") || issue.id().starts_with("frankenscipy-") {
-        "frankenscipy".to_owned()
-    } else if text.contains("frankenfs") || issue.is_local() {
-        "frankenfs".to_owned()
-    } else {
-        "unknown".to_owned()
-    }
+    foreign_franken_project_prefix(&id)
+        .or_else(|| foreign_franken_project_text_hint(&text))
+        .map_or_else(
+            || {
+                if text.contains("networkx") {
+                    "franken_networkx".to_owned()
+                } else if text.contains("scipy") {
+                    "frankenscipy".to_owned()
+                } else if text.contains("frankenfs") || issue.is_local() {
+                    "frankenfs".to_owned()
+                } else {
+                    "unknown".to_owned()
+                }
+            },
+            str::to_owned,
+        )
 }
 
 fn issue_prefix(id: &str) -> String {
-    for project_prefix in ["frankenscipy", "franken_networkx"] {
-        if id
-            .strip_prefix(project_prefix)
-            .is_some_and(|suffix| suffix.starts_with('-'))
-        {
-            return project_prefix.to_owned();
-        }
+    if let Some(project_prefix) = foreign_franken_project_prefix(id) {
+        return project_prefix.to_owned();
     }
 
     let mut segments = id.split('-');
@@ -1128,6 +1138,23 @@ fn issue_prefix(id: &str) -> String {
         .next()
         .filter(|segment| !segment.is_empty())
         .map_or_else(|| first.to_owned(), |second| format!("{first}-{second}"))
+}
+
+fn foreign_franken_project_prefix(id: &str) -> Option<&'static str> {
+    FOREIGN_FRANKEN_PROJECT_PREFIXES
+        .iter()
+        .copied()
+        .find(|project_prefix| {
+            id.strip_prefix(project_prefix)
+                .is_some_and(|suffix| suffix.starts_with('-'))
+        })
+}
+
+fn foreign_franken_project_text_hint(text: &str) -> Option<&'static str> {
+    FOREIGN_FRANKEN_PROJECT_PREFIXES
+        .iter()
+        .copied()
+        .find(|project_prefix| text.contains(project_prefix))
 }
 
 fn sorted_ids<'a>(issues: impl Iterator<Item = &'a TrackerIssue<'a>>) -> Vec<String> {
@@ -1840,6 +1867,74 @@ mod tests {
             report.foreign_group_summaries[0].owner_hints,
             vec!["frankenscipy"]
         );
+    }
+
+    #[test]
+    fn foreign_group_owner_hints_include_known_franken_suite_ids() {
+        let issues = [
+            line(&serde_json::json!({
+                "id": "franken_numpy-33vtd",
+                "title": "foreign NumPy diagnostics row",
+                "status": "open"
+            })),
+            line(&serde_json::json!({
+                "id": "franken_numpy-mvq7p",
+                "title": "foreign NumPy profiling row",
+                "status": "open"
+            })),
+            line(&serde_json::json!({
+                "id": "frankentorch-awhz",
+                "title": "foreign Torch API row",
+                "status": "open"
+            })),
+            line(&serde_json::json!({
+                "id": "frankentorch-nanmean",
+                "title": "foreign Torch nanmean row",
+                "status": "open"
+            })),
+            line(&serde_json::json!({
+                "id": "frankenredis-729zz",
+                "title": "foreign Redis parity row",
+                "status": "open"
+            })),
+        ]
+        .join("\n");
+
+        let report = analyze_tracker_source_hygiene(&issues, &config()).expect("analyze");
+        let groups: BTreeMap<&str, &TrackerForeignGroupSummary> = report
+            .foreign_group_summaries
+            .iter()
+            .map(|group| (group.prefix.as_str(), group))
+            .collect();
+
+        assert_eq!(
+            report.excluded_foreign_by_prefix,
+            vec![
+                TrackerPrefixCount {
+                    prefix: "franken_numpy".to_owned(),
+                    count: 2,
+                },
+                TrackerPrefixCount {
+                    prefix: "frankenredis".to_owned(),
+                    count: 1,
+                },
+                TrackerPrefixCount {
+                    prefix: "frankentorch".to_owned(),
+                    count: 2,
+                },
+            ]
+        );
+        for (prefix, expected_count) in [
+            ("franken_numpy", 2),
+            ("frankenredis", 1),
+            ("frankentorch", 2),
+        ] {
+            assert!(groups.contains_key(prefix), "missing {prefix} group");
+            if let Some(group) = groups.get(prefix) {
+                assert_eq!(group.count, expected_count, "{prefix}");
+                assert_eq!(group.owner_hints, vec![prefix.to_owned()], "{prefix}");
+            }
+        }
     }
 
     #[test]
