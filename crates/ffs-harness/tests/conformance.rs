@@ -5229,6 +5229,7 @@ fn full_conformance_gate_pass() {
     ext4_indirect_block_addressing_conforms();
     ext4_fast_commit_replay_openfs_evidence_conforms();
     ext4_fast_commit_truncated_stream_falls_back_to_jbd2_only();
+    ext4_reference_image_opens_with_journal_replay_segments();
     btrfs_send_stream_multi_command_conforms();
     btrfs_send_stream_unknown_command_preserves_attrs_as_unspec();
     btrfs_send_stream_rejects_missing_end_command();
