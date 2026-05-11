@@ -688,6 +688,72 @@
       ]
     },
     {
+      "suite_id": "ffs_fuzzing_gate",
+      "script": "scripts/e2e/ffs_fuzzing_gate_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "degradation",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "fuzzing_gate_subgate_scripts",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_subgate_scripts|outcome=PASS"
+        },
+        {
+          "id": "fuzzing_gate_modules_exported",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_modules_exported|outcome=PASS"
+        },
+        {
+          "id": "fuzzing_gate_fuzz_targets",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_fuzz_targets|outcome=PASS"
+        },
+        {
+          "id": "fuzzing_gate_corpus_infra",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_corpus_infra|outcome=PASS"
+        },
+        {
+          "id": "fuzzing_gate_campaign_automation",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_campaign_automation|outcome=PASS"
+        },
+        {
+          "id": "fuzzing_gate_crash_promotion",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_crash_promotion|outcome=PASS"
+        },
+        {
+          "id": "fuzzing_gate_fuzz_dashboard",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_fuzz_dashboard|outcome=PASS"
+        },
+        {
+          "id": "fuzzing_gate_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "fuzzing_gate_traceability",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_traceability|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_fuse_production",
       "script": "scripts/e2e/ffs_fuse_production.sh",
       "required_categories": [
