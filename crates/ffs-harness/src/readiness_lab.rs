@@ -5921,6 +5921,24 @@ mod tests {
         );
     }
 
+    /// bd-rchk0.53.21 - exact-output snapshot for the dry-run RCH
+    /// schedule markdown consumed by readiness-lab operator handoffs.
+    ///
+    /// The scheduler tests prove ordering and validation semantics. This
+    /// snapshot pins the rendered advisory/product-evidence wording, lane
+    /// ordering, coalesced duplicate count, target dirs, artifact paths, and
+    /// empty findings sections.
+    #[test]
+    fn render_readiness_lab_rch_lane_schedule_markdown_sample_snapshot() {
+        let report = plan_rch_lanes(&sample_rch_lane_schedule_manifest());
+        let markdown = render_readiness_lab_rch_lane_schedule_markdown(&report);
+
+        insta::assert_snapshot!(
+            "render_readiness_lab_rch_lane_schedule_markdown_sample",
+            markdown
+        );
+    }
+
     #[test]
     fn rch_lane_scheduler_rejects_shared_target_dir_and_missing_evidence() {
         let mut manifest = sample_rch_lane_schedule_manifest();

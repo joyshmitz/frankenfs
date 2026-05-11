@@ -1,0 +1,32 @@
+---
+source: crates/ffs-harness/src/readiness_lab.rs
+expression: markdown
+---
+# FrankenFS Readiness Lab RCH Lane Schedule
+
+- Plan: `readiness-lab-rch-plan`
+- Manifest: `rch-lanes.json`
+- Valid: `true`
+- Dry run only: `true`
+- Product evidence claim: `none`
+- Release-gate effect: RCH lane scheduler output is advisory dry-run planning only; it never executes cargo lanes and cannot promote readiness claims
+- Source bead: `bd-hejjl`
+- Lanes: `5`
+- Planned lanes: `4`
+- Coalesced duplicates: `1`
+- Local fallback violations: `0`
+
+| order | lane | kind | deps | target_dir | artifact | cost | coalesced |
+|---:|---|---|---:|---|---|---:|---:|
+| `1` | `check` | `cargo_check` | `0` | `/data/tmp/rch_target_frankenfs_readiness_lab_check` | `artifacts/readiness-lab/rch-schedule/check.json` | `2` | `1` |
+| `2` | `test` | `cargo_test` | `1` | `/data/tmp/rch_target_frankenfs_readiness_lab_test` | `artifacts/readiness-lab/rch-schedule/test.json` | `4` | `0` |
+| `3` | `clippy` | `cargo_clippy` | `1` | `/data/tmp/rch_target_frankenfs_readiness_lab_clippy` | `artifacts/readiness-lab/rch-schedule/clippy.json` | `6` | `0` |
+| `4` | `dashboard` | `readiness_dashboard` | `2` | `/data/tmp/rch_target_frankenfs_readiness_lab_dashboard` | `artifacts/readiness-lab/rch-schedule/dashboard.json` | `3` | `0` |
+
+## Errors
+
+- none
+
+## Warnings
+
+- none
