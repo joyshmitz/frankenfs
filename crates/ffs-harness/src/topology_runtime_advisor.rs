@@ -1408,6 +1408,21 @@ mod tests {
         assert!(json.contains("\"product_evidence_claim\": \"none\""));
     }
 
+    /// bd-rchk0.212.7 - exact-output snapshot for the primary topology
+    /// runtime advisor markdown consumed by operator handoffs.
+    ///
+    /// The validation tests prove advisory-only semantics and rejection
+    /// behavior. This snapshot pins the rendered host/FUSE classification,
+    /// command transcript paths, advisory wording, and empty Issues section.
+    #[test]
+    fn render_topology_runtime_advisor_markdown_fixture_snapshot() {
+        let manifest = fixture_manifest();
+        let report = validate_fixture(&manifest);
+        let markdown = render_topology_runtime_advisor_markdown(&report);
+
+        insta::assert_snapshot!("render_topology_runtime_advisor_markdown_fixture", markdown);
+    }
+
     #[test]
     fn checked_in_sample_manifest_validates() {
         let manifest: TopologyRuntimeAdvisorManifest = serde_json::from_str(include_str!(

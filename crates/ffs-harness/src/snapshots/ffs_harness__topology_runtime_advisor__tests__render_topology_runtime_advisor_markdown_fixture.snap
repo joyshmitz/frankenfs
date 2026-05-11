@@ -1,0 +1,32 @@
+---
+source: crates/ffs-harness/src/topology_runtime_advisor.rs
+expression: markdown
+---
+# Topology Runtime Advisor Report
+
+- Operation: `topology-advisor-op-001`
+- Scenario: `topology-advisor-valid`
+- Valid: `true`
+- Outcome: `pass`
+- Advisory only: `true`
+- Product evidence claim: `none`
+- Release gate effect: `advisory_only`
+- Source bead: `bd-rchk0.212.1`
+- Real campaign bead: `bd-rchk0.53.8`
+- Host class: `large_host_floor_met`
+- FUSE capability: `available`
+- Workloads: `2`
+- Runtime candidates: `3`
+- Artifacts: `3`
+
+## Command Transcript
+
+- Manifest: `artifacts/topology-advisor/manifest.json`
+- Artifact root: `artifacts/topology-advisor`
+- Stdout: `artifacts/topology-advisor/stdout.log`
+- Stderr: `artifacts/topology-advisor/stderr.log`
+- Structured log: `artifacts/topology-advisor/structured.jsonl`
+
+## Issues
+
+none
