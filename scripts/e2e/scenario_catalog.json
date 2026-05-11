@@ -1899,6 +1899,95 @@
       ]
     },
     {
+      "suite_id": "ffs_permissioned_campaign_broker",
+      "script": "scripts/e2e/ffs_permissioned_campaign_broker_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "permissioned_broker_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=permissioned_broker_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "permissioned_broker_fixtures_written",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=permissioned_broker_fixtures_written|outcome=PASS"
+        },
+        {
+          "id": "permissioned_broker_json_artifacts_parse",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=permissioned_broker_json_artifacts_parse|outcome=PASS"
+        },
+        {
+          "id": "permissioned_broker_xfstests_packet",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=permissioned_broker_xfstests_packet|outcome=PASS"
+        },
+        {
+          "id": "permissioned_broker_swarm_packet",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=permissioned_broker_swarm_packet|outcome=PASS"
+        },
+        {
+          "id": "permissioned_broker_swarm_blocker_packet",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=permissioned_broker_swarm_blocker_packet|outcome=PASS"
+        },
+        {
+          "id": "swarm_capability_calibration_packets",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_capability_calibration_packets|outcome=PASS"
+        },
+        {
+          "id": "swarm_calibration_release_gate_hidden",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_calibration_release_gate_hidden|outcome=PASS"
+        },
+        {
+          "id": "permissioned_broker_execution_ledgers_validate",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=permissioned_broker_execution_ledgers_validate|outcome=PASS"
+        },
+        {
+          "id": "permissioned_broker_invalid_dry_run_ledger_refused",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=permissioned_broker_invalid_dry_run_ledger_refused|outcome=PASS"
+        },
+        {
+          "id": "permissioned_broker_missing_inputs_blockers",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=permissioned_broker_missing_inputs_blockers|outcome=PASS"
+        },
+        {
+          "id": "permissioned_broker_invalid_manifest_refused",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=permissioned_broker_invalid_manifest_refused|outcome=PASS"
+        },
+        {
+          "id": "permissioned_broker_non_execution_guard",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=permissioned_broker_non_execution_guard|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_proof_overhead_budget",
       "script": "scripts/e2e/ffs_proof_overhead_budget_e2e.sh",
       "required_categories": [
