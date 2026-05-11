@@ -5171,9 +5171,10 @@ fn full_conformance_gate_pass() {
     fixture_checksum_manifest_is_complete();
     golden_checksum_manifest_is_complete();
 
-    // 3) Goldens deserialize successfully and satisfy basic invariants.
+    // 3) Conformance and legacy goldens deserialize successfully and satisfy basic invariants.
     let workspace = workspace_root();
     validate_golden_jsons(workspace);
+    validate_legacy_fixture_goldens(workspace);
 
     // 4) Fuzz corpus is populated.
     assert_fuzz_corpus_populated(workspace);
