@@ -1587,6 +1587,24 @@ mod tests {
         assert_ledger(&report, "hot_inode_imbalance");
     }
 
+    /// bd-rchk0.212.6 - exact-output snapshot for the advisory scoring
+    /// markdown consumed by topology-runtime operator handoffs.
+    ///
+    /// The scoring tests above prove the selected candidate and ledger signals.
+    /// This snapshot pins the rendered recommendation, confidence tier,
+    /// candidate ordering, rejection fields, and loss/risk rationale.
+    #[test]
+    fn render_topology_runtime_advisor_score_markdown_fixture_snapshot() {
+        let manifest = fixture_manifest();
+        let report = score_fixture(&manifest);
+        let markdown = render_topology_runtime_advisor_score_markdown(&report);
+
+        insta::assert_snapshot!(
+            "render_topology_runtime_advisor_score_markdown_fixture",
+            markdown
+        );
+    }
+
     #[test]
     fn writeback_pressure_requires_backpressure_thresholds() {
         let mut manifest = fixture_manifest();

@@ -1,0 +1,33 @@
+---
+source: crates/ffs-harness/src/topology_runtime_advisor.rs
+expression: markdown
+---
+# Topology Runtime Advisor Score
+
+- Operation: `topology-advisor-op-001`
+- Scenario: `topology-advisor-valid`
+- Valid: `true`
+- Advisory only: `true`
+- Product evidence claim: `none`
+- Release gate effect: `advisory_only`
+- Release claim state: `not_product_evidence`
+- Recommendation: `managed`
+- Confidence: `high`
+
+## Candidates
+
+- `managed`: score `85` rejection `none`
+  - hot-inode skew favors centralized backpressure
+  - write-heavy fsync cadence favors managed scheduling
+- `per_core`: score `50` rejection `none`
+  - CPU/RAM/NUMA floor can support per-core routing
+  - queue depth can amortize per-core scheduling overhead
+  - hot-inode skew risks per-core imbalance
+- `standard`: score `45` rejection `none`
+  - low dirty-byte and queue pressure favor the baseline mode
+  - writeback pressure needs explicit backpressure management
+
+## Loss/Risk Ledger
+
+- `hot_inode_imbalance` expected_loss `70`: per-core sharding risks routing most work to one hot inode shard
+- `writeback_backpressure` expected_loss `65`: dirty-byte pressure and fsync cadence require explicit backpressure thresholds
