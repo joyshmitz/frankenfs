@@ -295,6 +295,70 @@
       ]
     },
     {
+      "suite_id": "ffs_health_consistency",
+      "script": "scripts/e2e/ffs_health_consistency_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "health_consistency_module_exists",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=health_consistency_module_exists|outcome=PASS"
+        },
+        {
+          "id": "health_canonical_dimensions_defined",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=health_canonical_dimensions_defined|outcome=PASS"
+        },
+        {
+          "id": "health_degradation_five_variants",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=health_degradation_five_variants|outcome=PASS"
+        },
+        {
+          "id": "health_tui_degradation_coverage",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=health_tui_degradation_coverage|outcome=PASS"
+        },
+        {
+          "id": "health_pressure_counters_in_fuse",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=health_pressure_counters_in_fuse|outcome=PASS"
+        },
+        {
+          "id": "health_runtime_modes_in_cli",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=health_runtime_modes_in_cli|outcome=PASS"
+        },
+        {
+          "id": "health_wal_replay_markers",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=health_wal_replay_markers|outcome=PASS"
+        },
+        {
+          "id": "health_source_of_truth_documented",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=health_source_of_truth_documented|outcome=PASS"
+        },
+        {
+          "id": "health_consistency_unit_tests_pass",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=health_consistency_unit_tests_pass|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_performance_manifest",
       "script": "scripts/e2e/ffs_performance_manifest_e2e.sh",
       "required_categories": [
