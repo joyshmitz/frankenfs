@@ -5638,6 +5638,20 @@ mod tests {
         assert!(markdown.contains("Product-claim violations: `0`"));
     }
 
+    /// bd-rchk0.53.22 - exact-output snapshot for the readiness-lab
+    /// contract markdown consumed by operator handoffs.
+    ///
+    /// The validation tests prove the contract semantics. This snapshot pins
+    /// the rendered lab identity, manifest path, aggregate counters,
+    /// advisory/product-claim wording, and empty findings sections.
+    #[test]
+    fn render_readiness_lab_contract_markdown_sample_snapshot() {
+        let report = validate(&sample_bundle());
+        let markdown = render_readiness_lab_contract_markdown(&report);
+
+        insta::assert_snapshot!("render_readiness_lab_contract_markdown_sample", markdown);
+    }
+
     #[test]
     fn serialization_roundtrip_preserves_bundle() -> serde_json::Result<()> {
         let bundle = sample_bundle();

@@ -1,0 +1,22 @@
+---
+source: crates/ffs-harness/src/readiness_lab.rs
+expression: markdown
+---
+# FrankenFS Readiness Lab Contract Report
+
+- Lab: `readiness-lab-fixture`
+- Manifest: `fixture.json`
+- Valid: `true`
+- Artifacts: `2`
+- Lanes: `1`
+- RCH assumptions: `1`
+- Advisory artifacts: `2`
+- Product-claim violations: `0`
+
+## Errors
+
+- none
+
+## Warnings
+
+- none
