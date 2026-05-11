@@ -1,0 +1,25 @@
+---
+source: crates/ffs-harness/src/remediation_severity_gate.rs
+expression: markdown
+---
+# Remediation Severity Gate
+
+- gate: `frankenfs_remediation_severity_gate_v1`
+- schema version: `1`
+- bead: `bd-t6zqr`
+- valid: `true`
+- entries: `11`
+- block-release entries: `4`
+
+## Outcome Classes
+- `host_capability_skip`
+- `inconclusive_oracle_conflict`
+- `low_confidence_repair`
+- `missing_proof_lane`
+- `noisy_performance`
+- `pass_with_experimental_caveat`
+- `product_failure`
+- `security_refusal`
+- `stale_artifact`
+- `unsafe_repair_refusal`
+- `unsupported_operation`

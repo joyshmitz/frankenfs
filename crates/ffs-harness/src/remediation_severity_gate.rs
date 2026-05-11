@@ -12,7 +12,7 @@
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fs, path::Path};
 
 pub const REMEDIATION_SEVERITY_GATE_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_REMEDIATION_SEVERITY_GATE_PATH: &str =
@@ -112,17 +112,34 @@ pub fn parse_remediation_severity_gate(text: &str) -> Result<RemediationSeverity
         .map_err(|err| anyhow::anyhow!("failed to parse remediation severity gate JSON: {err}"))
 }
 
+pub fn load_remediation_severity_gate(path: &Path) -> Result<RemediationSeverityGate> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to read remediation severity gate `{}`: {err}",
+            path.display()
+        )
+    })?;
+    parse_remediation_severity_gate(&text)
+}
+
 pub fn validate_default_remediation_severity_gate() -> Result<RemediationSeverityGateReport> {
     let gate = parse_remediation_severity_gate(DEFAULT_REMEDIATION_SEVERITY_GATE_JSON)?;
     let report = validate_remediation_severity_gate(&gate);
-    if !report.valid {
-        bail!(
-            "remediation severity gate failed with {} error(s): {}",
-            report.errors.len(),
-            report.errors.join("; ")
-        );
-    }
+    fail_on_remediation_severity_gate_errors(&report)?;
     Ok(report)
+}
+
+pub fn fail_on_remediation_severity_gate_errors(
+    report: &RemediationSeverityGateReport,
+) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    bail!(
+        "remediation severity gate failed with {} error(s): {}",
+        report.errors.len(),
+        report.errors.join("; ")
+    );
 }
 
 #[must_use]
@@ -347,6 +364,45 @@ fn validate_required_outcome_coverage(seen: &BTreeSet<String>, errors: &mut Vec<
             ));
         }
     }
+}
+
+#[must_use]
+pub fn render_remediation_severity_gate_markdown(report: &RemediationSeverityGateReport) -> String {
+    let mut out = String::new();
+    out.push_str("# Remediation Severity Gate\n\n");
+    out.push_str("- gate: `");
+    out.push_str(&report.gate_id);
+    out.push_str("`\n");
+    out.push_str("- schema version: `");
+    out.push_str(&report.schema_version.to_string());
+    out.push_str("`\n");
+    out.push_str("- bead: `");
+    out.push_str(&report.bead_id);
+    out.push_str("`\n");
+    out.push_str("- valid: `");
+    out.push_str(if report.valid { "true" } else { "false" });
+    out.push_str("`\n");
+    out.push_str("- entries: `");
+    out.push_str(&report.entry_count.to_string());
+    out.push_str("`\n");
+    out.push_str("- block-release entries: `");
+    out.push_str(&report.block_release_count.to_string());
+    out.push_str("`\n\n");
+    out.push_str("## Outcome Classes\n");
+    for outcome_class in &report.outcome_classes_covered {
+        out.push_str("- `");
+        out.push_str(outcome_class);
+        out.push_str("`\n");
+    }
+    if !report.errors.is_empty() {
+        out.push_str("\n## Errors\n");
+        for error in &report.errors {
+            out.push_str("- ");
+            out.push_str(error);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -667,5 +723,30 @@ mod tests {
     fn block_release_count_is_reported() {
         let report = validate_default_remediation_severity_gate().expect("default validates");
         assert!(report.block_release_count >= 1);
+    }
+
+    #[test]
+    fn render_remediation_severity_gate_markdown_default_gate() {
+        let report = validate_default_remediation_severity_gate()
+            .expect("default remediation severity gate validates");
+        let markdown = render_remediation_severity_gate_markdown(&report);
+        insta::assert_snapshot!(
+            "render_remediation_severity_gate_markdown_default_gate",
+            markdown
+        );
+    }
+
+    #[test]
+    fn fail_on_errors_rejects_invalid_report() {
+        let mut gate = fixture_gate();
+        gate.entries[0].release_gate_effect = "annotate_caveat".to_owned();
+        let report = validate_remediation_severity_gate(&gate);
+        let err = fail_on_remediation_severity_gate_errors(&report)
+            .expect_err("invalid report fails closed");
+        assert!(err.to_string().contains("remediation severity gate failed"));
+        assert!(
+            err.to_string()
+                .contains("data_loss_unrecoverable must use release_gate_effect=block_release")
+        );
     }
 }

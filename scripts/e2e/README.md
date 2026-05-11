@@ -378,6 +378,32 @@ schema ids, README wording ids, cleanup policy, and explicit host-skip reasons.
 Rows that require real FUSE mounts remain host-skipped until a permissioned
 lane records authoritative mounted artifacts.
 
+## Remediation Severity Gate Contract
+
+The remediation severity gate lives in:
+
+- `tests/remediation-severity-gate/remediation_severity_gate.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-remediation-severity-gate \
+  --gate tests/remediation-severity-gate/remediation_severity_gate.json \
+  --out artifacts/remediation/severity_gate_report.json \
+  --summary-out artifacts/remediation/severity_gate_summary.md
+```
+
+This gate is a release-blocking remediation outcome contract, not evidence that
+any repair, rollback, or host remediation command has been executed. It must
+keep product failures, host-capability skips, unsafe repair refusals,
+low-confidence repair, missing proof lanes, inconclusive oracle conflicts, and
+experimental pass caveats visible, with data-safety severity, mutation status,
+safe retry policy, escalation path, owning bead, docs target, artifact
+requirements, release-gate effect, and exactly one immediate action or explicit
+non-goal rationale for every entry. Rows with unrecoverable data loss must
+block release, while host-capability skips and experimental caveats must not
+masquerade as product failures.
+
 ## Swarm Workload Harness Contract
 
 The 64-core/256GB swarm workload harness plan lives in:

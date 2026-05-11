@@ -192,6 +192,11 @@ use ffs_harness::{
     remediation_catalog::{
         DEFAULT_REMEDIATION_CATALOG_PATH, parse_remediation_catalog, validate_remediation_catalog,
     },
+    remediation_severity_gate::{
+        DEFAULT_REMEDIATION_SEVERITY_GATE_PATH, fail_on_remediation_severity_gate_errors,
+        load_remediation_severity_gate, render_remediation_severity_gate_markdown,
+        validate_remediation_severity_gate,
+    },
     repair_confidence_lab::{
         DEFAULT_REPAIR_CONFIDENCE_LAB_PATH, fail_on_repair_confidence_lab_errors,
         load_repair_confidence_lab_spec, render_repair_confidence_lab_markdown,
@@ -540,6 +545,9 @@ fn run() -> Result<()> {
             validate_repair_writeback_serialization_cmd(&args[1..])
         }
         Some("validate-remediation-catalog") => validate_remediation_catalog_cmd(&args[1..]),
+        Some("validate-remediation-severity-gate") => {
+            validate_remediation_severity_gate_cmd(&args[1..])
+        }
         Some("validate-writeback-cache-audit") => validate_writeback_cache_audit_cmd(&args[1..]),
         Some("validate-writeback-cache-ordering") => {
             validate_writeback_cache_ordering_cmd(&args[1..])
@@ -982,6 +990,14 @@ struct FaultInjectionCorpusCmdArgs {
 #[derive(Debug)]
 struct RepairCorpusCmdArgs {
     corpus_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
+struct RemediationSeverityGateCmdArgs {
+    gate_path: String,
     out_path: Option<String>,
     summary_out_path: Option<String>,
     format: ProofBundleFormat,
@@ -7593,6 +7609,89 @@ fn validate_remediation_catalog_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn validate_remediation_severity_gate_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_remediation_severity_gate_cmd_args(args)? else {
+        return Ok(());
+    };
+    let gate = load_remediation_severity_gate(Path::new(&cmd_args.gate_path))?;
+    let report = validate_remediation_severity_gate(&gate);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_remediation_severity_gate_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "remediation severity gate report written: {} valid={} entries={}",
+            path, report.valid, report.entry_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_remediation_severity_gate_markdown(&report)),
+        )?;
+        println!("remediation severity gate summary written: {path}");
+    }
+
+    fail_on_remediation_severity_gate_errors(&report)
+}
+
+fn parse_remediation_severity_gate_cmd_args(
+    args: &[String],
+) -> Result<Option<RemediationSeverityGateCmdArgs>> {
+    let mut gate_path = DEFAULT_REMEDIATION_SEVERITY_GATE_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--gate" => {
+                i += 1;
+                args.get(i)
+                    .context("--gate requires a path")?
+                    .clone_into(&mut gate_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_remediation_severity_gate_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-remediation-severity-gate argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(RemediationSeverityGateCmdArgs {
+        gate_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
 fn validate_mounted_recovery_matrix_cmd(args: &[String]) -> Result<()> {
     let mut matrix_path = DEFAULT_RECOVERY_MATRIX_PATH.to_owned();
     let mut out_path: Option<String> = None;
@@ -8032,6 +8131,7 @@ fn print_usage_commands() {
     print_operator_recovery_drill_usage_summary();
     print_repair_writeback_serialization_usage_summary();
     println!("  ffs-harness validate-remediation-catalog [--catalog FILE] [--out FILE]");
+    print_remediation_severity_gate_usage_summary();
     print_writeback_cache_audit_usage_summary();
     print_writeback_cache_ordering_usage_summary();
     print_writeback_cache_crash_replay_usage_summary();
@@ -8166,6 +8266,7 @@ fn print_usage_examples() {
     println!(
         "  ffs-harness validate-remediation-catalog --out artifacts/remediation/catalog_report.json"
     );
+    print_remediation_severity_gate_example();
     print_writeback_cache_audit_example();
     print_writeback_cache_ordering_example();
     print_writeback_cache_crash_replay_example();
@@ -9174,6 +9275,28 @@ fn print_remediation_catalog_usage() {
     println!("Options:");
     println!("  --catalog FILE                     Read remediation catalog JSON");
     println!("  --out FILE                         Write JSON validation report to FILE");
+}
+
+fn print_remediation_severity_gate_usage_summary() {
+    println!(
+        "  ffs-harness validate-remediation-severity-gate [--gate FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_remediation_severity_gate_example() {
+    println!(
+        "  ffs-harness validate-remediation-severity-gate --gate tests/remediation-severity-gate/remediation_severity_gate.json --out artifacts/remediation/severity_gate_report.json --summary-out artifacts/remediation/severity_gate_summary.md"
+    );
+}
+
+fn print_remediation_severity_gate_usage() {
+    println!("Usage: ffs-harness validate-remediation-severity-gate [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --gate FILE                        Read remediation severity gate JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report");
+    println!("  --summary-out FILE                 Write Markdown severity summary");
 }
 
 fn print_cross_oracle_arbitration_usage() {
