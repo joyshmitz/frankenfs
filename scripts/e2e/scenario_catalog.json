@@ -231,6 +231,70 @@
       ]
     },
     {
+      "suite_id": "ffs_error_taxonomy",
+      "script": "scripts/e2e/ffs_error_taxonomy_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "taxonomy_module_exists",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=taxonomy_module_exists|outcome=PASS"
+        },
+        {
+          "id": "taxonomy_seven_classes",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=taxonomy_seven_classes|outcome=PASS"
+        },
+        {
+          "id": "taxonomy_min_scenarios",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=taxonomy_min_scenarios|outcome=PASS"
+        },
+        {
+          "id": "taxonomy_hints_nonempty",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=taxonomy_hints_nonempty|outcome=PASS"
+        },
+        {
+          "id": "taxonomy_runbook_links",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=taxonomy_runbook_links|outcome=PASS"
+        },
+        {
+          "id": "taxonomy_variant_refs",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=taxonomy_variant_refs|outcome=PASS"
+        },
+        {
+          "id": "taxonomy_preset_alignment",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=taxonomy_preset_alignment|outcome=PASS"
+        },
+        {
+          "id": "taxonomy_code_format",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=taxonomy_code_format|outcome=PASS"
+        },
+        {
+          "id": "taxonomy_unit_tests_pass",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=taxonomy_unit_tests_pass|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_performance_manifest",
       "script": "scripts/e2e/ffs_performance_manifest_e2e.sh",
       "required_categories": [
