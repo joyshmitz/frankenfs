@@ -223,6 +223,72 @@
       ]
     },
     {
+      "suite_id": "ffs_btrfs_write_churn",
+      "script": "scripts/e2e/ffs_btrfs_write_churn_e2e.sh",
+      "required_categories": [
+        "happy",
+        "corruption",
+        "recovery",
+        "degradation"
+      ],
+      "scenarios": [
+        {
+          "id": "churn_tests_exist",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=churn_tests_exist|outcome=PASS"
+        },
+        {
+          "id": "no_false_clean_invariant",
+          "category": "corruption",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=no_false_clean_invariant|outcome=PASS"
+        },
+        {
+          "id": "evidence_churn_context",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_churn_context|outcome=PASS"
+        },
+        {
+          "id": "btrfs_churn_logging_markers",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=logging_markers|outcome=PASS"
+        },
+        {
+          "id": "churn_tests_pass",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=churn_tests_pass|outcome=PASS"
+        },
+        {
+          "id": "btrfs_churn_validators",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_validators|outcome=PASS"
+        },
+        {
+          "id": "btrfs_churn_pipeline_suite",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=pipeline_suite|outcome=PASS"
+        },
+        {
+          "id": "btrfs_cli_repair",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_cli_repair|outcome=PASS"
+        },
+        {
+          "id": "btrfs_churn_telemetry",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=churn_telemetry|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_fuse_production",
       "script": "scripts/e2e/ffs_fuse_production.sh",
       "required_categories": [
