@@ -93,6 +93,70 @@
       ]
     },
     {
+      "suite_id": "ffs_btrfs_capability_drift",
+      "script": "scripts/e2e/ffs_btrfs_capability_drift_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "btrfs_drift_module_exists",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_drift_module_exists|outcome=PASS"
+        },
+        {
+          "id": "btrfs_drift_unit_contracts_parseable",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_drift_unit_contracts_parseable|outcome=PASS"
+        },
+        {
+          "id": "btrfs_drift_e2e_contracts_parseable",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_drift_e2e_contracts_parseable|outcome=PASS"
+        },
+        {
+          "id": "btrfs_drift_unit_checker_pattern",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_drift_unit_checker_pattern|outcome=PASS"
+        },
+        {
+          "id": "btrfs_drift_e2e_checker_stripping",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_drift_e2e_checker_stripping|outcome=PASS"
+        },
+        {
+          "id": "btrfs_drift_parser_selectivity",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_drift_parser_selectivity|outcome=PASS"
+        },
+        {
+          "id": "btrfs_drift_unit_coverage_test",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_drift_unit_coverage_test|outcome=PASS"
+        },
+        {
+          "id": "btrfs_drift_e2e_coverage_test",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_drift_e2e_coverage_test|outcome=PASS"
+        },
+        {
+          "id": "btrfs_drift_unit_tests_pass",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_drift_unit_tests_pass|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_fuse_production",
       "script": "scripts/e2e/ffs_fuse_production.sh",
       "required_categories": [
