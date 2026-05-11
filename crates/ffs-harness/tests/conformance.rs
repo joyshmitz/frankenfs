@@ -38,7 +38,7 @@ use std::{
     fs,
     io::{Read, Seek, SeekFrom, Write},
     os::unix::ffi::OsStrExt,
-    path::Path,
+    path::{Component, Path},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering as AtomicOrdering},
@@ -4680,6 +4680,65 @@ fn checksum_manifest_requires_tracked_text_artifacts() {
     );
 }
 
+#[test]
+#[should_panic(expected = "digest should be 64 lowercase hex characters")]
+fn checksum_manifest_rejects_malformed_digest() {
+    let tmp = tempfile::TempDir::new().expect("tmpdir for malformed digest manifest test");
+    let manifest = tmp.path().join("checksums.sha256");
+    fs::write(&manifest, "not-a-sha256  listed.json\n").expect("write checksum manifest");
+
+    parse_checksum_inventory(&manifest);
+}
+
+#[test]
+#[should_panic(expected = "duplicate file entry: listed.json")]
+fn checksum_manifest_rejects_duplicate_entries() {
+    let tmp = tempfile::TempDir::new().expect("tmpdir for duplicate manifest test");
+    let manifest = tmp.path().join("checksums.sha256");
+    let digest = sha256_hex(b"{}");
+    fs::write(
+        &manifest,
+        format!("{digest}  listed.json\n{digest}  listed.json\n"),
+    )
+    .expect("write checksum manifest");
+
+    parse_checksum_inventory(&manifest);
+}
+
+#[test]
+#[should_panic(expected = "top-level relative artifact path")]
+fn checksum_manifest_rejects_parent_directory_escape() {
+    let tmp = tempfile::TempDir::new().expect("tmpdir for path escape manifest test");
+    let manifest = tmp.path().join("checksums.sha256");
+    let digest = sha256_hex(b"{}");
+    fs::write(&manifest, format!("{digest}  ../escape.json\n")).expect("write checksum manifest");
+
+    parse_checksum_inventory(&manifest);
+}
+
+#[test]
+#[should_panic(expected = "top-level relative artifact path")]
+fn checksum_manifest_rejects_absolute_paths() {
+    let tmp = tempfile::TempDir::new().expect("tmpdir for absolute path manifest test");
+    let manifest = tmp.path().join("checksums.sha256");
+    let digest = sha256_hex(b"{}");
+    fs::write(&manifest, format!("{digest}  /tmp/escape.json\n")).expect("write checksum manifest");
+
+    parse_checksum_inventory(&manifest);
+}
+
+#[test]
+#[should_panic(expected = "top-level relative artifact path")]
+fn checksum_manifest_rejects_nested_paths() {
+    let tmp = tempfile::TempDir::new().expect("tmpdir for nested path manifest test");
+    let manifest = tmp.path().join("checksums.sha256");
+    let digest = sha256_hex(b"{}");
+    fs::write(&manifest, format!("{digest}  nested/listed.json\n"))
+        .expect("write checksum manifest");
+
+    parse_checksum_inventory(&manifest);
+}
+
 /// CI gate: verify that every fixture listed in checksums.sha256 exists,
 /// is non-empty, and that its SHA-256 digest matches the committed manifest.
 #[test]
@@ -4865,23 +4924,58 @@ fn validate_golden_jsons(workspace: &Path) {
 fn parse_checksum_inventory(path: &Path) -> HashMap<String, String> {
     let raw = fs::read_to_string(path)
         .unwrap_or_else(|err| panic!("checksum inventory {} unreadable: {err}", path.display()));
-    raw.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            let mut parts = line.split_whitespace();
-            let digest = parts
-                .next()
-                .unwrap_or_else(|| panic!("checksum line missing digest: {line}"));
-            let file_name = parts
-                .next()
-                .unwrap_or_else(|| panic!("checksum line missing file name: {line}"));
-            assert!(
-                parts.next().is_none(),
-                "checksum line should have exactly two fields: {line}"
-            );
-            (file_name.to_owned(), digest.to_owned())
-        })
-        .collect()
+    let mut inventory = HashMap::new();
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let (digest, file_name) = parse_checksum_inventory_line(line);
+        assert!(
+            inventory
+                .insert(file_name.to_owned(), digest.to_owned())
+                .is_none(),
+            "checksum inventory {} has duplicate file entry: {file_name}",
+            path.display()
+        );
+    }
+    inventory
+}
+
+fn parse_checksum_inventory_line(line: &str) -> (&str, &str) {
+    let mut parts = line.split_whitespace();
+    let digest = parts
+        .next()
+        .unwrap_or_else(|| panic!("checksum line missing digest: {line}"));
+    let file_name = parts
+        .next()
+        .unwrap_or_else(|| panic!("checksum line missing file name: {line}"));
+    assert!(
+        parts.next().is_none(),
+        "checksum line should have exactly two fields: {line}"
+    );
+    assert!(
+        valid_checksum_digest(digest),
+        "checksum line digest should be 64 lowercase hex characters: {line}"
+    );
+    assert!(
+        valid_checksum_manifest_filename(file_name),
+        "checksum line file name must be a top-level relative artifact path: {line}"
+    );
+    (digest, file_name)
+}
+
+fn valid_checksum_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .as_bytes()
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn valid_checksum_manifest_filename(file_name: &str) -> bool {
+    let path = Path::new(file_name);
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        && path.components().count() == 1
 }
 
 fn sorted_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
