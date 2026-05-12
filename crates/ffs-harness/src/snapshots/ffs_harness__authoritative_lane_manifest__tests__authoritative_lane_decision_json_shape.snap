@@ -1,0 +1,29 @@
+---
+source: crates/ffs-harness/src/authoritative_lane_manifest.rs
+expression: serde_json::to_string_pretty(&shape)?
+---
+{
+  "allowed_decision_tokens": [
+    "pass",
+    "skip",
+    "fail",
+    "fail_closed_authoritative"
+  ],
+  "pass": {
+    "decision": "pass",
+    "lane_id": "mounted_authoritative_v1",
+    "environment_kind": "rch_authoritative"
+  },
+  "local_skip": {
+    "decision": "skip",
+    "lane_id": "mounted_authoritative_v1",
+    "reason": "local_developer_run",
+    "remediation_hint": "rerun fuse-capability-probe and the mounted matrix on a permissioned worker"
+  },
+  "stale_fail_closed": {
+    "decision": "fail_closed_authoritative",
+    "lane_id": "mounted_authoritative_v1",
+    "reason": "stale_capability_probe",
+    "remediation_hint": "rerun fuse-capability-probe; authoritative runs cannot trust a stale probe"
+  }
+}

@@ -636,4 +636,43 @@ mod tests {
         let decision = evaluate_authoritative_lane(&manifest);
         assert_eq!(reason(&decision), Some("missing_mounted_logs"));
     }
+
+    #[test]
+    fn authoritative_lane_decision_json_shape() -> Result<(), serde_json::Error> {
+        let pass_decision = evaluate_authoritative_lane(&happy_manifest());
+        let pass_json = serde_json::to_string_pretty(&pass_decision)?;
+        let pass_decoded: AuthoritativeLaneDecision = serde_json::from_str(&pass_json)?;
+        assert_eq!(pass_decoded, pass_decision);
+
+        let mut local_manifest = happy_manifest();
+        local_manifest.environment_kind = "local_developer".to_owned();
+        local_manifest.mounted_logs_present = false;
+        let local_skip = evaluate_authoritative_lane(&local_manifest);
+        let local_skip_json = serde_json::to_string_pretty(&local_skip)?;
+        let local_skip_decoded: AuthoritativeLaneDecision = serde_json::from_str(&local_skip_json)?;
+        assert_eq!(local_skip_decoded, local_skip);
+
+        let mut stale_manifest = happy_manifest();
+        stale_manifest.now_unix =
+            stale_manifest.probe_at_unix + stale_manifest.freshness_ttl_seconds + 1;
+        let stale_fail_closed = evaluate_authoritative_lane(&stale_manifest);
+        let stale_fail_closed_json = serde_json::to_string_pretty(&stale_fail_closed)?;
+        let stale_fail_closed_decoded: AuthoritativeLaneDecision =
+            serde_json::from_str(&stale_fail_closed_json)?;
+        assert_eq!(stale_fail_closed_decoded, stale_fail_closed);
+
+        let shape = serde_json::json!({
+            "allowed_decision_tokens": allowed_decision_tokens(),
+            "pass": pass_decoded,
+            "local_skip": local_skip_decoded,
+            "stale_fail_closed": stale_fail_closed_decoded,
+        });
+
+        insta::assert_snapshot!(
+            "authoritative_lane_decision_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+
+        Ok(())
+    }
 }
