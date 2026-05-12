@@ -1,0 +1,120 @@
+---
+source: crates/ffs-harness/src/mounted_write_matrix.rs
+expression: json
+---
+{
+  "schema_version": 4,
+  "bead_id": "bd-rchk0.3.2",
+  "scenario_count": 14,
+  "filesystems": [
+    "btrfs",
+    "ext4"
+  ],
+  "operation_kinds": [
+    "create",
+    "fallocate_keep_size",
+    "fallocate_punch_hole",
+    "fallocate_zero_range",
+    "fsync",
+    "hardlink",
+    "host_capability_skip",
+    "mkdir",
+    "mknod_block_device",
+    "read_only_write_erofs",
+    "read_only_write_probe",
+    "rename",
+    "rmdir",
+    "root_owned_write_eacces",
+    "rw_repair_rejected_before_serialization",
+    "setattr",
+    "symlink",
+    "truncate_extend",
+    "unlink",
+    "write_readback",
+    "xattr_create",
+    "xattr_list_get",
+    "xattr_replace",
+    "xattr_set_get",
+    "xattr_set_overlong"
+  ],
+  "fsync_patterns": [
+    "every_write",
+    "final_only",
+    "metadata_only",
+    "none"
+  ],
+  "output_formats": [
+    "json",
+    "csv"
+  ],
+  "max_concurrency": 4,
+  "write_sizes": [
+    1,
+    4096,
+    16384,
+    65536,
+    1048576
+  ],
+  "scenario_classes": [
+    "crash_reopen",
+    "host_skip",
+    "no_partial_mutation",
+    "positive",
+    "refusal"
+  ],
+  "expected_error_classes": [
+    "EACCES",
+    "ENAMETOOLONG",
+    "EOPNOTSUPP",
+    "EROFS",
+    "HOST_CAPABILITY_SKIP",
+    "none"
+  ],
+  "no_partial_mutation_scenarios": 5,
+  "multi_handle_scenario_count": 10,
+  "multi_handle_kinds": [
+    "metadata_attr_while_open",
+    "open_unlink",
+    "readdir_after_mutation",
+    "rejected_op_no_partial_mutation",
+    "rename_while_open",
+    "symlink_read_after_rename",
+    "truncate_while_open",
+    "two_handle_read_after_write",
+    "xattr_visibility"
+  ],
+  "multi_handle_filesystems": [
+    "btrfs",
+    "ext4"
+  ],
+  "multi_handle_max_handles": 2,
+  "multi_handle_unsupported_count": 1,
+  "namespace_scenario_count": 10,
+  "namespace_filesystems": [
+    "btrfs",
+    "ext4"
+  ],
+  "namespace_operation_kinds": [
+    "cross_directory_rename",
+    "hardlink_lifecycle",
+    "rename_no_overwrite",
+    "rename_overwrite",
+    "rmdir_non_empty_reject",
+    "symlink_persistence",
+    "unlink_open_handle",
+    "unsupported_fallocate_noop",
+    "xattr_namespace_update"
+  ],
+  "namespace_fsync_boundaries": [
+    "clean_unmount",
+    "data_fsync",
+    "file_close",
+    "forced_reopen",
+    "host_capability_skip",
+    "parent_fsyncdir",
+    "unsupported_rejection"
+  ],
+  "namespace_no_partial_mutation_count": 2,
+  "valid": true,
+  "errors": []
+}

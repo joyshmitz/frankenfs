@@ -1568,6 +1568,14 @@ mod tests {
     }
 
     #[test]
+    fn mounted_write_matrix_report_json_shape() {
+        let report = validate_default_mounted_write_matrix().expect("default matrix validates");
+        let json = serde_json::to_string_pretty(&report).expect("mounted write report serializes");
+
+        insta::assert_snapshot!("mounted_write_matrix_report_json_shape", json);
+    }
+
+    #[test]
     fn result_contract_requires_csv_and_json() {
         let mut matrix = valid_matrix();
         matrix
