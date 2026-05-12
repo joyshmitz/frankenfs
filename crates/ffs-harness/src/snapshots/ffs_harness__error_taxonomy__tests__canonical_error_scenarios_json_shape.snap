@@ -1,0 +1,126 @@
+---
+source: crates/ffs-harness/src/error_taxonomy.rs
+expression: json
+---
+[
+  {
+    "code": "FFS-CFG-001",
+    "class": "configuration",
+    "title": "Invalid filesystem geometry",
+    "ffs_error_variant": "InvalidGeometry",
+    "remediation_hint": "Verify image geometry with `ffs fsck <image>`. Common causes: zero blocks_per_group, unsupported block count.",
+    "runbook_ref": null
+  },
+  {
+    "code": "FFS-CFG-002",
+    "class": "configuration",
+    "title": "Invalid on-disk format",
+    "ffs_error_variant": "Format",
+    "remediation_hint": "Verify the image is a valid ext4/btrfs filesystem. Run `file <image>` to confirm type.",
+    "runbook_ref": null
+  },
+  {
+    "code": "FFS-CMP-001",
+    "class": "compatibility",
+    "title": "Unsupported feature flags",
+    "ffs_error_variant": "UnsupportedFeature",
+    "remediation_hint": "Upgrade FrankenFS or use an image without unsupported features (ENCRYPT, INLINE_DATA). Check features with `ffs fsck <image>`.",
+    "runbook_ref": null
+  },
+  {
+    "code": "FFS-CMP-002",
+    "class": "compatibility",
+    "title": "Incompatible feature contract",
+    "ffs_error_variant": "IncompatibleFeature",
+    "remediation_hint": "Image requires FILETYPE+EXTENTS. Recreate with `mkfs.ext4 -O extents,filetype`.",
+    "runbook_ref": null
+  },
+  {
+    "code": "FFS-CMP-003",
+    "class": "compatibility",
+    "title": "Unsupported block size",
+    "ffs_error_variant": "UnsupportedBlockSize",
+    "remediation_hint": "FrankenFS v1 supports 1K/2K/4K block sizes. Recreate the image with a supported block size.",
+    "runbook_ref": null
+  },
+  {
+    "code": "FFS-RPL-001",
+    "class": "replay",
+    "title": "WAL replay failure",
+    "ffs_error_variant": "Cancelled",
+    "remediation_hint": "Inspect WAL with `ffs evidence --preset replay-anomalies <ledger>`. See runbook: docs/runbooks/replay-failure-triage.md",
+    "runbook_ref": "docs/runbooks/replay-failure-triage.md"
+  },
+  {
+    "code": "FFS-RPL-002",
+    "class": "replay",
+    "title": "MVCC serialization conflict",
+    "ffs_error_variant": "MvccConflict",
+    "remediation_hint": "Retry the operation. Persistent conflicts may indicate excessive contention — reduce concurrent writers.",
+    "runbook_ref": "docs/runbooks/replay-failure-triage.md"
+  },
+  {
+    "code": "FFS-RPR-001",
+    "class": "repair",
+    "title": "Repair failed — insufficient symbols",
+    "ffs_error_variant": "RepairFailed",
+    "remediation_hint": "Run `ffs repair --rebuild-symbols <image>` to regenerate repair symbols. See runbook: docs/runbooks/corruption-recovery.md",
+    "runbook_ref": "docs/runbooks/corruption-recovery.md"
+  },
+  {
+    "code": "FFS-RPR-002",
+    "class": "repair",
+    "title": "Scrub detected unrecoverable corruption",
+    "ffs_error_variant": "Corruption",
+    "remediation_hint": "Run `ffs evidence --preset repair-failures <ledger>` to identify affected blocks. See runbook: docs/runbooks/corruption-recovery.md",
+    "runbook_ref": "docs/runbooks/corruption-recovery.md"
+  },
+  {
+    "code": "FFS-PRS-001",
+    "class": "pressure",
+    "title": "Backpressure activated",
+    "ffs_error_variant": "NoSpace",
+    "remediation_hint": "Reduce write load or increase available memory. See runbook: docs/runbooks/backpressure-investigation.md",
+    "runbook_ref": "docs/runbooks/backpressure-investigation.md"
+  },
+  {
+    "code": "FFS-PRS-002",
+    "class": "pressure",
+    "title": "Degradation level escalated",
+    "ffs_error_variant": "Io",
+    "remediation_hint": "System degradation detected. Check `ffs evidence --preset pressure-transitions <ledger>`. See runbook: docs/runbooks/backpressure-investigation.md",
+    "runbook_ref": "docs/runbooks/backpressure-investigation.md"
+  },
+  {
+    "code": "FFS-IOC-001",
+    "class": "io_corruption",
+    "title": "Block corruption detected",
+    "ffs_error_variant": "Corruption",
+    "remediation_hint": "Metadata corruption at specific block(s). Run `ffs repair <image>` to attempt RaptorQ recovery. See runbook: docs/runbooks/corruption-recovery.md",
+    "runbook_ref": "docs/runbooks/corruption-recovery.md"
+  },
+  {
+    "code": "FFS-IOC-002",
+    "class": "io_corruption",
+    "title": "I/O device error",
+    "ffs_error_variant": "Io",
+    "remediation_hint": "I/O error from underlying device. Check disk health with `smartctl -a /dev/sdX`. Replace media if errors persist.",
+    "runbook_ref": "docs/runbooks/corruption-recovery.md"
+  },
+  {
+    "code": "FFS-UNS-001",
+    "class": "unsupported_op",
+    "title": "Native-mode boundary violation",
+    "ffs_error_variant": "ModeViolation",
+    "remediation_hint": "Operation requires native mount mode. Remount with `--mode=native` to enable repair symbols and version store.",
+    "runbook_ref": null
+  },
+  {
+    "code": "FFS-UNS-002",
+    "class": "unsupported_op",
+    "title": "Read-only filesystem write attempt",
+    "ffs_error_variant": "ReadOnly",
+    "remediation_hint": "Filesystem is mounted read-only. Remount with write access or check mount flags.",
+    "runbook_ref": null
+  }
+]

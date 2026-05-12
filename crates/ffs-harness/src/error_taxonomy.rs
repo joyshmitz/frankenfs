@@ -577,6 +577,13 @@ mod tests {
     }
 
     #[test]
+    fn canonical_error_scenarios_json_shape() {
+        let scenarios = canonical_scenarios();
+        let json = serde_json::to_string_pretty(&scenarios).expect("serialize scenarios");
+        insta::assert_snapshot!("canonical_error_scenarios_json_shape", json);
+    }
+
+    #[test]
     fn code_prefixes_are_distinct_per_class() {
         let prefixes: Vec<&str> = ErrorClass::all()
             .iter()
