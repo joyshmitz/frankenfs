@@ -1,0 +1,113 @@
+---
+source: crates/ffs-harness/src/operator_recovery_drill.rs
+expression: serde_json::to_string_pretty(&shape)?
+---
+{
+  "schema_version": 1,
+  "drill_id": "operator_recovery_drill_v1",
+  "bead_id": "bd-rchk0.5.8",
+  "proof_bundle_lane": "operator_recovery_drill",
+  "valid": true,
+  "scenario_count": 4,
+  "by_outcome": {
+    "detection_only": 1,
+    "dry_run_success": 1,
+    "mutating_repair_verified": 1,
+    "unsafe_refused": 1
+  },
+  "by_phase": {
+    "detect": 1,
+    "dry_run": 1,
+    "mutate": 1,
+    "refuse": 1
+  },
+  "mutation_allowed_count": 1,
+  "mutation_refused_count": 1,
+  "missing_required_outcomes": [],
+  "missing_required_log_fields": [],
+  "missing_required_consumers": [],
+  "log_line_keys": [
+    "scenario_id",
+    "outcome",
+    "phase",
+    "drill_decision",
+    "mutation_allowed",
+    "confidence_threshold",
+    "confidence_score",
+    "residual_risk",
+    "command_count",
+    "exact_commands",
+    "image_hashes",
+    "pre_image_hash",
+    "post_image_hash",
+    "corruption_manifest",
+    "repair_plan",
+    "operator_warnings",
+    "post_repair_verification",
+    "rollback_or_refusal_outcome",
+    "cleanup_status",
+    "proof_bundle_lane",
+    "refusal_reason",
+    "reproduction_command"
+  ],
+  "scenario_reports": [
+    {
+      "scenario_id": "operator_detect_only_metadata_mismatch",
+      "phase": "detect",
+      "expected_outcome": "detection_only",
+      "drill_decision": "detection_only",
+      "mutation_allowed": false,
+      "refusal_reason": "detection_only",
+      "artifact_paths": [
+        "artifacts/operator-recovery/detect/manifest.json",
+        "artifacts/operator-recovery/detect/evidence-ledger.jsonl"
+      ],
+      "proof_bundle_lane": "operator_recovery_drill",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-operator-recovery-drill --spec docs/operator-recovery-drill.json --select operator_detect_only_metadata_mismatch"
+    },
+    {
+      "scenario_id": "operator_dry_run_single_block_recoverable",
+      "phase": "dry_run",
+      "expected_outcome": "dry_run_success",
+      "drill_decision": "dry_run_ready",
+      "mutation_allowed": false,
+      "refusal_reason": "dry_run_only",
+      "artifact_paths": [
+        "artifacts/operator-recovery/dry-run/plan.json",
+        "artifacts/operator-recovery/dry-run/summary.json"
+      ],
+      "proof_bundle_lane": "operator_recovery_drill",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-operator-recovery-drill --spec docs/operator-recovery-drill.json --select operator_dry_run_single_block_recoverable"
+    },
+    {
+      "scenario_id": "operator_mutate_verified_single_block",
+      "phase": "mutate",
+      "expected_outcome": "mutating_repair_verified",
+      "drill_decision": "mutate_allowed",
+      "mutation_allowed": true,
+      "refusal_reason": null,
+      "artifact_paths": [
+        "artifacts/operator-recovery/mutate/plan.json",
+        "artifacts/operator-recovery/mutate/post-verify.json"
+      ],
+      "proof_bundle_lane": "operator_recovery_drill",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-operator-recovery-drill --spec docs/operator-recovery-drill.json --select operator_mutate_verified_single_block"
+    },
+    {
+      "scenario_id": "operator_refuse_low_confidence_multi_block",
+      "phase": "refuse",
+      "expected_outcome": "unsafe_refused",
+      "drill_decision": "preflight_failed_refused",
+      "mutation_allowed": false,
+      "refusal_reason": "blocking_preflight_failed",
+      "artifact_paths": [
+        "artifacts/operator-recovery/refuse/refusal.json",
+        "artifacts/operator-recovery/refuse/manifest.json"
+      ],
+      "proof_bundle_lane": "operator_recovery_drill",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-operator-recovery-drill --spec docs/operator-recovery-drill.json --select operator_refuse_low_confidence_multi_block"
+    }
+  ],
+  "errors": [],
+  "warnings": []
+}

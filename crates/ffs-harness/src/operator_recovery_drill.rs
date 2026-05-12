@@ -404,7 +404,10 @@ pub fn render_operator_recovery_drill_markdown(report: &OperatorRecoveryDrillRep
 }
 
 fn validate_header(spec: &OperatorRecoveryDrillSpec, errors: &mut Vec<String>) {
-    if spec.schema_version != OPERATOR_RECOVERY_DRILL_SCHEMA_VERSION {
+    if spec
+        .schema_version
+        .ne(&OPERATOR_RECOVERY_DRILL_SCHEMA_VERSION)
+    {
         errors.push(format!(
             "schema_version must be {OPERATOR_RECOVERY_DRILL_SCHEMA_VERSION}, got {}",
             spec.schema_version
@@ -439,7 +442,7 @@ fn validate_scenario(
         &scenario.reproduction_command,
         errors,
     );
-    if scenario.proof_bundle_lane != spec.proof_bundle_lane {
+    if scenario.proof_bundle_lane.ne(&spec.proof_bundle_lane) {
         errors.push(format!(
             "scenario {} proof_bundle_lane {} does not match spec lane {}",
             scenario.scenario_id, scenario.proof_bundle_lane, spec.proof_bundle_lane
@@ -480,7 +483,11 @@ fn validate_preflight(
             scenario.scenario_id
         ));
     }
-    if blocks_mutation && scenario.expected_outcome != OperatorRecoveryOutcome::UnsafeRefused {
+    if blocks_mutation
+        && scenario
+            .expected_outcome
+            .ne(&OperatorRecoveryOutcome::UnsafeRefused)
+    {
         errors.push(format!(
             "scenario {} blocking preflight failure must produce unsafe_refused",
             scenario.scenario_id
@@ -594,7 +601,10 @@ fn validate_plan(scenario: &OperatorRecoveryScenario, errors: &mut Vec<String>) 
             ));
         }
     }
-    if scenario.expected_outcome == OperatorRecoveryOutcome::UnsafeRefused {
+    if scenario
+        .expected_outcome
+        .eq(&OperatorRecoveryOutcome::UnsafeRefused)
+    {
         validate_optional_nonempty(
             "repair_plan.refusal_reason",
             plan.refusal_reason.as_deref(),
@@ -660,7 +670,7 @@ fn validate_artifacts(scenario: &OperatorRecoveryScenario, errors: &mut Vec<Stri
         artifact
             .consumers
             .iter()
-            .any(|consumer| consumer == "proof_bundle")
+            .any(|consumer| consumer.as_str().eq("proof_bundle"))
     }) {
         errors.push(format!(
             "scenario {} must feed a proof_bundle artifact consumer",
@@ -743,7 +753,7 @@ fn validate_outcome_contract(
                     scenario.scenario_id
                 ));
             }
-            if scenario.verification.status != "dry_run_verified" {
+            if scenario.verification.status.as_str().ne("dry_run_verified") {
                 errors.push(format!(
                     "dry-run scenario {} must emit dry_run_verified verification",
                     scenario.scenario_id
@@ -764,13 +774,13 @@ fn validate_outcome_contract(
                 ));
                 return;
             };
-            if post_hash == scenario.image_hashes.pre_repair_hash {
+            if post_hash.eq(scenario.image_hashes.pre_repair_hash.as_str()) {
                 errors.push(format!(
                     "mutating scenario {} must change post_repair_hash",
                     scenario.scenario_id
                 ));
             }
-            if scenario.verification.status != "passed"
+            if scenario.verification.status.as_str().ne("passed")
                 || !scenario.verification.post_repair_scrub_clean
                 || !scenario.verification.reopened_image
             {
@@ -812,8 +822,9 @@ fn evaluate_scenario(scenario: &OperatorRecoveryScenario) -> OperatorRecoverySce
     let verification = &scenario.verification;
     let mut refusal_reason = None;
 
-    let mutation_allowed = scenario.expected_outcome
-        == OperatorRecoveryOutcome::MutatingRepairVerified
+    let mutation_allowed = scenario
+        .expected_outcome
+        .eq(&OperatorRecoveryOutcome::MutatingRepairVerified)
         && !blocking_preflight_failure
         && threshold.mutation_allowed_by_threshold
         && threshold.confidence_score >= 0.95
@@ -822,7 +833,7 @@ fn evaluate_scenario(scenario: &OperatorRecoveryScenario) -> OperatorRecoverySce
         && plan.dry_run_validated
         && plan.rollback_available
         && plan.operator_approval_required
-        && verification.status == "passed"
+        && verification.status.as_str().eq("passed")
         && verification.post_repair_scrub_clean
         && verification.reopened_image
         && scenario.image_hashes.post_repair_hash.is_some();
@@ -943,7 +954,7 @@ fn is_sha256_digest(value: &str) -> bool {
     let Some(hex) = value.strip_prefix("sha256:") else {
         return false;
     };
-    hex.len() == 64 && hex.chars().all(|ch| ch.is_ascii_hexdigit())
+    hex.len().eq(&64) && hex.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 fn validate_nonempty(field: &str, value: &str, errors: &mut Vec<String>) {
@@ -989,7 +1000,7 @@ fn validate_stable_id(field: &str, value: &str, errors: &mut Vec<String>) {
     let valid = value.split('_').all(|segment| !segment.is_empty())
         && value
             .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_');
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch.eq(&'_'));
     if !valid {
         errors.push(format!("{field} {value} must be lowercase snake-case"));
     }
@@ -1037,7 +1048,7 @@ const ALLOWED_BACKUP_STRATEGIES: [&str; 4] = [
 pub fn evaluate_mutation_preconditions(
     gate: &MutationPreconditionGate,
 ) -> MutationPreconditionDecision {
-    if gate.preflight_freshness_ttl_seconds == 0 {
+    if gate.preflight_freshness_ttl_seconds.eq(&0) {
         return refuse(
             "stale_preflight",
             "rerun preflight checks before requesting mutation",
@@ -1058,7 +1069,10 @@ pub fn evaluate_mutation_preconditions(
             "rerun preflight checks within the freshness window",
         );
     }
-    if gate.artifact_schema_version != gate.expected_artifact_schema_version {
+    if gate
+        .artifact_schema_version
+        .ne(&gate.expected_artifact_schema_version)
+    {
         return refuse(
             "stale_artifact_schema",
             "regenerate proof artifacts against the current schema before mutating",
@@ -1073,7 +1087,7 @@ pub fn evaluate_mutation_preconditions(
             "re-hash the image and rebuild the dry-run plan with sha256:<64-hex> digests",
         );
     }
-    if gate.current_image_hash != gate.planned_image_hash {
+    if gate.current_image_hash.ne(&gate.planned_image_hash) {
         return refuse(
             "image_hash_drifted",
             "image hash changed since dry-run; rebuild the plan against the current image",
@@ -1085,7 +1099,7 @@ pub fn evaluate_mutation_preconditions(
             "stage a rollback artifact (snapshot, image copy) before mutating",
         );
     }
-    if gate.operator_confirmation_hash != gate.planned_image_hash {
+    if gate.operator_confirmation_hash.ne(&gate.planned_image_hash) {
         return refuse(
             "operator_confirmation_mismatch",
             "operator must confirm the planned image hash before mutating",
@@ -1103,7 +1117,7 @@ pub fn evaluate_mutation_preconditions(
             "raise repair confidence above the configured threshold or stay in dry-run",
         );
     }
-    if gate.backup_strategy.trim().is_empty() || gate.backup_strategy == "none" {
+    if gate.backup_strategy.trim().is_empty() || gate.backup_strategy.as_str().eq("none") {
         return refuse(
             "missing_backup",
             "select a backup strategy (snapshot, copy_on_write_image, external backup) before mutating",
@@ -1162,7 +1176,9 @@ mod tests {
             .scenarios
             .iter_mut()
             .find(|scenario| {
-                scenario.expected_outcome == OperatorRecoveryOutcome::MutatingRepairVerified
+                scenario
+                    .expected_outcome
+                    .eq(&OperatorRecoveryOutcome::MutatingRepairVerified)
             })
             .expect("fixture includes mutating scenario");
         scenario.image_hashes.original_image_hash = "sha256:not-a-real-digest".to_owned();
@@ -1195,7 +1211,9 @@ mod tests {
             .scenarios
             .iter_mut()
             .find(|scenario| {
-                scenario.expected_outcome == OperatorRecoveryOutcome::MutatingRepairVerified
+                scenario
+                    .expected_outcome
+                    .eq(&OperatorRecoveryOutcome::MutatingRepairVerified)
             })
             .expect("fixture includes mutating scenario");
         scenario.repair_plan.rollback_available = false;
@@ -1223,7 +1241,9 @@ mod tests {
             .scenarios
             .iter_mut()
             .find(|scenario| {
-                scenario.expected_outcome == OperatorRecoveryOutcome::MutatingRepairVerified
+                scenario
+                    .expected_outcome
+                    .eq(&OperatorRecoveryOutcome::MutatingRepairVerified)
             })
             .expect("fixture includes mutating scenario");
         scenario.preflight_checks[0].passed = false;
@@ -1243,7 +1263,11 @@ mod tests {
         let scenario = spec
             .scenarios
             .iter_mut()
-            .find(|scenario| scenario.expected_outcome == OperatorRecoveryOutcome::DryRunSuccess)
+            .find(|scenario| {
+                scenario
+                    .expected_outcome
+                    .eq(&OperatorRecoveryOutcome::DryRunSuccess)
+            })
             .expect("fixture includes dry-run scenario");
         scenario.repair_plan.mutation_requested = true;
         let report = report_for(spec);
@@ -1260,7 +1284,7 @@ mod tests {
     fn missing_log_field_is_rejected() {
         let mut spec = checked_in_spec();
         spec.required_log_fields
-            .retain(|field| field != "rollback_or_refusal_outcome");
+            .retain(|field| field.as_str().ne("rollback_or_refusal_outcome"));
         let report = report_for(spec);
         assert!(!report.valid);
         assert!(
@@ -1276,7 +1300,7 @@ mod tests {
         for artifact in &mut spec.scenarios[0].expected_artifacts {
             artifact
                 .consumers
-                .retain(|consumer| consumer != "proof_bundle");
+                .retain(|consumer| consumer.as_str().ne("proof_bundle"));
         }
         let report = report_for(spec);
         assert!(!report.valid);
@@ -1480,5 +1504,72 @@ mod tests {
         let report = report_for(checked_in_spec());
         let markdown = render_operator_recovery_drill_markdown(&report);
         insta::assert_snapshot!(markdown);
+    }
+
+    #[test]
+    fn operator_recovery_drill_report_json_shape() -> Result<()> {
+        let report = validate_operator_recovery_drill(&checked_in_spec());
+        let json = serde_json::to_string_pretty(&report)?;
+        let parsed: OperatorRecoveryDrillReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+
+        let expected_log_line_keys = report
+            .scenario_reports
+            .first()
+            .map(|scenario| log_line_keys(&scenario.log_line))
+            .unwrap_or_default();
+        for scenario in &report.scenario_reports {
+            assert_eq!(log_line_keys(&scenario.log_line), expected_log_line_keys);
+        }
+
+        let scenario_rows = report
+            .scenario_reports
+            .iter()
+            .map(|scenario| {
+                serde_json::json!({
+                    "scenario_id": &scenario.scenario_id,
+                    "phase": scenario.phase.label(),
+                    "expected_outcome": scenario.expected_outcome.label(),
+                    "drill_decision": &scenario.drill_decision,
+                    "mutation_allowed": scenario.mutation_allowed,
+                    "refusal_reason": &scenario.refusal_reason,
+                    "artifact_paths": &scenario.artifact_paths,
+                    "proof_bundle_lane": &scenario.proof_bundle_lane,
+                    "reproduction_command": &scenario.reproduction_command,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let shape = serde_json::json!({
+            "schema_version": report.schema_version,
+            "drill_id": &report.drill_id,
+            "bead_id": &report.bead_id,
+            "proof_bundle_lane": &report.proof_bundle_lane,
+            "valid": report.valid,
+            "scenario_count": report.scenario_count,
+            "by_outcome": &report.by_outcome,
+            "by_phase": &report.by_phase,
+            "mutation_allowed_count": report.mutation_allowed_count,
+            "mutation_refused_count": report.mutation_refused_count,
+            "missing_required_outcomes": &report.missing_required_outcomes,
+            "missing_required_log_fields": &report.missing_required_log_fields,
+            "missing_required_consumers": &report.missing_required_consumers,
+            "log_line_keys": expected_log_line_keys,
+            "scenario_reports": scenario_rows,
+            "errors": &report.errors,
+            "warnings": &report.warnings,
+        });
+        insta::assert_snapshot!(
+            "operator_recovery_drill_report_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
+    }
+
+    fn log_line_keys(line: &str) -> Vec<&str> {
+        line.split('|')
+            .skip(1)
+            .map(|field| field.split_once('=').map_or(field, |(key, _value)| key))
+            .collect()
     }
 }
