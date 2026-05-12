@@ -2626,6 +2626,56 @@ mod tests {
         assert_eq!(SCENARIO_ID_PATTERN, catalog_pattern);
     }
 
+    #[test]
+    fn active_catalog_literal_scenario_ids_match_manifest_validator() -> serde_json::Result<()> {
+        let catalog: serde_json::Value =
+            serde_json::from_str(include_str!("../../../scripts/e2e/scenario_catalog.json"))?;
+        let suites = catalog
+            .get("suites")
+            .and_then(serde_json::Value::as_array)
+            .expect("scenario catalog should define suites");
+
+        let mut checked = 0usize;
+        let mut invalid = Vec::new();
+        for suite in suites {
+            let suite_id = suite
+                .get("suite_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<missing-suite>");
+            let Some(scenarios) = suite.get("scenarios").and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+
+            for scenario in scenarios {
+                if scenario
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("active")
+                    != "active"
+                {
+                    continue;
+                }
+                let Some(scenario_id) = scenario.get("id").and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+
+                checked += 1;
+                if !is_valid_scenario_id(scenario_id) {
+                    invalid.push(format!("{suite_id}:{scenario_id}"));
+                }
+            }
+        }
+
+        assert!(checked > 0, "expected active literal scenario IDs");
+        assert!(
+            invalid.is_empty(),
+            "active catalog scenario IDs rejected by manifest validator: {invalid:?}"
+        );
+        Ok(())
+    }
+
     // ── Retention policy tests ───────────────────────────────────────
 
     #[test]
