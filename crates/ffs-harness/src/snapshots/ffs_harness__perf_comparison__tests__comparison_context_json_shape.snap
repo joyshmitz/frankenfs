@@ -1,0 +1,9 @@
+---
+source: crates/ffs-harness/src/perf_comparison.rs
+expression: json
+---
+{
+  "benchmark_id": "block_cache_arc_scan",
+  "profile_id": "ci-github-actions",
+  "baseline_ref": "v1.0.3"
+}

@@ -1456,7 +1456,8 @@ mod tests {
             profile_id: "ci-github-actions".to_owned(),
             baseline_ref: "v1.0.3".to_owned(),
         };
-        let json = serde_json::to_string(&ctx).expect("serialize");
+        let json = serde_json::to_string_pretty(&ctx).expect("serialize");
+        insta::assert_snapshot!("comparison_context_json_shape", json);
         let parsed: ComparisonContext = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.benchmark_id, ctx.benchmark_id);
         assert_eq!(parsed.profile_id, ctx.profile_id);
