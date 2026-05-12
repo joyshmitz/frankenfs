@@ -494,6 +494,17 @@ mod tests {
     }
 
     #[test]
+    fn mounted_checkpoint_survivor_report_json_shape() -> Result<()> {
+        let report = validate_default_mounted_checkpoint_survivor()?;
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("mounted_checkpoint_survivor_report_json_shape", json);
+        let parsed: MountedCheckpointSurvivorReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn render_mounted_checkpoint_survivor_markdown_default_matrix() {
         let report = validate_default_mounted_checkpoint_survivor()
             .expect("default mounted checkpoint survivor validates");
