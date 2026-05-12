@@ -157,7 +157,7 @@ fn try_early_exit(result: &ComparisonResult, family: BenchmarkFamily) -> Option<
     let op = &result.operation_id;
 
     // Branch 1: noise floor
-    if result.final_verdict == ComparisonVerdict::Pass
+    if matches!(result.final_verdict, ComparisonVerdict::Pass)
         && result.delta_percent.abs() <= noise_floor_for(family)
     {
         return Some(TriageDecision {
@@ -177,7 +177,7 @@ fn try_early_exit(result: &ComparisonResult, family: BenchmarkFamily) -> Option<
     }
 
     // Branch 2: insufficient data
-    if result.final_verdict == ComparisonVerdict::Inconclusive {
+    if matches!(result.final_verdict, ComparisonVerdict::Inconclusive) {
         return Some(TriageDecision {
             operation_id: op.clone(),
             family,
@@ -194,7 +194,7 @@ fn try_early_exit(result: &ComparisonResult, family: BenchmarkFamily) -> Option<
     }
 
     // Branch 3: not significant (Pass verdict from significance downgrade)
-    if result.final_verdict == ComparisonVerdict::Pass && !result.significant {
+    if matches!(result.final_verdict, ComparisonVerdict::Pass) && !result.significant {
         return Some(TriageDecision {
             operation_id: op.clone(),
             family,
@@ -212,7 +212,7 @@ fn try_early_exit(result: &ComparisonResult, family: BenchmarkFamily) -> Option<
     }
 
     // Branch 4: negligible effect size
-    if result.final_verdict == ComparisonVerdict::Pass && result.effect_size.abs() < 0.2 {
+    if matches!(result.final_verdict, ComparisonVerdict::Pass) && result.effect_size.abs() < 0.2 {
         return Some(TriageDecision {
             operation_id: op.clone(),
             family,
@@ -245,7 +245,7 @@ fn resolve_hysteresis_block(
 ) -> bool {
     match hysteresis {
         Some(HystereticVerdict::ConfirmedFail) => true,
-        Some(HystereticVerdict::ConfirmedWarn) => verdict == ComparisonVerdict::Fail,
+        Some(HystereticVerdict::ConfirmedWarn) => matches!(verdict, ComparisonVerdict::Fail),
         _ => false,
     }
 }
@@ -601,7 +601,8 @@ mod tests {
     fn triage_decision_round_trips_through_json() {
         let result = fail_result("test_op");
         let decision = classify_triage(&result, BenchmarkFamily::Parser, None);
-        let json = serde_json::to_string(&decision).expect("serialize");
+        let json = serde_json::to_string_pretty(&decision).expect("serialize");
+        insta::assert_snapshot!("triage_decision_json_shape", json);
         let parsed: TriageDecision = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.operation_id, decision.operation_id);
         assert_eq!(parsed.cause, decision.cause);
