@@ -419,10 +419,10 @@ e2e_validate_operational_manifest() {
     fi
 
     local harness_cmd=()
-    if [[ -n "${FFS_HARNESS_BIN:-}" ]]; then
+    if [[ -n "${FFS_HARNESS_BIN:-}" && -x "${FFS_HARNESS_BIN:-}" ]]; then
         harness_cmd=("$FFS_HARNESS_BIN")
     else
-        harness_cmd=(cargo run -p ffs-harness --)
+        e2e_fail "FFS_HARNESS_BIN must point to an executable ffs-harness binary built through RCH"
     fi
 
     if ! e2e_run "${harness_cmd[@]}" validate-operational-manifest "$manifest_path"; then
@@ -449,10 +449,10 @@ e2e_probe_fuse_capability() {
     e2e_step "FUSE Capability Probe"
 
     local harness_cmd=()
-    if [[ -n "${FFS_HARNESS_BIN:-}" ]]; then
+    if [[ -n "${FFS_HARNESS_BIN:-}" && -x "${FFS_HARNESS_BIN:-}" ]]; then
         harness_cmd=("$FFS_HARNESS_BIN")
     else
-        harness_cmd=(cargo run -p ffs-harness --)
+        e2e_fail "FFS_HARNESS_BIN must point to an executable ffs-harness binary built through RCH"
     fi
 
     if ! e2e_run "${harness_cmd[@]}" fuse-capability-probe --out "$report_path" "$@"; then

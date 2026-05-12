@@ -28,6 +28,8 @@ RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_CLIENT_RUST_LOG="${RCH_CLIENT_RUST_LOG:-info}"
 FFS_CLI_BIN="${FFS_CLI_BIN:-$CARGO_TARGET_DIR/release/ffs-cli}"
+FFS_HARNESS_BIN="${FFS_HARNESS_BIN:-$CARGO_TARGET_DIR/debug/ffs-harness}"
+export FFS_HARNESS_BIN
 
 for rch_env_var in CARGO_TARGET_DIR RUST_BACKTRACE; do
     case ",${RCH_ENV_ALLOWLIST:-}," in
@@ -544,6 +546,28 @@ run_remote_build() {
         duration_ms=$(( $(timestamp_ms) - start_ms ))
         print_rch_log "$output_path"
         fail_suite "build_ffs_cli" "$duration_ms" "RCH build failed; log=$output_path"
+    fi
+}
+
+run_remote_harness_build() {
+    local output_path="$E2E_LOG_DIR/build_ffs_harness.log"
+    local start_ms duration_ms
+
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        fail_suite "build_ffs_harness" 0 "rch not found; this suite requires offloaded cargo execution"
+    fi
+
+    start_ms="$(timestamp_ms)"
+    if RCH_REQUIRED_ARTIFACT="$FFS_HARNESS_BIN" run_rch_capture "$output_path" cargo build -p ffs-harness --bin ffs-harness; then
+        duration_ms=$(( $(timestamp_ms) - start_ms ))
+        if [[ ! -x "$FFS_HARNESS_BIN" ]]; then
+            fail_suite "build_ffs_harness" "$duration_ms" "ffs-harness binary missing after RCH build at $FFS_HARNESS_BIN"
+        fi
+        record_test "build_ffs_harness" "pass" "$duration_ms" "binary=$FFS_HARNESS_BIN log=$output_path"
+    else
+        duration_ms=$(( $(timestamp_ms) - start_ms ))
+        print_rch_log "$output_path"
+        fail_suite "build_ffs_harness" "$duration_ms" "RCH build failed; log=$output_path"
     fi
 }
 
@@ -1143,6 +1167,8 @@ run_optional_btrfs_smoke() {
 e2e_step "Phase 0: build ffs-cli"
 run_remote_build
 e2e_assert_file "$FFS_CLI_BIN"
+run_remote_harness_build
+e2e_assert_file "$FFS_HARNESS_BIN"
 
 ensure_mount_capability
 prepare_fixtures

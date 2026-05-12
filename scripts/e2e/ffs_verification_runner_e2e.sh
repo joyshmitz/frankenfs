@@ -562,6 +562,12 @@ else
     scenario_result "permissioned_fuse_lane_artifacts" "FAIL" "Only ${FUSE_LANE_FEATURES}/9 FUSE lane hooks found"
 fi
 
+if grep -Eq 'cargo run( --quiet)? -p ffs-harness|cargo run .* -p ffs-harness' scripts/e2e/lib.sh; then
+    scenario_result "permissioned_fuse_lane_rch_harness_binary" "FAIL" "shared FUSE capability helper still has a local cargo fallback"
+else
+    scenario_result "permissioned_fuse_lane_rch_harness_binary" "PASS" "shared FUSE capability helper requires a prebuilt FFS_HARNESS_BIN"
+fi
+
 #######################################
 # Scenario 11: Permissioned btrfs lane controls
 #######################################
