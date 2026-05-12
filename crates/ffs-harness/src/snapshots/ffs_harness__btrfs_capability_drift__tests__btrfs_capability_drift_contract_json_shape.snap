@@ -1,0 +1,44 @@
+---
+source: crates/ffs-harness/src/btrfs_capability_drift.rs
+expression: serde_json::to_string_pretty(&shape)?
+---
+{
+  "contract_version": 1,
+  "rows": [
+    {
+      "contract_id": "unit::btrfs_write_create_file",
+      "kind": "unit",
+      "bare_name": "btrfs_write_create_file",
+      "class": "supported"
+    },
+    {
+      "contract_id": "e2e::btrfs_rw_crash_matrix_01_create_alpha_no_fsync",
+      "kind": "e2e",
+      "bare_name": "btrfs_rw_crash_matrix_01_create_alpha_no_fsync",
+      "class": "crash-consistency"
+    },
+    {
+      "contract_id": "e2e::btrfs_rw_missing_case",
+      "kind": "e2e",
+      "bare_name": "btrfs_rw_missing_case",
+      "class": "unsupported"
+    }
+  ],
+  "results": [
+    {
+      "contract_id": "unit::btrfs_write_create_file",
+      "kind": "unit",
+      "found": true
+    },
+    {
+      "contract_id": "e2e::btrfs_rw_crash_matrix_01_create_alpha_no_fsync",
+      "kind": "e2e",
+      "found": true
+    },
+    {
+      "contract_id": "e2e::btrfs_rw_missing_case",
+      "kind": "e2e",
+      "found": false
+    }
+  ]
+}

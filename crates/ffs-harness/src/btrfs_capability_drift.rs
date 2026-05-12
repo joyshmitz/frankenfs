@@ -15,11 +15,13 @@
 //!
 //! The drift-detection contract version is [`DRIFT_CONTRACT_VERSION`].
 
+use serde::{Deserialize, Serialize};
+
 /// Drift-detection contract version.
 pub const DRIFT_CONTRACT_VERSION: u32 = 1;
 
 /// A parsed capability contract row from FEATURE_PARITY.md.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityContractRow {
     /// Full contract ID (e.g., `unit::btrfs_write_create_file`).
     pub contract_id: String,
@@ -32,14 +34,15 @@ pub struct CapabilityContractRow {
 }
 
 /// Type of contract verification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ContractKind {
     Unit,
     E2e,
 }
 
 /// Result of drift checking one contract row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DriftCheckResult {
     pub contract_id: String,
     pub kind: ContractKind,
@@ -105,7 +108,7 @@ pub fn check_unit_contract(ffs_core_source: &str, bare_name: &str) -> bool {
 
     let mut tokens = RustCodeTokens::new(ffs_core_source);
     while let Some(token) = tokens.next() {
-        if token != CodeToken::Ident("fn") {
+        if !matches!(token, CodeToken::Ident("fn")) {
             continue;
         }
 
@@ -415,6 +418,38 @@ mod tests {
             rows[1].bare_name,
             "btrfs_rw_crash_matrix_01_create_alpha_no_fsync"
         );
+    }
+
+    #[test]
+    fn btrfs_capability_drift_contract_json_shape() -> Result<(), serde_json::Error> {
+        let parity = r"
+| Contract ID | Operation | Class | Expected |
+|---|---|---|---|
+| `unit::btrfs_write_create_file` | create | supported | success |
+| `e2e::btrfs_rw_crash_matrix_01_create_alpha_no_fsync` | crash 1 | crash-consistency | ok |
+| `e2e::btrfs_rw_missing_case` | missing | unsupported | blocked |
+";
+        let core_src = "fn btrfs_write_create_file() {}";
+        let e2e_src = r#"
+crash_matrix_label_for_point() {
+    case "$1" in
+        1) printf 'create_alpha_no_fsync' ;;
+        *) return 1 ;;
+    esac
+}
+"#;
+
+        let shape = serde_json::json!({
+            "contract_version": DRIFT_CONTRACT_VERSION,
+            "rows": parse_capability_table(parity),
+            "results": check_btrfs_drift(parity, core_src, e2e_src),
+        });
+
+        insta::assert_snapshot!(
+            "btrfs_capability_drift_contract_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
     }
 
     #[test]
