@@ -228,7 +228,10 @@ pub fn render_swarm_operator_report_markdown(report: &SwarmOperatorValidationRep
 
 fn validate_report_shape(report: &SwarmOperatorReport) -> Vec<String> {
     let mut errors = Vec::new();
-    if report.schema_version != SWARM_OPERATOR_REPORT_SCHEMA_VERSION {
+    if report
+        .schema_version
+        .ne(&SWARM_OPERATOR_REPORT_SCHEMA_VERSION)
+    {
         errors.push(format!(
             "schema_version must be {}; got {}",
             SWARM_OPERATOR_REPORT_SCHEMA_VERSION, report.schema_version
@@ -394,6 +397,15 @@ mod tests {
         assert!(validation.valid, "{:?}", validation.errors);
         assert_eq!(validation.card_count, REQUIRED_CARD_IDS.len());
         assert_eq!(validation.required_card_count, REQUIRED_CARD_IDS.len());
+    }
+
+    #[test]
+    fn swarm_operator_validation_report_json_shape() {
+        let validation = validate_swarm_operator_report(&sample_report());
+        let json = serde_json::to_string_pretty(&validation)
+            .expect("swarm operator validation report serializes");
+
+        insta::assert_snapshot!("swarm_operator_validation_report_json_shape", json);
     }
 
     #[test]
