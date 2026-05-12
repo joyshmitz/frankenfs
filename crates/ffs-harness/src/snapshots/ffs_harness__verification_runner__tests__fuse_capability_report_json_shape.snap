@@ -1,0 +1,59 @@
+---
+source: crates/ffs-harness/src/verification_runner.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "scenario_id": "fuse_capability_probe",
+  "result": "available",
+  "checks": [
+    {
+      "name": "user_enabled",
+      "status": "pass",
+      "detail": "FUSE lanes are enabled for this run"
+    },
+    {
+      "name": "dev_fuse_present",
+      "status": "pass",
+      "detail": "/dev/fuse exists"
+    },
+    {
+      "name": "fusermount_present",
+      "status": "pass",
+      "detail": "fusermount3 or fusermount is available"
+    },
+    {
+      "name": "kernel_module_available",
+      "status": "pass",
+      "detail": "kernel advertises FUSE support"
+    },
+    {
+      "name": "dev_fuse_access",
+      "status": "pass",
+      "detail": "current process can open /dev/fuse read/write"
+    },
+    {
+      "name": "user_namespace_or_capability",
+      "status": "pass",
+      "detail": "user namespace/capability state permits mount attempts"
+    },
+    {
+      "name": "mount_probe",
+      "status": "pass",
+      "detail": "mount probe completed successfully"
+    },
+    {
+      "name": "unmount_probe",
+      "status": "pass",
+      "detail": "unmount probe completed successfully"
+    },
+    {
+      "name": "default_permissions_workspace",
+      "status": "pass",
+      "detail": "no DefaultPermissions/EACCES workspace issue observed"
+    }
+  ],
+  "metadata": {
+    "mount_probe_required": "true"
+  }
+}
