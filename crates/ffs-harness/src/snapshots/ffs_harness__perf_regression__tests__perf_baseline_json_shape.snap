@@ -1,0 +1,31 @@
+---
+source: crates/ffs-harness/src/perf_regression.rs
+expression: json
+---
+{
+  "generated_at": "2026-02-17T00:00:00Z",
+  "commit": "abc123",
+  "branch": "main",
+  "p99_warn_threshold_percent": 10.0,
+  "p99_fail_threshold_percent": 20.0,
+  "measurements": [
+    {
+      "operation": "metadata_parity_cli",
+      "metric": "latency",
+      "p50_us": 800.0,
+      "p95_us": 1100.0,
+      "p99_us": 1450.0,
+      "throughput_ops_sec": 1011.5,
+      "status": "measured"
+    },
+    {
+      "operation": "write_seq_4k",
+      "metric": "latency",
+      "p50_us": 0.0,
+      "p95_us": 0.0,
+      "p99_us": 0.0,
+      "throughput_ops_sec": 0.0,
+      "status": "pending"
+    }
+  ]
+}

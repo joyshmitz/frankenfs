@@ -208,6 +208,8 @@ mod tests {
         };
 
         let json = serde_json::to_string_pretty(&baseline).expect("serialize");
+        insta::assert_snapshot!("perf_baseline_json_shape", json);
+
         let parsed = parse_baseline(&json).expect("parse round-trip");
         assert_eq!(parsed.generated_at, "2026-02-17T00:00:00Z");
         assert_eq!(parsed.commit, "abc123");
