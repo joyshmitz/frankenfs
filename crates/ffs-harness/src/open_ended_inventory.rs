@@ -1594,8 +1594,8 @@ fn validate_open_ended_note_match(row: &OpenEndedNoteMatch, errors: &mut Vec<Str
 mod tests {
     use super::{
         DECISIONS, INVENTORY_MARKDOWN, OPEN_ENDED_NOTE_PATTERNS, OpenEndedInventoryReport,
-        OpenEndedNoteSource, PROOF_TYPES, analyze_inventory, scan_open_ended_notes,
-        validate_current_inventory,
+        OpenEndedNoteScanReport, OpenEndedNoteSource, PROOF_TYPES, analyze_inventory,
+        scan_open_ended_notes, validate_current_inventory,
     };
     use std::fs;
     use std::path::Path;
@@ -1822,6 +1822,67 @@ mod tests {
             row.matched_phrase == "not yet implemented"
                 && row.risk_surface == "implementation-placeholder"
         }));
+    }
+
+    #[test]
+    fn open_ended_note_scan_report_json_shape() -> anyhow::Result<()> {
+        let reproduction_command =
+            "cargo test -p ffs-harness open_ended_note_scanner -- --nocapture";
+        let report = scan_open_ended_notes(
+            &[note_source(
+                "tests/open-ended-inventory/scanner_fixture_positive.md",
+                POSITIVE_SCANNER_FIXTURE,
+            )],
+            "artifacts/open-ended-inventory/positive_report.json",
+            reproduction_command,
+        );
+        assert!(report.valid, "{:?}", report.errors);
+
+        let json = serde_json::to_string_pretty(&report)?;
+        let parsed: OpenEndedNoteScanReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        assert_eq!(parsed.unresolved_note_count, 0);
+        assert!(parsed.match_count >= 4);
+        assert!(parsed.false_positive_count >= 2);
+
+        let row_samples = parsed
+            .rows
+            .iter()
+            .take(4)
+            .map(|row| {
+                serde_json::json!({
+                    "source_path": &row.source_path,
+                    "line_number": row.line_number,
+                    "section_id": &row.section_id,
+                    "matched_phrase": &row.matched_phrase,
+                    "decision": &row.decision,
+                    "linked_bead_or_artifact": &row.linked_bead_or_artifact,
+                    "proof_type": &row.proof_type,
+                    "required_log_field_count": row.required_log_fields.len(),
+                    "required_artifact_count": row.required_artifacts.len(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let shape = serde_json::json!({
+            "schema_version": parsed.schema_version,
+            "scanner_version": &parsed.scanner_version,
+            "source_count": parsed.source_count,
+            "search_pattern_count": parsed.search_patterns.len(),
+            "match_count": parsed.match_count,
+            "real_open_note_count": parsed.real_open_note_count,
+            "false_positive_count": parsed.false_positive_count,
+            "unresolved_note_count": parsed.unresolved_note_count,
+            "output_path": &parsed.output_path,
+            "reproduction_command": &parsed.reproduction_command,
+            "valid": parsed.valid,
+            "error_count": parsed.errors.len(),
+            "row_samples": row_samples,
+        });
+        insta::assert_snapshot!(
+            "open_ended_note_scan_report_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
     }
 
     #[test]

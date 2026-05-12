@@ -1,0 +1,64 @@
+---
+source: crates/ffs-harness/src/open_ended_inventory.rs
+expression: "serde_json::to_string_pretty(&shape)?"
+---
+{
+  "schema_version": 1,
+  "scanner_version": "bd-mockscan-open-ended-note-scanner-v2",
+  "source_count": 1,
+  "search_pattern_count": 15,
+  "match_count": 15,
+  "real_open_note_count": 0,
+  "false_positive_count": 3,
+  "unresolved_note_count": 0,
+  "output_path": "artifacts/open-ended-inventory/positive_report.json",
+  "reproduction_command": "cargo test -p ffs-harness open_ended_note_scanner -- --nocapture",
+  "valid": true,
+  "error_count": 0,
+  "row_samples": [
+    {
+      "source_path": "tests/open-ended-inventory/scanner_fixture_positive.md",
+      "line_number": 9,
+      "section_id": "real-notes-that-are-already-linked",
+      "matched_phrase": "expand corpus",
+      "decision": "already_linked",
+      "linked_bead_or_artifact": "bd-l7ov7",
+      "proof_type": "corpus-seed",
+      "required_log_field_count": 8,
+      "required_artifact_count": 3
+    },
+    {
+      "source_path": "tests/open-ended-inventory/scanner_fixture_positive.md",
+      "line_number": 10,
+      "section_id": "real-notes-that-are-already-linked",
+      "matched_phrase": "TODO fuzz",
+      "decision": "already_linked",
+      "linked_bead_or_artifact": "bd-l7ov7",
+      "proof_type": "property-test",
+      "required_log_field_count": 8,
+      "required_artifact_count": 3
+    },
+    {
+      "source_path": "tests/open-ended-inventory/scanner_fixture_positive.md",
+      "line_number": 11,
+      "section_id": "real-notes-that-are-already-linked",
+      "matched_phrase": "more goldens",
+      "decision": "already_linked",
+      "linked_bead_or_artifact": "bd-l7ov7",
+      "proof_type": "golden-fixture",
+      "required_log_field_count": 8,
+      "required_artifact_count": 3
+    },
+    {
+      "source_path": "tests/open-ended-inventory/scanner_fixture_positive.md",
+      "line_number": 12,
+      "section_id": "real-notes-that-are-already-linked",
+      "matched_phrase": "known gaps",
+      "decision": "already_linked",
+      "linked_bead_or_artifact": "bd-l7ov7",
+      "proof_type": "mounted-e2e",
+      "required_log_field_count": 8,
+      "required_artifact_count": 3
+    }
+  ]
+}
