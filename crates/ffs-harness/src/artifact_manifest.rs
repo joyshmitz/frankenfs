@@ -2581,37 +2581,40 @@ mod tests {
     // ── JSON round-trip ──────────────────────────────────────────────
 
     #[test]
-    fn manifest_json_round_trip() {
+    fn manifest_json_round_trip() -> serde_json::Result<()> {
         let manifest = sample_manifest();
-        let json = serde_json::to_string_pretty(&manifest).expect("serialize");
-        let parsed: ArtifactManifest = serde_json::from_str(&json).expect("deserialize");
+        let json = serde_json::to_string_pretty(&manifest)?;
+        let parsed: ArtifactManifest = serde_json::from_str(&json)?;
         assert_eq!(parsed.run_id, manifest.run_id);
         assert_eq!(parsed.gate_id, manifest.gate_id);
         assert_eq!(parsed.scenarios.len(), manifest.scenarios.len());
         assert_eq!(parsed.artifacts.len(), manifest.artifacts.len());
         assert_eq!(parsed.verdict, manifest.verdict);
+        Ok(())
     }
 
     #[test]
-    fn artifact_category_json_round_trip() {
+    fn artifact_category_json_round_trip() -> serde_json::Result<()> {
         for &cat in ArtifactCategory::ALL {
-            let json = serde_json::to_string(&cat).expect("serialize");
-            let parsed: ArtifactCategory = serde_json::from_str(&json).expect("deserialize");
+            let json = serde_json::to_string(&cat)?;
+            let parsed: ArtifactCategory = serde_json::from_str(&json)?;
             assert_eq!(parsed, cat);
         }
+        Ok(())
     }
 
     #[test]
-    fn scenario_result_json_round_trip() {
+    fn scenario_result_json_round_trip() -> serde_json::Result<()> {
         for result in [
             ScenarioResult::Pass,
             ScenarioResult::Fail,
             ScenarioResult::Skip,
         ] {
-            let json = serde_json::to_string(&result).expect("serialize");
-            let parsed: ScenarioResult = serde_json::from_str(&json).expect("deserialize");
+            let json = serde_json::to_string(&result)?;
+            let parsed: ScenarioResult = serde_json::from_str(&json)?;
             assert_eq!(parsed, result);
         }
+        Ok(())
     }
 
     #[test]
