@@ -6,7 +6,7 @@
 //! metamorphic relation each seed exercises, and whether reproducing that seed
 //! is analysis-only, dry-run, or requires an explicit permissioned-run ack.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -689,11 +689,9 @@ mod tests {
                     .iter()
                     .any(|field| field.eq("required"))
         }));
-        assert!(
-            report
-                .by_proof_consumer
-                .contains_key("swarm_workload_harness")
-        );
+        assert!(report
+            .by_proof_consumer
+            .contains_key("swarm_workload_harness"));
     }
 
     #[test]
@@ -716,14 +714,16 @@ mod tests {
     }
 
     #[test]
-    fn metamorphic_workload_seed_catalog_report_json_shape() {
+    fn metamorphic_workload_seed_catalog_report_json_shape() -> Result<()> {
         let catalog = fixture_catalog();
         let report = validate_fixture(&catalog);
         assert!(report.valid, "{:?}", report.errors);
-        let json = serde_json::to_string_pretty(&report)
-            .expect("metamorphic workload seed catalog report serializes");
+        let json = serde_json::to_string_pretty(&report)?;
 
         insta::assert_snapshot!("metamorphic_workload_seed_catalog_report_json_shape", json);
+        let parsed: MetamorphicWorkloadSeedCatalogReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
     }
 
     #[test]
@@ -761,12 +761,10 @@ mod tests {
             "tests/metamorphic-workload-seeds/missing_source.json".to_owned();
         let report = validate_fixture(&catalog);
         assert!(!report.valid);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|error| error.contains("source_artifact does not exist"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("source_artifact does not exist")));
     }
 
     #[test]
@@ -850,12 +848,10 @@ mod tests {
         seed.ack_requirement = None;
         let report = validate_fixture(&catalog);
         assert!(!report.valid);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|error| error.contains("must declare ack_requirement"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("must declare ack_requirement")));
     }
 
     #[test]
@@ -864,12 +860,10 @@ mod tests {
         catalog.seeds[0].relation_type = "unknown_relation".to_owned();
         let report = validate_fixture(&catalog);
         assert!(!report.valid);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|error| error.contains("relation_type references unknown value"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("relation_type references unknown value")));
     }
 
     #[test]
@@ -878,12 +872,10 @@ mod tests {
         catalog.seeds[0].invariant.clear();
         let report = validate_fixture(&catalog);
         assert!(!report.valid);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|error| error.contains("invariant must not be empty"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("invariant must not be empty")));
     }
 
     #[test]
@@ -892,12 +884,10 @@ mod tests {
         catalog.seeds[0].proof_consumers = vec!["unknown_consumer".to_owned()];
         let report = validate_fixture(&catalog);
         assert!(!report.valid);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|error| error.contains("proof_consumers references unknown value"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("proof_consumers references unknown value")));
     }
 
     #[test]
@@ -908,11 +898,9 @@ mod tests {
         }
         let report = validate_fixture(&catalog);
         assert!(!report.valid);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|error| error.contains("at least 5 source kinds"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("at least 5 source kinds")));
     }
 }
