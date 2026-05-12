@@ -1,0 +1,28 @@
+---
+source: crates/ffs-harness/src/remediation_catalog.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "catalog_id": "frankenfs_readiness_remediation_v1",
+  "bead_id": "bd-rchk0.5.12",
+  "entry_count": 8,
+  "outcome_classes": [
+    "host_capability_skip",
+    "passing_with_caveat",
+    "product_failure",
+    "security_refusal",
+    "stale_artifact",
+    "unsafe_repair_refusal",
+    "unsupported_operation"
+  ],
+  "feature_states": [
+    "deferred",
+    "detection_only",
+    "experimental",
+    "unsupported",
+    "validated"
+  ],
+  "valid": true,
+  "errors": []
+}

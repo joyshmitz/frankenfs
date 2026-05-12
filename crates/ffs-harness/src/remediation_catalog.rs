@@ -9,7 +9,7 @@
 //! docs target. Release gates and proof bundles consume this catalog so they
 //! can fail closed when an outcome lacks a concrete next action.
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -420,6 +420,17 @@ mod tests {
     }
 
     #[test]
+    fn remediation_catalog_report_json_shape() -> Result<()> {
+        let report = validate_default_remediation_catalog()?;
+        let json = serde_json::to_string_pretty(&report)?;
+
+        insta::assert_snapshot!("remediation_catalog_report_json_shape", json);
+        let parsed: RemediationCatalogReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn default_catalog_covers_mvcc_merge_proof_refusals() {
         let catalog = fixture_catalog();
         let entry = catalog
@@ -456,12 +467,10 @@ mod tests {
             .entries
             .retain(|entry| entry.outcome_class != "host_capability_skip");
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("missing required outcome_class `host_capability_skip`"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("missing required outcome_class `host_capability_skip`")));
     }
 
     #[test]
@@ -471,12 +480,10 @@ mod tests {
             .entries
             .retain(|entry| entry.outcome_class != "security_refusal");
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("missing required outcome_class `security_refusal`"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("missing required outcome_class `security_refusal`")));
     }
 
     #[test]
@@ -486,12 +493,10 @@ mod tests {
             .entries
             .retain(|entry| entry.outcome_class != "unsafe_repair_refusal");
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("missing required outcome_class `unsafe_repair_refusal`"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("missing required outcome_class `unsafe_repair_refusal`")));
     }
 
     #[test]
@@ -500,12 +505,10 @@ mod tests {
         let dup = catalog.entries[0].id.clone();
         catalog.entries[1].id = dup;
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("duplicate remediation id"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("duplicate remediation id")));
     }
 
     #[test]
@@ -513,12 +516,10 @@ mod tests {
         let mut catalog = fixture_catalog();
         catalog.entries[0].proof_lane = "vibes_lane".to_owned();
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("unsupported proof_lane"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("unsupported proof_lane")));
     }
 
     #[test]
@@ -526,12 +527,10 @@ mod tests {
         let mut catalog = fixture_catalog();
         catalog.entries[0].feature_state = "telepathy".to_owned();
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("unsupported feature_state"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("unsupported feature_state")));
     }
 
     #[test]
@@ -539,12 +538,10 @@ mod tests {
         let mut catalog = fixture_catalog();
         catalog.entries[0].data_safety_severity = "kinda_safe".to_owned();
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("unsupported data_safety_severity"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("unsupported data_safety_severity")));
     }
 
     #[test]
@@ -552,12 +549,10 @@ mod tests {
         let mut catalog = fixture_catalog();
         catalog.entries[0].mutation_status = "yolo".to_owned();
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("unsupported mutation_status"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("unsupported mutation_status")));
     }
 
     #[test]
@@ -565,12 +560,10 @@ mod tests {
         let mut catalog = fixture_catalog();
         catalog.entries[0].user_summary = String::new();
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("missing user_summary"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("missing user_summary")));
     }
 
     #[test]
@@ -578,12 +571,10 @@ mod tests {
         let mut catalog = fixture_catalog();
         catalog.entries[0].immediate_action = String::new();
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("missing immediate_action"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("missing immediate_action")));
     }
 
     #[test]
@@ -591,12 +582,10 @@ mod tests {
         let mut catalog = fixture_catalog();
         catalog.entries[0].reproduction_command = String::new();
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("missing reproduction_command"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("missing reproduction_command")));
     }
 
     #[test]
@@ -616,12 +605,10 @@ mod tests {
         let mut catalog = fixture_catalog();
         catalog.entries[0].artifact_links.clear();
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("at least one artifact_link"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("at least one artifact_link")));
     }
 
     #[test]
@@ -629,12 +616,10 @@ mod tests {
         let mut catalog = fixture_catalog();
         catalog.entries[0].owning_bead = "PROJ-42".to_owned();
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("owning_bead must look like bd-"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("owning_bead must look like bd-")));
     }
 
     #[test]
@@ -647,12 +632,10 @@ mod tests {
             .expect("fixture has security_refusal entry");
         refusal.data_safety_severity = "data_loss_unrecoverable".to_owned();
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("refusal outcome must classify"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("refusal outcome must classify")));
     }
 
     #[test]
@@ -665,13 +648,10 @@ mod tests {
             .expect("fixture has passing_with_caveat entry");
         caveat.feature_state = "validated".to_owned();
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err
-                    .contains("passing_with_caveat must not claim feature_state=validated"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("passing_with_caveat must not claim feature_state=validated")));
     }
 
     #[test]
@@ -679,12 +659,10 @@ mod tests {
         let mut catalog = fixture_catalog();
         catalog.entries.clear();
         let report = validate_remediation_catalog(&catalog);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("at least one entry"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("at least one entry")));
     }
 
     #[test]
