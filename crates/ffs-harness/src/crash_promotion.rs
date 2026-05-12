@@ -589,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn promotion_result_json_round_trips() {
+    fn promotion_result_json_round_trips() -> Result<(), serde_json::Error> {
         let result = PromotionResult {
             crash: CrashArtifact {
                 target: "fuzz_ext4_metadata".to_owned(),
@@ -603,11 +603,11 @@ mod tests {
             regression_case: None,
             error: None,
         };
-        let json = serde_json::to_string_pretty(&result).expect("serialize");
+        let json = serde_json::to_string_pretty(&result)?;
         insta::assert_snapshot!("promotion_result_json_shape", json);
-        let parsed: PromotionResult = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(parsed.crash.target, "fuzz_ext4_metadata");
-        assert_eq!(parsed.steps_completed.len(), 2);
+        let parsed: PromotionResult = serde_json::from_str(&json)?;
+        assert_eq!(parsed, result);
+        Ok(())
     }
 
     #[test]

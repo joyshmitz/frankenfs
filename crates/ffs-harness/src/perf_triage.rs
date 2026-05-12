@@ -598,15 +598,14 @@ mod tests {
     }
 
     #[test]
-    fn triage_decision_round_trips_through_json() {
+    fn triage_decision_round_trips_through_json() -> Result<(), serde_json::Error> {
         let result = fail_result("test_op");
         let decision = classify_triage(&result, BenchmarkFamily::Parser, None);
-        let json = serde_json::to_string_pretty(&decision).expect("serialize");
+        let json = serde_json::to_string_pretty(&decision)?;
         insta::assert_snapshot!("triage_decision_json_shape", json);
-        let parsed: TriageDecision = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(parsed.operation_id, decision.operation_id);
-        assert_eq!(parsed.cause, decision.cause);
-        assert_eq!(parsed.action, decision.action);
+        let parsed: TriageDecision = serde_json::from_str(&json)?;
+        assert_eq!(parsed, decision);
+        Ok(())
     }
 
     #[test]
