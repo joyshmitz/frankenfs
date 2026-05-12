@@ -1221,6 +1221,8 @@ mod tests {
             "cross_oracle_arbitration_validation_report_json_shape",
             json
         );
+        let parsed: CrossOracleArbitrationValidationReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, validation);
         Ok(())
     }
 
