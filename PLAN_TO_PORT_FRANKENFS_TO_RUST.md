@@ -61,7 +61,7 @@ operational readiness.
 ### 0.2 `ffs-types` (Canonical Newtypes + Shared Parsing Primitives)
 
 - [x] Decide inode ID strategy: canonical `InodeNumber(u64)` in shared APIs, with format-boundary wrappers `Ext4InodeNumber(u32)` and `BtrfsObjectId(u64)` plus explicit conversion helpers/tests in `crates/ffs-types/src/lib.rs`
-- [x] Add missing newtypes used by docs/spec: `BlockSize` (validated), `GroupNumber`, `Generation` (landed); `ByteOffset`/`DeviceId` deferred as not yet needed
+- [x] Add missing newtypes used by docs/spec: `BlockSize` (validated), `GroupNumber`, `Generation`, `ByteOffset`, and `DeviceId` (landed)
 - [x] Add helpers: `BlockSize::byte_to_block/block_to_byte/shift`, `BlockNumber::checked_add/sub`, `block_to_group`, `group_first_block`, `inode_to_group`, `inode_index_in_group`
 
 ### 0.3 `ffs-error` (Error Model + Errno Mapping)
