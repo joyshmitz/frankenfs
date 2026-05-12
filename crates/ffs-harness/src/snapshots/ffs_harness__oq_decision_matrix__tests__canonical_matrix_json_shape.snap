@@ -1,0 +1,132 @@
+---
+source: crates/ffs-harness/src/oq_decision_matrix.rs
+expression: json
+---
+[
+  {
+    "id": "OQ1",
+    "title": "Native-mode on-disk boundary and mutation contract",
+    "status": "resolved",
+    "decision_doc": "docs/oq1-native-mode-boundary.md",
+    "closing_bead": "bd-h6nz.6.1",
+    "unit_test_patterns": [
+      "mount_mode_default_is_compat",
+      "mode_violation_errno"
+    ],
+    "e2e_scripts": [
+      "scripts/e2e/ffs_mount_mode_e2e.sh"
+    ],
+    "impl_crates": [
+      "ffs-types",
+      "ffs-core"
+    ],
+    "log_target": "ffs::core"
+  },
+  {
+    "id": "OQ2",
+    "title": "Conflict-resolution policy beyond FCW",
+    "status": "resolved",
+    "decision_doc": null,
+    "closing_bead": "bd-h6nz.6.2",
+    "unit_test_patterns": [
+      "fcw",
+      "fairness"
+    ],
+    "e2e_scripts": [],
+    "impl_crates": [
+      "ffs-mvcc"
+    ],
+    "log_target": null
+  },
+  {
+    "id": "OQ3",
+    "title": "Repair-symbol invalidation/refresh policy under heavy writes",
+    "status": "resolved",
+    "decision_doc": null,
+    "closing_bead": "bd-h6nz.6.3",
+    "unit_test_patterns": [
+      "refresh_policy",
+      "staleness"
+    ],
+    "e2e_scripts": [
+      "scripts/e2e/ffs_refresh_policy_e2e.sh"
+    ],
+    "impl_crates": [
+      "ffs-repair"
+    ],
+    "log_target": "ffs::repair"
+  },
+  {
+    "id": "OQ4",
+    "title": "FUSE writeback-mode interaction with MVCC dirty tracking",
+    "status": "resolved",
+    "decision_doc": null,
+    "closing_bead": "bd-h6nz.6.4",
+    "unit_test_patterns": [
+      "log_contract",
+      "writeback"
+    ],
+    "e2e_scripts": [
+      "scripts/e2e/ffs_log_contract_e2e.sh"
+    ],
+    "impl_crates": [
+      "ffs-core",
+      "ffs-fuse"
+    ],
+    "log_target": "ffs::core"
+  },
+  {
+    "id": "OQ5",
+    "title": "Multi-host repair scope and safety model",
+    "status": "resolved",
+    "decision_doc": null,
+    "closing_bead": "bd-h6nz.6.5",
+    "unit_test_patterns": [
+      "repair",
+      "coordination"
+    ],
+    "e2e_scripts": [
+      "scripts/e2e/ffs_log_contract_e2e.sh"
+    ],
+    "impl_crates": [
+      "ffs-cli"
+    ],
+    "log_target": null
+  },
+  {
+    "id": "OQ6",
+    "title": "Inode generation number lifecycle and reuse policy",
+    "status": "resolved",
+    "decision_doc": "docs/generation-policy.md",
+    "closing_bead": "bd-h6nz.6.6",
+    "unit_test_patterns": [
+      "generation",
+      "bumps_generation"
+    ],
+    "e2e_scripts": [],
+    "impl_crates": [
+      "ffs-inode",
+      "ffs-core"
+    ],
+    "log_target": "ffs::inode::generation"
+  },
+  {
+    "id": "OQ7",
+    "title": "Durable version-store persistence format",
+    "status": "resolved",
+    "decision_doc": "docs/oq7-version-store-format.md",
+    "closing_bead": "bd-h6nz.6.7",
+    "unit_test_patterns": [
+      "oq7",
+      "wal",
+      "persist"
+    ],
+    "e2e_scripts": [
+      "scripts/e2e/ffs_version_store_format_e2e.sh"
+    ],
+    "impl_crates": [
+      "ffs-mvcc"
+    ],
+    "log_target": null
+  }
+]

@@ -292,6 +292,13 @@ mod tests {
     }
 
     #[test]
+    fn canonical_matrix_json_shape() {
+        let matrix = canonical_matrix();
+        let json = serde_json::to_string_pretty(&matrix).expect("serialize matrix");
+        insta::assert_snapshot!("canonical_matrix_json_shape", json);
+    }
+
+    #[test]
     fn no_decision_has_empty_title() {
         let matrix = canonical_matrix();
         for d in &matrix {
