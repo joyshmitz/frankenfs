@@ -55,7 +55,7 @@ operational readiness.
 - [ ] `bd-rchk3` xfstests baseline: run a fresh dated baseline, capture commands/artifacts, and turn real failures into beads. 2026-05-01 status: subset/regression gate is documented, but real execution is blocked by unbuilt xfstests helpers and the current dpkg lock blocking `xfslibs-dev`/`libaio-dev` install.
 - [ ] `bd-rchk4` mounted FUSE CI: make critical mounted ext4/btrfs paths run in a permissioned CI or RCH workflow, with visible skip diagnostics when local FUSE permissions are absent.
 - [ ] `bd-rchk5` performance baselines: re-measure representative throughput/latency targets against current code and record environment metadata.
-- [ ] `bd-rchk6` mounted self-healing lifecycle: decide and implement automatic mounted repair, or explicitly narrow V1.x to detection-only scrub plus explicit repair commands.
+- [x] `bd-rchk6` mounted self-healing lifecycle: implemented explicit mounted automatic repair via `--background-repair --background-scrub-ledger <jsonl>`, with read-write repair routed through the mounted MVCC repair-writeback serializer.
 - [ ] `bd-rchk7` fuzz/conformance expansion: replace remaining open-ended corpus expansion notes with completed fixtures or narrow beads.
 
 ### 0.2 `ffs-types` (Canonical Newtypes + Shared Parsing Primitives)
