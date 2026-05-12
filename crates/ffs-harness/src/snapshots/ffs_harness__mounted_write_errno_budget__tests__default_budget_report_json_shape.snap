@@ -1,0 +1,25 @@
+---
+source: crates/ffs-harness/src/mounted_write_errno_budget.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "catalog_id": "frankenfs_mounted_write_errno_budget_v1",
+  "bead_id": "bd-6t32i",
+  "cell_count": 11,
+  "operations_covered": [
+    "host_fuse_skip",
+    "missing_ledger",
+    "permission_denied",
+    "stale_repair_lease",
+    "stale_snapshot",
+    "unsafe_repair_refusal",
+    "unsupported_operation",
+    "write_readback_failure",
+    "writeback_cache_gate_refusal"
+  ],
+  "broad_fallback_total": 0,
+  "budget_exceeded_cell_count": 0,
+  "valid": true,
+  "errors": []
+}

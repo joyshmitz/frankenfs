@@ -498,6 +498,10 @@ mod tests {
     fn default_catalog_validates_required_coverage() {
         let report = validate_default_mounted_write_errno_budget()
             .expect("default mounted write errno budget validates");
+        let json = serde_json::to_string_pretty(&report).expect("serialize");
+
+        insta::assert_snapshot!("default_budget_report_json_shape", json);
+
         assert_eq!(report.bead_id, "bd-6t32i");
         for op in REQUIRED_OPERATION_COVERAGE {
             assert!(
