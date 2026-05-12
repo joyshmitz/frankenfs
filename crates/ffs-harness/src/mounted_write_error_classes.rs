@@ -650,27 +650,26 @@ mod tests {
     /// class ordering, error section, and the no-error sentinel so operator
     /// report consumers notice accidental markdown drift.
     #[test]
-    fn render_mounted_write_error_classes_markdown_default_report() {
-        let report = validate_default_mounted_write_error_classes()
-            .expect("default mounted write error classes validates");
+    fn render_mounted_write_error_classes_markdown_default_report() -> Result<()> {
+        let report = validate_default_mounted_write_error_classes()?;
         let markdown = render_mounted_write_error_classes_markdown(&report);
         insta::assert_snapshot!(
             "render_mounted_write_error_classes_markdown_default_report",
             markdown
         );
+        Ok(())
     }
 
     #[test]
-    fn mounted_write_error_report_json_shape() {
-        let report = validate_default_mounted_write_error_classes()
-            .expect("default mounted write error classes validates");
-        let json = serde_json::to_string_pretty(&report).expect("serialize report");
+    fn mounted_write_error_report_json_shape() -> Result<()> {
+        let report = validate_default_mounted_write_error_classes()?;
+        let json = serde_json::to_string_pretty(&report)?;
 
         insta::assert_snapshot!("mounted_write_error_report_json_shape", json);
 
-        let roundtrip: MountedWriteErrorReport =
-            serde_json::from_str(&json).expect("deserialize report");
+        let roundtrip: MountedWriteErrorReport = serde_json::from_str(&json)?;
         assert_eq!(roundtrip, report);
+        Ok(())
     }
 
     #[test]
