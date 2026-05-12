@@ -1,0 +1,98 @@
+---
+source: crates/ffs-harness/src/xfstests.rs
+expression: shape_json
+---
+{
+  "schema_version": 1,
+  "triage_id": "triage-fixture",
+  "baseline_id": "xfstests-baseline-test",
+  "subset_version": "xfstests-curated-v1",
+  "source_baseline_manifest": "baseline_manifest.json",
+  "live_bead_creation_enabled": false,
+  "disposition_counts": {
+    "failed": 2,
+    "host_blocked": 1,
+    "unsupported": 1
+  },
+  "duplicate_groups": [
+    {
+      "duplicate_key": "ffs-core:failed:eio-after-fsync-boundary",
+      "primary_test_id": "generic/001",
+      "merged_test_ids": [
+        "generic/001",
+        "generic/002"
+      ]
+    }
+  ],
+  "proposed_bead_count": 1,
+  "fixture_recipe_count": 1,
+  "excluded_row_count": 2,
+  "proposed_br_command_count": 1,
+  "proposed": [
+    {
+      "proposed_id_placeholder": "dry-run-xfstests-product-failure-0001",
+      "failing_test_id": "generic/001",
+      "related_test_ids": [
+        "generic/001",
+        "generic/002"
+      ],
+      "filesystem_flavor": "generic",
+      "normalized_outcome": "failed",
+      "suspected_crate_boundary": "ffs-core",
+      "minimization_status": "command_is_single_xfstests_row",
+      "duplicate_key": "ffs-core:failed:eio-after-fsync-boundary",
+      "labels": [
+        "xfstests",
+        "conformance",
+        "product-bug",
+        "generic"
+      ],
+      "dependency_beads": [
+        "bd-rchk3.4",
+        "xfstests-baseline-test"
+      ],
+      "raw_log_ref_count": 1,
+      "raw_log_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "fixture_recipe_id": "xfstests-sparse-fixture-generic-001",
+      "live_create": false
+    }
+  ],
+  "fixtures": [
+    {
+      "recipe_id": "xfstests-sparse-fixture-generic-001",
+      "source_xfstests_id": "generic/001",
+      "related_test_ids": [
+        "generic/001",
+        "generic/002"
+      ],
+      "filesystem_flavor": "generic",
+      "suspected_crate_boundary": "ffs-core",
+      "fixture_manifest_kind": "sparse_fixture_generation_recipe",
+      "proposed_fixture_path": "conformance/fixtures/xfstests/generic-001.json",
+      "source_raw_log_ref_count": 1,
+      "source_raw_log_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "dependency_hint_count": 3,
+      "recipe_step_count": 4,
+      "promotion_status": "dry_run_recipe_only",
+      "live_fixture_write_enabled": false
+    }
+  ],
+  "excluded": [
+    {
+      "test_id": "ext4/001",
+      "status": "host_blocked",
+      "classification": "environment_blocked",
+      "reason": "host-blocked rows are environment work",
+      "raw_log_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "has_remediation": true
+    },
+    {
+      "test_id": "btrfs/001",
+      "status": "unsupported",
+      "classification": "unsupported_by_v1",
+      "reason": "unsupported-scope rows must not pollute product backlog",
+      "raw_log_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "has_remediation": true
+    }
+  ]
+}

@@ -4194,6 +4194,142 @@ generic/001  2s ... pass\n";
         Ok(())
     }
 
+    fn fixture_failure_triage_report(
+        tmp_path: &std::path::Path,
+    ) -> Result<XfstestsFailureTriageReport> {
+        let raw = tmp_path.join("check.log");
+        fs::write(
+            &raw,
+            "generic/001 failed EIO\ngeneric/002 failed EIO\next4/001 host blocked\nbtrfs/001 unsupported\n",
+        )?;
+        let mut first = baseline_case("generic/001", XfstestsBaselineRowStatus::Failed);
+        first.not_run_reason = Some("EIO after fsync boundary".to_owned());
+        let mut second = baseline_case("generic/002", XfstestsBaselineRowStatus::Failed);
+        second.not_run_reason = Some("EIO after fsync boundary".to_owned());
+        let mut host = baseline_case("ext4/001", XfstestsBaselineRowStatus::HostBlocked);
+        host.classification = "environment_blocked".to_owned();
+        let mut unsupported = baseline_case("btrfs/001", XfstestsBaselineRowStatus::Unsupported);
+        unsupported.classification = "unsupported_by_v1".to_owned();
+        let manifest = manifest_with_cases(&raw, vec![first, second, host, unsupported]);
+
+        let mut report = build_xfstests_failure_triage_report(XfstestsFailureTriageInput {
+            triage_id: "triage-fixture",
+            baseline_manifest_path: tmp_path.join("baseline_manifest.json").as_path(),
+            baseline_manifest: &manifest,
+            reproduction_command: "./scripts/e2e/ffs_xfstests_e2e.sh",
+        })?;
+        report.source_baseline_manifest = "baseline_manifest.json".to_owned();
+        canonicalize_failure_triage_hashes(&mut report);
+        Ok(report)
+    }
+
+    fn compact_failure_triage_report_shape(
+        report: &XfstestsFailureTriageReport,
+    ) -> serde_json::Value {
+        let proposed = report
+            .proposed_beads
+            .iter()
+            .map(|bead| {
+                serde_json::json!({
+                    "proposed_id_placeholder": &bead.proposed_id_placeholder,
+                    "failing_test_id": &bead.failing_test_id,
+                    "related_test_ids": &bead.related_test_ids,
+                    "filesystem_flavor": &bead.filesystem_flavor,
+                    "normalized_outcome": &bead.normalized_outcome,
+                    "suspected_crate_boundary": &bead.suspected_crate_boundary,
+                    "minimization_status": &bead.minimization_status,
+                    "duplicate_key": &bead.duplicate_key,
+                    "labels": &bead.labels,
+                    "dependency_beads": &bead.dependency_beads,
+                    "raw_log_ref_count": bead.raw_log_refs.len(),
+                    "raw_log_hash": &bead.raw_log_hash,
+                    "fixture_recipe_id": &bead.fixture_recipe.recipe_id,
+                    "live_create": bead.live_create,
+                })
+            })
+            .collect::<Vec<_>>();
+        let fixtures = report
+            .fixture_recipes
+            .iter()
+            .map(|recipe| {
+                serde_json::json!({
+                    "recipe_id": &recipe.recipe_id,
+                    "source_xfstests_id": &recipe.source_xfstests_id,
+                    "related_test_ids": &recipe.related_test_ids,
+                    "filesystem_flavor": &recipe.filesystem_flavor,
+                    "suspected_crate_boundary": &recipe.suspected_crate_boundary,
+                    "fixture_manifest_kind": &recipe.fixture_manifest_kind,
+                    "proposed_fixture_path": &recipe.proposed_fixture_path,
+                    "source_raw_log_ref_count": recipe.source_raw_log_refs.len(),
+                    "source_raw_log_hash": &recipe.source_raw_log_hash,
+                    "dependency_hint_count": recipe.dependency_hints.len(),
+                    "recipe_step_count": recipe.recipe_steps.len(),
+                    "promotion_status": &recipe.promotion_status,
+                    "live_fixture_write_enabled": recipe.live_fixture_write_enabled,
+                })
+            })
+            .collect::<Vec<_>>();
+        let excluded = report
+            .excluded_rows
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "test_id": &row.test_id,
+                    "status": &row.status,
+                    "classification": &row.classification,
+                    "reason": &row.reason,
+                    "raw_log_hash": &row.raw_log_hash,
+                    "has_remediation": row.remediation.is_some(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        serde_json::json!({
+            "schema_version": report.schema_version,
+            "triage_id": &report.triage_id,
+            "baseline_id": &report.baseline_id,
+            "subset_version": &report.subset_version,
+            "source_baseline_manifest": &report.source_baseline_manifest,
+            "live_bead_creation_enabled": report.live_bead_creation_enabled,
+            "disposition_counts": &report.disposition_counts,
+            "duplicate_groups": &report.duplicate_groups,
+            "proposed_bead_count": report.proposed_beads.len(),
+            "fixture_recipe_count": report.fixture_recipes.len(),
+            "excluded_row_count": report.excluded_rows.len(),
+            "proposed_br_command_count": report.proposed_br_commands.len(),
+            "proposed": proposed,
+            "fixtures": fixtures,
+            "excluded": excluded,
+        })
+    }
+
+    #[test]
+    fn xfstests_failure_triage_report_json_shape() -> Result<()> {
+        let tmp = tempdir()?;
+        let report = fixture_failure_triage_report(tmp.path())?;
+
+        let json = serde_json::to_string_pretty(&report)?;
+        let parsed: XfstestsFailureTriageReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        assert!(validate_xfstests_failure_triage_report(&parsed).is_empty());
+        assert_eq!(parsed.proposed_beads.len(), 1);
+        assert_eq!(parsed.fixture_recipes.len(), 1);
+        assert_eq!(parsed.duplicate_groups.len(), 1);
+        assert_eq!(parsed.excluded_rows.len(), 2);
+        assert_eq!(
+            parsed.proposed_br_commands.len(),
+            parsed.proposed_beads.len()
+        );
+        assert_eq!(parsed.disposition_counts.get("failed"), Some(&2));
+        assert_eq!(parsed.disposition_counts.get("host_blocked"), Some(&1));
+        assert_eq!(parsed.disposition_counts.get("unsupported"), Some(&1));
+
+        let shape_json =
+            serde_json::to_string_pretty(&compact_failure_triage_report_shape(&parsed))?;
+        insta::assert_snapshot!("xfstests_failure_triage_report_json_shape", shape_json);
+        Ok(())
+    }
+
     #[test]
     fn failure_triage_rejects_duplicate_group_drift() -> Result<()> {
         let tmp = tempdir()?;
