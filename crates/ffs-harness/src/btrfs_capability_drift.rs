@@ -438,11 +438,19 @@ crash_matrix_label_for_point() {
     esac
 }
 "#;
+        let rows = parse_capability_table(parity);
+        let results = check_btrfs_drift(parity, core_src, e2e_src);
+        let rows_round_trip: Vec<CapabilityContractRow> =
+            serde_json::from_str(&serde_json::to_string(&rows)?)?;
+        let results_round_trip: Vec<DriftCheckResult> =
+            serde_json::from_str(&serde_json::to_string(&results)?)?;
+        assert_eq!(rows_round_trip, rows);
+        assert_eq!(results_round_trip, results);
 
         let shape = serde_json::json!({
             "contract_version": DRIFT_CONTRACT_VERSION,
-            "rows": parse_capability_table(parity),
-            "results": check_btrfs_drift(parity, core_src, e2e_src),
+            "rows": rows,
+            "results": results,
         });
 
         insta::assert_snapshot!(

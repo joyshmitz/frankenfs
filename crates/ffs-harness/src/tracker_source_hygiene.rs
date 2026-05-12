@@ -1695,6 +1695,10 @@ mod tests {
         });
         let json = serde_json::to_string_pretty(&shape).map_err(|err| err.to_string())?;
         insta::assert_snapshot!("tracker_source_hygiene_report_json_shape", json);
+        let report_json = serde_json::to_string(&report).map_err(|err| err.to_string())?;
+        let round_trip: TrackerSourceHygieneReport =
+            serde_json::from_str(&report_json).map_err(|err| err.to_string())?;
+        assert_eq!(round_trip, report);
         Ok(())
     }
 
