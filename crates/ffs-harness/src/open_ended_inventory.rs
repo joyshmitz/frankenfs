@@ -1873,9 +1873,9 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
 
     use super::{
         DEFAULT_SOURCE_SCOPE_MANIFEST_JSON, REQUIRED_SOURCE_FAMILIES,
-        SOURCE_SCOPE_MANIFEST_SCHEMA_VERSION, SourceScopeManifest, parse_source_scope_manifest,
-        scan_source_scope_manifest, validate_default_source_scope_manifest,
-        validate_source_scope_manifest,
+        SOURCE_SCOPE_MANIFEST_SCHEMA_VERSION, SourceScopeManifest, SourceScopeManifestReport,
+        parse_source_scope_manifest, scan_source_scope_manifest,
+        validate_default_source_scope_manifest, validate_source_scope_manifest,
     };
 
     fn fixture_manifest() -> SourceScopeManifest {
@@ -1944,6 +1944,16 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
             );
         }
         assert!(report.stale_sources.is_empty());
+    }
+
+    #[test]
+    fn source_scope_manifest_report_json_shape() -> anyhow::Result<()> {
+        let report = validate_default_source_scope_manifest()?;
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("source_scope_manifest_report_json_shape", json);
+        let parsed: SourceScopeManifestReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
     }
 
     #[test]
