@@ -1,0 +1,14 @@
+---
+source: crates/ffs-harness/src/low_privilege_demo_sandbox.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "manifest_id": "frankenfs_low_privilege_demo_sandbox_v1",
+  "bead_id": "bd-3crxf",
+  "fixture_count": 4,
+  "lane_count": 4,
+  "host_skipped_lanes": 1,
+  "valid": true,
+  "errors": []
+}
