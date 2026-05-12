@@ -1327,11 +1327,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checked_in_swarm_workload_harness_manifest_validates() {
+    fn checked_in_swarm_workload_harness_manifest_validates() -> Result<()> {
         let manifest = load_swarm_workload_harness_manifest(Path::new(&workspace_path(
             DEFAULT_SWARM_WORKLOAD_HARNESS_MANIFEST,
-        )))
-        .expect("load checked-in manifest");
+        )))?;
         let report = validate_swarm_workload_harness_manifest(&manifest);
         assert!(
             report.valid,
@@ -1344,6 +1343,7 @@ mod tests {
         assert_eq!(report.verdict_counts.get("pass"), Some(&1));
         assert_eq!(report.verdict_counts.get("skip"), Some(&1));
         assert!(report.issues.is_empty());
+        Ok(())
     }
 
     /// The markdown renderer is consumed by proof-bundle and release-gate
@@ -1353,11 +1353,10 @@ mod tests {
     /// omitted Missing Workload Classes / Errors sections for the checked-in
     /// manifest fixture.
     #[test]
-    fn render_swarm_workload_harness_markdown_checked_in_manifest_snapshot() {
+    fn render_swarm_workload_harness_markdown_checked_in_manifest_snapshot() -> Result<()> {
         let manifest = load_swarm_workload_harness_manifest(Path::new(&workspace_path(
             DEFAULT_SWARM_WORKLOAD_HARNESS_MANIFEST,
-        )))
-        .expect("load checked-in manifest");
+        )))?;
         let report = validate_swarm_workload_harness_manifest(&manifest);
         let markdown = render_swarm_workload_harness_markdown(&report);
 
@@ -1365,22 +1364,22 @@ mod tests {
             "render_swarm_workload_harness_markdown_checked_in_manifest",
             markdown
         );
+        Ok(())
     }
 
     #[test]
-    fn swarm_workload_harness_report_json_shape() {
+    fn swarm_workload_harness_report_json_shape() -> Result<()> {
         let manifest = load_swarm_workload_harness_manifest(Path::new(&workspace_path(
             DEFAULT_SWARM_WORKLOAD_HARNESS_MANIFEST,
-        )))
-        .expect("load checked-in manifest");
+        )))?;
         let report = validate_swarm_workload_harness_manifest(&manifest);
-        let json = serde_json::to_string_pretty(&report).expect("serialize report");
+        let json = serde_json::to_string_pretty(&report)?;
 
         insta::assert_snapshot!("swarm_workload_harness_report_json_shape", json);
 
-        let roundtrip: SwarmWorkloadHarnessReport =
-            serde_json::from_str(&json).expect("deserialize report");
+        let roundtrip: SwarmWorkloadHarnessReport = serde_json::from_str(&json)?;
         assert_eq!(roundtrip, report);
+        Ok(())
     }
 
     #[test]
