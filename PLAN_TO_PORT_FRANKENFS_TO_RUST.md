@@ -124,11 +124,15 @@ novel capabilities shared across both filesystems:
    block group so that single- or multi-block corruption can be repaired
    automatically without external backups.
 
-Mounted automatic repair is the remaining policy/runtime reconciliation point:
-the current mounted scrub path is detection-only, while explicit write-side
-repair is available through `ffs repair` / `ffs fsck --repair`. `bd-rchk6`
-tracks either implementing automatic mounted repair or narrowing the V1.x
-mounted contract consistently.
+Mounted automatic repair is implemented as an explicit opt-in mode. Default
+read-only mounts run detection-only scrub, read-write mounts keep background
+scrub disabled unless requested, and `--background-repair
+--background-scrub-ledger <jsonl>` grants the daemon permission to recover
+blocks and refresh repair symbols with durable evidence. Read-write mounted
+repair routes recovered source blocks through the mounted MVCC repair-writeback
+serializer before symbol refresh; `bd-rchk6` is closed for the V1.x lifecycle
+decision, while xfstests, mounted CI, and performance baselines remain tracked
+separately.
 
 ### 1.1 Deliverable Summary
 

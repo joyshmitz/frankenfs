@@ -34,7 +34,7 @@ This section records *current* (not historical) drift between this spec and the 
 - **Missing normative traits (integration points):** Spec §8/§9/§14 define normative traits (repair manager, scrub progress, semantics ops) that are not yet fully present as explicit contracts in code (`crates/ffs-repair` now ships scrub/recovery pipelines and evidence wiring, and `crates/ffs-fuse` ships production mount scaffolding). Resolution: promote the remaining behavior to explicit trait contracts in the owning crates without creating dependency cycles, then migrate call sites to those contracts. Tracks: `bd-2l4`, `bd-3bf`, `bd-hv6`.
 - **Engine terminology drift:** This spec frequently uses `FrankenFsEngine` as the orchestration name. In current code, the active FUSE runtime path is `ffs-fuse -> ffs-core::FsOps` (currently `OpenFs`). Treat `FrankenFsEngine` mentions as conceptual/utility naming unless a section explicitly requires that concrete type. Track: `bd-vyt6`.
 - **Tracked parity vs runtime readiness:** `FEATURE_PARITY.md` now reports 97/97 tracked V1 rows complete. That is a denominator-scoped feature claim, not a production-readiness claim. Reality-check bridge items outside the parity denominator are tracked by `bd-rchk1` through `bd-rchk7` (docs/status, `DISC-004`, xfstests baseline, mounted FUSE CI, performance baselines, mounted self-healing lifecycle, and fuzz/conformance expansion).
-- **Mounted self-healing current behavior:** Sections that describe transparent online RaptorQ recovery are implemented for the explicit client read-only mounted repair mode. The current V1.x mounted runtime starts detection-only scrub for default read-only mounts; `--background-repair --background-scrub-ledger <jsonl>` grants the scrub daemon permission to repair blocks and refresh repair symbols with durable evidence. `--background-repair` is rejected with `--rw` until repair writeback is serialized with mounted write traffic.
+- **Mounted self-healing current behavior:** Sections that describe transparent online RaptorQ recovery are implemented for explicit mounted repair mode. The current V1.x mounted runtime starts detection-only scrub for default read-only mounts, leaves read-write background scrub disabled unless requested, and treats `--background-repair --background-scrub-ledger <jsonl>` as the opt-in authority to repair blocks and refresh repair symbols with durable evidence. Read-write mounted repair now routes recovered source blocks through the mounted MVCC repair-writeback serializer before symbol refresh and keeps kernel FUSE writeback-cache mode disabled.
 
 ### 0.1.2 Audit Checklist (Mechanical)
 
@@ -126,15 +126,16 @@ A block write that never triggers repair symbol refresh for its group is a spec-
 > **Current implementation boundary:** the CLI/offline repair path implements
 > write-side repair operations, and the mounted background scrub path can run
 > the same recovery/writeback pipeline when explicitly started with
-> `--background-repair --background-scrub-ledger <jsonl>` on a client read-only
-> mount. Mounted read-write automatic repair remains out of scope until repair
-> writeback and client writes share a serialization point. The normative V1.x
-> fail-closed contract is data-backed in
+> `--background-repair --background-scrub-ledger <jsonl>`. Default read-only
+> mounts remain detection-only, read-write mounts require explicit scrub/repair
+> opt-in, and read-write mounted repair routes recovered source blocks through
+> the mounted MVCC repair-writeback serializer before repair-symbol refresh.
+> The normative V1.x fail-closed contract is data-backed in
 > `docs/repair-writeback-serialization-contract.json` and validated by
-> `ffs-harness validate-repair-writeback-serialization`; a read-write mounted
-> mutation request must emit `rw_repair_serialization_missing` with MVCC epoch,
-> lease, repair-symbol generation, artifact paths, cleanup status, reproduction
-> command, and follow-up bead evidence.
+> `ffs-harness validate-repair-writeback-serialization`; direct repair
+> writeback that bypasses the mounted mutation authority remains rejected with
+> MVCC epoch, lease, repair-symbol generation, artifact paths, cleanup status,
+> reproduction command, and follow-up bead evidence.
 
 ### 0.5 Table of Contents
 
