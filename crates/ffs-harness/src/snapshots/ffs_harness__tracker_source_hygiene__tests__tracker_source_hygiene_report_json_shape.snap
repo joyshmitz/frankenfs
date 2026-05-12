@@ -1,0 +1,146 @@
+---
+source: crates/ffs-harness/src/tracker_source_hygiene.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "status": "pass",
+  "mutation_policy": "report-only; this command never deletes, rewrites, closes, or edits tracker rows",
+  "counts": {
+    "total_rows": 38,
+    "local_total": 8,
+    "foreign_total": 30,
+    "open_total": 32,
+    "local_open": 5,
+    "foreign_open": 27,
+    "foreign_in_progress": 2,
+    "excluded_foreign_open_count": 27,
+    "excluded_foreign_in_progress_count": 2,
+    "excluded_foreign_stale_in_progress_count": 1
+  },
+  "classifier": {
+    "local_id_regex": "^(bd|frankenfs)-",
+    "local_rule": "FrankenFS-local rows use bd-* or frankenfs-* issue IDs",
+    "foreign_rule": "Rows with other issue ID prefixes are reported as foreign-looking"
+  },
+  "foreign_prefixes": [
+    {
+      "prefix": "br-r37",
+      "count": 22
+    },
+    {
+      "prefix": "franken_numpy",
+      "count": 2
+    },
+    {
+      "prefix": "frankenredis",
+      "count": 1
+    },
+    {
+      "prefix": "frankentorch",
+      "count": 2
+    }
+  ],
+  "queue_state": {
+    "schema_version": 1,
+    "verdict": "ready",
+    "claimable_count": 2,
+    "local_open_count": 5,
+    "local_epic_count": 1,
+    "blocked_local_count": 1,
+    "permission_gated_count": 1,
+    "local_nonclaimable_count": 3,
+    "local_in_progress_count": 2,
+    "stale_in_progress_count": 1,
+    "excluded_foreign_open_count": 27,
+    "excluded_foreign_in_progress_count": 2,
+    "excluded_foreign_stale_in_progress_count": 1,
+    "excluded_foreign_stale_in_progress_ids": [
+      "frankenscipy-foreign-in-progress-stale"
+    ],
+    "claimable_ids": [
+      "bd-fixture-ready",
+      "bd-fixture-blocker"
+    ],
+    "local_epic_ids": [
+      "bd-fixture-epic"
+    ],
+    "blocked_local_ids": [
+      "bd-fixture-blocked"
+    ],
+    "permission_gated_ids": [
+      "bd-fixture-permissioned"
+    ],
+    "local_nonclaimable_ids": [
+      "bd-fixture-epic",
+      "bd-fixture-permissioned",
+      "bd-fixture-blocked"
+    ],
+    "local_in_progress_ids": [
+      "bd-fixture-in-progress-fresh",
+      "bd-fixture-in-progress-stale"
+    ],
+    "stale_in_progress_ids": [
+      "bd-fixture-in-progress-stale"
+    ],
+    "next_safe_actions": [
+      "claim one source_aware_ready row before creating fallback work"
+    ]
+  },
+  "local_graph_exports": {
+    "schema_version": 1,
+    "mutation_policy": "report-only; exports copy matching source rows without editing tracker state",
+    "local_open": {
+      "row_count": 5,
+      "id_count": 5
+    },
+    "source_aware_ready": {
+      "row_count": 2,
+      "id_count": 2
+    },
+    "local_nonclaimable": {
+      "row_count": 3,
+      "id_count": 3
+    }
+  },
+  "source_aware_ready_ids": [
+    "bd-fixture-ready",
+    "bd-fixture-blocker"
+  ],
+  "permission_gated_ids": [
+    "bd-fixture-permissioned"
+  ],
+  "blocked_local_ids": [
+    "bd-fixture-blocked"
+  ],
+  "local_nonclaimable": [
+    {
+      "id": "bd-fixture-epic",
+      "reason": "epic",
+      "permission_gate_kind": null,
+      "blocked_by": []
+    },
+    {
+      "id": "bd-fixture-permissioned",
+      "reason": "permission_gated",
+      "permission_gate_kind": "xfstests_real_run",
+      "blocked_by": []
+    },
+    {
+      "id": "bd-fixture-blocked",
+      "reason": "blocked",
+      "permission_gate_kind": null,
+      "blocked_by": [
+        "bd-fixture-blocker"
+      ]
+    }
+  ],
+  "stale_in_progress_ids": [
+    "bd-fixture-in-progress-stale"
+  ],
+  "foreign_stale_in_progress_ids": [
+    "frankenscipy-foreign-in-progress-stale"
+  ],
+  "reproduction_command_count": 5,
+  "errors": []
+}

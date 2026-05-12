@@ -1603,6 +1603,102 @@ mod tests {
     }
 
     #[test]
+    fn tracker_source_hygiene_report_json_shape() -> Result<(), String> {
+        let report = analyze_tracker_source_hygiene(COMMITTED_FIXTURE_ISSUES, &config())
+            .map_err(|err| err.to_string())?;
+        let local_graph_exports = report.local_graph_exports.as_ref().map(|exports| {
+            serde_json::json!({
+                "schema_version": exports.schema_version,
+                "mutation_policy": &exports.mutation_policy,
+                "local_open": {
+                    "row_count": exports.local_open.row_count,
+                    "id_count": exports.local_open.id_count,
+                },
+                "source_aware_ready": {
+                    "row_count": exports.source_aware_ready.row_count,
+                    "id_count": exports.source_aware_ready.id_count,
+                },
+                "local_nonclaimable": {
+                    "row_count": exports.local_nonclaimable.row_count,
+                    "id_count": exports.local_nonclaimable.id_count,
+                },
+            })
+        });
+        let local_nonclaimable = report
+            .local_nonclaimable_rows
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "id": row.id.as_str(),
+                    "reason": row.reason.as_str(),
+                    "permission_gate_kind": row
+                        .permission_gate
+                        .as_ref()
+                        .map(|gate| gate.gate_kind.as_str()),
+                    "blocked_by": row
+                        .blocked_by
+                        .iter()
+                        .map(|dependency| dependency.id.as_str())
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let shape = serde_json::json!({
+            "schema_version": report.schema_version,
+            "status": &report.status,
+            "mutation_policy": &report.mutation_policy,
+            "counts": {
+                "total_rows": report.total_rows,
+                "local_total": report.local_total,
+                "foreign_total": report.foreign_total,
+                "open_total": report.open_total,
+                "local_open": report.local_open,
+                "foreign_open": report.foreign_open,
+                "foreign_in_progress": report.foreign_in_progress,
+                "excluded_foreign_open_count": report.excluded_foreign_open_count,
+                "excluded_foreign_in_progress_count": report.excluded_foreign_in_progress_count,
+                "excluded_foreign_stale_in_progress_count": report
+                    .excluded_foreign_stale_in_progress_count,
+            },
+            "classifier": &report.classifier,
+            "foreign_prefixes": &report.excluded_foreign_by_prefix,
+            "queue_state": &report.source_aware_queue_state,
+            "local_graph_exports": local_graph_exports,
+            "source_aware_ready_ids": report
+                .source_aware_ready_rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            "permission_gated_ids": report
+                .permission_gated_rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            "blocked_local_ids": report
+                .blocked_local_rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            "local_nonclaimable": local_nonclaimable,
+            "stale_in_progress_ids": report
+                .stale_in_progress_rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            "foreign_stale_in_progress_ids": report
+                .foreign_stale_in_progress_samples
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            "reproduction_command_count": report.reproduction_commands.len(),
+            "errors": &report.errors,
+        });
+        let json = serde_json::to_string_pretty(&shape).map_err(|err| err.to_string())?;
+        insta::assert_snapshot!("tracker_source_hygiene_report_json_shape", json);
+        Ok(())
+    }
+
+    #[test]
     fn writes_local_graph_exports_with_checksum_files() -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|err| err.to_string())?;
         let issues_path = temp.path().join("issues.jsonl");
