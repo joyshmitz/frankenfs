@@ -61,3 +61,31 @@ fn readiness_lab_runbook_preserves_advisory_claim_boundaries() -> Result<(), Str
 
     Ok(())
 }
+
+#[test]
+fn agents_workspace_layout_names_crate_local_benchmarks() -> Result<(), String> {
+    let agents = read_repo_file("AGENTS.md")?;
+
+    if !agents.contains(
+        "| `crates/*/benches/` | Crate-local performance benchmarks with regression detection |",
+    ) {
+        return Err("AGENTS.md should preserve crate-local benchmark table marker".to_owned());
+    }
+
+    if !agents.contains("├── crates/*/benches/              # Crate-local performance benchmarks")
+    {
+        return Err("AGENTS.md should preserve crate-local benchmark tree marker".to_owned());
+    }
+
+    if agents
+        .contains("| `benches/` (workspace) | Performance benchmarks with regression detection |")
+    {
+        return Err("AGENTS.md must not keep the stale root benchmark table marker".to_owned());
+    }
+
+    if agents.contains("├── benches/                       # Performance benchmarks") {
+        return Err("AGENTS.md must not keep the stale root benchmark tree marker".to_owned());
+    }
+
+    Ok(())
+}
