@@ -1611,6 +1611,21 @@ evidence, cleanup status, and release-gate output. The calibration E2E includes
 a release-gate fixture proving that calibration-only evidence keeps
 `swarm.responsiveness` hidden until those real campaign artifacts exist.
 
+### Adaptive Runtime Manifest Contract
+
+`ffs_adaptive_runtime_manifest_e2e.sh` validates the checked-in adaptive
+runtime evidence manifest without mounting FUSE or generating workload load. It
+exercises the same `validate-adaptive-runtime-manifest` command that proof
+bundles and release gates consume, captures JSON and Markdown reports, and
+asserts that `accepted_large_host`, `per_core`, host classification, FUSE
+capability, artifact counts, raw-log counts, ACK controls, and reproduction
+commands stay explicit.
+
+The suite also checks fail-closed boundaries: a strict `--current-git-sha`
+mismatch and a malformed manifest with a missing `run_id` must both reject with
+actionable diagnostics. It is a non-permissioned contract gate only; it does not
+upgrade `swarm.responsiveness` or replace the permissioned large-host campaign.
+
 ### Operator Readiness Dashboard
 
 The readiness dashboard is a read-only display layer over strict validator

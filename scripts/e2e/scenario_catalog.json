@@ -3463,6 +3463,59 @@
       ]
     },
     {
+      "suite_id": "ffs_adaptive_runtime_manifest",
+      "script": "scripts/e2e/ffs_adaptive_runtime_manifest_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "adaptive_runtime_manifest_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_manifest_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "adaptive_runtime_manifest_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_manifest_validates|outcome=PASS"
+        },
+        {
+          "id": "adaptive_runtime_manifest_contract",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_manifest_contract|outcome=PASS"
+        },
+        {
+          "id": "adaptive_runtime_manifest_markdown_docs",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_manifest_markdown_docs|outcome=PASS"
+        },
+        {
+          "id": "adaptive_runtime_manifest_rejects_git_mismatch",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_manifest_rejects_git_mismatch|outcome=PASS"
+        },
+        {
+          "id": "adaptive_runtime_manifest_rejects_malformed",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_manifest_rejects_malformed|outcome=PASS"
+        },
+        {
+          "id": "adaptive_runtime_manifest_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_manifest_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_adaptive_runtime_runner",
       "script": "scripts/e2e/ffs_adaptive_runtime_runner_e2e.sh",
       "required_categories": [
