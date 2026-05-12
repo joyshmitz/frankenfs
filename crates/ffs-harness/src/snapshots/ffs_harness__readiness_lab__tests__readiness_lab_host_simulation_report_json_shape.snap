@@ -1,0 +1,50 @@
+---
+source: crates/ffs-harness/src/readiness_lab.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "simulation_id": "host-matrix",
+  "manifest_path": "hosts.json",
+  "valid": true,
+  "product_evidence_claim": "none",
+  "release_gate_effect": "simulator output is advisory only; swarm.responsiveness remains hidden or blocked until bd-rchk0.53.8 records executed large-host proof-bundle lanes and release-gate output",
+  "source_bead": "bd-4532j",
+  "real_campaign_bead": "bd-rchk0.53.8",
+  "expected_artifact_root": "artifacts/swarm/large-host",
+  "host_count": 1,
+  "candidate_count": 1,
+  "small_host_count": 0,
+  "capability_downgrade_count": 0,
+  "blocked_count": 0,
+  "stale_inventory_count": 0,
+  "future_inventory_count": 0,
+  "rows": [
+    {
+      "host_id": "candidate",
+      "valid": true,
+      "classification": "authoritative_large_host_candidate",
+      "candidate_for_authorized_run": true,
+      "product_evidence_claim": "none",
+      "release_gate_effect": "swarm.responsiveness remains hidden or blocked until bd-rchk0.53.8 records executed large-host proof-bundle lanes and release-gate output",
+      "logical_cpus": 64,
+      "ram_total_gib": 256,
+      "numa_topology_visible": true,
+      "numa_nodes": 2,
+      "storage_visible": true,
+      "fuse_available": true,
+      "runner_configured": true,
+      "swarm_ack_configured": true,
+      "worker_identity": "vmi-sim-64c-256gb",
+      "queue_isolation": "dedicated",
+      "target_dir_isolated": true,
+      "artifact_root": "artifacts/swarm/large-host",
+      "blocker_count": 0,
+      "blockers": [],
+      "downgrade_count": 0,
+      "downgrade_reasons": []
+    }
+  ],
+  "errors": [],
+  "warnings": []
+}

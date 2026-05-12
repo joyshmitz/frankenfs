@@ -5816,6 +5816,30 @@ mod tests {
     }
 
     #[test]
+    fn readiness_lab_host_simulation_report_json_shape() -> serde_json::Result<()> {
+        let report = simulate_hosts(&sample_host_simulation_manifest());
+        assert!(report.valid);
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("readiness_lab_host_simulation_report_json_shape", json);
+        let decoded: ReadinessLabHostSimulationReport = serde_json::from_str(&json)?;
+
+        assert_eq!(decoded, report);
+        assert_eq!(
+            decoded.product_evidence_claim,
+            READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM
+        );
+        assert!(
+            decoded
+                .release_gate_effect
+                .contains("swarm.responsiveness remains hidden"),
+            "{}",
+            decoded.release_gate_effect
+        );
+        Ok(())
+    }
+
+    #[test]
     fn host_simulator_classifies_small_cpu_or_ram_as_smoke_only() {
         let mut manifest = sample_host_simulation_manifest();
         manifest.hosts[0].logical_cpus = 16;

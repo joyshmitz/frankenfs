@@ -794,6 +794,77 @@ mod tests {
     }
 
     #[test]
+    fn deferred_parity_audit_report_json_shape() -> Result<()> {
+        let report = analyze_deferred_parity_audit(
+            &fixture_issues(),
+            &fixture_report(),
+            &[("README.md".to_owned(), "Tracked V1 parity 100%".to_owned())],
+        );
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+
+        let shape = serde_json::json!({
+            "audit_run_id": &report.audit_run_id,
+            "counts": {
+                "source_issue_count": report.source_issue_count,
+                "detected_gap_count": report.detected_gap_count,
+                "registry_row_count": report.registry_row_count,
+                "docs_claim_count": report.docs_claim_count,
+            },
+            "findings": report
+                .findings
+                .iter()
+                .map(|finding| {
+                    serde_json::json!({
+                        "source_bead_id": finding.source_bead_id.as_str(),
+                        "gap_class": finding.gap_class.as_str(),
+                        "matched_vocabulary_rule": finding.matched_vocabulary_rule.as_str(),
+                        "labels": &finding.labels,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "docs_claims": report
+                .docs_claims
+                .iter()
+                .map(|claim| {
+                    serde_json::json!({
+                        "source_path": claim.source_path.as_str(),
+                        "section": claim.section.as_str(),
+                        "risk_surface": claim.risk_surface.as_str(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "registry_rows": report
+                .registry_rows
+                .iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "row_id": row.row_id.as_str(),
+                        "source_bead_id": row.source_bead_id.as_str(),
+                        "gap_class": row.gap_class.as_str(),
+                        "decision": row.decision.as_str(),
+                        "linked_follow_up_or_non_goal": row
+                            .linked_follow_up_or_non_goal
+                            .as_str(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "errors": &report.errors,
+            "reproduction_command": &report.reproduction_command,
+        });
+        let json = serde_json::to_string_pretty(&shape)?;
+        insta::assert_snapshot!("deferred_parity_audit_report_json_shape", json);
+
+        let full_json = serde_json::to_string_pretty(&report)?;
+        let roundtrip: DeferredParityAuditReport = serde_json::from_str(&full_json)?;
+        assert_eq!(roundtrip, report);
+        Ok(())
+    }
+
+    #[test]
     fn missing_required_historical_bead_fails() {
         let report = analyze_deferred_parity_audit(
             &fixture_issues(),

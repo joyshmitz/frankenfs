@@ -1,0 +1,82 @@
+---
+source: crates/ffs-harness/src/deferred_parity_audit.rs
+expression: json
+---
+{
+  "audit_run_id": "bd-39lau-deferred-parity-audit-v1",
+  "counts": {
+    "source_issue_count": 8,
+    "detected_gap_count": 3,
+    "registry_row_count": 4,
+    "docs_claim_count": 1
+  },
+  "findings": [
+    {
+      "source_bead_id": "bd-nzv3.24",
+      "gap_class": "deferred",
+      "matched_vocabulary_rule": "deferred",
+      "labels": [
+        "btrfs",
+        "multidevice",
+        "raid"
+      ]
+    },
+    {
+      "source_bead_id": "bd-nzv3.15",
+      "gap_class": "deferred",
+      "matched_vocabulary_rule": "full export deferred",
+      "labels": [
+        "btrfs",
+        "send-receive"
+      ]
+    },
+    {
+      "source_bead_id": "bd-nzv3.21",
+      "gap_class": "basic-coverage",
+      "matched_vocabulary_rule": "basic coverage",
+      "labels": [
+        "casefold",
+        "ext4"
+      ]
+    }
+  ],
+  "docs_claims": [
+    {
+      "source_path": "README.md",
+      "section": "line 1",
+      "risk_surface": "flat parity or readiness wording"
+    }
+  ],
+  "registry_rows": [
+    {
+      "row_id": "D1",
+      "source_bead_id": "bd-nzv3.24",
+      "gap_class": "deferred",
+      "decision": "active-follow-up",
+      "linked_follow_up_or_non_goal": "bd-ch373"
+    },
+    {
+      "row_id": "D2",
+      "source_bead_id": "bd-nzv3.15",
+      "gap_class": "deferred",
+      "decision": "active-follow-up",
+      "linked_follow_up_or_non_goal": "bd-naww5"
+    },
+    {
+      "row_id": "D3",
+      "source_bead_id": "bd-nzv3.21",
+      "gap_class": "basic-coverage",
+      "decision": "active-follow-up",
+      "linked_follow_up_or_non_goal": "bd-9er6s"
+    },
+    {
+      "row_id": "D4",
+      "source_bead_id": "docs:flat-parity",
+      "gap_class": "implemented-unvalidated",
+      "decision": "active-follow-up",
+      "linked_follow_up_or_non_goal": "bd-mpcse"
+    }
+  ],
+  "errors": [],
+  "reproduction_command": "ffs-harness validate-deferred-parity-audit --issues .beads/issues.jsonl --report docs/reports/DEFERRED_PARITY_AUDIT.md --doc README.md --doc FEATURE_PARITY.md"
+}
