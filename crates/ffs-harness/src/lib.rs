@@ -686,6 +686,47 @@ mod tests {
         assert!(report.overall_coverage_percent > 0.0);
     }
 
+    fn representative_parity_report() -> ParityReport {
+        let domains = vec![
+            CoverageDomain::new("ext4 metadata parsing", 10, 10),
+            CoverageDomain::new("btrfs metadata parsing", 14, 20),
+        ];
+
+        ParityReport {
+            domains,
+            overall_implemented: 24,
+            overall_total: 30,
+            overall_coverage_percent: percentage(24, 30),
+        }
+    }
+
+    #[test]
+    fn parity_report_current_json_round_trips() -> Result<(), serde_json::Error> {
+        let report = ParityReport::current();
+        let json = serde_json::to_string_pretty(&report)?;
+        let parsed: ParityReport = serde_json::from_str(&json)?;
+
+        assert_eq!(
+            serde_json::to_value(&parsed)?,
+            serde_json::to_value(&report)?
+        );
+        assert_eq!(parsed.domains.len(), report.domains.len());
+        assert_eq!(parsed.overall_implemented, report.overall_implemented);
+        assert_eq!(parsed.overall_total, report.overall_total);
+        Ok(())
+    }
+
+    #[test]
+    fn parity_report_json_shape() -> Result<(), serde_json::Error> {
+        let report = representative_parity_report();
+        let json = serde_json::to_string_pretty(&report)?;
+        let parsed: ParityReport = serde_json::from_str(&json)?;
+
+        assert_eq!(serde_json::to_string_pretty(&parsed)?, json);
+        insta::assert_snapshot!("parity_report_json_shape", json);
+        Ok(())
+    }
+
     // ── Fixture generation tests ──────────────────────────────────────
 
     #[test]
