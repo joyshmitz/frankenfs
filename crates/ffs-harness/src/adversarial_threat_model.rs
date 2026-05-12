@@ -1348,6 +1348,17 @@ mod tests {
     }
 
     #[test]
+    fn adversarial_threat_model_report_json_shape() -> Result<()> {
+        let model = sample_model();
+        let report = validate_adversarial_threat_model(&model, "artifacts/security/dry-run");
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("adversarial_threat_model_report_json_shape", json);
+        let parsed: AdversarialThreatModelReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn path_classifier_refuses_traversal_absolute_symlink_and_empty() {
         assert_eq!(
             classify_hostile_artifact_path(
