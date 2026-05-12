@@ -1545,6 +1545,23 @@ mod tests {
     }
 
     #[test]
+    fn wal_group_commit_gate_report_json_shape() {
+        let manifest: WalGroupCommitGateManifest = serde_json::from_str(include_str!(
+            "../../../benchmarks/wal_group_commit_gate_manifest.json"
+        ))
+        .expect("checked-in WAL group-commit gate manifest parses");
+        let report = validate_wal_group_commit_gate_manifest(&manifest);
+        assert!(report.valid, "{:?}", report.errors);
+        let json = serde_json::to_string_pretty(&report).expect("serialize report");
+
+        insta::assert_snapshot!("wal_group_commit_gate_report_json_shape", json);
+
+        let roundtrip: WalGroupCommitGateReport =
+            serde_json::from_str(&json).expect("deserialize report");
+        assert_eq!(roundtrip, report);
+    }
+
+    #[test]
     fn missing_required_invariant_is_rejected() {
         let mut manifest = sample_manifest();
         manifest
