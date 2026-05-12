@@ -379,6 +379,14 @@ mod tests {
     }
 
     #[test]
+    fn canonical_drills_json_shape() {
+        let drills = canonical_drills();
+        let json = serde_json::to_string_pretty(&drills).expect("serialize");
+
+        insta::assert_snapshot!("canonical_drills_json_shape", json);
+    }
+
+    #[test]
     fn drill_ids_are_unique() {
         let drills = canonical_drills();
         let ids: std::collections::HashSet<&str> = drills.iter().map(|d| d.id.as_str()).collect();

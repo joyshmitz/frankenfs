@@ -1,0 +1,94 @@
+---
+source: crates/ffs-harness/src/tabletop_drill.rs
+expression: json
+---
+[
+  {
+    "id": "drill-replay-anomaly",
+    "title": "Mount failure due to WAL replay anomaly",
+    "error_codes": [
+      "FFS-RPL-001",
+      "FFS-RPL-002"
+    ],
+    "evidence_preset": "replay-anomalies",
+    "runbook_path": "docs/runbooks/replay-failure-triage.md",
+    "required_runbook_sections": [
+      "Quick Reference",
+      "Inspect Replay State",
+      "Check Structured Logs",
+      "Corruption Recovery",
+      "Escalation"
+    ],
+    "cli_commands": [
+      "ffs info --mvcc",
+      "ffs evidence --preset replay-anomalies"
+    ],
+    "log_markers": [
+      "wal_replay_start",
+      "wal_replay_done",
+      "wal_replay_truncated_tail"
+    ],
+    "log_marker_sources": [
+      "crates/ffs-mvcc/src/wal_replay.rs"
+    ]
+  },
+  {
+    "id": "drill-corruption-partial-repair",
+    "title": "Corruption detected with partial repair success",
+    "error_codes": [
+      "FFS-IOC-001",
+      "FFS-RPR-001",
+      "FFS-RPR-002"
+    ],
+    "evidence_preset": "repair-failures",
+    "runbook_path": "docs/runbooks/corruption-recovery.md",
+    "required_runbook_sections": [
+      "Quick Reference",
+      "Detection",
+      "Evidence Ledger",
+      "Repair Decision",
+      "Post-Repair Verification"
+    ],
+    "cli_commands": [
+      "ffs repair",
+      "ffs evidence --preset repair-failures"
+    ],
+    "log_markers": [
+      "scrub_complete",
+      "repair_complete"
+    ],
+    "log_marker_sources": [
+      "crates/ffs-cli/src/main.rs",
+      "crates/ffs-cli/src/cmd_repair.rs"
+    ]
+  },
+  {
+    "id": "drill-sustained-pressure",
+    "title": "Sustained pressure causing throttle/shed behavior",
+    "error_codes": [
+      "FFS-PRS-001",
+      "FFS-PRS-002"
+    ],
+    "evidence_preset": "pressure-transitions",
+    "runbook_path": "docs/runbooks/backpressure-investigation.md",
+    "required_runbook_sections": [
+      "Quick Reference",
+      "Degradation Analysis",
+      "Throttle Events",
+      "Shed Events",
+      "Safe Escalation"
+    ],
+    "cli_commands": [
+      "ffs evidence --preset pressure-transitions",
+      "ffs mount --runtime-mode"
+    ],
+    "log_markers": [
+      "degradation_transition",
+      "backpressure"
+    ],
+    "log_marker_sources": [
+      "crates/ffs-core/src/degradation.rs",
+      "crates/ffs-repair/src/evidence.rs"
+    ]
+  }
+]
