@@ -85,6 +85,7 @@ use ffs_ondisk::{
     ExtentTree, ext4_chksum, map_logical_to_physical, parse_dev_item, parse_dir_block,
     parse_dx_root, parse_extent_tree, parse_leaf_items, parse_sys_chunk_array, parse_xattr_block,
 };
+use hex::FromHex;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -262,7 +263,7 @@ impl SparseFixture {
     pub fn materialize(&self) -> Result<Vec<u8>> {
         let mut bytes = vec![0_u8; self.size];
         for write in &self.writes {
-            let payload = hex::decode(&write.hex)
+            let payload = Vec::<u8>::from_hex(write.hex.as_bytes())
                 .with_context(|| format!("invalid hex at offset {}", write.offset))?;
             let end = write
                 .offset
@@ -290,7 +291,7 @@ pub fn load_sparse_fixture(path: &Path) -> Result<Vec<u8>> {
 
     let mut bytes = vec![0_u8; fixture.size];
     for write in fixture.writes {
-        let payload = hex::decode(write.hex)
+        let payload = Vec::<u8>::from_hex(write.hex.as_bytes())
             .with_context(|| format!("invalid hex at offset {}", write.offset))?;
 
         let end = write
@@ -741,26 +742,28 @@ mod tests {
 }"#;
 
     #[test]
-    fn sparse_fixture_json_round_trip() {
+    fn sparse_fixture_json_round_trip() -> Result<(), serde_json::Error> {
         let original = vec![0, 0x42, 0, 0, 0xDE, 0xAD, 0, 0];
         let fixture = SparseFixture::from_bytes(&original);
-        let json = serde_json::to_string_pretty(&fixture).expect("serialize");
-        let parsed: SparseFixture = serde_json::from_str(&json).expect("deserialize");
+        let json = serde_json::to_string_pretty(&fixture)?;
+        let parsed: SparseFixture = serde_json::from_str(&json)?;
         let materialized = parsed.materialize().expect("materialize");
         assert_eq!(materialized, original);
+        Ok(())
     }
 
     #[test]
-    fn representative_sparse_fixture_json_exact_golden_contract() {
+    fn representative_sparse_fixture_json_exact_golden_contract() -> Result<(), serde_json::Error> {
         let original = vec![0, 0xAB, 0, 0, 1, 2, 3, 0, 0, 0, 0xFF, 0];
         let fixture = SparseFixture::from_bytes(&original);
-        let json = serde_json::to_string_pretty(&fixture).expect("serialize");
+        let json = serde_json::to_string_pretty(&fixture)?;
 
         assert_eq!(json, REPRESENTATIVE_SPARSE_FIXTURE_JSON_GOLDEN);
 
-        let parsed: SparseFixture = serde_json::from_str(&json).expect("deserialize");
+        let parsed: SparseFixture = serde_json::from_str(&json)?;
         let materialized = parsed.materialize().expect("materialize");
         assert_eq!(materialized, original);
+        Ok(())
     }
 
     #[test]
