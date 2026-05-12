@@ -1,0 +1,35 @@
+---
+source: crates/ffs-harness/src/metrics.rs
+expression: json
+---
+{
+  "elapsed_secs": 0.0,
+  "metrics": {
+    "json.counter": {
+      "kind": "counter",
+      "value": 7
+    },
+    "json.gauge": {
+      "kind": "gauge",
+      "value": -3
+    },
+    "json.hist": {
+      "kind": "histogram",
+      "histogram": {
+        "buckets": [
+          {
+            "le": 10,
+            "count": 2
+          },
+          {
+            "le": 100,
+            "count": 1
+          }
+        ],
+        "inf_count": 1,
+        "sum": 522,
+        "count": 4
+      }
+    }
+  }
+}

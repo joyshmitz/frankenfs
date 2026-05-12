@@ -704,6 +704,28 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_json_serialization_shape() {
+        let registry = MetricsRegistry::new();
+        registry.enable();
+        let counter = registry.register("json.counter", MetricKind::Counter);
+        let gauge = registry.register("json.gauge", MetricKind::Gauge);
+        let hist = registry.register_histogram("json.hist", &[10, 100]);
+
+        counter.increment(7);
+        gauge.set(-3);
+        hist.observe(1);
+        hist.observe(10);
+        hist.observe(11);
+        hist.observe(500);
+
+        let mut snap = registry.snapshot();
+        snap.elapsed_secs = 0.0;
+        let json = serde_json::to_string_pretty(&snap).expect("serialize");
+
+        insta::assert_snapshot!("snapshot_json_serialization_shape", json);
+    }
+
+    #[test]
     fn rolling_window_pruning() {
         let registry = MetricsRegistry::with_window(1); // 1-second window
         registry.enable();
