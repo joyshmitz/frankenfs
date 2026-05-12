@@ -687,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_json_serialization() {
+    fn snapshot_json_serialization() -> Result<(), serde_json::Error> {
         let registry = MetricsRegistry::new();
         registry.enable();
         let _ = registry.register("json.counter", MetricKind::Counter);
@@ -695,16 +695,17 @@ mod tests {
         let _ = registry.register("json.hist", MetricKind::Histogram);
 
         let snap = registry.snapshot();
-        let json = serde_json::to_string_pretty(&snap).expect("serialize");
-        let deser: MetricsSnapshot = serde_json::from_str(&json).expect("deserialize");
+        let json = serde_json::to_string_pretty(&snap)?;
+        let deser: MetricsSnapshot = serde_json::from_str(&json)?;
         assert_eq!(deser.metrics.len(), 3);
         assert!(deser.metrics.contains_key("json.counter"));
         assert!(deser.metrics.contains_key("json.gauge"));
         assert!(deser.metrics.contains_key("json.hist"));
+        Ok(())
     }
 
     #[test]
-    fn snapshot_json_serialization_shape() {
+    fn snapshot_json_serialization_shape() -> Result<(), serde_json::Error> {
         let registry = MetricsRegistry::new();
         registry.enable();
         let counter = registry.register("json.counter", MetricKind::Counter);
@@ -720,9 +721,10 @@ mod tests {
 
         let mut snap = registry.snapshot();
         snap.elapsed_secs = 0.0;
-        let json = serde_json::to_string_pretty(&snap).expect("serialize");
+        let json = serde_json::to_string_pretty(&snap)?;
 
         insta::assert_snapshot!("snapshot_json_serialization_shape", json);
+        Ok(())
     }
 
     #[test]
