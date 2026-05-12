@@ -639,29 +639,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_campaign_summary_rejects_target_count_drift() {
+    fn parse_campaign_summary_rejects_target_count_drift() -> Result<(), serde_json::Error> {
         let mut summary = sample_campaign();
         summary.config.target_count = 99;
-        let json = serde_json::to_string(&summary).expect("serialize");
+        let json = serde_json::to_string(&summary)?;
         let result = parse_campaign_summary(&json);
         assert!(
             result
                 .unwrap_err()
                 .contains("config.target_count 99 does not match 4 target row"),
         );
+        Ok(())
     }
 
     #[test]
-    fn parse_campaign_summary_rejects_totals_drift() {
+    fn parse_campaign_summary_rejects_totals_drift() -> Result<(), serde_json::Error> {
         let mut summary = sample_campaign();
         summary.totals.total_runs += 1;
         summary.totals.total_coverage += 1;
         summary.totals.total_crashes += 1;
-        let json = serde_json::to_string(&summary).expect("serialize");
+        let json = serde_json::to_string(&summary)?;
         let err = parse_campaign_summary(&json).unwrap_err();
         assert!(err.contains("totals.total_runs"));
         assert!(err.contains("totals.total_coverage"));
         assert!(err.contains("totals.total_crashes"));
+        Ok(())
     }
 
     #[test]
@@ -678,14 +680,15 @@ mod tests {
     }
 
     #[test]
-    fn validate_schema_checks_all_fields() {
+    fn validate_schema_checks_all_fields() -> Result<(), serde_json::Error> {
         let summary = sample_campaign();
-        let json = serde_json::to_string(&summary).expect("serialize");
+        let json = serde_json::to_string(&summary)?;
         let checks = validate_campaign_schema(&json);
         assert_eq!(checks.len(), 5);
         for check in &checks {
             assert!(check.present, "field {} missing", check.field);
         }
+        Ok(())
     }
 
     #[test]
