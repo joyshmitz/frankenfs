@@ -403,6 +403,31 @@ schema ids, README wording ids, cleanup policy, and explicit host-skip reasons.
 Rows that require real FUSE mounts remain host-skipped until a permissioned
 lane records authoritative mounted artifacts.
 
+## Remediation Catalog Contract
+
+The user-facing remediation catalog lives in:
+
+- `tests/remediation-catalog/remediation_catalog.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-remediation-catalog \
+  --catalog tests/remediation-catalog/remediation_catalog.json \
+  --out artifacts/remediation/catalog_report.json \
+  --summary-out artifacts/remediation/catalog_summary.md
+```
+
+This catalog is an operator action contract for proof failures and readiness
+blockers, not evidence that any repair, rollback, or host remediation command
+has been executed. It must keep product failures, host-capability skips,
+unsupported operations, stale artifacts, security refusals, unsafe repair
+refusals, and passing-with-caveat outcomes visible, with user summary,
+technical cause, immediate action, safe retry policy, reproduction command,
+artifact links, owning bead, escalation path, and docs target for every entry.
+The CLI must emit JSON reports for machines and Markdown summaries for human
+handoffs through `--format markdown` and `--summary-out`.
+
 ## Remediation Severity Gate Contract
 
 The remediation severity gate lives in:

@@ -201,7 +201,8 @@ use ffs_harness::{
         render_release_gate_markdown,
     },
     remediation_catalog::{
-        DEFAULT_REMEDIATION_CATALOG_PATH, parse_remediation_catalog, validate_remediation_catalog,
+        DEFAULT_REMEDIATION_CATALOG_PATH, parse_remediation_catalog, render_remediation_markdown,
+        validate_remediation_catalog,
     },
     remediation_severity_gate::{
         DEFAULT_REMEDIATION_SEVERITY_GATE_PATH, fail_on_remediation_severity_gate_errors,
@@ -7800,6 +7801,8 @@ fn parse_inventory_closeout_gate_cmd_args(
 fn validate_remediation_catalog_cmd(args: &[String]) -> Result<()> {
     let mut catalog_path = DEFAULT_REMEDIATION_CATALOG_PATH.to_owned();
     let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
     let mut i = 0;
 
     while i < args.len() {
@@ -7813,6 +7816,19 @@ fn validate_remediation_catalog_cmd(args: &[String]) -> Result<()> {
             "--out" => {
                 i += 1;
                 out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
             }
             "--help" | "-h" => {
                 print_remediation_catalog_usage();
@@ -7834,15 +7850,25 @@ fn validate_remediation_catalog_cmd(args: &[String]) -> Result<()> {
             report.errors.join("; ")
         );
     }
-    let json = serde_json::to_string_pretty(&report)?;
+    let output = match format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_remediation_markdown(&catalog),
+    };
     if let Some(path) = out_path {
-        write_text_file(Path::new(&path), &format!("{json}\n"))?;
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
         println!(
             "remediation catalog report written: {} entries={}",
             path, report.entry_count
         );
     } else {
-        println!("{json}");
+        println!("{output}");
+    }
+    if let Some(path) = summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_remediation_markdown(&catalog)),
+        )?;
+        println!("remediation catalog summary written: {path}");
     }
     Ok(())
 }
@@ -8370,7 +8396,9 @@ fn print_usage_commands() {
     print_repair_writeback_serialization_usage_summary();
     print_chaos_replay_lab_usage_summary();
     print_inventory_closeout_gate_usage_summary();
-    println!("  ffs-harness validate-remediation-catalog [--catalog FILE] [--out FILE]");
+    println!(
+        "  ffs-harness validate-remediation-catalog [--catalog FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
     print_remediation_severity_gate_usage_summary();
     print_writeback_cache_audit_usage_summary();
     print_writeback_cache_ordering_usage_summary();
@@ -8505,7 +8533,7 @@ fn print_usage_examples() {
     print_repair_writeback_serialization_example();
     print_chaos_replay_lab_example();
     println!(
-        "  ffs-harness validate-remediation-catalog --out artifacts/remediation/catalog_report.json"
+        "  ffs-harness validate-remediation-catalog --out artifacts/remediation/catalog_report.json --summary-out artifacts/remediation/catalog_summary.md"
     );
     print_inventory_closeout_gate_example();
     print_remediation_severity_gate_example();
@@ -9540,7 +9568,9 @@ fn print_remediation_catalog_usage() {
     println!();
     println!("Options:");
     println!("  --catalog FILE                     Read remediation catalog JSON");
-    println!("  --out FILE                         Write JSON validation report to FILE");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report to FILE");
+    println!("  --summary-out FILE                 Write Markdown catalog summary to FILE");
 }
 
 fn print_inventory_closeout_gate_usage_summary() {
