@@ -423,14 +423,16 @@ mod tests {
     }
 
     #[test]
-    fn default_manifest_validates_required_lanes_and_side_effects() {
-        let report = validate_default_low_privilege_demo_sandbox()
-            .expect("default low-privilege demo sandbox validates");
-        let json = serde_json::to_string_pretty(&report).expect("report serializes");
+    fn default_manifest_validates_required_lanes_and_side_effects() -> Result<()> {
+        let report = validate_default_low_privilege_demo_sandbox()?;
+        let json = serde_json::to_string_pretty(&report)?;
         insta::assert_snapshot!("low_privilege_demo_sandbox_report_json_shape", json);
+        let parsed: LowPrivilegeDemoSandboxReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
 
         assert_eq!(report.bead_id, "bd-3crxf");
         assert!(report.host_skipped_lanes >= 1);
+        Ok(())
     }
 
     #[test]
