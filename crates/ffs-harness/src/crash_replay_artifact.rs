@@ -577,6 +577,16 @@ mod tests {
     }
 
     #[test]
+    fn crash_replay_artifact_report_json_shape() -> Result<()> {
+        let report = validate_default_crash_replay_artifact()?;
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("crash_replay_artifact_report_json_shape", json);
+        let parsed: CrashReplayArtifactReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn missing_schedule_id_is_rejected() {
         let mut artifact = fixture_artifact();
         artifact.schedule_id = String::new();

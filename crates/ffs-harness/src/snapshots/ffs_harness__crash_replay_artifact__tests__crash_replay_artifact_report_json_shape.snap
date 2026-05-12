@@ -1,0 +1,14 @@
+---
+source: crates/ffs-harness/src/crash_replay_artifact.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "artifact_id": "crash_replay_pre_commit_baseline_001",
+  "bead_id": "bd-nk49l",
+  "lane_type": "core_labruntime",
+  "oracle_verdict": "exact_match",
+  "fail_closed": false,
+  "valid": true,
+  "errors": []
+}
