@@ -1928,6 +1928,19 @@ mod tests {
         insta::assert_snapshot!("render_release_gate_markdown_failing_threshold", markdown);
     }
 
+    #[test]
+    fn release_gate_evaluation_report_json_shape() -> Result<()> {
+        let mut proof = passing_proof();
+        proof.totals.pass = 8;
+        let report = evaluate_release_gates(&sample_policy(), &proof);
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("release_gate_evaluation_report_json_shape", json);
+        let parsed: ReleaseGateEvaluationReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
     fn canonical_policy_path() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/release-gates/release_gate_policy_v1.json")

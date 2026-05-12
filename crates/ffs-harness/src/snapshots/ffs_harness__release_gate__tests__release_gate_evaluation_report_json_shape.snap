@@ -1,0 +1,67 @@
+---
+source: crates/ffs-harness/src/release_gate.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "policy_id": "bd-rchk0.5.6.1-release-gate",
+  "bundle_id": "release-gate-proof",
+  "valid": false,
+  "release_ready": false,
+  "proof_bundle_valid": true,
+  "feature_reports": [
+    {
+      "feature_id": "writeback_cache",
+      "docs_wording_id": "readme.writeback_cache",
+      "previous_state": "experimental",
+      "target_state": "validated",
+      "final_state": "experimental",
+      "upgrade_allowed": false,
+      "finding_ids": [
+        "writeback_cache::threshold_failure::1"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "finding_id": "writeback_cache::threshold_failure::1",
+      "feature_id": "writeback_cache",
+      "severity": "block",
+      "previous_state": "experimental",
+      "proposed_state": "experimental",
+      "final_state": "experimental",
+      "transition_reason": "threshold pass_lanes at_least 9 observed 8",
+      "controlling_artifact_hash": "release-gate-proof",
+      "threshold_value": 9,
+      "observed_value": 8,
+      "remediation_id": "bd-rchk0.5.6.1",
+      "docs_wording_id": "readme.writeback_cache",
+      "reproduction_command": "cargo run -p ffs-harness -- evaluate-release-gates --bundle manifest.json --policy release_gate.json"
+    }
+  ],
+  "generated_wording": [
+    {
+      "docs_wording_id": "readme.writeback_cache",
+      "feature_id": "writeback_cache",
+      "state": "experimental",
+      "wording": "writeback_cache is experimental and requires operator caution."
+    }
+  ],
+  "required_log_fields": [
+    "controlling_artifact_hash",
+    "docs_wording_id",
+    "feature_id",
+    "final_state",
+    "observed_value",
+    "output_path",
+    "previous_state",
+    "proposed_state",
+    "remediation_id",
+    "reproduction_command",
+    "threshold_value",
+    "transition_reason"
+  ],
+  "errors": [],
+  "warnings": [],
+  "reproduction_command": "cargo run -p ffs-harness -- evaluate-release-gates --bundle manifest.json --policy release_gate.json"
+}
