@@ -1,0 +1,25 @@
+---
+source: crates/ffs-harness/src/inventory_closeout_gate.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "gate_id": "frankenfs_inventory_closeout_v1",
+  "bead_id": "bd-rpjp9",
+  "total_rows": 8,
+  "completed_rows": 5,
+  "stale_allowed_rows": 1,
+  "false_positive_rows": 1,
+  "high_risk_surfaces_seen": [
+    "fuzz",
+    "golden",
+    "mounted_path",
+    "parser",
+    "performance",
+    "readme_feature_parity",
+    "repair",
+    "xfstests"
+  ],
+  "valid": true,
+  "errors": []
+}

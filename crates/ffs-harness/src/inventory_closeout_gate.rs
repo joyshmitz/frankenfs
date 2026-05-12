@@ -772,6 +772,16 @@ mod tests {
     }
 
     #[test]
+    fn inventory_closeout_gate_report_json_shape() -> Result<()> {
+        let report = validate_default_inventory_closeout_gate()?;
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("inventory_closeout_gate_report_json_shape", json);
+        let parsed: InventoryCloseoutReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn fail_on_errors_rejects_invalid_report() {
         let mut gate = fixture_gate();
         gate.rows[0].risk_surface = "telepathy".to_owned();
