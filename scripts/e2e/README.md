@@ -1660,6 +1660,21 @@ The dashboard E2E is non-destructive and uses synthetic reports:
 ./scripts/e2e/ffs_readiness_dashboard_e2e.sh
 ```
 
+### Readiness Action Autopilot Contract
+
+`ffs_readiness_action_autopilot_e2e.sh` exercises the
+`recommend-readiness-actions` dry-run CLI without executing any recommended
+commands. The gate writes the JSON report, Markdown report, deterministic
+stdout log, and deterministic stderr log, then checks that local-safe,
+permissioned, stale-evidence, and impossible recommendations stay classified as
+planner output rather than executed work.
+
+The suite treats malformed planning input as a fail-closed error and verifies
+that the deterministic stderr log says permissioned, destructive, and
+stale-evidence commands stayed dry-run only. It complements
+`docs/runbooks/readiness-action-autopilot.md`; it does not authorize xfstests,
+mounted mutation, package installs, or large-host campaigns.
+
 ### Non-Permissioned Readiness Lab Contracts
 
 Readiness lab contracts describe advisory artifacts that help agents rehearse

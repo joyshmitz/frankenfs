@@ -5361,6 +5361,59 @@
       ]
     },
     {
+      "suite_id": "ffs_readiness_action_autopilot",
+      "script": "scripts/e2e/ffs_readiness_action_autopilot_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "readiness_action_autopilot_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_action_autopilot_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "readiness_action_autopilot_report_pack",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_action_autopilot_report_pack|outcome=PASS"
+        },
+        {
+          "id": "readiness_action_autopilot_report_contract",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_action_autopilot_report_contract|outcome=PASS"
+        },
+        {
+          "id": "readiness_action_autopilot_dry_run_logs",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_action_autopilot_dry_run_logs|outcome=PASS"
+        },
+        {
+          "id": "readiness_action_autopilot_rejects_bad_input",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_action_autopilot_rejects_bad_input|outcome=PASS"
+        },
+        {
+          "id": "readiness_action_autopilot_docs_contract",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_action_autopilot_docs_contract|outcome=PASS"
+        },
+        {
+          "id": "readiness_action_autopilot_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_action_autopilot_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_permissioned_campaign_broker",
       "script": "scripts/e2e/ffs_permissioned_campaign_broker_e2e.sh",
       "required_categories": [
