@@ -2121,6 +2121,84 @@ mod tests {
     }
 
     #[test]
+    fn soak_canary_campaign_report_json_shape() -> serde_json::Result<()> {
+        let manifest = sample_manifest();
+        let report = validate_soak_canary_campaign_manifest(&manifest, "artifacts/soak");
+        assert!(report.valid, "{:?}", report.errors);
+
+        let full_json = serde_json::to_string_pretty(&report)?;
+        let decoded: SoakCanaryCampaignReport = serde_json::from_str(&full_json)?;
+        assert_eq!(decoded, report);
+        assert!(
+            decoded
+                .artifact_consumers
+                .contains(&"release_gate_evaluator".to_owned())
+        );
+        assert!(
+            decoded
+                .failure_evaluations
+                .iter()
+                .any(|evaluation| evaluation.follow_up_bead == "bd-t21em")
+        );
+        assert!(
+            decoded
+                .heartbeat_summaries
+                .iter()
+                .any(|summary| summary.starts_with("HEARTBEAT|"))
+        );
+
+        let failure_outcomes = report
+            .failure_evaluations
+            .iter()
+            .map(|evaluation| evaluation.outcome.label())
+            .collect::<Vec<_>>();
+        let root_cause_classes = report
+            .root_cause_samples
+            .iter()
+            .map(|sample| sample.classification.label())
+            .collect::<Vec<_>>();
+        let command_samples = report
+            .command_expansions
+            .iter()
+            .take(3)
+            .map(|command| {
+                json!({
+                    "profile_id": command.profile_id,
+                    "workload_id": command.workload_id,
+                    "seed": command.seed,
+                    "artifact_path": command.artifact_path,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let shape = json!({
+            "schema_version": report.schema_version,
+            "manifest_id": report.manifest_id,
+            "valid": report.valid,
+            "profile_count": report.profile_count,
+            "workload_count": report.workload_count,
+            "long_profile_ids": report.long_profile_ids,
+            "required_environment_field_count": report.required_environment_fields.len(),
+            "required_log_field_count": report.required_log_fields.len(),
+            "artifact_consumers": report.artifact_consumers,
+            "stop_condition_precedence": report.stop_condition_precedence,
+            "command_expansion_count": report.command_expansions.len(),
+            "command_samples": command_samples,
+            "failure_outcomes": failure_outcomes,
+            "root_cause_classes": root_cause_classes,
+            "heartbeat_summary_count": report.heartbeat_summaries.len(),
+            "sample_outcome_counts": report.sample_outcome_counts,
+            "sample_artifact_manifest_error_count": report.sample_artifact_manifest_errors.len(),
+            "errors": report.errors,
+        });
+        insta::assert_snapshot!(
+            "soak_canary_campaign_report_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
+    }
+
+    #[test]
     fn sample_artifact_manifest_exposes_proof_bundle_and_release_gate_metadata() {
         let manifest = sample_manifest();
         let evaluations = sample_failure_evaluations(&manifest);

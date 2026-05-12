@@ -1,0 +1,83 @@
+---
+source: crates/ffs-harness/src/soak_canary_campaign.rs
+expression: serde_json::to_string_pretty(&shape)?
+---
+{
+  "schema_version": 1,
+  "manifest_id": "bd-rchk0.5.9-soak-canary-campaigns-v1",
+  "valid": true,
+  "profile_count": 4,
+  "workload_count": 7,
+  "long_profile_ids": [
+    "nightly",
+    "stress",
+    "canary"
+  ],
+  "required_environment_field_count": 14,
+  "required_log_field_count": 16,
+  "artifact_consumers": [
+    "operator_proof_bundle",
+    "release_gate_evaluator",
+    "operational_readiness_report"
+  ],
+  "stop_condition_precedence": [
+    "resource_budget_exceeded",
+    "timeout",
+    "infrastructure_error",
+    "failure_threshold_exceeded",
+    "flake_threshold_exceeded",
+    "host_capability_skip",
+    "stale_baseline",
+    "inconclusive",
+    "completed"
+  ],
+  "command_expansion_count": 36,
+  "command_samples": [
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "seed": 1001,
+      "artifact_path": "artifacts/soak/smoke/soak_mount_cycle_ext4_ro_summary.json"
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "seed": 1002,
+      "artifact_path": "artifacts/soak/smoke/soak_mount_cycle_ext4_ro_summary.json"
+    },
+    {
+      "profile_id": "nightly",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "seed": 1001,
+      "artifact_path": "artifacts/soak/nightly/soak_mount_cycle_ext4_ro_summary.json"
+    }
+  ],
+  "failure_outcomes": [
+    "pass",
+    "fail",
+    "error",
+    "flake",
+    "skip"
+  ],
+  "root_cause_classes": [
+    "clean_pass",
+    "product_regression",
+    "host_capability_skip",
+    "infrastructure_error",
+    "timeout",
+    "resource_exhaustion",
+    "known_quarantined_flake",
+    "new_recurring_flake",
+    "inconclusive"
+  ],
+  "heartbeat_summary_count": 1,
+  "sample_outcome_counts": {
+    "error": 1,
+    "fail": 1,
+    "flake": 1,
+    "pass": 1,
+    "skip": 1
+  },
+  "sample_artifact_manifest_error_count": 0,
+  "errors": []
+}
