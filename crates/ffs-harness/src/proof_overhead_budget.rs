@@ -1509,11 +1509,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_budget_schema_and_observed_metrics_json() {
-        let budget_json = serde_json::to_string(&budget_config()).expect("serialize budget");
-        let metrics_json = serde_json::to_string(&observed_metrics()).expect("serialize metrics");
-        let parsed_budget = parse_proof_overhead_budget_config(&budget_json).expect("parse budget");
-        let parsed_metrics = parse_observed_proof_metrics(&metrics_json).expect("parse metrics");
+    fn parses_budget_schema_and_observed_metrics_json() -> Result<()> {
+        let budget_json = serde_json::to_string(&budget_config())?;
+        let metrics_json = serde_json::to_string(&observed_metrics())?;
+        let parsed_budget = parse_proof_overhead_budget_config(&budget_json)?;
+        let parsed_metrics = parse_observed_proof_metrics(&metrics_json)?;
 
         assert!(
             validate_proof_overhead_budget_config(&parsed_budget).is_empty(),
@@ -1525,6 +1525,7 @@ mod tests {
         );
         assert_eq!(parsed_budget.profile, BudgetProfile::DeveloperSmoke);
         assert_eq!(parsed_metrics.metrics.len(), 3);
+        Ok(())
     }
 
     #[test]
