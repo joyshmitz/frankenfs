@@ -535,11 +535,14 @@ mod tests {
     }
 
     #[test]
-    fn casefold_corpus_report_json_shape() {
-        let report = validate_default_casefold_corpus().expect("default casefold corpus validates");
-        let json = serde_json::to_string_pretty(&report).expect("casefold report serializes");
+    fn casefold_corpus_report_json_shape() -> Result<()> {
+        let report = validate_default_casefold_corpus()?;
+        let json = serde_json::to_string_pretty(&report)?;
 
         insta::assert_snapshot!("casefold_corpus_report_json_shape", json);
+        let parsed: CasefoldCorpusReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
     }
 
     #[test]
