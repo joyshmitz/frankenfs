@@ -1,0 +1,20 @@
+---
+source: crates/ffs-harness/src/adaptive_runtime_manifest.rs
+expression: json
+---
+{
+  "manifest_version": 1,
+  "scenario_id": "adaptive_runtime_accepted_large_host",
+  "run_id": "adaptive-runtime-run-20260507T000000Z",
+  "valid": true,
+  "runtime_controls_accepted": true,
+  "release_claim_state": "accepted_large_host",
+  "runtime_mode": "per_core",
+  "host_lane": "permissioned_large_host",
+  "host_classification": "large_host_floor_met",
+  "fuse_capability_state": "available",
+  "artifact_count": 3,
+  "raw_log_count": 2,
+  "issues": [],
+  "errors": []
+}

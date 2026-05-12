@@ -1,0 +1,77 @@
+---
+source: crates/ffs-harness/src/adaptive_runtime_manifest.rs
+expression: json
+---
+{
+  "report": {
+    "contract_version": 1,
+    "valid": true,
+    "mode": "dry_run",
+    "classification": "small_host_smoke",
+    "execution": {
+      "dry_run_only": true,
+      "permissioned_real_allowed": false
+    },
+    "ack": {
+      "env": "FFS_ADAPTIVE_RUNTIME_REAL_RUN_ACK",
+      "value": "adaptive-runtime-may-mount-and-generate-load",
+      "present": false,
+      "matches_expected": false
+    },
+    "path_plan": {
+      "artifact_root": "artifacts/adaptive-runtime/runner",
+      "raw_stdout_path": "artifacts/adaptive-runtime/runner/stdout.log",
+      "raw_stderr_path": "artifacts/adaptive-runtime/runner/stderr.log",
+      "structured_log_path": "artifacts/adaptive-runtime/runner/structured.jsonl",
+      "runner_manifest_path": "artifacts/adaptive-runtime/runner/runner_manifest.json",
+      "cleanup_report_path": "artifacts/adaptive-runtime/runner/cleanup_report.json",
+      "host_facts_path": "artifacts/adaptive-runtime/runner/host_facts.json"
+    },
+    "host_facts": {
+      "host_fingerprint": "local-smoke-16c-64gb-1numa",
+      "cpu_count": 16,
+      "ram_bytes": 68719476736,
+      "numa_nodes": 1,
+      "kernel": "Linux 6.17.0-14-generic x86_64",
+      "fuse_capability_summary": {
+        "state": "available",
+        "detail": "fixture FUSE available"
+      }
+    },
+    "cleanup_status": "not_started_dry_run",
+    "artifact_paths": [
+      "artifacts/adaptive-runtime/runner/stdout.log",
+      "artifacts/adaptive-runtime/runner/stderr.log",
+      "artifacts/adaptive-runtime/runner/structured.jsonl",
+      "artifacts/adaptive-runtime/runner/runner_manifest.json",
+      "artifacts/adaptive-runtime/runner/cleanup_report.json",
+      "artifacts/adaptive-runtime/runner/host_facts.json"
+    ],
+    "capability_downgrade_reasons": [
+      "host below large-host floor: cpu_count=16 ram_bytes=68719476736 numa_nodes=1",
+      "dry-run mode does not mount or generate adaptive runtime load"
+    ],
+    "refusal_reasons": [],
+    "errors": [],
+    "generated_at": "2026-05-07T00:00:00Z",
+    "git_sha": "c87266f2",
+    "reproduction_command": "cargo run -p ffs-harness -- adaptive-runtime-runner --artifact-root artifacts/adaptive-runtime/runner"
+  },
+  "cleanup_report": {
+    "contract_version": 1,
+    "cleanup_status": "not_started_dry_run",
+    "cleanup_performed": false,
+    "mutating_workload_started": false,
+    "preserved_artifacts": [
+      "artifacts/adaptive-runtime/runner/stdout.log",
+      "artifacts/adaptive-runtime/runner/stderr.log",
+      "artifacts/adaptive-runtime/runner/structured.jsonl",
+      "artifacts/adaptive-runtime/runner/runner_manifest.json",
+      "artifacts/adaptive-runtime/runner/cleanup_report.json",
+      "artifacts/adaptive-runtime/runner/host_facts.json"
+    ],
+    "notes": [
+      "no mount or adaptive workload was started"
+    ]
+  }
+}

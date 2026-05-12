@@ -1495,6 +1495,24 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_runtime_evidence_report_json_shape() -> Result<()> {
+        let manifest = fixture_manifest();
+        let config = AdaptiveRuntimeEvidenceValidationConfig {
+            reference_epoch_days: parse_manifest_timestamp_epoch_days("2026-05-07T12:00:00Z"),
+            current_git_sha: None,
+        };
+        let report = validate_adaptive_runtime_evidence_manifest_with_config(&manifest, &config);
+        assert!(report.valid, "{:?}", report.errors);
+        assert!(report.runtime_controls_accepted);
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("adaptive_runtime_evidence_report_json_shape", json);
+        let parsed: AdaptiveRuntimeEvidenceReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn strict_git_sha_mismatch_is_rejected() {
         let manifest = fixture_manifest();
         let config = AdaptiveRuntimeEvidenceValidationConfig {
@@ -1728,6 +1746,29 @@ mod tests {
         let markdown = render_adaptive_runtime_runner_markdown(&artifacts.report);
 
         insta::assert_snapshot!("render_adaptive_runtime_runner_markdown_dry_run", markdown);
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct AdaptiveRuntimeRunnerJsonShape {
+        report: AdaptiveRuntimeRunnerReport,
+        cleanup_report: AdaptiveRuntimeRunnerCleanupReport,
+    }
+
+    #[test]
+    fn adaptive_runtime_runner_report_json_shape() -> Result<()> {
+        let artifacts = build_adaptive_runtime_runner_artifacts(fixture_runner_config(
+            AdaptiveRuntimeRunnerMode::DryRun,
+        ));
+        let shape = AdaptiveRuntimeRunnerJsonShape {
+            report: artifacts.report,
+            cleanup_report: artifacts.cleanup_report,
+        };
+
+        let json = serde_json::to_string_pretty(&shape)?;
+        insta::assert_snapshot!("adaptive_runtime_runner_report_json_shape", json);
+        let parsed: AdaptiveRuntimeRunnerJsonShape = serde_json::from_str(&json)?;
+        assert_eq!(parsed, shape);
+        Ok(())
     }
 
     #[test]
