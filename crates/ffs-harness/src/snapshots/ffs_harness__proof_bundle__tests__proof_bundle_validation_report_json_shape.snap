@@ -1,0 +1,596 @@
+---
+source: crates/ffs-harness/src/proof_bundle.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "bundle_id": "proof-bundle-sample",
+  "manifest_path": "$BUNDLE/manifest.json",
+  "valid": true,
+  "totals": {
+    "pass": 5,
+    "fail": 3,
+    "skip": 3,
+    "error": 3,
+    "lanes": 14,
+    "scenarios": 14,
+    "artifacts": 16
+  },
+  "missing_required_lanes": [],
+  "duplicate_lane_ids": [],
+  "duplicate_scenario_ids": [],
+  "stale_git_sha": null,
+  "stale_timestamp": null,
+  "broken_links": [],
+  "raw_log_hash_mismatches": [],
+  "artifact_hash_mismatches": [],
+  "artifact_hash_chain": {
+    "expected_sha256": "7c71869ed24132798196e900483767d7f48c7e8943b41da70f29b3e3f5c682ae",
+    "observed_sha256": "7c71869ed24132798196e900483767d7f48c7e8943b41da70f29b3e3f5c682ae",
+    "artifact_count": 16,
+    "redaction_policy_version": "redaction-v1"
+  },
+  "artifact_reports": [
+    {
+      "lane_id": "conformance",
+      "path": "artifacts/conformance.json",
+      "sha256": "69a52a5178528153d77b4c14ab920e7e358fbaaf9bcdb5d0004517b79ea70629",
+      "redacted": true,
+      "role": "primary_evidence"
+    },
+    {
+      "lane_id": "xfstests",
+      "path": "artifacts/xfstests.json",
+      "sha256": "5b0573d61440036a8420af28402ddf1c0e30cce290b496518fb6a4d5555d478c",
+      "redacted": false,
+      "role": "primary_evidence"
+    },
+    {
+      "lane_id": "fuse",
+      "path": "artifacts/fuse.json",
+      "sha256": "af3926e483ff04042e6798006b976b3fd81d03408daeafd7791a1253e1fb2650",
+      "redacted": true,
+      "role": "primary_evidence"
+    },
+    {
+      "lane_id": "differential_oracle",
+      "path": "artifacts/differential_oracle.json",
+      "sha256": "0c72b3ba6302e7a0184ccc0c990f8416e852e82cb02f498531f34a80dd848e8b",
+      "redacted": false,
+      "role": "primary_evidence"
+    },
+    {
+      "lane_id": "repair_lab",
+      "path": "artifacts/repair_lab.json",
+      "sha256": "8f98152a144d8e9edc2f7c3c656eecb66bca9bbe36609d948ae045368211ef09",
+      "redacted": true,
+      "role": "primary_evidence"
+    },
+    {
+      "lane_id": "crash_replay",
+      "path": "artifacts/crash_replay.json",
+      "sha256": "b37d9bde732c7b751fcb2f20ee3cf8a5057c5a299cd0ee4209283b71914c9e9c",
+      "redacted": false,
+      "role": "primary_evidence"
+    },
+    {
+      "lane_id": "performance",
+      "path": "artifacts/performance.json",
+      "sha256": "2eca810483dad3d8882a2318923bcf701126a3126dc124159603118955c0b1fd",
+      "redacted": true,
+      "role": "primary_evidence"
+    },
+    {
+      "lane_id": "swarm_workload_harness",
+      "path": "artifacts/swarm_workload_harness.json",
+      "sha256": "a250faf47180c78b27d09d90ba23b5db041dff38ffb44cc7a4394f9d1b3ebf56",
+      "redacted": false,
+      "role": "swarm_validator_report"
+    },
+    {
+      "lane_id": "swarm_tail_latency",
+      "path": "artifacts/swarm_tail_latency.json",
+      "sha256": "ca8b1082a3dd47d27cc9b923af5e124de8b3793f3e8bcd348a62a7f86fa8bef4",
+      "redacted": true,
+      "role": "swarm_validator_report"
+    },
+    {
+      "lane_id": "swarm_tail_latency",
+      "path": "artifacts/swarm_tail_latency_p99_attribution.json",
+      "sha256": "fad356dde2c96864db4aff6b9333104a7549eb01cdab20f9f43861f2c5176f56",
+      "redacted": false,
+      "role": "p99_attribution_ledger"
+    },
+    {
+      "lane_id": "writeback_cache",
+      "path": "artifacts/writeback_cache.json",
+      "sha256": "187ec094fec6add269e09695f327b20c4f0312f7d75fb3060a4ddd7ac8511cdb",
+      "redacted": false,
+      "role": "primary_evidence"
+    },
+    {
+      "lane_id": "scrub_repair_status",
+      "path": "artifacts/scrub_repair_status.json",
+      "sha256": "dbb088a4757905d03aeac97b70fa6da8de71a22bf3557c6922903629c88be45d",
+      "redacted": true,
+      "role": "primary_evidence"
+    },
+    {
+      "lane_id": "known_deferrals",
+      "path": "artifacts/known_deferrals.json",
+      "sha256": "241962eb05140ca79865443e40f92f52500309addae2a008291f1782cc586be0",
+      "redacted": false,
+      "role": "primary_evidence"
+    },
+    {
+      "lane_id": "release_gates",
+      "path": "artifacts/release_gates.json",
+      "sha256": "9acafce52cf691ad450cdbe763a503987997aad0f87bb19bf73e971a72e5b030",
+      "redacted": true,
+      "role": "primary_evidence"
+    },
+    {
+      "lane_id": "adaptive_runtime",
+      "path": "artifacts/adaptive_runtime.json",
+      "sha256": "d953175178ccbb3ad0d4c9b4ef6f255ffbeb7c5acb7049d23ec967ab1f66afaa",
+      "redacted": false,
+      "role": "adaptive_runtime_validator_report"
+    },
+    {
+      "lane_id": "adaptive_runtime",
+      "path": "artifacts/adaptive_runtime_runner.json",
+      "sha256": "4f8ddbe917a1417a27428e11c56a3b8a97c865c3c7730744d813a9d3c7ec3828",
+      "redacted": false,
+      "role": "adaptive_runtime_runner_report"
+    }
+  ],
+  "redaction_errors": [],
+  "redaction_leaks": [],
+  "integrity_errors": [],
+  "lanes": [
+    {
+      "lane_id": "conformance",
+      "status": "pass",
+      "raw_log_path": "logs/conformance.log",
+      "summary_path": "summaries/conformance.md",
+      "scenario_count": 1,
+      "artifact_count": 1,
+      "metadata": {
+        "source_command": "cargo run -p ffs-harness -- validate-conformance"
+      }
+    },
+    {
+      "lane_id": "xfstests",
+      "status": "fail",
+      "raw_log_path": "logs/xfstests.log",
+      "summary_path": "summaries/xfstests.md",
+      "scenario_count": 1,
+      "artifact_count": 1,
+      "metadata": {
+        "source_command": "cargo run -p ffs-harness -- validate-xfstests"
+      }
+    },
+    {
+      "lane_id": "fuse",
+      "status": "skip",
+      "raw_log_path": "logs/fuse.log",
+      "summary_path": "summaries/fuse.md",
+      "scenario_count": 1,
+      "artifact_count": 1,
+      "metadata": {
+        "source_command": "cargo run -p ffs-harness -- validate-fuse"
+      }
+    },
+    {
+      "lane_id": "differential_oracle",
+      "status": "error",
+      "raw_log_path": "logs/differential_oracle.log",
+      "summary_path": "summaries/differential_oracle.md",
+      "scenario_count": 1,
+      "artifact_count": 1,
+      "metadata": {
+        "source_command": "cargo run -p ffs-harness -- validate-differential_oracle"
+      }
+    },
+    {
+      "lane_id": "repair_lab",
+      "status": "pass",
+      "raw_log_path": "logs/repair_lab.log",
+      "summary_path": "summaries/repair_lab.md",
+      "scenario_count": 1,
+      "artifact_count": 1,
+      "metadata": {
+        "source_command": "cargo run -p ffs-harness -- validate-repair_lab"
+      }
+    },
+    {
+      "lane_id": "crash_replay",
+      "status": "fail",
+      "raw_log_path": "logs/crash_replay.log",
+      "summary_path": "summaries/crash_replay.md",
+      "scenario_count": 1,
+      "artifact_count": 1,
+      "metadata": {
+        "source_command": "cargo run -p ffs-harness -- validate-crash_replay"
+      }
+    },
+    {
+      "lane_id": "performance",
+      "status": "skip",
+      "raw_log_path": "logs/performance.log",
+      "summary_path": "summaries/performance.md",
+      "scenario_count": 1,
+      "artifact_count": 1,
+      "metadata": {
+        "source_command": "cargo run -p ffs-harness -- validate-performance"
+      }
+    },
+    {
+      "lane_id": "swarm_workload_harness",
+      "status": "error",
+      "raw_log_path": "logs/swarm_workload_harness.log",
+      "summary_path": "summaries/swarm_workload_harness.md",
+      "scenario_count": 1,
+      "artifact_count": 1,
+      "metadata": {
+        "downgrade_reason": "swarm evidence errored and blocks release wording",
+        "freshness": "fresh",
+        "host_class": "developer_smoke",
+        "manifest_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "release_claim": "error",
+        "source_command": "cargo run -p ffs-harness -- validate-swarm_workload_harness",
+        "validator_report": "artifacts/swarm_workload_harness.json"
+      }
+    },
+    {
+      "lane_id": "swarm_tail_latency",
+      "status": "pass",
+      "raw_log_path": "logs/swarm_tail_latency.log",
+      "summary_path": "summaries/swarm_tail_latency.md",
+      "scenario_count": 1,
+      "artifact_count": 2,
+      "metadata": {
+        "freshness": "fresh",
+        "host_class": "permissioned_large_host",
+        "manifest_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "p99_attribution_artifact": "artifacts/swarm_tail_latency_p99_attribution.json",
+        "release_claim": "authoritative_large_host",
+        "source_command": "cargo run -p ffs-harness -- validate-swarm_tail_latency",
+        "validator_report": "artifacts/swarm_tail_latency.json"
+      }
+    },
+    {
+      "lane_id": "writeback_cache",
+      "status": "fail",
+      "raw_log_path": "logs/writeback_cache.log",
+      "summary_path": "summaries/writeback_cache.md",
+      "scenario_count": 1,
+      "artifact_count": 1,
+      "metadata": {
+        "source_command": "cargo run -p ffs-harness -- validate-writeback_cache"
+      }
+    },
+    {
+      "lane_id": "scrub_repair_status",
+      "status": "skip",
+      "raw_log_path": "logs/scrub_repair_status.log",
+      "summary_path": "summaries/scrub_repair_status.md",
+      "scenario_count": 1,
+      "artifact_count": 1,
+      "metadata": {
+        "source_command": "cargo run -p ffs-harness -- validate-scrub_repair_status"
+      }
+    },
+    {
+      "lane_id": "known_deferrals",
+      "status": "error",
+      "raw_log_path": "logs/known_deferrals.log",
+      "summary_path": "summaries/known_deferrals.md",
+      "scenario_count": 1,
+      "artifact_count": 1,
+      "metadata": {
+        "source_command": "cargo run -p ffs-harness -- validate-known_deferrals"
+      }
+    },
+    {
+      "lane_id": "release_gates",
+      "status": "pass",
+      "raw_log_path": "logs/release_gates.log",
+      "summary_path": "summaries/release_gates.md",
+      "scenario_count": 1,
+      "artifact_count": 1,
+      "metadata": {
+        "source_command": "cargo run -p ffs-harness -- validate-release_gates"
+      }
+    },
+    {
+      "lane_id": "adaptive_runtime",
+      "status": "pass",
+      "raw_log_path": "logs/adaptive_runtime.log",
+      "summary_path": "summaries/adaptive_runtime.md",
+      "scenario_count": 1,
+      "artifact_count": 2,
+      "metadata": {
+        "cleanup_status": "clean",
+        "freshness": "fresh",
+        "host_classification": "accepted_large_host",
+        "release_claim_state": "accepted_large_host",
+        "run_id": "adaptive-runtime-run-20260507T000000Z",
+        "runner_report": "artifacts/adaptive_runtime_runner.json",
+        "scenario_id": "adaptive_runtime_accepted_large_host",
+        "source_command": "cargo run -p ffs-harness -- validate-adaptive_runtime",
+        "validator_report": "artifacts/adaptive_runtime.json"
+      }
+    }
+  ],
+  "lane_provenance": [
+    {
+      "lane_id": "conformance",
+      "status": "pass",
+      "provenance_class": "executed_product_evidence",
+      "claim_effect": "strengthens_public_claim",
+      "artifact_roles": [
+        "primary_evidence"
+      ],
+      "source_command": "cargo run -p ffs-harness -- validate-conformance",
+      "git_sha": "abcdef1",
+      "freshness": "freshness_not_declared",
+      "host_class": "not_declared",
+      "raw_log_path": "logs/conformance.log",
+      "raw_log_present": true,
+      "rationale": "executed product evidence with outcome=pass has claim_effect=strengthens_public_claim"
+    },
+    {
+      "lane_id": "xfstests",
+      "status": "fail",
+      "provenance_class": "executed_product_evidence",
+      "claim_effect": "blocks_public_claim",
+      "artifact_roles": [
+        "primary_evidence"
+      ],
+      "source_command": "cargo run -p ffs-harness -- validate-xfstests",
+      "git_sha": "abcdef1",
+      "freshness": "freshness_not_declared",
+      "host_class": "not_declared",
+      "raw_log_path": "logs/xfstests.log",
+      "raw_log_present": true,
+      "rationale": "executed product evidence with outcome=fail has claim_effect=blocks_public_claim"
+    },
+    {
+      "lane_id": "fuse",
+      "status": "skip",
+      "provenance_class": "executed_product_evidence",
+      "claim_effect": "does_not_strengthen_public_claim",
+      "artifact_roles": [
+        "primary_evidence"
+      ],
+      "source_command": "cargo run -p ffs-harness -- validate-fuse",
+      "git_sha": "abcdef1",
+      "freshness": "freshness_not_declared",
+      "host_class": "not_declared",
+      "raw_log_path": "logs/fuse.log",
+      "raw_log_present": true,
+      "rationale": "executed product evidence with outcome=skip has claim_effect=does_not_strengthen_public_claim"
+    },
+    {
+      "lane_id": "differential_oracle",
+      "status": "error",
+      "provenance_class": "executed_product_evidence",
+      "claim_effect": "blocks_public_claim",
+      "artifact_roles": [
+        "primary_evidence"
+      ],
+      "source_command": "cargo run -p ffs-harness -- validate-differential_oracle",
+      "git_sha": "abcdef1",
+      "freshness": "freshness_not_declared",
+      "host_class": "not_declared",
+      "raw_log_path": "logs/differential_oracle.log",
+      "raw_log_present": true,
+      "rationale": "executed product evidence with outcome=error has claim_effect=blocks_public_claim"
+    },
+    {
+      "lane_id": "repair_lab",
+      "status": "pass",
+      "provenance_class": "executed_product_evidence",
+      "claim_effect": "strengthens_public_claim",
+      "artifact_roles": [
+        "primary_evidence"
+      ],
+      "source_command": "cargo run -p ffs-harness -- validate-repair_lab",
+      "git_sha": "abcdef1",
+      "freshness": "freshness_not_declared",
+      "host_class": "not_declared",
+      "raw_log_path": "logs/repair_lab.log",
+      "raw_log_present": true,
+      "rationale": "executed product evidence with outcome=pass has claim_effect=strengthens_public_claim"
+    },
+    {
+      "lane_id": "crash_replay",
+      "status": "fail",
+      "provenance_class": "executed_product_evidence",
+      "claim_effect": "blocks_public_claim",
+      "artifact_roles": [
+        "primary_evidence"
+      ],
+      "source_command": "cargo run -p ffs-harness -- validate-crash_replay",
+      "git_sha": "abcdef1",
+      "freshness": "freshness_not_declared",
+      "host_class": "not_declared",
+      "raw_log_path": "logs/crash_replay.log",
+      "raw_log_present": true,
+      "rationale": "executed product evidence with outcome=fail has claim_effect=blocks_public_claim"
+    },
+    {
+      "lane_id": "performance",
+      "status": "skip",
+      "provenance_class": "executed_product_evidence",
+      "claim_effect": "does_not_strengthen_public_claim",
+      "artifact_roles": [
+        "primary_evidence"
+      ],
+      "source_command": "cargo run -p ffs-harness -- validate-performance",
+      "git_sha": "abcdef1",
+      "freshness": "freshness_not_declared",
+      "host_class": "not_declared",
+      "raw_log_path": "logs/performance.log",
+      "raw_log_present": true,
+      "rationale": "executed product evidence with outcome=skip has claim_effect=does_not_strengthen_public_claim"
+    },
+    {
+      "lane_id": "swarm_workload_harness",
+      "status": "error",
+      "provenance_class": "small_host_smoke",
+      "claim_effect": "experimental_only",
+      "artifact_roles": [
+        "swarm_validator_report"
+      ],
+      "source_command": "cargo run -p ffs-harness -- validate-swarm_workload_harness",
+      "git_sha": "abcdef1",
+      "freshness": "fresh",
+      "host_class": "developer_smoke",
+      "raw_log_path": "logs/swarm_workload_harness.log",
+      "raw_log_present": true,
+      "rationale": "small-host smoke evidence is useful for regression checks but only supports experimental claims"
+    },
+    {
+      "lane_id": "swarm_tail_latency",
+      "status": "pass",
+      "provenance_class": "executed_product_evidence",
+      "claim_effect": "strengthens_public_claim",
+      "artifact_roles": [
+        "p99_attribution_ledger",
+        "swarm_validator_report"
+      ],
+      "source_command": "cargo run -p ffs-harness -- validate-swarm_tail_latency",
+      "git_sha": "abcdef1",
+      "freshness": "fresh",
+      "host_class": "permissioned_large_host",
+      "raw_log_path": "logs/swarm_tail_latency.log",
+      "raw_log_present": true,
+      "rationale": "executed product evidence with outcome=pass has claim_effect=strengthens_public_claim"
+    },
+    {
+      "lane_id": "writeback_cache",
+      "status": "fail",
+      "provenance_class": "executed_product_evidence",
+      "claim_effect": "blocks_public_claim",
+      "artifact_roles": [
+        "primary_evidence"
+      ],
+      "source_command": "cargo run -p ffs-harness -- validate-writeback_cache",
+      "git_sha": "abcdef1",
+      "freshness": "freshness_not_declared",
+      "host_class": "not_declared",
+      "raw_log_path": "logs/writeback_cache.log",
+      "raw_log_present": true,
+      "rationale": "executed product evidence with outcome=fail has claim_effect=blocks_public_claim"
+    },
+    {
+      "lane_id": "scrub_repair_status",
+      "status": "skip",
+      "provenance_class": "executed_product_evidence",
+      "claim_effect": "does_not_strengthen_public_claim",
+      "artifact_roles": [
+        "primary_evidence"
+      ],
+      "source_command": "cargo run -p ffs-harness -- validate-scrub_repair_status",
+      "git_sha": "abcdef1",
+      "freshness": "freshness_not_declared",
+      "host_class": "not_declared",
+      "raw_log_path": "logs/scrub_repair_status.log",
+      "raw_log_present": true,
+      "rationale": "executed product evidence with outcome=skip has claim_effect=does_not_strengthen_public_claim"
+    },
+    {
+      "lane_id": "known_deferrals",
+      "status": "error",
+      "provenance_class": "unsupported_future_scope",
+      "claim_effect": "does_not_strengthen_public_claim",
+      "artifact_roles": [
+        "primary_evidence"
+      ],
+      "source_command": "cargo run -p ffs-harness -- validate-known_deferrals",
+      "git_sha": "abcdef1",
+      "freshness": "freshness_not_declared",
+      "host_class": "not_declared",
+      "raw_log_path": "logs/known_deferrals.log",
+      "raw_log_present": true,
+      "rationale": "unsupported future-scope material is tracked as deferral context only"
+    },
+    {
+      "lane_id": "release_gates",
+      "status": "pass",
+      "provenance_class": "executed_product_evidence",
+      "claim_effect": "strengthens_public_claim",
+      "artifact_roles": [
+        "primary_evidence"
+      ],
+      "source_command": "cargo run -p ffs-harness -- validate-release_gates",
+      "git_sha": "abcdef1",
+      "freshness": "freshness_not_declared",
+      "host_class": "not_declared",
+      "raw_log_path": "logs/release_gates.log",
+      "raw_log_present": true,
+      "rationale": "executed product evidence with outcome=pass has claim_effect=strengthens_public_claim"
+    },
+    {
+      "lane_id": "adaptive_runtime",
+      "status": "pass",
+      "provenance_class": "executed_product_evidence",
+      "claim_effect": "strengthens_public_claim",
+      "artifact_roles": [
+        "adaptive_runtime_runner_report",
+        "adaptive_runtime_validator_report"
+      ],
+      "source_command": "cargo run -p ffs-harness -- validate-adaptive_runtime",
+      "git_sha": "abcdef1",
+      "freshness": "fresh",
+      "host_class": "accepted_large_host",
+      "raw_log_path": "logs/adaptive_runtime.log",
+      "raw_log_present": true,
+      "rationale": "executed product evidence with outcome=pass has claim_effect=strengthens_public_claim"
+    }
+  ],
+  "swarm_evidence": [
+    {
+      "lane_id": "swarm_workload_harness",
+      "status": "error",
+      "raw_log_path": "logs/swarm_workload_harness.log",
+      "host_class": "developer_smoke",
+      "manifest_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "validator_report": "artifacts/swarm_workload_harness.json",
+      "freshness": "fresh",
+      "release_claim": "error",
+      "downgrade_reason": "swarm evidence errored and blocks release wording"
+    },
+    {
+      "lane_id": "swarm_tail_latency",
+      "status": "pass",
+      "raw_log_path": "logs/swarm_tail_latency.log",
+      "host_class": "permissioned_large_host",
+      "manifest_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "validator_report": "artifacts/swarm_tail_latency.json",
+      "p99_attribution_artifact": "artifacts/swarm_tail_latency_p99_attribution.json",
+      "freshness": "fresh",
+      "release_claim": "authoritative_large_host"
+    }
+  ],
+  "adaptive_runtime_evidence": [
+    {
+      "lane_id": "adaptive_runtime",
+      "status": "pass",
+      "raw_log_path": "logs/adaptive_runtime.log",
+      "scenario_id": "adaptive_runtime_accepted_large_host",
+      "run_id": "adaptive-runtime-run-20260507T000000Z",
+      "release_claim_state": "accepted_large_host",
+      "freshness": "fresh",
+      "host_classification": "accepted_large_host",
+      "cleanup_status": "clean",
+      "validator_report": "artifacts/adaptive_runtime.json",
+      "runner_report": "artifacts/adaptive_runtime_runner.json"
+    }
+  ],
+  "errors": [],
+  "warnings": [],
+  "reproduction_command": "cargo run -p ffs-harness -- validate-proof-bundle --bundle manifest.json"
+}

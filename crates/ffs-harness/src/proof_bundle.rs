@@ -3477,6 +3477,20 @@ mod tests {
     }
 
     #[test]
+    fn proof_bundle_validation_report_json_shape() -> Result<()> {
+        let sample = sample_bundle();
+        let mut report = validate_sample(&sample);
+        let bundle_root = sample.root.path().display().to_string();
+        report.manifest_path = report.manifest_path.replace(&bundle_root, "$BUNDLE");
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("proof_bundle_validation_report_json_shape", json);
+        let parsed: ProofBundleValidationReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn summary_separates_pass_skip_fail_and_error_outcomes() {
         let sample = sample_bundle();
         let report = validate_sample(&sample);
