@@ -1,0 +1,13 @@
+---
+source: crates/ffs-harness/src/fuzz_dashboard.rs
+expression: json
+---
+{
+  "target": "fuzz_ext4_metadata",
+  "metric": "execs_per_sec",
+  "baseline_value": 500.0,
+  "current_value": 200.0,
+  "change_pct": -60.0,
+  "threshold_pct": -50.0,
+  "severity": "warning"
+}

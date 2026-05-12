@@ -570,6 +570,14 @@ mod tests {
     }
 
     #[test]
+    fn campaign_summary_json_shape() {
+        let summary = sample_campaign();
+        let json = serde_json::to_string_pretty(&summary).expect("serialize");
+
+        insta::assert_snapshot!("campaign_summary_json_shape", json);
+    }
+
+    #[test]
     fn parses_nightly_fuzz_script_summary_shape() {
         let json = r#"{
           "schema_version": 1,
@@ -737,5 +745,21 @@ mod tests {
         let parsed: RegressionAlert = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.target, "fuzz_ext4_metadata");
         assert_eq!(parsed.severity, AlertSeverity::Warning);
+    }
+
+    #[test]
+    fn regression_alert_json_shape() {
+        let alert = RegressionAlert {
+            target: "fuzz_ext4_metadata".to_owned(),
+            metric: "execs_per_sec".to_owned(),
+            baseline_value: 500.0,
+            current_value: 200.0,
+            change_pct: -60.0,
+            threshold_pct: -50.0,
+            severity: AlertSeverity::Warning,
+        };
+        let json = serde_json::to_string_pretty(&alert).expect("serialize");
+
+        insta::assert_snapshot!("regression_alert_json_shape", json);
     }
 }

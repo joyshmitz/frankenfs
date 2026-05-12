@@ -1,0 +1,66 @@
+---
+source: crates/ffs-harness/src/fuzz_dashboard.rs
+expression: json
+---
+{
+  "campaign_id": "20260312T120000Z",
+  "commit_sha": "abc1234",
+  "timestamp": "20260312T120000Z",
+  "config": {
+    "duration_per_target": 60,
+    "jobs": 1,
+    "target_count": 4
+  },
+  "totals": {
+    "elapsed_seconds": 240,
+    "total_crashes": 0,
+    "total_coverage": 5000,
+    "total_runs": 100000
+  },
+  "targets": [
+    {
+      "target": "fuzz_ext4_metadata",
+      "status": "ok",
+      "exit_code": 0,
+      "coverage": 1500,
+      "total_runs": 30000,
+      "corpus_size": 55,
+      "crash_count": 0,
+      "new_inputs": 3,
+      "elapsed_seconds": 60
+    },
+    {
+      "target": "fuzz_btrfs_metadata",
+      "status": "ok",
+      "exit_code": 0,
+      "coverage": 1200,
+      "total_runs": 25000,
+      "corpus_size": 45,
+      "crash_count": 0,
+      "new_inputs": 2,
+      "elapsed_seconds": 60
+    },
+    {
+      "target": "fuzz_ext4_dir_extent",
+      "status": "ok",
+      "exit_code": 0,
+      "coverage": 1800,
+      "total_runs": 35000,
+      "corpus_size": 27,
+      "crash_count": 0,
+      "new_inputs": 5,
+      "elapsed_seconds": 60
+    },
+    {
+      "target": "fuzz_ext4_xattr",
+      "status": "ok",
+      "exit_code": 0,
+      "coverage": 500,
+      "total_runs": 10000,
+      "corpus_size": 179,
+      "crash_count": 0,
+      "new_inputs": 1,
+      "elapsed_seconds": 60
+    }
+  ]
+}
