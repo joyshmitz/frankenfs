@@ -1884,6 +1884,106 @@ mod tests {
     }
 
     #[test]
+    fn performance_delta_closeout_report_json_shape() -> serde_json::Result<()> {
+        let config = load_performance_delta_closeout_config(Path::new(&workspace_path(
+            DEFAULT_PERFORMANCE_DELTA_CLOSEOUT_CONFIG,
+        )))
+        .expect("load checked-in config");
+        let issue_ledger = write_issue_ledger(&[
+            "bd-rchk5.5",
+            "bd-rchk5.6",
+            "bd-rchk5.7",
+            "bd-rchk5.8",
+            "bd-9vzzk",
+            "bd-t21em",
+        ]);
+        let mut config = absolutize_paths(config);
+        config.issues_path = issue_ledger.path().display().to_string();
+        let report = run_performance_delta_closeout(&config).expect("build closeout report");
+        assert!(report.valid, "{:?}", report.errors);
+
+        let full_json = serde_json::to_string_pretty(&report)?;
+        let decoded: PerformanceDeltaCloseoutReport = serde_json::from_str(&full_json)?;
+        assert_eq!(decoded.schema_version, report.schema_version);
+        assert_eq!(decoded.closeout_id, report.closeout_id);
+        assert_eq!(decoded.source_bead_id, report.source_bead_id);
+        assert_eq!(decoded.valid, report.valid);
+        assert_eq!(decoded.row_count, report.row_count);
+        assert_eq!(decoded.classification_counts, report.classification_counts);
+        assert_eq!(decoded.follow_up_beads, report.follow_up_beads);
+        assert_eq!(
+            decoded.follow_up_payloads.len(),
+            report.follow_up_payloads.len()
+        );
+        assert_eq!(decoded.rows.len(), report.rows.len());
+        assert_eq!(
+            decoded
+                .rows
+                .iter()
+                .map(|row| &row.row_id)
+                .collect::<Vec<_>>(),
+            report
+                .rows
+                .iter()
+                .map(|row| &row.row_id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(decoded.errors, report.errors);
+        assert!(
+            decoded
+                .follow_up_beads
+                .iter()
+                .any(|bead| bead == "bd-rchk5.5")
+        );
+        assert!(
+            decoded
+                .classification_counts
+                .contains_key(PerformanceDeltaClassification::MissingReference.label())
+        );
+
+        let row_samples = report
+            .rows
+            .iter()
+            .take(4)
+            .map(|row| {
+                serde_json::json!({
+                    "row_id": &row.row_id,
+                    "row_kind": &row.row_kind,
+                    "operation": &row.operation,
+                    "classification": row.classification,
+                    "release_claim_state": &row.release_claim_state,
+                    "follow_up_present": row.follow_up_present,
+                    "has_follow_up_payload": row.follow_up_payload.is_some(),
+                    "has_validation_command": row.validation_command.is_some(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let shape = serde_json::json!({
+            "schema_version": report.schema_version,
+            "closeout_id": report.closeout_id,
+            "source_bead_id": report.source_bead_id,
+            "generated_at": report.generated_at,
+            "valid": report.valid,
+            "row_count": report.row_count,
+            "classification_counts": report.classification_counts,
+            "follow_up_beads": report.follow_up_beads,
+            "follow_up_payload_count": report.follow_up_payloads.len(),
+            "rows_requiring_follow_up": report.rows_requiring_follow_up,
+            "issue_ledger_issue_count": report.issue_ledger.issue_count,
+            "issue_ledger_sha256": report.issue_ledger.sha256,
+            "missing_follow_up_count": report.issue_ledger.missing_follow_up_beads.len(),
+            "row_samples": row_samples,
+            "errors": report.errors,
+        });
+        insta::assert_snapshot!(
+            "performance_delta_closeout_report_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
+    }
+
+    #[test]
     fn markdown_mentions_follow_up_beads() {
         let report = PerformanceDeltaCloseoutReport {
             schema_version: PERFORMANCE_DELTA_CLOSEOUT_SCHEMA_VERSION,

@@ -1,0 +1,75 @@
+---
+source: crates/ffs-harness/src/performance_delta_closeout.rs
+expression: "serde_json::to_string_pretty(&shape)?"
+---
+{
+  "schema_version": 1,
+  "closeout_id": "bd-rchk5.4-performance-delta-closeout-v1",
+  "source_bead_id": "bd-rchk5.4",
+  "generated_at": "2026-05-03T21:35:00Z",
+  "valid": true,
+  "row_count": 14,
+  "classification_counts": {
+    "improved": 4,
+    "missing_reference": 5,
+    "pending_capability": 1,
+    "regression": 3,
+    "unmeasured": 1
+  },
+  "follow_up_beads": [
+    "bd-9vzzk",
+    "bd-rchk5.5",
+    "bd-rchk5.6",
+    "bd-rchk5.7",
+    "bd-rchk5.8",
+    "bd-t21em"
+  ],
+  "follow_up_payload_count": 10,
+  "rows_requiring_follow_up": 10,
+  "issue_ledger_issue_count": 6,
+  "issue_ledger_sha256": "sha256:eed1375188ef98a36b705b993c6998f29938fab4a01765f372f79679ca6856d3",
+  "missing_follow_up_count": 0,
+  "row_samples": [
+    {
+      "row_id": "measurement:block_cache_arc_sequential_scan:/data/projects/frankenfs/crates/ffs-harness/../../benchmarks/baselines/history/20260503-bd-rchk5-2-arc-seq.json",
+      "row_kind": "measurement",
+      "operation": "block_cache_arc_sequential_scan",
+      "classification": "improved",
+      "release_claim_state": "measured_local",
+      "follow_up_present": false,
+      "has_follow_up_payload": false,
+      "has_validation_command": true
+    },
+    {
+      "row_id": "measurement:block_cache_arc_mixed_seq70_hot30:/data/projects/frankenfs/crates/ffs-harness/../../benchmarks/baselines/history/20260503-bd-rchk5-2-arc-mixed.json",
+      "row_kind": "measurement",
+      "operation": "block_cache_arc_mixed_seq70_hot30",
+      "classification": "improved",
+      "release_claim_state": "measured_local",
+      "follow_up_present": false,
+      "has_follow_up_payload": false,
+      "has_validation_command": true
+    },
+    {
+      "row_id": "measurement:block_cache_sharded_arc_concurrent_hot_read_64threads:/data/projects/frankenfs/crates/ffs-harness/../../benchmarks/baselines/history/20260503-sharded-arc-hot64.json",
+      "row_kind": "measurement",
+      "operation": "block_cache_sharded_arc_concurrent_hot_read_64threads",
+      "classification": "missing_reference",
+      "release_claim_state": "reference_limited_experimental",
+      "follow_up_present": true,
+      "has_follow_up_payload": true,
+      "has_validation_command": true
+    },
+    {
+      "row_id": "measurement:block_cache_sharded_s3fifo_concurrent_hot_read_64threads:/data/projects/frankenfs/crates/ffs-harness/../../benchmarks/baselines/history/20260503-sharded-s3fifo-hot64.json",
+      "row_kind": "measurement",
+      "operation": "block_cache_sharded_s3fifo_concurrent_hot_read_64threads",
+      "classification": "missing_reference",
+      "release_claim_state": "reference_limited_experimental",
+      "follow_up_present": true,
+      "has_follow_up_payload": true,
+      "has_validation_command": true
+    }
+  ],
+  "errors": []
+}
