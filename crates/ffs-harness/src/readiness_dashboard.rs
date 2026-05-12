@@ -1866,16 +1866,8 @@ mod tests {
         );
     }
 
-    /// bd-rchk0.53.18 - exact-output snapshot for the operator-facing
-    /// readiness dashboard markdown renderer.
-    ///
-    /// Field-level tests above pin claim classification and recommendation
-    /// wiring. This snapshot guards the rendered title, summary counters,
-    /// source/claim tables, recommendation wording, tracker follow-up table,
-    /// warning section, and stable row ordering consumed by operators.
-    #[test]
-    fn render_readiness_dashboard_markdown_mixed_sources_snapshot() {
-        let report = ReadinessDashboardReport {
+    fn mixed_sources_dashboard_report() -> ReadinessDashboardReport {
+        ReadinessDashboardReport {
             schema_version: READINESS_DASHBOARD_SCHEMA_VERSION,
             dashboard_id: "frankenfs-readiness-dashboard:v1".to_owned(),
             valid: false,
@@ -2001,7 +1993,30 @@ mod tests {
                 "permissioned xfstests lane requires explicit ACK".to_owned(),
             ],
             errors: Vec::new(),
-        };
+        }
+    }
+
+    #[test]
+    fn readiness_dashboard_report_json_shape() -> Result<()> {
+        let report = mixed_sources_dashboard_report();
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("readiness_dashboard_report_json_shape", json);
+        let parsed: ReadinessDashboardReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    /// bd-rchk0.53.18 - exact-output snapshot for the operator-facing
+    /// readiness dashboard markdown renderer.
+    ///
+    /// Field-level tests above pin claim classification and recommendation
+    /// wiring. This snapshot guards the rendered title, summary counters,
+    /// source/claim tables, recommendation wording, tracker follow-up table,
+    /// warning section, and stable row ordering consumed by operators.
+    #[test]
+    fn render_readiness_dashboard_markdown_mixed_sources_snapshot() {
+        let report = mixed_sources_dashboard_report();
         let markdown = render_readiness_dashboard_markdown(&report);
 
         assert!(markdown.contains("# FrankenFS Operator Readiness Dashboard"));

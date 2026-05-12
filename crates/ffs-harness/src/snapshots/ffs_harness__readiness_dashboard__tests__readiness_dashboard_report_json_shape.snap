@@ -1,0 +1,140 @@
+---
+source: crates/ffs-harness/src/readiness_dashboard.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "dashboard_id": "frankenfs-readiness-dashboard:v1",
+  "valid": false,
+  "source_report_count": 2,
+  "claim_count": 3,
+  "recommendation_count": 2,
+  "source_validator_failure_count": 1,
+  "sources": [
+    {
+      "source_kind": "release_gate",
+      "path": "artifacts/readiness/release_gate.json",
+      "valid": false,
+      "summary": "policy=policy-a bundle=bundle-a release_ready=false findings=1",
+      "referenced_beads": [
+        "bd-rchk3.3"
+      ],
+      "produced_claim_ids": [
+        "release_gate:mount.rw.ext4",
+        "release_gate:xfstests.baseline"
+      ]
+    },
+    {
+      "source_kind": "readiness_lab_host_simulation",
+      "path": "artifacts/readiness/lab/hosts.json",
+      "valid": true,
+      "summary": "valid=true product_evidence_claim=none",
+      "referenced_beads": [
+        "bd-919xg"
+      ],
+      "produced_claim_ids": [
+        "readiness_lab:host_simulation:large-a"
+      ]
+    }
+  ],
+  "claims": [
+    {
+      "claim_id": "release_gate:mount.rw.ext4",
+      "claim_state": "validated",
+      "source_kind": "release_gate",
+      "source_path": "artifacts/readiness/release_gate.json",
+      "validator_report": "artifacts/readiness/release_gate.json",
+      "controlling_lane": "release_gate",
+      "freshness": "validator_reported_fresh_or_unchecked",
+      "host_class": null,
+      "missing_artifacts": [],
+      "remediation_bead": null,
+      "next_safe_command": "cargo run -p ffs-harness -- evaluate-release-gates --bundle bundle.json --policy policy.json",
+      "evidence_basis": [
+        "release_gate:validated"
+      ]
+    },
+    {
+      "claim_id": "release_gate:xfstests.baseline",
+      "claim_state": "blocked",
+      "source_kind": "release_gate",
+      "source_path": "artifacts/readiness/release_gate.json",
+      "validator_report": "artifacts/readiness/release_gate.json",
+      "controlling_lane": "xfstests",
+      "freshness": "proof_bundle_invalid",
+      "host_class": null,
+      "missing_artifacts": [
+        "fresh permissioned xfstests baseline proof lane",
+        "raw xfstests log archive"
+      ],
+      "remediation_bead": "bd-rchk3.3",
+      "next_safe_command": "br show bd-rchk3.3 --no-db --json",
+      "evidence_basis": [
+        "finding:missing-xfstests"
+      ]
+    },
+    {
+      "claim_id": "readiness_lab:host_simulation:large-a",
+      "claim_state": "advisory_only",
+      "source_kind": "readiness_lab_host_simulation",
+      "source_path": "artifacts/readiness/lab/hosts.json",
+      "validator_report": "artifacts/readiness/lab/hosts.json",
+      "controlling_lane": "readiness_lab",
+      "freshness": "advisory_simulation_only",
+      "host_class": "permissioned_large_host",
+      "missing_artifacts": [],
+      "remediation_bead": "bd-919xg",
+      "next_safe_command": "br show bd-919xg --no-db --json",
+      "evidence_basis": [
+        "product_evidence_claim:none"
+      ]
+    }
+  ],
+  "recommendations": [
+    {
+      "action_id": "readiness-dashboard:release_gate-xfstests-baseline",
+      "claim_id": "release_gate:xfstests.baseline",
+      "severity": "blocker",
+      "title": "Re-run permissioned xfstests evidence lane",
+      "validator_report": "artifacts/readiness/release_gate.json",
+      "bead_id": "bd-rchk3.3",
+      "next_safe_command": "br show bd-rchk3.3 --no-db --json",
+      "rationale": "fresh permissioned xfstests baseline proof lane is missing",
+      "missing_artifacts": [
+        "raw xfstests log archive"
+      ],
+      "controlling_lane": "xfstests"
+    },
+    {
+      "action_id": "readiness-dashboard:readiness_lab-host-simulation-large-a",
+      "claim_id": "readiness_lab:host_simulation:large-a",
+      "severity": "follow_up",
+      "title": "Keep readiness lab evidence advisory",
+      "validator_report": "artifacts/readiness/lab/hosts.json",
+      "bead_id": "bd-919xg",
+      "next_safe_command": "br show bd-919xg --no-db --json",
+      "rationale": "advisory lab result cannot upgrade public readiness",
+      "missing_artifacts": [],
+      "controlling_lane": "readiness_lab"
+    }
+  ],
+  "tracker_follow_up_beads": [
+    {
+      "issue_id": "bd-rchk3.3",
+      "status": "open",
+      "title": "Execute permissioned xfstests baseline",
+      "priority": "P1"
+    },
+    {
+      "issue_id": "bd-919xg",
+      "status": "in_progress",
+      "title": "Integrate advisory lab state into readiness dashboard",
+      "priority": "P2"
+    }
+  ],
+  "warnings": [
+    "readiness lab reports are advisory only",
+    "permissioned xfstests lane requires explicit ACK"
+  ],
+  "errors": []
+}
