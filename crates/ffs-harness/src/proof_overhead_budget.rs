@@ -1499,6 +1499,16 @@ mod tests {
     }
 
     #[test]
+    fn proof_overhead_budget_report_json_shape() -> Result<()> {
+        let report = evaluate_proof_overhead_budget(&budget_config(), &observed_metrics());
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("proof_overhead_budget_report_json_shape", json);
+        let parsed: ProofOverheadBudgetReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn parses_budget_schema_and_observed_metrics_json() {
         let budget_json = serde_json::to_string(&budget_config()).expect("serialize budget");
         let metrics_json = serde_json::to_string(&observed_metrics()).expect("serialize metrics");

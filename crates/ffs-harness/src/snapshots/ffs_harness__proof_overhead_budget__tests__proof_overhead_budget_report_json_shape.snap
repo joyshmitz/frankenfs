@@ -1,0 +1,211 @@
+---
+source: crates/ffs-harness/src/proof_overhead_budget.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "scenario_id": "proof_budget_developer_smoke",
+  "profile": "developer_smoke",
+  "baseline_id": "budget-baseline-2026-05-01",
+  "baseline_age_days": 2,
+  "baseline_stale": false,
+  "release_gate_verdict": "pass",
+  "release_gate_consumers": [
+    "release-gates",
+    "ci-required"
+  ],
+  "metric_results": [
+    {
+      "category": "runtime_overhead",
+      "metric": "runtime_overhead_percent",
+      "observed_value": 4.0,
+      "warn_budget_value": 8.0,
+      "budget_value": 12.0,
+      "unit": "percent",
+      "threshold_decision": "pass",
+      "release_gate_required": true,
+      "diagnostic": "metric runtime_overhead_percent observed=4 percent warn_at=8 fail_at=12 decision=pass"
+    },
+    {
+      "category": "memory_overhead",
+      "metric": "memory_overhead_percent",
+      "observed_value": 7.0,
+      "warn_budget_value": 10.0,
+      "budget_value": 20.0,
+      "unit": "percent",
+      "threshold_decision": "pass",
+      "release_gate_required": true,
+      "diagnostic": "metric memory_overhead_percent observed=7 percent warn_at=10 fail_at=20 decision=pass"
+    },
+    {
+      "category": "log_volume",
+      "metric": "log_bytes",
+      "observed_value": 2048.0,
+      "warn_budget_value": 4096.0,
+      "budget_value": 8192.0,
+      "unit": "bytes",
+      "threshold_decision": "pass",
+      "release_gate_required": true,
+      "diagnostic": "metric log_bytes observed=2048 bytes warn_at=4096 fail_at=8192 decision=pass"
+    }
+  ],
+  "retention_result": {
+    "total_artifact_bytes": 2900,
+    "compressed_total_artifact_bytes": 2900,
+    "max_total_artifact_bytes": 8192,
+    "compress_above_bytes": 3000,
+    "retention_count": 20,
+    "retention_days": 30,
+    "compression_retention_decision": "pass",
+    "action": "retain",
+    "missing_mandatory_artifact_classes": [],
+    "reproduction_command_preserved": true
+  },
+  "log_records": [
+    {
+      "scenario_id": "proof_budget_developer_smoke",
+      "profile": "developer_smoke",
+      "baseline_id": "budget-baseline-2026-05-01",
+      "metric": "runtime_overhead_percent",
+      "category": "runtime_overhead",
+      "observed_value": 4.0,
+      "budget_value": 12.0,
+      "unit": "percent",
+      "threshold_decision": "pass",
+      "artifact_sizes": [
+        {
+          "path": "artifacts/proof/bundle.json",
+          "class": "proof_bundle",
+          "artifact_class": "proof_bundle",
+          "original_size_bytes": 2000,
+          "size_bytes": 2000,
+          "retention_action": "retain",
+          "retention_decision": "retain",
+          "redaction_policy_version": "redact-v1",
+          "dropped_fields": [],
+          "sampled_fields": [],
+          "validator_result": "pass",
+          "cleanup_status": "clean"
+        },
+        {
+          "path": "artifacts/proof/repro.json",
+          "class": "reproduction_pack",
+          "artifact_class": "reproduction_pack",
+          "original_size_bytes": 900,
+          "size_bytes": 900,
+          "retention_action": "retain",
+          "retention_decision": "retain",
+          "redaction_policy_version": "redact-v1",
+          "dropped_fields": [],
+          "sampled_fields": [],
+          "validator_result": "pass",
+          "cleanup_status": "clean"
+        }
+      ],
+      "compression_retention_decision": "pass",
+      "reproduction_command": "ffs-harness validate-proof-overhead-budget --budget budget.json --metrics metrics.json"
+    },
+    {
+      "scenario_id": "proof_budget_developer_smoke",
+      "profile": "developer_smoke",
+      "baseline_id": "budget-baseline-2026-05-01",
+      "metric": "memory_overhead_percent",
+      "category": "memory_overhead",
+      "observed_value": 7.0,
+      "budget_value": 20.0,
+      "unit": "percent",
+      "threshold_decision": "pass",
+      "artifact_sizes": [
+        {
+          "path": "artifacts/proof/bundle.json",
+          "class": "proof_bundle",
+          "artifact_class": "proof_bundle",
+          "original_size_bytes": 2000,
+          "size_bytes": 2000,
+          "retention_action": "retain",
+          "retention_decision": "retain",
+          "redaction_policy_version": "redact-v1",
+          "dropped_fields": [],
+          "sampled_fields": [],
+          "validator_result": "pass",
+          "cleanup_status": "clean"
+        },
+        {
+          "path": "artifacts/proof/repro.json",
+          "class": "reproduction_pack",
+          "artifact_class": "reproduction_pack",
+          "original_size_bytes": 900,
+          "size_bytes": 900,
+          "retention_action": "retain",
+          "retention_decision": "retain",
+          "redaction_policy_version": "redact-v1",
+          "dropped_fields": [],
+          "sampled_fields": [],
+          "validator_result": "pass",
+          "cleanup_status": "clean"
+        }
+      ],
+      "compression_retention_decision": "pass",
+      "reproduction_command": "ffs-harness validate-proof-overhead-budget --budget budget.json --metrics metrics.json"
+    },
+    {
+      "scenario_id": "proof_budget_developer_smoke",
+      "profile": "developer_smoke",
+      "baseline_id": "budget-baseline-2026-05-01",
+      "metric": "log_bytes",
+      "category": "log_volume",
+      "observed_value": 2048.0,
+      "budget_value": 8192.0,
+      "unit": "bytes",
+      "threshold_decision": "pass",
+      "artifact_sizes": [
+        {
+          "path": "artifacts/proof/bundle.json",
+          "class": "proof_bundle",
+          "artifact_class": "proof_bundle",
+          "original_size_bytes": 2000,
+          "size_bytes": 2000,
+          "retention_action": "retain",
+          "retention_decision": "retain",
+          "redaction_policy_version": "redact-v1",
+          "dropped_fields": [],
+          "sampled_fields": [],
+          "validator_result": "pass",
+          "cleanup_status": "clean"
+        },
+        {
+          "path": "artifacts/proof/repro.json",
+          "class": "reproduction_pack",
+          "artifact_class": "reproduction_pack",
+          "original_size_bytes": 900,
+          "size_bytes": 900,
+          "retention_action": "retain",
+          "retention_decision": "retain",
+          "redaction_policy_version": "redact-v1",
+          "dropped_fields": [],
+          "sampled_fields": [],
+          "validator_result": "pass",
+          "cleanup_status": "clean"
+        }
+      ],
+      "compression_retention_decision": "pass",
+      "reproduction_command": "ffs-harness validate-proof-overhead-budget --budget budget.json --metrics metrics.json"
+    }
+  ],
+  "required_log_fields": [
+    "scenario_id",
+    "profile",
+    "baseline_id",
+    "observed_value",
+    "budget_value",
+    "unit",
+    "threshold_decision",
+    "artifact_sizes",
+    "compression_retention_decision",
+    "reproduction_command"
+  ],
+  "human_summary": "scenario=proof_budget_developer_smoke profile=developer_smoke baseline=budget-baseline-2026-05-01 verdict=pass metrics=3 errors=0 warnings=0 artifacts=2900 retention_action=retain reproduction_command=ffs-harness validate-proof-overhead-budget --budget budget.json --metrics metrics.json",
+  "reproduction_command": "ffs-harness validate-proof-overhead-budget --budget budget.json --metrics metrics.json",
+  "errors": [],
+  "warnings": []
+}
