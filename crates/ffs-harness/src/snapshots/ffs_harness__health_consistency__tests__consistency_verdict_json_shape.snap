@@ -1,0 +1,30 @@
+---
+source: crates/ffs-harness/src/health_consistency.rs
+expression: pretty
+---
+{
+  "version": 1,
+  "total_checks": 2,
+  "passed": 1,
+  "failed": 1,
+  "results": [
+    {
+      "dimension": "test_dim",
+      "surface": "cli",
+      "passed": true,
+      "identifiers_found": [
+        "a"
+      ],
+      "identifiers_missing": []
+    },
+    {
+      "dimension": "test_dim",
+      "surface": "tui",
+      "passed": false,
+      "identifiers_found": [],
+      "identifiers_missing": [
+        "b"
+      ]
+    }
+  ]
+}

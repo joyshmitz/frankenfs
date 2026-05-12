@@ -450,6 +450,9 @@ mod tests {
         assert!(json.get("passed").is_some());
         assert!(json.get("failed").is_some());
         assert!(json.get("results").is_some());
+
+        let pretty = serde_json::to_string_pretty(&verdict).expect("serialize verdict");
+        insta::assert_snapshot!("consistency_verdict_json_shape", pretty);
     }
 
     #[test]
