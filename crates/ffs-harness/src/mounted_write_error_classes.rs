@@ -661,6 +661,19 @@ mod tests {
     }
 
     #[test]
+    fn mounted_write_error_report_json_shape() {
+        let report = validate_default_mounted_write_error_classes()
+            .expect("default mounted write error classes validates");
+        let json = serde_json::to_string_pretty(&report).expect("serialize report");
+
+        insta::assert_snapshot!("mounted_write_error_report_json_shape", json);
+
+        let roundtrip: MountedWriteErrorReport =
+            serde_json::from_str(&json).expect("deserialize report");
+        assert_eq!(roundtrip, report);
+    }
+
+    #[test]
     fn missing_default_permissions_class_is_rejected() {
         let mut catalog = fixture_catalog();
         catalog

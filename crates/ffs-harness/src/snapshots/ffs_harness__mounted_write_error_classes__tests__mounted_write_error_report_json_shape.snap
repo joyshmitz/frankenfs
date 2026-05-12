@@ -1,0 +1,23 @@
+---
+source: crates/ffs-harness/src/mounted_write_error_classes.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "catalog_id": "frankenfs_mounted_write_error_classes_v1",
+  "bead_id": "bd-rchk0.3.4",
+  "entry_count": 9,
+  "error_classes_seen": [
+    "cancelled_by_caller",
+    "default_permissions_eacces",
+    "host_capability_skip",
+    "ok",
+    "product_failure",
+    "repair_serialization_blocked",
+    "stale_snapshot_refused",
+    "unsupported_operation"
+  ],
+  "broad_fallback_count": 0,
+  "valid": true,
+  "errors": []
+}
