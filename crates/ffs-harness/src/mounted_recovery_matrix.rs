@@ -672,10 +672,12 @@ mod tests {
     }
 
     #[test]
-    fn default_matrix_validates_recovery_contract() {
-        let report = validate_default_mounted_recovery_matrix().expect("default matrix validates");
-        let json = serde_json::to_string_pretty(&report).expect("report serializes");
+    fn default_matrix_validates_recovery_contract() -> Result<()> {
+        let report = validate_default_mounted_recovery_matrix()?;
+        let json = serde_json::to_string_pretty(&report)?;
         insta::assert_snapshot!("mounted_recovery_matrix_report_json_shape", json);
+        let parsed: MountedRecoveryMatrixReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
 
         assert_eq!(report.bead_id, "bd-rchk0.3.3");
         assert_eq!(report.filesystems, vec!["btrfs", "ext4"]);
@@ -690,6 +692,7 @@ mod tests {
                 .process_control_methods
                 .contains(&"terminate_mount_daemon".to_owned())
         );
+        Ok(())
     }
 
     #[test]
