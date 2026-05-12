@@ -401,7 +401,7 @@ fn parse_coverage_domains(
         if domain.is_empty()
             || domain.eq_ignore_ascii_case("domain")
             || domain.eq_ignore_ascii_case("overall")
-            || domain.chars().all(|ch| ch == '-')
+            || domain.chars().all(|ch| ch.eq(&'-'))
         {
             continue;
         }
@@ -734,7 +734,7 @@ fn validate_support_state_rows(rows: &[SupportStateAccountingRow]) -> Vec<String
                 row.feature_id
             ));
         }
-        if row.docs_wording_id == row.feature_id {
+        if row.docs_wording_id.eq(&row.feature_id) {
             errors.push(format!(
                 "{} docs_wording_id must be a stable wording id",
                 row.feature_id
@@ -743,7 +743,7 @@ fn validate_support_state_rows(rows: &[SupportStateAccountingRow]) -> Vec<String
         if !row.owner_bead.starts_with("bd-") {
             errors.push(format!("{} owner_bead is not a bead id", row.feature_id));
         }
-        if row.support_state != "validated" && row.unsupported_or_deferred_rationale.is_empty() {
+        if row.support_state.ne("validated") && row.unsupported_or_deferred_rationale.is_empty() {
             errors.push(format!(
                 "{} non-validated state lacks rationale",
                 row.feature_id
@@ -814,7 +814,7 @@ fn reference_check(
         field: field.to_owned(),
         exists: issues
             .get(referenced_bead_id)
-            .is_some_and(|issue| issue.id == referenced_bead_id),
+            .is_some_and(|issue| issue.id.eq(referenced_bead_id)),
     }
 }
 
@@ -851,7 +851,7 @@ pub fn classify_historical_claims(
 
 fn migration_case_from_claim(claim: &HistoricalParityClaim) -> SupportStateMigrationCase {
     let rows = support_state_rows();
-    if let Some(row) = rows.iter().find(|row| row.feature_id == claim.feature_id) {
+    if let Some(row) = rows.iter().find(|row| row.feature_id.eq(&claim.feature_id)) {
         return SupportStateMigrationCase {
             historical_claim: claim.historical_claim.clone(),
             feature_id: claim.feature_id.clone(),
@@ -890,11 +890,11 @@ fn validate_migration_cases(cases: &[SupportStateMigrationCase]) -> Vec<String> 
     ];
 
     for (feature_id, expected_state) in expected {
-        let Some(case) = cases.iter().find(|case| case.feature_id == feature_id) else {
+        let Some(case) = cases.iter().find(|case| case.feature_id.eq(feature_id)) else {
             errors.push(format!("missing migration case {feature_id}"));
             continue;
         };
-        if case.classified_support_state != expected_state {
+        if case.classified_support_state.ne(expected_state) {
             errors.push(format!(
                 "{} classified as {}, expected {expected_state}",
                 feature_id, case.classified_support_state
@@ -907,7 +907,7 @@ fn validate_migration_cases(cases: &[SupportStateMigrationCase]) -> Vec<String> 
         "FEATURE_PARITY 90/90",
         "FEATURE_PARITY 100 percent",
     ] {
-        if !cases.iter().any(|case| case.historical_claim == old_claim) {
+        if !cases.iter().any(|case| case.historical_claim.eq(old_claim)) {
             errors.push(format!("missing historical claim fixture {old_claim}"));
         }
     }
@@ -1029,7 +1029,7 @@ mod tests {
         }
         let sample = rows
             .iter()
-            .find(|row| row.feature_id == "btrfs_send_receive_streams")
+            .find(|row| row.feature_id.eq("btrfs_send_receive_streams"))
             .expect("send/receive row");
         assert_eq!(sample.support_state, "parse_only");
         assert_eq!(sample.owner_bead, "bd-naww5");
@@ -1107,5 +1107,17 @@ mod tests {
         assert!(markdown.contains("btrfs_send_receive_streams"));
         assert!(markdown.contains("Required Log Fields"));
         insta::assert_snapshot!(markdown);
+    }
+
+    #[test]
+    fn support_state_accounting_report_json_shape() {
+        let report = analyze_support_state_accounting(
+            &fixture_issues(),
+            &feature_parity_fixture(),
+            &[DEFAULT_ARTIFACT_PATH.to_owned()],
+        );
+        let json = serde_json::to_string_pretty(&report).expect("support-state report serializes");
+
+        insta::assert_snapshot!("support_state_accounting_report_json_shape", json);
     }
 }

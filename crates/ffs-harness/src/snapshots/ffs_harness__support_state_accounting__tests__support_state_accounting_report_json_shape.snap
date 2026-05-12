@@ -1,0 +1,589 @@
+---
+source: crates/ffs-harness/src/support_state_accounting.rs
+expression: json
+---
+{
+  "support_state_version": "bd-mpcse-support-state-accounting-v1",
+  "source_issue_count": 11,
+  "coverage_domain_count": 5,
+  "row_count": 13,
+  "flat_parity_rejected": true,
+  "release_gate_contract": "bd-rchk0.5.6.1 fail-closed release evaluator consumes support-state rows",
+  "generated_artifact_paths": [
+    "artifacts/parity/support_state_accounting.json"
+  ],
+  "coverage_domains": [
+    {
+      "domain": "ext4 metadata parsing",
+      "implemented": 27,
+      "total_tracked": 27,
+      "coverage": "100.0%",
+      "count_claim_scope": "implementation inventory only; readiness comes from support_state rows"
+    },
+    {
+      "domain": "btrfs metadata parsing",
+      "implemented": 27,
+      "total_tracked": 27,
+      "coverage": "100.0%",
+      "count_claim_scope": "implementation inventory only; readiness comes from support_state rows"
+    },
+    {
+      "domain": "MVCC/COW core",
+      "implemented": 14,
+      "total_tracked": 14,
+      "coverage": "100.0%",
+      "count_claim_scope": "implementation inventory only; readiness comes from support_state rows"
+    },
+    {
+      "domain": "FUSE surface",
+      "implemented": 19,
+      "total_tracked": 19,
+      "coverage": "100.0%",
+      "count_claim_scope": "implementation inventory only; readiness comes from support_state rows"
+    },
+    {
+      "domain": "self-healing durability policy",
+      "implemented": 10,
+      "total_tracked": 10,
+      "coverage": "100.0%",
+      "count_claim_scope": "implementation inventory only; readiness comes from support_state rows"
+    }
+  ],
+  "rows": [
+    {
+      "feature_id": "readonly_ext4_btrfs_inspection",
+      "domain": "ext4/btrfs mounted inspection",
+      "legacy_count_bucket": "100_percent_v1_bucket",
+      "support_state": "validated",
+      "evidence_lane": "conformance fixtures plus mounted read-only smoke",
+      "artifact_freshness": "fresh authoritative gate required before stronger docs wording",
+      "gate_consumer": "release-gates:bd-rchk0.5.6.1",
+      "docs_wording_id": "support.readonly-inspection.validated",
+      "unsupported_or_deferred_rationale": "validated read-only inspection may be claimed without mutating-readiness wording",
+      "owner_bead": "bd-mpcse",
+      "docs_target": "FEATURE_PARITY.md",
+      "release_gate_effect": "allows validated read-only wording only",
+      "old_count_claim": "100 percent V1 feature coverage",
+      "downgrade_or_upgrade_reason": "keeps inventory count separate from write and repair readiness",
+      "required_logs": "feature_id,old_count_claim,support_state,controlling_bead_or_artifact,downgrade_or_upgrade_reason,docs_target,release_gate_effect,reproduction_command",
+      "reproduction_command": "ffs-harness validate-support-state-accounting --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
+    },
+    {
+      "feature_id": "btrfs_send_receive_streams",
+      "domain": "btrfs metadata parsing",
+      "legacy_count_bucket": "86/86,90/90,100_percent_buckets",
+      "support_state": "parse_only",
+      "evidence_lane": "send stream parser and dump comparison; no export/apply roundtrip",
+      "artifact_freshness": "roundtrip corpus required before support upgrade",
+      "gate_consumer": "release-gates:bd-rchk0.5.6.1",
+      "docs_wording_id": "support.btrfs-send-receive.parse-only",
+      "unsupported_or_deferred_rationale": "full export/receive apply remains owned by bd-naww5",
+      "owner_bead": "bd-naww5",
+      "docs_target": "FEATURE_PARITY.md",
+      "release_gate_effect": "blocks full send/receive parity wording",
+      "old_count_claim": "100 percent btrfs metadata parsing",
+      "downgrade_or_upgrade_reason": "parser coverage is real but not operational send/receive readiness",
+      "required_logs": "feature_id,old_count_claim,support_state,controlling_bead_or_artifact,downgrade_or_upgrade_reason,docs_target,release_gate_effect,reproduction_command",
+      "reproduction_command": "ffs-harness validate-support-state-accounting --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
+    },
+    {
+      "feature_id": "btrfs_multi_device_raid",
+      "domain": "btrfs metadata parsing",
+      "legacy_count_bucket": "90/90,100_percent_buckets",
+      "support_state": "single_device_only",
+      "evidence_lane": "single-device and stripe mapping fixtures; multi-image corpus pending",
+      "artifact_freshness": "multi-image degraded corpus required before support upgrade",
+      "gate_consumer": "release-gates:bd-rchk0.5.6.1",
+      "docs_wording_id": "support.btrfs-multidevice.single-device-only",
+      "unsupported_or_deferred_rationale": "multi-device proof surface is owned by bd-ch373",
+      "owner_bead": "bd-ch373",
+      "docs_target": "FEATURE_PARITY.md",
+      "release_gate_effect": "downgrades multidevice readiness claims",
+      "old_count_claim": "100 percent btrfs metadata parsing",
+      "downgrade_or_upgrade_reason": "single-device evidence must not imply degraded multidevice readiness",
+      "required_logs": "feature_id,old_count_claim,support_state,controlling_bead_or_artifact,downgrade_or_upgrade_reason,docs_target,release_gate_effect,reproduction_command",
+      "reproduction_command": "ffs-harness validate-support-state-accounting --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
+    },
+    {
+      "feature_id": "ext4_casefold",
+      "domain": "ext4 metadata parsing",
+      "legacy_count_bucket": "90/90,100_percent_buckets",
+      "support_state": "basic_coverage",
+      "evidence_lane": "basic lookup/readdir fixture coverage",
+      "artifact_freshness": "unicode collision corpus required before support upgrade",
+      "gate_consumer": "release-gates:bd-rchk0.5.6.1",
+      "docs_wording_id": "support.ext4-casefold.basic-coverage",
+      "unsupported_or_deferred_rationale": "Unicode collision conformance is owned by bd-9er6s",
+      "owner_bead": "bd-9er6s",
+      "docs_target": "FEATURE_PARITY.md",
+      "release_gate_effect": "blocks robust casefold parity wording",
+      "old_count_claim": "100 percent ext4 metadata parsing",
+      "downgrade_or_upgrade_reason": "basic feature coverage is narrower than collision-safe mounted conformance",
+      "required_logs": "feature_id,old_count_claim,support_state,controlling_bead_or_artifact,downgrade_or_upgrade_reason,docs_target,release_gate_effect,reproduction_command",
+      "reproduction_command": "ffs-harness validate-support-state-accounting --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
+    },
+    {
+      "feature_id": "mounted_write_paths",
+      "domain": "FUSE surface",
+      "legacy_count_bucket": "100_percent_v1_bucket",
+      "support_state": "experimental",
+      "evidence_lane": "mounted write matrix and crash/replay proof lanes",
+      "artifact_freshness": "fresh mounted matrix plus crash evidence required before support upgrade",
+      "gate_consumer": "release-gates:bd-rchk0.5.6.1",
+      "docs_wording_id": "support.mounted-writes.experimental",
+      "unsupported_or_deferred_rationale": "write-path claims remain operator-caution until all gate lanes agree",
+      "owner_bead": "bd-jtu4q",
+      "docs_target": "README.md",
+      "release_gate_effect": "keeps mounted write wording experimental",
+      "old_count_claim": "100 percent FUSE surface",
+      "downgrade_or_upgrade_reason": "write success coverage is not the same as data-integrity readiness",
+      "required_logs": "feature_id,old_count_claim,support_state,controlling_bead_or_artifact,downgrade_or_upgrade_reason,docs_target,release_gate_effect,reproduction_command",
+      "reproduction_command": "ffs-harness validate-support-state-accounting --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
+    },
+    {
+      "feature_id": "background_scrub",
+      "domain": "self-healing durability policy",
+      "legacy_count_bucket": "100_percent_v1_bucket",
+      "support_state": "detection_only",
+      "evidence_lane": "scrub detection evidence without automatic writeback promotion",
+      "artifact_freshness": "fresh repair side-effect fixtures required before support upgrade",
+      "gate_consumer": "release-gates:bd-rchk0.5.6.1",
+      "docs_wording_id": "support.background-scrub.detection-only",
+      "unsupported_or_deferred_rationale": "mounted repair side effects are owned by bd-wjsuj",
+      "owner_bead": "bd-wjsuj",
+      "docs_target": "README.md",
+      "release_gate_effect": "allows detection-only scrub wording",
+      "old_count_claim": "100 percent self-healing durability policy",
+      "downgrade_or_upgrade_reason": "detection-only scrub must not imply automatic mutation readiness",
+      "required_logs": "feature_id,old_count_claim,support_state,controlling_bead_or_artifact,downgrade_or_upgrade_reason,docs_target,release_gate_effect,reproduction_command",
+      "reproduction_command": "ffs-harness validate-support-state-accounting --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
+    },
+    {
+      "feature_id": "fuse_writeback_cache",
+      "domain": "FUSE surface",
+      "legacy_count_bucket": "100_percent_v1_bucket",
+      "support_state": "disabled",
+      "evidence_lane": "negative-option audit and runtime kill-switch gate",
+      "artifact_freshness": "fresh negative and positive ordering oracle required before support upgrade",
+      "gate_consumer": "release-gates:bd-rchk0.5.6.1",
+      "docs_wording_id": "support.writeback-cache.disabled",
+      "unsupported_or_deferred_rationale": "writeback-cache opt-in is owned by bd-rchk0.2.1.1 and bd-4nobd",
+      "owner_bead": "bd-4nobd",
+      "docs_target": "README.md",
+      "release_gate_effect": "fails closed to disabled",
+      "old_count_claim": "100 percent FUSE surface",
+      "downgrade_or_upgrade_reason": "kernel writeback cache is unsafe unless ordering proof is fresh",
+      "required_logs": "feature_id,old_count_claim,support_state,controlling_bead_or_artifact,downgrade_or_upgrade_reason,docs_target,release_gate_effect,reproduction_command",
+      "reproduction_command": "ffs-harness validate-support-state-accounting --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
+    },
+    {
+      "feature_id": "writeback_cache_negative_option",
+      "domain": "FUSE surface",
+      "legacy_count_bucket": "100_percent_v1_bucket",
+      "support_state": "deferred",
+      "evidence_lane": "negative-option audit proof pending",
+      "artifact_freshness": "fresh negative-option proof required",
+      "gate_consumer": "release-gates:bd-rchk0.5.6.1",
+      "docs_wording_id": "support.writeback-cache.negative-option-deferred",
+      "unsupported_or_deferred_rationale": "negative-option audit remains open in bd-rchk0.2.1.1",
+      "owner_bead": "bd-rchk0.2.1.1",
+      "docs_target": "README.md",
+      "release_gate_effect": "blocks writeback-cache upgrade",
+      "old_count_claim": "100 percent FUSE surface",
+      "downgrade_or_upgrade_reason": "explicit deferred state prevents docs from hand-upgrading the option",
+      "required_logs": "feature_id,old_count_claim,support_state,controlling_bead_or_artifact,downgrade_or_upgrade_reason,docs_target,release_gate_effect,reproduction_command",
+      "reproduction_command": "ffs-harness validate-support-state-accounting --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
+    },
+    {
+      "feature_id": "readonly_repair_with_ledger",
+      "domain": "self-healing durability policy",
+      "legacy_count_bucket": "100_percent_v1_bucket",
+      "support_state": "opt_in_mutating",
+      "evidence_lane": "operator opt-in repair ledger and side-effect boundary fixtures",
+      "artifact_freshness": "fresh mounted repair conformance required",
+      "gate_consumer": "release-gates:bd-rchk0.5.6.1",
+      "docs_wording_id": "support.readonly-repair.opt-in-mutating",
+      "unsupported_or_deferred_rationale": "repair mutation must remain explicit operator opt-in",
+      "owner_bead": "bd-wjsuj",
+      "docs_target": "README.md",
+      "release_gate_effect": "allows opt-in-only repair wording",
+      "old_count_claim": "100 percent self-healing durability policy",
+      "downgrade_or_upgrade_reason": "repair mutation has a narrower supported envelope than durability inventory",
+      "required_logs": "feature_id,old_count_claim,support_state,controlling_bead_or_artifact,downgrade_or_upgrade_reason,docs_target,release_gate_effect,reproduction_command",
+      "reproduction_command": "ffs-harness validate-support-state-accounting --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
+    },
+    {
+      "feature_id": "rw_background_repair",
+      "domain": "self-healing durability policy",
+      "legacy_count_bucket": "100_percent_v1_bucket",
+      "support_state": "host_blocked",
+      "evidence_lane": "read-write serialization gate absent or stale",
+      "artifact_freshness": "fresh two-key gate and rollback proof required",
+      "gate_consumer": "release-gates:bd-rchk0.5.6.1",
+      "docs_wording_id": "support.rw-background-repair.host-blocked",
+      "unsupported_or_deferred_rationale": "rw automatic repair enablement is owned by bd-bqgy8",
+      "owner_bead": "bd-bqgy8",
+      "docs_target": "README.md",
+      "release_gate_effect": "blocks read-write automatic repair claims",
+      "old_count_claim": "100 percent self-healing durability policy",
+      "downgrade_or_upgrade_reason": "rw repair risks user data unless serialization and rollback proof is fresh",
+      "required_logs": "feature_id,old_count_claim,support_state,controlling_bead_or_artifact,downgrade_or_upgrade_reason,docs_target,release_gate_effect,reproduction_command",
+      "reproduction_command": "ffs-harness validate-support-state-accounting --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
+    },
+    {
+      "feature_id": "performance_claim_budget",
+      "domain": "performance evidence",
+      "legacy_count_bucket": "not_counted_by_feature_parity",
+      "support_state": "dry_run_only",
+      "evidence_lane": "dry-run manifest validation and claim-tier budget checks",
+      "artifact_freshness": "authoritative benchmark artifacts required before support upgrade",
+      "gate_consumer": "release-gates:bd-rchk0.5.6.1",
+      "docs_wording_id": "support.performance.dry-run-only",
+      "unsupported_or_deferred_rationale": "measured core benchmark execution remains owned by bd-rchk5.2",
+      "owner_bead": "bd-rchk5.2",
+      "docs_target": "README.md",
+      "release_gate_effect": "blocks performance claims stronger than experimental",
+      "old_count_claim": "historical performance wording outside feature counts",
+      "downgrade_or_upgrade_reason": "dry-run manifests control claims but do not replace benchmark data",
+      "required_logs": "feature_id,old_count_claim,support_state,controlling_bead_or_artifact,downgrade_or_upgrade_reason,docs_target,release_gate_effect,reproduction_command",
+      "reproduction_command": "ffs-harness validate-support-state-accounting --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
+    },
+    {
+      "feature_id": "unsupported_legacy_ext4_codecs",
+      "domain": "ext4 metadata parsing",
+      "legacy_count_bucket": "100_percent_v1_bucket",
+      "support_state": "unsupported",
+      "evidence_lane": "deterministic EOPNOTSUPP rejection for excluded codecs",
+      "artifact_freshness": "explicit non-goal accepted until scope changes",
+      "gate_consumer": "release-gates:bd-rchk0.5.6.1",
+      "docs_wording_id": "support.ext4-legacy-codecs.unsupported",
+      "unsupported_or_deferred_rationale": "rare e2compr methods lzv1, bzip2, and lzrw3a are explicit V1 non-goals",
+      "owner_bead": "bd-mpcse",
+      "docs_target": "FEATURE_PARITY.md",
+      "release_gate_effect": "permits unsupported wording only",
+      "old_count_claim": "100 percent ext4 metadata parsing",
+      "downgrade_or_upgrade_reason": "deterministic rejection counts as inventory coverage, not support",
+      "required_logs": "feature_id,old_count_claim,support_state,controlling_bead_or_artifact,downgrade_or_upgrade_reason,docs_target,release_gate_effect,reproduction_command",
+      "reproduction_command": "ffs-harness validate-support-state-accounting --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
+    },
+    {
+      "feature_id": "performance_budget_enforcement",
+      "domain": "performance evidence",
+      "legacy_count_bucket": "not_counted_by_feature_parity",
+      "support_state": "validated",
+      "evidence_lane": "performance manifest claim-tier and budget validator",
+      "artifact_freshness": "manifest validation fresh as of bd-hol07 closure",
+      "gate_consumer": "release-gates:bd-rchk0.5.6.1",
+      "docs_wording_id": "support.performance-budget.validated",
+      "unsupported_or_deferred_rationale": "claim-budget enforcement is implemented; benchmark execution remains separate",
+      "owner_bead": "bd-hol07",
+      "docs_target": "benchmarks/performance_baseline_manifest.json",
+      "release_gate_effect": "allows only budget-enforced performance wording",
+      "old_count_claim": "historical performance wording outside feature counts",
+      "downgrade_or_upgrade_reason": "budget enforcement is validated but does not prove workload speed",
+      "required_logs": "feature_id,old_count_claim,support_state,controlling_bead_or_artifact,downgrade_or_upgrade_reason,docs_target,release_gate_effect,reproduction_command",
+      "reproduction_command": "ffs-harness validate-support-state-accounting --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
+    }
+  ],
+  "grouped_by_support_state": {
+    "basic_coverage": [
+      "ext4_casefold"
+    ],
+    "deferred": [
+      "writeback_cache_negative_option"
+    ],
+    "detection_only": [
+      "background_scrub"
+    ],
+    "disabled": [
+      "fuse_writeback_cache"
+    ],
+    "dry_run_only": [
+      "performance_claim_budget"
+    ],
+    "experimental": [
+      "mounted_write_paths"
+    ],
+    "host_blocked": [
+      "rw_background_repair"
+    ],
+    "opt_in_mutating": [
+      "readonly_repair_with_ledger"
+    ],
+    "parse_only": [
+      "btrfs_send_receive_streams"
+    ],
+    "single_device_only": [
+      "btrfs_multi_device_raid"
+    ],
+    "unsupported": [
+      "unsupported_legacy_ext4_codecs"
+    ],
+    "validated": [
+      "readonly_ext4_btrfs_inspection",
+      "performance_budget_enforcement"
+    ]
+  },
+  "grouped_by_gate_consumer": {
+    "release-gates:bd-rchk0.5.6.1": [
+      "readonly_ext4_btrfs_inspection",
+      "btrfs_send_receive_streams",
+      "btrfs_multi_device_raid",
+      "ext4_casefold",
+      "mounted_write_paths",
+      "background_scrub",
+      "fuse_writeback_cache",
+      "writeback_cache_negative_option",
+      "readonly_repair_with_ledger",
+      "rw_background_repair",
+      "performance_claim_budget",
+      "unsupported_legacy_ext4_codecs",
+      "performance_budget_enforcement"
+    ]
+  },
+  "grouped_by_docs_target": {
+    "FEATURE_PARITY.md": [
+      "readonly_ext4_btrfs_inspection",
+      "btrfs_send_receive_streams",
+      "btrfs_multi_device_raid",
+      "ext4_casefold",
+      "unsupported_legacy_ext4_codecs"
+    ],
+    "README.md": [
+      "mounted_write_paths",
+      "background_scrub",
+      "fuse_writeback_cache",
+      "writeback_cache_negative_option",
+      "readonly_repair_with_ledger",
+      "rw_background_repair",
+      "performance_claim_budget"
+    ],
+    "benchmarks/performance_baseline_manifest.json": [
+      "performance_budget_enforcement"
+    ]
+  },
+  "migration_cases": [
+    {
+      "historical_claim": "FEATURE_PARITY 86/86",
+      "feature_id": "btrfs_send_receive_streams",
+      "old_bucket": "86/86,90/90,100_percent_buckets",
+      "classified_support_state": "parse_only",
+      "docs_safe_claim": "btrfs_send_receive_streams may claim `parse_only` only with wording id `support.btrfs-send-receive.parse-only`",
+      "owner_bead": "bd-naww5"
+    },
+    {
+      "historical_claim": "FEATURE_PARITY 86/86",
+      "feature_id": "btrfs_multi_device_raid",
+      "old_bucket": "90/90,100_percent_buckets",
+      "classified_support_state": "single_device_only",
+      "docs_safe_claim": "btrfs_multi_device_raid may claim `single_device_only` only with wording id `support.btrfs-multidevice.single-device-only`",
+      "owner_bead": "bd-ch373"
+    },
+    {
+      "historical_claim": "FEATURE_PARITY 90/90",
+      "feature_id": "ext4_casefold",
+      "old_bucket": "90/90,100_percent_buckets",
+      "classified_support_state": "basic_coverage",
+      "docs_safe_claim": "ext4_casefold may claim `basic_coverage` only with wording id `support.ext4-casefold.basic-coverage`",
+      "owner_bead": "bd-9er6s"
+    },
+    {
+      "historical_claim": "FEATURE_PARITY 90/90",
+      "feature_id": "mounted_write_paths",
+      "old_bucket": "100_percent_v1_bucket",
+      "classified_support_state": "experimental",
+      "docs_safe_claim": "mounted_write_paths may claim `experimental` only with wording id `support.mounted-writes.experimental`",
+      "owner_bead": "bd-jtu4q"
+    },
+    {
+      "historical_claim": "FEATURE_PARITY 100 percent",
+      "feature_id": "background_scrub",
+      "old_bucket": "100_percent_v1_bucket",
+      "classified_support_state": "detection_only",
+      "docs_safe_claim": "background_scrub may claim `detection_only` only with wording id `support.background-scrub.detection-only`",
+      "owner_bead": "bd-wjsuj"
+    },
+    {
+      "historical_claim": "FEATURE_PARITY 100 percent",
+      "feature_id": "fuse_writeback_cache",
+      "old_bucket": "100_percent_v1_bucket",
+      "classified_support_state": "disabled",
+      "docs_safe_claim": "fuse_writeback_cache may claim `disabled` only with wording id `support.writeback-cache.disabled`",
+      "owner_bead": "bd-4nobd"
+    },
+    {
+      "historical_claim": "FEATURE_PARITY 100 percent",
+      "feature_id": "rw_background_repair",
+      "old_bucket": "100_percent_v1_bucket",
+      "classified_support_state": "host_blocked",
+      "docs_safe_claim": "rw_background_repair may claim `host_blocked` only with wording id `support.rw-background-repair.host-blocked`",
+      "owner_bead": "bd-bqgy8"
+    },
+    {
+      "historical_claim": "FEATURE_PARITY 100 percent",
+      "feature_id": "readonly_ext4_btrfs_inspection",
+      "old_bucket": "100_percent_v1_bucket",
+      "classified_support_state": "validated",
+      "docs_safe_claim": "readonly_ext4_btrfs_inspection may claim `validated` only with wording id `support.readonly-inspection.validated`",
+      "owner_bead": "bd-mpcse"
+    }
+  ],
+  "reference_checks": [
+    {
+      "feature_id": "support-state-accounting",
+      "referenced_bead_id": "bd-mpcse",
+      "field": "required_owner_beads",
+      "exists": true
+    },
+    {
+      "feature_id": "support-state-accounting",
+      "referenced_bead_id": "bd-jtu4q",
+      "field": "required_owner_beads",
+      "exists": true
+    },
+    {
+      "feature_id": "support-state-accounting",
+      "referenced_bead_id": "bd-naww5",
+      "field": "required_owner_beads",
+      "exists": true
+    },
+    {
+      "feature_id": "support-state-accounting",
+      "referenced_bead_id": "bd-ch373",
+      "field": "required_owner_beads",
+      "exists": true
+    },
+    {
+      "feature_id": "support-state-accounting",
+      "referenced_bead_id": "bd-9er6s",
+      "field": "required_owner_beads",
+      "exists": true
+    },
+    {
+      "feature_id": "support-state-accounting",
+      "referenced_bead_id": "bd-4nobd",
+      "field": "required_owner_beads",
+      "exists": true
+    },
+    {
+      "feature_id": "support-state-accounting",
+      "referenced_bead_id": "bd-rchk0.2.1.1",
+      "field": "required_owner_beads",
+      "exists": true
+    },
+    {
+      "feature_id": "support-state-accounting",
+      "referenced_bead_id": "bd-bqgy8",
+      "field": "required_owner_beads",
+      "exists": true
+    },
+    {
+      "feature_id": "support-state-accounting",
+      "referenced_bead_id": "bd-wjsuj",
+      "field": "required_owner_beads",
+      "exists": true
+    },
+    {
+      "feature_id": "support-state-accounting",
+      "referenced_bead_id": "bd-rchk5.2",
+      "field": "required_owner_beads",
+      "exists": true
+    },
+    {
+      "feature_id": "support-state-accounting",
+      "referenced_bead_id": "bd-hol07",
+      "field": "required_owner_beads",
+      "exists": true
+    },
+    {
+      "feature_id": "readonly_ext4_btrfs_inspection",
+      "referenced_bead_id": "bd-mpcse",
+      "field": "owner_bead",
+      "exists": true
+    },
+    {
+      "feature_id": "btrfs_send_receive_streams",
+      "referenced_bead_id": "bd-naww5",
+      "field": "owner_bead",
+      "exists": true
+    },
+    {
+      "feature_id": "btrfs_multi_device_raid",
+      "referenced_bead_id": "bd-ch373",
+      "field": "owner_bead",
+      "exists": true
+    },
+    {
+      "feature_id": "ext4_casefold",
+      "referenced_bead_id": "bd-9er6s",
+      "field": "owner_bead",
+      "exists": true
+    },
+    {
+      "feature_id": "mounted_write_paths",
+      "referenced_bead_id": "bd-jtu4q",
+      "field": "owner_bead",
+      "exists": true
+    },
+    {
+      "feature_id": "background_scrub",
+      "referenced_bead_id": "bd-wjsuj",
+      "field": "owner_bead",
+      "exists": true
+    },
+    {
+      "feature_id": "fuse_writeback_cache",
+      "referenced_bead_id": "bd-4nobd",
+      "field": "owner_bead",
+      "exists": true
+    },
+    {
+      "feature_id": "writeback_cache_negative_option",
+      "referenced_bead_id": "bd-rchk0.2.1.1",
+      "field": "owner_bead",
+      "exists": true
+    },
+    {
+      "feature_id": "readonly_repair_with_ledger",
+      "referenced_bead_id": "bd-wjsuj",
+      "field": "owner_bead",
+      "exists": true
+    },
+    {
+      "feature_id": "rw_background_repair",
+      "referenced_bead_id": "bd-bqgy8",
+      "field": "owner_bead",
+      "exists": true
+    },
+    {
+      "feature_id": "performance_claim_budget",
+      "referenced_bead_id": "bd-rchk5.2",
+      "field": "owner_bead",
+      "exists": true
+    },
+    {
+      "feature_id": "unsupported_legacy_ext4_codecs",
+      "referenced_bead_id": "bd-mpcse",
+      "field": "owner_bead",
+      "exists": true
+    },
+    {
+      "feature_id": "performance_budget_enforcement",
+      "referenced_bead_id": "bd-hol07",
+      "field": "owner_bead",
+      "exists": true
+    }
+  ],
+  "required_log_fields": [
+    "feature_id",
+    "old_count_claim",
+    "support_state",
+    "controlling_bead_or_artifact",
+    "downgrade_or_upgrade_reason",
+    "docs_target",
+    "release_gate_effect",
+    "reproduction_command"
+  ],
+  "errors": [],
+  "reproduction_command": "ffs-harness validate-support-state-accounting --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/parity/support_state_accounting.json --summary-out artifacts/parity/support_state_accounting.md"
+}
