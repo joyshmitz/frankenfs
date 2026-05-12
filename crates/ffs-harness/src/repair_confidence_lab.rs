@@ -1426,6 +1426,116 @@ mod tests {
     }
 
     #[test]
+    fn repair_confidence_lab_report_json_shape() -> Result<()> {
+        let spec = checked_in_spec();
+        let report = validate_repair_confidence_lab(&spec);
+        assert!(report.valid, "{:#?}", report.errors);
+
+        let full_json = serde_json::to_string_pretty(&report)?;
+        let parsed: RepairConfidenceLabReport = serde_json::from_str(&full_json)?;
+        assert_eq!(parsed, report);
+
+        let expected_scenario_log_keys = report
+            .scenario_reports
+            .first()
+            .map(|scenario| log_line_keys(&scenario.log_line))
+            .unwrap_or_default();
+        for scenario in &report.scenario_reports {
+            assert_eq!(log_line_keys(&scenario.log_line), expected_scenario_log_keys);
+        }
+
+        let expected_calibration_log_keys = report
+            .calibration_reports
+            .first()
+            .map(|case| log_line_keys(&case.log_line))
+            .unwrap_or_default();
+        for case in &report.calibration_reports {
+            assert_eq!(log_line_keys(&case.log_line), expected_calibration_log_keys);
+        }
+
+        let scenario_rows = report
+            .scenario_reports
+            .iter()
+            .map(|scenario| {
+                serde_json::json!({
+                    "scenario_id": &scenario.scenario_id,
+                    "phase": scenario.phase.label(),
+                    "expected_outcome": scenario.expected_outcome.label(),
+                    "corruption_class": &scenario.corruption_class,
+                    "threshold_id": &scenario.threshold_id,
+                    "confidence_score": scenario.confidence_score,
+                    "symbol_coverage": scenario.symbol_coverage,
+                    "ledger_integrity": scenario.ledger_integrity,
+                    "residual_risk": scenario.residual_risk,
+                    "threshold_decision": &scenario.threshold_decision,
+                    "mutation_allowed": scenario.mutation_allowed,
+                    "refusal_reason": &scenario.refusal_reason,
+                    "reproduction_command": &scenario.reproduction_command,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let calibration_rows = report
+            .calibration_reports
+            .iter()
+            .map(|case| {
+                serde_json::json!({
+                    "corpus_id": &case.corpus_id,
+                    "seed": case.seed,
+                    "corruption_class": &case.corruption_class,
+                    "expected_recoverability": case.expected_recoverability.label(),
+                    "expected_outcome": case.expected_outcome.label(),
+                    "observed_outcome": case.observed_outcome.label(),
+                    "confidence_score": case.confidence_score,
+                    "threshold_decision": &case.threshold_decision,
+                    "refusal_reason": &case.refusal_reason,
+                    "ledger_row_ids": &case.ledger_row_ids,
+                    "artifact_path": &case.artifact_path,
+                    "reproduction_command": &case.reproduction_command,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let shape = serde_json::json!({
+            "schema_version": report.schema_version,
+            "lab_id": &report.lab_id,
+            "bead_id": &report.bead_id,
+            "valid": report.valid,
+            "scenario_count": report.scenario_count,
+            "by_outcome": &report.by_outcome,
+            "by_phase": &report.by_phase,
+            "decision_counts": &report.decision_counts,
+            "mutation_allowed_count": report.mutation_allowed_count,
+            "mutation_refused_count": report.mutation_refused_count,
+            "calibration_case_count": report.calibration_case_count,
+            "calibration_outcome_counts": &report.calibration_outcome_counts,
+            "missing_required_calibration_classes": &report.missing_required_calibration_classes,
+            "missing_required_refusal_reasons": &report.missing_required_refusal_reasons,
+            "missing_required_outcomes": &report.missing_required_outcomes,
+            "missing_required_log_fields": &report.missing_required_log_fields,
+            "missing_docs_claims": &report.missing_docs_claims,
+            "scenario_log_line_keys": expected_scenario_log_keys,
+            "calibration_log_line_keys": expected_calibration_log_keys,
+            "scenario_reports": scenario_rows,
+            "calibration_reports": calibration_rows,
+            "errors": &report.errors,
+            "warnings": &report.warnings,
+        });
+        insta::assert_snapshot!(
+            "repair_confidence_lab_report_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
+    }
+
+    fn log_line_keys(line: &str) -> Vec<&str> {
+        line.split('|')
+            .skip(1)
+            .map(|field| field.split_once('=').map_or(field, |(key, _value)| key))
+            .collect()
+    }
+
+    #[test]
     fn calibration_corpus_covers_recovery_refusal_and_verification() {
         let spec = checked_in_spec();
         let report = validate_repair_confidence_lab(&spec);
