@@ -1,0 +1,51 @@
+---
+source: crates/ffs-harness/src/swarm_cache_controller.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "contract_id": "bd-p2j3e.5-swarm-cache-controller-v1",
+  "valid": true,
+  "candidate_count": 3,
+  "scenario_count": 2,
+  "small_host_downgrade_count": 1,
+  "authoritative_claim_count": 1,
+  "claim_state_counts": {
+    "measured_authoritative": 4,
+    "small_host_smoke": 3
+  },
+  "rows": [
+    {
+      "scenario_id": "cache_pressure_256gb_authoritative_fixture",
+      "workload_class": "cache_pressure",
+      "host_meets_target": true,
+      "release_claim_state": "measured_authoritative",
+      "lane": "permissioned_large_host",
+      "candidate_ids": [
+        "current_arc",
+        "s3_fifo_guarded",
+        "segmented_pressure_guard"
+      ],
+      "best_p99_candidate_id": "s3_fifo_guarded",
+      "current_arc_p99_us": 5400.0,
+      "best_p99_us": 4100.0,
+      "backpressure_state": "healthy"
+    },
+    {
+      "scenario_id": "cache_pressure_small_host_smoke",
+      "workload_class": "fixture_smoke",
+      "host_meets_target": false,
+      "release_claim_state": "small_host_smoke",
+      "lane": "developer_smoke",
+      "candidate_ids": [
+        "current_arc",
+        "s3_fifo_guarded"
+      ],
+      "best_p99_candidate_id": "s3_fifo_guarded",
+      "current_arc_p99_us": 8000.0,
+      "best_p99_us": 6900.0,
+      "backpressure_state": "healthy"
+    }
+  ],
+  "errors": []
+}

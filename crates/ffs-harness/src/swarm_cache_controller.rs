@@ -355,7 +355,9 @@ pub fn validate_swarm_cache_controller_contract(
         .scenarios
         .iter()
         .filter(|scenario| {
-            scenario.release_claim_state == CacheReleaseClaimState::MeasuredAuthoritative
+            scenario
+                .release_claim_state
+                .eq(&CacheReleaseClaimState::MeasuredAuthoritative)
         })
         .count();
     let claim_state_counts = count_claim_states(contract);
@@ -441,7 +443,10 @@ pub fn render_swarm_cache_controller_markdown(report: &SwarmCacheValidationRepor
 
 fn validate_contract_shape(contract: &SwarmCacheControllerContract) -> Vec<String> {
     let mut errors = Vec::new();
-    if contract.schema_version != SWARM_CACHE_CONTROLLER_SCHEMA_VERSION {
+    if contract
+        .schema_version
+        .ne(&SWARM_CACHE_CONTROLLER_SCHEMA_VERSION)
+    {
         errors.push(format!(
             "schema_version must be {}; got {}",
             SWARM_CACHE_CONTROLLER_SCHEMA_VERSION, contract.schema_version
@@ -460,7 +465,7 @@ fn validate_contract_shape(contract: &SwarmCacheControllerContract) -> Vec<Strin
     if contract.target_host.min_ram_total_gb < 256 {
         errors.push("target_host.min_ram_total_gb must be at least 256".to_owned());
     }
-    if contract.target_host.min_ram_available_gb == 0 {
+    if contract.target_host.min_ram_available_gb.eq(&0) {
         errors.push("target_host.min_ram_available_gb must be positive".to_owned());
     }
     if contract.candidates.is_empty() {
@@ -528,12 +533,12 @@ fn current_arc_candidate_id(
     let current_arc_candidates = contract
         .candidates
         .iter()
-        .filter(|candidate| candidate.algorithm == CacheAdmissionAlgorithm::CurrentArc)
+        .filter(|candidate| candidate.algorithm.eq(&CacheAdmissionAlgorithm::CurrentArc))
         .collect::<Vec<_>>();
 
     match current_arc_candidates.as_slice() {
         [candidate] => {
-            if candidate.candidate_id != contract.fallback_candidate_id {
+            if candidate.candidate_id.ne(&contract.fallback_candidate_id) {
                 errors.push(format!(
                     "current ARC candidate {} must be the top-level fallback {}",
                     candidate.candidate_id, contract.fallback_candidate_id
@@ -595,14 +600,14 @@ fn validate_host_observation(
     scenario: &SwarmCacheScenario,
     errors: &mut Vec<String>,
 ) {
-    if scenario.host.cpu_cores_logical == 0 {
+    if scenario.host.cpu_cores_logical.eq(&0) {
         errors.push(format!(
             "scenario {} host.cpu_cores_logical must be positive",
             scenario.scenario_id
         ));
     }
     if let Some(numa_nodes) = scenario.host.numa_nodes
-        && numa_nodes == 0
+        && numa_nodes.eq(&0)
     {
         errors.push(format!(
             "scenario {} host.numa_nodes must be positive when present",
@@ -631,7 +636,10 @@ fn validate_host_observation(
         ));
     }
     if scenario.release_claim_state.requires_large_host()
-        && scenario.host.lane != SwarmCacheLane::PermissionedLargeHost
+        && scenario
+            .host
+            .lane
+            .ne(&SwarmCacheLane::PermissionedLargeHost)
     {
         errors.push(format!(
             "scenario {} authoritative claim must run in permissioned_large_host lane",
@@ -670,7 +678,7 @@ fn validate_backpressure(
         &backpressure.flush_policy,
         errors,
     );
-    if backpressure.flush_batch_size == 0 {
+    if backpressure.flush_batch_size.eq(&0) {
         errors.push(format!(
             "scenario {scenario_id} flush_batch_size must be positive"
         ));
@@ -793,7 +801,7 @@ fn build_row(
     let current_arc = scenario
         .measurements
         .iter()
-        .find(|measurement| measurement.candidate_id == current_arc_id);
+        .find(|measurement| measurement.candidate_id.eq(current_arc_id));
 
     let Some(current_arc) = current_arc else {
         errors.push(format!(
@@ -898,6 +906,18 @@ mod tests {
         assert!(report.errors.is_empty());
     }
 
+    #[test]
+    fn swarm_cache_controller_report_json_shape() {
+        let contract = load_swarm_cache_controller_contract(Path::new(&workspace_path(
+            DEFAULT_SWARM_CACHE_CONTROLLER_CONTRACT,
+        )))
+        .expect("load checked-in cache controller contract");
+        let report = validate_swarm_cache_controller_contract(&contract);
+        let json = serde_json::to_string_pretty(&report).expect("swarm cache report serializes");
+
+        insta::assert_snapshot!("swarm_cache_controller_report_json_shape", json);
+    }
+
     /// The markdown renderer feeds proof-bundle and release-gate operator
     /// workflows. The checked-in fixture validation above pins semantics; this
     /// snapshot pins the title, metadata bullets, scenario table layout,
@@ -941,7 +961,7 @@ mod tests {
         let mut contract = sample_contract();
         contract
             .candidates
-            .retain(|candidate| candidate.algorithm != CacheAdmissionAlgorithm::CurrentArc);
+            .retain(|candidate| candidate.algorithm.ne(&CacheAdmissionAlgorithm::CurrentArc));
 
         let report = validate_swarm_cache_controller_contract(&contract);
 
