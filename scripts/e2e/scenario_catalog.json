@@ -2066,6 +2066,12 @@
           "evidence": "SCENARIO_RESULT|scenario_id=lib_rch_required_artifact_missing_fails_fast|outcome=PASS"
         },
         {
+          "id": "catalog_id_pattern_sample_rejects_bad_patterns",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=catalog_id_pattern_sample_rejects_bad_patterns|outcome=PASS"
+        },
+        {
           "id": "gate_runner_features",
           "category": "happy",
           "status": "active",

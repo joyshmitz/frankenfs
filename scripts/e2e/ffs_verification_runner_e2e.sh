@@ -15,6 +15,7 @@
 # 11. Mounted write error-class RCH probes use direct cargo commands
 # 12. Mounted ext4/btrfs scenario matrix artifacts are wired
 # 13. Shared E2E artifact directories are unique under concurrent starts
+# 14. Scenario catalog id_pattern sample validation fails closed
 #
 # Usage: ./scripts/e2e/ffs_verification_runner_e2e.sh
 #
@@ -317,6 +318,49 @@ SH
         && grep -Fq "RCH_REQUIRED_ARTIFACT_MISSING" "$output_path"
 }
 
+verify_catalog_id_pattern_sample_rejects_bad_patterns() {
+    local probe_dir bad_catalog probe_log status
+    probe_dir="$E2E_TEMP_DIR/catalog_id_pattern_sample_probe"
+    bad_catalog="$probe_dir/bad_scenario_catalog.json"
+    probe_log="$probe_dir/catalog_validation.log"
+
+    mkdir -p "$probe_dir"
+    cat >"$bad_catalog" <<'JSON'
+{
+  "catalog_version": "probe",
+  "scenario_id_regex": "^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$",
+  "taxonomy": ["error"],
+  "suites": [
+    {
+      "suite_id": "bad_catalog_probe",
+      "script": "scripts/e2e/bad_catalog_probe.sh",
+      "required_categories": ["error"],
+      "scenarios": [
+        {
+          "id_pattern": "^bad_[A-Z]+$",
+          "category": "error",
+          "status": "active",
+          "evidence": "bad_catalog_probe"
+        }
+      ]
+    }
+  ]
+}
+JSON
+
+    set +e
+    (
+        cd "$REPO_ROOT"
+        export REPO_ROOT
+        E2E_LOG_FILE="$probe_log" e2e_validate_scenario_catalog "$bad_catalog"
+    ) >"$probe_dir/stdout.log" 2>"$probe_dir/stderr.log"
+    status=$?
+    set -e
+
+    [[ "$status" -ne 0 ]] \
+        && grep -Fq "generated id_pattern sample does not match scenario_id_regex" "$probe_log"
+}
+
 e2e_init "ffs_verification_runner"
 
 RUNNER_SRC="crates/ffs-harness/src/verification_runner.rs"
@@ -445,6 +489,17 @@ if e2e_rch_capture_fixture_matrix_self_test >/dev/null \
     scenario_result "lib_rch_required_artifact_missing_fails_fast" "PASS" "Missing required artifact returned 99 before command timeout"
 else
     scenario_result "lib_rch_required_artifact_missing_fails_fast" "FAIL" "Missing required artifact did not fail closed promptly"
+fi
+
+#######################################
+# Scenario 4g: scenario catalog id_pattern samples fail closed
+#######################################
+e2e_step "Scenario 4g: scenario catalog id_pattern sample fail-closed check"
+
+if verify_catalog_id_pattern_sample_rejects_bad_patterns; then
+    scenario_result "catalog_id_pattern_sample_rejects_bad_patterns" "PASS" "Invalid id_pattern sample rejected by scenario_id_regex"
+else
+    scenario_result "catalog_id_pattern_sample_rejects_bad_patterns" "FAIL" "Invalid id_pattern sample was not rejected"
 fi
 
 #######################################
