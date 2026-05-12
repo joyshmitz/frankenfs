@@ -1648,6 +1648,82 @@ mod tests {
     }
 
     #[test]
+    fn docs_status_drift_report_json_shape() -> Result<()> {
+        let report = fixture_report(None);
+        assert!(report.release_gate_pass, "{:?}", report.errors);
+
+        let rule = serde_json::to_value(
+            report
+                .rules
+                .first()
+                .expect("fixture includes docs status rule"),
+        )?;
+        let observation = serde_json::to_value(
+            report
+                .observations
+                .first()
+                .expect("fixture includes docs status observation"),
+        )?;
+        let release_gate_wording_contract = serde_json::to_value(
+            report
+                .release_gate_wording_contracts
+                .first()
+                .expect("fixture includes release-gate wording contract"),
+        )?;
+        let release_gate_wording_observation = serde_json::to_value(
+            report
+                .release_gate_wording_observations
+                .first()
+                .expect("fixture includes release-gate wording observation"),
+        )?;
+        let structured_log = serde_json::to_value(
+            report
+                .structured_logs
+                .first()
+                .expect("fixture includes structured log event"),
+        )?;
+        let shape = serde_json::json!({
+            "docs_status_drift_version": &report.docs_status_drift_version,
+            "release_gate_contract": &report.release_gate_contract,
+            "release_gate_pass": report.release_gate_pass,
+            "source_issue_count": report.source_issue_count,
+            "rule_count": report.rule_count,
+            "observation_count": report.observation_count,
+            "release_gate_wording_contract_count": report.release_gate_wording_contract_count,
+            "release_gate_wording_observation_count": report.release_gate_wording_observation_count,
+            "required_doc_targets": &report.required_doc_targets,
+            "allowed_status_vocabulary": &report.allowed_status_vocabulary,
+            "generated_artifact_paths": &report.generated_artifact_paths,
+            "rule_fields": json_object_keys(&rule),
+            "observation_fields": json_object_keys(&observation),
+            "release_gate_wording_contract_fields": json_object_keys(&release_gate_wording_contract),
+            "release_gate_wording_observation_fields": json_object_keys(&release_gate_wording_observation),
+            "structured_log_fields": json_object_keys(&structured_log),
+            "grouped_by_docs_target": &report.grouped_by_docs_target,
+            "grouped_by_public_status": &report.grouped_by_public_status,
+            "drift_classification_counts": &report.drift_classification_counts,
+            "release_gate_wording_drift_classification_counts": &report.release_gate_wording_drift_classification_counts,
+            "required_log_fields": &report.required_log_fields,
+            "required_release_gate_wording_fields": &report.required_release_gate_wording_fields,
+            "errors": &report.errors,
+            "reproduction_command": &report.reproduction_command,
+        });
+        let json = serde_json::to_string_pretty(&shape)?;
+        insta::assert_snapshot!("docs_status_drift_report_json_shape", json);
+
+        let full_json = serde_json::to_string_pretty(&report)?;
+        let roundtrip: DocsStatusDriftReport = serde_json::from_str(&full_json)?;
+        assert_eq!(roundtrip, report);
+        Ok(())
+    }
+
+    fn json_object_keys(value: &Value) -> Vec<String> {
+        value.as_object().map_or_else(Vec::new, |object| {
+            object.keys().cloned().collect::<Vec<_>>()
+        })
+    }
+
+    #[test]
     fn schema_rejects_rules_missing_required_fields() {
         let support_rows = support_rows_for_tests();
         let matrix_rows = matrix_rows_for_tests();
