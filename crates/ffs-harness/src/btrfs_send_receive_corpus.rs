@@ -585,6 +585,16 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_send_receive_corpus_report_json_shape() {
+        let report = validate_default_btrfs_send_receive_corpus()
+            .expect("default btrfs send/receive corpus validates");
+        let json =
+            serde_json::to_string_pretty(&report).expect("btrfs send/receive report serializes");
+
+        insta::assert_snapshot!("btrfs_send_receive_corpus_report_json_shape", json);
+    }
+
+    #[test]
     fn fail_on_errors_rejects_invalid_report() {
         let mut corpus = fixture_corpus();
         corpus.cases.clear();

@@ -1,0 +1,23 @@
+---
+source: crates/ffs-harness/src/btrfs_send_receive_corpus.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "corpus_id": "frankenfs_btrfs_send_recv_v1",
+  "bead_id": "bd-naww5",
+  "case_count": 6,
+  "supported_subsets": [
+    "export_only",
+    "parse_only",
+    "receive_only",
+    "roundtrip_supported",
+    "unsupported"
+  ],
+  "refusal_kinds": [
+    "refused_incremental_parent_mismatch",
+    "refused_unsupported_record"
+  ],
+  "valid": true,
+  "errors": []
+}
