@@ -325,14 +325,19 @@ mod tests {
     }
 
     #[test]
-    fn happy_gate_accepts_rw_background_repair() {
+    fn happy_gate_accepts_rw_background_repair() -> anyhow::Result<()> {
         let gate = happy_gate();
-        let json = serde_json::to_string_pretty(&gate).expect("serialize");
+        let json = serde_json::to_string_pretty(&gate)?;
 
         insta::assert_snapshot!("happy_gate_json_shape", json);
 
+        let roundtrip: RwBackgroundRepairGate = serde_json::from_str(&json)?;
+        assert_eq!(roundtrip, gate);
+
         let decision = evaluate_rw_background_repair_gate(&gate);
         assert!(matches!(decision, RwBackgroundRepairDecision::Accept));
+
+        Ok(())
     }
 
     #[test]
