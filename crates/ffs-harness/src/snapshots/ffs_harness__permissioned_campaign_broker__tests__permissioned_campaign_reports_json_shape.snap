@@ -1,0 +1,111 @@
+---
+source: crates/ffs-harness/src/permissioned_campaign_broker.rs
+expression: serde_json::to_string_pretty(&shape)?
+---
+{
+  "broker": {
+    "schema_version": 1,
+    "campaign_id": "bd-rchk3.3-xfstests-real-20260507",
+    "lane_kind": "xfstests_real_baseline",
+    "valid": true,
+    "packet_status": "ready_for_operator_approval",
+    "product_evidence_claim": "none",
+    "target_beads": [
+      "bd-rchk3.3",
+      "bd-rchk3"
+    ],
+    "ack_env": "XFSTESTS_REAL_RUN_ACK",
+    "runner_env": [
+      "XFSTESTS_DIR",
+      "TEST_DIR",
+      "SCRATCH_MNT",
+      "RESULT_BASE"
+    ],
+    "host_facts": [
+      "xfstests_helpers",
+      "explicit_test_and_scratch_paths",
+      "fuse_access"
+    ],
+    "safe_path_roots": [
+      "test_dir",
+      "scratch",
+      "results"
+    ],
+    "destructive_operations": [
+      "mount_test_device",
+      "mount_scratch_device",
+      "mutate_test_device",
+      "mutate_scratch_device"
+    ],
+    "exact_commands": [
+      {
+        "command_id": "xfstests_preflight",
+        "command_role": "preflight"
+      },
+      {
+        "command_id": "xfstests_permissioned_run",
+        "command_role": "permissioned_run"
+      },
+      {
+        "command_id": "xfstests_preserve_artifacts",
+        "command_role": "cleanup"
+      }
+    ],
+    "issue_count": 0
+  },
+  "execution_ledger": {
+    "schema_version": 1,
+    "campaign_id": "bd-rchk3.3-xfstests-real-20260507",
+    "lane_kind": "xfstests_real_baseline",
+    "valid": true,
+    "git_sha": "abcdef123456",
+    "final_status": "resumed",
+    "cleanup_status": "not_started",
+    "product_evidence_claim": "none",
+    "artifact_count": 3,
+    "proof_bundle_lane_candidates": [
+      {
+        "lane_id": "xfstests",
+        "promotion_status": "blocked"
+      }
+    ],
+    "issue_count": 0
+  },
+  "swarm_calibration": {
+    "schema_version": 1,
+    "packet_id": "bd-4v16z.9-large-host-calibration-20260509",
+    "valid": true,
+    "classification": "authoritative_large_host_candidate",
+    "candidate_for_authorized_run": true,
+    "product_evidence_claim": "none",
+    "release_gate_effect": "swarm.responsiveness remains hidden or blocked until bd-rchk0.53.8 records executed large-host proof-bundle lanes and release-gate output",
+    "target_beads": [
+      "bd-4v16z.9",
+      "bd-rchk0.53.8"
+    ],
+    "real_campaign_bead": "bd-rchk0.53.8",
+    "host_facts": [
+      "logical_cpus",
+      "ram_total_gib",
+      "ram_available_gib",
+      "numa_topology_visible",
+      "numa_nodes",
+      "storage_class",
+      "fuse_capability"
+    ],
+    "worker_identity": "rch:large-host-01",
+    "worker_fingerprint_age_days": 0,
+    "queue_isolation": "dedicated",
+    "target_dir_isolated": true,
+    "resource_caps": {
+      "max_duration_secs": 7200,
+      "max_threads": 96,
+      "max_memory_gib": 384.0,
+      "max_temp_storage_gib": 512.0,
+      "max_queue_depth": 4096
+    },
+    "blocker_count": 0,
+    "downgrade_count": 0,
+    "issue_count": 0
+  }
+}

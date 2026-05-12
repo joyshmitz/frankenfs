@@ -3870,6 +3870,141 @@ mod tests {
     }
 
     #[test]
+    fn permissioned_campaign_reports_json_shape() -> Result<(), serde_json::Error> {
+        let broker_report =
+            validate_permissioned_campaign_broker_manifest(&valid_xfstests_manifest(), &config());
+        let broker_json = serde_json::to_string_pretty(&broker_report)?;
+        let broker_decoded: PermissionedCampaignBrokerReport = serde_json::from_str(&broker_json)?;
+        assert_eq!(broker_decoded, broker_report);
+
+        let manifest = valid_xfstests_manifest();
+        let ledger = valid_execution_ledger(
+            &manifest,
+            &[
+                PermissionedCampaignLedgerStepStatus::Running,
+                PermissionedCampaignLedgerStepStatus::Interrupted,
+                PermissionedCampaignLedgerStepStatus::Resumed,
+            ],
+        );
+        let ledger_report =
+            validate_permissioned_campaign_execution_ledger(&manifest, &ledger, &ledger_config());
+        let ledger_json = serde_json::to_string_pretty(&ledger_report)?;
+        let ledger_decoded: PermissionedCampaignExecutionLedgerReport =
+            serde_json::from_str(&ledger_json)?;
+        assert_eq!(ledger_decoded, ledger_report);
+
+        let calibration_report = validate_swarm_capability_calibration_manifest(
+            &valid_swarm_calibration_manifest(),
+            &swarm_calibration_config(),
+        );
+        let calibration_json = serde_json::to_string_pretty(&calibration_report)?;
+        let calibration_decoded: SwarmCapabilityCalibrationReport =
+            serde_json::from_str(&calibration_json)?;
+        assert_eq!(calibration_decoded, calibration_report);
+
+        let shape = serde_json::json!({
+            "broker": {
+                "schema_version": broker_decoded.schema_version,
+                "campaign_id": &broker_decoded.campaign_id,
+                "lane_kind": &broker_decoded.lane_kind,
+                "valid": broker_decoded.valid,
+                "packet_status": &broker_decoded.packet_status,
+                "product_evidence_claim": &broker_decoded.product_evidence_claim,
+                "target_beads": &broker_decoded.target_beads,
+                "ack_env": &broker_decoded.ack_env,
+                "runner_env": broker_decoded
+                    .runner_env
+                    .iter()
+                    .map(|entry| entry.env_var.as_str())
+                    .collect::<Vec<_>>(),
+                "host_facts": broker_decoded
+                    .host_facts
+                    .iter()
+                    .map(|fact| fact.fact_id.as_str())
+                    .collect::<Vec<_>>(),
+                "safe_path_roots": broker_decoded
+                    .safe_path_roots
+                    .iter()
+                    .map(|root| root.root_id.as_str())
+                    .collect::<Vec<_>>(),
+                "destructive_operations": &broker_decoded.destructive_operations,
+                "exact_commands": broker_decoded
+                    .exact_commands
+                    .iter()
+                    .map(|command| {
+                        serde_json::json!({
+                            "command_id": &command.command_id,
+                            "command_role": &command.command_role,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                "issue_count": broker_decoded.issue_count,
+            },
+            "execution_ledger": {
+                "schema_version": ledger_decoded.schema_version,
+                "campaign_id": &ledger_decoded.campaign_id,
+                "lane_kind": &ledger_decoded.lane_kind,
+                "valid": ledger_decoded.valid,
+                "git_sha": &ledger_decoded.git_sha,
+                "final_status": &ledger_decoded.final_status,
+                "cleanup_status": &ledger_decoded.cleanup_status,
+                "product_evidence_claim": &ledger_decoded.product_evidence_claim,
+                "artifact_count": ledger_decoded.artifact_count,
+                "proof_bundle_lane_candidates": ledger_decoded
+                    .proof_bundle_lane_candidates
+                    .iter()
+                    .map(|candidate| {
+                        serde_json::json!({
+                            "lane_id": &candidate.lane_id,
+                            "promotion_status": &candidate.promotion_status,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                "issue_count": ledger_decoded.issue_count,
+            },
+            "swarm_calibration": {
+                "schema_version": calibration_decoded.schema_version,
+                "packet_id": &calibration_decoded.packet_id,
+                "valid": calibration_decoded.valid,
+                "classification": &calibration_decoded.classification,
+                "candidate_for_authorized_run": calibration_decoded.candidate_for_authorized_run,
+                "product_evidence_claim": &calibration_decoded.product_evidence_claim,
+                "release_gate_effect": &calibration_decoded.release_gate_effect,
+                "target_beads": &calibration_decoded.target_beads,
+                "real_campaign_bead": &calibration_decoded.real_campaign_bead,
+                "host_facts": calibration_decoded
+                    .host_facts
+                    .iter()
+                    .map(|fact| fact.fact_id.as_str())
+                    .collect::<Vec<_>>(),
+                "worker_identity": &calibration_decoded.worker_identity,
+                "worker_fingerprint_age_days": calibration_decoded.worker_fingerprint_age_days,
+                "queue_isolation": &calibration_decoded.queue_isolation,
+                "target_dir_isolated": calibration_decoded.target_dir_isolated,
+                "resource_caps": {
+                    "max_duration_secs": calibration_decoded.resource_caps.max_duration_secs,
+                    "max_threads": calibration_decoded.resource_caps.max_threads,
+                    "max_memory_gib": calibration_decoded.resource_caps.max_memory_gib,
+                    "max_temp_storage_gib": calibration_decoded
+                        .resource_caps
+                        .max_temp_storage_gib,
+                    "max_queue_depth": calibration_decoded.resource_caps.max_queue_depth,
+                },
+                "blocker_count": calibration_decoded.blocker_count,
+                "downgrade_count": calibration_decoded.downgrade_count,
+                "issue_count": calibration_decoded.issue_count,
+            },
+        });
+
+        insta::assert_snapshot!(
+            "permissioned_campaign_reports_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn missing_ack_text_is_rejected() {
         let mut manifest = valid_xfstests_manifest();
         manifest.required_ack.exact_value.clear();
