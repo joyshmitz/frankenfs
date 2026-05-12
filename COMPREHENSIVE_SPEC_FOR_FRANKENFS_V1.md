@@ -3092,10 +3092,20 @@ pub trait JournalManager: Send + Sync {
 }
 ```
 
-Supports two modes: **JBD2-compat** (full journal lifecycle) and **native COW** (replay only; `begin_transaction`/`journal_block`/`commit_transaction`/`checkpoint` are no-ops since MVCC handles consistency).
+Supports two coordination modes:
+
+1. **JBD2-compat**: full journal lifecycle. `begin_transaction`,
+   `journal_block`, `revoke_block`, `commit_transaction`, and `checkpoint`
+   perform real descriptor/data/revoke/commit/checkpoint work for
+   ext4-compatible journaled commits.
+2. **Native MVCC/COW**: dirty-image replay remains a mount prerequisite, but
+   plain native commits do not call journal write methods. MVCC version chains
+   plus the `ffs-mvcc` durable WAL/checkpoint path provide crash consistency.
+   Journal write entry points in this mode are explicit mode-boundary
+   operations; they must not silently accept mutation as successful no-ops.
 
 - `replay`: MUST be called before any FS operations on mount. No-op if clean (`s_start == 0`). Scans descriptor+commit pairs, replays in sequence order, tracks revoked blocks.
-- `journal_block`: copies block data into journal area (JBD2-compat) for crash replay.
+- `journal_block`: copies block data into journal area (JBD2-compat) for crash replay; native MVCC callers use MVCC/WAL commit records instead.
 - `revoke_block`: marks freed block; skipped during replay even if in earlier transactions.
 - `checkpoint`: flush committed journal entries to final on-disk locations, reclaim space.
 
