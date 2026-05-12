@@ -726,6 +726,19 @@ mod tests {
     }
 
     #[test]
+    fn remediation_severity_gate_report_json_shape() -> Result<()> {
+        let report = validate_default_remediation_severity_gate()
+            .expect("default remediation severity gate validates");
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("remediation_severity_gate_report_json_shape", json);
+
+        let roundtrip: RemediationSeverityGateReport = serde_json::from_str(&json)?;
+        assert_eq!(roundtrip, report);
+        Ok(())
+    }
+
+    #[test]
     fn render_remediation_severity_gate_markdown_default_gate() {
         let report = validate_default_remediation_severity_gate()
             .expect("default remediation severity gate validates");
