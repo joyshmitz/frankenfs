@@ -876,6 +876,17 @@ mod tests {
     }
 
     #[test]
+    fn mounted_repair_mutation_boundary_report_json_shape() -> Result<()> {
+        let report = validate_default_mounted_repair_mutation_boundary()?;
+        let json = serde_json::to_string_pretty(&report)?;
+
+        insta::assert_snapshot!("mounted_repair_mutation_boundary_report_json_shape", json);
+        let parsed: MountedRepairMutationBoundaryReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn fail_on_errors_rejects_invalid_report() {
         let mut matrix = fixture_matrix();
         matrix.scenarios[0].expected_mutation_scope = "wild_write".to_owned();

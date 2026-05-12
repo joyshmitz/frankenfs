@@ -1,0 +1,20 @@
+---
+source: crates/ffs-harness/src/mounted_repair_mutation_boundary.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "matrix_id": "frankenfs_mounted_repair_mutation_boundary_v1",
+  "bead_id": "bd-wjsuj",
+  "scenario_count": 6,
+  "kinds_seen": [
+    "default_ro_detection_only",
+    "host_capability_skip",
+    "missing_ledger_refused",
+    "ro_repair_with_ledger_allowed",
+    "rw_repair_refused",
+    "stale_ledger_refused"
+  ],
+  "valid": true,
+  "errors": []
+}
