@@ -47,7 +47,7 @@ of the run artifact.
 | MVCC            | merge-proof success rate                  | (extend `wal_throughput.rs`)                                          | append-only proof variant                                      |
 | Repair / scrub  | encode throughput (LRC)                   | `crates/ffs-repair/benches/scrub_codec.rs`                            | group_size × group_count × global_parity matrix                |
 | Repair / scrub  | decode throughput (LRC)                   | `crates/ffs-repair/benches/scrub_codec.rs`                            | corrupt 1, k/2, and k blocks                                   |
-| Repair / scrub  | symbol refresh staleness latency          | (new bench — bd-TBD)                                                  | rolling refresh interval × block-group count                   |
+| Repair / scrub  | symbol refresh staleness latency          | `crates/ffs-repair/benches/scrub_codec.rs`                            | rolling refresh interval × block-group count                   |
 | Allocator       | bitmap find_free                          | `crates/ffs-alloc/benches/bitmap_ops.rs`                              | 128-byte bitmap, varied density                                |
 | Allocator       | batch allocation                          | `crates/ffs-alloc/benches/batch_alloc.rs`                             | 1k-allocation batch                                            |
 | BTree           | bw_tree insert / lookup                   | `crates/ffs-btree/benches/bwtree_vs_locked.rs`                        | 1k-page workload                                               |
@@ -215,13 +215,13 @@ baselines/<git_sha>/<timestamp>/
 
 ## Open items vs the existing benchmark set
 
-The benchmark inventory above maps each row to a bench that already
-exists, except for two gaps that need new benches before this manifest
-can be exercised end-to-end:
+The benchmark inventory above maps each row to a bench file that already
+exists, with the repair symbol refresh staleness path covered by
+`repair_symbol_refresh_staleness_latency` in
+`crates/ffs-repair/benches/scrub_codec.rs`. The remaining extensions before
+this manifest can be exercised end-to-end are:
 
-1. **Repair symbol refresh staleness latency** — no current bench
-   covers the rolling-refresh path. Filed as a follow-up.
-2. **MVCC merge-proof success rate** — `wal_throughput.rs` measures
+1. **MVCC merge-proof success rate** — `wal_throughput.rs` measures
    commit throughput but not the proof-validation success ratio.
    Filed as an extension.
 
