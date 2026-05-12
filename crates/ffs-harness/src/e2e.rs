@@ -3505,6 +3505,102 @@ mod tests {
         let _ = fs::remove_dir_all(&output_dir);
     }
 
+    fn sample_survivor_set() -> CrashReplaySurvivorSet {
+        CrashReplaySurvivorSet {
+            file_count: 1,
+            directory_count: 2,
+            files: vec!["/logs/a.bin".to_owned()],
+            directories: vec!["/".to_owned(), "/logs".to_owned()],
+            content_hash: "b2f9e4d4b8d7087bd2a0db4460da90d0f1a5e93f".to_owned(),
+        }
+    }
+
+    #[test]
+    fn crash_replay_suite_report_json_shape() -> Result<()> {
+        let report = CrashReplaySuiteReport {
+            schedule_count: 1,
+            passed_schedules: 1,
+            failed_schedules: 0,
+            duration_us: 0,
+            output_dir: Some("artifacts/e2e/crash-replay".to_owned()),
+            results: vec![CrashReplayScheduleResult {
+                schedule_id: 7,
+                seed: 0xC0FF_EE00_0000_0007,
+                operation_count: 2,
+                passed: true,
+                case_results: vec![CrashReplayCaseResult {
+                    lane_type: CrashReplayLane::CoreDeterministic,
+                    crash_point: CrashPoint {
+                        op_index: 1,
+                        stage: CrashPointStage::AfterOp,
+                    },
+                    classification: CrashReplayClassification::FsyncBoundary,
+                    executed_operations: 2,
+                    minimized_operation_count: 1,
+                    expected_survivors: sample_survivor_set(),
+                    observed_survivors: sample_survivor_set(),
+                    cleanup_status: "cleaned_up_simulated_state".to_owned(),
+                    raw_log: "CRASH_REPLAY_CASE schedule=7 case=0 status=pass".to_owned(),
+                    minimized_reproduction_command:
+                        "ffs-harness run-crash-replay --count 1 --seed 7".to_owned(),
+                    unreduced_follow_up_bead: None,
+                    passed: true,
+                    errors: Vec::new(),
+                }],
+                duration_us: 0,
+            }],
+        };
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("crash_replay_suite_report_json_shape", json);
+        let parsed: CrashReplaySuiteReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed.schedule_count, 1);
+        assert_eq!(parsed.results.len(), 1);
+        assert_eq!(parsed.results[0].case_results.len(), 1);
+        assert!(parsed.results[0].case_results[0].passed);
+        Ok(())
+    }
+
+    #[test]
+    fn fsx_stress_report_json_shape() -> Result<()> {
+        let mut operation_mix = BTreeMap::new();
+        operation_mix.insert("corruption_cycle".to_owned(), 1);
+        operation_mix.insert("fsync".to_owned(), 1);
+        operation_mix.insert("write".to_owned(), 2);
+
+        let report = FsxStressReport {
+            seed: 0xF5A5_7E55_0000_0001,
+            operation_count: 4,
+            operations_executed: 4,
+            passed: false,
+            corruption_cycles: 1,
+            repaired_cycles: 0,
+            final_file_size: 4096,
+            final_sha256: "0f343b0931126a20f133d67c2b018a3b".to_owned(),
+            operation_mix,
+            failure: Some(FsxFailureReport {
+                operation_index: 3,
+                operation: FsxOperation::CorruptionCycle {
+                    offset: 128,
+                    len: 32,
+                },
+                reason: "full verify mismatch".to_owned(),
+                expected_sha256: "f00ba4".to_owned(),
+                actual_sha256: "badc0de".to_owned(),
+            }),
+            duration_us: 0,
+            output_dir: Some("artifacts/e2e/fsx".to_owned()),
+        };
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("fsx_stress_report_json_shape", json);
+        let parsed: FsxStressReport = serde_json::from_str(&json)?;
+        assert!(!parsed.passed);
+        assert_eq!(parsed.failure.expect("failure").operation_index, 3);
+        assert_eq!(parsed.operation_mix.get("write"), Some(&2));
+        Ok(())
+    }
+
     #[test]
     fn image_type_display() {
         assert_eq!(ImageType::Ext4.to_string(), "ext4");

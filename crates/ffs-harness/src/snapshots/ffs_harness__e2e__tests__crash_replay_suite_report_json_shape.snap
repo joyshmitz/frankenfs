@@ -1,0 +1,62 @@
+---
+source: crates/ffs-harness/src/e2e.rs
+expression: json
+---
+{
+  "schedule_count": 1,
+  "passed_schedules": 1,
+  "failed_schedules": 0,
+  "duration_us": 0,
+  "output_dir": "artifacts/e2e/crash-replay",
+  "results": [
+    {
+      "schedule_id": 7,
+      "seed": 13907095858110791687,
+      "operation_count": 2,
+      "passed": true,
+      "case_results": [
+        {
+          "lane_type": "core_deterministic",
+          "crash_point": {
+            "op_index": 1,
+            "stage": "after_op"
+          },
+          "classification": "fsync_boundary",
+          "executed_operations": 2,
+          "minimized_operation_count": 1,
+          "expected_survivors": {
+            "file_count": 1,
+            "directory_count": 2,
+            "files": [
+              "/logs/a.bin"
+            ],
+            "directories": [
+              "/",
+              "/logs"
+            ],
+            "content_hash": "b2f9e4d4b8d7087bd2a0db4460da90d0f1a5e93f"
+          },
+          "observed_survivors": {
+            "file_count": 1,
+            "directory_count": 2,
+            "files": [
+              "/logs/a.bin"
+            ],
+            "directories": [
+              "/",
+              "/logs"
+            ],
+            "content_hash": "b2f9e4d4b8d7087bd2a0db4460da90d0f1a5e93f"
+          },
+          "cleanup_status": "cleaned_up_simulated_state",
+          "raw_log": "CRASH_REPLAY_CASE schedule=7 case=0 status=pass",
+          "minimized_reproduction_command": "ffs-harness run-crash-replay --count 1 --seed 7",
+          "unreduced_follow_up_bead": null,
+          "passed": true,
+          "errors": []
+        }
+      ],
+      "duration_us": 0
+    }
+  ]
+}
