@@ -1659,6 +1659,35 @@ mod tests {
     }
 
     #[test]
+    fn readiness_action_fixture_validation_report_json_shape() -> serde_json::Result<()> {
+        let fixture_set = default_readiness_action_autopilot_fixture_set();
+        let report = validate_readiness_action_fixture_set(&fixture_set);
+        assert!(report.valid, "{:?}", report.errors);
+
+        let json = serde_json::to_string_pretty(&report)?;
+        let decoded: ReadinessActionFixtureValidationReport = serde_json::from_str(&json)?;
+        assert_eq!(decoded, report);
+
+        let shape = serde_json::json!({
+            "schema_version": report.schema_version,
+            "validator_version": report.validator_version,
+            "fixture_set_id": report.fixture_set_id,
+            "fixture_count": report.fixture_count,
+            "valid": report.valid,
+            "classifications_seen": report.classifications_seen,
+            "input_kinds_seen": report.input_kinds_seen,
+            "safety_classes_seen": report.safety_classes_seen,
+            "evidence_tiers_seen": report.evidence_tiers_seen,
+            "error_count": report.errors.len(),
+        });
+        insta::assert_snapshot!(
+            "readiness_action_fixture_validation_report_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
+    }
+
+    #[test]
     fn fixtures_round_trip_with_stable_json() {
         let fixture_set = default_readiness_action_autopilot_fixture_set();
         let first = serde_json::to_string_pretty(&fixture_set).expect("serialize fixtures");
