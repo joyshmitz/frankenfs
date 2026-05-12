@@ -488,4 +488,49 @@ mod tests {
             assert_eq!(diagnostic_log_path, "artifacts/mounted-lane/diagnostic.log");
         }
     }
+
+    #[test]
+    fn mounted_lane_decision_json_shape() -> Result<(), serde_json::Error> {
+        let pass_decision = evaluate_mounted_lane_gate(&happy_gate());
+        let pass_json = serde_json::to_string_pretty(&pass_decision)?;
+        let pass_decoded: MountedLaneDecision = serde_json::from_str(&pass_json)?;
+        assert_eq!(pass_decoded, pass_decision);
+
+        let mut local_gate = happy_gate();
+        local_gate.run_kind = "local_developer".to_owned();
+        local_gate.authoritative_lane_required = false;
+        local_gate.capability_probe.status = "unavailable_no_helper".to_owned();
+        local_gate.capability_probe.helper_binary_present = false;
+        let local_skip = evaluate_mounted_lane_gate(&local_gate);
+        let local_skip_json = serde_json::to_string_pretty(&local_skip)?;
+        let local_skip_decoded: MountedLaneDecision = serde_json::from_str(&local_skip_json)?;
+        assert_eq!(local_skip_decoded, local_skip);
+
+        let mut authoritative_gate = happy_gate();
+        authoritative_gate.capability_probe.status = "unavailable_no_helper".to_owned();
+        authoritative_gate.capability_probe.helper_binary_present = false;
+        let authoritative_fail = evaluate_mounted_lane_gate(&authoritative_gate);
+        let authoritative_fail_json = serde_json::to_string_pretty(&authoritative_fail)?;
+        let authoritative_fail_decoded: MountedLaneDecision =
+            serde_json::from_str(&authoritative_fail_json)?;
+        assert_eq!(authoritative_fail_decoded, authoritative_fail);
+
+        let shape = serde_json::json!({
+            "allowed_decision_tokens": [
+                "pass",
+                "skip",
+                "fail",
+            ],
+            "pass": pass_decoded,
+            "local_skip": local_skip_decoded,
+            "authoritative_fail": authoritative_fail_decoded,
+        });
+
+        insta::assert_snapshot!(
+            "mounted_lane_decision_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+
+        Ok(())
+    }
 }

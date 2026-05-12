@@ -1,0 +1,28 @@
+---
+source: crates/ffs-harness/src/mounted_lane_gate.rs
+expression: serde_json::to_string_pretty(&shape)?
+---
+{
+  "allowed_decision_tokens": [
+    "pass",
+    "skip",
+    "fail"
+  ],
+  "pass": {
+    "decision": "pass",
+    "run_kind": "rch_authoritative",
+    "capability": "available"
+  },
+  "local_skip": {
+    "decision": "skip",
+    "reason": "fuse_capability_unavailable",
+    "remediation_hint": "local run skipped — install fuser/fuse kernel module to exercise the mounted lane locally",
+    "diagnostic_log_path": "artifacts/mounted-lane/diagnostic.log"
+  },
+  "authoritative_fail": {
+    "decision": "fail",
+    "reason": "fuse_capability_unavailable",
+    "remediation_hint": "authoritative mounted coverage required; install/configure FUSE before the next run",
+    "diagnostic_log_path": "artifacts/mounted-lane/diagnostic.log"
+  }
+}
