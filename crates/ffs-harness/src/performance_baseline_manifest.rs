@@ -1529,6 +1529,20 @@ mod tests {
     }
 
     #[test]
+    fn performance_baseline_manifest_report_json_shape() -> Result<()> {
+        let manifest = sample_manifest();
+        let report =
+            validate_performance_baseline_manifest(&manifest, "artifacts/performance/dry-run");
+        assert!(report.valid, "{:?}", report.errors);
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("performance_baseline_manifest_report_json_shape", json);
+        let parsed: PerformanceBaselineManifestReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_missing_workload_id() {
         let mut manifest = sample_manifest();
         manifest.workloads[0].workload_id.clear();
