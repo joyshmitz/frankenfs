@@ -400,12 +400,14 @@ mod tests {
     }
 
     #[test]
-    fn swarm_operator_validation_report_json_shape() {
+    fn swarm_operator_validation_report_json_shape() -> Result<()> {
         let validation = validate_swarm_operator_report(&sample_report());
-        let json = serde_json::to_string_pretty(&validation)
-            .expect("swarm operator validation report serializes");
+        let json = serde_json::to_string_pretty(&validation)?;
 
         insta::assert_snapshot!("swarm_operator_validation_report_json_shape", json);
+        let parsed: SwarmOperatorValidationReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, validation);
+        Ok(())
     }
 
     #[test]
