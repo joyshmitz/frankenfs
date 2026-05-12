@@ -731,4 +731,49 @@ mod tests {
         let decision = evaluate_authoritative_environment(&manifest, &manifest.clone());
         assert_eq!(reason(&decision), Some("stale_environment_schema"));
     }
+
+    #[test]
+    fn authoritative_environment_decision_json_shape() -> Result<(), serde_json::Error> {
+        let authoritative_decision =
+            evaluate_authoritative_environment(&happy_manifest(), &happy_manifest());
+        let authoritative_json = serde_json::to_string_pretty(&authoritative_decision)?;
+        let authoritative_decoded: AuthoritativeEnvironmentDecision =
+            serde_json::from_str(&authoritative_json)?;
+        assert_eq!(authoritative_decoded, authoritative_decision);
+
+        let mut local_manifest = happy_manifest();
+        local_manifest.authoritative = false;
+        let local_skip = evaluate_authoritative_environment(&local_manifest, &local_manifest);
+        let local_skip_json = serde_json::to_string_pretty(&local_skip)?;
+        let local_skip_decoded: AuthoritativeEnvironmentDecision =
+            serde_json::from_str(&local_skip_json)?;
+        assert_eq!(local_skip_decoded, local_skip);
+
+        let manifest = happy_manifest();
+        let mut observed = manifest.clone();
+        observed.host_id = "other-host".to_owned();
+        let host_reject = evaluate_authoritative_environment(&manifest, &observed);
+        let host_reject_json = serde_json::to_string_pretty(&host_reject)?;
+        let host_reject_decoded: AuthoritativeEnvironmentDecision =
+            serde_json::from_str(&host_reject_json)?;
+        assert_eq!(host_reject_decoded, host_reject);
+
+        let shape = serde_json::json!({
+            "allowed_decision_tokens": [
+                "authoritative",
+                "skip",
+                "reject_mismatch",
+            ],
+            "authoritative": authoritative_decoded,
+            "local_skip": local_skip_decoded,
+            "host_reject": host_reject_decoded,
+        });
+
+        insta::assert_snapshot!(
+            "authoritative_environment_decision_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+
+        Ok(())
+    }
 }

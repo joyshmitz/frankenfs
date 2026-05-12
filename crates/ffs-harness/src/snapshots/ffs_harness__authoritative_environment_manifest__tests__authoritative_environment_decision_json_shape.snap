@@ -1,0 +1,25 @@
+---
+source: crates/ffs-harness/src/authoritative_environment_manifest.rs
+expression: serde_json::to_string_pretty(&shape)?
+---
+{
+  "allowed_decision_tokens": [
+    "authoritative",
+    "skip",
+    "reject_mismatch"
+  ],
+  "authoritative": {
+    "decision": "authoritative",
+    "manifest_id": "env_001"
+  },
+  "local_skip": {
+    "decision": "skip",
+    "reason": "non_authoritative_local_run",
+    "remediation": "rerun on an authoritative worker before promoting public claims"
+  },
+  "host_reject": {
+    "decision": "reject_mismatch",
+    "reason": "host_mismatch",
+    "remediation": "observed host differs from recorded manifest; rebuild the manifest on the actual worker"
+  }
+}
