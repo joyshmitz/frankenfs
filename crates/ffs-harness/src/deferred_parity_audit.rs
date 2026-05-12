@@ -767,8 +767,8 @@ mod tests {
     }
 
     #[test]
-    fn exposes_full_gap_vocabulary_for_schema_tests() {
-        let json = serde_json::to_string_pretty(&GAP_CLASSES).expect("serialize");
+    fn exposes_full_gap_vocabulary_for_schema_tests() -> Result<()> {
+        let json = serde_json::to_string_pretty(&GAP_CLASSES)?;
         insta::assert_snapshot!("gap_classes_json_shape", json);
 
         assert!(GAP_CLASSES.contains(&"validated"));
@@ -791,6 +791,7 @@ mod tests {
         assert!(GAP_CLASSES.contains(&"explicit-non-goal"));
         assert!(GAP_CLASSES.contains(&"security-refused"));
         assert!(GAP_CLASSES.contains(&"non-authoritative-local-only"));
+        Ok(())
     }
 
     #[test]
