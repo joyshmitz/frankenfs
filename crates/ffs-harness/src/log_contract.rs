@@ -457,6 +457,52 @@ mod tests {
     }
 
     #[test]
+    fn structured_log_contract_json_shape() -> Result<(), serde_json::Error> {
+        let shape = serde_json::json!({
+            "contract_version": CONTRACT_VERSION,
+            "canonical_fields": field::CANONICAL_FIELDS,
+            "outcome_vocabulary": outcome::VOCABULARY,
+            "severity_levels": [
+                LogSeverity::Trace,
+                LogSeverity::Debug,
+                LogSeverity::Info,
+                LogSeverity::Warn,
+                LogSeverity::Error,
+            ],
+            "severity_tracing_levels": [
+                LogSeverity::Trace.as_str(),
+                LogSeverity::Debug.as_str(),
+                LogSeverity::Info.as_str(),
+                LogSeverity::Warn.as_str(),
+                LogSeverity::Error.as_str(),
+            ],
+            "error_categories": [
+                ErrorCategory::Precondition,
+                ErrorCategory::Io,
+                ErrorCategory::Integrity,
+                ErrorCategory::Concurrency,
+                ErrorCategory::Resource,
+                ErrorCategory::Validation,
+                ErrorCategory::Internal,
+            ],
+            "e2e_marker": {
+                "prefix": e2e_marker::PREFIX,
+                "separator": e2e_marker::SEP,
+                "pass": e2e_marker::PASS,
+                "fail": e2e_marker::FAIL,
+                "scenario_id_regex": e2e_marker::SCENARIO_ID_REGEX,
+            },
+            "subsystem_targets": SUBSYSTEM_TARGETS,
+        });
+
+        insta::assert_snapshot!(
+            "structured_log_contract_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
+    }
+
+    #[test]
     fn e2e_marker_parse_valid() {
         let line = "SCENARIO_RESULT|scenario_id=taxonomy_builds_clean|outcome=PASS";
         let (id, outcome_val, detail) = e2e_marker::parse_marker(line).expect("parse");

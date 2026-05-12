@@ -1,0 +1,156 @@
+---
+source: crates/ffs-harness/src/log_contract.rs
+expression: serde_json::to_string_pretty(&shape)?
+---
+{
+  "contract_version": 1,
+  "canonical_fields": [
+    "operation_id",
+    "scenario_id",
+    "outcome",
+    "error_class",
+    "target",
+    "duration_us",
+    "txn_id",
+    "commit_seq",
+    "group_id",
+    "ino",
+    "offset"
+  ],
+  "outcome_vocabulary": [
+    "start",
+    "applied",
+    "rejected",
+    "completed",
+    "failed",
+    "skipped"
+  ],
+  "severity_levels": [
+    "trace",
+    "debug",
+    "info",
+    "warn",
+    "error"
+  ],
+  "severity_tracing_levels": [
+    "TRACE",
+    "DEBUG",
+    "INFO",
+    "WARN",
+    "ERROR"
+  ],
+  "error_categories": [
+    "precondition",
+    "io",
+    "integrity",
+    "concurrency",
+    "resource",
+    "validation",
+    "internal"
+  ],
+  "e2e_marker": {
+    "prefix": "SCENARIO_RESULT",
+    "separator": "|",
+    "pass": "PASS",
+    "fail": "FAIL",
+    "scenario_id_regex": "^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$"
+  },
+  "subsystem_targets": [
+    [
+      "ffs::cli",
+      "ffs-cli"
+    ],
+    [
+      "ffs::cli::mount",
+      "ffs-cli"
+    ],
+    [
+      "ffs::cli::inspect",
+      "ffs-cli"
+    ],
+    [
+      "ffs::cli::scrub",
+      "ffs-cli"
+    ],
+    [
+      "ffs::cli::fsck",
+      "ffs-cli"
+    ],
+    [
+      "ffs::cli::parity",
+      "ffs-cli"
+    ],
+    [
+      "ffs::cli::evidence",
+      "ffs-cli"
+    ],
+    [
+      "ffs::cli::repair",
+      "ffs-cli"
+    ],
+    [
+      "ffs::mvcc",
+      "ffs-core"
+    ],
+    [
+      "ffs::write",
+      "ffs-core"
+    ],
+    [
+      "ffs::journal",
+      "ffs-core"
+    ],
+    [
+      "ffs::btrfs::rw",
+      "ffs-core"
+    ],
+    [
+      "ffs::btrfs::alloc",
+      "ffs-btrfs"
+    ],
+    [
+      "ffs::btrfs::txn",
+      "ffs-btrfs"
+    ],
+    [
+      "ffs::durability",
+      "ffs-core"
+    ],
+    [
+      "ffs::fuse::io",
+      "ffs-fuse"
+    ],
+    [
+      "ffs::wal_buffer",
+      "ffs-journal"
+    ],
+    [
+      "ffs::group_commit",
+      "ffs-journal"
+    ],
+    [
+      "ffs::bwtree",
+      "ffs-btree"
+    ],
+    [
+      "ffs::repair::refresh",
+      "ffs-repair"
+    ],
+    [
+      "ffs::repair::policy",
+      "ffs-repair"
+    ],
+    [
+      "ffs::repair::daemon",
+      "ffs-repair"
+    ],
+    [
+      "ffs::checksum",
+      "ffs-types"
+    ],
+    [
+      "ffs::benchmark_taxonomy",
+      "ffs-harness"
+    ]
+  ]
+}
