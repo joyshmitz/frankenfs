@@ -11,7 +11,7 @@
 //! capability check command. Mounted lanes that cannot run on the current
 //! host MUST be recorded as structured host skips, not silently absent.
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -353,18 +353,27 @@ mod tests {
     }
 
     #[test]
+    fn low_privilege_demo_report_json_shape() -> Result<()> {
+        let report = validate_default_low_privilege_demo_manifest()?;
+        let json = serde_json::to_string_pretty(&report)?;
+
+        insta::assert_snapshot!("low_privilege_demo_report_json_shape", json);
+        let parsed: LowPrivilegeDemoReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn missing_low_privilege_kind_is_rejected() {
         let mut manifest = fixture_manifest();
         manifest.lanes.retain(|lane| {
             !(lane.execution_kind == "parser_unit" && lane.expected_outcome == "executed")
         });
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("must execute `parser_unit` at capability=none"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("must execute `parser_unit` at capability=none")));
     }
 
     #[test]
@@ -374,12 +383,10 @@ mod tests {
             !(lane.execution_kind == "repair_dry_run" && lane.expected_outcome == "executed")
         });
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("must execute `repair_dry_run`"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("must execute `repair_dry_run`")));
     }
 
     #[test]
@@ -389,12 +396,10 @@ mod tests {
             !(lane.execution_kind == "mounted_smoke" && lane.expected_outcome == "host_skipped")
         });
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("must record a host-skipped `mounted_smoke` lane"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("must record a host-skipped `mounted_smoke` lane")));
     }
 
     #[test]
@@ -403,12 +408,10 @@ mod tests {
         let dup = manifest.lanes[0].lane_id.clone();
         manifest.lanes[1].lane_id = dup;
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("duplicate low-privilege demo lane_id"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("duplicate low-privilege demo lane_id")));
     }
 
     #[test]
@@ -416,12 +419,10 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.lanes[0].lane_id = "demo_001".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("must start with lpd_"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("must start with lpd_")));
     }
 
     #[test]
@@ -429,12 +430,10 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.lanes[0].execution_kind = "telepathy_lane".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("unsupported execution_kind"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("unsupported execution_kind")));
     }
 
     #[test]
@@ -442,12 +441,10 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.lanes[0].capability_requirement = "magic".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("unsupported capability_requirement"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("unsupported capability_requirement")));
     }
 
     #[test]
@@ -455,12 +452,10 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.lanes[0].expected_outcome = "kinda_ran".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("unsupported expected_outcome"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("unsupported expected_outcome")));
     }
 
     #[test]
@@ -474,12 +469,10 @@ mod tests {
         lane.expected_outcome = "host_skipped".to_owned();
         lane.host_skip_reason = "would never happen".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("capability=none cannot expect host_skipped outcome"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("capability=none cannot expect host_skipped outcome")));
     }
 
     #[test]
@@ -492,8 +485,10 @@ mod tests {
             .expect("low-privilege lane exists");
         lane.expected_outcome = "capability_blocked".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(report.errors.iter().any(|err| err
-            .contains("capability=none cannot expect capability_blocked outcome")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("capability=none cannot expect capability_blocked outcome")));
     }
 
     #[test]
@@ -506,12 +501,10 @@ mod tests {
             .expect("host-skipped lane exists");
         lane.host_skip_reason = String::new();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("host_skipped outcome must declare host_skip_reason"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("host_skipped outcome must declare host_skip_reason")));
     }
 
     #[test]
@@ -524,13 +517,10 @@ mod tests {
             .expect("executed lane exists");
         lane.host_skip_reason = "leftover prose".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err
-                    .contains("non-host_skipped outcome must leave host_skip_reason empty"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("non-host_skipped outcome must leave host_skip_reason empty")));
     }
 
     #[test]
@@ -545,12 +535,10 @@ mod tests {
         lane.expected_outcome = "executed".to_owned();
         lane.host_skip_reason = String::new();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("mounted_smoke cannot claim capability=none"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("mounted_smoke cannot claim capability=none")));
     }
 
     #[test]
@@ -563,12 +551,10 @@ mod tests {
             .expect("parser unit lane exists");
         lane.capability_requirement = "fuse".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("parser_unit must run at capability=none"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("parser_unit must run at capability=none")));
     }
 
     #[test]
@@ -576,12 +562,10 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.lanes[0].fixture_hash = "md5:not-supported".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("fixture_hash must be sha256"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("fixture_hash must be sha256")));
     }
 
     #[test]
@@ -589,12 +573,10 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.git_sha = String::new();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("missing git_sha"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("missing git_sha")));
     }
 
     #[test]
@@ -602,12 +584,10 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.kernel = String::new();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("missing kernel"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("missing kernel")));
     }
 
     #[test]
@@ -615,12 +595,10 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.lanes[0].reproduction_command = String::new();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("missing reproduction_command"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("missing reproduction_command")));
     }
 
     #[test]
@@ -628,12 +606,10 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.lanes[0].capability_check_command = String::new();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("missing capability_check_command"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("missing capability_check_command")));
     }
 
     #[test]
@@ -641,11 +617,9 @@ mod tests {
         let mut manifest = fixture_manifest();
         manifest.lanes.clear();
         let report = validate_low_privilege_demo_manifest(&manifest);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|err| err.contains("at least one lane"))
-        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|err| err.contains("at least one lane")));
     }
 }
