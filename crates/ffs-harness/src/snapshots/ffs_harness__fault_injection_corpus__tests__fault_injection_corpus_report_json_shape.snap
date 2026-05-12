@@ -1,0 +1,28 @@
+---
+source: crates/ffs-harness/src/fault_injection_corpus.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "corpus_id": "frankenfs_fault_injection_corpus_v1",
+  "bead_id": "bd-rchk0.5.3",
+  "case_count": 7,
+  "fault_kinds_seen": [
+    "adversarial_seed",
+    "bit_flip",
+    "block_erasure",
+    "mismatched_symbol_set",
+    "reordered_blocks",
+    "truncated_repair_metadata"
+  ],
+  "repair_classes_seen": [
+    "clean_repair",
+    "detection_only",
+    "false_positive",
+    "partial_repair",
+    "unsafe_to_repair"
+  ],
+  "adversarial_count": 2,
+  "valid": true,
+  "errors": []
+}
