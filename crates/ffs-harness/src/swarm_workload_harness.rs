@@ -1368,6 +1368,22 @@ mod tests {
     }
 
     #[test]
+    fn swarm_workload_harness_report_json_shape() {
+        let manifest = load_swarm_workload_harness_manifest(Path::new(&workspace_path(
+            DEFAULT_SWARM_WORKLOAD_HARNESS_MANIFEST,
+        )))
+        .expect("load checked-in manifest");
+        let report = validate_swarm_workload_harness_manifest(&manifest);
+        let json = serde_json::to_string_pretty(&report).expect("serialize report");
+
+        insta::assert_snapshot!("swarm_workload_harness_report_json_shape", json);
+
+        let roundtrip: SwarmWorkloadHarnessReport =
+            serde_json::from_str(&json).expect("deserialize report");
+        assert_eq!(roundtrip, report);
+    }
+
+    #[test]
     fn small_host_pass_claim_fails_closed() {
         let mut manifest = fixture_manifest();
         manifest.scenarios[1].classification = SwarmHarnessClassification::Pass;
