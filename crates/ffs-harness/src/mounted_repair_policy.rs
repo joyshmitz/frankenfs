@@ -479,6 +479,16 @@ mod tests {
     }
 
     #[test]
+    fn mounted_repair_policy_report_json_shape() -> Result<()> {
+        let report = validate_default_mounted_repair_policy()?;
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("mounted_repair_policy_report_json_shape", json);
+        let parsed: MountedRepairPolicyReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn missing_default_scrub_kind_is_rejected() {
         let mut policy = fixture_policy();
         policy

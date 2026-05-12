@@ -1,0 +1,18 @@
+---
+source: crates/ffs-harness/src/mounted_repair_policy.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "policy_id": "frankenfs_mounted_repair_policy_v1",
+  "bead_id": "bd-rchk7.3",
+  "scenario_count": 4,
+  "kinds": [
+    "default_ro_scrub_detect_only",
+    "ledger_evidence_lifecycle",
+    "ro_background_repair_with_ledger",
+    "rw_background_repair_rejected"
+  ],
+  "valid": true,
+  "errors": []
+}
