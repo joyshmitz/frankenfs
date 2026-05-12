@@ -16,6 +16,7 @@
 # 12. Mounted ext4/btrfs scenario matrix artifacts are wired
 # 13. Shared E2E artifact directories are unique under concurrent starts
 # 14. Scenario catalog id_pattern sample validation fails closed
+# 15. Verification gate scenario_catalog_valid uses the full catalog validator
 #
 # Usage: ./scripts/e2e/ffs_verification_runner_e2e.sh
 #
@@ -361,6 +362,25 @@ JSON
         && grep -Fq "generated id_pattern sample does not match scenario_id_regex" "$probe_log"
 }
 
+verify_verification_gate_catalog_valid_uses_full_validator() {
+    local gate_path block_path
+    gate_path="$REPO_ROOT/scripts/e2e/ffs_verification_gate_e2e.sh"
+    block_path="$E2E_TEMP_DIR/verification_gate_catalog_validation_block.txt"
+
+    awk '
+        /^# Scenario 4: Scenario catalog validates/ { in_block = 1 }
+        in_block { print }
+        /^# Scenario 5: Cross-epic script conformance/ { exit }
+    ' "$gate_path" >"$block_path"
+
+    grep -Fq 'e2e_validate_scenario_catalog "$CATALOG"' "$block_path" \
+        && grep -Fq 'scenario_result "scenario_catalog_valid" "PASS"' "$block_path" \
+        && grep -Fq 'scenario_result "scenario_catalog_valid" "FAIL"' "$block_path" \
+        && grep -Fq 'scenario_catalog_validation.log' "$block_path" \
+        && ! grep -Fq 'CATALOG_FIELDS=0' "$block_path" \
+        && ! grep -Fq 'Duplicate IDs found' "$block_path"
+}
+
 e2e_init "ffs_verification_runner"
 
 RUNNER_SRC="crates/ffs-harness/src/verification_runner.rs"
@@ -500,6 +520,17 @@ if verify_catalog_id_pattern_sample_rejects_bad_patterns; then
     scenario_result "catalog_id_pattern_sample_rejects_bad_patterns" "PASS" "Invalid id_pattern sample rejected by scenario_id_regex"
 else
     scenario_result "catalog_id_pattern_sample_rejects_bad_patterns" "FAIL" "Invalid id_pattern sample was not rejected"
+fi
+
+#######################################
+# Scenario 4h: verification gate catalog-valid marker uses full validator
+#######################################
+e2e_step "Scenario 4h: verification gate scenario_catalog_valid uses full validator"
+
+if verify_verification_gate_catalog_valid_uses_full_validator; then
+    scenario_result "verification_gate_catalog_valid_full_validator" "PASS" "scenario_catalog_valid is backed by e2e_validate_scenario_catalog"
+else
+    scenario_result "verification_gate_catalog_valid_full_validator" "FAIL" "scenario_catalog_valid still has a shallow catalog check"
 fi
 
 #######################################

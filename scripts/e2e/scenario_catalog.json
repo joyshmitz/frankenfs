@@ -2072,6 +2072,12 @@
           "evidence": "SCENARIO_RESULT|scenario_id=catalog_id_pattern_sample_rejects_bad_patterns|outcome=PASS"
         },
         {
+          "id": "verification_gate_catalog_valid_full_validator",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=verification_gate_catalog_valid_full_validator|outcome=PASS"
+        },
+        {
           "id": "gate_runner_features",
           "category": "happy",
           "status": "active",

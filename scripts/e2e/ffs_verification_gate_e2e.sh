@@ -197,31 +197,11 @@ e2e_step "Scenario 4: Scenario catalog validation"
 
 CATALOG="$REPO_ROOT/scripts/e2e/scenario_catalog.json"
 if [[ -f "$CATALOG" ]]; then
-    # Check for required fields
-    CATALOG_FIELDS=0
-    if jq -e '.catalog_version' "$CATALOG" >/dev/null 2>&1; then
-        CATALOG_FIELDS=$((CATALOG_FIELDS + 1))
-    fi
-    if jq -e '.scenario_id_regex' "$CATALOG" >/dev/null 2>&1; then
-        CATALOG_FIELDS=$((CATALOG_FIELDS + 1))
-    fi
-    if jq -e '.taxonomy' "$CATALOG" >/dev/null 2>&1; then
-        CATALOG_FIELDS=$((CATALOG_FIELDS + 1))
-    fi
-    if jq -e '.suites' "$CATALOG" >/dev/null 2>&1; then
-        CATALOG_FIELDS=$((CATALOG_FIELDS + 1))
-    fi
-
-    if [[ $CATALOG_FIELDS -eq 4 ]]; then
-        # Check for duplicate active IDs
-        DUPS=$(jq -r '.suites[].scenarios[] | select((.status // "active") == "active" and has("id")) | .id' "$CATALOG" | sort | uniq -d)
-        if [[ -z "$DUPS" ]]; then
-            scenario_result "scenario_catalog_valid" "PASS" "Catalog valid with all required fields"
-        else
-            scenario_result "scenario_catalog_valid" "FAIL" "Duplicate IDs found: $DUPS"
-        fi
+    CATALOG_VALIDATION_LOG="$E2E_LOG_DIR/scenario_catalog_validation.log"
+    if ( E2E_LOG_FILE="$CATALOG_VALIDATION_LOG" e2e_validate_scenario_catalog "$CATALOG" ); then
+        scenario_result "scenario_catalog_valid" "PASS" "Catalog validator passed log=${CATALOG_VALIDATION_LOG}"
     else
-        scenario_result "scenario_catalog_valid" "FAIL" "Only ${CATALOG_FIELDS}/4 required fields present"
+        scenario_result "scenario_catalog_valid" "FAIL" "Catalog validator failed log=${CATALOG_VALIDATION_LOG}"
     fi
 else
     scenario_result "scenario_catalog_valid" "FAIL" "Catalog file missing"
