@@ -1,0 +1,20 @@
+---
+source: crates/ffs-harness/src/crash_promotion.rs
+expression: json
+---
+{
+  "crash": {
+    "target": "fuzz_ext4_metadata",
+    "crash_path": "/tmp/crash",
+    "campaign_id": "test",
+    "commit_sha": "abc",
+    "minimized": false,
+    "input_size": 10
+  },
+  "steps_completed": [
+    "discovered",
+    "minimized"
+  ],
+  "regression_case": null,
+  "error": null
+}

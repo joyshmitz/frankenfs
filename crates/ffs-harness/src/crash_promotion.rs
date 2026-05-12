@@ -603,7 +603,8 @@ mod tests {
             regression_case: None,
             error: None,
         };
-        let json = serde_json::to_string(&result).expect("serialize");
+        let json = serde_json::to_string_pretty(&result).expect("serialize");
+        insta::assert_snapshot!("promotion_result_json_shape", json);
         let parsed: PromotionResult = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.crash.target, "fuzz_ext4_metadata");
         assert_eq!(parsed.steps_completed.len(), 2);
