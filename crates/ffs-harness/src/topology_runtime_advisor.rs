@@ -1389,7 +1389,7 @@ mod tests {
     const REFERENCE_TIMESTAMP: &str = "2026-05-10T00:00:00Z";
 
     #[test]
-    fn valid_manifest_renders_advisory_report() {
+    fn valid_manifest_renders_advisory_report() -> Result<()> {
         let manifest = fixture_manifest();
         let report = validate_fixture(&manifest);
 
@@ -1404,8 +1404,9 @@ mod tests {
         assert!(markdown.contains("Topology Runtime Advisor Report"));
         assert!(markdown.contains("Product evidence claim: `none`"));
 
-        let json = serde_json::to_string_pretty(&report).expect("serialize report");
+        let json = serde_json::to_string_pretty(&report)?;
         assert!(json.contains("\"product_evidence_claim\": \"none\""));
+        Ok(())
     }
 
     #[test]
