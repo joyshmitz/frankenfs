@@ -976,6 +976,25 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_smoke_report_json_shape() -> Result<()> {
+        let manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
+        let mut report = run_fuzz_smoke_manifest(&manifest, &workspace_root());
+        assert!(report.valid, "{:?}", report.errors);
+
+        report.command_line = "$COMMAND".to_owned();
+        report.duration_ms = 0;
+        for result in &mut report.seed_results {
+            result.duration_ms = 0;
+        }
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("fuzz_smoke_report_json_shape", json);
+        let parsed: FuzzSmokeReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn malformed_mounted_write_error_catalog_bytes_use_owned_class() {
         let execution = execute_target("mounted_write_error_classes_catalog", br#"{"entries":["#);
         assert_eq!(execution.actual_class, "MountedWriteErrorClassesInvalid");
