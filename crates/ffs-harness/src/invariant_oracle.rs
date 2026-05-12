@@ -1851,6 +1851,32 @@ mod tests {
         assert!(markdown.contains("validate-invariant-oracle"));
     }
 
+    #[test]
+    fn invariant_oracle_report_json_shape() -> Result<()> {
+        let mut trace = valid_trace();
+        let mut bad = op(
+            3,
+            InvariantAction::ModelInvariantProbe,
+            "/alpha",
+            None,
+            state(&[("/alpha", 5)], &["/alpha"]),
+            state(&[("/alpha", 4)], &["/alpha"]),
+        );
+        bad.expected_violation = Some("file_size_matches_model".to_owned());
+        bad.failure_class = Some(InvariantFailureClass::ProductionBug);
+        trace.operations.push(bad);
+
+        let report = validate_invariant_trace(&trace);
+        assert!(report.valid, "{:?}", report.errors);
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("invariant_oracle_report_json_shape", json);
+
+        let roundtrip: InvariantOracleReport = serde_json::from_str(&json)?;
+        assert_eq!(roundtrip, report);
+        Ok(())
+    }
+
     /// bd-bogcc — golden-output snapshot for
     /// `render_invariant_oracle_markdown` on a deterministic trace
     /// fixture (valid_trace + one synthetic violation). Pins the

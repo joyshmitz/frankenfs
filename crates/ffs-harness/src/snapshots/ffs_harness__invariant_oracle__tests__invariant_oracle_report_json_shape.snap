@@ -1,0 +1,101 @@
+---
+source: crates/ffs-harness/src/invariant_oracle.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "model_version": "ffs-invariant-oracle-model-v1",
+  "trace_id": "trace-valid-write",
+  "seed": 42,
+  "operation_count": 4,
+  "deterministic_replay_id": "49926fc0ca6d279246270faa7333cd16679d004dd60a844a9bd457d35735a485",
+  "valid": true,
+  "expected_failure_count": 1,
+  "unexpected_failure_count": 0,
+  "failure_class_counts": {
+    "production_bug": 1
+  },
+  "violations": [
+    {
+      "model_version": "ffs-invariant-oracle-model-v1",
+      "trace_id": "trace-valid-write",
+      "operation_index": 3,
+      "operation_id": "op-3",
+      "violated_invariant": "file_size_matches_model",
+      "classification": "production_bug",
+      "expected": true,
+      "failure_class": "production_bug",
+      "pre_state_hash": "197df2b989d912ad7d28c01bdbc9def5e272994da541621d115367d9d7c95404",
+      "post_state_hash": "d85d4e26e69b8198eb4b357d8e59c59ac883659f2a8661cd0494c64355786f04",
+      "expected_invariant_result": true,
+      "observed_invariant_result": false,
+      "expected_state": {
+        "directories": [
+          "/"
+        ],
+        "files": [
+          {
+            "path": "/alpha",
+            "size": 5,
+            "content_hash": "13f37dc0a0c9989f9ede82a12d6eafd6b4dd9ad4524bee875c9f8adad81d03b1"
+          }
+        ],
+        "durable_paths": [
+          "/alpha"
+        ],
+        "extents": [],
+        "snapshots": [],
+        "journal_replay_count": 0,
+        "repair_writeback_count": 0
+      },
+      "observed_state": {
+        "directories": [
+          "/"
+        ],
+        "files": [
+          {
+            "path": "/alpha",
+            "size": 4,
+            "content_hash": "4ec8ae9d48ae3b7420564aaacb373c9f52d3752c3fe0a4b12f5cb0e7a58f94ee"
+          }
+        ],
+        "durable_paths": [
+          "/alpha"
+        ],
+        "extents": [],
+        "snapshots": [],
+        "journal_replay_count": 0,
+        "repair_writeback_count": 0
+      },
+      "minimized_trace": {
+        "original_trace_len": 4,
+        "minimized_trace_len": 4,
+        "minimized": true,
+        "operation_ids": [
+          "op-0",
+          "op-1",
+          "op-2",
+          "op-3"
+        ],
+        "shrink_steps": [
+          "seed=42",
+          "kept prefix through failing operation index 3",
+          "dropped_suffix_operations=0"
+        ],
+        "reproduction_command": "ffs-harness validate-invariant-oracle --trace artifacts/invariant/trace.json"
+      },
+      "reproduction_command": "ffs-harness validate-invariant-oracle --trace artifacts/invariant/trace.json",
+      "artifact_refs": [
+        "logs/op-3.jsonl"
+      ]
+    }
+  ],
+  "errors": [],
+  "reproduction_command": "ffs-harness validate-invariant-oracle --trace artifacts/invariant/trace.json",
+  "required_artifacts": [
+    "logs/op-0.jsonl",
+    "logs/op-1.jsonl",
+    "logs/op-2.jsonl",
+    "logs/op-3.jsonl"
+  ]
+}
