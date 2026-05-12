@@ -1524,11 +1524,10 @@ mod tests {
     }
 
     #[test]
-    fn render_wal_group_commit_gate_markdown_checked_in_manifest_snapshot() {
+    fn render_wal_group_commit_gate_markdown_checked_in_manifest_snapshot() -> Result<()> {
         let manifest: WalGroupCommitGateManifest = serde_json::from_str(include_str!(
             "../../../benchmarks/wal_group_commit_gate_manifest.json"
-        ))
-        .expect("checked-in WAL group-commit gate manifest parses");
+        ))?;
         let report = validate_wal_group_commit_gate_manifest(&manifest);
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.missing_reference_count, 1);
@@ -1542,23 +1541,23 @@ mod tests {
             "render_wal_group_commit_gate_markdown_checked_in_manifest",
             markdown
         );
+        Ok(())
     }
 
     #[test]
-    fn wal_group_commit_gate_report_json_shape() {
+    fn wal_group_commit_gate_report_json_shape() -> Result<()> {
         let manifest: WalGroupCommitGateManifest = serde_json::from_str(include_str!(
             "../../../benchmarks/wal_group_commit_gate_manifest.json"
-        ))
-        .expect("checked-in WAL group-commit gate manifest parses");
+        ))?;
         let report = validate_wal_group_commit_gate_manifest(&manifest);
         assert!(report.valid, "{:?}", report.errors);
-        let json = serde_json::to_string_pretty(&report).expect("serialize report");
+        let json = serde_json::to_string_pretty(&report)?;
 
         insta::assert_snapshot!("wal_group_commit_gate_report_json_shape", json);
 
-        let roundtrip: WalGroupCommitGateReport =
-            serde_json::from_str(&json).expect("deserialize report");
+        let roundtrip: WalGroupCommitGateReport = serde_json::from_str(&json)?;
         assert_eq!(roundtrip, report);
+        Ok(())
     }
 
     #[test]
