@@ -2017,16 +2017,17 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
     }
 
     #[test]
-    fn fuse_capability_report_serializes_machine_readable_artifact() {
+    fn fuse_capability_report_serializes_machine_readable_artifact() -> Result<(), serde_json::Error>
+    {
         let report = build_fuse_capability_probe_report(base_fuse_probe_input());
-        let json = serde_json::to_string_pretty(&report).expect("serialize report");
+        let json = serde_json::to_string_pretty(&report)?;
         insta::assert_snapshot!("fuse_capability_report_json_shape", json);
-        let parsed: FuseCapabilityProbeReport =
-            serde_json::from_str(&json).expect("deserialize report");
+        let parsed: FuseCapabilityProbeReport = serde_json::from_str(&json)?;
 
         assert_eq!(parsed, report);
         assert_eq!(parsed.scenario_id, "fuse_capability_probe");
         assert_eq!(parsed.schema_version, FUSE_CAPABILITY_REPORT_SCHEMA_VERSION);
+        Ok(())
     }
 
     #[test]
