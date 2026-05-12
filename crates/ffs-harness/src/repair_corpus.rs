@@ -536,6 +536,17 @@ mod tests {
     }
 
     #[test]
+    fn repair_corpus_report_json_shape() -> Result<()> {
+        let report = validate_default_repair_corpus()?;
+        let json = serde_json::to_string_pretty(&report)?;
+
+        insta::assert_snapshot!("repair_corpus_report_json_shape", json);
+        let parsed: RepairCorpusReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn fail_on_errors_rejects_invalid_report() {
         let mut corpus = fixture_corpus();
         corpus.cases.clear();

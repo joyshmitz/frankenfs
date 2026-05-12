@@ -1,0 +1,24 @@
+---
+source: crates/ffs-harness/src/repair_corpus.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "corpus_id": "frankenfs_repair_chain_of_custody_v1",
+  "bead_id": "bd-0xa7h",
+  "case_count": 5,
+  "outcome_classes": [
+    "recovered",
+    "refused_other",
+    "refused_stale_ledger",
+    "refused_wrong_image"
+  ],
+  "refusal_reasons": [
+    "post_repair_refresh_mismatch",
+    "stale_ledger",
+    "truncated_ledger",
+    "wrong_image_ledger"
+  ],
+  "valid": true,
+  "errors": []
+}
