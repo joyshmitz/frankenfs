@@ -595,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn log_severity_roundtrip_json() {
+    fn log_severity_roundtrip_json() -> Result<(), serde_json::Error> {
         for severity in [
             LogSeverity::Trace,
             LogSeverity::Debug,
@@ -603,14 +603,15 @@ mod tests {
             LogSeverity::Warn,
             LogSeverity::Error,
         ] {
-            let json = serde_json::to_string(&severity).expect("serialize");
-            let parsed: LogSeverity = serde_json::from_str(&json).expect("deserialize");
+            let json = serde_json::to_string(&severity)?;
+            let parsed: LogSeverity = serde_json::from_str(&json)?;
             assert_eq!(parsed, severity);
         }
+        Ok(())
     }
 
     #[test]
-    fn error_category_roundtrip_json() {
+    fn error_category_roundtrip_json() -> Result<(), serde_json::Error> {
         for cat in [
             ErrorCategory::Precondition,
             ErrorCategory::Io,
@@ -620,9 +621,10 @@ mod tests {
             ErrorCategory::Validation,
             ErrorCategory::Internal,
         ] {
-            let json = serde_json::to_string(&cat).expect("serialize");
-            let parsed: ErrorCategory = serde_json::from_str(&json).expect("deserialize");
+            let json = serde_json::to_string(&cat)?;
+            let parsed: ErrorCategory = serde_json::from_str(&json)?;
             assert_eq!(parsed, cat);
         }
+        Ok(())
     }
 }
