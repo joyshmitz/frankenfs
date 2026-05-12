@@ -1,0 +1,259 @@
+---
+source: crates/ffs-harness/src/operational_readiness_report.rs
+expression: serde_json::to_string_pretty(&shape)?
+---
+{
+  "schema_version": 1,
+  "report_id": "operational-readiness:$FIXTURE:abc123",
+  "source_root": "$FIXTURE",
+  "source_manifest_count": 1,
+  "source_legacy_summary_count": 0,
+  "ignored_json_count": 0,
+  "scenario_count": 9,
+  "readiness_event_count": 9,
+  "readiness_event_envelope_version": 1,
+  "readiness_event_lane_ids": [
+    "fuse_lane",
+    "fuzz_smoke",
+    "mounted_scenario_matrix",
+    "performance",
+    "proof_bundle",
+    "release_gate",
+    "repair_policy",
+    "writeback_cache",
+    "xfstests"
+  ],
+  "correlation_graph_summary": {
+    "event_nodes": 9,
+    "parent_edges": 9,
+    "orphan_parent_edges": 0,
+    "aggregate_events": 0
+  },
+  "totals": {
+    "pass": 2,
+    "fail": 3,
+    "skip": 2,
+    "error": 2,
+    "product_failures": 2,
+    "environment_blockers": 3
+  },
+  "workstreams": {
+    "fuse_lane": {
+      "pass": 0,
+      "fail": 0,
+      "skip": 1,
+      "error": 0,
+      "product_failures": 0,
+      "environment_blockers": 1
+    },
+    "fuzz_smoke": {
+      "pass": 0,
+      "fail": 0,
+      "skip": 0,
+      "error": 1,
+      "product_failures": 0,
+      "environment_blockers": 1
+    },
+    "mounted_scenario_matrix": {
+      "pass": 1,
+      "fail": 0,
+      "skip": 0,
+      "error": 0,
+      "product_failures": 0,
+      "environment_blockers": 0
+    },
+    "performance": {
+      "pass": 0,
+      "fail": 0,
+      "skip": 0,
+      "error": 1,
+      "product_failures": 0,
+      "environment_blockers": 1
+    },
+    "proof_bundle": {
+      "pass": 0,
+      "fail": 1,
+      "skip": 0,
+      "error": 0,
+      "product_failures": 0,
+      "environment_blockers": 0
+    },
+    "release_gate": {
+      "pass": 0,
+      "fail": 0,
+      "skip": 1,
+      "error": 0,
+      "product_failures": 0,
+      "environment_blockers": 0
+    },
+    "repair_policy": {
+      "pass": 0,
+      "fail": 1,
+      "skip": 0,
+      "error": 0,
+      "product_failures": 1,
+      "environment_blockers": 0
+    },
+    "writeback_cache": {
+      "pass": 0,
+      "fail": 1,
+      "skip": 0,
+      "error": 0,
+      "product_failures": 1,
+      "environment_blockers": 0
+    },
+    "xfstests": {
+      "pass": 1,
+      "fail": 0,
+      "skip": 0,
+      "error": 0,
+      "product_failures": 0,
+      "environment_blockers": 0
+    }
+  },
+  "required_workstreams_missing": [],
+  "contract_failed": false,
+  "contract_violation_count": 0,
+  "duplicate_scenario_ids": [],
+  "stale_git_sha_count": 0,
+  "stale_artifact_count": 0,
+  "invalid_artifact_timestamp_count": 0,
+  "missing_log_path_count": 0,
+  "scenarios": [
+    {
+      "workstream": "fuse_lane",
+      "scenario_id": "fuse_capability_probe",
+      "outcome": "skip",
+      "taxonomy_class": "host_capability_skip",
+      "environment_only_blocker": true,
+      "product_failure": false,
+      "readiness_event_ids": [
+        "event_fuse_capability_probe"
+      ],
+      "event_severities": [
+        "warning"
+      ],
+      "owner_bead": "bd-rchk0.4.3"
+    },
+    {
+      "workstream": "fuzz_smoke",
+      "scenario_id": "fuzz_repair_smoke",
+      "outcome": "error",
+      "taxonomy_class": "host_capability_skip",
+      "environment_only_blocker": true,
+      "product_failure": false,
+      "readiness_event_ids": [
+        "event_fuzz_repair_smoke"
+      ],
+      "event_severities": [
+        "error"
+      ],
+      "owner_bead": "bd-rchk0.4.3"
+    },
+    {
+      "workstream": "mounted_scenario_matrix",
+      "scenario_id": "mounted_ext4_rw",
+      "outcome": "pass",
+      "taxonomy_class": "pass",
+      "environment_only_blocker": false,
+      "product_failure": false,
+      "readiness_event_ids": [
+        "event_mounted_ext4_rw"
+      ],
+      "event_severities": [
+        "info"
+      ],
+      "owner_bead": "bd-rchk0.4.3"
+    },
+    {
+      "workstream": "performance",
+      "scenario_id": "perf_baseline_run",
+      "outcome": "error",
+      "taxonomy_class": "host_capability_skip",
+      "environment_only_blocker": true,
+      "product_failure": false,
+      "readiness_event_ids": [
+        "event_perf_baseline_run"
+      ],
+      "event_severities": [
+        "error"
+      ],
+      "owner_bead": "bd-rchk0.4.3"
+    },
+    {
+      "workstream": "proof_bundle",
+      "scenario_id": "proof_bundle_stale",
+      "outcome": "fail",
+      "taxonomy_class": "stale_artifact",
+      "environment_only_blocker": false,
+      "product_failure": false,
+      "readiness_event_ids": [
+        "event_proof_bundle_stale"
+      ],
+      "event_severities": [
+        "error"
+      ],
+      "owner_bead": "bd-rchk0.4.3"
+    },
+    {
+      "workstream": "release_gate",
+      "scenario_id": "release_gate_unsupported",
+      "outcome": "skip",
+      "taxonomy_class": "unsupported_by_scope",
+      "environment_only_blocker": false,
+      "product_failure": false,
+      "readiness_event_ids": [
+        "event_release_gate_unsupported"
+      ],
+      "event_severities": [
+        "warning"
+      ],
+      "owner_bead": "bd-rchk0.4.3"
+    },
+    {
+      "workstream": "repair_policy",
+      "scenario_id": "repair_policy_refusal",
+      "outcome": "fail",
+      "taxonomy_class": "product_failure",
+      "environment_only_blocker": false,
+      "product_failure": true,
+      "readiness_event_ids": [
+        "event_repair_policy_refusal"
+      ],
+      "event_severities": [
+        "error"
+      ],
+      "owner_bead": "bd-rchk0.4.3"
+    },
+    {
+      "workstream": "writeback_cache",
+      "scenario_id": "writeback_crash_matrix",
+      "outcome": "fail",
+      "taxonomy_class": "product_failure",
+      "environment_only_blocker": false,
+      "product_failure": true,
+      "readiness_event_ids": [
+        "event_writeback_crash_matrix"
+      ],
+      "event_severities": [
+        "error"
+      ],
+      "owner_bead": "bd-rchk0.4.3"
+    },
+    {
+      "workstream": "xfstests",
+      "scenario_id": "xfstests_generic_subset",
+      "outcome": "pass",
+      "taxonomy_class": "pass",
+      "environment_only_blocker": false,
+      "product_failure": false,
+      "readiness_event_ids": [
+        "event_xfstests_generic_subset"
+      ],
+      "event_severities": [
+        "info"
+      ],
+      "owner_bead": "bd-rchk0.4.3"
+    }
+  ]
+}

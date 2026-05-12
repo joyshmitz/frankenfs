@@ -1569,6 +1569,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn normalize_report_source_paths(report: &mut OperationalReadinessReport, fixture_root: &str) {
+        report.report_id = report.report_id.replace(fixture_root, "$FIXTURE");
         report.source_root = "$FIXTURE".to_owned();
         for row in &mut report.scenarios {
             row.source_path = row.source_path.replace(fixture_root, "$FIXTURE");
@@ -1846,6 +1847,68 @@ mod tests {
             "render_operational_readiness_markdown_mixed_manifest",
             markdown
         );
+    }
+
+    #[test]
+    fn operational_readiness_report_json_shape() -> Result<()> {
+        let fixture = ReadinessFixture::new();
+        let manifest = sample_operational_manifest("abc123");
+        fixture.write_manifest("operational.json", &manifest);
+
+        let mut report = fixture.report(Some("abc123"));
+        let fixture_root = fixture.dir.path().display().to_string();
+        normalize_report_source_paths(&mut report, &fixture_root);
+
+        let json = serde_json::to_string_pretty(&report)?;
+        let parsed: OperationalReadinessReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+
+        let scenario_shape = report
+            .scenarios
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "workstream": row.workstream,
+                    "scenario_id": row.scenario_id,
+                    "outcome": row.outcome,
+                    "taxonomy_class": row.taxonomy_class,
+                    "environment_only_blocker": row.environment_only_blocker,
+                    "product_failure": row.product_failure,
+                    "readiness_event_ids": row.readiness_event_ids,
+                    "event_severities": row.event_severities,
+                    "owner_bead": row.owner_bead,
+                })
+            })
+            .collect::<Vec<_>>();
+        let shape = serde_json::json!({
+            "schema_version": report.schema_version,
+            "report_id": report.report_id,
+            "source_root": report.source_root,
+            "source_manifest_count": report.source_manifest_count,
+            "source_legacy_summary_count": report.source_legacy_summary_count,
+            "ignored_json_count": report.ignored_json_count,
+            "scenario_count": report.scenario_count,
+            "readiness_event_count": report.readiness_event_count,
+            "readiness_event_envelope_version": report.readiness_event_envelope_version,
+            "readiness_event_lane_ids": report.readiness_event_lane_ids,
+            "correlation_graph_summary": report.correlation_graph_summary,
+            "totals": report.totals,
+            "workstreams": report.workstreams,
+            "required_workstreams_missing": report.required_workstreams_missing,
+            "contract_failed": report.contract_failed,
+            "contract_violation_count": report.contract_violations.len(),
+            "duplicate_scenario_ids": report.duplicate_scenario_ids,
+            "stale_git_sha_count": report.stale_git_shas.len(),
+            "stale_artifact_count": report.stale_artifacts.len(),
+            "invalid_artifact_timestamp_count": report.invalid_artifact_timestamps.len(),
+            "missing_log_path_count": report.missing_log_paths.len(),
+            "scenarios": scenario_shape,
+        });
+        insta::assert_snapshot!(
+            "operational_readiness_report_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
     }
 
     #[test]
