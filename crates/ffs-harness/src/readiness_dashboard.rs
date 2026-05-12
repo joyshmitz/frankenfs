@@ -1576,8 +1576,8 @@ mod tests {
     }
 
     #[test]
-    fn readiness_lab_reports_stay_advisory_beside_authoritative_claims() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn readiness_lab_reports_stay_advisory_beside_authoritative_claims() -> Result<()> {
+        let dir = tempfile::tempdir()?;
         let release_path = dir.path().join("release_gate.json");
         let host_path = dir.path().join("host_simulation.json");
         let schedule_path = dir.path().join("rch_schedule.json");
@@ -1610,8 +1610,7 @@ mod tests {
   "warnings": [],
   "reproduction_command": "cargo run -p ffs-harness -- evaluate-release-gates --bundle bundle.json --policy policy.json"
 }"#,
-        )
-        .expect("write release gate");
+        )?;
         fs::write(
             &host_path,
             serde_json::to_string_pretty(&serde_json::json!({
@@ -1634,10 +1633,8 @@ mod tests {
                 ],
                 "errors": [],
                 "warnings": []
-            }))
-            .expect("serialize host report"),
-        )
-        .expect("write host report");
+            }))?,
+        )?;
         fs::write(
             &schedule_path,
             serde_json::to_string_pretty(&serde_json::json!({
@@ -1660,10 +1657,8 @@ mod tests {
                 ],
                 "errors": [],
                 "warnings": []
-            }))
-            .expect("serialize schedule report"),
-        )
-        .expect("write schedule report");
+            }))?,
+        )?;
         fs::write(
             &truth_path,
             serde_json::to_string_pretty(&serde_json::json!({
@@ -1682,10 +1677,8 @@ mod tests {
                 "edges": [],
                 "errors": [],
                 "warnings": []
-            }))
-            .expect("serialize truth graph"),
-        )
-        .expect("write truth graph");
+            }))?,
+        )?;
         fs::write(
             &replay_path,
             serde_json::to_string_pretty(&serde_json::json!({
@@ -1706,18 +1699,15 @@ mod tests {
                 ],
                 "errors": [],
                 "warnings": []
-            }))
-            .expect("serialize replay report"),
-        )
-        .expect("write replay report");
+            }))?,
+        )?;
 
         let report = build_readiness_dashboard(&ReadinessDashboardConfig {
             release_gate_reports: vec![release_path],
             readiness_lab_reports: vec![host_path, schedule_path, truth_path, replay_path],
             default_remediation_bead: Some("bd-4v16z.10".to_owned()),
             ..ReadinessDashboardConfig::default()
-        })
-        .expect("dashboard");
+        })?;
 
         assert!(report.valid);
         assert_eq!(report.source_report_count, 5);
@@ -1761,11 +1751,12 @@ mod tests {
             );
             assert_eq!(recommendation.bead_id.as_deref(), Some("bd-919xg"));
         }
+        Ok(())
     }
 
     #[test]
-    fn stale_readiness_lab_artifact_blocks_with_report_link() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn stale_readiness_lab_artifact_blocks_with_report_link() -> Result<()> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("stale_replay.json");
         fs::write(
             &path,
@@ -1788,17 +1779,14 @@ mod tests {
                     }
                 ],
                 "warnings": []
-            }))
-            .expect("serialize stale replay"),
-        )
-        .expect("write stale replay");
+            }))?,
+        )?;
 
         let report = build_readiness_dashboard(&ReadinessDashboardConfig {
             readiness_lab_reports: vec![path.clone()],
             default_remediation_bead: Some("bd-4v16z.10".to_owned()),
             ..ReadinessDashboardConfig::default()
-        })
-        .expect("dashboard");
+        })?;
 
         assert_eq!(report.source_validator_failure_count, 1);
         assert_eq!(
@@ -1825,6 +1813,7 @@ mod tests {
             report.recommendations[0].validator_report.as_deref(),
             Some(path.display().to_string().as_str())
         );
+        Ok(())
     }
 
     #[test]
