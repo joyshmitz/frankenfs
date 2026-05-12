@@ -6112,6 +6112,50 @@ mod tests {
     }
 
     #[test]
+    fn readiness_lab_truth_graph_report_json_shape() -> serde_json::Result<()> {
+        let report = build_truth_graph(&sample_truth_graph_manifest());
+        assert!(report.valid);
+
+        let full_json = serde_json::to_string_pretty(&report)?;
+        let decoded: ReadinessLabTruthGraphReport = serde_json::from_str(&full_json)?;
+        assert_eq!(decoded, report);
+        assert_eq!(
+            decoded.product_evidence_claim,
+            READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM
+        );
+        assert!(
+            decoded.edges.iter().any(|edge| edge.edge_kind == "blocks"),
+            "{:?}",
+            decoded.edges
+        );
+
+        let shape = serde_json::json!({
+            "schema_version": report.schema_version,
+            "graph_id": report.graph_id,
+            "valid": report.valid,
+            "dry_run_only": report.dry_run_only,
+            "product_evidence_claim": report.product_evidence_claim,
+            "release_gate_effect": report.release_gate_effect,
+            "source_count": report.source_count,
+            "claim_count": report.claim_count,
+            "node_count": report.node_count,
+            "edge_count": report.edge_count,
+            "stale_claim_count": report.stale_claim_count,
+            "contradictory_claim_count": report.contradictory_claim_count,
+            "permission_requirement_count": report.permission_requirement_count,
+            "simulated_node_count": report.simulated_node_count,
+            "blocker_edge_count": report.blocker_edge_count,
+            "errors": report.errors,
+            "warnings": report.warnings,
+        });
+        insta::assert_snapshot!(
+            "readiness_lab_truth_graph_report_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
+    }
+
+    #[test]
     fn truth_graph_exposes_contradictory_non_stale_claims() {
         let mut manifest = sample_truth_graph_manifest();
         manifest.sources[0].claims[0]

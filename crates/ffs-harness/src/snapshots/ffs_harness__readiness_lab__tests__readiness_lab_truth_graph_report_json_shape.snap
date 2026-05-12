@@ -1,0 +1,23 @@
+---
+source: crates/ffs-harness/src/readiness_lab.rs
+expression: serde_json::to_string_pretty(&shape)?
+---
+{
+  "schema_version": 1,
+  "graph_id": "readiness-lab-truth-graph",
+  "valid": true,
+  "dry_run_only": true,
+  "product_evidence_claim": "none",
+  "release_gate_effect": "advisory_only",
+  "source_count": 4,
+  "claim_count": 4,
+  "node_count": 28,
+  "edge_count": 26,
+  "stale_claim_count": 1,
+  "contradictory_claim_count": 0,
+  "permission_requirement_count": 1,
+  "simulated_node_count": 5,
+  "blocker_edge_count": 2,
+  "errors": [],
+  "warnings": []
+}
