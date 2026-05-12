@@ -1291,13 +1291,14 @@ mod tests {
     }
 
     #[test]
-    fn taxonomy_json_round_trip() {
+    fn taxonomy_json_round_trip() -> Result<(), serde_json::Error> {
         let taxonomy = Taxonomy::canonical();
-        let json = serde_json::to_string_pretty(&taxonomy).expect("serialize");
-        let parsed: Taxonomy = serde_json::from_str(&json).expect("deserialize");
+        let json = serde_json::to_string_pretty(&taxonomy)?;
+        let parsed: Taxonomy = serde_json::from_str(&json)?;
         assert_eq!(parsed.version, taxonomy.version);
         assert_eq!(parsed.operations.len(), taxonomy.operations.len());
         assert_eq!(parsed.host_profiles.len(), taxonomy.host_profiles.len());
+        Ok(())
     }
 
     #[test]
