@@ -444,7 +444,7 @@ mod tests {
                 },
             ],
         };
-        let json = serde_json::to_value(&verdict).expect("serialize verdict");
+        let json = serde_json::to_value(&verdict)?;
         assert!(json.get("version").is_some());
         assert!(json.get("total_checks").is_some());
         assert!(json.get("passed").is_some());
