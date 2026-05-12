@@ -177,7 +177,7 @@ mod tests {
     // ── bd-3ib.3: Performance baseline and regression detection tests ──
 
     #[test]
-    fn perf_baseline_json_round_trip() {
+    fn perf_baseline_json_round_trip() -> Result<(), serde_json::Error> {
         // Verify the PerfBaseline struct serializes and deserializes correctly.
         let baseline = PerfBaseline {
             generated_at: "2026-02-17T00:00:00Z".to_owned(),
@@ -207,16 +207,17 @@ mod tests {
             ],
         };
 
-        let json = serde_json::to_string_pretty(&baseline).expect("serialize");
+        let json = serde_json::to_string_pretty(&baseline)?;
         insta::assert_snapshot!("perf_baseline_json_shape", json);
 
-        let parsed = parse_baseline(&json).expect("parse round-trip");
+        let parsed = parse_baseline(&json)?;
         assert_eq!(parsed.generated_at, "2026-02-17T00:00:00Z");
         assert_eq!(parsed.commit, "abc123");
         assert_eq!(parsed.measurements.len(), 2);
         assert_eq!(parsed.measurements[0].operation, "metadata_parity_cli");
         assert!((parsed.measurements[0].p99_us - 1450.0).abs() < f64::EPSILON);
         assert_eq!(parsed.measurements[1].status, "pending");
+        Ok(())
     }
 
     #[test]
