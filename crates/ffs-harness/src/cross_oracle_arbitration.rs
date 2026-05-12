@@ -1212,6 +1212,18 @@ mod tests {
         assert!(markdown.contains("validate-cross-oracle-arbitration"));
     }
 
+    #[test]
+    fn cross_oracle_arbitration_validation_report_json_shape() -> Result<()> {
+        let validation = validate_cross_oracle_arbitration_report(&valid_report());
+        let json = serde_json::to_string_pretty(&validation)?;
+
+        insta::assert_snapshot!(
+            "cross_oracle_arbitration_validation_report_json_shape",
+            json
+        );
+        Ok(())
+    }
+
     /// bd-0ztd2 — golden-artifact pin for the cross-oracle arbitration
     /// markdown emitter. The substring-style sibling test catches
     /// missing keywords; this snapshot catches whitespace, heading,

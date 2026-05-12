@@ -1,0 +1,241 @@
+---
+source: crates/ffs-harness/src/cross_oracle_arbitration.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "bead_id": "bd-zj57e",
+  "valid": true,
+  "arbitration_count": 9,
+  "fail_closed_count": 4,
+  "category_counts": {
+    "fixture_bug": 1,
+    "frankenfs_product_bug": 1,
+    "harness_bug": 1,
+    "host_capability_gap": 1,
+    "inconclusive_conflict": 1,
+    "kernel_baseline_issue": 1,
+    "model_bug": 1,
+    "repair_oracle_gap": 1,
+    "unsupported_scope": 1
+  },
+  "source_kind_counts": {
+    "crash_replay_survivor": 3,
+    "invariant_trace": 4,
+    "mounted_differential": 6,
+    "release_gate_status": 5,
+    "repair_confidence": 1
+  },
+  "blocked_public_claims": [
+    "background_scrub_mutation",
+    "data_integrity",
+    "mounted_writes",
+    "mutating_repair",
+    "proof_bundle_completeness",
+    "writeback_cache"
+  ],
+  "summaries": [
+    {
+      "arbitration_id": "arb_model_bug",
+      "status": "resolved",
+      "classification": "model_bug",
+      "source_oracle_ids": [
+        "invariant_model",
+        "mounted_pass"
+      ],
+      "controlling_artifacts": [
+        "artifacts/oracles/invariant_model.json",
+        "artifacts/oracles/mounted_pass.json"
+      ],
+      "blocked_public_claims": [
+        "proof_bundle_completeness"
+      ],
+      "release_gate_impact": "downgrade",
+      "owning_bead": "bd-zj57e",
+      "remediation_id": "remediate_cross_oracle_conflict",
+      "follow_up_bead_id": null,
+      "non_goal_reason": null,
+      "reproduction_command": "ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_model_bug/report.json"
+    },
+    {
+      "arbitration_id": "arb_kernel_baseline_issue",
+      "status": "unresolved",
+      "classification": "kernel_baseline_issue",
+      "source_oracle_ids": [
+        "mounted_kernel",
+        "release_gate_kernel"
+      ],
+      "controlling_artifacts": [
+        "artifacts/oracles/mounted_kernel.json",
+        "artifacts/oracles/release_gate_kernel.json"
+      ],
+      "blocked_public_claims": [
+        "mounted_writes"
+      ],
+      "release_gate_impact": "fail_closed",
+      "owning_bead": "bd-zj57e",
+      "remediation_id": "remediate_cross_oracle_conflict",
+      "follow_up_bead_id": "bd-zj57e",
+      "non_goal_reason": null,
+      "reproduction_command": "ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_kernel_baseline_issue/report.json"
+    },
+    {
+      "arbitration_id": "arb_frankenfs_product_bug",
+      "status": "unresolved",
+      "classification": "frankenfs_product_bug",
+      "source_oracle_ids": [
+        "invariant_product",
+        "mounted_product",
+        "release_product"
+      ],
+      "controlling_artifacts": [
+        "artifacts/oracles/invariant_product.json",
+        "artifacts/oracles/mounted_product.json",
+        "artifacts/oracles/release_product.json"
+      ],
+      "blocked_public_claims": [
+        "mounted_writes",
+        "data_integrity"
+      ],
+      "release_gate_impact": "fail_closed",
+      "owning_bead": "bd-zj57e",
+      "remediation_id": "remediate_cross_oracle_conflict",
+      "follow_up_bead_id": "bd-zj57e",
+      "non_goal_reason": null,
+      "reproduction_command": "ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_frankenfs_product_bug/report.json"
+    },
+    {
+      "arbitration_id": "arb_harness_bug",
+      "status": "resolved",
+      "classification": "harness_bug",
+      "source_oracle_ids": [
+        "crash_harness",
+        "invariant_harness"
+      ],
+      "controlling_artifacts": [
+        "artifacts/oracles/crash_harness.json",
+        "artifacts/oracles/invariant_harness.json"
+      ],
+      "blocked_public_claims": [
+        "proof_bundle_completeness"
+      ],
+      "release_gate_impact": "downgrade",
+      "owning_bead": "bd-zj57e",
+      "remediation_id": "remediate_cross_oracle_conflict",
+      "follow_up_bead_id": null,
+      "non_goal_reason": null,
+      "reproduction_command": "ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_harness_bug/report.json"
+    },
+    {
+      "arbitration_id": "arb_fixture_bug",
+      "status": "resolved",
+      "classification": "fixture_bug",
+      "source_oracle_ids": [
+        "mounted_fixture",
+        "crash_fixture"
+      ],
+      "controlling_artifacts": [
+        "artifacts/oracles/mounted_fixture.json",
+        "artifacts/oracles/crash_fixture.json"
+      ],
+      "blocked_public_claims": [
+        "proof_bundle_completeness"
+      ],
+      "release_gate_impact": "downgrade",
+      "owning_bead": "bd-zj57e",
+      "remediation_id": "remediate_cross_oracle_conflict",
+      "follow_up_bead_id": null,
+      "non_goal_reason": null,
+      "reproduction_command": "ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_fixture_bug/report.json"
+    },
+    {
+      "arbitration_id": "arb_unsupported_scope",
+      "status": "scoped_out",
+      "classification": "unsupported_scope",
+      "source_oracle_ids": [
+        "mounted_unsupported",
+        "release_unsupported"
+      ],
+      "controlling_artifacts": [
+        "artifacts/oracles/mounted_unsupported.json",
+        "artifacts/oracles/release_unsupported.json"
+      ],
+      "blocked_public_claims": [
+        "writeback_cache"
+      ],
+      "release_gate_impact": "downgrade",
+      "owning_bead": "bd-zj57e",
+      "remediation_id": "remediate_cross_oracle_conflict",
+      "follow_up_bead_id": null,
+      "non_goal_reason": "unsupported V1 scope is explicitly non-goal",
+      "reproduction_command": "ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_unsupported_scope/report.json"
+    },
+    {
+      "arbitration_id": "arb_host_capability_gap",
+      "status": "resolved",
+      "classification": "host_capability_gap",
+      "source_oracle_ids": [
+        "mounted_host",
+        "release_host"
+      ],
+      "controlling_artifacts": [
+        "artifacts/oracles/mounted_host.json",
+        "artifacts/oracles/release_host.json"
+      ],
+      "blocked_public_claims": [
+        "mounted_writes"
+      ],
+      "release_gate_impact": "downgrade",
+      "owning_bead": "bd-zj57e",
+      "remediation_id": "remediate_cross_oracle_conflict",
+      "follow_up_bead_id": null,
+      "non_goal_reason": null,
+      "reproduction_command": "ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_host_capability_gap/report.json"
+    },
+    {
+      "arbitration_id": "arb_repair_oracle_gap",
+      "status": "unresolved",
+      "classification": "repair_oracle_gap",
+      "source_oracle_ids": [
+        "repair_missing",
+        "release_repair"
+      ],
+      "controlling_artifacts": [
+        "artifacts/oracles/release_repair.json"
+      ],
+      "blocked_public_claims": [
+        "mutating_repair",
+        "background_scrub_mutation"
+      ],
+      "release_gate_impact": "fail_closed",
+      "owning_bead": "bd-zj57e",
+      "remediation_id": "remediate_cross_oracle_conflict",
+      "follow_up_bead_id": "bd-zj57e",
+      "non_goal_reason": null,
+      "reproduction_command": "ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_repair_oracle_gap/report.json"
+    },
+    {
+      "arbitration_id": "arb_inconclusive_conflict",
+      "status": "unresolved",
+      "classification": "inconclusive_conflict",
+      "source_oracle_ids": [
+        "invariant_inconclusive",
+        "crash_inconclusive"
+      ],
+      "controlling_artifacts": [
+        "artifacts/oracles/invariant_inconclusive.json",
+        "artifacts/oracles/crash_inconclusive.json"
+      ],
+      "blocked_public_claims": [
+        "data_integrity"
+      ],
+      "release_gate_impact": "fail_closed",
+      "owning_bead": "bd-zj57e",
+      "remediation_id": "remediate_cross_oracle_conflict",
+      "follow_up_bead_id": "bd-zj57e",
+      "non_goal_reason": null,
+      "reproduction_command": "ffs-harness validate-cross-oracle-arbitration --report artifacts/cross_oracle/arb_inconclusive_conflict/report.json"
+    }
+  ],
+  "errors": []
+}
