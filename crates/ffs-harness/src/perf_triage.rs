@@ -675,13 +675,14 @@ mod tests {
     }
 
     #[test]
-    fn triage_decision_json_includes_followup_command() {
+    fn triage_decision_json_includes_followup_command() -> Result<(), serde_json::Error> {
         let result = fail_result("test_op");
         let decision = classify_triage(&result, BenchmarkFamily::Parser, None);
-        let json = serde_json::to_string(&decision).expect("serialize");
+        let json = serde_json::to_string(&decision)?;
         assert!(
             json.contains("followup_command"),
             "JSON must include followup_command field"
         );
+        Ok(())
     }
 }
