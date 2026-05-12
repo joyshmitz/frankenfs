@@ -1853,6 +1853,19 @@ mod tests {
     }
 
     #[test]
+    fn mounted_differential_validation_report_json_shape() -> Result<()> {
+        let validation = validate_mounted_differential_oracle_report(&valid_report());
+        assert!(validation.valid, "{:?}", validation.errors);
+
+        let json = serde_json::to_string_pretty(&validation)?;
+        insta::assert_snapshot!("mounted_differential_validation_report_json_shape", json);
+
+        let roundtrip: MountedDifferentialValidationReport = serde_json::from_str(&json)?;
+        assert_eq!(roundtrip, validation);
+        Ok(())
+    }
+
+    #[test]
     fn render_mounted_differential_oracle_markdown_diff_gate_blocks_snapshot() {
         let mut report = valid_report();
         report.scenarios[1].classification = MountedDifferentialClassification::Diff;

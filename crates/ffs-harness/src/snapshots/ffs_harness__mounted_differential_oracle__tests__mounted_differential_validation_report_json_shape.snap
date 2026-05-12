@@ -1,0 +1,33 @@
+---
+source: crates/ffs-harness/src/mounted_differential_oracle.rs
+expression: json
+---
+{
+  "schema_version": 2,
+  "bead_id": "bd-rchk0.5.2.1",
+  "valid": true,
+  "scenario_count": 10,
+  "filesystems": [
+    "btrfs",
+    "ext4"
+  ],
+  "classification_counts": {
+    "allowed_diff": 1,
+    "host_skip": 7,
+    "pass": 1,
+    "unsupported": 1
+  },
+  "host_skip_classes": [
+    "btrfs_default_permissions_root_owned",
+    "fuse_missing",
+    "fuse_permission_denied",
+    "kernel_mount_permission_denied",
+    "mkfs_btrfs_missing",
+    "mkfs_ext4_missing",
+    "unsupported_scope"
+  ],
+  "allowlist_count": 1,
+  "unresolved_public_claims": [],
+  "errors": [],
+  "warnings": []
+}
