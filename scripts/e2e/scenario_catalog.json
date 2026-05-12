@@ -2648,6 +2648,53 @@
       ]
     },
     {
+      "suite_id": "ffs_swarm_operator_report",
+      "script": "scripts/e2e/ffs_swarm_operator_report_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "swarm_operator_report_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_operator_report_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "swarm_operator_report_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_operator_report_validates|outcome=PASS"
+        },
+        {
+          "id": "swarm_operator_report_operator_contract",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_operator_report_operator_contract|outcome=PASS"
+        },
+        {
+          "id": "swarm_operator_report_invalid_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_operator_report_invalid_rejected|outcome=PASS"
+        },
+        {
+          "id": "swarm_operator_report_markdown_docs",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_operator_report_markdown_docs|outcome=PASS"
+        },
+        {
+          "id": "swarm_operator_report_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_operator_report_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_swarm_cache_controller",
       "script": "scripts/e2e/ffs_swarm_cache_controller_e2e.sh",
       "required_categories": [

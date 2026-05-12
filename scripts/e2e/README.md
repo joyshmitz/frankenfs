@@ -528,6 +528,32 @@ workload-harness release-claim state that may upgrade public wording; stale,
 missing, unsupported, `small_host_smoke`, or `capability_downgraded_smoke`
 evidence remains downgrade/blocker evidence.
 
+## Swarm Operator Report Contract
+
+The swarm operator decision report lives in:
+
+- `benchmarks/swarm_operator_report.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-swarm-operator-report \
+  --report benchmarks/swarm_operator_report.json \
+  --out artifacts/performance/swarm_operator_report.json \
+  --summary-out artifacts/performance/swarm_operator_report.md
+```
+
+This report is an operator decision contract for the swarm-performance
+workstream, not an authoritative large-host measurement. It must keep the tail
+latency decomposition, NUMA/shard harness, RCU/QSBR metadata path, parallel WAL
+group-commit gate, cache budget controller, and scrub/repair scheduler cards
+visible. Every card must preserve invariants, evidence rows, expected-loss
+policy, fallback behavior, validation commands, release-claim state, and linked
+beads. Non-permissioned reports must not upgrade to
+`measured_authoritative`; that state requires a separate permissioned
+large-host lane with fresh raw artifacts and proof-bundle/release-gate
+consumers.
+
 ## Swarm Tail-Latency Ledger Contract
 
 The 64-core/256GB swarm tail-latency decomposition ledger lives in:
