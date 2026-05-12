@@ -1441,7 +1441,10 @@ mod tests {
             .map(|scenario| log_line_keys(&scenario.log_line))
             .unwrap_or_default();
         for scenario in &report.scenario_reports {
-            assert_eq!(log_line_keys(&scenario.log_line), expected_scenario_log_keys);
+            assert_eq!(
+                log_line_keys(&scenario.log_line),
+                expected_scenario_log_keys
+            );
         }
 
         let expected_calibration_log_keys = report
