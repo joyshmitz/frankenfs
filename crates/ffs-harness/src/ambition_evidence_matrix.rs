@@ -1875,6 +1875,25 @@ mod tests {
     }
 
     #[test]
+    fn ambition_evidence_matrix_report_json_shape() -> Result<()> {
+        let report = analyze_ambition_evidence_matrix(
+            &fixture_issues(),
+            &[DEFAULT_ARTIFACT_PATH.to_owned()],
+        );
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("ambition_evidence_matrix_report_json_shape", json);
+        let parsed: AmbitionEvidenceMatrixReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn groups_rows_by_user_risk_and_evidence_coverage() {
         let report = analyze_ambition_evidence_matrix(
             &fixture_issues(),
