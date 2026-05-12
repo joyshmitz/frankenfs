@@ -213,10 +213,10 @@ pub fn validate_metamorphic_workload_seed_catalog_with_repo_root(
         for consumer in &seed.proof_consumers {
             *by_proof_consumer.entry(consumer.clone()).or_default() += 1;
         }
-        if seed.execution_mode == "dry_run" {
+        if seed.execution_mode.eq("dry_run") {
             dry_run_seed_ids.push(seed.seed_id.clone());
         }
-        if seed.execution_mode == "permissioned" {
+        if seed.execution_mode.eq("permissioned") {
             permissioned_seed_ids.push(seed.seed_id.clone());
         }
         source_artifacts.insert(seed.source_artifact.clone());
@@ -348,7 +348,10 @@ pub fn render_metamorphic_workload_seed_catalog_markdown(
 }
 
 fn validate_header(catalog: &MetamorphicWorkloadSeedCatalog, errors: &mut Vec<String>) {
-    if catalog.schema_version != METAMORPHIC_WORKLOAD_SEED_CATALOG_SCHEMA_VERSION {
+    if catalog
+        .schema_version
+        .ne(&METAMORPHIC_WORKLOAD_SEED_CATALOG_SCHEMA_VERSION)
+    {
         errors.push(format!(
             "schema_version must be {METAMORPHIC_WORKLOAD_SEED_CATALOG_SCHEMA_VERSION}, got {}",
             catalog.schema_version
@@ -423,7 +426,7 @@ fn validate_seed(
             seed.seed_id, seed.execution_mode
         ));
     }
-    if seed.execution_mode == "permissioned"
+    if seed.execution_mode.eq("permissioned")
         && seed
             .ack_requirement
             .as_deref()
@@ -563,7 +566,7 @@ fn build_coverage_row(seed: &MetamorphicWorkloadSeed) -> MetamorphicWorkloadSeed
 fn source_value_contains_seed(source_value: &Value, seed_value: &SeedValue) -> bool {
     match source_value {
         Value::Number(number) => match seed_value {
-            SeedValue::Number(seed) => number.as_u64() == Some(*seed),
+            SeedValue::Number(seed) => number.as_u64().is_some_and(|value| value.eq(seed)),
             SeedValue::Symbolic(seed) => number.to_string().contains(seed),
         },
         Value::String(value) => value.contains(&seed_value.label()),
@@ -684,7 +687,7 @@ mod tests {
                 && row
                     .expected_artifact_fields
                     .iter()
-                    .any(|field| field == "required")
+                    .any(|field| field.eq("required"))
         }));
         assert!(
             report
@@ -710,6 +713,17 @@ mod tests {
             "render_metamorphic_workload_seed_catalog_markdown_checked_in_catalog",
             markdown
         );
+    }
+
+    #[test]
+    fn metamorphic_workload_seed_catalog_report_json_shape() {
+        let catalog = fixture_catalog();
+        let report = validate_fixture(&catalog);
+        assert!(report.valid, "{:?}", report.errors);
+        let json = serde_json::to_string_pretty(&report)
+            .expect("metamorphic workload seed catalog report serializes");
+
+        insta::assert_snapshot!("metamorphic_workload_seed_catalog_report_json_shape", json);
     }
 
     #[test]
@@ -794,7 +808,7 @@ mod tests {
         let seed = catalog
             .seeds
             .iter_mut()
-            .find(|seed| seed.seed_id == "seed_soak_mount_ext4_1001")
+            .find(|seed| seed.seed_id.eq("seed_soak_mount_ext4_1001"))
             .expect("fixture has soak/canary seed");
         seed.seed_value = SeedValue::Number(9_999_999);
         let report = validate_fixture(&catalog);
@@ -811,7 +825,7 @@ mod tests {
         let seed = catalog
             .seeds
             .iter()
-            .find(|seed| seed.seed_id == "seed_workload_append_truncate_64001")
+            .find(|seed| seed.seed_id.eq("seed_workload_append_truncate_64001"))
             .expect("fixture has command-contained seed");
         let resolved = resolve_catalog_relative_path(&repo_root(), &seed.source_artifact)
             .expect("fixture source artifact path resolves");
@@ -831,7 +845,7 @@ mod tests {
         let seed = catalog
             .seeds
             .iter_mut()
-            .find(|seed| seed.execution_mode == "permissioned")
+            .find(|seed| seed.execution_mode.eq("permissioned"))
             .expect("fixture has permissioned seed");
         seed.ack_requirement = None;
         let report = validate_fixture(&catalog);

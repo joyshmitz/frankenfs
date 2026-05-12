@@ -1,0 +1,260 @@
+---
+source: crates/ffs-harness/src/metamorphic_workload_seed_catalog.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "catalog_id": "frankenfs_metamorphic_workload_seed_catalog",
+  "catalog_version": "2026-05-06.1",
+  "bead_id": "bd-rchk0.79",
+  "valid": true,
+  "seed_count": 8,
+  "source_kind_count": 8,
+  "relation_counts": {
+    "failure_classification_stable": 1,
+    "operation_reorder_commutes": 1,
+    "repair_monotonic": 2,
+    "replay_deterministic": 2,
+    "tail_latency_order_invariant": 2
+  },
+  "source_kind_counts": {
+    "crash_replay_artifact": 1,
+    "fault_injection_corpus": 1,
+    "repair_confidence_lab": 1,
+    "repair_writeback_serialization": 1,
+    "soak_canary_campaign": 1,
+    "swarm_tail_latency": 1,
+    "swarm_workload_harness": 1,
+    "workload_corpus": 1
+  },
+  "execution_mode_counts": {
+    "analysis_only": 1,
+    "dry_run": 6,
+    "permissioned": 1
+  },
+  "by_proof_consumer": {
+    "crash_replay_lab": 2,
+    "fault_injection_corpus": 1,
+    "operational_readiness_report": 2,
+    "proof_bundle": 6,
+    "release_gate": 5,
+    "repair_lab": 3,
+    "soak_canary_campaigns": 1,
+    "swarm_tail_latency": 1,
+    "swarm_workload_harness": 2,
+    "workload_corpus": 1
+  },
+  "dry_run_seed_ids": [
+    "seed_workload_append_truncate_64001",
+    "seed_soak_mount_ext4_1001",
+    "seed_swarm_metadata_storm_10001",
+    "seed_crash_replay_labruntime_42",
+    "seed_repair_writeback_schedule_9001",
+    "seed_repair_confidence_mutation_53001"
+  ],
+  "permissioned_seed_ids": [
+    "seed_swarm_tail_latency_7310001"
+  ],
+  "source_artifacts": [
+    "benchmarks/soak_canary_campaign_manifest.json",
+    "benchmarks/swarm_tail_latency_ledger.json",
+    "benchmarks/swarm_workload_harness_manifest.json",
+    "docs/repair-confidence-mutation-safety.json",
+    "docs/repair-writeback-serialization-contract.json",
+    "tests/crash-replay-artifact/crash_replay_artifact.json",
+    "tests/fault-injection-corpus/fault_injection_corpus.json",
+    "tests/workload-corpus/p1_workload_corpus.json"
+  ],
+  "source_value_verified_count": 8,
+  "coverage_matrix": [
+    {
+      "seed_id": "seed_workload_append_truncate_64001",
+      "seed_value": "64001",
+      "source_kind": "workload_corpus",
+      "source_artifact": "tests/workload-corpus/p1_workload_corpus.json",
+      "source_value_pointer": "/scenarios/3/reproduction_command",
+      "relation_type": "replay_deterministic",
+      "invariant": "Repeated crash-replay validation for the same append/truncate seed must produce the same survivor classification and log-replay outcome.",
+      "proof_consumers": [
+        "workload_corpus",
+        "crash_replay_lab",
+        "proof_bundle"
+      ],
+      "execution_mode": "dry_run",
+      "ack_requirement": null,
+      "linked_workload_scenarios": [
+        "workload_append_truncate_log_churn"
+      ],
+      "reproduction_command": "cargo run -p ffs-harness -- run-crash-replay --count 64 --seed 64001",
+      "expected_artifact_fields": [
+        "path",
+        "kind",
+        "required"
+      ]
+    },
+    {
+      "seed_id": "seed_soak_mount_ext4_1001",
+      "seed_value": "1001",
+      "source_kind": "soak_canary_campaign",
+      "source_artifact": "benchmarks/soak_canary_campaign_manifest.json",
+      "source_value_pointer": "/workloads/0/seeds/0",
+      "relation_type": "operation_reorder_commutes",
+      "invariant": "Mount, probe, unmount, and reopen cycles with the same seed must preserve the final root metadata observation independent of heartbeat grouping.",
+      "proof_consumers": [
+        "soak_canary_campaigns",
+        "release_gate",
+        "operational_readiness_report"
+      ],
+      "execution_mode": "dry_run",
+      "ack_requirement": null,
+      "linked_workload_scenarios": [],
+      "reproduction_command": "scripts/e2e/ffs_soak_canary_campaign_e2e.sh --dry-run",
+      "expected_artifact_fields": [
+        "path",
+        "kind",
+        "required"
+      ]
+    },
+    {
+      "seed_id": "seed_swarm_metadata_storm_10001",
+      "seed_value": "10001",
+      "source_kind": "swarm_workload_harness",
+      "source_artifact": "benchmarks/swarm_workload_harness_manifest.json",
+      "source_value_pointer": "/scenarios/0/workload_seeds/0",
+      "relation_type": "tail_latency_order_invariant",
+      "invariant": "Dry-run expansion must preserve the same workload seed ordering and attribution lanes before any large-host campaign is permitted.",
+      "proof_consumers": [
+        "swarm_workload_harness",
+        "proof_bundle",
+        "release_gate"
+      ],
+      "execution_mode": "dry_run",
+      "ack_requirement": null,
+      "linked_workload_scenarios": [],
+      "reproduction_command": "cargo run -p ffs-harness -- validate-swarm-workload-harness --manifest benchmarks/swarm_workload_harness_manifest.json",
+      "expected_artifact_fields": [
+        "path",
+        "kind",
+        "required"
+      ]
+    },
+    {
+      "seed_id": "seed_swarm_tail_latency_7310001",
+      "seed_value": "7310001",
+      "source_kind": "swarm_tail_latency",
+      "source_artifact": "benchmarks/swarm_tail_latency_ledger.json",
+      "source_value_pointer": "/rows/0/workload_seed",
+      "relation_type": "tail_latency_order_invariant",
+      "invariant": "Authoritative p99 attribution for the same workload seed must not upgrade downgrade/blocker evidence into public readiness without the large-host ack.",
+      "proof_consumers": [
+        "swarm_tail_latency",
+        "swarm_workload_harness",
+        "release_gate"
+      ],
+      "execution_mode": "permissioned",
+      "ack_requirement": "FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host",
+      "linked_workload_scenarios": [],
+      "reproduction_command": "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host cargo run -p ffs-harness -- validate-swarm-workload-harness --manifest benchmarks/swarm_workload_harness_manifest.json",
+      "expected_artifact_fields": [
+        "path",
+        "kind",
+        "required"
+      ]
+    },
+    {
+      "seed_id": "seed_crash_replay_labruntime_42",
+      "seed_value": "42",
+      "source_kind": "crash_replay_artifact",
+      "source_artifact": "tests/crash-replay-artifact/crash_replay_artifact.json",
+      "source_value_pointer": "/seed",
+      "relation_type": "replay_deterministic",
+      "invariant": "LabRuntime replay for the recorded seed must keep the same operation trace, failure classification, and raw log identity.",
+      "proof_consumers": [
+        "crash_replay_lab",
+        "proof_bundle",
+        "release_gate"
+      ],
+      "execution_mode": "dry_run",
+      "ack_requirement": null,
+      "linked_workload_scenarios": [],
+      "reproduction_command": "rch exec -- cargo test -p ffs-harness --test crash_replay -- pre_commit_seed_42",
+      "expected_artifact_fields": [
+        "path",
+        "kind",
+        "required"
+      ]
+    },
+    {
+      "seed_id": "seed_repair_writeback_schedule_9001",
+      "seed_value": "9001",
+      "source_kind": "repair_writeback_serialization",
+      "source_artifact": "docs/repair-writeback-serialization-contract.json",
+      "source_value_pointer": "/race_schedule_manifest/schedules/0/seed",
+      "relation_type": "repair_monotonic",
+      "invariant": "Increasing available repair evidence for the same writeback schedule seed may improve acceptance, but must not hide duplicate targets or stale-symbol rejection.",
+      "proof_consumers": [
+        "repair_lab",
+        "proof_bundle",
+        "operational_readiness_report"
+      ],
+      "execution_mode": "dry_run",
+      "ack_requirement": null,
+      "linked_workload_scenarios": [],
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json",
+      "expected_artifact_fields": [
+        "path",
+        "kind",
+        "required"
+      ]
+    },
+    {
+      "seed_id": "seed_fault_injection_case_1001",
+      "seed_value": "1001",
+      "source_kind": "fault_injection_corpus",
+      "source_artifact": "tests/fault-injection-corpus/fault_injection_corpus.json",
+      "source_value_pointer": "/cases/0/seed",
+      "relation_type": "failure_classification_stable",
+      "invariant": "The same injected fault seed must retain its error class and operator remediation classification across proof-bundle rebuilds.",
+      "proof_consumers": [
+        "fault_injection_corpus",
+        "repair_lab",
+        "proof_bundle"
+      ],
+      "execution_mode": "analysis_only",
+      "ack_requirement": null,
+      "linked_workload_scenarios": [],
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json",
+      "expected_artifact_fields": [
+        "path",
+        "kind",
+        "required"
+      ]
+    },
+    {
+      "seed_id": "seed_repair_confidence_mutation_53001",
+      "seed_value": "53001",
+      "source_kind": "repair_confidence_lab",
+      "source_artifact": "docs/repair-confidence-mutation-safety.json",
+      "source_value_pointer": "/calibration_corpus/0/seed",
+      "relation_type": "repair_monotonic",
+      "invariant": "Repair confidence for the same mutation seed must preserve the threshold decision and never convert detection-only evidence into mutation permission.",
+      "proof_consumers": [
+        "repair_lab",
+        "proof_bundle",
+        "release_gate"
+      ],
+      "execution_mode": "dry_run",
+      "ack_requirement": null,
+      "linked_workload_scenarios": [],
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json",
+      "expected_artifact_fields": [
+        "path",
+        "kind",
+        "required"
+      ]
+    }
+  ],
+  "duplicate_seed_ids": [],
+  "errors": [],
+  "warnings": []
+}
