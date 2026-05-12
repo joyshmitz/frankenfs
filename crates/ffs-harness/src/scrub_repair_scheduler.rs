@@ -996,4 +996,14 @@ mod tests {
             markdown
         );
     }
+
+    #[test]
+    fn scrub_repair_scheduler_report_json_shape() -> Result<()> {
+        let report = validate_scrub_repair_scheduler_manifest(&sample_manifest());
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("scrub_repair_scheduler_report_json_shape", json);
+        let parsed: ScrubRepairSchedulerReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
 }
