@@ -568,19 +568,22 @@ mod tests {
     }
 
     #[test]
-    fn scenario_json_round_trips() {
+    fn scenario_json_round_trips() -> Result<(), serde_json::Error> {
         let scenarios = canonical_scenarios();
-        let json = serde_json::to_string(&scenarios).expect("serialize");
-        let parsed: Vec<ErrorScenario> = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(parsed.len(), scenarios.len());
-        assert_eq!(parsed[0].code, scenarios[0].code);
+        let json = serde_json::to_string(&scenarios)?;
+        let parsed: Vec<ErrorScenario> = serde_json::from_str(&json)?;
+        assert_eq!(parsed, scenarios);
+        Ok(())
     }
 
     #[test]
-    fn canonical_error_scenarios_json_shape() {
+    fn canonical_error_scenarios_json_shape() -> Result<(), serde_json::Error> {
         let scenarios = canonical_scenarios();
-        let json = serde_json::to_string_pretty(&scenarios).expect("serialize scenarios");
+        let json = serde_json::to_string_pretty(&scenarios)?;
         insta::assert_snapshot!("canonical_error_scenarios_json_shape", json);
+        let parsed: Vec<ErrorScenario> = serde_json::from_str(&json)?;
+        assert_eq!(parsed, scenarios);
+        Ok(())
     }
 
     #[test]

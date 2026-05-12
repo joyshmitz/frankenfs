@@ -283,19 +283,22 @@ mod tests {
     }
 
     #[test]
-    fn matrix_json_round_trips() {
+    fn matrix_json_round_trips() -> Result<(), serde_json::Error> {
         let matrix = canonical_matrix();
-        let json = serde_json::to_string(&matrix).expect("serialize");
-        let parsed: Vec<OqDecision> = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(parsed.len(), matrix.len());
-        assert_eq!(parsed[0].id, matrix[0].id);
+        let json = serde_json::to_string(&matrix)?;
+        let parsed: Vec<OqDecision> = serde_json::from_str(&json)?;
+        assert_eq!(parsed, matrix);
+        Ok(())
     }
 
     #[test]
-    fn canonical_matrix_json_shape() {
+    fn canonical_matrix_json_shape() -> Result<(), serde_json::Error> {
         let matrix = canonical_matrix();
-        let json = serde_json::to_string_pretty(&matrix).expect("serialize matrix");
+        let json = serde_json::to_string_pretty(&matrix)?;
         insta::assert_snapshot!("canonical_matrix_json_shape", json);
+        let parsed: Vec<OqDecision> = serde_json::from_str(&json)?;
+        assert_eq!(parsed, matrix);
+        Ok(())
     }
 
     #[test]
