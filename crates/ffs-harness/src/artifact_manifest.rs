@@ -3984,6 +3984,94 @@ mod tests {
     }
 
     #[test]
+    fn artifact_schema_fixture_report_json_shape() -> Result<(), serde_json::Error> {
+        fn expectation_name(expectation: ArtifactSchemaFixtureExpectation) -> &'static str {
+            match expectation {
+                ArtifactSchemaFixtureExpectation::Accept => "accept",
+                ArtifactSchemaFixtureExpectation::Reject => "reject",
+            }
+        }
+
+        let mut report = validate_artifact_schema_fixture_dir(
+            &artifact_schema_fixture_dir(),
+            "cargo test -p ffs-harness artifact_schema_fixture_suite",
+        );
+        assert!(report.valid, "fixture report errors: {report:#?}");
+        assert_eq!(report.positive_count, 1);
+        assert_eq!(report.negative_count, 1);
+        assert_eq!(report.fixture_count, 2);
+        report.fixture_dir = "tests/artifact-schema-fixtures".to_owned();
+
+        let json = serde_json::to_string_pretty(&report)?;
+        let parsed: ArtifactSchemaFixtureReport = serde_json::from_str(&json)?;
+        assert!(parsed.valid, "parsed fixture report errors: {parsed:#?}");
+        assert_eq!(parsed.schema_version, report.schema_version);
+        assert_eq!(parsed.validator_version, report.validator_version);
+        assert_eq!(parsed.positive_count, report.positive_count);
+        assert_eq!(parsed.negative_count, report.negative_count);
+        assert_eq!(parsed.fixture_count, report.fixture_count);
+        assert_eq!(parsed.fixtures.len(), report.fixtures.len());
+        assert!(parsed.fixtures.iter().any(|row| {
+            row.fixture_id == "positive_matrix"
+                && row.observed_result == ArtifactSchemaFixtureExpectation::Accept
+                && row.observed_diagnostics.is_empty()
+        }));
+        assert!(parsed.fixtures.iter().any(|row| {
+            row.fixture_id == "negative_matrix"
+                && row.observed_result == ArtifactSchemaFixtureExpectation::Reject
+                && !row.observed_diagnostics.is_empty()
+        }));
+
+        let fixtures = parsed
+            .fixtures
+            .iter()
+            .map(|row| {
+                let expected_diagnostic_codes = row
+                    .expected_diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.code.as_str())
+                    .collect::<Vec<_>>();
+                let observed_diagnostic_codes = row
+                    .observed_diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.code.as_str())
+                    .collect::<Vec<_>>();
+                serde_json::json!({
+                    "fixture_id": &row.fixture_id,
+                    "classification": &row.classification,
+                    "fixture_path": &row.fixture_path,
+                    "fixture_sha256_is_recorded": row.fixture_sha256.starts_with("sha256:"),
+                    "schema_version": row.schema_version,
+                    "expected_result": expectation_name(row.expected_result),
+                    "observed_result": expectation_name(row.observed_result),
+                    "expected_diagnostic_count": row.expected_diagnostics.len(),
+                    "observed_diagnostic_count": row.observed_diagnostics.len(),
+                    "expected_diagnostic_codes": expected_diagnostic_codes,
+                    "observed_diagnostic_codes": observed_diagnostic_codes,
+                    "valid": row.valid,
+                })
+            })
+            .collect::<Vec<_>>();
+        let shape = serde_json::json!({
+            "schema_version": parsed.schema_version,
+            "validator_version": parsed.validator_version,
+            "fixture_dir": &parsed.fixture_dir,
+            "reproduction_command": &parsed.reproduction_command,
+            "valid": parsed.valid,
+            "positive_count": parsed.positive_count,
+            "negative_count": parsed.negative_count,
+            "fixture_count": parsed.fixture_count,
+            "error_count": parsed.errors.len(),
+            "fixtures": fixtures,
+        });
+        insta::assert_snapshot!(
+            "artifact_schema_fixture_report_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
+    }
+
+    #[test]
     fn render_artifact_schema_fixture_markdown_checked_in_fixtures_snapshot() {
         let mut report = validate_artifact_schema_fixture_dir(
             &artifact_schema_fixture_dir(),

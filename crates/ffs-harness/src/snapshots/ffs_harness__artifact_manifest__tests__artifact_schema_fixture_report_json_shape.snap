@@ -1,0 +1,73 @@
+---
+source: crates/ffs-harness/src/artifact_manifest.rs
+expression: "serde_json::to_string_pretty(&shape)?"
+---
+{
+  "schema_version": 1,
+  "validator_version": 1,
+  "fixture_dir": "tests/artifact-schema-fixtures",
+  "reproduction_command": "cargo test -p ffs-harness artifact_schema_fixture_suite",
+  "valid": true,
+  "positive_count": 1,
+  "negative_count": 1,
+  "fixture_count": 2,
+  "error_count": 0,
+  "fixtures": [
+    {
+      "fixture_id": "negative_matrix",
+      "classification": "missing_run_id,missing_lane_id,duplicate_scenario_id,stale_schema,missing_raw_log_path,broken_artifact_hash,ambiguous_skip_reason,missing_cleanup_status,missing_artifact,missing_remediation_id,invalid_classification,missing_reproduction_command,redacted_reproduction_command",
+      "fixture_path": "negative/negative_matrix.fixture.json",
+      "fixture_sha256_is_recorded": false,
+      "schema_version": 1,
+      "expected_result": "reject",
+      "observed_result": "reject",
+      "expected_diagnostic_count": 13,
+      "observed_diagnostic_count": 13,
+      "expected_diagnostic_codes": [
+        "ambiguous_skip_reason",
+        "artifact_sha256_mismatch",
+        "duplicate_scenario_id",
+        "invalid_classification",
+        "missing_artifact",
+        "missing_cleanup_status",
+        "missing_lane_id",
+        "missing_raw_log_path",
+        "missing_remediation_id",
+        "missing_reproduction_command",
+        "missing_run_id",
+        "redacted_reproduction_command",
+        "stale_schema_version"
+      ],
+      "observed_diagnostic_codes": [
+        "ambiguous_skip_reason",
+        "artifact_sha256_mismatch",
+        "duplicate_scenario_id",
+        "invalid_classification",
+        "missing_artifact",
+        "missing_cleanup_status",
+        "missing_lane_id",
+        "missing_raw_log_path",
+        "missing_remediation_id",
+        "missing_reproduction_command",
+        "missing_run_id",
+        "redacted_reproduction_command",
+        "stale_schema_version"
+      ],
+      "valid": true
+    },
+    {
+      "fixture_id": "positive_matrix",
+      "classification": "pass,product_failure,host_capability_skip,authoritative_lane_unavailable,harness_failure,unsupported_scope,stale_artifact,missing_artifact,noisy_measurement,security_refusal,unsafe_repair_refusal,inconclusive_oracle_conflict,pass_with_experimental_caveat",
+      "fixture_path": "positive/positive_matrix.fixture.json",
+      "fixture_sha256_is_recorded": false,
+      "schema_version": 1,
+      "expected_result": "accept",
+      "observed_result": "accept",
+      "expected_diagnostic_count": 0,
+      "observed_diagnostic_count": 0,
+      "expected_diagnostic_codes": [],
+      "observed_diagnostic_codes": [],
+      "valid": true
+    }
+  ]
+}
