@@ -326,7 +326,12 @@ mod tests {
 
     #[test]
     fn happy_gate_accepts_rw_background_repair() {
-        let decision = evaluate_rw_background_repair_gate(&happy_gate());
+        let gate = happy_gate();
+        let json = serde_json::to_string_pretty(&gate).expect("serialize");
+
+        insta::assert_snapshot!("happy_gate_json_shape", json);
+
+        let decision = evaluate_rw_background_repair_gate(&gate);
         assert!(matches!(decision, RwBackgroundRepairDecision::Accept));
     }
 
@@ -509,15 +514,14 @@ mod tests {
         let mut gate = happy_gate();
         gate.race_tests.fresh = false;
         let decision = evaluate_rw_background_repair_gate(&gate);
-        if let RwBackgroundRepairDecision::Refuse {
-            controlling_artifact,
-            ..
-        } = decision
-        {
-            assert_eq!(controlling_artifact, "race_tests");
-        } else {
-            panic!("expected refuse decision");
-        }
+        let controlling_artifact = match &decision {
+            RwBackgroundRepairDecision::Refuse {
+                controlling_artifact,
+                ..
+            } => Some(controlling_artifact.as_str()),
+            RwBackgroundRepairDecision::Accept => None,
+        };
+        assert_eq!(controlling_artifact, Some("race_tests"));
     }
 
     #[test]

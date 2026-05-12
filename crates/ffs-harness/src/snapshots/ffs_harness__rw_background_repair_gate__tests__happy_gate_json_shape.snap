@@ -1,0 +1,55 @@
+---
+source: crates/ffs-harness/src/rw_background_repair_gate.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "gate_version": "v1",
+  "bead_id": "bd-bqgy8",
+  "default_state": "disabled",
+  "operator_opt_in": true,
+  "rollback_command": "ffs --disable-background-repair",
+  "rollback_artifact_present": true,
+  "serialization_gate": {
+    "artifact_id": "serialization_gate",
+    "fresh": true,
+    "passed": true,
+    "downgraded": false,
+    "artifact_path": "artifacts/qa/serialization_gate.json"
+  },
+  "mounted_write_matrix": {
+    "artifact_id": "mounted_write_matrix",
+    "fresh": true,
+    "passed": true,
+    "downgraded": false,
+    "artifact_path": "artifacts/qa/mounted_write_matrix.json"
+  },
+  "race_tests": {
+    "artifact_id": "race_tests",
+    "fresh": true,
+    "passed": true,
+    "downgraded": false,
+    "artifact_path": "artifacts/qa/race_tests.json"
+  },
+  "repair_corpus": {
+    "artifact_id": "repair_corpus",
+    "fresh": true,
+    "passed": true,
+    "downgraded": false,
+    "artifact_path": "artifacts/qa/repair_corpus.json"
+  },
+  "release_gate": {
+    "artifact_id": "release_gate",
+    "fresh": true,
+    "passed": true,
+    "downgraded": false,
+    "artifact_path": "artifacts/qa/release_gate.json"
+  },
+  "remediation_catalog": {
+    "remediation_id": "rem_unsafe_repair_refused",
+    "linked_bead": "bd-rchk0.5.3"
+  },
+  "writeback_cache_state": "audited_disabled",
+  "image_writable": true,
+  "conflicting_flags": []
+}
