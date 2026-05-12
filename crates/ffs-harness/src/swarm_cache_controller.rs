@@ -907,15 +907,17 @@ mod tests {
     }
 
     #[test]
-    fn swarm_cache_controller_report_json_shape() {
+    fn swarm_cache_controller_report_json_shape() -> Result<()> {
         let contract = load_swarm_cache_controller_contract(Path::new(&workspace_path(
             DEFAULT_SWARM_CACHE_CONTROLLER_CONTRACT,
-        )))
-        .expect("load checked-in cache controller contract");
+        )))?;
         let report = validate_swarm_cache_controller_contract(&contract);
-        let json = serde_json::to_string_pretty(&report).expect("swarm cache report serializes");
+        let json = serde_json::to_string_pretty(&report)?;
 
         insta::assert_snapshot!("swarm_cache_controller_report_json_shape", json);
+        let parsed: SwarmCacheValidationReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
     }
 
     /// The markdown renderer feeds proof-bundle and release-gate operator
