@@ -1593,8 +1593,9 @@ fn validate_open_ended_note_match(row: &OpenEndedNoteMatch, errors: &mut Vec<Str
 #[cfg(test)]
 mod tests {
     use super::{
-        DECISIONS, INVENTORY_MARKDOWN, OPEN_ENDED_NOTE_PATTERNS, OpenEndedNoteSource, PROOF_TYPES,
-        analyze_inventory, scan_open_ended_notes, validate_current_inventory,
+        DECISIONS, INVENTORY_MARKDOWN, OPEN_ENDED_NOTE_PATTERNS, OpenEndedInventoryReport,
+        OpenEndedNoteSource, PROOF_TYPES, analyze_inventory, scan_open_ended_notes,
+        validate_current_inventory,
     };
     use std::fs;
     use std::path::Path;
@@ -1630,6 +1631,51 @@ mod tests {
                 .map(|value| (*value).to_owned())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn open_ended_inventory_report_json_shape() -> anyhow::Result<()> {
+        let report = validate_current_inventory()?;
+        let json = serde_json::to_string_pretty(&report)?;
+        let parsed: OpenEndedInventoryReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        assert!(parsed.row_count >= 10, "expected substantive inventory");
+        assert!(parsed.errors.is_empty());
+        assert!(
+            parsed
+                .rows
+                .iter()
+                .any(|row| row.linked_bead_or_artifact.contains("bd-"))
+        );
+
+        let row_samples = report
+            .rows
+            .iter()
+            .take(4)
+            .map(|row| {
+                serde_json::json!({
+                    "id": &row.id,
+                    "source_location": &row.source_location,
+                    "required_proof_type": &row.required_proof_type,
+                    "decision": &row.decision,
+                    "linked_bead_or_artifact": &row.linked_bead_or_artifact,
+                    "owner_status": &row.owner_status,
+                    "has_non_applicability_rationale": row.non_applicability_rationale != "n/a",
+                })
+            })
+            .collect::<Vec<_>>();
+        let shape = serde_json::json!({
+            "row_count": report.row_count,
+            "proof_types": &report.proof_types,
+            "decisions": &report.decisions,
+            "error_count": report.errors.len(),
+            "row_samples": row_samples,
+        });
+        insta::assert_snapshot!(
+            "open_ended_inventory_report_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
     }
 
     #[test]
