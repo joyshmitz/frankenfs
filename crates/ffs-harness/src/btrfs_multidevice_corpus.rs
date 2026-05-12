@@ -531,6 +531,18 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_multidev_corpus_report_json_shape() {
+        let report = validate_default_btrfs_multidev_corpus()
+            .expect("default btrfs multi-device corpus validates");
+        let json =
+            serde_json::to_string_pretty(&report).expect("btrfs multi-device report serializes");
+        insta::assert_snapshot!("btrfs_multidev_corpus_report_json_shape", json);
+        let parsed: BtrfsMultidevCorpusReport =
+            serde_json::from_str(&json).expect("report deserializes");
+        assert_eq!(parsed, report);
+    }
+
+    #[test]
     fn fail_on_errors_rejects_invalid_report() {
         let mut corpus = fixture_corpus();
         corpus.scenarios.clear();
