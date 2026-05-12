@@ -2605,7 +2605,17 @@ that share the same trait interface (`JournalManager`, Section 9.7).
 Modules:
 - `replay.rs`: JBD2 journal replay engine. Implements the four-phase algorithm from Section 11.6.4: (1) SCAN from `s_start` following `s_sequence`, matching magic and sequence numbers, parsing DESCRIPTOR/COMMIT/REVOKE blocks, stopping on mismatch or wrap; (2) REVOKE set construction (`HashMap<BlockNumber, u32>` mapping block to highest revoking sequence); (3) REPLAY oldest-first, skipping revoked blocks, writing data to target locations, restoring escaped magic bytes; (4) CLEANUP: set `s_start=0`, write journal superblock. Handles circular wrap via `next(pos) = s_first + ((pos - s_first + 1) % (s_maxlen - s_first))`.
 - `jbd2.rs`: JBD2-compatible transaction lifecycle for write operations (active only in JBD2-compat mode). `JournalTransaction`: reserve blocks, write descriptor tags, copy data blocks to journal area, write revoke blocks, write commit block. Compound transactions: multiple FS operations batched within a single journal transaction (commit interval 5s or when journal space below 25%). Checkpoint: write committed journal data to final locations, advance journal head.
-- `cow.rs`: Native COW journal (active in MVCC-native mode). Journal replay is still supported (for mounting dirty ext4 images), but write-path journaling is a no-op -- MVCC version chains provide crash consistency. The `begin_transaction`, `journal_block`, `commit_transaction`, and `checkpoint` methods are stubs returning `Ok(())`.
+- Native/MVCC journal coordination: journal replay is still supported for
+  mounting dirty ext4 images, and write-side journaling is real when a
+  JBD2-compatible journal is configured. `Jbd2Writer::begin_transaction()` and
+  `Jbd2Writer::commit_transaction()` serialize descriptor/data/revoke/commit
+  blocks with `Cx` cancellation checks, checksum/bounds validation, and
+  failure paths that preserve the prior journal head. `ffs-core`
+  `OpenFs::commit_transaction_journaled()` bridges MVCC staged writes into
+  that writer for journaled ext4-compatible commits. Plain MVCC-native commits
+  remain journal-free by explicit mode choice; MVCC version chains and the
+  `ffs-mvcc` durable WAL/checkpoint path provide the native crash-consistency
+  contract.
 - `structs.rs`: `JournalSuperblock`, `JournalBlockHeader`, `DescriptorTag`, `RevokeHeader`, `CommitHeader` parsing from `ffs-ondisk` journal types. Checksum validation for v3 tags (CRC32C per tag).
 
 Dependency rationale: depends on `ffs-block` for `BlockDevice` trait
