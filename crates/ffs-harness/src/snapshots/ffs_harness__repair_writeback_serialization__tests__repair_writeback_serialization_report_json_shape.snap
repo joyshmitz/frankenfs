@@ -1,0 +1,938 @@
+---
+source: crates/ffs-harness/src/repair_writeback_serialization.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "contract_id": "bd-rchk0.1.1-repair-writeback-serialization-v1",
+  "bead_id": "bd-rchk0.1.1",
+  "valid": true,
+  "state_count": 10,
+  "transition_count": 12,
+  "rejection_case_count": 7,
+  "identity_guard_count": 7,
+  "scenario_count": 8,
+  "schedule_count": 12,
+  "required_states": [
+    "detection_only_scrub",
+    "repair_planning",
+    "repair_lease_held",
+    "client_write_in_flight",
+    "fsync_boundary",
+    "repair_writeback_blocked_rw",
+    "repair_writeback_staged",
+    "repair_symbol_refresh",
+    "writeback_failure",
+    "cleanup_complete"
+  ],
+  "required_race_coverage_cases": [
+    "repair_before_write",
+    "write_before_repair",
+    "overlapping_writes",
+    "disjoint_writes",
+    "fsync_during_repair",
+    "cancellation_during_decode",
+    "cancellation_during_writeback",
+    "symbol_refresh_races_client_write",
+    "unmount_pending_repair",
+    "reopen_after_failed_repair",
+    "retry_after_abort"
+  ],
+  "missing_required_states": [],
+  "missing_required_invariants": [],
+  "missing_required_evidence_fields": [],
+  "missing_required_rejection_cases": [],
+  "missing_required_identity_guards": [],
+  "missing_required_coverage_tags": [],
+  "missing_required_consumers": [],
+  "missing_required_race_coverage": [],
+  "missing_required_schedule_log_fields": [],
+  "duplicate_ids": [],
+  "transition_evaluations": [
+    {
+      "from_state": "client_write_in_flight",
+      "event": "repair_writeback_requested",
+      "to_state": "repair_writeback_blocked_rw",
+      "allowed": false,
+      "mutation_allowed": false,
+      "error_class": "rw_repair_serialization_missing",
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "snapshot_epoch",
+        "lease_id",
+        "repair_symbol_version",
+        "expected_state",
+        "observed_state",
+        "error_class",
+        "artifact_paths",
+        "cleanup_status",
+        "reproduction_command",
+        "follow_up_bead"
+      ],
+      "follow_up_bead": "bd-rchk0.1.2"
+    },
+    {
+      "from_state": "client_write_in_flight",
+      "event": "flush_observed",
+      "to_state": "client_write_in_flight",
+      "allowed": false,
+      "mutation_allowed": false,
+      "error_class": "flush_non_durable",
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "expected_state",
+        "observed_state",
+        "error_class",
+        "reproduction_command"
+      ],
+      "follow_up_bead": "bd-rchk0.1.1.1"
+    },
+    {
+      "from_state": "repair_lease_held",
+      "event": "repair_symbol_stale",
+      "to_state": "repair_writeback_blocked_rw",
+      "allowed": false,
+      "mutation_allowed": false,
+      "error_class": "stale_repair_symbol",
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "snapshot_epoch",
+        "lease_id",
+        "repair_symbol_version",
+        "error_class",
+        "artifact_paths",
+        "cleanup_status",
+        "reproduction_command",
+        "follow_up_bead"
+      ],
+      "follow_up_bead": "bd-rchk0.1.3"
+    },
+    {
+      "from_state": "repair_lease_held",
+      "event": "fsync_boundary_missing",
+      "to_state": "repair_writeback_blocked_rw",
+      "allowed": false,
+      "mutation_allowed": false,
+      "error_class": "dirty_cache_not_fsynced",
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "snapshot_epoch",
+        "lease_id",
+        "error_class",
+        "artifact_paths",
+        "cleanup_status",
+        "reproduction_command",
+        "follow_up_bead"
+      ],
+      "follow_up_bead": "bd-rchk0.1.1.1"
+    },
+    {
+      "from_state": "repair_writeback_staged",
+      "event": "writeback_failed",
+      "to_state": "writeback_failure",
+      "allowed": true,
+      "mutation_allowed": false,
+      "error_class": "writeback_failure_no_refresh",
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "snapshot_epoch",
+        "lease_id",
+        "repair_symbol_version",
+        "error_class",
+        "artifact_paths",
+        "cleanup_status",
+        "reproduction_command",
+        "follow_up_bead"
+      ],
+      "follow_up_bead": "bd-rchk0.1.4"
+    },
+    {
+      "from_state": "repair_writeback_staged",
+      "event": "repair_cancelled",
+      "to_state": "cleanup_complete",
+      "allowed": true,
+      "mutation_allowed": false,
+      "error_class": "cancelled_repair_cleanup",
+      "required_evidence_fields": [
+        "operation_id",
+        "scenario_id",
+        "lease_id",
+        "cleanup_status",
+        "artifact_paths",
+        "reproduction_command",
+        "follow_up_bead"
+      ],
+      "follow_up_bead": "bd-rchk0.1.1.1"
+    }
+  ],
+  "identity_guard_reports": [
+    {
+      "guard_id": "epoch_generation_monotonic",
+      "identity_kind": "epoch",
+      "monotonic_field": "epoch_id",
+      "aba_fixture_id": "aba_old_epoch_reused_after_reopen",
+      "refusal_error_class": "snapshot_epoch_mismatch",
+      "persisted_across_reopen": true,
+      "rejects_structural_aba": true,
+      "downstream_beads": [
+        "bd-rchk0.1.2",
+        "bd-rchk0.1.3",
+        "bd-rchk0.1.4"
+      ],
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "guard_id": "lease_generation_monotonic",
+      "identity_kind": "lease",
+      "monotonic_field": "lease_generation",
+      "aba_fixture_id": "aba_old_lease_id_reacquired_with_new_generation",
+      "refusal_error_class": "stale_lease_generation",
+      "persisted_across_reopen": true,
+      "rejects_structural_aba": true,
+      "downstream_beads": [
+        "bd-rchk0.1.2",
+        "bd-rchk0.1.4"
+      ],
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "guard_id": "snapshot_id_mismatch_rejected",
+      "identity_kind": "snapshot",
+      "monotonic_field": "snapshot_id",
+      "aba_fixture_id": "aba_snapshot_id_reused_after_unmount_reopen",
+      "refusal_error_class": "snapshot_id_mismatch",
+      "persisted_across_reopen": true,
+      "rejects_structural_aba": true,
+      "downstream_beads": [
+        "bd-rchk0.1.2",
+        "bd-rchk0.1.3"
+      ],
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "guard_id": "repair_symbol_generation_monotonic",
+      "identity_kind": "repair_symbol",
+      "monotonic_field": "repair_symbol_generation",
+      "aba_fixture_id": "aba_symbol_generation_matches_value_but_not_epoch",
+      "refusal_error_class": "stale_repair_symbol",
+      "persisted_across_reopen": true,
+      "rejects_structural_aba": true,
+      "downstream_beads": [
+        "bd-rchk0.1.3",
+        "bd-rchk0.1.4"
+      ],
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "guard_id": "block_range_epoch_guard",
+      "identity_kind": "block_range",
+      "monotonic_field": "block_range",
+      "aba_fixture_id": "aba_block_range_same_address_new_epoch",
+      "refusal_error_class": "block_range_epoch_mismatch",
+      "persisted_across_reopen": true,
+      "rejects_structural_aba": true,
+      "downstream_beads": [
+        "bd-rchk0.1.2",
+        "bd-rchk0.1.3"
+      ],
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "guard_id": "retry_generation_advances_after_abort",
+      "identity_kind": "retry",
+      "monotonic_field": "epoch_id",
+      "aba_fixture_id": "aba_retry_after_abort_reuses_old_plan_identity",
+      "refusal_error_class": "retry_generation_stale",
+      "persisted_across_reopen": false,
+      "rejects_structural_aba": true,
+      "downstream_beads": [
+        "bd-rchk0.1.3",
+        "bd-rchk0.1.4"
+      ],
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "guard_id": "halfway_failure_preserves_generation",
+      "identity_kind": "repair_symbol",
+      "monotonic_field": "repair_symbol_generation",
+      "aba_fixture_id": "aba_halfway_failure_reuses_failed_symbol_generation",
+      "refusal_error_class": "writeback_failure_no_refresh",
+      "persisted_across_reopen": true,
+      "rejects_structural_aba": true,
+      "downstream_beads": [
+        "bd-rchk0.1.4"
+      ],
+      "valid": true,
+      "diagnostics": []
+    }
+  ],
+  "scenario_reports": [
+    {
+      "scenario_id": "repair_writeback_rw_fail_closed",
+      "expected_outcome": "rejected",
+      "expected_error_class": "rw_repair_serialization_missing",
+      "final_state": "repair_writeback_blocked_rw",
+      "coverage_tags": [
+        "fail_closed_rw_repair",
+        "mvcc_snapshot_boundary"
+      ],
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/rw_fail_closed.json",
+        "artifacts/repair-writeback/dry-run/rw_fail_closed.log"
+      ],
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "scenario_id": "repair_writeback_mvcc_snapshot_boundary",
+      "expected_outcome": "accepted",
+      "expected_error_class": "none",
+      "final_state": "repair_planning",
+      "coverage_tags": [
+        "mvcc_snapshot_boundary"
+      ],
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/mvcc_snapshot_boundary.json"
+      ],
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "scenario_id": "repair_writeback_flush_non_durable",
+      "expected_outcome": "rejected",
+      "expected_error_class": "flush_non_durable",
+      "final_state": "client_write_in_flight",
+      "coverage_tags": [
+        "dirty_cache_flush"
+      ],
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/flush_non_durable.json"
+      ],
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "scenario_id": "repair_writeback_fsync_boundary_required",
+      "expected_outcome": "rejected",
+      "expected_error_class": "dirty_cache_not_fsynced",
+      "final_state": "repair_writeback_blocked_rw",
+      "coverage_tags": [
+        "fsync_fsyncdir_boundary",
+        "dirty_cache_flush"
+      ],
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/fsync_boundary_required.json"
+      ],
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "scenario_id": "repair_writeback_lease_required",
+      "expected_outcome": "rejected",
+      "expected_error_class": "lease_expired_or_missing",
+      "final_state": "cleanup_complete",
+      "coverage_tags": [
+        "repair_lease"
+      ],
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/lease_required.json"
+      ],
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "scenario_id": "repair_writeback_stale_symbol_rejected",
+      "expected_outcome": "rejected",
+      "expected_error_class": "stale_repair_symbol",
+      "final_state": "repair_writeback_blocked_rw",
+      "coverage_tags": [
+        "stale_repair_symbol"
+      ],
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/stale_symbol_rejected.json"
+      ],
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "scenario_id": "repair_writeback_cancellation_cleanup",
+      "expected_outcome": "accepted",
+      "expected_error_class": "cancelled_repair_cleanup",
+      "final_state": "cleanup_complete",
+      "coverage_tags": [
+        "cancellation"
+      ],
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/cancellation_cleanup.json"
+      ],
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "scenario_id": "repair_writeback_halfway_failure",
+      "expected_outcome": "error",
+      "expected_error_class": "writeback_failure_no_refresh",
+      "final_state": "writeback_failure",
+      "coverage_tags": [
+        "writeback_failure",
+        "halfway_recovery_failure"
+      ],
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/halfway_failure.json",
+        "artifacts/repair-writeback/dry-run/halfway_failure_repro.log"
+      ],
+      "proves_no_lost_client_write": true,
+      "preserves_reproduction_data": true,
+      "valid": true,
+      "diagnostics": []
+    }
+  ],
+  "schedule_reports": [
+    {
+      "schedule_id": "rw-repair-race-repair-before-write",
+      "coverage_case": "repair_before_write",
+      "seed": 9001,
+      "operation_trace": [
+        "repair_detect_corruption",
+        "repair_decode",
+        "repair_writeback",
+        "client_write",
+        "fsync"
+      ],
+      "yield_points": [
+        "repair_detected",
+        "repair_decode_completed",
+        "repair_writeback_requested",
+        "client_write_begin",
+        "fsync_boundary"
+      ],
+      "explored_schedule_count": 96,
+      "pruned_schedule_count": 64,
+      "classification": "accepted",
+      "timeout_decision": "completed",
+      "liveness_decision": "within_deadline",
+      "expected_survivor_set": [
+        "repaired_block_42",
+        "client_write_block_42_after_repair"
+      ],
+      "observed_survivor_set": [
+        "repaired_block_42",
+        "client_write_block_42_after_repair"
+      ],
+      "ledger_outcomes": [
+        "repair_writeback_serialized",
+        "client_write_committed_after_repair",
+        "fsync_durable"
+      ],
+      "minimized": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/races/repair_before_write.json",
+        "artifacts/repair-writeback/dry-run/races/repair_before_write.trace"
+      ],
+      "cleanup_status": "preserved_trace_and_ledger",
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "schedule_id": "rw-repair-race-write-before-repair",
+      "coverage_case": "write_before_repair",
+      "seed": 9002,
+      "operation_trace": [
+        "client_write",
+        "fsync",
+        "repair_detect_corruption",
+        "repair_decode",
+        "repair_writeback"
+      ],
+      "yield_points": [
+        "client_write_begin",
+        "client_write_committed",
+        "fsync_boundary",
+        "repair_detected",
+        "repair_writeback_requested"
+      ],
+      "explored_schedule_count": 128,
+      "pruned_schedule_count": 87,
+      "classification": "rejected",
+      "timeout_decision": "completed",
+      "liveness_decision": "within_deadline",
+      "expected_survivor_set": [
+        "fsynced_client_block_42"
+      ],
+      "observed_survivor_set": [
+        "fsynced_client_block_42"
+      ],
+      "ledger_outcomes": [
+        "repair_snapshot_rebased",
+        "stale_candidate_rejected",
+        "client_write_survived"
+      ],
+      "minimized": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/races/write_before_repair.json"
+      ],
+      "cleanup_status": "no_mutation_after_stale_candidate",
+      "follow_up_bead": "bd-rchk0.1.3",
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "schedule_id": "rw-repair-race-overlapping-writes",
+      "coverage_case": "overlapping_writes",
+      "seed": 9003,
+      "operation_trace": [
+        "client_write",
+        "repair_writeback",
+        "client_write",
+        "fsync"
+      ],
+      "yield_points": [
+        "client_write_begin",
+        "repair_writeback_requested",
+        "repair_writeback_staged",
+        "client_write_committed",
+        "fsync_boundary"
+      ],
+      "explored_schedule_count": 192,
+      "pruned_schedule_count": 121,
+      "classification": "rejected",
+      "timeout_decision": "completed",
+      "liveness_decision": "within_deadline",
+      "expected_survivor_set": [
+        "latest_client_write_block_42"
+      ],
+      "observed_survivor_set": [
+        "latest_client_write_block_42"
+      ],
+      "ledger_outcomes": [
+        "overlap_detected",
+        "repair_writeback_rejected",
+        "latest_client_write_survived"
+      ],
+      "minimized": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/races/overlapping_writes.json"
+      ],
+      "cleanup_status": "overlap_rejection_preserved",
+      "follow_up_bead": "bd-rchk0.1.2",
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "schedule_id": "rw-repair-race-disjoint-writes",
+      "coverage_case": "disjoint_writes",
+      "seed": 9004,
+      "operation_trace": [
+        "client_write",
+        "repair_detect_corruption",
+        "repair_decode",
+        "repair_writeback",
+        "fsync"
+      ],
+      "yield_points": [
+        "client_write_begin",
+        "repair_detected",
+        "repair_decode_completed",
+        "repair_writeback_staged",
+        "fsync_boundary"
+      ],
+      "explored_schedule_count": 72,
+      "pruned_schedule_count": 48,
+      "classification": "accepted",
+      "timeout_decision": "completed",
+      "liveness_decision": "within_deadline",
+      "expected_survivor_set": [
+        "client_write_block_10",
+        "repaired_block_20"
+      ],
+      "observed_survivor_set": [
+        "client_write_block_10",
+        "repaired_block_20"
+      ],
+      "ledger_outcomes": [
+        "disjoint_ranges_proven",
+        "repair_writeback_serialized",
+        "client_write_survived"
+      ],
+      "minimized": false,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/races/disjoint_writes.json"
+      ],
+      "cleanup_status": "disjoint_survivors_verified",
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "schedule_id": "rw-repair-race-fsync-during-repair",
+      "coverage_case": "fsync_during_repair",
+      "seed": 9005,
+      "operation_trace": [
+        "repair_detect_corruption",
+        "repair_decode",
+        "client_write",
+        "fsync",
+        "repair_writeback"
+      ],
+      "yield_points": [
+        "repair_detected",
+        "repair_decode_started",
+        "client_write_begin",
+        "fsync_boundary",
+        "repair_writeback_requested"
+      ],
+      "explored_schedule_count": 224,
+      "pruned_schedule_count": 150,
+      "classification": "rejected",
+      "timeout_decision": "completed",
+      "liveness_decision": "within_deadline",
+      "expected_survivor_set": [
+        "fsynced_client_block_42"
+      ],
+      "observed_survivor_set": [
+        "fsynced_client_block_42"
+      ],
+      "ledger_outcomes": [
+        "fsync_boundary_observed",
+        "repair_candidate_stale",
+        "repair_writeback_rejected"
+      ],
+      "minimized": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/races/fsync_during_repair.json"
+      ],
+      "cleanup_status": "fsync_survivor_preserved",
+      "follow_up_bead": "bd-rchk0.1.3",
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "schedule_id": "rw-repair-race-cancel-decode",
+      "coverage_case": "cancellation_during_decode",
+      "seed": 9006,
+      "operation_trace": [
+        "repair_detect_corruption",
+        "repair_decode",
+        "abort_repair"
+      ],
+      "yield_points": [
+        "repair_detected",
+        "repair_decode_started",
+        "cancellation_checkpoint"
+      ],
+      "explored_schedule_count": 64,
+      "pruned_schedule_count": 41,
+      "classification": "accepted",
+      "timeout_decision": "completed",
+      "liveness_decision": "within_deadline",
+      "expected_survivor_set": [
+        "pre_decode_source_block_42"
+      ],
+      "observed_survivor_set": [
+        "pre_decode_source_block_42"
+      ],
+      "ledger_outcomes": [
+        "decode_cancelled",
+        "cleanup_complete",
+        "no_symbol_refresh"
+      ],
+      "minimized": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/races/cancellation_during_decode.json"
+      ],
+      "cleanup_status": "decoder_buffers_released_no_source_mutation",
+      "follow_up_bead": "bd-rchk0.1.4",
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "schedule_id": "rw-repair-race-cancel-writeback",
+      "coverage_case": "cancellation_during_writeback",
+      "seed": 9007,
+      "operation_trace": [
+        "repair_detect_corruption",
+        "repair_decode",
+        "repair_writeback",
+        "abort_repair"
+      ],
+      "yield_points": [
+        "repair_decode_completed",
+        "repair_writeback_staged",
+        "cancellation_checkpoint"
+      ],
+      "explored_schedule_count": 88,
+      "pruned_schedule_count": 57,
+      "classification": "rejected",
+      "timeout_decision": "completed",
+      "liveness_decision": "within_deadline",
+      "expected_survivor_set": [
+        "pre_writeback_source_block_42"
+      ],
+      "observed_survivor_set": [
+        "pre_writeback_source_block_42"
+      ],
+      "ledger_outcomes": [
+        "writeback_cancelled",
+        "staged_write_discarded",
+        "no_symbol_refresh"
+      ],
+      "minimized": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/races/cancellation_during_writeback.json"
+      ],
+      "cleanup_status": "staged_write_discarded_symbols_not_refreshed",
+      "follow_up_bead": "bd-rchk0.1.4",
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "schedule_id": "rw-repair-race-symbol-refresh-client-write",
+      "coverage_case": "symbol_refresh_races_client_write",
+      "seed": 9008,
+      "operation_trace": [
+        "repair_writeback",
+        "client_write",
+        "symbol_refresh",
+        "fsync"
+      ],
+      "yield_points": [
+        "repair_writeback_staged",
+        "client_write_begin",
+        "symbol_refresh",
+        "fsync_boundary"
+      ],
+      "explored_schedule_count": 256,
+      "pruned_schedule_count": 173,
+      "classification": "rejected",
+      "timeout_decision": "completed",
+      "liveness_decision": "within_deadline",
+      "expected_survivor_set": [
+        "client_write_block_42",
+        "previous_symbol_generation"
+      ],
+      "observed_survivor_set": [
+        "client_write_block_42",
+        "previous_symbol_generation"
+      ],
+      "ledger_outcomes": [
+        "symbol_refresh_suppressed",
+        "stale_symbol_rejected",
+        "client_write_survived"
+      ],
+      "minimized": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/races/symbol_refresh_client_write.json"
+      ],
+      "cleanup_status": "symbol_refresh_suppressed",
+      "follow_up_bead": "bd-rchk0.1.3",
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "schedule_id": "rw-repair-race-unmount-pending-repair",
+      "coverage_case": "unmount_pending_repair",
+      "seed": 9009,
+      "operation_trace": [
+        "repair_detect_corruption",
+        "repair_decode",
+        "repair_writeback",
+        "unmount"
+      ],
+      "yield_points": [
+        "repair_detected",
+        "repair_decode_started",
+        "repair_writeback_staged",
+        "unmount_checkpoint"
+      ],
+      "explored_schedule_count": 144,
+      "pruned_schedule_count": 95,
+      "classification": "rejected",
+      "timeout_decision": "completed",
+      "liveness_decision": "within_deadline",
+      "expected_survivor_set": [
+        "last_durable_client_state"
+      ],
+      "observed_survivor_set": [
+        "last_durable_client_state"
+      ],
+      "ledger_outcomes": [
+        "unmount_cancelled_pending_repair",
+        "cleanup_complete",
+        "no_partial_writeback"
+      ],
+      "minimized": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/races/unmount_pending_repair.json"
+      ],
+      "cleanup_status": "unmount_cleanup_joined_pending_repair",
+      "follow_up_bead": "bd-rchk0.1.4",
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "schedule_id": "rw-repair-race-reopen-after-failed-repair",
+      "coverage_case": "reopen_after_failed_repair",
+      "seed": 9010,
+      "operation_trace": [
+        "repair_detect_corruption",
+        "repair_decode",
+        "repair_writeback",
+        "unmount",
+        "reopen"
+      ],
+      "yield_points": [
+        "repair_decode_completed",
+        "repair_writeback_staged",
+        "unmount_checkpoint",
+        "reopen_checkpoint"
+      ],
+      "explored_schedule_count": 112,
+      "pruned_schedule_count": 73,
+      "classification": "accepted",
+      "timeout_decision": "completed",
+      "liveness_decision": "within_deadline",
+      "expected_survivor_set": [
+        "last_durable_client_state",
+        "failed_repair_ledger_record"
+      ],
+      "observed_survivor_set": [
+        "last_durable_client_state",
+        "failed_repair_ledger_record"
+      ],
+      "ledger_outcomes": [
+        "writeback_failure_no_refresh",
+        "reopen_observed_failure_ledger",
+        "no_hidden_partial_repair"
+      ],
+      "minimized": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/races/reopen_after_failed_repair.json"
+      ],
+      "cleanup_status": "failed_repair_visible_after_reopen",
+      "follow_up_bead": "bd-rchk0.1.4",
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "schedule_id": "rw-repair-race-retry-after-abort",
+      "coverage_case": "retry_after_abort",
+      "seed": 9011,
+      "operation_trace": [
+        "repair_detect_corruption",
+        "abort_repair",
+        "retry_repair",
+        "repair_decode",
+        "repair_writeback"
+      ],
+      "yield_points": [
+        "repair_detected",
+        "cancellation_checkpoint",
+        "retry_checkpoint",
+        "repair_decode_completed",
+        "repair_writeback_requested"
+      ],
+      "explored_schedule_count": 168,
+      "pruned_schedule_count": 109,
+      "classification": "accepted",
+      "timeout_decision": "completed",
+      "liveness_decision": "within_deadline",
+      "expected_survivor_set": [
+        "retried_repair_block_42"
+      ],
+      "observed_survivor_set": [
+        "retried_repair_block_42"
+      ],
+      "ledger_outcomes": [
+        "abort_record_preserved",
+        "retry_rebased_on_current_epoch",
+        "repair_writeback_serialized"
+      ],
+      "minimized": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/races/retry_after_abort.json"
+      ],
+      "cleanup_status": "retry_ledger_preserved",
+      "valid": true,
+      "diagnostics": []
+    },
+    {
+      "schedule_id": "rw-repair-race-unsupported-epoch-rewind",
+      "coverage_case": "unsupported_nested_repair_epoch_rewind",
+      "seed": 9012,
+      "operation_trace": [
+        "repair_writeback",
+        "symbol_refresh",
+        "client_write",
+        "fsync"
+      ],
+      "yield_points": [
+        "repair_writeback_staged",
+        "symbol_refresh",
+        "client_write_begin",
+        "fsync_boundary"
+      ],
+      "explored_schedule_count": 32,
+      "pruned_schedule_count": 31,
+      "classification": "unsupported_interleaving",
+      "timeout_decision": "not_applicable",
+      "liveness_decision": "within_deadline",
+      "expected_survivor_set": [
+        "pre_unsupported_interleaving_state"
+      ],
+      "observed_survivor_set": [
+        "pre_unsupported_interleaving_state"
+      ],
+      "ledger_outcomes": [
+        "unsupported_interleaving_classified",
+        "no_readiness_upgrade",
+        "follow_up_bead_recorded"
+      ],
+      "minimized": true,
+      "artifact_paths": [
+        "artifacts/repair-writeback/dry-run/races/unsupported_epoch_rewind.json"
+      ],
+      "cleanup_status": "unsupported_interleaving_preserved_for_follow_up",
+      "follow_up_bead": "bd-rchk0.1.2",
+      "valid": true,
+      "diagnostics": []
+    }
+  ],
+  "risk_report": {
+    "decision_id": "rw-repair-expected-loss-v1",
+    "chosen_option": "fail_closed_until_unified_serializer",
+    "rejected_option": "enable_rw_repair_without_serializer",
+    "chosen_expected_loss_points": 25,
+    "rejected_expected_loss_points": 605,
+    "fail_closed_is_lower_loss": true,
+    "valid": true,
+    "diagnostics": []
+  },
+  "artifact_root": "artifacts/repair-writeback/dry-run",
+  "errors": [],
+  "warnings": [],
+  "reproduction_command": "cargo run -p ffs-harness -- validate-repair-writeback-serialization --contract docs/repair-writeback-serialization-contract.json --out artifacts/repair-writeback/dry-run/contract_report.json --artifact-out artifacts/repair-writeback/dry-run/artifact_manifest.json --summary-out artifacts/repair-writeback/dry-run/contract_summary.md"
+}

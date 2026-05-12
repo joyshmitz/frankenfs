@@ -2055,6 +2055,25 @@ mod tests {
     }
 
     #[test]
+    fn repair_writeback_serialization_report_json_shape() -> Result<()> {
+        let contract = sample_contract();
+        let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(
+            report.contract_id,
+            "bd-rchk0.1.1-repair-writeback-serialization-v1"
+        );
+        assert_eq!(report.bead_id, "bd-rchk0.1.1");
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("repair_writeback_serialization_report_json_shape", json);
+
+        let roundtrip: RepairWritebackSerializationReport = serde_json::from_str(&json)?;
+        assert_eq!(roundtrip, report);
+        Ok(())
+    }
+
+    #[test]
     fn model_rejects_repair_writeback_during_client_write() {
         let contract = sample_contract();
         let transition = evaluate_transition(
