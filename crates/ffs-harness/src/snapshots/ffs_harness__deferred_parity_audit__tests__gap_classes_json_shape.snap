@@ -1,0 +1,26 @@
+---
+source: crates/ffs-harness/src/deferred_parity_audit.rs
+expression: json
+---
+[
+  "validated",
+  "implemented-unvalidated",
+  "partial",
+  "basic-coverage",
+  "parse-only",
+  "single-device-only",
+  "experimental",
+  "detection-only",
+  "dry-run-only",
+  "opt-in-mutating",
+  "disabled",
+  "unsupported",
+  "deferred",
+  "not-run",
+  "host-blocked",
+  "stale-evidence",
+  "superseded",
+  "explicit-non-goal",
+  "security-refused",
+  "non-authoritative-local-only"
+]

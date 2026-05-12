@@ -768,6 +768,9 @@ mod tests {
 
     #[test]
     fn exposes_full_gap_vocabulary_for_schema_tests() {
+        let json = serde_json::to_string_pretty(&GAP_CLASSES).expect("serialize");
+        insta::assert_snapshot!("gap_classes_json_shape", json);
+
         assert!(GAP_CLASSES.contains(&"validated"));
         assert!(GAP_CLASSES.contains(&"implemented-unvalidated"));
         assert!(GAP_CLASSES.contains(&"partial"));
