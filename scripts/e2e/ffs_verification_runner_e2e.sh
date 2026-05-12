@@ -615,7 +615,7 @@ for feature in \
     "Permissioned FUSE Lane" \
     "FFS_RUN_BTRFS_LANE_PROBE=1" \
     "FFS_REQUIRE_BTRFS_LANE_PROBE=1" \
-    "rch exec" \
+    "FUSE-capable worker shell command" \
     "fuse_capability.json" \
     "fuse_permissioned_lane.json"; do
     if grep -q "$feature" "$E2E_README"; then
@@ -623,7 +623,9 @@ for feature in \
     fi
 done
 
-if [[ $FUSE_LANE_DOCS -eq 6 ]]; then
+if grep -Eq 'rch[[:space:]]+exec[[:space:]]+--[[:space:]]+bash|bash[[:space:]]+-lc.*ffs_fuse_production' "$E2E_README"; then
+    scenario_result "permissioned_fuse_lane_docs" "FAIL" "permissioned FUSE docs still wrap the mounted lane in a shell command"
+elif [[ $FUSE_LANE_DOCS -eq 6 ]]; then
     scenario_result "permissioned_fuse_lane_docs" "PASS" "Permissioned lane docs present"
 else
     scenario_result "permissioned_fuse_lane_docs" "FAIL" "Only ${FUSE_LANE_DOCS}/6 documentation markers found"

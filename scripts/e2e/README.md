@@ -909,15 +909,20 @@ FFS_REQUIRE_BTRFS_LANE_PROBE=1 \
 ./scripts/e2e/ffs_fuse_production.sh
 ```
 
-RCH worker command, for workers configured with FUSE access:
+FUSE-capable worker shell command:
 
 ```bash
-rch exec -- bash -lc 'cd /data/projects/frankenfs && \
-  FFS_USE_RCH=0 \
-  FFS_RUN_BTRFS_LANE_PROBE=1 \
-  FFS_REQUIRE_BTRFS_LANE_PROBE=1 \
-  ./scripts/e2e/ffs_fuse_production.sh'
+cd /data/projects/frankenfs
+FFS_USE_RCH=0 \
+FFS_RUN_BTRFS_LANE_PROBE=1 \
+FFS_REQUIRE_BTRFS_LANE_PROBE=1 \
+./scripts/e2e/ffs_fuse_production.sh
 ```
+
+Run that command in a shell that is already on the FUSE-capable worker. Do not
+use RCH to launch a shell wrapper around the whole mounted lane; RCH command
+classification is for the runner's internal cargo commands, and the FUSE probe
+must execute on the host that owns `/dev/fuse`.
 
 The runner emits these shared QA artifacts under
 `artifacts/e2e/<timestamp>_ffs_fuse_production/`:
