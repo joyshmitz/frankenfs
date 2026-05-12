@@ -561,20 +561,23 @@ mod tests {
     }
 
     #[test]
-    fn campaign_json_round_trips() {
+    fn campaign_json_round_trips() -> Result<(), String> {
         let summary = sample_campaign();
-        let json = serde_json::to_string_pretty(&summary).expect("serialize");
-        let parsed = parse_campaign_summary(&json).expect("parse");
-        assert_eq!(parsed.campaign_id, summary.campaign_id);
-        assert_eq!(parsed.targets.len(), 4);
+        let json = serde_json::to_string_pretty(&summary).map_err(|err| err.to_string())?;
+        let parsed = parse_campaign_summary(&json)?;
+        assert_eq!(parsed, summary);
+        Ok(())
     }
 
     #[test]
-    fn campaign_summary_json_shape() {
+    fn campaign_summary_json_shape() -> Result<(), String> {
         let summary = sample_campaign();
-        let json = serde_json::to_string_pretty(&summary).expect("serialize");
+        let json = serde_json::to_string_pretty(&summary).map_err(|err| err.to_string())?;
 
         insta::assert_snapshot!("campaign_summary_json_shape", json);
+        let parsed = parse_campaign_summary(&json)?;
+        assert_eq!(parsed, summary);
+        Ok(())
     }
 
     #[test]
@@ -731,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn regression_alert_json_round_trips() {
+    fn regression_alert_json_round_trips() -> Result<(), serde_json::Error> {
         let alert = RegressionAlert {
             target: "fuzz_ext4_metadata".to_owned(),
             metric: "execs_per_sec".to_owned(),
@@ -741,14 +744,14 @@ mod tests {
             threshold_pct: -50.0,
             severity: AlertSeverity::Warning,
         };
-        let json = serde_json::to_string(&alert).expect("serialize");
-        let parsed: RegressionAlert = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(parsed.target, "fuzz_ext4_metadata");
-        assert_eq!(parsed.severity, AlertSeverity::Warning);
+        let json = serde_json::to_string(&alert)?;
+        let parsed: RegressionAlert = serde_json::from_str(&json)?;
+        assert_eq!(parsed, alert);
+        Ok(())
     }
 
     #[test]
-    fn regression_alert_json_shape() {
+    fn regression_alert_json_shape() -> Result<(), serde_json::Error> {
         let alert = RegressionAlert {
             target: "fuzz_ext4_metadata".to_owned(),
             metric: "execs_per_sec".to_owned(),
@@ -758,8 +761,11 @@ mod tests {
             threshold_pct: -50.0,
             severity: AlertSeverity::Warning,
         };
-        let json = serde_json::to_string_pretty(&alert).expect("serialize");
+        let json = serde_json::to_string_pretty(&alert)?;
 
         insta::assert_snapshot!("regression_alert_json_shape", json);
+        let parsed: RegressionAlert = serde_json::from_str(&json)?;
+        assert_eq!(parsed, alert);
+        Ok(())
     }
 }
