@@ -421,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn consistency_verdict_json_schema_stability() {
+    fn consistency_verdict_json_schema_stability() -> anyhow::Result<()> {
         let verdict = ConsistencyVerdict {
             version: HEALTH_CONTRACT_VERSION,
             total_checks: 2,
@@ -451,8 +451,13 @@ mod tests {
         assert!(json.get("failed").is_some());
         assert!(json.get("results").is_some());
 
-        let pretty = serde_json::to_string_pretty(&verdict).expect("serialize verdict");
+        let pretty = serde_json::to_string_pretty(&verdict)?;
         insta::assert_snapshot!("consistency_verdict_json_shape", pretty);
+
+        let roundtrip: ConsistencyVerdict = serde_json::from_str(&pretty)?;
+        assert_eq!(roundtrip, verdict);
+
+        Ok(())
     }
 
     #[test]
