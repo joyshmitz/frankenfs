@@ -1,0 +1,22 @@
+---
+source: crates/ffs-harness/src/chaos_replay_lab.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "lab_id": "frankenfs_chaos_replay_lab_v1",
+  "bead_id": "bd-rchk0.5.5",
+  "schedule_count": 7,
+  "crash_taxonomies_seen": [
+    "concurrent_writer_conflict",
+    "metadata_data_ordering_boundary",
+    "mount_teardown_race",
+    "post_commit_pre_flush_crash",
+    "pre_commit_crash",
+    "repair_interruption",
+    "replay_interruption"
+  ],
+  "minimized_count": 3,
+  "valid": true,
+  "errors": []
+}

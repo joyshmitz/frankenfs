@@ -836,6 +836,15 @@ mod tests {
     }
 
     #[test]
+    fn chaos_replay_lab_report_json_shape() {
+        let report =
+            validate_default_chaos_replay_lab().expect("default chaos replay lab validates");
+        let json = serde_json::to_string_pretty(&report).expect("chaos replay report serializes");
+
+        insta::assert_snapshot!("chaos_replay_lab_report_json_shape", json);
+    }
+
+    #[test]
     fn fail_on_errors_rejects_invalid_report() {
         let mut report = validate_default_chaos_replay_lab()
             .expect("default chaos replay lab validates before mutation");
