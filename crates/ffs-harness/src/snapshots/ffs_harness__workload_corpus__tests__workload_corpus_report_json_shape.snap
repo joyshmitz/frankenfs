@@ -1,0 +1,204 @@
+---
+source: crates/ffs-harness/src/workload_corpus.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "coverage_matrix_version": 1,
+  "corpus_id": "frankenfs_p1_user_risk_workloads",
+  "corpus_version": "2026-05-04.1",
+  "bead_id": "bd-rchk0.5.7",
+  "valid": true,
+  "scenario_count": 11,
+  "status_counts": {
+    "host_skip": 2,
+    "negative": 2,
+    "positive": 6,
+    "unsupported": 1
+  },
+  "by_user_risk": {
+    "data_loss": 3,
+    "host_capability_ambiguity": 2,
+    "metadata_incoherence": 2,
+    "permission_boundary": 1,
+    "repair_overclaim": 1,
+    "tail_latency": 1,
+    "unsupported_scope_hidden": 1
+  },
+  "by_filesystem_flavor": {
+    "btrfs": 4,
+    "ext4": 7,
+    "mixed": 2,
+    "native": 1,
+    "not_applicable": 1
+  },
+  "by_proof_consumer": {
+    "crash_replay_lab": 3,
+    "invariant_oracle": 3,
+    "mounted_differential_oracle": 8,
+    "operational_readiness_report": 5,
+    "performance_baseline": 1,
+    "proof_bundle": 10,
+    "release_gate": 3,
+    "repair_lab": 1
+  },
+  "proof_bundle_coverage": {
+    "scenario_ids": [
+      "workload_editor_save_atomic_ext4",
+      "workload_package_extract_parallel_mixed",
+      "workload_metadata_tree_churn_64core",
+      "workload_mount_unmount_reopen_ext4",
+      "workload_ext4_dir_index_xattr_specific",
+      "workload_btrfs_default_permissions_owner_diagnostic",
+      "workload_repair_corruption_scrub",
+      "workload_unsupported_device_node_reject",
+      "workload_permission_boundary_non_owner",
+      "workload_expected_host_skip_fuse_permission"
+    ],
+    "by_user_risk": {
+      "data_loss": 2,
+      "host_capability_ambiguity": 2,
+      "metadata_incoherence": 2,
+      "permission_boundary": 1,
+      "repair_overclaim": 1,
+      "tail_latency": 1,
+      "unsupported_scope_hidden": 1
+    },
+    "by_filesystem_flavor": {
+      "btrfs": 4,
+      "ext4": 6,
+      "mixed": 2,
+      "not_applicable": 1
+    },
+    "ready": true
+  },
+  "coverage_matrix_count": 11,
+  "coverage_matrix_first": {
+    "matrix_version": 1,
+    "claim_id": "claim_workload_editor_save_atomic_ext4",
+    "scenario_id": "workload_editor_save_atomic_ext4",
+    "status": "positive",
+    "user_risk": "data_loss",
+    "risk_tier": "p1",
+    "filesystem_scope": [
+      "ext4"
+    ],
+    "operation_class": "editor_save",
+    "required_capabilities": [
+      "block_device_fixture",
+      "metadata_ops",
+      "crash_replay"
+    ],
+    "proof_consumers": [
+      "invariant_oracle",
+      "crash_replay_lab",
+      "proof_bundle"
+    ],
+    "unit_test_obligations": [
+      "workload_corpus_schema",
+      "coverage_matrix_row"
+    ],
+    "e2e_obligations": [
+      "scripts/e2e/ffs_invariant_oracle_e2e.sh",
+      "scripts/e2e/ffs_crash_matrix_e2e.sh"
+    ],
+    "fuzz_or_soak_obligations": [
+      "crash_replay_lab"
+    ],
+    "expected_log_fields": [
+      "reproduction_command",
+      "scenario_id",
+      "user_risk"
+    ],
+    "expected_artifact_fields": [
+      "path",
+      "kind",
+      "required"
+    ],
+    "non_applicability_rationale": null
+  },
+  "coverage_matrix_last": {
+    "matrix_version": 1,
+    "claim_id": "claim_workload_expected_host_skip_fuse_permission",
+    "scenario_id": "workload_expected_host_skip_fuse_permission",
+    "status": "host_skip",
+    "user_risk": "host_capability_ambiguity",
+    "risk_tier": "p2",
+    "filesystem_scope": [
+      "not_applicable"
+    ],
+    "operation_class": "host_skip",
+    "required_capabilities": [
+      "host_capability_probe",
+      "fuse_mount"
+    ],
+    "proof_consumers": [
+      "mounted_differential_oracle",
+      "operational_readiness_report",
+      "proof_bundle"
+    ],
+    "unit_test_obligations": [
+      "workload_corpus_schema",
+      "coverage_matrix_row"
+    ],
+    "e2e_obligations": [
+      "scripts/e2e/ffs_mount_runtime_gate_e2e.sh",
+      "scripts/e2e/ffs_operational_readiness_report_e2e.sh"
+    ],
+    "fuzz_or_soak_obligations": [],
+    "expected_log_fields": [
+      "reproduction_command",
+      "scenario_id",
+      "user_risk"
+    ],
+    "expected_artifact_fields": [
+      "path",
+      "kind",
+      "required"
+    ],
+    "non_applicability_rationale": "FUSE lanes must skip with explicit host capability evidence when /dev/fuse, fusermount, namespace, or mount permissions are unavailable."
+  },
+  "duplicate_scenario_ids": [],
+  "missing_high_risk_user_risks": [],
+  "missing_required_statuses": [],
+  "host_skip_scenarios": [
+    "workload_btrfs_default_permissions_owner_diagnostic",
+    "workload_expected_host_skip_fuse_permission"
+  ],
+  "btrfs_default_permissions_scenarios": [
+    "workload_btrfs_default_permissions_owner_diagnostic"
+  ],
+  "scenario_log_count": 11,
+  "scenario_log_first": {
+    "scenario_id": "workload_editor_save_atomic_ext4",
+    "status": "positive",
+    "user_risk": "data_loss",
+    "filesystem_flavors": [
+      "ext4"
+    ],
+    "proof_consumers": [
+      "invariant_oracle",
+      "crash_replay_lab",
+      "proof_bundle"
+    ],
+    "reproduction_command": "cargo run -p ffs-harness -- validate-workload-corpus --corpus tests/workload-corpus/p1_workload_corpus.json --select workload_editor_save_atomic_ext4",
+    "log_line": "WORKLOAD_CORPUS_SCENARIO|scenario_id=workload_editor_save_atomic_ext4|status=positive|user_risk=data_loss|filesystems=ext4|proof_consumers=invariant_oracle,crash_replay_lab,proof_bundle|reproduction_command=cargo run -p ffs-harness -- validate-workload-corpus --corpus tests/workload-corpus/p1_workload_corpus.json --select workload_editor_save_atomic_ext4"
+  },
+  "scenario_log_last": {
+    "scenario_id": "workload_expected_host_skip_fuse_permission",
+    "status": "host_skip",
+    "user_risk": "host_capability_ambiguity",
+    "filesystem_flavors": [
+      "not_applicable"
+    ],
+    "proof_consumers": [
+      "mounted_differential_oracle",
+      "operational_readiness_report",
+      "proof_bundle"
+    ],
+    "reproduction_command": "cargo run -p ffs-harness -- fuse-capability-probe --require-mount-probe",
+    "log_line": "WORKLOAD_CORPUS_SCENARIO|scenario_id=workload_expected_host_skip_fuse_permission|status=host_skip|user_risk=host_capability_ambiguity|filesystems=not_applicable|proof_consumers=mounted_differential_oracle,operational_readiness_report,proof_bundle|reproduction_command=cargo run -p ffs-harness -- fuse-capability-probe --require-mount-probe"
+  },
+  "errors": [],
+  "warnings": []
+}

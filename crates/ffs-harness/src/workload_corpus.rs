@@ -872,6 +872,50 @@ mod tests {
     }
 
     #[test]
+    fn workload_corpus_report_json_shape() -> Result<()> {
+        let corpus = fixture_corpus();
+        let report = validate_workload_corpus(&corpus);
+        assert!(report.valid, "{:?}", report.errors);
+
+        let full_json = serde_json::to_string_pretty(&report)?;
+        let parsed: WorkloadCorpusValidationReport = serde_json::from_str(&full_json)?;
+        assert_eq!(parsed, report);
+
+        let shape = serde_json::json!({
+            "schema_version": report.schema_version,
+            "coverage_matrix_version": report.coverage_matrix_version,
+            "corpus_id": &report.corpus_id,
+            "corpus_version": &report.corpus_version,
+            "bead_id": &report.bead_id,
+            "valid": report.valid,
+            "scenario_count": report.scenario_count,
+            "status_counts": &report.status_counts,
+            "by_user_risk": &report.by_user_risk,
+            "by_filesystem_flavor": &report.by_filesystem_flavor,
+            "by_proof_consumer": &report.by_proof_consumer,
+            "proof_bundle_coverage": &report.proof_bundle_coverage,
+            "coverage_matrix_count": report.coverage_matrix.len(),
+            "coverage_matrix_first": report.coverage_matrix.first(),
+            "coverage_matrix_last": report.coverage_matrix.last(),
+            "duplicate_scenario_ids": &report.duplicate_scenario_ids,
+            "missing_high_risk_user_risks": &report.missing_high_risk_user_risks,
+            "missing_required_statuses": &report.missing_required_statuses,
+            "host_skip_scenarios": &report.host_skip_scenarios,
+            "btrfs_default_permissions_scenarios": &report.btrfs_default_permissions_scenarios,
+            "scenario_log_count": report.scenario_logs.len(),
+            "scenario_log_first": report.scenario_logs.first(),
+            "scenario_log_last": report.scenario_logs.last(),
+            "errors": &report.errors,
+            "warnings": &report.warnings,
+        });
+        let json = serde_json::to_string_pretty(&shape)?;
+        insta::assert_snapshot!("workload_corpus_report_json_shape", json);
+        let parsed_shape: serde_json::Value = serde_json::from_str(&json)?;
+        assert_eq!(parsed_shape, shape);
+        Ok(())
+    }
+
+    #[test]
     fn validates_selected_reproduction_scenario() {
         let corpus = fixture_corpus();
         validate_selected_workload_scenario(&corpus, "workload_editor_save_atomic_ext4")
