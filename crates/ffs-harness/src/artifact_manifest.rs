@@ -2676,6 +2676,69 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn active_catalog_literal_id_patterns_match_manifest_validator() -> serde_json::Result<()> {
+        let catalog: serde_json::Value =
+            serde_json::from_str(include_str!("../../../scripts/e2e/scenario_catalog.json"))?;
+        let suites = catalog
+            .get("suites")
+            .and_then(serde_json::Value::as_array)
+            .expect("scenario catalog should define suites");
+
+        let mut checked = 0usize;
+        let mut invalid = Vec::new();
+        for suite in suites {
+            let suite_id = suite
+                .get("suite_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<missing-suite>");
+            let Some(scenarios) = suite.get("scenarios").and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+
+            for scenario in scenarios {
+                if scenario
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("active")
+                    != "active"
+                {
+                    continue;
+                }
+                let Some(pattern) = scenario
+                    .get("id_pattern")
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                let Some(literal_id) = pattern
+                    .strip_prefix('^')
+                    .and_then(|inner| inner.strip_suffix('$'))
+                    .filter(|inner| {
+                        inner
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                    })
+                else {
+                    continue;
+                };
+
+                checked += 1;
+                if !is_valid_scenario_id(literal_id) {
+                    invalid.push(format!("{suite_id}:{pattern}"));
+                }
+            }
+        }
+
+        assert!(checked > 0, "expected active literal scenario ID patterns");
+        assert!(
+            invalid.is_empty(),
+            "active catalog literal id_patterns rejected by manifest validator: {invalid:?}"
+        );
+        Ok(())
+    }
+
     // ── Retention policy tests ───────────────────────────────────────
 
     #[test]
