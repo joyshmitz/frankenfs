@@ -235,7 +235,7 @@ cargo test --workspace --all-features
 | `ffs-btrfs` | Btrfs structures/tree/mutation logic used by `ffs-core`, plus legacy extraction reference coverage |
 | `conformance/` (workspace) | Shared sparse parser/conformance fixtures consumed by harness + integration suites |
 | `tests/` (workspace) | Shared golden outputs, generated images, and fuzz corpus consumed by integration suites |
-| `benches/` (workspace) | Performance benchmarks with regression detection |
+| `crates/*/benches/` | Crate-local performance benchmarks with regression detection |
 
 ### Test Fixtures
 
@@ -301,7 +301,7 @@ frankenfs/
 ├── tests/                         # Shared goldens, images, and fuzz corpus
 │   ├── fixtures/                  # Generated images + golden inspect outputs
 │   └── fuzz_corpus/               # Shared fuzz seeds
-├── benches/                       # Performance benchmarks
+├── crates/*/benches/              # Crate-local performance benchmarks
 └── (legacy_ext4_and_btrfs_code/)  # Original C source (gitignored; see kernel.org v6.19)
 ```
 
