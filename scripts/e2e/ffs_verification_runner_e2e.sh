@@ -12,8 +12,9 @@
 # 8. Retry semantics function is available in lib.sh
 # 9. Existing E2E scripts pass conformance check
 # 10. Permissioned FUSE lane artifacts and docs are wired
-# 11. Mounted ext4/btrfs scenario matrix artifacts are wired
-# 12. Shared E2E artifact directories are unique under concurrent starts
+# 11. Mounted write error-class RCH probes use direct cargo commands
+# 12. Mounted ext4/btrfs scenario matrix artifacts are wired
+# 13. Shared E2E artifact directories are unique under concurrent starts
 #
 # Usage: ./scripts/e2e/ffs_verification_runner_e2e.sh
 #
@@ -322,6 +323,7 @@ RUNNER_SRC="crates/ffs-harness/src/verification_runner.rs"
 LIB_SH="scripts/e2e/lib.sh"
 GATE_SH="scripts/e2e/run_gate.sh"
 FUSE_PROD_SH="scripts/e2e/ffs_fuse_production.sh"
+MOUNTED_WRITE_ERROR_CLASSES_SH="scripts/e2e/ffs_mounted_write_error_classes_e2e.sh"
 E2E_README="scripts/e2e/README.md"
 
 #######################################
@@ -590,9 +592,23 @@ else
 fi
 
 #######################################
-# Scenario 12: Permissioned lane documentation
+# Scenario 12: Mounted write error-class RCH guardrails
 #######################################
-e2e_step "Scenario 12: Permissioned lane documentation"
+e2e_step "Scenario 12: Mounted write error-class RCH guardrails"
+
+if grep -Eq 'exec[[:space:]]+--[[:space:]]+bash|bash[[:space:]]+-c' "$MOUNTED_WRITE_ERROR_CLASSES_SH"; then
+    scenario_result "mounted_write_error_classes_direct_rch_cargo" "FAIL" "mounted write suite still wraps cargo in rch exec -- bash"
+elif grep -q "e2e_rch_capture" "$MOUNTED_WRITE_ERROR_CLASSES_SH" \
+    && grep -q "validate-mounted-write-error-classes" "$MOUNTED_WRITE_ERROR_CLASSES_SH"; then
+    scenario_result "mounted_write_error_classes_direct_rch_cargo" "PASS" "mounted write suite uses shared RCH capture with direct cargo commands"
+else
+    scenario_result "mounted_write_error_classes_direct_rch_cargo" "FAIL" "mounted write suite is missing shared RCH capture markers"
+fi
+
+#######################################
+# Scenario 13: Permissioned lane documentation
+#######################################
+e2e_step "Scenario 13: Permissioned lane documentation"
 
 FUSE_LANE_DOCS=0
 for feature in \
@@ -614,9 +630,9 @@ else
 fi
 
 #######################################
-# Scenario 13: Mounted scenario matrix artifacts
+# Scenario 14: Mounted scenario matrix artifacts
 #######################################
-e2e_step "Scenario 13: Mounted scenario matrix artifacts"
+e2e_step "Scenario 14: Mounted scenario matrix artifacts"
 
 MOUNTED_MATRIX_FEATURES=0
 for feature in \
@@ -641,9 +657,9 @@ else
 fi
 
 #######################################
-# Scenario 14: Btrfs mounted production rows
+# Scenario 15: Btrfs mounted production rows
 #######################################
-e2e_step "Scenario 14: Btrfs mounted production rows"
+e2e_step "Scenario 15: Btrfs mounted production rows"
 
 BTRFS_MOUNTED_ROWS=0
 for feature in \
@@ -665,9 +681,9 @@ else
 fi
 
 #######################################
-# Scenario 15: Scenario catalog covers production FUSE matrix
+# Scenario 16: Scenario catalog covers production FUSE matrix
 #######################################
-e2e_step "Scenario 15: Scenario catalog covers production FUSE matrix"
+e2e_step "Scenario 16: Scenario catalog covers production FUSE matrix"
 
 CATALOG_MATRIX_ROWS=0
 for feature in \

@@ -19,20 +19,17 @@ E2E_CLEANUP_ITEMS=()
 
 CATALOG_PATH="${FFS_MOUNTED_WRITE_ERROR_CLASSES_CATALOG:-$REPO_ROOT/tests/mounted-write-error-classes/mounted_write_error_classes.json}"
 MATRIX_PATH="${FFS_MOUNTED_WRITE_MATRIX:-$REPO_ROOT/tests/workload-matrix/mounted_write_workload_matrix.json}"
+RCH_INPUT_DIR="$REPO_ROOT/artifacts/rch_input/$(basename "$E2E_LOG_DIR")"
 REPORT_JSON="$E2E_LOG_DIR/mounted_write_error_classes_report.json"
 QA_ARTIFACT_JSON="$E2E_LOG_DIR/mounted_write_error_classes_qa_artifact.json"
 STDOUT_PATH="$E2E_LOG_DIR/mounted_write_error_classes.stdout"
 STDERR_PATH="$E2E_LOG_DIR/mounted_write_error_classes.stderr"
-BAD_CATALOG_PATH="$E2E_LOG_DIR/malformed_mounted_write_error_classes.json"
+BAD_CATALOG_PATH="$RCH_INPUT_DIR/malformed_mounted_write_error_classes.json"
 BAD_REPORT_JSON="$E2E_LOG_DIR/malformed_mounted_write_error_classes_report.json"
 BAD_STDOUT_PATH="$E2E_LOG_DIR/malformed_mounted_write_error_classes.stdout"
 BAD_STDERR_PATH="$E2E_LOG_DIR/malformed_mounted_write_error_classes.stderr"
-BAD_REMOTE_CATALOG_PATH="/tmp/ffs_malformed_mounted_write_error_classes_$$.json"
 
 COMMAND=(
-    "${RCH_BIN:-rch}"
-    exec
-    --
     cargo
     run
     --quiet
@@ -45,12 +42,14 @@ COMMAND=(
     --matrix
     "$MATRIX_PATH"
 )
-printf -v COMMAND_LINE '%q ' "${COMMAND[@]}"
+COMMAND_DISPLAY=("${RCH_BIN:-rch}" exec -- "${COMMAND[@]}")
+printf -v COMMAND_LINE '%q ' "${COMMAND_DISPLAY[@]}"
 COMMAND_LINE="${COMMAND_LINE% }"
 
 e2e_step "Validate mounted write error class catalog"
 START_NS="$(date +%s%N)"
-if RCH_VISIBILITY=none "${COMMAND[@]}" >"$STDOUT_PATH" 2>"$STDERR_PATH"; then
+: >"$STDERR_PATH"
+if RCH_VISIBILITY=none e2e_rch_capture "$STDOUT_PATH" "${COMMAND[@]}"; then
     COMMAND_STATUS="pass"
     COMMAND_EXIT_CODE=0
 else
@@ -68,6 +67,7 @@ import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(
     '{"schema_version":1,"catalog_id":"malformed","entries":[',
     encoding="utf-8",
@@ -75,24 +75,24 @@ path.write_text(
 PY
 
 BAD_COMMAND=(
-    "${RCH_BIN:-rch}"
-    exec
+    cargo
+    run
+    --quiet
+    -p
+    ffs-harness
     --
-    bash
-    -c
-    'set -euo pipefail
-bad_path="$1"
-matrix_path="$2"
-printf "%s" "{\"schema_version\":1,\"catalog_id\":\"malformed\",\"entries\":[" >"$bad_path"
-cargo run --quiet -p ffs-harness -- validate-mounted-write-error-classes --catalog "$bad_path" --matrix "$matrix_path"'
-    _
-    "$BAD_REMOTE_CATALOG_PATH"
+    validate-mounted-write-error-classes
+    --catalog
+    "$BAD_CATALOG_PATH"
+    --matrix
     "$MATRIX_PATH"
 )
-printf -v BAD_COMMAND_LINE '%q ' "${BAD_COMMAND[@]}"
+BAD_COMMAND_DISPLAY=("${RCH_BIN:-rch}" exec -- "${BAD_COMMAND[@]}")
+printf -v BAD_COMMAND_LINE '%q ' "${BAD_COMMAND_DISPLAY[@]}"
 BAD_COMMAND_LINE="${BAD_COMMAND_LINE% }"
 
-if RCH_VISIBILITY=none "${BAD_COMMAND[@]}" >"$BAD_STDOUT_PATH" 2>"$BAD_STDERR_PATH"; then
+: >"$BAD_STDERR_PATH"
+if RCH_VISIBILITY=none e2e_rch_capture "$BAD_STDOUT_PATH" "${BAD_COMMAND[@]}"; then
     BAD_COMMAND_STATUS="pass"
     BAD_COMMAND_EXIT_CODE=0
 else
