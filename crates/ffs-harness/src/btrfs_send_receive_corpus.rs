@@ -585,13 +585,14 @@ mod tests {
     }
 
     #[test]
-    fn btrfs_send_receive_corpus_report_json_shape() {
-        let report = validate_default_btrfs_send_receive_corpus()
-            .expect("default btrfs send/receive corpus validates");
-        let json =
-            serde_json::to_string_pretty(&report).expect("btrfs send/receive report serializes");
+    fn btrfs_send_receive_corpus_report_json_shape() -> Result<()> {
+        let report = validate_default_btrfs_send_receive_corpus()?;
+        let json = serde_json::to_string_pretty(&report)?;
 
         insta::assert_snapshot!("btrfs_send_receive_corpus_report_json_shape", json);
+        let parsed: BtrfsSendReceiveCorpusReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
     }
 
     #[test]
