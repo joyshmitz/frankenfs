@@ -1,0 +1,495 @@
+---
+source: crates/ffs-harness/src/writeback_cache_audit.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "gate_version": "bd-rchk0.2.3-crash-replay-v1",
+  "bead_id": "bd-rchk0.2.3",
+  "scenario_id": "writeback_crash_replay_default_sample",
+  "valid": true,
+  "decision": {
+    "decision": "accept"
+  },
+  "matrix_id": "writeback_cache_crash_replay_matrix_v1",
+  "required_crash_point_ids": [
+    "cp01_before_first_write",
+    "cp02_after_first_write_before_flush",
+    "cp03_after_flush_before_fsync",
+    "cp04_after_fsync_before_metadata",
+    "cp05_after_metadata_before_fsyncdir",
+    "cp06_after_fsyncdir_before_unmount",
+    "cp07_after_repeated_write_before_fsync",
+    "cp08_after_repeated_write_fsync",
+    "cp09_after_cancellation_before_writeback",
+    "cp10_after_clean_unmount_before_reopen",
+    "cp11_after_reopen_before_repair_refresh",
+    "cp12_after_repair_refresh"
+  ],
+  "covered_crash_point_ids": [
+    "cp01_before_first_write",
+    "cp02_after_first_write_before_flush",
+    "cp03_after_flush_before_fsync",
+    "cp04_after_fsync_before_metadata",
+    "cp05_after_metadata_before_fsyncdir",
+    "cp06_after_fsyncdir_before_unmount",
+    "cp07_after_repeated_write_before_fsync",
+    "cp08_after_repeated_write_fsync",
+    "cp09_after_cancellation_before_writeback",
+    "cp10_after_clean_unmount_before_reopen",
+    "cp11_after_reopen_before_repair_refresh",
+    "cp12_after_repair_refresh"
+  ],
+  "failure_modes": [
+    "default_off_or_not_opted_in",
+    "raw_fuser_option_missing",
+    "missing_operation_trace",
+    "missing_crash_point",
+    "survivor_set_mismatch",
+    "flush_misclassified_as_durable",
+    "missing_fsync_boundary",
+    "missing_fsyncdir_boundary",
+    "metadata_after_data_violation",
+    "unmount_reopen_missing",
+    "cancellation_not_classified",
+    "stale_epoch_state",
+    "unsupported_combination_not_rejected",
+    "replay_status_mismatch"
+  ],
+  "mount_options": {
+    "raw_options": [
+      "rw",
+      "fsname=frankenfs",
+      "writeback_cache"
+    ],
+    "fs_name": "frankenfs",
+    "allow_other": false,
+    "auto_unmount": true,
+    "default_permissions": true,
+    "mode": "rw"
+  },
+  "raw_fuser_options": [
+    "fsname=frankenfs",
+    "subtype=ffs",
+    "rw",
+    "writeback_cache"
+  ],
+  "epoch_id": "epoch-writeback-crash-0001",
+  "epoch_state": "fresh",
+  "host_capability_fingerprint": "fuse3-writeback-cache-enabled-host",
+  "lane_manifest_id": "fuse-writeback-cache-rw-lane-v1",
+  "operation_trace": [
+    {
+      "step": 1,
+      "operation": "create",
+      "target": "/writeback/data.bin",
+      "durability_boundary": "none",
+      "expected_result": "success"
+    },
+    {
+      "step": 2,
+      "operation": "write",
+      "target": "/writeback/data.bin",
+      "durability_boundary": "kernel_writeback_cache",
+      "expected_result": "success"
+    },
+    {
+      "step": 3,
+      "operation": "flush",
+      "target": "/writeback/data.bin",
+      "durability_boundary": "non_durable",
+      "expected_result": "success"
+    },
+    {
+      "step": 4,
+      "operation": "fsync",
+      "target": "/writeback/data.bin",
+      "durability_boundary": "file_durable",
+      "expected_result": "success"
+    },
+    {
+      "step": 5,
+      "operation": "rename",
+      "target": "/writeback/data.bin",
+      "durability_boundary": "metadata_after_data",
+      "expected_result": "success"
+    },
+    {
+      "step": 6,
+      "operation": "fsyncdir",
+      "target": "/writeback/data.bin",
+      "durability_boundary": "directory_durable",
+      "expected_result": "success"
+    },
+    {
+      "step": 7,
+      "operation": "write",
+      "target": "/writeback/data.bin",
+      "durability_boundary": "repeated_write",
+      "expected_result": "success"
+    },
+    {
+      "step": 8,
+      "operation": "fsync",
+      "target": "/writeback/data.bin",
+      "durability_boundary": "last_write_durable",
+      "expected_result": "success"
+    },
+    {
+      "step": 9,
+      "operation": "cancel",
+      "target": "/writeback/data.bin",
+      "durability_boundary": "classified_before_writeback",
+      "expected_result": "success"
+    },
+    {
+      "step": 10,
+      "operation": "unmount",
+      "target": "/writeback/data.bin",
+      "durability_boundary": "dirty_pages_flushed_or_rejected",
+      "expected_result": "success"
+    },
+    {
+      "step": 11,
+      "operation": "reopen",
+      "target": "/writeback/data.bin",
+      "durability_boundary": "survivor_set_verified",
+      "expected_result": "success"
+    },
+    {
+      "step": 12,
+      "operation": "repair_refresh",
+      "target": "/writeback/data.bin",
+      "durability_boundary": "post_writeback_refresh",
+      "expected_result": "success"
+    }
+  ],
+  "crash_points": [
+    {
+      "crash_point_id": "cp01_before_first_write",
+      "description": "cp01_before_first_write mounted writeback-cache crash point",
+      "operation_step": 1,
+      "expected_survivor_set": [
+        "/",
+        "/writeback",
+        "/writeback/data.bin:blake3=stable-v2"
+      ],
+      "actual_survivor_set": [
+        "/writeback/data.bin:blake3=stable-v2",
+        "/",
+        "/writeback"
+      ],
+      "fsync_observed_durable": true,
+      "fsyncdir_observed_durable": true,
+      "flush_observed_non_durable": true,
+      "metadata_after_data_observed": true,
+      "unmount_reopen_observed": true,
+      "cancellation_state": "none",
+      "repeated_write_state": "not_applicable",
+      "replay_status": "survivor_set_verified",
+      "stdout_path": "artifacts/writeback-cache/crash-replay/cp01_before_first_write.stdout",
+      "stderr_path": "artifacts/writeback-cache/crash-replay/cp01_before_first_write.stderr",
+      "cleanup_status": "retained_for_qa"
+    },
+    {
+      "crash_point_id": "cp02_after_first_write_before_flush",
+      "description": "cp02_after_first_write_before_flush mounted writeback-cache crash point",
+      "operation_step": 2,
+      "expected_survivor_set": [
+        "/",
+        "/writeback",
+        "/writeback/data.bin:blake3=stable-v2"
+      ],
+      "actual_survivor_set": [
+        "/writeback/data.bin:blake3=stable-v2",
+        "/",
+        "/writeback"
+      ],
+      "fsync_observed_durable": true,
+      "fsyncdir_observed_durable": true,
+      "flush_observed_non_durable": true,
+      "metadata_after_data_observed": true,
+      "unmount_reopen_observed": true,
+      "cancellation_state": "none",
+      "repeated_write_state": "not_applicable",
+      "replay_status": "survivor_set_verified",
+      "stdout_path": "artifacts/writeback-cache/crash-replay/cp02_after_first_write_before_flush.stdout",
+      "stderr_path": "artifacts/writeback-cache/crash-replay/cp02_after_first_write_before_flush.stderr",
+      "cleanup_status": "retained_for_qa"
+    },
+    {
+      "crash_point_id": "cp03_after_flush_before_fsync",
+      "description": "cp03_after_flush_before_fsync mounted writeback-cache crash point",
+      "operation_step": 3,
+      "expected_survivor_set": [
+        "/",
+        "/writeback",
+        "/writeback/data.bin:blake3=stable-v2"
+      ],
+      "actual_survivor_set": [
+        "/writeback/data.bin:blake3=stable-v2",
+        "/",
+        "/writeback"
+      ],
+      "fsync_observed_durable": true,
+      "fsyncdir_observed_durable": true,
+      "flush_observed_non_durable": true,
+      "metadata_after_data_observed": true,
+      "unmount_reopen_observed": true,
+      "cancellation_state": "none",
+      "repeated_write_state": "not_applicable",
+      "replay_status": "survivor_set_verified",
+      "stdout_path": "artifacts/writeback-cache/crash-replay/cp03_after_flush_before_fsync.stdout",
+      "stderr_path": "artifacts/writeback-cache/crash-replay/cp03_after_flush_before_fsync.stderr",
+      "cleanup_status": "retained_for_qa"
+    },
+    {
+      "crash_point_id": "cp04_after_fsync_before_metadata",
+      "description": "cp04_after_fsync_before_metadata mounted writeback-cache crash point",
+      "operation_step": 4,
+      "expected_survivor_set": [
+        "/",
+        "/writeback",
+        "/writeback/data.bin:blake3=stable-v2"
+      ],
+      "actual_survivor_set": [
+        "/writeback/data.bin:blake3=stable-v2",
+        "/",
+        "/writeback"
+      ],
+      "fsync_observed_durable": true,
+      "fsyncdir_observed_durable": true,
+      "flush_observed_non_durable": true,
+      "metadata_after_data_observed": true,
+      "unmount_reopen_observed": true,
+      "cancellation_state": "none",
+      "repeated_write_state": "not_applicable",
+      "replay_status": "survivor_set_verified",
+      "stdout_path": "artifacts/writeback-cache/crash-replay/cp04_after_fsync_before_metadata.stdout",
+      "stderr_path": "artifacts/writeback-cache/crash-replay/cp04_after_fsync_before_metadata.stderr",
+      "cleanup_status": "retained_for_qa"
+    },
+    {
+      "crash_point_id": "cp05_after_metadata_before_fsyncdir",
+      "description": "cp05_after_metadata_before_fsyncdir mounted writeback-cache crash point",
+      "operation_step": 5,
+      "expected_survivor_set": [
+        "/",
+        "/writeback",
+        "/writeback/data.bin:blake3=stable-v2"
+      ],
+      "actual_survivor_set": [
+        "/writeback/data.bin:blake3=stable-v2",
+        "/",
+        "/writeback"
+      ],
+      "fsync_observed_durable": true,
+      "fsyncdir_observed_durable": true,
+      "flush_observed_non_durable": true,
+      "metadata_after_data_observed": true,
+      "unmount_reopen_observed": true,
+      "cancellation_state": "none",
+      "repeated_write_state": "not_applicable",
+      "replay_status": "survivor_set_verified",
+      "stdout_path": "artifacts/writeback-cache/crash-replay/cp05_after_metadata_before_fsyncdir.stdout",
+      "stderr_path": "artifacts/writeback-cache/crash-replay/cp05_after_metadata_before_fsyncdir.stderr",
+      "cleanup_status": "retained_for_qa"
+    },
+    {
+      "crash_point_id": "cp06_after_fsyncdir_before_unmount",
+      "description": "cp06_after_fsyncdir_before_unmount mounted writeback-cache crash point",
+      "operation_step": 6,
+      "expected_survivor_set": [
+        "/",
+        "/writeback",
+        "/writeback/data.bin:blake3=stable-v2"
+      ],
+      "actual_survivor_set": [
+        "/writeback/data.bin:blake3=stable-v2",
+        "/",
+        "/writeback"
+      ],
+      "fsync_observed_durable": true,
+      "fsyncdir_observed_durable": true,
+      "flush_observed_non_durable": true,
+      "metadata_after_data_observed": true,
+      "unmount_reopen_observed": true,
+      "cancellation_state": "none",
+      "repeated_write_state": "not_applicable",
+      "replay_status": "survivor_set_verified",
+      "stdout_path": "artifacts/writeback-cache/crash-replay/cp06_after_fsyncdir_before_unmount.stdout",
+      "stderr_path": "artifacts/writeback-cache/crash-replay/cp06_after_fsyncdir_before_unmount.stderr",
+      "cleanup_status": "retained_for_qa"
+    },
+    {
+      "crash_point_id": "cp07_after_repeated_write_before_fsync",
+      "description": "cp07_after_repeated_write_before_fsync mounted writeback-cache crash point",
+      "operation_step": 7,
+      "expected_survivor_set": [
+        "/",
+        "/writeback",
+        "/writeback/data.bin:blake3=stable-v2"
+      ],
+      "actual_survivor_set": [
+        "/writeback/data.bin:blake3=stable-v2",
+        "/",
+        "/writeback"
+      ],
+      "fsync_observed_durable": true,
+      "fsyncdir_observed_durable": true,
+      "flush_observed_non_durable": true,
+      "metadata_after_data_observed": true,
+      "unmount_reopen_observed": true,
+      "cancellation_state": "none",
+      "repeated_write_state": "last_fsynced_write_survived",
+      "replay_status": "survivor_set_verified",
+      "stdout_path": "artifacts/writeback-cache/crash-replay/cp07_after_repeated_write_before_fsync.stdout",
+      "stderr_path": "artifacts/writeback-cache/crash-replay/cp07_after_repeated_write_before_fsync.stderr",
+      "cleanup_status": "retained_for_qa"
+    },
+    {
+      "crash_point_id": "cp08_after_repeated_write_fsync",
+      "description": "cp08_after_repeated_write_fsync mounted writeback-cache crash point",
+      "operation_step": 8,
+      "expected_survivor_set": [
+        "/",
+        "/writeback",
+        "/writeback/data.bin:blake3=stable-v2"
+      ],
+      "actual_survivor_set": [
+        "/writeback/data.bin:blake3=stable-v2",
+        "/",
+        "/writeback"
+      ],
+      "fsync_observed_durable": true,
+      "fsyncdir_observed_durable": true,
+      "flush_observed_non_durable": true,
+      "metadata_after_data_observed": true,
+      "unmount_reopen_observed": true,
+      "cancellation_state": "none",
+      "repeated_write_state": "last_fsynced_write_survived",
+      "replay_status": "survivor_set_verified",
+      "stdout_path": "artifacts/writeback-cache/crash-replay/cp08_after_repeated_write_fsync.stdout",
+      "stderr_path": "artifacts/writeback-cache/crash-replay/cp08_after_repeated_write_fsync.stderr",
+      "cleanup_status": "retained_for_qa"
+    },
+    {
+      "crash_point_id": "cp09_after_cancellation_before_writeback",
+      "description": "cp09_after_cancellation_before_writeback mounted writeback-cache crash point",
+      "operation_step": 9,
+      "expected_survivor_set": [
+        "/",
+        "/writeback",
+        "/writeback/data.bin:blake3=stable-v2"
+      ],
+      "actual_survivor_set": [
+        "/writeback/data.bin:blake3=stable-v2",
+        "/",
+        "/writeback"
+      ],
+      "fsync_observed_durable": true,
+      "fsyncdir_observed_durable": true,
+      "flush_observed_non_durable": true,
+      "metadata_after_data_observed": true,
+      "unmount_reopen_observed": true,
+      "cancellation_state": "cancelled_before_writeback_classified",
+      "repeated_write_state": "not_applicable",
+      "replay_status": "survivor_set_verified",
+      "stdout_path": "artifacts/writeback-cache/crash-replay/cp09_after_cancellation_before_writeback.stdout",
+      "stderr_path": "artifacts/writeback-cache/crash-replay/cp09_after_cancellation_before_writeback.stderr",
+      "cleanup_status": "retained_for_qa"
+    },
+    {
+      "crash_point_id": "cp10_after_clean_unmount_before_reopen",
+      "description": "cp10_after_clean_unmount_before_reopen mounted writeback-cache crash point",
+      "operation_step": 10,
+      "expected_survivor_set": [
+        "/",
+        "/writeback",
+        "/writeback/data.bin:blake3=stable-v2"
+      ],
+      "actual_survivor_set": [
+        "/writeback/data.bin:blake3=stable-v2",
+        "/",
+        "/writeback"
+      ],
+      "fsync_observed_durable": true,
+      "fsyncdir_observed_durable": true,
+      "flush_observed_non_durable": true,
+      "metadata_after_data_observed": true,
+      "unmount_reopen_observed": true,
+      "cancellation_state": "none",
+      "repeated_write_state": "not_applicable",
+      "replay_status": "survivor_set_verified",
+      "stdout_path": "artifacts/writeback-cache/crash-replay/cp10_after_clean_unmount_before_reopen.stdout",
+      "stderr_path": "artifacts/writeback-cache/crash-replay/cp10_after_clean_unmount_before_reopen.stderr",
+      "cleanup_status": "retained_for_qa"
+    },
+    {
+      "crash_point_id": "cp11_after_reopen_before_repair_refresh",
+      "description": "cp11_after_reopen_before_repair_refresh mounted writeback-cache crash point",
+      "operation_step": 11,
+      "expected_survivor_set": [
+        "/",
+        "/writeback",
+        "/writeback/data.bin:blake3=stable-v2"
+      ],
+      "actual_survivor_set": [
+        "/writeback/data.bin:blake3=stable-v2",
+        "/",
+        "/writeback"
+      ],
+      "fsync_observed_durable": true,
+      "fsyncdir_observed_durable": true,
+      "flush_observed_non_durable": true,
+      "metadata_after_data_observed": true,
+      "unmount_reopen_observed": true,
+      "cancellation_state": "none",
+      "repeated_write_state": "not_applicable",
+      "replay_status": "survivor_set_verified",
+      "stdout_path": "artifacts/writeback-cache/crash-replay/cp11_after_reopen_before_repair_refresh.stdout",
+      "stderr_path": "artifacts/writeback-cache/crash-replay/cp11_after_reopen_before_repair_refresh.stderr",
+      "cleanup_status": "retained_for_qa"
+    },
+    {
+      "crash_point_id": "cp12_after_repair_refresh",
+      "description": "cp12_after_repair_refresh mounted writeback-cache crash point",
+      "operation_step": 12,
+      "expected_survivor_set": [
+        "/",
+        "/writeback",
+        "/writeback/data.bin:blake3=stable-v2"
+      ],
+      "actual_survivor_set": [
+        "/writeback/data.bin:blake3=stable-v2",
+        "/",
+        "/writeback"
+      ],
+      "fsync_observed_durable": true,
+      "fsyncdir_observed_durable": true,
+      "flush_observed_non_durable": true,
+      "metadata_after_data_observed": true,
+      "unmount_reopen_observed": true,
+      "cancellation_state": "none",
+      "repeated_write_state": "not_applicable",
+      "replay_status": "survivor_set_verified",
+      "stdout_path": "artifacts/writeback-cache/crash-replay/cp12_after_repair_refresh.stdout",
+      "stderr_path": "artifacts/writeback-cache/crash-replay/cp12_after_repair_refresh.stderr",
+      "cleanup_status": "retained_for_qa"
+    }
+  ],
+  "unsupported_combinations": [
+    {
+      "combination_id": "writeback_cache_ro_mount",
+      "rejected": true,
+      "reason": "read_only_writeback_cache",
+      "follow_up_bead": "bd-rchk0.2.4"
+    }
+  ],
+  "artifact_paths": [
+    "artifacts/writeback-cache/crash-replay/matrix.json",
+    "artifacts/writeback-cache/crash-replay/results.json",
+    "artifacts/writeback-cache/crash-replay/run.log"
+  ],
+  "reproduction_command": "ffs-harness validate-writeback-crash-replay --oracle oracle.json"
+}

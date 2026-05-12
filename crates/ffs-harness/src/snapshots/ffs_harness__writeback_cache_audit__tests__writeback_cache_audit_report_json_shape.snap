@@ -1,0 +1,124 @@
+---
+source: crates/ffs-harness/src/writeback_cache_audit.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "gate_version": "v1",
+  "bead_id": "bd-rchk0.2.1.1",
+  "scenario_id": "writeback_cache_audit_default_sample",
+  "valid": true,
+  "decision": {
+    "decision": "accept"
+  },
+  "invariant_map": [
+    {
+      "id": "I1",
+      "name": "Snapshot Visibility Boundary",
+      "gate_requirement": "epoch_barrier_artifact must be present, fresh, and passing before rw opt-in"
+    },
+    {
+      "id": "I2",
+      "name": "Alias Order Preservation",
+      "gate_requirement": "operation_class must be in the audited mounted-write envelope"
+    },
+    {
+      "id": "I3",
+      "name": "Metadata-After-Data Dependency",
+      "gate_requirement": "rw repair-write serialization must be accepted and conflicting flags absent"
+    },
+    {
+      "id": "I4",
+      "name": "Sync Boundary Completeness",
+      "gate_requirement": "fsync evidence must be present, fresh, and passing"
+    },
+    {
+      "id": "I5",
+      "name": "Flush Non-Durability",
+      "gate_requirement": "mount mode must be rw with explicit opt-in; flush-only evidence is not sufficient"
+    },
+    {
+      "id": "I6",
+      "name": "Cross-Epoch Order",
+      "gate_requirement": "crash matrix evidence must be present, fresh, and passing"
+    }
+  ],
+  "failure_modes": [
+    "missing_epoch_barrier_artifact",
+    "stale_epoch_barrier_artifact",
+    "rw_repair_serialization_unsupported",
+    "default_or_read_only_mount",
+    "unsupported_filesystem_or_operation",
+    "fuse_capability_unavailable",
+    "stale_crash_matrix_or_missing_fsync_evidence",
+    "conflicting_cli_flags",
+    "runtime_kill_switch_engaged",
+    "writeback_feature_downgraded",
+    "stale_gate_artifact",
+    "host_capability_mismatch",
+    "config_default_attempt"
+  ],
+  "required_artifact_fields": [
+    "schema_version",
+    "gate_version",
+    "bead_id",
+    "mount_options.raw_options",
+    "mount_options.mode",
+    "runtime_guard.kill_switch_state",
+    "runtime_guard.feature_state",
+    "runtime_guard.config_source",
+    "runtime_guard.gate_artifact_hash",
+    "runtime_guard.gate_fresh",
+    "runtime_guard.gate_age_secs",
+    "runtime_guard.gate_max_age_secs",
+    "runtime_guard.host_capability_fingerprint",
+    "runtime_guard.lane_manifest_id",
+    "runtime_guard.lane_manifest_path",
+    "runtime_guard.lane_manifest_fresh",
+    "runtime_guard.lane_manifest_matches_host",
+    "runtime_guard.release_gate_consumer",
+    "repair_serialization_state",
+    "fuse_capability.probe_status",
+    "fuse_capability.kernel_supports_writeback_cache",
+    "fuse_capability.helper_binary_present",
+    "epoch_barrier_artifact.artifact_path",
+    "crash_matrix_artifact.artifact_path",
+    "fsync_evidence_artifact.artifact_path",
+    "filesystem_flavor",
+    "operation_class",
+    "explicit_opt_in"
+  ],
+  "mount_options": {
+    "raw_options": [
+      "rw",
+      "default_permissions"
+    ],
+    "fs_name": "frankenfs",
+    "allow_other": false,
+    "auto_unmount": true,
+    "default_permissions": true,
+    "mode": "rw"
+  },
+  "runtime_guard": {
+    "kill_switch_state": "disarmed",
+    "feature_state": "accepted",
+    "config_source": "cli_explicit",
+    "gate_artifact_hash": "blake3:writeback-cache-gate-v1",
+    "gate_fresh": true,
+    "gate_age_secs": 30,
+    "gate_max_age_secs": 86400,
+    "host_capability_fingerprint": "linux-fuse-writeback-cache-v1",
+    "lane_manifest_id": "authoritative-env-frankenfs-fuse-v1",
+    "lane_manifest_path": "artifacts/qa/authoritative_environment_manifest.json",
+    "lane_manifest_fresh": true,
+    "lane_manifest_matches_host": true,
+    "release_gate_consumer": "writeback_cache.release_gate"
+  },
+  "artifact_paths": [
+    "artifacts/qa/epoch_barrier_proof.json",
+    "artifacts/qa/crash_matrix.json",
+    "artifacts/qa/fsync_evidence.json",
+    "artifacts/qa/authoritative_environment_manifest.json"
+  ],
+  "reproduction_command": "ffs-harness validate-writeback-cache-audit --gate gate.json"
+}

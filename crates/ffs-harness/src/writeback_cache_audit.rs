@@ -2731,6 +2731,48 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn writeback_cache_audit_report_json_shape() -> Result<()> {
+        let report = build_writeback_cache_audit_report(
+            &happy_gate(),
+            "writeback_cache_audit_default_sample",
+            "ffs-harness validate-writeback-cache-audit --gate gate.json",
+        )?;
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("writeback_cache_audit_report_json_shape", json);
+        let parsed: WritebackCacheAuditReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
+    fn writeback_ordering_report_json_shape() -> Result<()> {
+        let report = build_writeback_ordering_report(
+            &happy_ordering_oracle(),
+            "writeback_ordering_default_sample",
+            "ffs-harness validate-writeback-ordering --oracle oracle.json",
+        )?;
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("writeback_ordering_report_json_shape", json);
+        let parsed: WritebackOrderingReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
+    fn writeback_crash_replay_report_json_shape() -> Result<()> {
+        let report = build_writeback_crash_replay_report(
+            &happy_crash_replay_oracle(),
+            "writeback_crash_replay_default_sample",
+            "ffs-harness validate-writeback-crash-replay --oracle oracle.json",
+        )?;
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("writeback_crash_replay_report_json_shape", json);
+        let parsed: WritebackCrashReplayReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
     /// bd-v766a — Golden-artifact pin for the writeback-cache audit
     /// markdown emitter. The 18+ sibling tests cover validation /
     /// decision logic; this snapshot catches whitespace, heading-
