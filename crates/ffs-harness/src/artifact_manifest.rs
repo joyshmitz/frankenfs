@@ -2739,6 +2739,116 @@ mod tests {
         Ok(())
     }
 
+    fn catalog_id_pattern_sample(pattern: &str) -> Option<String> {
+        let body = pattern.strip_prefix('^')?.strip_suffix('$')?;
+        let bytes = body.as_bytes();
+        let mut index = 0usize;
+        let mut sample = String::new();
+
+        while let Some(&byte) = bytes.get(index) {
+            if byte.is_ascii_alphanumeric() || byte == b'_' {
+                sample.push(char::from(byte));
+                index += 1;
+                continue;
+            }
+
+            if byte != b'[' {
+                return None;
+            }
+
+            let class_start = index + 1;
+            let class_end = bytes
+                .get(class_start..)?
+                .iter()
+                .position(|candidate| *candidate == b']')?
+                + class_start;
+            let class = body.get(class_start..class_end)?;
+            let atom = match class {
+                "a-z0-9" | "a-z0-9_" => "sample",
+                "0-9" => "0",
+                "A-Z" => "A",
+                _ => return None,
+            };
+
+            index = class_end + 1;
+            let mut repeat = 1usize;
+            if bytes.get(index) == Some(&b'+') {
+                index += 1;
+            } else if bytes.get(index) == Some(&b'{') {
+                let repeat_start = index + 1;
+                let repeat_end = bytes
+                    .get(repeat_start..)?
+                    .iter()
+                    .position(|candidate| *candidate == b'}')?
+                    + repeat_start;
+                repeat = body.get(repeat_start..repeat_end)?.parse().ok()?;
+                index = repeat_end + 1;
+            }
+
+            for _ in 0..repeat {
+                sample.push_str(atom);
+            }
+        }
+
+        (!sample.is_empty()).then_some(sample)
+    }
+
+    #[test]
+    fn active_catalog_id_patterns_have_manifest_valid_samples() -> serde_json::Result<()> {
+        let catalog: serde_json::Value =
+            serde_json::from_str(include_str!("../../../scripts/e2e/scenario_catalog.json"))?;
+        let suites = catalog
+            .get("suites")
+            .and_then(serde_json::Value::as_array)
+            .expect("scenario catalog should define suites");
+
+        let mut checked = 0usize;
+        let mut invalid = Vec::new();
+        for suite in suites {
+            let suite_id = suite
+                .get("suite_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<missing-suite>");
+            let Some(scenarios) = suite.get("scenarios").and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+
+            for scenario in scenarios {
+                if scenario
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("active")
+                    != "active"
+                {
+                    continue;
+                }
+                let Some(pattern) = scenario
+                    .get("id_pattern")
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+
+                checked += 1;
+                let Some(sample) = catalog_id_pattern_sample(pattern) else {
+                    invalid.push(format!("{suite_id}:{pattern}:unsupported"));
+                    continue;
+                };
+                if !is_valid_scenario_id(&sample) {
+                    invalid.push(format!("{suite_id}:{pattern}:{sample}"));
+                }
+            }
+        }
+
+        assert!(checked > 0, "expected active scenario catalog ID patterns");
+        assert!(
+            invalid.is_empty(),
+            "active catalog id_patterns cannot produce manifest-valid scenario IDs: {invalid:?}"
+        );
+        Ok(())
+    }
+
     // ── Retention policy tests ───────────────────────────────────────
 
     #[test]

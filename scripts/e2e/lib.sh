@@ -134,6 +134,81 @@ e2e_catalog_evidence_present() {
 }
 
 #######################################
+# Generate a representative scenario ID from a catalog id_pattern.
+# Arguments:
+#   $1 - Anchored Bash ERE pattern from scenario_catalog.json
+#######################################
+e2e_catalog_id_pattern_sample() {
+    local pattern="$1"
+    local body sample index length char end_index class atom repeat quant_end repeat_index
+
+    [[ "$pattern" == \^* && "$pattern" == *\$ ]] || return 1
+
+    body="${pattern#^}"
+    body="${body%\$}"
+    sample=""
+    index=0
+    length=${#body}
+
+    while ((index < length)); do
+        char="${body:index:1}"
+        if [[ "$char" =~ [A-Za-z0-9_] ]]; then
+            sample+="$char"
+            index=$((index + 1))
+            continue
+        fi
+
+        if [[ "$char" != "[" ]]; then
+            return 1
+        fi
+
+        end_index=$((index + 1))
+        while ((end_index < length)) && [[ "${body:end_index:1}" != "]" ]]; do
+            end_index=$((end_index + 1))
+        done
+        ((end_index < length)) || return 1
+
+        class="${body:index + 1:end_index - index - 1}"
+        case "$class" in
+            a-z0-9 | a-z0-9_)
+                atom="sample"
+                ;;
+            0-9)
+                atom="0"
+                ;;
+            A-Z)
+                atom="A"
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+
+        index=$((end_index + 1))
+        repeat=1
+        if ((index < length)) && [[ "${body:index:1}" == "+" ]]; then
+            index=$((index + 1))
+        elif ((index < length)) && [[ "${body:index:1}" == "{" ]]; then
+            quant_end=$((index + 1))
+            while ((quant_end < length)) && [[ "${body:quant_end:1}" != "}" ]]; do
+                quant_end=$((quant_end + 1))
+            done
+            ((quant_end < length)) || return 1
+            repeat="${body:index + 1:quant_end - index - 1}"
+            [[ "$repeat" =~ ^[0-9]+$ ]] || return 1
+            index=$((quant_end + 1))
+        fi
+
+        for ((repeat_index = 0; repeat_index < repeat; repeat_index++)); do
+            sample+="$atom"
+        done
+    done
+
+    [[ -n "$sample" ]] || return 1
+    printf '%s\n' "$sample"
+}
+
+#######################################
 # Validate E2E scenario catalog contract
 # Arguments:
 #   $1 - Catalog path (default: $REPO_ROOT/scripts/e2e/scenario_catalog.json)
@@ -230,7 +305,7 @@ e2e_validate_scenario_catalog() {
         e2e_fail "Scenario catalog uses unknown scenario status (expected active or inactive): $unknown_statuses"
     fi
 
-    local pattern_suite literal_pattern literal_id regex_status
+    local pattern_suite literal_pattern literal_id regex_status pattern_sample
     while IFS=$'\t' read -r pattern_suite literal_pattern; do
         [[ -n "$literal_pattern" ]] || continue
         if [[ "$literal_pattern" != \^* || "$literal_pattern" != *\$ ]]; then
@@ -249,6 +324,15 @@ e2e_validate_scenario_catalog() {
             if [[ ! "$literal_id" =~ $id_regex ]]; then
                 e2e_fail "Suite '$pattern_suite' literal id_pattern does not match scenario_id_regex: $literal_pattern"
             fi
+        fi
+        if ! pattern_sample="$(e2e_catalog_id_pattern_sample "$literal_pattern")"; then
+            e2e_fail "Suite '$pattern_suite' id_pattern is not sample-compatible with scenario_id_regex: $literal_pattern"
+        fi
+        if [[ ! "$pattern_sample" =~ $literal_pattern ]]; then
+            e2e_fail "Suite '$pattern_suite' generated id_pattern sample does not match pattern: pattern=$literal_pattern sample=$pattern_sample"
+        fi
+        if [[ ! "$pattern_sample" =~ $id_regex ]]; then
+            e2e_fail "Suite '$pattern_suite' generated id_pattern sample does not match scenario_id_regex: pattern=$literal_pattern sample=$pattern_sample"
         fi
     done < <(
         jq -r '
