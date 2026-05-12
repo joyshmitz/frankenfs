@@ -227,19 +227,23 @@ pub fn validate_mounted_recovery_matrix(
 }
 
 fn validate_top_level(matrix: &MountedRecoveryMatrix, errors: &mut Vec<String>) {
-    if matrix.schema_version != RECOVERY_MATRIX_SCHEMA_VERSION {
+    if matrix.schema_version.ne(&RECOVERY_MATRIX_SCHEMA_VERSION) {
         errors.push(format!(
             "schema_version must be {RECOVERY_MATRIX_SCHEMA_VERSION}, got {}",
             matrix.schema_version
         ));
     }
-    if matrix.bead_id != "bd-rchk0.3.3" {
+    if matrix.bead_id.as_str().ne("bd-rchk0.3.3") {
         errors.push(format!(
             "bead_id must be bd-rchk0.3.3, got {}",
             matrix.bead_id
         ));
     }
-    if matrix.runner != "scripts/e2e/ffs_mounted_recovery_matrix_e2e.sh" {
+    if matrix
+        .runner
+        .as_str()
+        .ne("scripts/e2e/ffs_mounted_recovery_matrix_e2e.sh")
+    {
         errors.push(format!("unexpected runner {}", matrix.runner));
     }
     if matrix.scenarios.is_empty() {
@@ -249,7 +253,11 @@ fn validate_top_level(matrix: &MountedRecoveryMatrix, errors: &mut Vec<String>) 
 
 fn validate_results_contract(contract: &RecoveryResultsContract, errors: &mut Vec<String>) {
     for required in REQUIRED_RESULT_FORMATS {
-        if !contract.formats.iter().any(|format| format == required) {
+        if !contract
+            .formats
+            .iter()
+            .any(|format| format.as_str().eq(required))
+        {
             errors.push(format!("results_contract missing {required} format"));
         }
     }
@@ -257,7 +265,7 @@ fn validate_results_contract(contract: &RecoveryResultsContract, errors: &mut Ve
         if !contract
             .required_fields
             .iter()
-            .any(|field| field == required)
+            .any(|field| field.as_str().eq(required))
         {
             errors.push(format!(
                 "results_contract missing required field {required}"
@@ -265,7 +273,11 @@ fn validate_results_contract(contract: &RecoveryResultsContract, errors: &mut Ve
         }
     }
     for required in REQUIRED_ARTIFACT_PATHS {
-        if !contract.artifact_paths.iter().any(|path| path == required) {
+        if !contract
+            .artifact_paths
+            .iter()
+            .any(|path| path.as_str().eq(required))
+        {
             errors.push(format!("results_contract missing artifact path {required}"));
         }
     }
@@ -273,7 +285,7 @@ fn validate_results_contract(contract: &RecoveryResultsContract, errors: &mut Ve
         if !contract
             .classifications
             .iter()
-            .any(|classification| classification == required)
+            .any(|classification| classification.as_str().eq(required))
         {
             errors.push(format!(
                 "results_contract missing classification {required}"
@@ -375,13 +387,18 @@ fn validate_scenario_classifiers(
     }
     error_classes.insert(scenario.error_class.clone());
 
-    if scenario.classification == "pass" && scenario.error_class != "none" {
+    if scenario.classification.as_str().eq("pass") && scenario.error_class.as_str().ne("none") {
         errors.push(format!(
             "scenario {} pass classification must use error_class none",
             scenario.scenario_id
         ));
     }
-    if scenario.classification != "pass" && scenario.error_class != scenario.classification {
+    if scenario.classification.as_str().ne("pass")
+        && scenario
+            .error_class
+            .as_str()
+            .ne(scenario.classification.as_str())
+    {
         errors.push(format!(
             "scenario {} non-pass classification must match error_class",
             scenario.scenario_id
@@ -525,14 +542,16 @@ fn validate_process_control(
     }
 
     match scenario.lifecycle_event.as_str() {
-        "clean_unmount" if control.method != "fusermount_unmount" => {
+        "clean_unmount" if control.method.as_str().ne("fusermount_unmount") => {
             errors.push(format!(
                 "scenario {} clean_unmount must use fusermount_unmount",
                 scenario.scenario_id
             ));
         }
         "forced_unmount" => {
-            if control.method != "fusermount_lazy_unmount" || !control.forced_unmount_allowed {
+            if control.method.as_str().ne("fusermount_lazy_unmount")
+                || !control.forced_unmount_allowed
+            {
                 errors.push(format!(
                     "scenario {} forced_unmount must use allowed fusermount_lazy_unmount",
                     scenario.scenario_id
@@ -546,13 +565,13 @@ fn validate_process_control(
             }
         }
         "process_termination" => {
-            if control.method != "terminate_mount_daemon" {
+            if control.method.as_str().ne("terminate_mount_daemon") {
                 errors.push(format!(
                     "scenario {} process_termination must target mount daemon",
                     scenario.scenario_id
                 ));
             }
-            if control.signal == "none" {
+            if control.signal.as_str().eq("none") {
                 errors.push(format!(
                     "scenario {} process_termination requires SIGTERM or SIGKILL",
                     scenario.scenario_id
@@ -565,7 +584,7 @@ fn validate_process_control(
                 ));
             }
         }
-        "cleanup" if control.method != "cleanup_temp_mount" => {
+        "cleanup" if control.method.as_str().ne("cleanup_temp_mount") => {
             errors.push(format!(
                 "scenario {} cleanup must use cleanup_temp_mount",
                 scenario.scenario_id
@@ -597,7 +616,7 @@ fn validate_coverage(
             errors.push(format!("matrix missing pre-crash operation {required}"));
         }
     }
-    if partial_artifact_scenario_count == 0 {
+    if partial_artifact_scenario_count < 1 {
         errors.push("matrix missing partial-artifact preservation scenario".to_owned());
     }
 }
@@ -655,6 +674,9 @@ mod tests {
     #[test]
     fn default_matrix_validates_recovery_contract() {
         let report = validate_default_mounted_recovery_matrix().expect("default matrix validates");
+        let json = serde_json::to_string_pretty(&report).expect("report serializes");
+        insta::assert_snapshot!("mounted_recovery_matrix_report_json_shape", json);
+
         assert_eq!(report.bead_id, "bd-rchk0.3.3");
         assert_eq!(report.filesystems, vec!["btrfs", "ext4"]);
         for event in REQUIRED_LIFECYCLE_EVENTS {
@@ -689,7 +711,7 @@ mod tests {
         let scenario = matrix
             .scenarios
             .iter_mut()
-            .find(|scenario| scenario.lifecycle_event == "process_termination")
+            .find(|scenario| scenario.lifecycle_event.as_str().eq("process_termination"))
             .expect("process termination scenario exists");
         scenario.process_control.preserve_partial_artifacts = false;
         let report = validate_mounted_recovery_matrix(&matrix);

@@ -1,0 +1,45 @@
+---
+source: crates/ffs-harness/src/mounted_recovery_matrix.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "bead_id": "bd-rchk0.3.3",
+  "scenario_count": 10,
+  "filesystems": [
+    "btrfs",
+    "ext4"
+  ],
+  "lifecycle_events": [
+    "clean_unmount",
+    "cleanup",
+    "forced_unmount",
+    "fsync_dir_boundary",
+    "fsync_file_boundary",
+    "process_termination",
+    "reopen_verify"
+  ],
+  "classifications": [
+    "host_limitation",
+    "pass",
+    "unsupported_v1_scope"
+  ],
+  "error_classes": [
+    "host_limitation",
+    "none",
+    "unsupported_v1_scope"
+  ],
+  "cleanup_statuses": [
+    "clean",
+    "preserved_artifacts"
+  ],
+  "process_control_methods": [
+    "cleanup_temp_mount",
+    "fusermount_lazy_unmount",
+    "fusermount_unmount",
+    "none",
+    "terminate_mount_daemon"
+  ],
+  "valid": true,
+  "errors": []
+}
