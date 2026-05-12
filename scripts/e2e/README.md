@@ -158,6 +158,21 @@ All explicit IDs in the catalog must match:
 
 That enforces lowercase snake-case with at least three segments (domain + behavior + qualifier).
 
+Active scenario rows must define exactly one of:
+
+- `id` for a literal scenario emitted by the runner.
+- `id_pattern` for a bounded family of runner-emitted scenario IDs.
+
+Every active `id_pattern` must be anchored with `^` and `$`, must be valid Bash
+ERE, and must be compatible with `scenario_id_regex`. The validator derives a
+representative sample from supported pattern atoms (`[a-z0-9]`, `[a-z0-9_]`,
+`[0-9]`, plus literal lowercase/digit/underscore text and fixed counts like
+`{2}`), then requires that sample to match both the declared pattern and the
+canonical scenario ID regex. Literal anchored patterns such as
+`^v12_program_gate_1$` are checked as literal IDs. A verification-runner
+fail-closed fixture keeps malformed wildcard patterns, such as uppercase-only
+samples, from silently entering the catalog.
+
 ### Taxonomy
 
 | Category | Meaning |
