@@ -1568,11 +1568,14 @@ mod tests {
     }
 
     #[test]
-    fn mounted_write_matrix_report_json_shape() {
-        let report = validate_default_mounted_write_matrix().expect("default matrix validates");
-        let json = serde_json::to_string_pretty(&report).expect("mounted write report serializes");
+    fn mounted_write_matrix_report_json_shape() -> Result<()> {
+        let report = validate_default_mounted_write_matrix()?;
+        let json = serde_json::to_string_pretty(&report)?;
 
         insta::assert_snapshot!("mounted_write_matrix_report_json_shape", json);
+        let parsed: MountedWriteMatrixReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
     }
 
     #[test]
