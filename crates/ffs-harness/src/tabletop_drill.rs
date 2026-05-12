@@ -496,7 +496,8 @@ mod tests {
     fn drill_result_json_round_trips() {
         let root = repo_root();
         let results = execute_all_drills(&root);
-        let json = serde_json::to_string(&results).expect("serialize");
+        let json = serde_json::to_string_pretty(&results).expect("serialize");
+        insta::assert_snapshot!("drill_result_json_shape", json);
         let parsed: Vec<DrillResult> = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.len(), results.len());
         assert_eq!(parsed[0].drill_id, results[0].drill_id);

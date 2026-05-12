@@ -1,0 +1,138 @@
+---
+source: crates/ffs-harness/src/tabletop_drill.rs
+expression: json
+---
+[
+  {
+    "drill_id": "drill-replay-anomaly",
+    "title": "Mount failure due to WAL replay anomaly",
+    "checks": [
+      {
+        "drill_id": "drill-replay-anomaly",
+        "check": "runbook_exists",
+        "passed": true,
+        "detail": "Runbook found: docs/runbooks/replay-failure-triage.md"
+      },
+      {
+        "drill_id": "drill-replay-anomaly",
+        "check": "runbook_sections",
+        "passed": true,
+        "detail": "5/5 required sections found"
+      },
+      {
+        "drill_id": "drill-replay-anomaly",
+        "check": "error_codes",
+        "passed": true,
+        "detail": "2/2 error codes found"
+      },
+      {
+        "drill_id": "drill-replay-anomaly",
+        "check": "evidence_preset",
+        "passed": true,
+        "detail": "Preset 'replay-anomalies' found in evidence command"
+      },
+      {
+        "drill_id": "drill-replay-anomaly",
+        "check": "log_markers",
+        "passed": true,
+        "detail": "3/3 log markers found in sources"
+      },
+      {
+        "drill_id": "drill-replay-anomaly",
+        "check": "cli_commands_in_runbook",
+        "passed": true,
+        "detail": "2/2 CLI commands referenced in runbook"
+      }
+    ],
+    "passed": true,
+    "gaps": []
+  },
+  {
+    "drill_id": "drill-corruption-partial-repair",
+    "title": "Corruption detected with partial repair success",
+    "checks": [
+      {
+        "drill_id": "drill-corruption-partial-repair",
+        "check": "runbook_exists",
+        "passed": true,
+        "detail": "Runbook found: docs/runbooks/corruption-recovery.md"
+      },
+      {
+        "drill_id": "drill-corruption-partial-repair",
+        "check": "runbook_sections",
+        "passed": true,
+        "detail": "5/5 required sections found"
+      },
+      {
+        "drill_id": "drill-corruption-partial-repair",
+        "check": "error_codes",
+        "passed": true,
+        "detail": "3/3 error codes found"
+      },
+      {
+        "drill_id": "drill-corruption-partial-repair",
+        "check": "evidence_preset",
+        "passed": true,
+        "detail": "Preset 'repair-failures' found in evidence command"
+      },
+      {
+        "drill_id": "drill-corruption-partial-repair",
+        "check": "log_markers",
+        "passed": true,
+        "detail": "2/2 log markers found in sources"
+      },
+      {
+        "drill_id": "drill-corruption-partial-repair",
+        "check": "cli_commands_in_runbook",
+        "passed": true,
+        "detail": "2/2 CLI commands referenced in runbook"
+      }
+    ],
+    "passed": true,
+    "gaps": []
+  },
+  {
+    "drill_id": "drill-sustained-pressure",
+    "title": "Sustained pressure causing throttle/shed behavior",
+    "checks": [
+      {
+        "drill_id": "drill-sustained-pressure",
+        "check": "runbook_exists",
+        "passed": true,
+        "detail": "Runbook found: docs/runbooks/backpressure-investigation.md"
+      },
+      {
+        "drill_id": "drill-sustained-pressure",
+        "check": "runbook_sections",
+        "passed": true,
+        "detail": "5/5 required sections found"
+      },
+      {
+        "drill_id": "drill-sustained-pressure",
+        "check": "error_codes",
+        "passed": true,
+        "detail": "2/2 error codes found"
+      },
+      {
+        "drill_id": "drill-sustained-pressure",
+        "check": "evidence_preset",
+        "passed": true,
+        "detail": "Preset 'pressure-transitions' found in evidence command"
+      },
+      {
+        "drill_id": "drill-sustained-pressure",
+        "check": "log_markers",
+        "passed": true,
+        "detail": "2/2 log markers found in sources"
+      },
+      {
+        "drill_id": "drill-sustained-pressure",
+        "check": "cli_commands_in_runbook",
+        "passed": true,
+        "detail": "2/2 CLI commands referenced in runbook"
+      }
+    ],
+    "passed": true,
+    "gaps": []
+  }
+]
