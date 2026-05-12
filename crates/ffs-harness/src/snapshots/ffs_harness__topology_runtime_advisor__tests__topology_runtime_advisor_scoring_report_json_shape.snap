@@ -1,0 +1,62 @@
+---
+source: crates/ffs-harness/src/topology_runtime_advisor.rs
+expression: json
+---
+{
+  "operation_id": "topology-advisor-op-001",
+  "scenario_id": "topology-advisor-valid",
+  "valid": true,
+  "advisory_only": true,
+  "product_evidence_claim": "none",
+  "release_gate_effect": "advisory_only",
+  "release_claim_state": "not_product_evidence",
+  "recommendation": "managed",
+  "confidence_tier": "high",
+  "candidate_scores": [
+    {
+      "runtime_candidate": "managed",
+      "score": 85,
+      "confidence_tier": "high",
+      "rejection_reason": null,
+      "rationale": [
+        "hot-inode skew favors centralized backpressure",
+        "write-heavy fsync cadence favors managed scheduling"
+      ]
+    },
+    {
+      "runtime_candidate": "per_core",
+      "score": 50,
+      "confidence_tier": "high",
+      "rejection_reason": null,
+      "rationale": [
+        "CPU/RAM/NUMA floor can support per-core routing",
+        "queue depth can amortize per-core scheduling overhead",
+        "hot-inode skew risks per-core imbalance"
+      ]
+    },
+    {
+      "runtime_candidate": "standard",
+      "score": 45,
+      "confidence_tier": "high",
+      "rejection_reason": null,
+      "rationale": [
+        "low dirty-byte and queue pressure favor the baseline mode",
+        "writeback pressure needs explicit backpressure management"
+      ]
+    }
+  ],
+  "rejected_candidates": 0,
+  "loss_risk_ledger": [
+    {
+      "signal": "hot_inode_imbalance",
+      "expected_loss": 70,
+      "rationale": "per-core sharding risks routing most work to one hot inode shard"
+    },
+    {
+      "signal": "writeback_backpressure",
+      "expected_loss": 65,
+      "rationale": "dirty-byte pressure and fsync cadence require explicit backpressure thresholds"
+    }
+  ],
+  "errors": []
+}

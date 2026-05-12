@@ -1408,6 +1408,21 @@ mod tests {
         assert!(json.contains("\"product_evidence_claim\": \"none\""));
     }
 
+    #[test]
+    fn topology_runtime_advisor_report_json_shape() -> Result<()> {
+        let manifest = fixture_manifest();
+        let report = validate_fixture(&manifest);
+
+        assert!(report.valid, "{:?}", report.errors);
+        assert!(report.advisory_only);
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("topology_runtime_advisor_report_json_shape", json);
+        let parsed: TopologyRuntimeAdvisorReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
     /// bd-rchk0.212.7 - exact-output snapshot for the primary topology
     /// runtime advisor markdown consumed by operator handoffs.
     ///
@@ -1618,6 +1633,22 @@ mod tests {
             "render_topology_runtime_advisor_score_markdown_fixture",
             markdown
         );
+    }
+
+    #[test]
+    fn topology_runtime_advisor_scoring_report_json_shape() -> Result<()> {
+        let manifest = fixture_manifest();
+        let report = score_fixture(&manifest);
+
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.recommendation.as_deref(), Some("managed"));
+        assert!(report.advisory_only);
+
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("topology_runtime_advisor_scoring_report_json_shape", json);
+        let parsed: TopologyRuntimeAdvisorScoringReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
     }
 
     #[test]

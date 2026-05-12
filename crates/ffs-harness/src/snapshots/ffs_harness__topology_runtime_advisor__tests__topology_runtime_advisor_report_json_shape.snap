@@ -1,0 +1,29 @@
+---
+source: crates/ffs-harness/src/topology_runtime_advisor.rs
+expression: json
+---
+{
+  "manifest_version": 1,
+  "operation_id": "topology-advisor-op-001",
+  "scenario_id": "topology-advisor-valid",
+  "valid": true,
+  "outcome": "pass",
+  "advisory_only": true,
+  "product_evidence_claim": "none",
+  "release_gate_effect": "advisory_only",
+  "manifest_path": "artifacts/topology-advisor/manifest.json",
+  "artifact_root": "artifacts/topology-advisor",
+  "source_bead": "bd-rchk0.212.1",
+  "real_campaign_bead": "bd-rchk0.53.8",
+  "host_classification": "large_host_floor_met",
+  "fuse_capability_state": "available",
+  "workload_count": 2,
+  "runtime_candidate_count": 3,
+  "artifact_count": 3,
+  "stdout_path": "artifacts/topology-advisor/stdout.log",
+  "stderr_path": "artifacts/topology-advisor/stderr.log",
+  "structured_log_path": "artifacts/topology-advisor/structured.jsonl",
+  "error_class": null,
+  "issues": [],
+  "errors": []
+}
