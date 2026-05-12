@@ -379,11 +379,15 @@ mod tests {
     }
 
     #[test]
-    fn canonical_drills_json_shape() {
+    fn canonical_drills_json_shape() -> Result<(), serde_json::Error> {
         let drills = canonical_drills();
-        let json = serde_json::to_string_pretty(&drills).expect("serialize");
+        let json = serde_json::to_string_pretty(&drills)?;
 
         insta::assert_snapshot!("canonical_drills_json_shape", json);
+
+        let parsed: Vec<DrillScenario> = serde_json::from_str(&json)?;
+        assert_eq!(parsed, drills);
+        Ok(())
     }
 
     #[test]
@@ -493,14 +497,14 @@ mod tests {
     }
 
     #[test]
-    fn drill_result_json_round_trips() {
+    fn drill_result_json_round_trips() -> Result<(), serde_json::Error> {
         let root = repo_root();
         let results = execute_all_drills(&root);
-        let json = serde_json::to_string_pretty(&results).expect("serialize");
+        let json = serde_json::to_string_pretty(&results)?;
         insta::assert_snapshot!("drill_result_json_shape", json);
-        let parsed: Vec<DrillResult> = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(parsed.len(), results.len());
-        assert_eq!(parsed[0].drill_id, results[0].drill_id);
+        let parsed: Vec<DrillResult> = serde_json::from_str(&json)?;
+        assert_eq!(parsed, results);
+        Ok(())
     }
 
     #[test]
