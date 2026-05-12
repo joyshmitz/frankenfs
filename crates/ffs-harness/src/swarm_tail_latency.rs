@@ -1031,6 +1031,19 @@ mod tests {
     }
 
     #[test]
+    fn swarm_tail_latency_report_json_shape() -> Result<()> {
+        let ledger = load_swarm_tail_latency_ledger(Path::new(&workspace_path(
+            DEFAULT_SWARM_TAIL_LATENCY_LEDGER,
+        )))?;
+        let report = validate_swarm_tail_latency_ledger(&ledger);
+        let json = serde_json::to_string_pretty(&report)?;
+        insta::assert_snapshot!("swarm_tail_latency_report_json_shape", json);
+        let parsed: SwarmTailLatencyReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn missing_component_is_rejected() {
         let mut ledger = fixture_ledger();
         ledger.rows[0]
