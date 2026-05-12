@@ -7,7 +7,7 @@
 //! inventory while forcing docs, proof bundles, and release gates to consume a
 //! feature state with evidence, freshness, wording, and ownership metadata.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -448,7 +448,8 @@ const SUPPORT_ROW_TEMPLATES: [SupportRowTemplate; 13] = [
         artifact_freshness: "fresh authoritative gate required before stronger docs wording",
         gate_consumer: "release-gates:bd-rchk0.5.6.1",
         docs_wording_id: "support.readonly-inspection.validated",
-        rationale: "validated read-only inspection may be claimed without mutating-readiness wording",
+        rationale:
+            "validated read-only inspection may be claimed without mutating-readiness wording",
         owner_bead: "bd-mpcse",
         docs_target: "FEATURE_PARITY.md",
         release_gate_effect: "allows validated read-only wording only",
@@ -509,7 +510,8 @@ const SUPPORT_ROW_TEMPLATES: [SupportRowTemplate; 13] = [
         legacy_count_bucket: "100_percent_v1_bucket",
         support_state: "experimental",
         evidence_lane: "mounted write matrix and crash/replay proof lanes",
-        artifact_freshness: "fresh mounted matrix plus crash evidence required before support upgrade",
+        artifact_freshness:
+            "fresh mounted matrix plus crash evidence required before support upgrade",
         gate_consumer: "release-gates:bd-rchk0.5.6.1",
         docs_wording_id: "support.mounted-writes.experimental",
         rationale: "write-path claims remain operator-caution until all gate lanes agree",
@@ -541,7 +543,8 @@ const SUPPORT_ROW_TEMPLATES: [SupportRowTemplate; 13] = [
         legacy_count_bucket: "100_percent_v1_bucket",
         support_state: "disabled",
         evidence_lane: "negative-option audit and runtime kill-switch gate",
-        artifact_freshness: "fresh negative and positive ordering oracle required before support upgrade",
+        artifact_freshness:
+            "fresh negative and positive ordering oracle required before support upgrade",
         gate_consumer: "release-gates:bd-rchk0.5.6.1",
         docs_wording_id: "support.writeback-cache.disabled",
         rationale: "writeback-cache opt-in is owned by bd-rchk0.2.1.1 and bd-4nobd",
@@ -1110,14 +1113,17 @@ mod tests {
     }
 
     #[test]
-    fn support_state_accounting_report_json_shape() {
+    fn support_state_accounting_report_json_shape() -> Result<()> {
         let report = analyze_support_state_accounting(
             &fixture_issues(),
             &feature_parity_fixture(),
             &[DEFAULT_ARTIFACT_PATH.to_owned()],
         );
-        let json = serde_json::to_string_pretty(&report).expect("support-state report serializes");
+        let json = serde_json::to_string_pretty(&report)?;
 
         insta::assert_snapshot!("support_state_accounting_report_json_shape", json);
+        let parsed: SupportStateAccountingReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
     }
 }
