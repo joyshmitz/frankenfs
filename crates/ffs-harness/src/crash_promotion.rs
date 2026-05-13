@@ -86,12 +86,11 @@ fn source_fuzz_targets(repo_root: &Path) -> Vec<String> {
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let path = entry.path();
-            (path.extension().is_some_and(|ext| ext == "rs")).then(|| {
-                path.file_stem()
-                    .expect("fuzz target source files must have a file stem")
-                    .to_string_lossy()
-                    .into_owned()
-            })
+            if path.extension().is_none_or(|ext| ext != "rs") {
+                return None;
+            }
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
         })
         .collect::<Vec<_>>();
     targets.sort();
@@ -277,19 +276,20 @@ pub fn generate_regression_test_source(case: &RegressionCase) -> String {
 /// - Minimized: `{minimized}`
 /// - Corpus seed: `{corpus_seed}`
 #[test]
-fn {test_name}() {{
+fn {test_name}() -> std::io::Result<()> {{
     let seed = std::fs::read(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("{seed_path}")
-    ).expect("regression seed must exist");
+    )?;
 
-    // Feed to the same parser as the fuzz target — must not panic.
+    // Feed to the same parser as the fuzz target; parsing failures are acceptable.
     let _ = ffs_ondisk::Ext4Superblock::parse_superblock_region(&seed);
     let _ = ffs_ondisk::Ext4Inode::parse_from_bytes(&seed);
     let _ = ffs_ondisk::Ext4GroupDesc::parse_from_bytes(&seed, 32);
     let _ = ffs_ondisk::Ext4GroupDesc::parse_from_bytes(&seed, 64);
     let _ = ffs_ondisk::parse_dir_block(&seed, 4096);
     let _ = ffs_ondisk::BtrfsSuperblock::parse_superblock_region(&seed);
+    Ok(())
 }}
 "#,
         target = tag.target,
@@ -422,16 +422,18 @@ pub struct PipelineCheck {
 mod tests {
     use super::*;
 
-    fn repo_root() -> String {
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    fn repo_root() -> std::io::Result<String> {
         env!("CARGO_MANIFEST_DIR")
             .strip_suffix("/crates/ffs-harness")
-            .expect("harness must be in crates/ffs-harness")
-            .to_owned()
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| std::io::Error::other("harness must be in crates/ffs-harness"))
     }
 
     #[test]
-    fn manifest_targets_match_source_files() {
-        let root = repo_root();
+    fn manifest_targets_match_source_files() -> TestResult {
+        let root = repo_root()?;
         let targets = manifest_fuzz_targets(Path::new(&root));
         assert!(
             !targets.is_empty(),
@@ -444,11 +446,12 @@ mod tests {
                 "fuzz target {target}.rs not found at {path}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn corpus_directories_exist() {
-        let root = repo_root();
+    fn corpus_directories_exist() -> TestResult {
+        let root = repo_root()?;
         let targets = manifest_fuzz_targets(Path::new(&root));
         for target in &targets {
             let path = format!("{root}/fuzz/corpus/{target}");
@@ -457,11 +460,12 @@ mod tests {
                 "corpus dir for {target} not found at {path}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn pipeline_validation_passes() {
-        let root = repo_root();
+    fn pipeline_validation_passes() -> TestResult {
+        let root = repo_root()?;
         let checks = validate_pipeline(&root);
         for check in &checks {
             assert!(
@@ -470,6 +474,7 @@ mod tests {
                 check.component, check.detail
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -611,29 +616,29 @@ mod tests {
     }
 
     #[test]
-    fn adversarial_corpus_exists_and_has_samples() {
-        let root = repo_root();
+    fn adversarial_corpus_exists_and_has_samples() -> TestResult {
+        let root = repo_root()?;
         let corpus_dir = format!("{root}/tests/fuzz_corpus");
         assert!(
             Path::new(&corpus_dir).is_dir(),
             "adversarial corpus dir missing"
         );
-        let count = std::fs::read_dir(&corpus_dir)
-            .expect("read fuzz_corpus dir")
+        let count = std::fs::read_dir(&corpus_dir)?
             .filter(|e| e.as_ref().is_ok_and(|e| e.path().is_file()))
             .count();
         assert!(
             count >= 10,
             "adversarial corpus should have >= 10 samples, got {count}"
         );
+        Ok(())
     }
 
     #[test]
-    fn dictionaries_have_tokens() {
-        let root = repo_root();
+    fn dictionaries_have_tokens() -> TestResult {
+        let root = repo_root()?;
         for dict in ["ext4.dict", "btrfs.dict"] {
             let path = format!("{root}/fuzz/dictionaries/{dict}");
-            let content = std::fs::read_to_string(&path).expect("read dictionary");
+            let content = std::fs::read_to_string(&path)?;
             let token_count = content
                 .lines()
                 .filter(|l| !l.is_empty() && !l.starts_with('#'))
@@ -643,6 +648,7 @@ mod tests {
                 "{dict} should have >= 5 tokens, got {token_count}"
             );
         }
+        Ok(())
     }
 
     #[test]
