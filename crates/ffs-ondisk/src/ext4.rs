@@ -12477,6 +12477,27 @@ mod tests {
             let _ = Ext4Superblock::parse_from_image(&image);
         }
 
+        // bd-vvkfy — Determinism MR for Ext4Superblock::parse_from_image.
+        // parse_from_image is the image-level mount entry point: it
+        // seeks to EXT4_SUPERBLOCK_OFFSET (1024) and parses the
+        // superblock region. Sister parse_superblock_region (slice-
+        // level entry) has its own determinism MR via bd-3fkbj;
+        // this pins the image-level wrapper. A regression that
+        // introduced HashMap iteration, allocator-address dependence,
+        // or any non-deterministic mount-time bootstrap state would
+        // surface here.
+        #[test]
+        fn ext4_proptest_parse_from_image_determinism(
+            image in proptest::collection::vec(
+                any::<u8>(),
+                0..=(EXT4_SUPERBLOCK_OFFSET + EXT4_SUPERBLOCK_SIZE + 256),
+            ),
+        ) {
+            let a = Ext4Superblock::parse_from_image(&image);
+            let b = Ext4Superblock::parse_from_image(&image);
+            prop_assert_eq!(a, b);
+        }
+
         #[test]
         fn ext4_proptest_parse_extent_tree_no_panic(
             block in proptest::collection::vec(any::<u8>(), 0..=4096),

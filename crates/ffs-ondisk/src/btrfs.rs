@@ -3528,6 +3528,26 @@ mod tests {
             let _ = BtrfsSuperblock::parse_from_image(&image);
         }
 
+        // bd-vvkfy — Determinism MR for BtrfsSuperblock::parse_from_image.
+        // parse_from_image is the image-level mount entry point: it
+        // seeks to BTRFS_SUPER_INFO_OFFSET (65536) and parses the
+        // superblock region. Sister parse_superblock_region (slice-
+        // level entry) has its own determinism MR via bd-hlrcn; this
+        // pins the image-level wrapper. A regression that introduced
+        // non-deterministic mount-time bootstrap state would surface
+        // here.
+        #[test]
+        fn btrfs_proptest_parse_from_image_determinism(
+            image in proptest::collection::vec(
+                any::<u8>(),
+                0..=(BTRFS_SUPER_INFO_OFFSET + BTRFS_SUPER_INFO_SIZE + 256),
+            ),
+        ) {
+            let a = BtrfsSuperblock::parse_from_image(&image);
+            let b = BtrfsSuperblock::parse_from_image(&image);
+            prop_assert_eq!(a, b);
+        }
+
         #[test]
         fn btrfs_proptest_parse_sys_chunk_array_no_panic(
             data in proptest::collection::vec(any::<u8>(), 0..=BTRFS_SYS_CHUNK_ARRAY_MAX),
