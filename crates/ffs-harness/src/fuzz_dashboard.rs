@@ -436,12 +436,45 @@ mod tests {
         }
     }
 
-    fn sample_campaign_with_crashes() -> CampaignSummary {
+    fn sample_campaign_with_crashes() -> Result<CampaignSummary, String> {
         let mut c = sample_campaign();
-        c.targets[0].crash_count = 2;
-        c.targets[0].exit_code = 77;
+        let ext4 = target_mut(&mut c, "fuzz_ext4_metadata")?;
+        ext4.crash_count = 2;
+        ext4.exit_code = 77;
         c.totals.total_crashes = 2;
-        c
+        Ok(c)
+    }
+
+    fn target<'a>(summary: &'a CampaignSummary, target: &str) -> Result<&'a TargetResult, String> {
+        summary
+            .targets
+            .iter()
+            .find(|result| result.target == target)
+            .ok_or_else(|| format!("missing {target} target"))
+    }
+
+    fn target_mut<'a>(
+        summary: &'a mut CampaignSummary,
+        target: &str,
+    ) -> Result<&'a mut TargetResult, String> {
+        summary
+            .targets
+            .iter_mut()
+            .find(|result| result.target == target)
+            .ok_or_else(|| format!("missing {target} target"))
+    }
+
+    fn first_alert(alerts: &[RegressionAlert]) -> Result<&RegressionAlert, String> {
+        alerts
+            .first()
+            .ok_or_else(|| "missing regression alert".to_owned())
+    }
+
+    fn parse_campaign_summary_error(json: &str) -> Result<String, String> {
+        match parse_campaign_summary(json) {
+            Ok(_) => Err("campaign summary unexpectedly parsed".to_owned()),
+            Err(err) => Ok(err),
+        }
     }
 
     #[test]
@@ -489,7 +522,7 @@ mod tests {
 
     #[test]
     fn assess_health_detects_crashes() -> Result<(), String> {
-        let summary = sample_campaign_with_crashes();
+        let summary = sample_campaign_with_crashes()?;
         let reports = assess_campaign_health(&summary);
         let ext4 = reports
             .iter()
@@ -503,8 +536,9 @@ mod tests {
     #[test]
     fn assess_health_detects_stagnant() -> Result<(), String> {
         let mut summary = sample_campaign();
-        summary.targets[3].new_inputs = 0;
-        summary.targets[3].coverage = 0;
+        let xattr = target_mut(&mut summary, "fuzz_ext4_xattr")?;
+        xattr.new_inputs = 0;
+        xattr.coverage = 0;
         let reports = assess_campaign_health(&summary);
         let xattr = reports
             .iter()
@@ -517,7 +551,7 @@ mod tests {
     #[test]
     fn assess_health_detects_error() -> Result<(), String> {
         let mut summary = sample_campaign();
-        summary.targets[1].exit_code = 1;
+        target_mut(&mut summary, "fuzz_btrfs_metadata")?.exit_code = 1;
         let reports = assess_campaign_health(&summary);
         let btrfs = reports
             .iter()
@@ -528,27 +562,29 @@ mod tests {
     }
 
     #[test]
-    fn detect_regressions_no_alerts_for_improvement() {
+    fn detect_regressions_no_alerts_for_improvement() -> Result<(), String> {
         let baseline = sample_campaign();
         let mut current = sample_campaign();
         // Improve throughput
-        current.targets[0].total_runs = 60_000;
+        target_mut(&mut current, "fuzz_ext4_metadata")?.total_runs = 60_000;
         let alerts = detect_regressions(&baseline, &current);
         assert!(alerts.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn detect_regressions_throughput_drop() {
+    fn detect_regressions_throughput_drop() -> Result<(), String> {
         let baseline = sample_campaign();
         let mut current = sample_campaign();
         // Drop throughput by 60% (below 50% threshold)
-        current.targets[0].total_runs = 12_000;
+        target_mut(&mut current, "fuzz_ext4_metadata")?.total_runs = 12_000;
         let alerts = detect_regressions(&baseline, &current);
         assert!(!alerts.is_empty());
-        let alert = &alerts[0];
+        let alert = first_alert(&alerts)?;
         assert_eq!(alert.target, "fuzz_ext4_metadata");
         assert_eq!(alert.metric, "execs_per_sec");
         assert_eq!(alert.severity, AlertSeverity::Warning);
+        Ok(())
     }
 
     #[test]
@@ -556,7 +592,7 @@ mod tests {
         let baseline = sample_campaign();
         let mut current = sample_campaign();
         // Drop coverage by 30% (below 20% threshold)
-        current.targets[2].coverage = 1200;
+        target_mut(&mut current, "fuzz_ext4_dir_extent")?.coverage = 1200;
         let alerts = detect_regressions(&baseline, &current);
         let cov_alert = alerts.iter().find(|a| a.metric == "coverage");
         let cov_alert = cov_alert.ok_or_else(|| "missing coverage alert".to_owned())?;
@@ -633,7 +669,7 @@ mod tests {
         let parsed = parse_campaign_summary(json)?;
         assert_eq!(parsed.config.target_count, 2);
         assert_eq!(parsed.totals.total_runs, 3000);
-        assert_eq!(parsed.targets[1].crash_count, 1);
+        assert_eq!(target(&parsed, "fuzz_btrfs_metadata")?.crash_count, 1);
         Ok(())
     }
 
@@ -644,27 +680,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_campaign_summary_rejects_target_count_drift() -> Result<(), serde_json::Error> {
+    fn parse_campaign_summary_rejects_target_count_drift() -> Result<(), String> {
         let mut summary = sample_campaign();
         summary.config.target_count = 99;
-        let json = serde_json::to_string(&summary)?;
-        let result = parse_campaign_summary(&json);
-        assert!(
-            result
-                .unwrap_err()
-                .contains("config.target_count 99 does not match 4 target row"),
-        );
+        let json = serde_json::to_string(&summary).map_err(|err| err.to_string())?;
+        let err = parse_campaign_summary_error(&json)?;
+        assert!(err.contains("config.target_count 99 does not match 4 target row"));
         Ok(())
     }
 
     #[test]
-    fn parse_campaign_summary_rejects_totals_drift() -> Result<(), serde_json::Error> {
+    fn parse_campaign_summary_rejects_totals_drift() -> Result<(), String> {
         let mut summary = sample_campaign();
         summary.totals.total_runs += 1;
         summary.totals.total_coverage += 1;
         summary.totals.total_crashes += 1;
-        let json = serde_json::to_string(&summary)?;
-        let err = parse_campaign_summary(&json).unwrap_err();
+        let json = serde_json::to_string(&summary).map_err(|err| err.to_string())?;
+        let err = parse_campaign_summary_error(&json)?;
         assert!(err.contains("totals.total_runs"));
         assert!(err.contains("totals.total_coverage"));
         assert!(err.contains("totals.total_crashes"));
@@ -672,9 +704,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_campaign_summary_rejects_duplicate_targets() {
+    fn validate_campaign_summary_rejects_duplicate_targets() -> Result<(), String> {
         let mut summary = sample_campaign();
-        summary.targets[1].target = summary.targets[0].target.clone();
+        let duplicate_target = target(&summary, "fuzz_ext4_metadata")?.target.clone();
+        target_mut(&mut summary, "fuzz_btrfs_metadata")?.target = duplicate_target;
         let errors = validate_campaign_summary(&summary);
         assert!(
             errors
@@ -682,6 +715,7 @@ mod tests {
                 .any(|error| error.contains("duplicate target row fuzz_ext4_metadata")),
             "expected duplicate target error, got {errors:?}",
         );
+        Ok(())
     }
 
     #[test]
