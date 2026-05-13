@@ -1688,12 +1688,11 @@ mod tests {
     }
 
     #[test]
-    fn fixtures_round_trip_with_stable_json() {
+    fn fixtures_round_trip_with_stable_json() -> serde_json::Result<()> {
         let fixture_set = default_readiness_action_autopilot_fixture_set();
-        let first = serde_json::to_string_pretty(&fixture_set).expect("serialize fixtures");
-        let reparsed: ReadinessActionAutopilotFixtureSet =
-            serde_json::from_str(&first).expect("parse fixtures");
-        let second = serde_json::to_string_pretty(&reparsed).expect("serialize reparsed fixtures");
+        let first = serde_json::to_string_pretty(&fixture_set)?;
+        let reparsed: ReadinessActionAutopilotFixtureSet = serde_json::from_str(&first)?;
+        let second = serde_json::to_string_pretty(&reparsed)?;
 
         assert_eq!(fixture_set, reparsed);
         assert_eq!(first, second);
@@ -1702,6 +1701,7 @@ mod tests {
                 "\"fixture_set_id\": \"frankenfs_readiness_action_autopilot_fixtures_v1\""
             )
         );
+        Ok(())
     }
 
     #[test]
@@ -2095,14 +2095,15 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_json_report_matches_golden() {
+    fn dry_run_json_report_matches_golden() -> serde_json::Result<()> {
         let report = build_readiness_action_dry_run_report(
             &planning_input(default_source_reports(), Vec::new()),
             dry_run_metadata(),
         );
-        let json = serde_json::to_string_pretty(&report).expect("serialize dry-run report");
+        let json = serde_json::to_string_pretty(&report)?;
 
         insta::assert_snapshot!("readiness_action_dry_run_json_report", json);
+        Ok(())
     }
 
     #[test]
@@ -2117,19 +2118,19 @@ mod tests {
     }
 
     #[test]
-    fn planner_output_is_stable_when_source_report_order_changes() {
+    fn planner_output_is_stable_when_source_report_order_changes() -> serde_json::Result<()> {
         let mut reversed_reports = default_source_reports();
         reversed_reports.reverse();
 
         let normal = plan_readiness_actions(&planning_input(default_source_reports(), Vec::new()));
         let reversed = plan_readiness_actions(&planning_input(reversed_reports, Vec::new()));
-        let normal_json = serde_json::to_string_pretty(&normal).expect("serialize normal plan");
-        let reversed_json =
-            serde_json::to_string_pretty(&reversed).expect("serialize reversed plan");
+        let normal_json = serde_json::to_string_pretty(&normal)?;
+        let reversed_json = serde_json::to_string_pretty(&reversed)?;
 
         assert_eq!(normal, reversed);
         assert_eq!(normal_json, reversed_json);
         insta::assert_snapshot!("readiness_action_planner_result_order_stable", normal_json);
+        Ok(())
     }
 
     #[test]
