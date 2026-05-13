@@ -12522,6 +12522,41 @@ mod tests {
         assert!(matches!(err, ffs_types::ParseError::InvalidField { .. }));
     }
 
+    /// bd-wmkq1 — Kernel-conformance pin for BTRFS_SEND_STREAM_MAGIC
+    /// and BTRFS_SEND_STREAM_VERSION per fs/btrfs/send.h. Per the
+    /// kernel header:
+    ///   #define BTRFS_SEND_STREAM_MAGIC "btrfs-stream"
+    ///   #define BTRFS_SEND_STREAM_MAGIC_LEN 13
+    ///   #define BTRFS_SEND_STREAM_VERSION 1
+    /// These are read by parse_send_stream at the head of every
+    /// btrfs-send/receive stream. A regression that drifted either
+    /// value would silently reject all valid send streams (or accept
+    /// malformed ones with a different magic).
+    ///
+    /// Sister pins: bd-q5dpf (tree objectids), bd-f0q7n (item-key
+    /// types).
+    #[test]
+    fn btrfs_send_stream_constants_match_send_h() {
+        // 13-byte "btrfs-stream\0" magic (12 chars + null).
+        assert_eq!(
+            BTRFS_SEND_STREAM_MAGIC.len(),
+            13,
+            "BTRFS_SEND_STREAM_MAGIC must be 13 bytes (12 chars + null)"
+        );
+        assert_eq!(
+            BTRFS_SEND_STREAM_MAGIC,
+            b"btrfs-stream\0",
+            "BTRFS_SEND_STREAM_MAGIC bytes must equal kernel magic 'btrfs-stream\\0'"
+        );
+        // Stream version v1 — has been v1 since send/receive was
+        // introduced; if a v2 stream appears, parse_send_stream will
+        // need updating.
+        assert_eq!(
+            BTRFS_SEND_STREAM_VERSION, 1,
+            "BTRFS_SEND_STREAM_VERSION must equal kernel value 1"
+        );
+    }
+
     /// bd-q5dpf — Kernel-conformance pin for the 11 BTRFS_*_TREE_OBJECTID
     /// constants + BTRFS_FIRST_FREE_OBJECTID per fs/btrfs/btrfs_tree.h.
     /// These identify every btree in btrfs (root, extent, chunk, dev,
