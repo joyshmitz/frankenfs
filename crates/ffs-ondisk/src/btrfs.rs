@@ -2402,6 +2402,115 @@ mod tests {
     /// (parse_inode_item), bd-xbqdw (parse_root_item), bd-kelr0
     /// (parse_inode_refs), bd-m9u35 (parse_root_ref), bd-swwp0
     /// (parse_extent_data).
+    /// bd-usqb3 — Kernel-conformance pin for parse_chunk_header field
+    /// offsets per fs/btrfs/btrfs_tree.h (struct btrfs_chunk, 48-byte
+    /// fixed header). Each of 9 fields is stamped with a UNIQUE
+    /// non-zero magic at its canonical kernel offset, then a single
+    /// parse_sys_chunk_array call must round-trip every field. The
+    /// 48-byte chunk header is read on every mount/probe of every
+    /// multi-device btrfs filesystem (via parse_sys_chunk_array) and
+    /// on every walk_chunk_tree descent (via parse_chunk_item, which
+    /// shares parse_chunk_header). A regression that drifted any
+    /// offset would mis-route chunk_type-vs-io_align silently.
+    ///
+    /// Sister pins: bd-latwe (BtrfsHeader), bd-na4cc (BtrfsDevItem),
+    /// bd-ormcf (BtrfsSuperblock), bd-2zmia (slot layouts), bd-h117q
+    /// (size constants).
+    #[test]
+    fn parse_chunk_header_kernel_offsets_match_btrfs_tree_h() {
+        // sys_chunk_array entry layout: btrfs_disk_key (17) +
+        // btrfs_chunk_fixed (48) + 1 btrfs_stripe (32) = 97 bytes.
+        let mut data = vec![0_u8; 17 + 48 + 32];
+
+        // Distinct non-zero magics. Constraints from parser:
+        //   key.objectid == BTRFS_FIRST_CHUNK_TREE_OBJECTID (256)
+        //   key.item_type == BTRFS_CHUNK_ITEM_KEY (228)
+        //   chunk_type RAID-bits.count_ones() <= 1 (use 0 RAID bits)
+        //   length, stripe_len, num_stripes != 0
+        //   stripe.devid != 0
+        let length = 0x0010_0000_u64; // 1 MiB chunk
+        let owner = 0x8888_8888_8888_8888_u64;
+        let stripe_len = 0x0001_0000_u64; // 64 KiB
+        // chunk_type = DATA (single-device, no RAID bits) so
+        // RAID_MASK & chunk_type == 0 (passes count_ones <= 1).
+        let chunk_type = chunk_type_flags::BTRFS_BLOCK_GROUP_DATA;
+        let io_align: u32 = 0x2020_2020;
+        let io_width: u32 = 0x2424_2424;
+        let sector_size: u32 = 0x2828_2828;
+        let num_stripes: u16 = 1; // must match the trailing stripe count
+        let sub_stripes: u16 = 0x2E2E;
+
+        // disk_key @ 0..17
+        data[0..8].copy_from_slice(&BTRFS_FIRST_CHUNK_TREE_OBJECTID.to_le_bytes());
+        data[8] = BTRFS_CHUNK_ITEM_KEY;
+        data[9..17].copy_from_slice(&0x0000_0000_0000_0010_u64.to_le_bytes());
+
+        // chunk_header @ 17..65 (= 17 + 48)
+        let base = 17;
+        data[base..base + 8].copy_from_slice(&length.to_le_bytes());
+        data[base + 8..base + 16].copy_from_slice(&owner.to_le_bytes());
+        data[base + 16..base + 24].copy_from_slice(&stripe_len.to_le_bytes());
+        data[base + 24..base + 32].copy_from_slice(&chunk_type.to_le_bytes());
+        data[base + 32..base + 36].copy_from_slice(&io_align.to_le_bytes());
+        data[base + 36..base + 40].copy_from_slice(&io_width.to_le_bytes());
+        data[base + 40..base + 44].copy_from_slice(&sector_size.to_le_bytes());
+        data[base + 44..base + 46].copy_from_slice(&num_stripes.to_le_bytes());
+        data[base + 46..base + 48].copy_from_slice(&sub_stripes.to_le_bytes());
+
+        // stripe @ 65..97: devid u64 + offset u64 + dev_uuid[16]
+        let stripe_devid = 0x4141_4141_4141_4141_u64;
+        let stripe_offset = 0x4949_4949_4949_4949_u64;
+        let mut stripe_uuid = [0_u8; 16];
+        stripe_uuid[0] = 0x51;
+        stripe_uuid[15] = 0x60;
+        let s_base = base + 48;
+        data[s_base..s_base + 8].copy_from_slice(&stripe_devid.to_le_bytes());
+        data[s_base + 8..s_base + 16].copy_from_slice(&stripe_offset.to_le_bytes());
+        data[s_base + 16..s_base + 32].copy_from_slice(&stripe_uuid);
+
+        let entries = parse_sys_chunk_array(&data).expect("kernel-stamped chunk must parse");
+        assert_eq!(entries.len(), 1, "exactly one chunk entry");
+
+        let entry = &entries[0];
+        // chunk_header fields.
+        assert_eq!(entry.length, length, "length @ chunk_base+0");
+        assert_eq!(entry.owner, owner, "owner @ chunk_base+8");
+        assert_eq!(entry.stripe_len, stripe_len, "stripe_len @ chunk_base+16");
+        assert_eq!(entry.chunk_type, chunk_type, "chunk_type @ chunk_base+24");
+        assert_eq!(entry.io_align, io_align, "io_align @ chunk_base+32");
+        assert_eq!(entry.io_width, io_width, "io_width @ chunk_base+36");
+        assert_eq!(
+            entry.sector_size, sector_size,
+            "sector_size @ chunk_base+40"
+        );
+        assert_eq!(
+            entry.num_stripes, num_stripes,
+            "num_stripes @ chunk_base+44"
+        );
+        assert_eq!(
+            entry.sub_stripes, sub_stripes,
+            "sub_stripes @ chunk_base+46"
+        );
+        // Embedded stripe fields.
+        assert_eq!(entry.stripes.len(), 1);
+        assert_eq!(
+            entry.stripes[0].devid, stripe_devid,
+            "stripe.devid @ stripe_base+0"
+        );
+        assert_eq!(
+            entry.stripes[0].offset, stripe_offset,
+            "stripe.offset @ stripe_base+8"
+        );
+        assert_eq!(
+            entry.stripes[0].dev_uuid, stripe_uuid,
+            "stripe.dev_uuid @ stripe_base+16..32"
+        );
+        // Size-arithmetic checks: BTRFS_CHUNK_FIXED_SIZE = 48,
+        // BTRFS_STRIPE_SIZE = 32, sum + disk_key (17) = 97 bytes.
+        assert_eq!(BTRFS_CHUNK_FIXED_SIZE, 48);
+        assert_eq!(BTRFS_STRIPE_SIZE, 32);
+    }
+
     #[test]
     fn parse_internal_items_kernel_slot_offsets_match_ctree_h() {
         // 4096-byte block, 1 slot, level=1 (internal node).
