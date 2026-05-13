@@ -143,7 +143,9 @@ impl HistogramState {
     fn observe(&self, value: u64) {
         // Find the first bucket whose bound >= value
         let idx = self.bounds.partition_point(|&b| b < value);
-        saturating_fetch_add_u64(&self.counts[idx], 1);
+        if let Some(count) = self.counts.get(idx) {
+            saturating_fetch_add_u64(count, 1);
+        }
         saturating_fetch_add_u64(&self.sum, value);
         saturating_fetch_add_u64(&self.total, 1);
     }
@@ -152,13 +154,16 @@ impl HistogramState {
         let buckets: Vec<BucketSnapshot> = self
             .bounds
             .iter()
-            .enumerate()
-            .map(|(i, &bound)| BucketSnapshot {
+            .zip(self.counts.iter())
+            .map(|(&bound, count)| BucketSnapshot {
                 le: bound,
-                count: self.counts[i].load(Ordering::Relaxed),
+                count: count.load(Ordering::Relaxed),
             })
             .collect();
-        let inf_count = self.counts[self.bounds.len()].load(Ordering::Relaxed);
+        let inf_count = self
+            .counts
+            .get(self.bounds.len())
+            .map_or(0, |count| count.load(Ordering::Relaxed));
 
         HistogramSnapshot {
             buckets,
@@ -494,17 +499,27 @@ mod tests {
             .ok_or_else(|| format!("missing histogram metric {name}"))
     }
 
+    fn metric_snapshot<'a>(
+        snap: &'a MetricsSnapshot,
+        name: &str,
+    ) -> Result<&'a MetricSnapshot, String> {
+        snap.metrics
+            .get(name)
+            .ok_or_else(|| format!("missing metric {name}"))
+    }
+
     #[test]
-    fn counter_increment() {
+    fn counter_increment() -> Result<(), String> {
         let registry = MetricsRegistry::new();
         registry.enable();
         let counter = registry.register("test.ops", MetricKind::Counter);
         counter.increment(1);
         counter.increment(5);
         let snap = registry.snapshot();
-        let m = &snap.metrics["test.ops"];
+        let m = metric_snapshot(&snap, "test.ops")?;
         assert_eq!(m.kind, MetricKind::Counter);
         assert_eq!(m.value, Some(6));
+        Ok(())
     }
 
     #[test]
@@ -584,15 +599,15 @@ mod tests {
 
         // Check bucket distribution
         // bounds: [1, 5, 10, 50, 100, 500, 1000, 5000, 10000, 50000, 100000, 1000000]
-        // 3 -> bucket[1] (le=5)
-        // 50 -> bucket[3] (le=50)
-        // 500 -> bucket[5] (le=500)
-        // 999_999 -> bucket[11] (le=1_000_000)
+        // 3 -> bucket index 1 (le=5)
+        // 50 -> bucket index 3 (le=50)
+        // 500 -> bucket index 5 (le=500)
+        // 999_999 -> bucket index 11 (le=1_000_000)
         // 5_000_000 -> inf bucket
-        assert_eq!(h.buckets[1].count, 1); // le=5
-        assert_eq!(h.buckets[3].count, 1); // le=50
-        assert_eq!(h.buckets[5].count, 1); // le=500
-        assert_eq!(h.buckets[11].count, 1); // le=1_000_000
+        assert_eq!(bucket(h, 1)?.count, 1); // le=5
+        assert_eq!(bucket(h, 3)?.count, 1); // le=50
+        assert_eq!(bucket(h, 5)?.count, 1); // le=500
+        assert_eq!(bucket(h, 11)?.count, 1); // le=1_000_000
         assert_eq!(h.inf_count, 1);
         Ok(())
     }
@@ -612,9 +627,9 @@ mod tests {
         let h = histogram_snapshot(&snap, "custom.hist")?;
         assert_eq!(h.count, 4);
         assert_eq!(h.buckets.len(), 3);
-        assert_eq!(h.buckets[0].count, 1);
-        assert_eq!(h.buckets[1].count, 1);
-        assert_eq!(h.buckets[2].count, 1);
+        assert_eq!(bucket(h, 0)?.count, 1);
+        assert_eq!(bucket(h, 1)?.count, 1);
+        assert_eq!(bucket(h, 2)?.count, 1);
         assert_eq!(h.inf_count, 1);
         Ok(())
     }
@@ -634,9 +649,9 @@ mod tests {
         let h = histogram_snapshot(&snap, "custom.hist")?;
         let bounds = h.buckets.iter().map(|bucket| bucket.le).collect::<Vec<_>>();
         assert_eq!(bounds, vec![10, 100, 1000]);
-        assert_eq!(h.buckets[0].count, 1);
-        assert_eq!(h.buckets[1].count, 1);
-        assert_eq!(h.buckets[2].count, 1);
+        assert_eq!(bucket(h, 0)?.count, 1);
+        assert_eq!(bucket(h, 1)?.count, 1);
+        assert_eq!(bucket(h, 2)?.count, 1);
         assert_eq!(h.inf_count, 1);
         Ok(())
     }
@@ -645,7 +660,8 @@ mod tests {
     fn histogram_totals_saturate_on_overflow() -> Result<(), String> {
         let registry = MetricsRegistry::new();
         registry.enable();
-        let hist = registry.register_histogram("custom.hist", &[10]);
+        let custom_bounds = [10_u64];
+        let hist = registry.register_histogram("custom.hist", &custom_bounds);
         hist.inner
             .histogram
             .sum
@@ -654,7 +670,7 @@ mod tests {
             .histogram
             .total
             .store(u64::MAX, Ordering::Relaxed);
-        hist.inner.histogram.counts[0].store(u64::MAX, Ordering::Relaxed);
+        histogram_count(&hist, 0)?.store(u64::MAX, Ordering::Relaxed);
 
         hist.observe(5);
 
@@ -662,7 +678,7 @@ mod tests {
         let h = histogram_snapshot(&snap, "custom.hist")?;
         assert_eq!(h.sum, u64::MAX);
         assert_eq!(h.count, u64::MAX);
-        assert_eq!(h.buckets[0].count, u64::MAX);
+        assert_eq!(bucket(h, 0)?.count, u64::MAX);
         Ok(())
     }
 
@@ -829,5 +845,21 @@ mod tests {
         // Re-register same metric
         let _ = registry.register("a", MetricKind::Counter);
         assert_eq!(registry.metric_count(), 2);
+    }
+
+    fn bucket(snapshot: &HistogramSnapshot, index: usize) -> Result<&BucketSnapshot, String> {
+        snapshot
+            .buckets
+            .get(index)
+            .ok_or_else(|| format!("missing histogram bucket {index}"))
+    }
+
+    fn histogram_count(handle: &MetricHandle, index: usize) -> Result<&AtomicU64, String> {
+        handle
+            .inner
+            .histogram
+            .counts
+            .get(index)
+            .ok_or_else(|| format!("missing histogram count {index}"))
     }
 }
