@@ -197,11 +197,16 @@ pub struct ScriptCheckResult {
 mod tests {
     use super::*;
 
-    fn repo_root() -> String {
+    fn repo_root() -> std::io::Result<String> {
         env!("CARGO_MANIFEST_DIR")
             .strip_suffix("/crates/ffs-harness")
-            .expect("harness must be in crates/ffs-harness")
-            .to_owned()
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "harness must be in crates/ffs-harness",
+                )
+            })
     }
 
     #[test]
@@ -257,8 +262,8 @@ mod tests {
     }
 
     #[test]
-    fn decision_documents_exist_on_disk() {
-        let root = repo_root();
+    fn decision_documents_exist_on_disk() -> std::io::Result<()> {
+        let root = repo_root()?;
         let results = check_decision_docs(&root);
         for r in &results {
             assert!(
@@ -267,11 +272,12 @@ mod tests {
                 r.oq_id, r.doc_path
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn e2e_scripts_exist_on_disk() {
-        let root = repo_root();
+    fn e2e_scripts_exist_on_disk() -> std::io::Result<()> {
+        let root = repo_root()?;
         let results = check_e2e_scripts(&root);
         for r in &results {
             assert!(
@@ -280,6 +286,7 @@ mod tests {
                 r.oq_id, r.script_path
             );
         }
+        Ok(())
     }
 
     #[test]

@@ -365,11 +365,16 @@ pub fn collect_gaps(results: &[DrillResult]) -> Vec<RemediationGap> {
 mod tests {
     use super::*;
 
-    fn repo_root() -> String {
+    fn repo_root() -> std::io::Result<String> {
         env!("CARGO_MANIFEST_DIR")
             .strip_suffix("/crates/ffs-harness")
-            .expect("harness must be in crates/ffs-harness")
-            .to_owned()
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "harness must be in crates/ffs-harness",
+                )
+            })
     }
 
     #[test]
@@ -434,8 +439,8 @@ mod tests {
     }
 
     #[test]
-    fn replay_drill_passes() {
-        let root = repo_root();
+    fn replay_drill_passes() -> std::io::Result<()> {
+        let root = repo_root()?;
         let drills = canonical_drills();
         let replay = &drills[0];
         assert_eq!(replay.id, "drill-replay-anomaly");
@@ -447,11 +452,12 @@ mod tests {
                 check.check, check.detail
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn corruption_drill_passes() {
-        let root = repo_root();
+    fn corruption_drill_passes() -> std::io::Result<()> {
+        let root = repo_root()?;
         let drills = canonical_drills();
         let corruption = &drills[1];
         assert_eq!(corruption.id, "drill-corruption-partial-repair");
@@ -463,11 +469,12 @@ mod tests {
                 check.check, check.detail
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn pressure_drill_passes() {
-        let root = repo_root();
+    fn pressure_drill_passes() -> std::io::Result<()> {
+        let root = repo_root()?;
         let drills = canonical_drills();
         let pressure = &drills[2];
         assert_eq!(pressure.id, "drill-sustained-pressure");
@@ -479,11 +486,12 @@ mod tests {
                 check.check, check.detail
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn no_remediation_gaps_in_canonical_drills() {
-        let root = repo_root();
+    fn no_remediation_gaps_in_canonical_drills() -> std::io::Result<()> {
+        let root = repo_root()?;
         let results = execute_all_drills(&root);
         let gaps = collect_gaps(&results);
         assert!(
@@ -494,11 +502,12 @@ mod tests {
                 .map(|g| format!("[{}] {}", g.drill_id, g.description))
                 .collect::<Vec<_>>()
         );
+        Ok(())
     }
 
     #[test]
-    fn drill_result_json_round_trips() -> Result<(), serde_json::Error> {
-        let root = repo_root();
+    fn drill_result_json_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+        let root = repo_root()?;
         let results = execute_all_drills(&root);
         let json = serde_json::to_string_pretty(&results)?;
         insta::assert_snapshot!("drill_result_json_shape", json);
@@ -528,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn gap_detection_works_for_missing_file() {
+    fn gap_detection_works_for_missing_file() -> std::io::Result<()> {
         let drill = DrillScenario {
             id: "test-missing".to_owned(),
             title: "Test".to_owned(),
@@ -540,7 +549,7 @@ mod tests {
             log_markers: vec!["nonexistent_marker".to_owned()],
             log_marker_sources: vec!["crates/ffs-harness/src/tabletop_drill.rs".to_owned()],
         };
-        let root = repo_root();
+        let root = repo_root()?;
         let result = execute_drill(&drill, &root);
         assert!(!result.passed, "drill with missing runbook should fail");
         assert!(!result.gaps.is_empty(), "should have gaps");
@@ -551,5 +560,6 @@ mod tests {
                 .any(|g| g.category == GapCategory::Runbook),
             "should have runbook gap"
         );
+        Ok(())
     }
 }
