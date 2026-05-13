@@ -832,10 +832,22 @@ mod tests {
         assert_eq!(report.classification_counts.get("skip"), Some(&1));
     }
 
+    fn authoritative_scenario_mut(
+        manifest: &mut ScrubRepairSchedulerManifest,
+    ) -> Result<&mut ScrubRepairSchedulerScenario> {
+        manifest
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.scenario_id == "scrub_repair_overlap_large_host")
+            .context("sample manifest includes authoritative scrub/repair scenario")
+    }
+
     #[test]
-    fn direct_repair_writeback_route_fails_closed() {
+    fn direct_repair_writeback_route_fails_closed() -> Result<()> {
         let mut manifest = sample_manifest();
-        manifest.scenarios[0].ledger.mutation_route = RepairMutationRoute::DirectBlockWrite;
+        authoritative_scenario_mut(&mut manifest)?
+            .ledger
+            .mutation_route = RepairMutationRoute::DirectBlockWrite;
 
         let report = validate_scrub_repair_scheduler_manifest(&manifest);
 
@@ -846,13 +858,15 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("bypasses the mounted mutation authority"))
         );
+        Ok(())
     }
 
     #[test]
-    fn stale_symbols_must_be_refused_when_over_budget() {
+    fn stale_symbols_must_be_refused_when_over_budget() -> Result<()> {
         let mut manifest = sample_manifest();
-        manifest.scenarios[0].stale_symbol_age_secs = 901;
-        manifest.scenarios[0].ledger.stale_symbol_policy = StaleSymbolPolicy::RefreshBeforeMutation;
+        let scenario = authoritative_scenario_mut(&mut manifest)?;
+        scenario.stale_symbol_age_secs = 901;
+        scenario.ledger.stale_symbol_policy = StaleSymbolPolicy::RefreshBeforeMutation;
 
         let report = validate_scrub_repair_scheduler_manifest(&manifest);
 
@@ -863,12 +877,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("stale symbols exceed policy"))
         );
+        Ok(())
     }
 
     #[test]
-    fn pass_rows_must_respect_foreground_budget() {
+    fn pass_rows_must_respect_foreground_budget() -> Result<()> {
         let mut manifest = sample_manifest();
-        manifest.scenarios[0].observed_foreground_p99_us = 7_500.0;
+        authoritative_scenario_mut(&mut manifest)?.observed_foreground_p99_us = 7_500.0;
 
         let report = validate_scrub_repair_scheduler_manifest(&manifest);
 
@@ -879,6 +894,7 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("foreground p99 regression"))
         );
+        Ok(())
     }
 
     fn sample_manifest() -> ScrubRepairSchedulerManifest {
