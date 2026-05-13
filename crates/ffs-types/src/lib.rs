@@ -2043,6 +2043,35 @@ mod tests {
             prop_assert_eq!(batch_result, scalar_result);
         }
 
+        /// bd-2ihe1 — batch_checksum Blake3 variant matches the public
+        /// blake3_hash truncated-to-32 helper. The CRC32c branch above
+        /// was the only proptest-covered variant; this closes the gap
+        /// on the Blake3Truncated32 dispatch arm. A regression that
+        /// dropped the explicit-le truncation step (e.g., switched to
+        /// big-endian bytes or used the wrong 4-byte window) would
+        /// silently corrupt every Blake3-mode batch checksum.
+        #[test]
+        fn proptest_batch_checksum_blake3_matches_scalar(
+            n_blocks in 1_usize..8,
+            fill_byte in any::<u8>(),
+            block_len in 1_usize..=128,
+        ) {
+            let block_data: Vec<Vec<u8>> = (0..n_blocks)
+                .map(|i| vec![fill_byte.wrapping_add(u8::try_from(i % 256).unwrap()); block_len])
+                .collect();
+            let block_refs: Vec<&[u8]> = block_data.iter().map(Vec::as_slice).collect();
+            let batch_result = batch_checksum(&block_refs, ChecksumAlgo::Blake3Truncated32);
+            let scalar_result: Vec<u32> = block_refs
+                .iter()
+                .map(|b| {
+                    let hash = blake3_hash(b);
+                    let bytes = hash.as_bytes();
+                    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+                })
+                .collect();
+            prop_assert_eq!(batch_result, scalar_result);
+        }
+
         /// trim_nul_padded on a string without NUL bytes preserves the string.
         #[test]
         fn proptest_trim_nul_padded_no_nul(
