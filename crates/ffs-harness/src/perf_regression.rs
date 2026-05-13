@@ -151,27 +151,30 @@ mod tests {
     }
 
     #[test]
-    fn classify_ok_when_within_warn_threshold() {
+    fn classify_ok_when_within_warn_threshold() -> Result<(), &'static str> {
         let threshold = RegressionThreshold::new(10.0, 20.0);
         let outcome = classify_latency_regression(100.0, 108.0, threshold)
-            .expect("positive baseline should produce an outcome");
+            .ok_or("positive baseline should produce an outcome")?;
         assert_eq!(outcome.status, RegressionStatus::Ok);
+        Ok(())
     }
 
     #[test]
-    fn classify_warn_when_above_warn_below_fail() {
+    fn classify_warn_when_above_warn_below_fail() -> Result<(), &'static str> {
         let threshold = RegressionThreshold::new(10.0, 20.0);
         let outcome = classify_latency_regression(100.0, 112.0, threshold)
-            .expect("positive baseline should produce an outcome");
+            .ok_or("positive baseline should produce an outcome")?;
         assert_eq!(outcome.status, RegressionStatus::Warn);
+        Ok(())
     }
 
     #[test]
-    fn classify_fail_when_above_fail_threshold() {
+    fn classify_fail_when_above_fail_threshold() -> Result<(), &'static str> {
         let threshold = RegressionThreshold::new(10.0, 20.0);
         let outcome = classify_latency_regression(100.0, 130.0, threshold)
-            .expect("positive baseline should produce an outcome");
+            .ok_or("positive baseline should produce an outcome")?;
         assert_eq!(outcome.status, RegressionStatus::Fail);
+        Ok(())
     }
 
     // ── bd-3ib.3: Performance baseline and regression detection tests ──
@@ -221,33 +224,35 @@ mod tests {
     }
 
     #[test]
-    fn perf_baseline_comparison_detects_regression() {
+    fn perf_baseline_comparison_detects_regression() -> Result<(), &'static str> {
         // Compare two baselines where one measurement regressed.
         let threshold = RegressionThreshold::new(10.0, 20.0);
         let baseline_p99 = 1000.0; // 1000 μs
         let current_p99 = 1250.0; // 25% worse → Fail
 
         let outcome = classify_latency_regression(baseline_p99, current_p99, threshold)
-            .expect("valid baseline");
+            .ok_or("valid baseline")?;
         assert_eq!(outcome.status, RegressionStatus::Fail);
         assert!((outcome.delta_percent - 25.0).abs() < 0.01);
+        Ok(())
     }
 
     #[test]
-    fn perf_baseline_comparison_passes_within_threshold() {
+    fn perf_baseline_comparison_passes_within_threshold() -> Result<(), &'static str> {
         // Compare two baselines where measurements are similar.
         let threshold = RegressionThreshold::new(10.0, 20.0);
         let baseline_p99 = 1000.0;
         let current_p99 = 1050.0; // 5% worse → Ok
 
         let outcome = classify_latency_regression(baseline_p99, current_p99, threshold)
-            .expect("valid baseline");
+            .ok_or("valid baseline")?;
         assert_eq!(outcome.status, RegressionStatus::Ok);
         assert!((outcome.delta_percent - 5.0).abs() < 0.01);
+        Ok(())
     }
 
     #[test]
-    fn perf_baseline_empty_measurements_is_valid() {
+    fn perf_baseline_empty_measurements_is_valid() -> Result<(), serde_json::Error> {
         // An empty baseline (no measurements yet) is a valid state.
         let json = r#"{
             "generated_at": "2026-02-17T00:00:00Z",
@@ -255,67 +260,73 @@ mod tests {
             "p99_fail_threshold_percent": 20.0,
             "measurements": []
         }"#;
-        let baseline = parse_baseline(json).expect("empty baseline should parse");
+        let baseline = parse_baseline(json)?;
         assert!(baseline.measurements.is_empty());
         assert_eq!(baseline.commit, ""); // defaults to empty
+        Ok(())
     }
 
     #[test]
-    fn perf_throughput_10pct_drop_detected() {
+    fn perf_throughput_10pct_drop_detected() -> Result<(), &'static str> {
         // A 10% throughput drop should be flagged as a warning with default thresholds.
         let threshold = RegressionThreshold::default(); // 10% warn, 20% fail
         let baseline_ops = 1000.0;
         let current_ops = 880.0; // 12% drop
 
         let outcome = classify_throughput_regression(baseline_ops, current_ops, threshold)
-            .expect("valid baseline");
+            .ok_or("valid baseline")?;
         assert_eq!(outcome.status, RegressionStatus::Warn);
         assert!((outcome.delta_percent - 12.0).abs() < 0.01);
+        Ok(())
     }
 
     #[test]
-    fn perf_throughput_improvement_passes() {
+    fn perf_throughput_improvement_passes() -> Result<(), &'static str> {
         // Throughput *improvement* (higher ops/sec) is not a regression.
         let threshold = RegressionThreshold::default();
         let baseline_ops = 1000.0;
         let current_ops = 1200.0; // 20% improvement
 
         let outcome = classify_throughput_regression(baseline_ops, current_ops, threshold)
-            .expect("valid baseline");
+            .ok_or("valid baseline")?;
         assert_eq!(outcome.status, RegressionStatus::Ok);
         // delta_percent should be negative (improvement).
         assert!(outcome.delta_percent < 0.0);
+        Ok(())
     }
 
     #[test]
-    fn perf_normal_variance_under_3pct_passes() {
+    fn perf_normal_variance_under_3pct_passes() -> Result<(), &'static str> {
         // Normal run-to-run variance under 3% should always pass, even with
         // tight thresholds (warn=5%, fail=10%).
         let threshold = RegressionThreshold::new(5.0, 10.0);
 
         // Latency: 2.5% increase → Ok.
-        let outcome = classify_latency_regression(100.0, 102.5, threshold).expect("valid baseline");
+        let outcome =
+            classify_latency_regression(100.0, 102.5, threshold).ok_or("valid baseline")?;
         assert_eq!(outcome.status, RegressionStatus::Ok);
 
         // Throughput: 2.5% drop → Ok.
         let outcome =
-            classify_throughput_regression(1000.0, 975.0, threshold).expect("valid baseline");
+            classify_throughput_regression(1000.0, 975.0, threshold).ok_or("valid baseline")?;
         assert_eq!(outcome.status, RegressionStatus::Ok);
+        Ok(())
     }
 
     #[test]
-    fn perf_custom_threshold_overrides_default() {
+    fn perf_custom_threshold_overrides_default() -> Result<(), &'static str> {
         // Custom thresholds: very tight (3% warn, 8% fail).
         let tight = RegressionThreshold::new(3.0, 8.0);
 
         // 5% latency increase: would be Ok with defaults (10%/20%),
         // but is Warn with tight thresholds.
-        let outcome = classify_latency_regression(100.0, 105.0, tight).expect("valid baseline");
+        let outcome = classify_latency_regression(100.0, 105.0, tight).ok_or("valid baseline")?;
         assert_eq!(outcome.status, RegressionStatus::Warn);
 
         // Same value with default thresholds: Ok.
         let outcome = classify_latency_regression(100.0, 105.0, RegressionThreshold::default())
-            .expect("valid baseline");
+            .ok_or("valid baseline")?;
         assert_eq!(outcome.status, RegressionStatus::Ok);
+        Ok(())
     }
 }
