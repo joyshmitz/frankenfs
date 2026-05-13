@@ -269,9 +269,9 @@ pub fn run_fuzz_smoke_manifest(
     let mut hasher = Sha256::new();
 
     hasher.update(manifest.corpus_id.as_bytes());
-    hasher.update([0]);
+    hasher.update(b"\0");
     hasher.update(manifest.corpus_version.as_bytes());
-    hasher.update([0]);
+    hasher.update(b"\0");
 
     if errors.is_empty() {
         for seed in &manifest.seeds {
@@ -813,7 +813,7 @@ fn update_corpus_checksum(hasher: &mut Sha256, result: &FuzzSmokeSeedResult) {
         result.sha256.as_str(),
     ] {
         hasher.update(part.as_bytes());
-        hasher.update([0]);
+        hasher.update(b"\0");
     }
 }
 
@@ -913,6 +913,42 @@ mod tests {
             .join("; ")
     }
 
+    fn default_manifest() -> Result<FuzzSmokeManifest> {
+        load_default_fuzz_smoke_manifest()
+    }
+
+    fn first_seed_mut(manifest: &mut FuzzSmokeManifest) -> Result<&mut FuzzSmokeSeed> {
+        manifest
+            .seeds
+            .first_mut()
+            .context("fixture manifest has at least one seed")
+    }
+
+    fn second_seed_mut(manifest: &mut FuzzSmokeManifest) -> Result<&mut FuzzSmokeSeed> {
+        manifest
+            .seeds
+            .get_mut(1)
+            .context("fixture manifest has at least two seeds")
+    }
+
+    fn first_seed_result(report: &FuzzSmokeReport) -> Result<&FuzzSmokeSeedResult> {
+        report
+            .seed_results
+            .first()
+            .context("fuzz smoke report has at least one seed result")
+    }
+
+    fn first_json_seed_mut(
+        value: &mut serde_json::Value,
+    ) -> Result<&mut serde_json::Map<String, serde_json::Value>> {
+        value
+            .get_mut("seeds")
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|seeds| seeds.first_mut())
+            .and_then(serde_json::Value::as_object_mut)
+            .context("manifest JSON has at least one seed object")
+    }
+
     #[test]
     fn hard_exit_scanner_reports_file_line_and_pattern() {
         let matches = scan_fuzz_target_hard_exit_text(
@@ -932,18 +968,19 @@ mod tests {
     }
 
     #[test]
-    fn fuzz_targets_do_not_use_direct_hard_exits() {
-        let matches = scan_fuzz_target_hard_exits(&workspace_root()).expect("scan fuzz targets");
+    fn fuzz_targets_do_not_use_direct_hard_exits() -> Result<()> {
+        let matches = scan_fuzz_target_hard_exits(&workspace_root())?;
         assert!(
             matches.is_empty(),
             "fuzz targets must use assert/expect diagnostics instead of direct hard exits: {}",
             render_hard_exit_matches(&matches)
         );
+        Ok(())
     }
 
     #[test]
-    fn default_manifest_validates_and_runs() {
-        let manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
+    fn default_manifest_validates_and_runs() -> Result<()> {
+        let manifest = default_manifest()?;
         let manifest_errors = validate_fuzz_smoke_manifest(&manifest);
         assert!(manifest_errors.is_empty(), "{manifest_errors:?}");
 
@@ -973,11 +1010,12 @@ mod tests {
                 .get("mounted_write_error_classes_catalog"),
             Some(&1)
         );
+        Ok(())
     }
 
     #[test]
     fn fuzz_smoke_report_json_shape() -> Result<()> {
-        let manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
+        let manifest = default_manifest()?;
         let mut report = run_fuzz_smoke_manifest(&manifest, &workspace_root());
         assert!(report.valid, "{:?}", report.errors);
 
@@ -1006,10 +1044,10 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_seed_ids_are_rejected() {
-        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
-        let duplicate_id = manifest.seeds[0].seed_id.clone();
-        manifest.seeds[1].seed_id = duplicate_id;
+    fn duplicate_seed_ids_are_rejected() -> Result<()> {
+        let mut manifest = default_manifest()?;
+        let duplicate_id = first_seed_mut(&mut manifest)?.seed_id.clone();
+        second_seed_mut(&mut manifest)?.seed_id = duplicate_id;
 
         let errors = validate_fuzz_smoke_manifest(&manifest);
         assert!(
@@ -1018,12 +1056,13 @@ mod tests {
                 .any(|error| error.contains("duplicate fuzz-smoke seed_id")),
             "{errors:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_targets_are_rejected() {
-        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
-        manifest.seeds[0].target = "unknown_parser".to_owned();
+    fn unsupported_targets_are_rejected() -> Result<()> {
+        let mut manifest = default_manifest()?;
+        first_seed_mut(&mut manifest)?.target = "unknown_parser".to_owned();
 
         let errors = validate_fuzz_smoke_manifest(&manifest);
         assert!(
@@ -1032,11 +1071,12 @@ mod tests {
                 .any(|error| error.contains("unsupported target")),
             "{errors:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_required_targets_are_rejected() {
-        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
+    fn missing_required_targets_are_rejected() -> Result<()> {
+        let mut manifest = default_manifest()?;
         let missing_target = "ext4_superblock".to_owned();
         manifest.seeds.retain(|seed| seed.target != missing_target);
 
@@ -1048,12 +1088,13 @@ mod tests {
             }),
             "{errors:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn parent_directory_seed_paths_are_rejected() {
-        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
-        manifest.seeds[0].path = "../outside-workspace.seed".to_owned();
+    fn parent_directory_seed_paths_are_rejected() -> Result<()> {
+        let mut manifest = default_manifest()?;
+        first_seed_mut(&mut manifest)?.path = "../outside-workspace.seed".to_owned();
 
         let errors = validate_fuzz_smoke_manifest(&manifest);
         assert!(
@@ -1062,11 +1103,12 @@ mod tests {
                 .any(|error| error.contains("without parent-directory segments")),
             "{errors:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_artifact_contract_fields_are_rejected() {
-        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
+    fn missing_artifact_contract_fields_are_rejected() -> Result<()> {
+        let mut manifest = default_manifest()?;
         manifest
             .artifact_contract
             .retain(|field| field != "stdout_path");
@@ -1078,26 +1120,26 @@ mod tests {
                 .any(|error| error.contains("artifact_contract missing required field")),
             "{errors:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_required_seed_schema_fields_are_rejected() {
-        let mut value: serde_json::Value =
-            serde_json::from_str(DEFAULT_FUZZ_SMOKE_MANIFEST_JSON).expect("manifest JSON parses");
-        value["seeds"][0]
-            .as_object_mut()
-            .expect("seed is object")
-            .remove("source");
+    fn missing_required_seed_schema_fields_are_rejected() -> Result<()> {
+        let mut value: serde_json::Value = serde_json::from_str(DEFAULT_FUZZ_SMOKE_MANIFEST_JSON)?;
+        first_json_seed_mut(&mut value)?.remove("source");
 
-        let text = serde_json::to_string(&value).expect("manifest serializes");
-        let error = parse_fuzz_smoke_manifest(&text).expect_err("source is required");
+        let text = serde_json::to_string(&value)?;
+        let error = parse_fuzz_smoke_manifest(&text)
+            .err()
+            .context("source is required")?;
         assert!(error.to_string().contains("missing field `source`"));
+        Ok(())
     }
 
     #[test]
-    fn missing_provenance_is_rejected() {
-        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
-        manifest.seeds[0].provenance.clear();
+    fn missing_provenance_is_rejected() -> Result<()> {
+        let mut manifest = default_manifest()?;
+        first_seed_mut(&mut manifest)?.provenance.clear();
 
         let errors = validate_fuzz_smoke_manifest(&manifest);
         assert!(
@@ -1106,12 +1148,13 @@ mod tests {
                 .any(|error| error.contains("missing provenance")),
             "{errors:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn stale_corpus_checksum_invalidates_report() {
-        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
-        manifest.seeds[0].corpus_checksum =
+    fn stale_corpus_checksum_invalidates_report() -> Result<()> {
+        let mut manifest = default_manifest()?;
+        first_seed_mut(&mut manifest)?.corpus_checksum =
             "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned();
 
         let report = run_fuzz_smoke_manifest(&manifest, &workspace_root());
@@ -1124,25 +1167,29 @@ mod tests {
             "{:?}",
             report.errors
         );
+        Ok(())
     }
 
     #[test]
-    fn resource_cap_classification_is_fail_closed() {
-        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
-        manifest.seeds[0].expected_class = "resource_cap".to_owned();
-        manifest.seeds[0].expected_error_contains = Some("exceeded max_input_bytes".to_owned());
-        manifest.seeds[0].resource_budget.max_input_bytes = 1;
+    fn resource_cap_classification_is_fail_closed() -> Result<()> {
+        let mut manifest = default_manifest()?;
+        let seed = first_seed_mut(&mut manifest)?;
+        seed.expected_class = "resource_cap".to_owned();
+        seed.expected_error_contains = Some("exceeded max_input_bytes".to_owned());
+        seed.resource_budget.max_input_bytes = 1;
 
         let report = run_fuzz_smoke_manifest(&manifest, &workspace_root());
         assert!(report.valid, "{:?}", report.errors);
-        assert_eq!(report.seed_results[0].actual_class, "resource_cap");
+        assert_eq!(first_seed_result(&report)?.actual_class, "resource_cap");
+        Ok(())
     }
 
     #[test]
-    fn timeout_and_resource_budgets_are_required() {
-        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
-        manifest.seeds[0].timeout_ms = 0;
-        manifest.seeds[0].resource_budget.max_input_bytes = 0;
+    fn timeout_and_resource_budgets_are_required() -> Result<()> {
+        let mut manifest = default_manifest()?;
+        let seed = first_seed_mut(&mut manifest)?;
+        seed.timeout_ms = 0;
+        seed.resource_budget.max_input_bytes = 0;
 
         let errors = validate_fuzz_smoke_manifest(&manifest);
         assert!(
@@ -1157,13 +1204,15 @@ mod tests {
                 .any(|error| error.contains("max_input_bytes must be positive")),
             "{errors:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn non_minimized_seed_requires_follow_up_bead() {
-        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
-        manifest.seeds[0].minimization.status = "not_minimized".to_owned();
-        manifest.seeds[0].minimization.follow_up_bead = None;
+    fn non_minimized_seed_requires_follow_up_bead() -> Result<()> {
+        let mut manifest = default_manifest()?;
+        let seed = first_seed_mut(&mut manifest)?;
+        seed.minimization.status = "not_minimized".to_owned();
+        seed.minimization.follow_up_bead = None;
 
         let errors = validate_fuzz_smoke_manifest(&manifest);
         assert!(
@@ -1172,12 +1221,16 @@ mod tests {
                 .any(|error| error.contains("non-minimized seeds require follow_up_bead")),
             "{errors:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn minimized_seed_requires_replay_command() {
-        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
-        manifest.seeds[0].minimization.replay_command.clear();
+    fn minimized_seed_requires_replay_command() -> Result<()> {
+        let mut manifest = default_manifest()?;
+        first_seed_mut(&mut manifest)?
+            .minimization
+            .replay_command
+            .clear();
 
         let errors = validate_fuzz_smoke_manifest(&manifest);
         assert!(
@@ -1186,16 +1239,18 @@ mod tests {
                 .any(|error| error.contains("minimized seeds require replay_command")),
             "{errors:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn active_quarantine_requires_owner_expiry_and_owning_bead() {
-        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
-        manifest.seeds[0].quarantine.status = "active".to_owned();
-        manifest.seeds[0].quarantine.quarantine_id = Some("q-fs-ext4-superblock".to_owned());
-        manifest.seeds[0].quarantine.expires_at = Some("2026-06-01T00:00:00Z".to_owned());
-        manifest.seeds[0].quarantine.rationale = Some("bounded parser follow-up".to_owned());
-        manifest.seeds[0].quarantine.owning_bead = Some("not-a-bead".to_owned());
+    fn active_quarantine_requires_owner_expiry_and_owning_bead() -> Result<()> {
+        let mut manifest = default_manifest()?;
+        let seed = first_seed_mut(&mut manifest)?;
+        seed.quarantine.status = "active".to_owned();
+        seed.quarantine.quarantine_id = Some("q-fs-ext4-superblock".to_owned());
+        seed.quarantine.expires_at = Some("2026-06-01T00:00:00Z".to_owned());
+        seed.quarantine.rationale = Some("bounded parser follow-up".to_owned());
+        seed.quarantine.owning_bead = Some("not-a-bead".to_owned());
 
         let errors = validate_fuzz_smoke_manifest(&manifest);
         assert!(
@@ -1210,12 +1265,13 @@ mod tests {
                 .any(|error| error.contains("quarantine owning_bead must look like bd-")),
             "{errors:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn expired_quarantine_is_rejected() {
-        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
-        manifest.seeds[0].quarantine.status = "expired".to_owned();
+    fn expired_quarantine_is_rejected() -> Result<()> {
+        let mut manifest = default_manifest()?;
+        first_seed_mut(&mut manifest)?.quarantine.status = "expired".to_owned();
 
         let errors = validate_fuzz_smoke_manifest(&manifest);
         assert!(
@@ -1224,12 +1280,13 @@ mod tests {
                 .any(|error| error.contains("quarantine has expired")),
             "{errors:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn expected_class_mismatch_invalidates_report() {
-        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
-        manifest.seeds[0].expected_class = "InvalidMagic".to_owned();
+    fn expected_class_mismatch_invalidates_report() -> Result<()> {
+        let mut manifest = default_manifest()?;
+        first_seed_mut(&mut manifest)?.expected_class = "InvalidMagic".to_owned();
 
         let report = run_fuzz_smoke_manifest(&manifest, &workspace_root());
         assert!(!report.valid);
@@ -1241,12 +1298,14 @@ mod tests {
             "{:?}",
             report.errors
         );
+        Ok(())
     }
 
     #[test]
-    fn expected_error_fragment_mismatch_invalidates_report() {
-        let mut manifest = load_default_fuzz_smoke_manifest().expect("default manifest parses");
-        manifest.seeds[0].expected_error_contains = Some("not-present-in-parser-error".to_owned());
+    fn expected_error_fragment_mismatch_invalidates_report() -> Result<()> {
+        let mut manifest = default_manifest()?;
+        first_seed_mut(&mut manifest)?.expected_error_contains =
+            Some("not-present-in-parser-error".to_owned());
 
         let report = run_fuzz_smoke_manifest(&manifest, &workspace_root());
         assert!(!report.valid);
@@ -1258,6 +1317,7 @@ mod tests {
             "{:?}",
             report.errors
         );
+        Ok(())
     }
 
     #[test]
