@@ -473,25 +473,40 @@ fn validate_filesystem_pair_coverage(catalog: &MountedWriteErrnoBudget, errors: 
 mod tests {
     use super::*;
 
-    fn fixture_catalog() -> MountedWriteErrnoBudget {
+    fn fixture_catalog() -> Result<MountedWriteErrnoBudget> {
         parse_mounted_write_errno_budget(DEFAULT_MOUNTED_WRITE_ERRNO_BUDGET_JSON)
-            .expect("default mounted write errno budget parses")
     }
 
     fn synthetic_broad_fallback_cell(
         catalog: &mut MountedWriteErrnoBudget,
-    ) -> &mut MountedWriteErrnoCell {
+    ) -> Result<&mut MountedWriteErrnoCell> {
         let cell = catalog
             .cells
             .iter_mut()
             .find(|c| c.cell_id == "ewb_btrfs_write_readback_eio_product_failure")
-            .expect("btrfs write/readback product failure fixture exists");
+            .ok_or_else(|| {
+                anyhow::anyhow!("btrfs write/readback product failure fixture must exist")
+            })?;
         cell.user_facing_class = "broad_fallback".to_owned();
         cell.broad_fallback_count = 1;
         cell.broad_fallback_justification =
             "synthetic opaque EIO branch for validator coverage".to_owned();
         cell.follow_up_bead = "bd-0s5a3".to_owned();
-        cell
+        Ok(cell)
+    }
+
+    fn first_cell(catalog: &MountedWriteErrnoBudget) -> Result<&MountedWriteErrnoCell> {
+        catalog
+            .cells
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("fixture must declare at least one errno cell"))
+    }
+
+    fn first_cell_mut(catalog: &mut MountedWriteErrnoBudget) -> Result<&mut MountedWriteErrnoCell> {
+        catalog
+            .cells
+            .first_mut()
+            .ok_or_else(|| anyhow::anyhow!("fixture must declare at least one errno cell"))
     }
 
     #[test]
@@ -522,8 +537,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_required_operation_is_rejected() {
-        let mut catalog = fixture_catalog();
+    fn missing_required_operation_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
         catalog
             .cells
             .retain(|cell| cell.operation_class != "stale_repair_lease");
@@ -534,11 +549,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required operation_class `stale_repair_lease`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_writeback_cache_operation_is_rejected() {
-        let mut catalog = fixture_catalog();
+    fn missing_writeback_cache_operation_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
         catalog
             .cells
             .retain(|cell| cell.operation_class != "writeback_cache_gate_refusal");
@@ -546,11 +562,12 @@ mod tests {
         assert!(report.errors.iter().any(|err| {
             err.contains("missing required operation_class `writeback_cache_gate_refusal`")
         }));
+        Ok(())
     }
 
     #[test]
-    fn permission_denied_must_cover_both_filesystems() {
-        let mut catalog = fixture_catalog();
+    fn permission_denied_must_cover_both_filesystems() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
         catalog.cells.retain(|cell| {
             !(cell.operation_class == "permission_denied" && cell.filesystem == "btrfs")
         });
@@ -561,11 +578,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("permission_denied cell for filesystem `btrfs`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_operation_must_cover_both_filesystems() {
-        let mut catalog = fixture_catalog();
+    fn unsupported_operation_must_cover_both_filesystems() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
         catalog.cells.retain(|cell| {
             !(cell.operation_class == "unsupported_operation" && cell.filesystem == "ext4")
         });
@@ -576,12 +594,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported_operation cell for filesystem `ext4`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_filesystem_operation_pair_is_rejected() {
-        let mut catalog = fixture_catalog();
-        let mut clone = catalog.cells[0].clone();
+    fn duplicate_filesystem_operation_pair_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let mut clone = first_cell(&catalog)?.clone();
         clone.cell_id = format!("{}_dup", clone.cell_id);
         catalog.cells.push(clone);
         let report = validate_mounted_write_errno_budget(&catalog);
@@ -591,13 +610,18 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicates the (filesystem, operation_class) pair"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_cell_id_is_rejected() {
-        let mut catalog = fixture_catalog();
-        let dup = catalog.cells[0].cell_id.clone();
-        catalog.cells[1].cell_id = dup;
+    fn duplicate_cell_id_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let dup = first_cell(&catalog)?.cell_id.clone();
+        let second = catalog
+            .cells
+            .get_mut(1)
+            .ok_or_else(|| anyhow::anyhow!("fixture must declare a second errno cell"))?;
+        second.cell_id = dup;
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(
             report
@@ -605,12 +629,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicate mounted write errno cell_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn cell_id_prefix_is_enforced() {
-        let mut catalog = fixture_catalog();
-        catalog.cells[0].cell_id = "cell_001".to_owned();
+    fn cell_id_prefix_is_enforced() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        first_cell_mut(&mut catalog)?.cell_id = "cell_001".to_owned();
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(
             report
@@ -618,27 +643,29 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must start with ewb_"))
         );
+        Ok(())
     }
 
     #[test]
-    fn errno_must_match_user_facing_class() {
-        let mut catalog = fixture_catalog();
+    fn errno_must_match_user_facing_class() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
         let cell = catalog
             .cells
             .iter_mut()
             .find(|c| c.user_facing_class == "default_permissions_eacces")
-            .expect("default permissions cell exists");
+            .ok_or_else(|| anyhow::anyhow!("default permissions cell must exist"))?;
         cell.normalized_errno = "EIO".to_owned();
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(report.errors.iter().any(|err| {
             err.contains("does not match user_facing_class `default_permissions_eacces`")
         }));
+        Ok(())
     }
 
     #[test]
-    fn unsupported_normalized_errno_is_rejected() {
-        let mut catalog = fixture_catalog();
-        catalog.cells[0].normalized_errno = "EUNICORN".to_owned();
+    fn unsupported_normalized_errno_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        first_cell_mut(&mut catalog)?.normalized_errno = "EUNICORN".to_owned();
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(
             report
@@ -646,12 +673,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported normalized_errno"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_remediation_id_is_rejected() {
-        let mut catalog = fixture_catalog();
-        catalog.cells[0].remediation_id = "fix-it".to_owned();
+    fn malformed_remediation_id_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        first_cell_mut(&mut catalog)?.remediation_id = "fix-it".to_owned();
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(
             report
@@ -659,12 +687,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("remediation_id must use the rem_ prefix"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_required_artifact_field_is_rejected() {
-        let mut catalog = fixture_catalog();
-        catalog.cells[0]
+    fn missing_required_artifact_field_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        first_cell_mut(&mut catalog)?
             .artifact_fields
             .retain(|f| f != "raw_errno");
         let report = validate_mounted_write_errno_budget(&catalog);
@@ -674,23 +703,25 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("artifact_fields missing `raw_errno`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn broad_fallback_class_requires_justification() {
-        let mut catalog = fixture_catalog();
-        let cell = synthetic_broad_fallback_cell(&mut catalog);
+    fn broad_fallback_class_requires_justification() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let cell = synthetic_broad_fallback_cell(&mut catalog)?;
         cell.broad_fallback_justification = String::new();
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(report.errors.iter().any(|err| {
             err.contains("broad_fallback class must declare broad_fallback_justification")
         }));
+        Ok(())
     }
 
     #[test]
-    fn broad_fallback_class_requires_follow_up_bead() {
-        let mut catalog = fixture_catalog();
-        let cell = synthetic_broad_fallback_cell(&mut catalog);
+    fn broad_fallback_class_requires_follow_up_bead() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let cell = synthetic_broad_fallback_cell(&mut catalog)?;
         cell.follow_up_bead = String::new();
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(
@@ -699,44 +730,47 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must link a follow_up_bead"))
         );
+        Ok(())
     }
 
     #[test]
-    fn broad_fallback_class_requires_distinct_investigation_bead() {
-        let mut catalog = fixture_catalog();
+    fn broad_fallback_class_requires_distinct_investigation_bead() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
         let owner_bead = catalog
             .catalog_owner_beads
             .first()
-            .expect("fixture declares catalog owner bead")
+            .ok_or_else(|| anyhow::anyhow!("fixture must declare a catalog owner bead"))?
             .clone();
-        let cell = synthetic_broad_fallback_cell(&mut catalog);
+        let cell = synthetic_broad_fallback_cell(&mut catalog)?;
         cell.follow_up_bead = owner_bead;
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(report.errors.iter().any(|err| {
             err.contains("must name a distinct investigation bead")
                 && err.contains("catalog owner bead")
         }));
+        Ok(())
     }
 
     #[test]
-    fn broad_fallback_class_requires_positive_count() {
-        let mut catalog = fixture_catalog();
-        let cell = synthetic_broad_fallback_cell(&mut catalog);
+    fn broad_fallback_class_requires_positive_count() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let cell = synthetic_broad_fallback_cell(&mut catalog)?;
         cell.broad_fallback_count = 0;
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(report.errors.iter().any(|err| {
             err.contains("broad_fallback class must record a positive broad_fallback_count")
         }));
+        Ok(())
     }
 
     #[test]
-    fn non_broad_class_must_leave_count_zero() {
-        let mut catalog = fixture_catalog();
+    fn non_broad_class_must_leave_count_zero() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
         let cell = catalog
             .cells
             .iter_mut()
             .find(|c| c.user_facing_class != "broad_fallback")
-            .expect("non-broad cell exists");
+            .ok_or_else(|| anyhow::anyhow!("non-broad cell must exist"))?;
         cell.broad_fallback_count = 5;
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(
@@ -745,13 +779,14 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("non-broad class must leave broad_fallback_count=0"))
         );
+        Ok(())
     }
 
     #[test]
-    fn budget_exceeded_cell_is_rejected() {
-        let mut catalog = fixture_catalog();
+    fn budget_exceeded_cell_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
         catalog.max_broad_fallback_budget_per_cell = 1;
-        let cell = synthetic_broad_fallback_cell(&mut catalog);
+        let cell = synthetic_broad_fallback_cell(&mut catalog)?;
         cell.broad_fallback_count = 5;
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(
@@ -761,11 +796,12 @@ mod tests {
                 .any(|err| err.contains("exceeds max_broad_fallback_budget_per_cell"))
         );
         assert_eq!(report.budget_exceeded_cell_count, 1);
+        Ok(())
     }
 
     #[test]
-    fn zero_max_budget_is_rejected() {
-        let mut catalog = fixture_catalog();
+    fn zero_max_budget_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
         catalog.max_broad_fallback_budget_per_cell = 0;
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(
@@ -774,12 +810,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("max_broad_fallback_budget_per_cell must be positive"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_artifact_fields_is_rejected() {
-        let mut catalog = fixture_catalog();
-        catalog.cells[0].artifact_fields.clear();
+    fn empty_artifact_fields_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        first_cell_mut(&mut catalog)?.artifact_fields.clear();
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(
             report
@@ -787,11 +824,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must declare at least one artifact_field"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_cells_list_is_rejected() {
-        let mut catalog = fixture_catalog();
+    fn empty_cells_list_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
         catalog.cells.clear();
         let report = validate_mounted_write_errno_budget(&catalog);
         assert!(
@@ -800,5 +838,6 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one cell"))
         );
+        Ok(())
     }
 }
