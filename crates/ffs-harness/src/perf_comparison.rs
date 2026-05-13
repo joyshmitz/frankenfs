@@ -88,12 +88,14 @@ pub fn compute_stats(values: &[f64]) -> Option<SampleStats> {
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    let min = sorted[0];
-    let max = sorted[n - 1];
+    let min = *sorted.first()?;
+    let max = *sorted.last()?;
     let median = if n % 2 == 0 {
-        f64::midpoint(sorted[n / 2 - 1], sorted[n / 2])
+        let lower = *sorted.get(n / 2 - 1)?;
+        let upper = *sorted.get(n / 2)?;
+        f64::midpoint(lower, upper)
     } else {
-        sorted[n / 2]
+        *sorted.get(n / 2)?
     };
 
     Some(SampleStats {
@@ -334,8 +336,10 @@ fn ln_gamma(val: f64) -> f64 {
     }
 
     let shifted = val - 1.0;
-    let mut sum = COEFFS[0];
-    for (idx, &coeff) in COEFFS.iter().enumerate().skip(1) {
+    let [first_coeff, rest_coeffs @ ..] = COEFFS;
+    let mut sum = first_coeff;
+    for (offset, coeff) in rest_coeffs.into_iter().enumerate() {
+        let idx = offset + 1;
         sum += coeff / (shifted + idx as f64);
     }
 
@@ -849,6 +853,7 @@ pub fn format_full_report(results: &[ComparisonResult]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{Context, Result};
 
     // ── compute_stats tests ──────────────────────────────────────────
 
@@ -858,81 +863,89 @@ mod tests {
     }
 
     #[test]
-    fn stats_single_value() {
-        let stats = compute_stats(&[42.0]).unwrap();
+    fn stats_single_value() -> Result<()> {
+        let stats = sample_stats(&[42.0])?;
         assert_eq!(stats.n, 1);
         assert!((stats.mean - 42.0).abs() < f64::EPSILON);
         assert!((stats.std_dev - 0.0).abs() < f64::EPSILON);
         assert!((stats.median - 42.0).abs() < f64::EPSILON);
+        Ok(())
     }
 
     #[test]
-    fn stats_known_values() {
+    fn stats_known_values() -> Result<()> {
         // Mean=5.0, std_dev=sqrt(2.5) ≈ 1.5811
-        let stats = compute_stats(&[3.0, 4.0, 5.0, 6.0, 7.0]).unwrap();
+        let stats = sample_stats(&[3.0, 4.0, 5.0, 6.0, 7.0])?;
         assert_eq!(stats.n, 5);
         assert!((stats.mean - 5.0).abs() < 1e-10);
         assert!((stats.std_dev - 2.5_f64.sqrt()).abs() < 1e-10);
         assert!((stats.median - 5.0).abs() < f64::EPSILON);
         assert!((stats.min - 3.0).abs() < f64::EPSILON);
         assert!((stats.max - 7.0).abs() < f64::EPSILON);
+        Ok(())
     }
 
     #[test]
-    fn stats_even_count_median() {
-        let stats = compute_stats(&[1.0, 2.0, 3.0, 4.0]).unwrap();
+    fn stats_even_count_median() -> Result<()> {
+        let stats = sample_stats(&[1.0, 2.0, 3.0, 4.0])?;
         assert!((stats.median - 2.5).abs() < f64::EPSILON);
+        Ok(())
     }
 
     #[test]
-    fn stats_cv_percent_is_correct() {
-        let stats = compute_stats(&[100.0, 100.0, 100.0]).unwrap();
+    fn stats_cv_percent_is_correct() -> Result<()> {
+        let stats = sample_stats(&[100.0, 100.0, 100.0])?;
         assert!((stats.cv_percent - 0.0).abs() < f64::EPSILON);
 
         // CV = std/mean * 100
-        let stats = compute_stats(&[90.0, 100.0, 110.0]).unwrap();
+        let stats = sample_stats(&[90.0, 100.0, 110.0])?;
         assert!(stats.cv_percent > 0.0);
+        Ok(())
     }
 
     // ── Cohen's d tests ──────────────────────────────────────────────
 
     #[test]
-    fn cohens_d_identical_samples() {
-        let s = compute_stats(&[10.0, 10.0, 10.0, 10.0]).unwrap();
+    fn cohens_d_identical_samples() -> Result<()> {
+        let s = sample_stats(&[10.0, 10.0, 10.0, 10.0])?;
         let d = cohens_d(&s, &s);
         assert!((d - 0.0).abs() < f64::EPSILON);
+        Ok(())
     }
 
     #[test]
-    fn cohens_d_known_large_effect() {
-        let baseline = compute_stats(&[100.0, 100.0, 100.0, 100.0, 100.0]).unwrap();
-        let current = compute_stats(&[120.0, 120.0, 120.0, 120.0, 120.0]).unwrap();
+    fn cohens_d_known_large_effect() -> Result<()> {
+        let baseline = sample_stats(&[100.0, 100.0, 100.0, 100.0, 100.0])?;
+        let current = sample_stats(&[120.0, 120.0, 120.0, 120.0, 120.0])?;
         // Both have std_dev ≈ 0, so d is very large (or infinite).
         // With equal values, std_dev = 0 → d = 0 (our guard).
         let d = cohens_d(&baseline, &current);
         // Both samples have zero variance → pooled_sd = 0 → d = 0.
         assert!((d - 0.0).abs() < f64::EPSILON);
+        Ok(())
     }
 
     #[test]
-    fn cohens_d_with_variance() {
-        let baseline = compute_stats(&[100.0, 102.0, 98.0, 101.0, 99.0]).unwrap();
-        let current = compute_stats(&[110.0, 112.0, 108.0, 111.0, 109.0]).unwrap();
+    fn cohens_d_with_variance() -> Result<()> {
+        let baseline = sample_stats(&[100.0, 102.0, 98.0, 101.0, 99.0])?;
+        let current = sample_stats(&[110.0, 112.0, 108.0, 111.0, 109.0])?;
         let d = cohens_d(&baseline, &current);
         // Both have similar std_dev (~1.58), difference in means = 10.
         // d ≈ 10 / 1.58 ≈ 6.3 — a very large effect.
         assert!(d > 5.0, "expected large effect, got d={d}");
         assert_eq!(effect_size_label(d), "large");
+        Ok(())
     }
 
     #[test]
-    fn cohens_d_small_effect() {
-        let baseline = compute_stats(&[100.0, 105.0, 95.0, 102.0, 98.0]).unwrap();
-        let current = compute_stats(&[101.0, 106.0, 96.0, 103.0, 99.0]).unwrap();
+    fn cohens_d_small_effect() -> Result<()> {
+        let baseline = sample_stats(&[100.0, 105.0, 95.0, 102.0, 98.0])?;
+        let current = sample_stats(&[101.0, 106.0, 96.0, 103.0, 99.0])?;
         let d = cohens_d(&baseline, &current);
         // Means differ by ~1, std_dev ~3.5 → d ≈ 0.28 (small).
         assert!(d > 0.0, "expected positive d");
         assert!(d < 0.5, "expected small effect, got d={d}");
+        Ok(())
     }
 
     #[test]
@@ -951,41 +964,44 @@ mod tests {
     // ── Welch's t-test tests ─────────────────────────────────────────
 
     #[test]
-    fn t_test_too_small_samples() {
-        let s1 = compute_stats(&[1.0]).unwrap();
-        let s2 = compute_stats(&[2.0, 3.0]).unwrap();
+    fn t_test_too_small_samples() -> Result<()> {
+        let s1 = sample_stats(&[1.0])?;
+        let s2 = sample_stats(&[2.0, 3.0])?;
         assert!(welch_t_test(&s1, &s2).is_none());
+        Ok(())
     }
 
     #[test]
-    fn t_test_identical_samples_high_p() {
-        let s = compute_stats(&[10.0, 11.0, 9.0, 10.5, 9.5]).unwrap();
-        let result = welch_t_test(&s, &s).unwrap();
+    fn t_test_identical_samples_high_p() -> Result<()> {
+        let s = sample_stats(&[10.0, 11.0, 9.0, 10.5, 9.5])?;
+        let result = t_test(&s, &s)?;
         assert!(
             result.p_value > 0.9,
             "identical samples should have p ≈ 1.0, got {}",
             result.p_value,
         );
+        Ok(())
     }
 
     #[test]
-    fn t_test_clearly_different_samples_low_p() {
-        let baseline = compute_stats(&[100.0, 101.0, 99.0, 100.5, 99.5]).unwrap();
-        let current = compute_stats(&[120.0, 121.0, 119.0, 120.5, 119.5]).unwrap();
-        let result = welch_t_test(&baseline, &current).unwrap();
+    fn t_test_clearly_different_samples_low_p() -> Result<()> {
+        let baseline = sample_stats(&[100.0, 101.0, 99.0, 100.5, 99.5])?;
+        let current = sample_stats(&[120.0, 121.0, 119.0, 120.5, 119.5])?;
+        let result = t_test(&baseline, &current)?;
         assert!(
             result.p_value < 0.001,
             "clearly different samples should have p < 0.001, got {}",
             result.p_value,
         );
+        Ok(())
     }
 
     #[test]
-    fn t_test_symmetry() {
-        let s1 = compute_stats(&[100.0, 102.0, 98.0, 101.0, 99.0]).unwrap();
-        let s2 = compute_stats(&[105.0, 107.0, 103.0, 106.0, 104.0]).unwrap();
-        let r1 = welch_t_test(&s1, &s2).unwrap();
-        let r2 = welch_t_test(&s2, &s1).unwrap();
+    fn t_test_symmetry() -> Result<()> {
+        let s1 = sample_stats(&[100.0, 102.0, 98.0, 101.0, 99.0])?;
+        let s2 = sample_stats(&[105.0, 107.0, 103.0, 106.0, 104.0])?;
+        let r1 = t_test(&s1, &s2)?;
+        let r2 = t_test(&s2, &s1)?;
         assert!(
             (r1.p_value - r2.p_value).abs() < 1e-10,
             "t-test should be symmetric in p-value",
@@ -994,6 +1010,15 @@ mod tests {
             (r1.t_stat + r2.t_stat).abs() < 1e-10,
             "t-test t_stat should flip sign",
         );
+        Ok(())
+    }
+
+    fn sample_stats(values: &[f64]) -> Result<SampleStats> {
+        compute_stats(values).context("sample stats")
+    }
+
+    fn t_test(baseline: &SampleStats, current: &SampleStats) -> Result<TTestResult> {
+        welch_t_test(baseline, current).context("welch t-test result")
     }
 
     // ── ln_gamma accuracy ────────────────────────────────────────────
