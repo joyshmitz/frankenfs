@@ -330,7 +330,13 @@ impl PerCoreDispatcher {
             .map(|m| m.pending_requests.load(Ordering::Relaxed))
             .fold(0, i64::saturating_add);
 
-        if total <= 0 {
+        // Do not steal if the system is essentially idle.
+        // We need at least an average of 1 request per core to justify the
+        // cross-core synchronization overhead of stealing.
+        let Ok(core_count) = i64::try_from(n) else {
+            return false;
+        };
+        if total < core_count {
             return false;
         }
 
