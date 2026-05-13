@@ -8736,16 +8736,16 @@ fn btrfs_csum_size_for_type(csum_type: u16) -> u16 {
 /// kernel itself returns `fsid` here, so we mirror that behaviour.
 fn encode_btrfs_fs_info_args(sb: &ffs_ondisk::BtrfsSuperblock) -> Vec<u8> {
     let mut buf = vec![0_u8; BTRFS_FS_INFO_ARGS_SIZE];
-    buf[0x00..0x08].copy_from_slice(&sb.num_devices.to_le_bytes());
-    buf[0x08..0x10].copy_from_slice(&sb.num_devices.to_le_bytes());
+    buf[0x00..0x08].copy_from_slice(&sb.num_devices.to_ne_bytes());
+    buf[0x08..0x10].copy_from_slice(&sb.num_devices.to_ne_bytes());
     buf[0x10..0x20].copy_from_slice(&sb.fsid);
-    buf[0x20..0x24].copy_from_slice(&sb.nodesize.to_le_bytes());
-    buf[0x24..0x28].copy_from_slice(&sb.sectorsize.to_le_bytes());
-    buf[0x28..0x2C].copy_from_slice(&sb.sectorsize.to_le_bytes());
-    buf[0x2C..0x2E].copy_from_slice(&sb.csum_type.to_le_bytes());
-    buf[0x2E..0x30].copy_from_slice(&btrfs_csum_size_for_type(sb.csum_type).to_le_bytes());
+    buf[0x20..0x24].copy_from_slice(&sb.nodesize.to_ne_bytes());
+    buf[0x24..0x28].copy_from_slice(&sb.sectorsize.to_ne_bytes());
+    buf[0x28..0x2C].copy_from_slice(&sb.sectorsize.to_ne_bytes());
+    buf[0x2C..0x2E].copy_from_slice(&sb.csum_type.to_ne_bytes());
+    buf[0x2E..0x30].copy_from_slice(&btrfs_csum_size_for_type(sb.csum_type).to_ne_bytes());
     // flags (0x30..0x38) already zero from vec![0; ...]
-    buf[0x38..0x40].copy_from_slice(&sb.generation.to_le_bytes());
+    buf[0x38..0x40].copy_from_slice(&sb.generation.to_ne_bytes());
     buf[0x40..0x50].copy_from_slice(&sb.fsid);
     buf
 }
@@ -8811,10 +8811,10 @@ fn encode_btrfs_dev_info_args(
     }
 
     let mut buf = vec![0_u8; BTRFS_DEV_INFO_ARGS_SIZE];
-    buf[0x00..0x08].copy_from_slice(&CANONICAL_DEVID.to_le_bytes());
+    buf[0x00..0x08].copy_from_slice(&CANONICAL_DEVID.to_ne_bytes());
     buf[0x08..0x18].copy_from_slice(&sb.fsid);
-    buf[0x18..0x20].copy_from_slice(&sb.bytes_used.to_le_bytes());
-    buf[0x20..0x28].copy_from_slice(&sb.total_bytes.to_le_bytes());
+    buf[0x18..0x20].copy_from_slice(&sb.bytes_used.to_ne_bytes());
+    buf[0x20..0x28].copy_from_slice(&sb.total_bytes.to_ne_bytes());
     // `unused[379]` (0x28..0x0C08) stays zeroed.  `path[1024]` (0x0C08..4096)
     // also stays zeroed — FrankenFS serves btrfs images out of a backing
     // file, not a /dev/* node, so there is no meaningful device path to

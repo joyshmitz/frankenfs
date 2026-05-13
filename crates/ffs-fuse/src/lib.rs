@@ -2605,12 +2605,12 @@ impl FrankenFuse {
         if buf.len() < FS_IOC_FSSETXATTR_SIZE {
             return Err(libc::EINVAL);
         }
-        let xflags = u32::from_le_bytes(buf[0..4].try_into().map_err(|_| libc::EINVAL)?);
-        let extsize = u32::from_le_bytes(buf[4..8].try_into().map_err(|_| libc::EINVAL)?);
+        let xflags = u32::from_ne_bytes(buf[0..4].try_into().map_err(|_| libc::EINVAL)?);
+        let extsize = u32::from_ne_bytes(buf[4..8].try_into().map_err(|_| libc::EINVAL)?);
         // fsx_nextents (bytes 8..12) is read-only on the SET path and
         // must be ignored — kernel zeroes it on its own copy.
-        let proj = u32::from_le_bytes(buf[12..16].try_into().map_err(|_| libc::EINVAL)?);
-        let cowextsize = u32::from_le_bytes(buf[16..20].try_into().map_err(|_| libc::EINVAL)?);
+        let proj = u32::from_ne_bytes(buf[12..16].try_into().map_err(|_| libc::EINVAL)?);
+        let cowextsize = u32::from_ne_bytes(buf[16..20].try_into().map_err(|_| libc::EINVAL)?);
         // fsx_pad[8] (bytes 20..28) is reserved; tolerate non-zero
         // padding to match the kernel which silently zeroes it.
         Ok(FsxattrInfo {
@@ -3419,7 +3419,7 @@ impl FrankenFuse {
                 }
                 let mut raw_devid = [0_u8; 8];
                 raw_devid.copy_from_slice(&in_data[0..8]);
-                let devid_in = u64::from_le_bytes(raw_devid);
+                let devid_in = u64::from_ne_bytes(raw_devid);
                 let mut uuid_in = [0_u8; 16];
                 uuid_in.copy_from_slice(&in_data[8..24]);
 
@@ -3445,13 +3445,13 @@ impl FrankenFuse {
                 {
                     return IoctlResult::Error(libc::EINVAL);
                 }
-                // Parse input: treeid (u64 le at offset 0), objectid (u64 le at offset 8).
+                // Parse input: treeid (u64 at offset 0), objectid (u64 at offset 8).
                 let mut raw_treeid = [0_u8; 8];
                 raw_treeid.copy_from_slice(&in_data[0..8]);
-                let treeid = u64::from_le_bytes(raw_treeid);
+                let treeid = u64::from_ne_bytes(raw_treeid);
                 let mut raw_objectid = [0_u8; 8];
                 raw_objectid.copy_from_slice(&in_data[8..16]);
-                let objectid = u64::from_le_bytes(raw_objectid);
+                let objectid = u64::from_ne_bytes(raw_objectid);
 
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
@@ -3460,8 +3460,8 @@ impl FrankenFuse {
                     Ok((resolved_treeid, path)) => {
                         // Build output: treeid (8 bytes) + objectid (8 bytes) + name[4080].
                         let mut buf = vec![0_u8; BTRFS_INO_LOOKUP_ARGS_SIZE as usize];
-                        buf[0..8].copy_from_slice(&resolved_treeid.to_le_bytes());
-                        buf[8..16].copy_from_slice(&objectid.to_le_bytes());
+                        buf[0..8].copy_from_slice(&resolved_treeid.to_ne_bytes());
+                        buf[8..16].copy_from_slice(&objectid.to_ne_bytes());
                         let path_len = path.len().min(4080);
                         buf[16..16 + path_len].copy_from_slice(&path[..path_len]);
                         IoctlResult::Data(buf)
@@ -7240,11 +7240,11 @@ mod tests {
         // backend will reject it, but the dispatcher must still parse
         // the buffer cleanly), projid=0x1234_5678.
         let mut buf = Vec::with_capacity(28);
-        buf.extend_from_slice(&0x0000_0048_u32.to_le_bytes()); // xflags
-        buf.extend_from_slice(&0_u32.to_le_bytes()); // extsize
-        buf.extend_from_slice(&0_u32.to_le_bytes()); // nextents (kernel zero)
-        buf.extend_from_slice(&0x1234_5678_u32.to_le_bytes()); // projid
-        buf.extend_from_slice(&0_u32.to_le_bytes()); // cowextsize
+        buf.extend_from_slice(&0x0000_0048_u32.to_ne_bytes()); // xflags
+        buf.extend_from_slice(&0_u32.to_ne_bytes()); // extsize
+        buf.extend_from_slice(&0_u32.to_ne_bytes()); // nextents (kernel zero)
+        buf.extend_from_slice(&0x1234_5678_u32.to_ne_bytes()); // projid
+        buf.extend_from_slice(&0_u32.to_ne_bytes()); // cowextsize
         buf.extend_from_slice(&[0_u8; 8]); // pad
 
         let response = dispatch_ioctl_for_testing(&fuse, 19, 0, FS_IOC_FSSETXATTR, &buf, 0);
@@ -7630,15 +7630,15 @@ mod tests {
         // Canned 1024-byte payload with distinctive marker bytes at each
         // named field offset so the dispatcher can't silently corrupt them.
         let mut payload = vec![0_u8; BTRFS_IOC_FS_INFO_SIZE as usize];
-        payload[0x00..0x08].copy_from_slice(&7_u64.to_le_bytes()); // max_id
-        payload[0x08..0x10].copy_from_slice(&3_u64.to_le_bytes()); // num_devices
+        payload[0x00..0x08].copy_from_slice(&7_u64.to_ne_bytes()); // max_id
+        payload[0x08..0x10].copy_from_slice(&3_u64.to_ne_bytes()); // num_devices
         payload[0x10..0x20].copy_from_slice(&[0x22_u8; 16]); // fsid
-        payload[0x20..0x24].copy_from_slice(&16_u32.pow(2).to_le_bytes()); // nodesize = 256
-        payload[0x24..0x28].copy_from_slice(&4096_u32.to_le_bytes()); // sectorsize
-        payload[0x28..0x2C].copy_from_slice(&4096_u32.to_le_bytes()); // clone_alignment
-        payload[0x2C..0x2E].copy_from_slice(&0_u16.to_le_bytes()); // csum_type (CRC32C)
-        payload[0x2E..0x30].copy_from_slice(&4_u16.to_le_bytes()); // csum_size
-        payload[0x38..0x40].copy_from_slice(&0xDEAD_BEEF_1234_5678_u64.to_le_bytes()); // generation
+        payload[0x20..0x24].copy_from_slice(&16_u32.pow(2).to_ne_bytes()); // nodesize = 256
+        payload[0x24..0x28].copy_from_slice(&4096_u32.to_ne_bytes()); // sectorsize
+        payload[0x28..0x2C].copy_from_slice(&4096_u32.to_ne_bytes()); // clone_alignment
+        payload[0x2C..0x2E].copy_from_slice(&0_u16.to_ne_bytes()); // csum_type (CRC32C)
+        payload[0x2E..0x30].copy_from_slice(&4_u16.to_ne_bytes()); // csum_size
+        payload[0x38..0x40].copy_from_slice(&0xDEAD_BEEF_1234_5678_u64.to_ne_bytes()); // generation
         payload[0x40..0x50].copy_from_slice(&[0x22_u8; 16]); // metadata_uuid == fsid
 
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -7727,7 +7727,7 @@ mod tests {
     /// well-formed BTRFS_IOC_DEV_INFO request needs to carry.
     fn btrfs_dev_info_in(devid: u64, uuid: &[u8; 16]) -> Vec<u8> {
         let mut buf = vec![0_u8; 24];
-        buf[0..8].copy_from_slice(&devid.to_le_bytes());
+        buf[0..8].copy_from_slice(&devid.to_ne_bytes());
         buf[8..24].copy_from_slice(uuid);
         buf
     }
@@ -7737,10 +7737,10 @@ mod tests {
         // Canned 4096-byte payload with distinctive marker values at every
         // named field offset so the dispatcher can't silently corrupt them.
         let mut payload = vec![0_u8; BTRFS_IOC_DEV_INFO_SIZE as usize];
-        payload[0x00..0x08].copy_from_slice(&1_u64.to_le_bytes()); // devid
+        payload[0x00..0x08].copy_from_slice(&1_u64.to_ne_bytes()); // devid
         payload[0x08..0x18].copy_from_slice(&[0x77_u8; 16]); // uuid
-        payload[0x18..0x20].copy_from_slice(&0xCAFE_BABE_u64.to_le_bytes()); // bytes_used
-        payload[0x20..0x28].copy_from_slice(&(128_u64 * 1024 * 1024).to_le_bytes()); // total_bytes
+        payload[0x18..0x20].copy_from_slice(&0xCAFE_BABE_u64.to_ne_bytes()); // bytes_used
+        payload[0x20..0x28].copy_from_slice(&(128_u64 * 1024 * 1024).to_ne_bytes()); // total_bytes
 
         let calls = Arc::new(Mutex::new(Vec::new()));
         let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_btrfs_dev_info(
