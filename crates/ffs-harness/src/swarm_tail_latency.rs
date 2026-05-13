@@ -974,22 +974,20 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn workspace_path(path: &str) -> String {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    fn workspace_path(path: &str) -> Result<String> {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest_dir
             .parent()
             .and_then(Path::parent)
-            .expect("workspace root")
-            .join(path)
-            .display()
-            .to_string()
+            .context("workspace root")?;
+        Ok(workspace.join(path).display().to_string())
     }
 
     #[test]
-    fn checked_in_swarm_tail_latency_ledger_validates() {
+    fn checked_in_swarm_tail_latency_ledger_validates() -> Result<()> {
         let ledger = load_swarm_tail_latency_ledger(Path::new(&workspace_path(
             DEFAULT_SWARM_TAIL_LATENCY_LEDGER,
-        )))
-        .expect("checked-in ledger loads");
+        )?))?;
         let report = validate_swarm_tail_latency_ledger(&ledger);
         assert!(
             report.valid,
@@ -1007,6 +1005,7 @@ mod tests {
             report.classification_counts.get("missing_reference"),
             Some(&1)
         );
+        Ok(())
     }
 
     /// The markdown renderer feeds proof-bundle and release-gate operator
@@ -1016,11 +1015,10 @@ mod tests {
     /// watched-alert cell escaping, and omitted Errors section for the
     /// checked-in ledger fixture.
     #[test]
-    fn render_swarm_tail_latency_markdown_checked_in_ledger_snapshot() {
+    fn render_swarm_tail_latency_markdown_checked_in_ledger_snapshot() -> Result<()> {
         let ledger = load_swarm_tail_latency_ledger(Path::new(&workspace_path(
             DEFAULT_SWARM_TAIL_LATENCY_LEDGER,
-        )))
-        .expect("checked-in ledger loads");
+        )?))?;
         let report = validate_swarm_tail_latency_ledger(&ledger);
         let markdown = render_swarm_tail_latency_markdown(&report);
 
@@ -1028,13 +1026,14 @@ mod tests {
             "render_swarm_tail_latency_markdown_checked_in_ledger",
             markdown
         );
+        Ok(())
     }
 
     #[test]
     fn swarm_tail_latency_report_json_shape() -> Result<()> {
         let ledger = load_swarm_tail_latency_ledger(Path::new(&workspace_path(
             DEFAULT_SWARM_TAIL_LATENCY_LEDGER,
-        )))?;
+        )?))?;
         let report = validate_swarm_tail_latency_ledger(&ledger);
         let json = serde_json::to_string_pretty(&report)?;
         insta::assert_snapshot!("swarm_tail_latency_report_json_shape", json);
@@ -1173,19 +1172,20 @@ mod tests {
     }
 
     #[test]
-    fn watched_dominant_components_are_reported() {
+    fn watched_dominant_components_are_reported() -> Result<()> {
         let ledger = fixture_ledger();
         let report = validate_swarm_tail_latency_ledger(&ledger);
         let row = report
             .rows
             .iter()
             .find(|row| row.scenario_id == "tail_latency_repair_backlog_fail")
-            .expect("repair backlog row");
+            .context("repair backlog row")?;
         assert_eq!(row.dominant_component, "repair_backlog");
         assert!(
             row.watched_dominant_components
                 .contains(&"repair_backlog".to_owned())
         );
+        Ok(())
     }
 
     fn fixture_ledger() -> SwarmTailLatencyLedger {
