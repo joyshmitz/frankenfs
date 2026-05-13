@@ -850,6 +850,21 @@ impl std::error::Error for TaxonomyError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{Context, Result};
+
+    fn first_uncovered<'a>(uncovered: &'a [&'a String]) -> Result<&'a str> {
+        uncovered
+            .first()
+            .map(|operation| operation.as_str())
+            .context("uncovered operation list has at least one entry")
+    }
+
+    fn taxonomy_entry<'a>(taxonomy: &'a Taxonomy, op: &str) -> Result<&'a BenchmarkEntry> {
+        taxonomy
+            .operations
+            .get(op)
+            .with_context(|| format!("{op} operation registered"))
+    }
 
     #[test]
     fn canonical_taxonomy_has_all_baseline_operations() {
@@ -1051,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn uncovered_operations_detected() {
+    fn uncovered_operations_detected() -> Result<()> {
         let taxonomy = Taxonomy::canonical();
         let ops = vec![
             "metadata_parity_cli".to_owned(),
@@ -1059,7 +1074,8 @@ mod tests {
         ];
         let uncovered = taxonomy.uncovered_operations(&ops);
         assert_eq!(uncovered.len(), 1);
-        assert_eq!(uncovered[0], "completely_unknown_benchmark");
+        assert_eq!(first_uncovered(&uncovered)?, "completely_unknown_benchmark");
+        Ok(())
     }
 
     #[test]
@@ -1149,7 +1165,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_runtime_mode_benchmarks_registered() {
+    fn mount_runtime_mode_benchmarks_registered() -> Result<()> {
         let taxonomy = Taxonomy::canonical();
 
         // Mount family entries for dispatch infrastructure
@@ -1161,10 +1177,7 @@ mod tests {
             "mount_runtime_metrics_record_throughput",
         ];
         for op in &mount_runtime_ops {
-            let entry = taxonomy
-                .operations
-                .get(*op)
-                .expect("mount runtime op registered");
+            let entry = taxonomy_entry(&taxonomy, op)?;
             assert_eq!(entry.family, BenchmarkFamily::Mount);
             assert_eq!(entry.owning_crate, "ffs-fuse");
         }
@@ -1176,13 +1189,11 @@ mod tests {
             "mount_runtime_backpressure_emergency",
         ];
         for op in &backpressure_ops {
-            let entry = taxonomy
-                .operations
-                .get(*op)
-                .expect("backpressure op registered");
+            let entry = taxonomy_entry(&taxonomy, op)?;
             assert_eq!(entry.family, BenchmarkFamily::DegradedMode);
             assert_eq!(entry.owning_crate, "ffs-fuse");
         }
+        Ok(())
     }
 
     #[test]
@@ -1230,7 +1241,7 @@ mod tests {
     }
 
     #[test]
-    fn degraded_throughput_benchmarks_registered() {
+    fn degraded_throughput_benchmarks_registered() -> Result<()> {
         let taxonomy = Taxonomy::canonical();
 
         // All degraded throughput scenarios must exist
@@ -1245,10 +1256,7 @@ mod tests {
             "degraded_backpressure_contention_4threads",
         ];
         for op in &degraded_throughput_ops {
-            let entry = taxonomy
-                .operations
-                .get(*op)
-                .expect("degraded throughput op registered");
+            let entry = taxonomy_entry(&taxonomy, op)?;
             assert_eq!(
                 entry.family,
                 BenchmarkFamily::DegradedMode,
@@ -1262,7 +1270,7 @@ mod tests {
             "degraded_throughput_critical_write",
             "degraded_backpressure_contention_4threads",
         ] {
-            let entry = &taxonomy.operations[op];
+            let entry = taxonomy_entry(&taxonomy, op)?;
             assert_eq!(
                 entry.metric,
                 MetricType::Throughput,
@@ -1272,13 +1280,14 @@ mod tests {
 
         // FSM tick is latency
         assert_eq!(
-            taxonomy.operations["degraded_fsm_tick_latency"].metric,
+            taxonomy_entry(&taxonomy, "degraded_fsm_tick_latency")?.metric,
             MetricType::Latency,
         );
+        Ok(())
     }
 
     #[test]
-    fn mount_runtime_benchmark_ops_not_in_baseline_flagged() {
+    fn mount_runtime_benchmark_ops_not_in_baseline_flagged() -> Result<()> {
         // Negative test: unknown benchmark operations should be detected as uncovered.
         let taxonomy = Taxonomy::canonical();
         let ops = vec![
@@ -1287,11 +1296,15 @@ mod tests {
         ];
         let uncovered = taxonomy.uncovered_operations(&ops);
         assert_eq!(uncovered.len(), 1);
-        assert_eq!(uncovered[0], "mount_runtime_nonexistent_scenario");
+        assert_eq!(
+            first_uncovered(&uncovered)?,
+            "mount_runtime_nonexistent_scenario"
+        );
+        Ok(())
     }
 
     #[test]
-    fn taxonomy_json_round_trip() -> Result<(), serde_json::Error> {
+    fn taxonomy_json_round_trip() -> Result<()> {
         let taxonomy = Taxonomy::canonical();
         let json = serde_json::to_string_pretty(&taxonomy)?;
         let parsed: Taxonomy = serde_json::from_str(&json)?;
@@ -1302,7 +1315,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_taxonomy_json_snapshot() -> Result<(), serde_json::Error> {
+    fn canonical_taxonomy_json_snapshot() -> Result<()> {
         let taxonomy = Taxonomy::canonical();
         let json = serde_json::to_string_pretty(&taxonomy)?;
         insta::assert_snapshot!("canonical_taxonomy_v1", json);
