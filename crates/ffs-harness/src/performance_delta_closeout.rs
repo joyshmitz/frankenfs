@@ -1576,6 +1576,8 @@ mod tests {
     use super::*;
     use std::{io::Write as _, path::PathBuf};
 
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     fn issue_ids() -> BTreeSet<String> {
         [
             "bd-rchk5.5",
@@ -1599,12 +1601,12 @@ mod tests {
         }
     }
 
-    fn write_issue_ledger(ids: &[&str]) -> tempfile::NamedTempFile {
-        let mut file = tempfile::NamedTempFile::new().expect("create issue ledger fixture");
+    fn write_issue_ledger(ids: &[&str]) -> std::io::Result<tempfile::NamedTempFile> {
+        let mut file = tempfile::NamedTempFile::new()?;
         for id in ids {
-            writeln!(file, r#"{{"id":"{id}"}}"#).expect("write issue ledger fixture row");
+            writeln!(file, r#"{{"id":"{id}"}}"#)?;
         }
-        file
+        Ok(file)
     }
 
     fn base_config() -> PerformanceDeltaCloseoutConfig {
@@ -1779,21 +1781,19 @@ mod tests {
     }
 
     #[test]
-    fn run_report_summarizes_issue_ledger_when_followups_are_missing() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn run_report_summarizes_issue_ledger_when_followups_are_missing() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let reference_path = dir.path().join("reference.json");
         let current_path = dir.path().join("current.json");
         fs::write(
             &reference_path,
             r#"{"environment":{"id":"test"},"measurements":[{"operation":"mount_cold","status":"measured","p99_us":100.0,"throughput_ops_sec":10.0,"command":"cargo bench"}]}"#,
-        )
-        .expect("write reference artifact");
+        )?;
         fs::write(
             &current_path,
             r#"{"environment":{"id":"test"},"measurements":[{"operation":"mount_cold","status":"measured","p99_us":200.0,"throughput_ops_sec":10.0,"command":"cargo bench"}]}"#,
-        )
-        .expect("write current artifact");
-        let issue_ledger = write_issue_ledger(&["bd-rchk5.8"]);
+        )?;
+        let issue_ledger = write_issue_ledger(&["bd-rchk5.8"])?;
         let mut config = base_config();
         config.issues_path = issue_ledger.path().display().to_string();
         config.reference_baselines = vec![reference_path.display().to_string()];
@@ -1801,7 +1801,7 @@ mod tests {
         config.comparison_artifacts.clear();
         config.unmeasured_claims.clear();
 
-        let report = run_performance_delta_closeout(&config).expect("run closeout");
+        let report = run_performance_delta_closeout(&config)?;
 
         assert!(!report.valid);
         assert_eq!(report.issue_ledger.issue_count, 1);
@@ -1815,14 +1815,14 @@ mod tests {
                 && error.contains("issue_count=1")
                 && error.contains("bd-rchk5.5")
         }));
+        Ok(())
     }
 
     #[test]
-    fn checked_in_closeout_config_validates_and_links_followups() {
+    fn checked_in_closeout_config_validates_and_links_followups() -> TestResult {
         let config = load_performance_delta_closeout_config(Path::new(&workspace_path(
             DEFAULT_PERFORMANCE_DELTA_CLOSEOUT_CONFIG,
-        )))
-        .expect("load checked-in config");
+        )))?;
         let issue_ledger = write_issue_ledger(&[
             "bd-rchk5.5",
             "bd-rchk5.6",
@@ -1830,10 +1830,10 @@ mod tests {
             "bd-rchk5.8",
             "bd-9vzzk",
             "bd-t21em",
-        ]);
+        ])?;
         let mut config = absolutize_paths(config);
         config.issues_path = issue_ledger.path().display().to_string();
-        let report = run_performance_delta_closeout(&config).expect("build closeout report");
+        let report = run_performance_delta_closeout(&config)?;
         assert!(report.valid, "{:?}", report.errors);
         assert!(report.row_count >= 10);
         assert!(
@@ -1881,14 +1881,14 @@ mod tests {
             assert!(row.release_wording.is_some());
             assert!(row.validation_command.is_some());
         }
+        Ok(())
     }
 
     #[test]
-    fn performance_delta_closeout_report_json_shape() -> serde_json::Result<()> {
+    fn performance_delta_closeout_report_json_shape() -> TestResult {
         let config = load_performance_delta_closeout_config(Path::new(&workspace_path(
             DEFAULT_PERFORMANCE_DELTA_CLOSEOUT_CONFIG,
-        )))
-        .expect("load checked-in config");
+        )))?;
         let issue_ledger = write_issue_ledger(&[
             "bd-rchk5.5",
             "bd-rchk5.6",
@@ -1896,10 +1896,10 @@ mod tests {
             "bd-rchk5.8",
             "bd-9vzzk",
             "bd-t21em",
-        ]);
+        ])?;
         let mut config = absolutize_paths(config);
         config.issues_path = issue_ledger.path().display().to_string();
-        let report = run_performance_delta_closeout(&config).expect("build closeout report");
+        let report = run_performance_delta_closeout(&config)?;
         assert!(report.valid, "{:?}", report.errors);
 
         let full_json = serde_json::to_string_pretty(&report)?;
