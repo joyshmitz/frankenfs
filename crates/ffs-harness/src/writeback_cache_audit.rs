@@ -1594,6 +1594,36 @@ fn validate_writeback_mount_options(options: &WritebackMountOptions) -> Result<(
 mod tests {
     use super::*;
 
+    fn invariant_evidence_mut(
+        oracle: &mut WritebackOrderingOracle,
+        index: usize,
+    ) -> Result<&mut WritebackOrderingInvariantEvidence> {
+        oracle
+            .invariant_evidence
+            .get_mut(index)
+            .with_context(|| format!("expected invariant evidence at index {index}"))
+    }
+
+    fn crash_point_mut(
+        oracle: &mut WritebackCrashReplayOracle,
+        index: usize,
+    ) -> Result<&mut WritebackCrashPointEvidence> {
+        oracle
+            .crash_points
+            .get_mut(index)
+            .with_context(|| format!("expected crash point at index {index}"))
+    }
+
+    fn unsupported_combination_mut(
+        oracle: &mut WritebackCrashReplayOracle,
+        index: usize,
+    ) -> Result<&mut WritebackUnsupportedCombination> {
+        oracle
+            .unsupported_combinations
+            .get_mut(index)
+            .with_context(|| format!("expected unsupported combination at index {index}"))
+    }
+
     fn happy_artifact(id: &str) -> ArtifactState {
         ArtifactState {
             artifact_id: id.to_owned(),
@@ -2182,21 +2212,21 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_mode_builds_policy_rejection_report() {
+    fn unsupported_mode_builds_policy_rejection_report() -> Result<()> {
         let mut gate = happy_gate();
         gate.mount_options.mode = "swap".to_owned();
         let report = build_writeback_cache_audit_report(
             &gate,
             "writeback_cache_audit_rejects_unsupported_mode",
             "ffs-harness validate-writeback-cache-audit --gate gate.json",
-        )
-        .expect("unsupported mode should still produce a policy report");
+        )?;
 
         assert!(matches!(
             report.decision,
             WritebackCacheAuditDecision::Reject { ref reason, .. }
                 if reason == "default_or_read_only_mount"
         ));
+        Ok(())
     }
 
     #[test]
@@ -2253,13 +2283,12 @@ mod tests {
     }
 
     #[test]
-    fn report_includes_failure_modes_artifact_fields_and_repro() {
+    fn report_includes_failure_modes_artifact_fields_and_repro() -> Result<()> {
         let report = build_writeback_cache_audit_report(
             &happy_gate(),
             "writeback_cache_audit_accepts_complete_gate",
             "ffs-harness validate-writeback-cache-audit --gate gate.json",
-        )
-        .expect("happy gate should build report");
+        )?;
 
         assert_eq!(
             report.scenario_id,
@@ -2296,21 +2325,22 @@ mod tests {
             report.decision,
             WritebackCacheAuditDecision::Accept
         ));
+        Ok(())
     }
 
     #[test]
-    fn require_accept_fails_closed_on_rejection() {
+    fn require_accept_fails_closed_on_rejection() -> Result<()> {
         let mut gate = happy_gate();
         gate.explicit_opt_in = false;
         let report = build_writeback_cache_audit_report(
             &gate,
             "writeback_cache_audit_rejects_default_mount",
             "ffs-harness validate-writeback-cache-audit --gate gate.json --require-accept",
-        )
-        .expect("schema-valid rejection should still build report");
+        )?;
 
         let result = fail_on_writeback_cache_audit_errors(&report);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
@@ -2345,9 +2375,9 @@ mod tests {
     }
 
     #[test]
-    fn ordering_oracle_rejects_missing_invariant_test_id() {
+    fn ordering_oracle_rejects_missing_invariant_test_id() -> Result<()> {
         let mut oracle = happy_ordering_oracle();
-        oracle.invariant_evidence[0].test_id.clear();
+        invariant_evidence_mut(&mut oracle, 0)?.test_id.clear();
         let decision = evaluate_writeback_ordering_oracle(&oracle);
         assert!(matches!(
             decision,
@@ -2358,12 +2388,15 @@ mod tests {
             } if reason == "missing_invariant_evidence"
                 && invariants_failing.contains(&"I1".to_owned())
         ));
+        Ok(())
     }
 
     #[test]
-    fn ordering_oracle_rejects_missing_invariant_artifact_field() {
+    fn ordering_oracle_rejects_missing_invariant_artifact_field() -> Result<()> {
         let mut oracle = happy_ordering_oracle();
-        oracle.invariant_evidence[1].artifact_field.clear();
+        invariant_evidence_mut(&mut oracle, 1)?
+            .artifact_field
+            .clear();
         let decision = evaluate_writeback_ordering_oracle(&oracle);
         assert!(matches!(
             decision,
@@ -2374,12 +2407,15 @@ mod tests {
             } if reason == "missing_invariant_evidence"
                 && invariants_failing.contains(&"I2".to_owned())
         ));
+        Ok(())
     }
 
     #[test]
-    fn ordering_oracle_rejects_missing_invariant_release_gate_consumer() {
+    fn ordering_oracle_rejects_missing_invariant_release_gate_consumer() -> Result<()> {
         let mut oracle = happy_ordering_oracle();
-        oracle.invariant_evidence[2].release_gate_consumer.clear();
+        invariant_evidence_mut(&mut oracle, 2)?
+            .release_gate_consumer
+            .clear();
         let decision = evaluate_writeback_ordering_oracle(&oracle);
         assert!(matches!(
             decision,
@@ -2390,30 +2426,34 @@ mod tests {
             } if reason == "missing_invariant_evidence"
                 && invariants_failing.contains(&"I3".to_owned())
         ));
+        Ok(())
     }
 
     #[test]
-    fn ordering_oracle_rejects_unsupported_invariant_even_with_rationale() {
+    fn ordering_oracle_rejects_unsupported_invariant_even_with_rationale() -> Result<()> {
         let mut oracle = happy_ordering_oracle();
-        oracle.invariant_evidence[3].supported = false;
-        oracle.invariant_evidence[3].unsupported_rationale =
+        let evidence = invariant_evidence_mut(&mut oracle, 3)?;
+        evidence.supported = false;
+        evidence.unsupported_rationale =
             "permissioned mounted lane unavailable on this host".to_owned();
         let decision = evaluate_writeback_ordering_oracle(&oracle);
         assert_eq!(
             ordering_rejection_reason(&decision),
             Some("missing_invariant_evidence")
         );
+        Ok(())
     }
 
     #[test]
-    fn ordering_oracle_rejects_unsupported_invariant_without_rationale() {
+    fn ordering_oracle_rejects_unsupported_invariant_without_rationale() -> Result<()> {
         let mut oracle = happy_ordering_oracle();
-        oracle.invariant_evidence[3].supported = false;
+        invariant_evidence_mut(&mut oracle, 3)?.supported = false;
         let decision = evaluate_writeback_ordering_oracle(&oracle);
         assert_eq!(
             ordering_rejection_reason(&decision),
             Some("missing_invariant_evidence")
         );
+        Ok(())
     }
 
     #[test]
@@ -2516,13 +2556,12 @@ mod tests {
     }
 
     #[test]
-    fn ordering_report_includes_oracle_fields_and_repro() {
+    fn ordering_report_includes_oracle_fields_and_repro() -> Result<()> {
         let report = build_writeback_ordering_report(
             &happy_ordering_oracle(),
             "writeback_cache_ordering_accepts_complete_oracle",
             "ffs-harness validate-writeback-cache-ordering --oracle oracle.json",
-        )
-        .expect("happy ordering oracle should build report");
+        )?;
 
         assert!(matches!(report.decision, WritebackOrderingDecision::Accept));
         assert_eq!(
@@ -2541,21 +2580,22 @@ mod tests {
                 .reproduction_command
                 .contains("validate-writeback-cache-ordering")
         );
+        Ok(())
     }
 
     #[test]
-    fn ordering_require_accept_fails_closed_on_rejection() {
+    fn ordering_require_accept_fails_closed_on_rejection() -> Result<()> {
         let mut oracle = happy_ordering_oracle();
         oracle.fsync_observed_durable = false;
         let report = build_writeback_ordering_report(
             &oracle,
             "writeback_cache_ordering_rejects_missing_fsync",
             "ffs-harness validate-writeback-cache-ordering --oracle oracle.json --require-accept",
-        )
-        .expect("schema-valid rejection should still build report");
+        )?;
 
         let result = fail_on_writeback_ordering_errors(&report);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
@@ -2576,9 +2616,9 @@ mod tests {
     }
 
     #[test]
-    fn crash_replay_oracle_rejects_survivor_set_mismatch() {
+    fn crash_replay_oracle_rejects_survivor_set_mismatch() -> Result<()> {
         let mut oracle = happy_crash_replay_oracle();
-        oracle.crash_points[0]
+        crash_point_mut(&mut oracle, 0)?
             .actual_survivor_set
             .push("/unexpected".to_owned());
         let decision = evaluate_writeback_crash_replay_oracle(&oracle);
@@ -2586,72 +2626,79 @@ mod tests {
             crash_replay_rejection_reason(&decision),
             Some("survivor_set_mismatch")
         );
+        Ok(())
     }
 
     #[test]
-    fn crash_replay_oracle_rejects_flush_as_durable() {
+    fn crash_replay_oracle_rejects_flush_as_durable() -> Result<()> {
         let mut oracle = happy_crash_replay_oracle();
-        oracle.crash_points[2].flush_observed_non_durable = false;
+        crash_point_mut(&mut oracle, 2)?.flush_observed_non_durable = false;
         let decision = evaluate_writeback_crash_replay_oracle(&oracle);
         assert_eq!(
             crash_replay_rejection_reason(&decision),
             Some("flush_misclassified_as_durable")
         );
+        Ok(())
     }
 
     #[test]
-    fn crash_replay_oracle_rejects_missing_fsync_boundary() {
+    fn crash_replay_oracle_rejects_missing_fsync_boundary() -> Result<()> {
         let mut oracle = happy_crash_replay_oracle();
-        oracle.crash_points[3].fsync_observed_durable = false;
+        crash_point_mut(&mut oracle, 3)?.fsync_observed_durable = false;
         let decision = evaluate_writeback_crash_replay_oracle(&oracle);
         assert_eq!(
             crash_replay_rejection_reason(&decision),
             Some("missing_fsync_boundary")
         );
+        Ok(())
     }
 
     #[test]
-    fn crash_replay_oracle_rejects_missing_fsyncdir_boundary() {
+    fn crash_replay_oracle_rejects_missing_fsyncdir_boundary() -> Result<()> {
         let mut oracle = happy_crash_replay_oracle();
-        oracle.crash_points[4].fsyncdir_observed_durable = false;
+        crash_point_mut(&mut oracle, 4)?.fsyncdir_observed_durable = false;
         let decision = evaluate_writeback_crash_replay_oracle(&oracle);
         assert_eq!(
             crash_replay_rejection_reason(&decision),
             Some("missing_fsyncdir_boundary")
         );
+        Ok(())
     }
 
     #[test]
-    fn crash_replay_oracle_rejects_metadata_overtaking_data() {
+    fn crash_replay_oracle_rejects_metadata_overtaking_data() -> Result<()> {
         let mut oracle = happy_crash_replay_oracle();
-        oracle.crash_points[4].metadata_after_data_observed = false;
+        crash_point_mut(&mut oracle, 4)?.metadata_after_data_observed = false;
         let decision = evaluate_writeback_crash_replay_oracle(&oracle);
         assert_eq!(
             crash_replay_rejection_reason(&decision),
             Some("metadata_after_data_violation")
         );
+        Ok(())
     }
 
     #[test]
-    fn crash_replay_oracle_rejects_missing_unmount_reopen_evidence() {
+    fn crash_replay_oracle_rejects_missing_unmount_reopen_evidence() -> Result<()> {
         let mut oracle = happy_crash_replay_oracle();
-        oracle.crash_points[9].unmount_reopen_observed = false;
+        crash_point_mut(&mut oracle, 9)?.unmount_reopen_observed = false;
         let decision = evaluate_writeback_crash_replay_oracle(&oracle);
         assert_eq!(
             crash_replay_rejection_reason(&decision),
             Some("unmount_reopen_missing")
         );
+        Ok(())
     }
 
     #[test]
-    fn crash_replay_oracle_rejects_unclassified_cancellation() {
+    fn crash_replay_oracle_rejects_unclassified_cancellation() -> Result<()> {
         let mut oracle = happy_crash_replay_oracle();
-        oracle.crash_points[8].cancellation_state = "cancelled_unclassified".to_owned();
+        crash_point_mut(&mut oracle, 8)?.cancellation_state = "cancelled_unclassified".to_owned();
         let decision = evaluate_writeback_crash_replay_oracle(&oracle);
         assert_eq!(
             crash_replay_rejection_reason(&decision),
             Some("cancellation_not_classified")
         );
+        Ok(())
     }
 
     #[test]
@@ -2666,24 +2713,24 @@ mod tests {
     }
 
     #[test]
-    fn crash_replay_oracle_rejects_unsupported_combo_without_follow_up() {
+    fn crash_replay_oracle_rejects_unsupported_combo_without_follow_up() -> Result<()> {
         let mut oracle = happy_crash_replay_oracle();
-        oracle.unsupported_combinations[0].rejected = false;
+        unsupported_combination_mut(&mut oracle, 0)?.rejected = false;
         let decision = evaluate_writeback_crash_replay_oracle(&oracle);
         assert_eq!(
             crash_replay_rejection_reason(&decision),
             Some("unsupported_combination_not_rejected")
         );
+        Ok(())
     }
 
     #[test]
-    fn crash_replay_report_includes_required_artifact_contract() {
+    fn crash_replay_report_includes_required_artifact_contract() -> Result<()> {
         let report = build_writeback_crash_replay_report(
             &happy_crash_replay_oracle(),
             "writeback_cache_crash_replay_accepts_complete_matrix",
             "ffs-harness validate-writeback-cache-crash-replay --oracle oracle.json",
-        )
-        .expect("happy crash/replay oracle should build report");
+        )?;
 
         assert!(matches!(
             report.decision,
@@ -2714,21 +2761,22 @@ mod tests {
                 .reproduction_command
                 .contains("validate-writeback-cache-crash-replay")
         );
+        Ok(())
     }
 
     #[test]
-    fn crash_replay_require_accept_fails_closed_on_rejection() {
+    fn crash_replay_require_accept_fails_closed_on_rejection() -> Result<()> {
         let mut oracle = happy_crash_replay_oracle();
-        oracle.crash_points[0].replay_status = "not_verified".to_owned();
+        crash_point_mut(&mut oracle, 0)?.replay_status = "not_verified".to_owned();
         let report = build_writeback_crash_replay_report(
             &oracle,
             "writeback_cache_crash_replay_rejects_unverified_replay",
             "ffs-harness validate-writeback-cache-crash-replay --oracle oracle.json --require-accept",
-        )
-        .expect("schema-valid rejection should still build report");
+        )?;
 
         let result = fail_on_writeback_crash_replay_errors(&report);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
@@ -2780,15 +2828,15 @@ mod tests {
     /// bytes that silently breaks downstream proof-bundle / release-
     /// gate dashboard parsers.
     #[test]
-    fn render_writeback_cache_audit_markdown_default_sample() {
+    fn render_writeback_cache_audit_markdown_default_sample() -> Result<()> {
         let report = build_writeback_cache_audit_report(
             &happy_gate(),
             "writeback_cache_audit_default_sample",
             "ffs-harness validate-writeback-cache-audit --gate gate.json",
-        )
-        .expect("happy_gate() must build a valid report");
+        )?;
         let markdown = render_writeback_cache_audit_markdown(&report);
         insta::assert_snapshot!(markdown);
+        Ok(())
     }
 
     /// bd-x2rhd — Golden-artifact pin for the writeback ordering
@@ -2798,15 +2846,15 @@ mod tests {
     /// breaks downstream proof-bundle / release-gate dashboard
     /// parsers. Pairs with bd-v766a (cache-audit emitter).
     #[test]
-    fn render_writeback_ordering_markdown_default_sample() {
+    fn render_writeback_ordering_markdown_default_sample() -> Result<()> {
         let report = build_writeback_ordering_report(
             &happy_ordering_oracle(),
             "writeback_ordering_default_sample",
             "ffs-harness validate-writeback-ordering --oracle oracle.json",
-        )
-        .expect("happy_ordering_oracle() must build a valid report");
+        )?;
         let markdown = render_writeback_ordering_markdown(&report);
         insta::assert_snapshot!(markdown);
+        Ok(())
     }
 
     /// bd-rchk0.83 - Golden-artifact pin for the writeback crash/replay
@@ -2815,14 +2863,14 @@ mod tests {
     /// ordering, and failure-mode formatting drift before proof-bundle or
     /// release-gate dashboard consumers see it.
     #[test]
-    fn render_writeback_crash_replay_markdown_default_sample() {
+    fn render_writeback_crash_replay_markdown_default_sample() -> Result<()> {
         let report = build_writeback_crash_replay_report(
             &happy_crash_replay_oracle(),
             "writeback_crash_replay_default_sample",
             "ffs-harness validate-writeback-crash-replay --oracle oracle.json",
-        )
-        .expect("happy_crash_replay_oracle() must build a valid report");
+        )?;
         let markdown = render_writeback_crash_replay_markdown(&report);
         insta::assert_snapshot!(markdown);
+        Ok(())
     }
 }
