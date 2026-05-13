@@ -488,19 +488,20 @@ mod tests {
     }
 
     #[test]
-    fn assess_health_detects_crashes() {
+    fn assess_health_detects_crashes() -> Result<(), String> {
         let summary = sample_campaign_with_crashes();
         let reports = assess_campaign_health(&summary);
         let ext4 = reports
             .iter()
             .find(|r| r.target == "fuzz_ext4_metadata")
-            .unwrap();
+            .ok_or_else(|| "missing fuzz_ext4_metadata report".to_owned())?;
         assert_eq!(ext4.health, TargetHealth::CrashesFound);
         assert!(ext4.detail.contains("2 crash"));
+        Ok(())
     }
 
     #[test]
-    fn assess_health_detects_stagnant() {
+    fn assess_health_detects_stagnant() -> Result<(), String> {
         let mut summary = sample_campaign();
         summary.targets[3].new_inputs = 0;
         summary.targets[3].coverage = 0;
@@ -508,20 +509,22 @@ mod tests {
         let xattr = reports
             .iter()
             .find(|r| r.target == "fuzz_ext4_xattr")
-            .unwrap();
+            .ok_or_else(|| "missing fuzz_ext4_xattr report".to_owned())?;
         assert_eq!(xattr.health, TargetHealth::Stagnant);
+        Ok(())
     }
 
     #[test]
-    fn assess_health_detects_error() {
+    fn assess_health_detects_error() -> Result<(), String> {
         let mut summary = sample_campaign();
         summary.targets[1].exit_code = 1;
         let reports = assess_campaign_health(&summary);
         let btrfs = reports
             .iter()
             .find(|r| r.target == "fuzz_btrfs_metadata")
-            .unwrap();
+            .ok_or_else(|| "missing fuzz_btrfs_metadata report".to_owned())?;
         assert_eq!(btrfs.health, TargetHealth::Error);
+        Ok(())
     }
 
     #[test]
@@ -549,15 +552,16 @@ mod tests {
     }
 
     #[test]
-    fn detect_regressions_coverage_drop() {
+    fn detect_regressions_coverage_drop() -> Result<(), String> {
         let baseline = sample_campaign();
         let mut current = sample_campaign();
         // Drop coverage by 30% (below 20% threshold)
         current.targets[2].coverage = 1200;
         let alerts = detect_regressions(&baseline, &current);
         let cov_alert = alerts.iter().find(|a| a.metric == "coverage");
-        assert!(cov_alert.is_some());
-        assert_eq!(cov_alert.unwrap().severity, AlertSeverity::Critical);
+        let cov_alert = cov_alert.ok_or_else(|| "missing coverage alert".to_owned())?;
+        assert_eq!(cov_alert.severity, AlertSeverity::Critical);
+        Ok(())
     }
 
     #[test]
@@ -581,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_nightly_fuzz_script_summary_shape() {
+    fn parses_nightly_fuzz_script_summary_shape() -> Result<(), String> {
         let json = r#"{
           "schema_version": 1,
           "campaign_id": "nightly_20260506_120000",
@@ -626,10 +630,11 @@ mod tests {
           ]
         }"#;
 
-        let parsed = parse_campaign_summary(json).expect("nightly summary should parse");
+        let parsed = parse_campaign_summary(json)?;
         assert_eq!(parsed.config.target_count, 2);
         assert_eq!(parsed.totals.total_runs, 3000);
         assert_eq!(parsed.targets[1].crash_count, 1);
+        Ok(())
     }
 
     #[test]
@@ -692,12 +697,17 @@ mod tests {
     }
 
     #[test]
-    fn nightly_script_produces_expected_schema_fields() {
+    fn nightly_script_produces_expected_schema_fields() -> std::io::Result<()> {
         let root = env!("CARGO_MANIFEST_DIR")
             .strip_suffix("/crates/ffs-harness")
-            .expect("harness must be in crates/ffs-harness");
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "harness must be in crates/ffs-harness",
+                )
+            })?;
         let script = format!("{root}/fuzz/scripts/nightly_fuzz.sh");
-        let content = std::fs::read_to_string(&script).expect("read nightly_fuzz.sh");
+        let content = std::fs::read_to_string(&script)?;
         // Verify the script generates all required JSON fields
         assert!(
             content.contains("campaign_id"),
@@ -734,6 +744,7 @@ mod tests {
             content.contains("\"elapsed_seconds\""),
             "missing target elapsed_seconds in script"
         );
+        Ok(())
     }
 
     #[test]
