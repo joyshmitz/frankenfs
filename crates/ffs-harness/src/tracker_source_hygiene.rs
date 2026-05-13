@@ -1385,8 +1385,8 @@ mod tests {
         }
     }
 
-    fn line(value: &serde_json::Value) -> String {
-        serde_json::to_string(value).expect("serialize fixture")
+    fn line(value: &serde_json::Value) -> Result<String, String> {
+        serde_json::to_string(value).map_err(|err| err.to_string())
     }
 
     fn golden_field<'a>(golden: &'a Value, field: &str) -> Result<&'a Value, String> {
@@ -1713,18 +1713,18 @@ mod tests {
                 "title": "safe local work",
                 "status": "open",
                 "priority": 1
-            })),
+            }))?,
             line(&serde_json::json!({
                 "id": "bd-epic",
                 "title": "local epic",
                 "status": "open",
                 "issue_type": "epic"
-            })),
+            }))?,
             line(&serde_json::json!({
                 "id": "br-r37-foreign",
                 "title": "foreign row",
                 "status": "open"
-            })),
+            }))?,
         ]
         .join("\n");
         fs::write(&issues_path, format!("{issues}\n")).map_err(|err| err.to_string())?;
@@ -1878,7 +1878,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_ready_blocked_permission_and_foreign_rows() {
+    fn classifies_ready_blocked_permission_and_foreign_rows() -> Result<(), String> {
         let issues = [
             line(&serde_json::json!({
                 "id": "bd-ready",
@@ -1886,7 +1886,7 @@ mod tests {
                 "status": "open",
                 "priority": 2,
                 "labels": ["qa_unit_required"]
-            })),
+            }))?,
             line(&serde_json::json!({
                 "id": "bd-blocked",
                 "title": "blocked local work",
@@ -1895,64 +1895,67 @@ mod tests {
                 "dependencies": [
                     {"type": "blocks", "depends_on_id": "bd-prereq"}
                 ]
-            })),
+            }))?,
             line(&serde_json::json!({
                 "id": "bd-prereq",
                 "title": "prerequisite",
                 "status": "open"
-            })),
+            }))?,
             line(&serde_json::json!({
                 "id": "bd-xfstests",
                 "title": "execute xfstests baseline",
                 "description": "requires real xfstests run",
                 "status": "open",
                 "priority": 1
-            })),
+            }))?,
             line(&serde_json::json!({
                 "id": "br-r37-c1",
                 "title": "NetworkX imported row",
                 "description": "franken_networkx parity",
                 "status": "open",
                 "priority": 0
-            })),
+            }))?,
             line(&serde_json::json!({
                 "id": "frankenscipy-foreign-stale",
                 "title": "stale foreign claim",
                 "status": "in_progress",
                 "priority": 1,
                 "updated_at": "2033-05-18T02:00:00Z"
-            })),
+            }))?,
             line(&serde_json::json!({
                 "id": "bd-epic",
                 "title": "open epic",
                 "issue_type": "epic",
                 "status": "open"
-            })),
+            }))?,
         ]
         .join("\n");
 
-        let report = analyze_tracker_source_hygiene(&issues, &config()).expect("analyze");
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
 
         assert_classification_report(&report);
+        Ok(())
     }
 
     #[test]
-    fn foreign_group_owner_hints_include_frankenscipy_ids() {
+    fn foreign_group_owner_hints_include_frankenscipy_ids() -> Result<(), String> {
         let issues = [
             line(&serde_json::json!({
                 "id": "frankenscipy-4703g",
                 "title": "foreign SciPy milestone row",
                 "status": "open"
-            })),
+            }))?,
             line(&serde_json::json!({
                 "id": "frankenscipy-vsas0",
                 "title": "foreign SciPy coverage row",
                 "status": "open"
-            })),
+            }))?,
         ]
         .join("\n");
 
-        let report = analyze_tracker_source_hygiene(&issues, &config()).expect("analyze");
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
 
         assert_eq!(
             report.excluded_foreign_by_prefix,
@@ -1967,40 +1970,42 @@ mod tests {
             report.foreign_group_summaries[0].owner_hints,
             vec!["frankenscipy"]
         );
+        Ok(())
     }
 
     #[test]
-    fn foreign_group_owner_hints_include_known_franken_suite_ids() {
+    fn foreign_group_owner_hints_include_known_franken_suite_ids() -> Result<(), String> {
         let issues = [
             line(&serde_json::json!({
                 "id": "franken_numpy-33vtd",
                 "title": "foreign NumPy diagnostics row",
                 "status": "open"
-            })),
+            }))?,
             line(&serde_json::json!({
                 "id": "franken_numpy-mvq7p",
                 "title": "foreign NumPy profiling row",
                 "status": "open"
-            })),
+            }))?,
             line(&serde_json::json!({
                 "id": "frankentorch-awhz",
                 "title": "foreign Torch API row",
                 "status": "open"
-            })),
+            }))?,
             line(&serde_json::json!({
                 "id": "frankentorch-nanmean",
                 "title": "foreign Torch nanmean row",
                 "status": "open"
-            })),
+            }))?,
             line(&serde_json::json!({
                 "id": "frankenredis-729zz",
                 "title": "foreign Redis parity row",
                 "status": "open"
-            })),
+            }))?,
         ]
         .join("\n");
 
-        let report = analyze_tracker_source_hygiene(&issues, &config()).expect("analyze");
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
         let groups: BTreeMap<&str, &TrackerForeignGroupSummary> = report
             .foreign_group_summaries
             .iter()
@@ -2035,10 +2040,11 @@ mod tests {
                 assert_eq!(group.owner_hints, vec![prefix.to_owned()], "{prefix}");
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn exact_permission_acks_make_gated_rows_claimable() {
+    fn exact_permission_acks_make_gated_rows_claimable() -> Result<(), String> {
         let mut cfg = config();
         cfg.xfstests_real_run_ack = Some(XFSTESTS_REAL_RUN_ACK_VALUE.to_owned());
         cfg.swarm_workload_enabled = true;
@@ -2048,22 +2054,24 @@ mod tests {
                 "id": "bd-xfstests",
                 "title": "run xfstests baseline",
                 "status": "open"
-            })),
+            }))?,
             line(&serde_json::json!({
                 "id": "bd-swarm",
                 "title": "permissioned large-host swarm campaign",
                 "status": "open"
-            })),
+            }))?,
         ]
         .join("\n");
 
-        let report = analyze_tracker_source_hygiene(&issues, &cfg).expect("analyze");
+        let report =
+            analyze_tracker_source_hygiene(&issues, &cfg).map_err(|err| err.to_string())?;
 
         assert!(report.permission_gated_rows.is_empty());
         assert_eq!(
             report.source_aware_queue_state.claimable_ids,
             vec!["bd-swarm", "bd-xfstests"]
         );
+        Ok(())
     }
 
     #[test]
@@ -2074,7 +2082,7 @@ mod tests {
             "description": "requires FFS_SWARM_WORKLOAD_REAL_RUN_ACK before using a large host",
             "status": "open",
             "priority": 1
-        }));
+        }))?;
         let cases = [
             ("disabled_without_ack", false, None, true),
             (
@@ -2140,15 +2148,16 @@ mod tests {
     }
 
     #[test]
-    fn stale_in_progress_takes_precedence_when_no_ready_rows() {
+    fn stale_in_progress_takes_precedence_when_no_ready_rows() -> Result<(), String> {
         let issues = line(&serde_json::json!({
             "id": "bd-active",
             "title": "claimed row",
             "status": "in_progress",
             "updated_at": "2033-05-18T02:33:19Z"
-        }));
+        }))?;
 
-        let report = analyze_tracker_source_hygiene(&issues, &config()).expect("analyze");
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
 
         assert_eq!(report.source_aware_queue_state.verdict, "stale_in_progress");
         assert_eq!(
@@ -2156,18 +2165,20 @@ mod tests {
             vec!["bd-active"]
         );
         assert_eq!(report.local_in_progress_rows[0].age_seconds, Some(3_601));
+        Ok(())
     }
 
     #[test]
-    fn foreign_stale_in_progress_guides_reopen_when_no_local_work() {
+    fn foreign_stale_in_progress_guides_reopen_when_no_local_work() -> Result<(), String> {
         let issues = line(&serde_json::json!({
             "id": "frankenscipy-stale",
             "title": "foreign stale claim",
             "status": "in_progress",
             "updated_at": "2033-05-18T02:00:00Z"
-        }));
+        }))?;
 
-        let report = analyze_tracker_source_hygiene(&issues, &config()).expect("analyze");
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
 
         assert_eq!(
             report.source_aware_queue_state.verdict,
@@ -2183,22 +2194,25 @@ mod tests {
             report.source_aware_queue_state.next_safe_actions[0]
                 .contains("excluded_foreign_stale_in_progress_ids")
         );
+        Ok(())
     }
 
     #[test]
-    fn strict_mode_fails_when_foreign_open_rows_exist() {
+    fn strict_mode_fails_when_foreign_open_rows_exist() -> Result<(), String> {
         let mut cfg = config();
         cfg.strict = true;
         let issues = line(&serde_json::json!({
             "id": "br-r37-c1",
             "title": "foreign row",
             "status": "open"
-        }));
+        }))?;
 
-        let report = analyze_tracker_source_hygiene(&issues, &cfg).expect("analyze");
+        let report =
+            analyze_tracker_source_hygiene(&issues, &cfg).map_err(|err| err.to_string())?;
 
         assert_eq!(report.status, "fail");
         assert!(fail_on_tracker_source_hygiene_errors(&report).is_err());
+        Ok(())
     }
 
     #[test]
@@ -2221,7 +2235,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_dependency_status_blocks_work() {
+    fn missing_dependency_status_blocks_work() -> Result<(), String> {
         let issues = line(&serde_json::json!({
             "id": "bd-blocked",
             "title": "blocked on missing row",
@@ -2229,16 +2243,18 @@ mod tests {
             "dependencies": [
                 {"type": "blocks", "depends_on_id": "bd-missing"}
             ]
-        }));
+        }))?;
 
-        let report = analyze_tracker_source_hygiene(&issues, &config()).expect("analyze");
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
 
         assert_eq!(report.source_aware_queue_state.verdict, "blocked");
         assert_eq!(report.blocked_local_rows[0].blocked_by[0].status, "missing");
+        Ok(())
     }
 
     #[test]
-    fn closed_dependencies_do_not_block_ready_work() {
+    fn closed_dependencies_do_not_block_ready_work() -> Result<(), String> {
         let issues = [
             line(&serde_json::json!({
                 "id": "bd-work",
@@ -2247,33 +2263,37 @@ mod tests {
                 "dependencies": [
                     {"type": "blocks", "depends_on_id": "bd-done"}
                 ]
-            })),
+            }))?,
             line(&serde_json::json!({
                 "id": "bd-done",
                 "title": "done",
                 "status": "closed"
-            })),
+            }))?,
         ]
         .join("\n");
 
-        let report = analyze_tracker_source_hygiene(&issues, &config()).expect("analyze");
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
 
         assert_eq!(report.source_aware_queue_state.verdict, "ready");
         assert_eq!(report.source_aware_ready_rows[0].id, "bd-work");
+        Ok(())
     }
 
     #[test]
-    fn epic_only_queue_has_create_child_action() {
+    fn epic_only_queue_has_create_child_action() -> Result<(), String> {
         let issues = line(&serde_json::json!({
             "id": "bd-epic",
             "title": "only epic",
             "status": "open",
             "issue_type": "epic"
-        }));
+        }))?;
 
-        let report = analyze_tracker_source_hygiene(&issues, &config()).expect("analyze");
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
 
         assert_eq!(report.source_aware_queue_state.verdict, "epic_only");
         assert!(report.source_aware_queue_state.next_safe_actions[0].contains("narrow child bead"));
+        Ok(())
     }
 }
