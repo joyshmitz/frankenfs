@@ -1656,31 +1656,31 @@ mod tests {
             report
                 .rules
                 .first()
-                .expect("fixture includes docs status rule"),
+                .context("fixture must include docs status rule")?,
         )?;
         let observation = serde_json::to_value(
             report
                 .observations
                 .first()
-                .expect("fixture includes docs status observation"),
+                .context("fixture must include docs status observation")?,
         )?;
         let release_gate_wording_contract = serde_json::to_value(
             report
                 .release_gate_wording_contracts
                 .first()
-                .expect("fixture includes release-gate wording contract"),
+                .context("fixture must include release-gate wording contract")?,
         )?;
         let release_gate_wording_observation = serde_json::to_value(
             report
                 .release_gate_wording_observations
                 .first()
-                .expect("fixture includes release-gate wording observation"),
+                .context("fixture must include release-gate wording observation")?,
         )?;
         let structured_log = serde_json::to_value(
             report
                 .structured_logs
                 .first()
-                .expect("fixture includes structured log event"),
+                .context("fixture must include structured log event")?,
         )?;
         let shape = serde_json::json!({
             "docs_status_drift_version": &report.docs_status_drift_version,
@@ -1724,11 +1724,14 @@ mod tests {
     }
 
     #[test]
-    fn schema_rejects_rules_missing_required_fields() {
+    fn schema_rejects_rules_missing_required_fields() -> Result<()> {
         let support_rows = support_rows_for_tests();
         let matrix_rows = matrix_rows_for_tests();
         let issues = issues_for_tests();
-        let base = default_docs_status_rules()[0].clone();
+        let base = default_docs_status_rules()
+            .into_iter()
+            .next()
+            .context("default docs status rules must include at least one rule")?;
         let mut cases: Vec<(&str, DocsStatusWordingRule)> = Vec::new();
 
         macro_rules! missing {
@@ -1793,6 +1796,7 @@ mod tests {
                 "expected {expected} error, observed {errors:?}"
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -1817,13 +1821,13 @@ mod tests {
     }
 
     #[test]
-    fn structured_logs_include_release_gate_fields() {
+    fn structured_logs_include_release_gate_fields() -> Result<()> {
         let report = fixture_report(None);
         let log = report
             .structured_logs
             .iter()
             .find(|event| event.feature_id == "rw_background_repair")
-            .expect("rw repair log");
+            .context("fixture must include rw repair log")?;
         assert_eq!(log.docs_target, "README.md");
         assert_eq!(log.remediation_id, "bd-bqgy8");
         assert_eq!(log.observed_wording_hash.len(), 64);
@@ -1837,10 +1841,11 @@ mod tests {
                 "missing log field {field}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn release_gate_wording_contracts_cover_readiness_state_matrix() {
+    fn release_gate_wording_contracts_cover_readiness_state_matrix() -> Result<()> {
         let report = fixture_report(None);
         let by_feature = report
             .release_gate_wording_contracts
@@ -1850,45 +1855,46 @@ mod tests {
 
         let xfstests = by_feature
             .get("xfstests.baseline")
-            .expect("xfstests contract");
+            .context("fixture must include xfstests contract")?;
         assert_eq!(xfstests.final_state, FeatureState::Hidden);
         assert_eq!(xfstests.controlling_lane, "xfstests");
         assert_eq!(xfstests.docs_target, "FEATURE_PARITY.md");
 
         let swarm = by_feature
             .get("swarm.responsiveness")
-            .expect("swarm contract");
+            .context("fixture must include swarm contract")?;
         assert_eq!(swarm.final_state, FeatureState::Hidden);
         assert_eq!(swarm.controlling_lane, "swarm_tail_latency");
 
         let writeback = by_feature
             .get("writeback_cache")
-            .expect("writeback-cache contract");
+            .context("fixture must include writeback-cache contract")?;
         assert_eq!(writeback.final_state, FeatureState::Disabled);
         assert_eq!(writeback.docs_wording_id, "readme.writeback_cache");
 
         let ext4_mount = by_feature
             .get("mount.rw.ext4")
-            .expect("ext4 mount contract");
+            .context("fixture must include ext4 mount contract")?;
         assert_eq!(ext4_mount.final_state, FeatureState::Experimental);
         assert!(ext4_mount.downgraded);
 
         let repair = by_feature
             .get("repair.rw.writeback")
-            .expect("repair writeback contract");
+            .context("fixture must include repair writeback contract")?;
         assert_eq!(repair.target_state, FeatureState::OptInMutating);
         assert_eq!(repair.final_state, FeatureState::DetectionOnly);
         assert!(repair.downgraded);
 
         let btrfs_mount = by_feature
             .get("mount.rw.btrfs")
-            .expect("btrfs mount contract");
+            .context("fixture must include btrfs mount contract")?;
         assert_eq!(btrfs_mount.final_state, FeatureState::Validated);
         assert!(btrfs_mount.authoritative);
+        Ok(())
     }
 
     #[test]
-    fn rejects_release_gate_hand_upgrade_with_controlling_lane_diagnostics() {
+    fn rejects_release_gate_hand_upgrade_with_controlling_lane_diagnostics() -> Result<()> {
         let snippets = r#"{
   "snippets": [
     {
@@ -1905,7 +1911,7 @@ mod tests {
             .errors
             .iter()
             .find(|error| error.contains("xfstests.baseline"))
-            .expect("xfstests release-gate error");
+            .context("fixture must include xfstests release-gate error")?;
         assert!(error.contains("docs_target=FEATURE_PARITY.md"));
         assert!(error.contains("docs_wording_id=feature_parity.xfstests"));
         assert!(error.contains("final_state=hidden"));
@@ -1914,10 +1920,11 @@ mod tests {
         assert!(error.contains("missing_artifact=fresh permissioned xfstests baseline proof lane"));
         assert!(error.contains("drift_classification=stronger-than-release-gate"));
         assert!(error.contains("remediation_id=bd-rchk3"));
+        Ok(())
     }
 
     #[test]
-    fn rejects_hand_upgraded_claim_with_exact_diagnostic_fields() {
+    fn rejects_hand_upgraded_claim_with_exact_diagnostic_fields() -> Result<()> {
         let snippets = r#"{
   "snippets": [
     {
@@ -1934,13 +1941,14 @@ mod tests {
             .errors
             .iter()
             .find(|error| error.contains("rw_background_repair"))
-            .expect("rw repair error");
+            .context("fixture must include rw repair error")?;
         assert!(error.contains("docs_target=README.md"));
         assert!(error.contains("expected_wording_id=docs.rw-background-repair.host-blocked"));
         assert!(error.contains("observed_wording_hash="));
         assert!(error.contains("source_support_state_row=rw_background_repair:host_blocked"));
         assert!(error.contains("drift_classification=stronger-than-evidence"));
         assert!(error.contains("remediation_id=bd-bqgy8"));
+        Ok(())
     }
 
     #[test]
