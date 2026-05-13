@@ -506,14 +506,65 @@ fn is_valid_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
 
-    fn fixture_corpus() -> RepairCorpus {
-        parse_repair_corpus(DEFAULT_REPAIR_CORPUS_JSON).expect("default repair corpus parses")
+    fn fixture_corpus() -> Result<RepairCorpus> {
+        parse_repair_corpus(DEFAULT_REPAIR_CORPUS_JSON).context("default repair corpus parses")
+    }
+
+    fn first_case_mut(corpus: &mut RepairCorpus) -> Result<&mut RepairCorpusCase> {
+        corpus
+            .cases
+            .first_mut()
+            .context("fixture corpus includes at least one case")
+    }
+
+    fn first_two_cases_mut(
+        corpus: &mut RepairCorpus,
+    ) -> Result<(&mut RepairCorpusCase, &mut RepairCorpusCase)> {
+        let (first, rest) = corpus
+            .cases
+            .split_first_mut()
+            .context("fixture corpus includes at least one case")?;
+        let second = rest
+            .first_mut()
+            .context("fixture corpus includes at least two cases")?;
+        Ok((first, second))
+    }
+
+    fn case_by_refusal_reason_mut<'a>(
+        corpus: &'a mut RepairCorpus,
+        refusal_reason: &str,
+    ) -> Result<&'a mut RepairCorpusCase> {
+        corpus
+            .cases
+            .iter_mut()
+            .find(|case| case.expected_refusal_reason == refusal_reason)
+            .with_context(|| format!("fixture corpus includes refusal reason {refusal_reason}"))
+    }
+
+    fn case_by_outcome_mut<'a>(
+        corpus: &'a mut RepairCorpus,
+        expected_outcome: &str,
+    ) -> Result<&'a mut RepairCorpusCase> {
+        corpus
+            .cases
+            .iter_mut()
+            .find(|case| case.expected_outcome == expected_outcome)
+            .with_context(|| format!("fixture corpus includes outcome {expected_outcome}"))
+    }
+
+    fn first_refusal_case_mut(corpus: &mut RepairCorpus) -> Result<&mut RepairCorpusCase> {
+        corpus
+            .cases
+            .iter_mut()
+            .find(|case| case.expected_outcome.starts_with("refused_"))
+            .context("fixture corpus includes a refusal case")
     }
 
     #[test]
-    fn default_corpus_validates_required_negative_cases() {
-        let report = validate_default_repair_corpus().expect("default corpus validates");
+    fn default_corpus_validates_required_negative_cases() -> Result<()> {
+        let report = validate_default_repair_corpus()?;
         assert_eq!(report.schema_version, REPAIR_CORPUS_SCHEMA_VERSION);
         assert_eq!(report.bead_id, "bd-0xa7h");
         for required in REQUIRED_NEGATIVE_CASES {
@@ -523,16 +574,18 @@ mod tests {
             );
         }
         assert!(report.outcome_classes.iter().any(|o| o == "recovered"));
+        Ok(())
     }
 
     #[test]
-    fn render_markdown_summarizes_default_corpus() {
-        let report = validate_default_repair_corpus().expect("default corpus validates");
+    fn render_markdown_summarizes_default_corpus() -> Result<()> {
+        let report = validate_default_repair_corpus()?;
         let markdown = render_repair_corpus_markdown(&report);
         assert!(markdown.contains("# Repair Corpus"));
         assert!(markdown.contains("wrong_image_ledger"));
         assert!(markdown.contains("refused_stale_ledger"));
         insta::assert_snapshot!("render_repair_corpus_markdown_default_corpus", markdown);
+        Ok(())
     }
 
     #[test]
@@ -547,17 +600,20 @@ mod tests {
     }
 
     #[test]
-    fn fail_on_errors_rejects_invalid_report() {
-        let mut corpus = fixture_corpus();
+    fn fail_on_errors_rejects_invalid_report() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus.cases.clear();
         let report = validate_repair_corpus(&corpus);
-        let err = fail_on_repair_corpus_errors(&report).expect_err("invalid report rejects");
+        let Err(err) = fail_on_repair_corpus_errors(&report) else {
+            anyhow::bail!("invalid report rejects");
+        };
         assert!(err.to_string().contains("repair corpus validation failed"));
+        Ok(())
     }
 
     #[test]
-    fn missing_wrong_image_case_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn missing_wrong_image_case_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus
             .cases
             .retain(|case| case.expected_refusal_reason != "wrong_image_ledger");
@@ -568,11 +624,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required negative case `wrong_image_ledger`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_stale_ledger_case_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn missing_stale_ledger_case_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus
             .cases
             .retain(|case| case.expected_refusal_reason != "stale_ledger");
@@ -583,13 +640,14 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required negative case `stale_ledger`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_case_id_is_rejected() {
-        let mut corpus = fixture_corpus();
-        let dup = corpus.cases[0].case_id.clone();
-        corpus.cases[1].case_id = dup;
+    fn duplicate_case_id_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let (first, second) = first_two_cases_mut(&mut corpus)?;
+        second.case_id = first.case_id.clone();
         let report = validate_repair_corpus(&corpus);
         assert!(
             report
@@ -597,12 +655,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicate repair corpus case_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_image_hash_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].original_image_hash = "md5:not-supported".to_owned();
+    fn malformed_image_hash_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.original_image_hash = "md5:not-supported".to_owned();
         let report = validate_repair_corpus(&corpus);
         assert!(
             report
@@ -610,12 +669,14 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("malformed original_image_hash"))
         );
+        Ok(())
     }
 
     #[test]
-    fn corrupted_hash_must_differ_from_original() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].corrupted_image_hash = corpus.cases[0].original_image_hash.clone();
+    fn corrupted_hash_must_differ_from_original() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = first_case_mut(&mut corpus)?;
+        case.corrupted_image_hash = case.original_image_hash.clone();
         let report = validate_repair_corpus(&corpus);
         assert!(
             report
@@ -623,16 +684,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must differ from original_image_hash"))
         );
+        Ok(())
     }
 
     #[test]
-    fn wrong_image_ledger_requires_distinct_bound_hash() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_refusal_reason == "wrong_image_ledger")
-            .expect("wrong_image_ledger fixture exists");
+    fn wrong_image_ledger_requires_distinct_bound_hash() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_refusal_reason_mut(&mut corpus, "wrong_image_ledger")?;
         case.ledger.bound_image_hash = case.original_image_hash.clone();
         let report = validate_repair_corpus(&corpus);
         assert!(
@@ -641,16 +699,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("wrong_image_ledger requires bound_image_hash differs"))
         );
+        Ok(())
     }
 
     #[test]
-    fn stale_ledger_requires_higher_against_generation() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_refusal_reason == "stale_ledger")
-            .expect("stale_ledger fixture exists");
+    fn stale_ledger_requires_higher_against_generation() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_refusal_reason_mut(&mut corpus, "stale_ledger")?;
         case.ledger.stale_against_generation = case.ledger.symbol_generation;
         let report = validate_repair_corpus(&corpus);
         assert!(
@@ -659,16 +714,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("stale_ledger requires stale_against_generation"))
         );
+        Ok(())
     }
 
     #[test]
-    fn truncated_ledger_requires_truncated_flag() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_refusal_reason == "truncated_ledger")
-            .expect("truncated_ledger fixture exists");
+    fn truncated_ledger_requires_truncated_flag() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_refusal_reason_mut(&mut corpus, "truncated_ledger")?;
         case.ledger.truncated = false;
         let report = validate_repair_corpus(&corpus);
         assert!(
@@ -677,17 +729,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("truncated_ledger must set ledger.truncated = true"))
         );
+        Ok(())
     }
 
     #[test]
-    fn insufficient_symbols_requires_lower_supply() {
-        let mut corpus = fixture_corpus();
-        let index = corpus
-            .cases
-            .iter()
-            .position(|c| c.expected_refusal_reason == "insufficient_symbols")
-            .unwrap_or(0);
-        let case = &mut corpus.cases[index];
+    fn insufficient_symbols_requires_lower_supply() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = first_case_mut(&mut corpus)?;
         case.expected_outcome = "refused_other".to_owned();
         case.expected_refusal_reason = "insufficient_symbols".to_owned();
         case.symbols_supplied = case.symbols_required_for_recovery;
@@ -695,16 +743,13 @@ mod tests {
         assert!(report.errors.iter().any(|err| err.contains(
             "insufficient_symbols requires symbols_supplied < symbols_required_for_recovery"
         )));
+        Ok(())
     }
 
     #[test]
-    fn recovered_outcome_requires_symbol_refresh() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_outcome == "recovered")
-            .expect("recovered fixture exists");
+    fn recovered_outcome_requires_symbol_refresh() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_outcome_mut(&mut corpus, "recovered")?;
         case.verification.post_repair_symbol_generation = case.ledger.symbol_generation;
         let report = validate_repair_corpus(&corpus);
         assert!(
@@ -713,16 +758,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must refresh post_repair_symbol_generation"))
         );
+        Ok(())
     }
 
     #[test]
-    fn recovered_outcome_requires_clean_scrub_and_reopen() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_outcome == "recovered")
-            .expect("recovered fixture exists");
+    fn recovered_outcome_requires_clean_scrub_and_reopen() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_outcome_mut(&mut corpus, "recovered")?;
         case.verification.scrub_clean = false;
         let report = validate_repair_corpus(&corpus);
         assert!(
@@ -731,16 +773,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must report scrub_clean and reopen_clean"))
         );
+        Ok(())
     }
 
     #[test]
-    fn recovered_outcome_cannot_undersupply_symbols() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_outcome == "recovered")
-            .expect("recovered fixture exists");
+    fn recovered_outcome_cannot_undersupply_symbols() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_outcome_mut(&mut corpus, "recovered")?;
         case.symbols_supplied = case.symbols_required_for_recovery - 1;
         let report = validate_repair_corpus(&corpus);
         assert!(
@@ -749,16 +788,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("recovered outcome cannot supply fewer symbols"))
         );
+        Ok(())
     }
 
     #[test]
-    fn refusal_outcome_requires_refusal_reason() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_outcome.starts_with("refused_"))
-            .expect("refusal fixture exists");
+    fn refusal_outcome_requires_refusal_reason() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = first_refusal_case_mut(&mut corpus)?;
         case.expected_refusal_reason = String::new();
         let report = validate_repair_corpus(&corpus);
         assert!(
@@ -767,12 +803,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must declare expected_refusal_reason"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_chain_of_custody_artifact_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].chain_of_custody.artifact_path = String::new();
+    fn missing_chain_of_custody_artifact_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.chain_of_custody.artifact_path = String::new();
         let report = validate_repair_corpus(&corpus);
         assert!(
             report
@@ -780,12 +817,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("chain_of_custody missing artifact_path"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_chain_of_custody_artifact_hash_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].chain_of_custody.artifact_sha256 = "deadbeef".to_owned();
+    fn malformed_chain_of_custody_artifact_hash_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?
+            .chain_of_custody
+            .artifact_sha256 = "deadbeef".to_owned();
         let report = validate_repair_corpus(&corpus);
         assert!(
             report
@@ -793,12 +833,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("artifact_sha256 must be sha256:<64-hex>"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_linked_bead_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].chain_of_custody.linked_bead = "PROJ-42".to_owned();
+    fn malformed_linked_bead_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.chain_of_custody.linked_bead = "PROJ-42".to_owned();
         let report = validate_repair_corpus(&corpus);
         assert!(
             report
@@ -806,11 +847,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("linked_bead must look like bd-"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_cases_list_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn empty_cases_list_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus.cases.clear();
         let report = validate_repair_corpus(&corpus);
         assert!(
@@ -819,5 +861,6 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one case"))
         );
+        Ok(())
     }
 }
