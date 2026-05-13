@@ -15507,6 +15507,24 @@ mod tests {
             }
         }
 
+        // bd-8u2xy — Idempotence MR for ext4_casefold_key.
+        // ext4_casefold_key must be a projection: fold(fold(x)) == fold(x).
+        // It is invoked twice per case-insensitive directory lookup (on
+        // the target and on each candidate entry), and the comparison
+        // assumes the once-applied output equals the twice-applied
+        // output. A regression that introduced a non-idempotent step
+        // (e.g., dropping a normalization pass on already-folded keys,
+        // or a per-call salt) would silently corrupt CASEFOLD lookups
+        // for non-trivial Unicode inputs.
+        #[test]
+        fn ext4_proptest_casefold_key_idempotent(
+            name in proptest::collection::vec(any::<u8>(), 0..=64),
+        ) {
+            let once = ext4_casefold_key(&name);
+            let twice = ext4_casefold_key(&once);
+            prop_assert_eq!(once, twice);
+        }
+
         // bd-8pbjm — ext4_chksum associativity proptest MR.
         // ext4_chksum is the foundational CRC32C primitive called from
         // every ext4 metadata-checksum path (group desc, bitmap, dir
