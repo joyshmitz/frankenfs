@@ -4997,6 +4997,42 @@ mod tests {
             let b = BtrfsHeader::parse_from_block(&block);
             prop_assert_eq!(a, b);
         }
+
+        // bd-begr3 — Determinism MR for verify_superblock_checksum.
+        // verify_superblock_checksum is invoked on every btrfs mount
+        // and reads csum_type at offset 0xC4 to dispatch (currently
+        // only CRC32C is supported but the dispatcher branches across
+        // 4 types). Sister ext4 verify_*_checksum trio has bd-0g4j6
+        // determinism MRs; this closes the btrfs side.
+        #[test]
+        fn btrfs_proptest_verify_superblock_checksum_determinism(
+            region in proptest::collection::vec(any::<u8>(), 0..=BTRFS_SUPER_INFO_SIZE),
+        ) {
+            let a = verify_superblock_checksum(&region);
+            let b = verify_superblock_checksum(&region);
+            prop_assert_eq!(a, b);
+        }
+
+        // bd-begr3 — Determinism MR for verify_tree_block_checksum.
+        // verify_tree_block_checksum is invoked on every btrfs leaf
+        // and internal node read. Takes an explicit csum_type argument
+        // (cycled over the 4 valid values to exercise the dispatch
+        // branches in validate_supported_csum_type).
+        #[test]
+        fn btrfs_proptest_verify_tree_block_checksum_determinism(
+            block in proptest::collection::vec(any::<u8>(), 0..=4096),
+            csum_type in prop_oneof![
+                Just(ffs_types::BTRFS_CSUM_TYPE_CRC32C),
+                Just(ffs_types::BTRFS_CSUM_TYPE_XXHASH64),
+                Just(ffs_types::BTRFS_CSUM_TYPE_SHA256),
+                Just(ffs_types::BTRFS_CSUM_TYPE_BLAKE2B),
+                any::<u16>(),
+            ],
+        ) {
+            let a = verify_tree_block_checksum(&block, csum_type);
+            let b = verify_tree_block_checksum(&block, csum_type);
+            prop_assert_eq!(a, b);
+        }
     }
 
     // ── RAID profile identification ────────────────────────────────
