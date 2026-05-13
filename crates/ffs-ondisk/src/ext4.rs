@@ -15691,5 +15691,39 @@ mod tests {
             prop_assert_eq!(direct, three_hop);
         }
 
+        // bd-0djme — ext4_gdt_crc16 foundational laws.
+        // ext4_gdt_crc16 is the CRC16 (polynomial 0x8005) primitive used
+        // inside group_desc_checksum_value for filesystems that select
+        // the GdtCsum (pre-metadata_csum) variant. It has no direct
+        // test — only transitively covered through
+        // group_desc_checksum_value. Sister ext4_chksum has bd-8pbjm
+        // pinning the same associativity + empty-suffix laws for the
+        // CRC32C variant; this closes the parallel.
+
+        // MR-1 — Empty-suffix identity: ext4_gdt_crc16(seed, &[]) == seed.
+        // The loop body of ext4_gdt_crc16 must be a no-op on empty input.
+        #[test]
+        fn ext4_gdt_crc16_proptest_empty_suffix_is_seed_identity(seed in any::<u16>()) {
+            prop_assert_eq!(super::ext4_gdt_crc16(seed, &[]), seed);
+        }
+
+        // MR-2 — Associativity across appends:
+        //   gdt_crc16(seed, a||b) == gdt_crc16(gdt_crc16(seed, a), b)
+        // Permits multi-region incremental checksumming throughout the
+        // group_desc_checksum_value (GdtCsum) code path
+        // (uuid || group_id || raw_gd_prefix || zero_csum_slot || raw_gd_suffix).
+        #[test]
+        fn ext4_gdt_crc16_proptest_associative_across_appends(
+            seed in any::<u16>(),
+            a in proptest::collection::vec(any::<u8>(), 0..=256),
+            b in proptest::collection::vec(any::<u8>(), 0..=256),
+        ) {
+            let mut concat = Vec::with_capacity(a.len() + b.len());
+            concat.extend_from_slice(&a);
+            concat.extend_from_slice(&b);
+            let direct = super::ext4_gdt_crc16(seed, &concat);
+            let two_hop = super::ext4_gdt_crc16(super::ext4_gdt_crc16(seed, &a), &b);
+            prop_assert_eq!(direct, two_hop);
+        }
     }
 }
