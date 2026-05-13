@@ -1847,7 +1847,7 @@ mod tests {
         #[test]
         fn proptest_block_size_block_byte_roundtrip(
             bs_log in 10_u32..=16,  // 1024..=65536 — valid BlockSize values
-            block in 0_u64..=(u32::MAX as u64),
+            block in 0_u64..=u64::from(u32::MAX),
         ) {
             let bs = BlockSize::new(1_u32 << bs_log).expect("valid block size");
             if let Some(byte_offset) = bs.block_to_byte(BlockNumber(block)) {
