@@ -15405,5 +15405,60 @@ mod tests {
             }
         }
 
+        // bd-8pbjm — ext4_chksum associativity proptest MR.
+        // ext4_chksum is the foundational CRC32C primitive called from
+        // every ext4 metadata-checksum path (group desc, bitmap, dir
+        // block, inode, extent block, superblock). Multi-region
+        // checksums require:
+        //     ext4_chksum(seed, a||b) == ext4_chksum(ext4_chksum(seed, a), b)
+        // The fixed-input ext4_chksum_hop_by_hop_append_fixed_case
+        // exercised one (seed, prefix, suffix) tuple; this sweeps
+        // arbitrary seed + variable-length prefix/suffix.
+        // A regression that broke associativity would silently corrupt
+        // every checksum that uses incremental computation (e.g., the
+        // inode csum that pre-checksums (ino, generation) then
+        // appends the inode body, or the group desc csum that
+        // pre-checksums group_number then appends raw_gd).
+        #[test]
+        fn ext4_chksum_proptest_associative_across_appends(
+            seed in any::<u32>(),
+            a in proptest::collection::vec(any::<u8>(), 0..=256),
+            b in proptest::collection::vec(any::<u8>(), 0..=256),
+        ) {
+            let mut concat = Vec::with_capacity(a.len() + b.len());
+            concat.extend_from_slice(&a);
+            concat.extend_from_slice(&b);
+            let direct = ext4_chksum(seed, &concat);
+            let two_hop = ext4_chksum(ext4_chksum(seed, &a), &b);
+            prop_assert_eq!(
+                direct,
+                two_hop,
+                "ext4_chksum must be associative across disjoint region appends: \
+                 seed={:#x}, a.len={}, b.len={}", seed, a.len(), b.len()
+            );
+        }
+
+        // bd-8pbjm MR-2 — three-way associativity (right-associative):
+        // ext4_chksum(seed, a||b||c) == ext4_chksum(ext4_chksum(ext4_chksum(seed, a), b), c).
+        // Stronger than MR-1 because it composes two associativity
+        // applications; a regression that subtly broke chaining beyond
+        // the first hop (e.g., off-by-one state reset) would surface
+        // here but pass MR-1.
+        #[test]
+        fn ext4_chksum_proptest_associative_three_way(
+            seed in any::<u32>(),
+            a in proptest::collection::vec(any::<u8>(), 0..=64),
+            b in proptest::collection::vec(any::<u8>(), 0..=64),
+            c in proptest::collection::vec(any::<u8>(), 0..=64),
+        ) {
+            let mut concat = Vec::with_capacity(a.len() + b.len() + c.len());
+            concat.extend_from_slice(&a);
+            concat.extend_from_slice(&b);
+            concat.extend_from_slice(&c);
+            let direct = ext4_chksum(seed, &concat);
+            let three_hop = ext4_chksum(ext4_chksum(ext4_chksum(seed, &a), &b), &c);
+            prop_assert_eq!(direct, three_hop);
+        }
+
     }
 }
