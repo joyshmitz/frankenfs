@@ -12568,6 +12568,62 @@ mod tests {
             let b = parse_send_stream(&bytes);
             proptest::prop_assert_eq!(a, b);
         }
+
+        // bd-gasht — btrfs_send_crc32c foundational laws.
+        // btrfs_send_crc32c is the in-house CRC32C primitive (poly
+        // 0x82F6_3B78 = bit-reversed Castagnoli) used by
+        // send_stream_command_crc32c. The command-header CRC
+        // computation (super::send_stream_command_crc32c) splits the
+        // input into command[..6] || zeros[..4] || command[10..] and
+        // CRC's each piece sequentially — which only works if the
+        // primitive is associative. Sister bd-8pbjm (ext4_chksum),
+        // bd-oviw2 (crc32c_append), bd-0djme (ext4_gdt_crc16) pin
+        // the same laws for the other CRC primitives.
+
+        /// MR-1 — Empty-suffix identity: f(seed, &[]) == seed.
+        #[test]
+        fn btrfs_send_crc32c_proptest_empty_suffix_is_seed_identity(
+            seed in proptest::prelude::any::<u32>(),
+        ) {
+            proptest::prop_assert_eq!(super::btrfs_send_crc32c(seed, &[]), seed);
+        }
+
+        /// MR-2 — Associativity across two-region appends.
+        #[test]
+        fn btrfs_send_crc32c_proptest_associative_across_appends(
+            seed in proptest::prelude::any::<u32>(),
+            a in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=256),
+            b in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=256),
+        ) {
+            let mut concat = Vec::with_capacity(a.len() + b.len());
+            concat.extend_from_slice(&a);
+            concat.extend_from_slice(&b);
+            let direct = super::btrfs_send_crc32c(seed, &concat);
+            let two_hop = super::btrfs_send_crc32c(super::btrfs_send_crc32c(seed, &a), &b);
+            proptest::prop_assert_eq!(direct, two_hop);
+        }
+
+        /// MR-3 — Three-region associativity: the exact composition used
+        /// by send_stream_command_crc32c (command[..6] || zeros[..4] ||
+        /// command[10..]).
+        #[test]
+        fn btrfs_send_crc32c_proptest_associative_three_way(
+            seed in proptest::prelude::any::<u32>(),
+            a in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=64),
+            b in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=64),
+            c in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=64),
+        ) {
+            let mut concat = Vec::with_capacity(a.len() + b.len() + c.len());
+            concat.extend_from_slice(&a);
+            concat.extend_from_slice(&b);
+            concat.extend_from_slice(&c);
+            let direct = super::btrfs_send_crc32c(seed, &concat);
+            let three_hop = super::btrfs_send_crc32c(
+                super::btrfs_send_crc32c(super::btrfs_send_crc32c(seed, &a), &b),
+                &c,
+            );
+            proptest::prop_assert_eq!(direct, three_hop);
+        }
     }
 
     /// bd-wmkq1 — Kernel-conformance pin for BTRFS_SEND_STREAM_MAGIC
