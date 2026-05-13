@@ -12684,6 +12684,83 @@ mod tests {
         );
     }
 
+    /// bd-5i0k6 — Kernel-conformance pin for the 25 SendAttr
+    /// discriminants per `enum btrfs_send_attr` in fs/btrfs/send.h.
+    /// parse_send_stream_attrs reads these from attribute headers
+    /// (u16 type field) and stores them as raw (u16, Vec<u8>) pairs
+    /// in SendStreamCommand. A regression that swapped XattrName
+    /// (13) and XattrData (14), or shifted any value, would silently
+    /// corrupt every attribute parse on a btrfs send stream. Sister
+    /// pin bd-uwg89 covers SendCommand discriminants.
+    #[test]
+    fn btrfs_send_attr_constants_match_kernel_header() {
+        // Values per fs/btrfs/send.h enum btrfs_send_attr.
+        let cases: &[(&str, SendAttr, u16)] = &[
+            ("BTRFS_SEND_A_UNSPEC", SendAttr::Unspec, 0),
+            ("BTRFS_SEND_A_UUID", SendAttr::Uuid, 1),
+            ("BTRFS_SEND_A_CTRANSID", SendAttr::Ctransid, 2),
+            ("BTRFS_SEND_A_INO", SendAttr::Ino, 3),
+            ("BTRFS_SEND_A_SIZE", SendAttr::Size, 4),
+            ("BTRFS_SEND_A_MODE", SendAttr::Mode, 5),
+            ("BTRFS_SEND_A_UID", SendAttr::Uid, 6),
+            ("BTRFS_SEND_A_GID", SendAttr::Gid, 7),
+            ("BTRFS_SEND_A_RDEV", SendAttr::Rdev, 8),
+            ("BTRFS_SEND_A_CTIME", SendAttr::Ctime, 9),
+            ("BTRFS_SEND_A_MTIME", SendAttr::Mtime, 10),
+            ("BTRFS_SEND_A_ATIME", SendAttr::Atime, 11),
+            ("BTRFS_SEND_A_OTIME", SendAttr::Otime, 12),
+            ("BTRFS_SEND_A_XATTR_NAME", SendAttr::XattrName, 13),
+            ("BTRFS_SEND_A_XATTR_DATA", SendAttr::XattrData, 14),
+            ("BTRFS_SEND_A_PATH", SendAttr::Path, 15),
+            ("BTRFS_SEND_A_PATH_TO", SendAttr::PathTo, 16),
+            ("BTRFS_SEND_A_PATH_LINK", SendAttr::PathLink, 17),
+            ("BTRFS_SEND_A_FILE_OFFSET", SendAttr::FileOffset, 18),
+            ("BTRFS_SEND_A_DATA", SendAttr::Data, 19),
+            ("BTRFS_SEND_A_CLONE_UUID", SendAttr::CloneUuid, 20),
+            ("BTRFS_SEND_A_CLONE_CTRANSID", SendAttr::CloneCtransid, 21),
+            ("BTRFS_SEND_A_CLONE_PATH", SendAttr::ClonePath, 22),
+            ("BTRFS_SEND_A_CLONE_OFFSET", SendAttr::CloneOffset, 23),
+            ("BTRFS_SEND_A_CLONE_LEN", SendAttr::CloneLen, 24),
+        ];
+        for (name, attr, expected) in cases {
+            assert_eq!(
+                *attr as u16, *expected,
+                "{name}: discriminant must equal kernel value {expected}"
+            );
+        }
+
+        // Pairwise distinctness.
+        let values: Vec<u16> = cases.iter().map(|&(_, _, v)| v).collect();
+        let mut sorted = values.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            values.len(),
+            sorted.len(),
+            "SendAttr discriminants must be pairwise distinct"
+        );
+
+        // Contiguous 0..=24 range (no gaps).
+        assert_eq!(*sorted.first().unwrap(), 0);
+        assert_eq!(*sorted.last().unwrap(), 24);
+        assert_eq!(sorted.len(), 25);
+        for (i, &v) in sorted.iter().enumerate() {
+            assert_eq!(
+                v,
+                u16::try_from(i).unwrap(),
+                "SendAttr discriminants must be contiguous 0..=24 (gap detected)"
+            );
+        }
+
+        // SendCommand and SendAttr discriminants overlap (both start at
+        // 0 and run contiguously). The kernel uses separate enum
+        // namespaces (cmd at the command-header `cmd` field, attr at
+        // the attribute-table `type` field), so overlap is intentional;
+        // this assert documents that the parser MUST distinguish based
+        // on byte position, not numeric value.
+        assert_eq!(SendCommand::Mkdir as u16, SendAttr::Size as u16);
+    }
+
     /// bd-q5dpf — Kernel-conformance pin for the 11 BTRFS_*_TREE_OBJECTID
     /// constants + BTRFS_FIRST_FREE_OBJECTID per fs/btrfs/btrfs_tree.h.
     /// These identify every btree in btrfs (root, extent, chunk, dev,
