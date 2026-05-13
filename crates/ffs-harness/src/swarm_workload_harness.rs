@@ -1382,12 +1382,36 @@ mod tests {
         Ok(())
     }
 
+    fn scenario_mut(
+        manifest: &mut SwarmWorkloadHarnessManifest,
+        index: usize,
+    ) -> Result<&mut SwarmWorkloadScenario> {
+        manifest
+            .scenarios
+            .get_mut(index)
+            .with_context(|| format!("fixture must include scenario at index {index}"))
+    }
+
+    fn workload_profile_mut(
+        manifest: &mut SwarmWorkloadHarnessManifest,
+        index: usize,
+    ) -> Result<&mut SwarmWorkloadProfile> {
+        manifest
+            .workload_profiles
+            .get_mut(index)
+            .with_context(|| format!("fixture must include workload profile at index {index}"))
+    }
+
+    fn scenario_path(index: usize, suffix: &str) -> String {
+        format!("scenarios[{index}].{suffix}")
+    }
+
     #[test]
-    fn small_host_pass_claim_fails_closed() {
+    fn small_host_pass_claim_fails_closed() -> Result<()> {
         let mut manifest = fixture_manifest();
-        manifest.scenarios[1].classification = SwarmHarnessClassification::Pass;
-        manifest.scenarios[1].release_claim_state =
-            SwarmHarnessReleaseClaimState::MeasuredAuthoritative;
+        let scenario = scenario_mut(&mut manifest, 1)?;
+        scenario.classification = SwarmHarnessClassification::Pass;
+        scenario.release_claim_state = SwarmHarnessReleaseClaimState::MeasuredAuthoritative;
         let report = validate_swarm_workload_harness_manifest(&manifest);
         assert!(!report.valid);
         assert!(
@@ -1409,12 +1433,13 @@ mod tests {
                 .any(|row| row.scenario_id == "swarm_workload_small_host_smoke"
                     && row.verdict == SwarmValidationVerdict::Error)
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_numa_reason_is_rejected() {
+    fn missing_numa_reason_is_rejected() -> Result<()> {
         let mut manifest = fixture_manifest();
-        manifest.scenarios[1].host.numa.missing_reason = None;
+        scenario_mut(&mut manifest, 1)?.host.numa.missing_reason = None;
         let report = validate_swarm_workload_harness_manifest(&manifest);
         assert!(!report.valid);
         assert!(
@@ -1423,6 +1448,7 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("missing_reason"))
         );
+        Ok(())
     }
 
     #[test]
@@ -1441,9 +1467,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_workload_seeds_are_rejected() {
+    fn missing_workload_seeds_are_rejected() -> Result<()> {
         let mut manifest = fixture_manifest();
-        manifest.scenarios[0].workload_seeds.clear();
+        scenario_mut(&mut manifest, 0)?.workload_seeds.clear();
         let report = validate_swarm_workload_harness_manifest(&manifest);
         assert!(!report.valid);
         assert!(
@@ -1452,12 +1478,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("workload_seeds"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unknown_cleanup_status_is_rejected() {
+    fn unknown_cleanup_status_is_rejected() -> Result<()> {
         let mut manifest = fixture_manifest();
-        manifest.scenarios[0].cleanup_status = SwarmCleanupStatus::Unknown;
+        scenario_mut(&mut manifest, 0)?.cleanup_status = SwarmCleanupStatus::Unknown;
         let report = validate_swarm_workload_harness_manifest(&manifest);
         assert!(!report.valid);
         assert!(
@@ -1466,6 +1493,7 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("cleanup_status"))
         );
+        Ok(())
     }
 
     #[test]
@@ -1487,65 +1515,60 @@ mod tests {
     }
 
     #[test]
-    fn missing_raw_logs_are_rejected_with_exact_path() {
+    fn missing_raw_logs_are_rejected_with_exact_path() -> Result<()> {
         let mut manifest = fixture_manifest();
-        manifest.scenarios[0].raw_logs.clear();
+        scenario_mut(&mut manifest, 0)?.raw_logs.clear();
         let report = validate_swarm_workload_harness_manifest(&manifest);
         assert!(!report.valid);
+        let raw_logs_path = scenario_path(0, "raw_logs");
         assert!(
             report
                 .issues
                 .iter()
-                .any(|issue| issue.path == "scenarios[0].raw_logs")
+                .any(|issue| issue.path == raw_logs_path)
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_cpu_ram_and_numa_visibility_are_rejected() {
+    fn missing_cpu_ram_and_numa_visibility_are_rejected() -> Result<()> {
         let mut manifest = fixture_manifest();
-        manifest.scenarios[0].host.cpu_cores_logical = 0;
-        manifest.scenarios[0].host.ram_total_gb = 0.0;
-        manifest.scenarios[0].host.numa.node_count = None;
+        let scenario = scenario_mut(&mut manifest, 0)?;
+        scenario.host.cpu_cores_logical = 0;
+        scenario.host.ram_total_gb = 0.0;
+        scenario.host.numa.node_count = None;
         let report = validate_swarm_workload_harness_manifest(&manifest);
         assert!(!report.valid);
-        assert!(
-            report
-                .issues
-                .iter()
-                .any(|issue| issue.path == "scenarios[0].host.cpu_cores_logical")
-        );
-        assert!(
-            report
-                .issues
-                .iter()
-                .any(|issue| issue.path == "scenarios[0].host.ram_total_gb")
-        );
-        assert!(
-            report
-                .issues
-                .iter()
-                .any(|issue| issue.path == "scenarios[0].host.numa.node_count")
-        );
+        let cpu_path = scenario_path(0, "host.cpu_cores_logical");
+        let ram_path = scenario_path(0, "host.ram_total_gb");
+        let numa_path = scenario_path(0, "host.numa.node_count");
+        assert!(report.issues.iter().any(|issue| issue.path == cpu_path));
+        assert!(report.issues.iter().any(|issue| issue.path == ram_path));
+        assert!(report.issues.iter().any(|issue| issue.path == numa_path));
+        Ok(())
     }
 
     #[test]
-    fn invalid_backpressure_state_is_rejected() {
+    fn invalid_backpressure_state_is_rejected() -> Result<()> {
         let mut manifest = fixture_manifest();
-        manifest.scenarios[0].counters.backpressure_state = SwarmBackpressureState::Unknown;
+        scenario_mut(&mut manifest, 0)?.counters.backpressure_state =
+            SwarmBackpressureState::Unknown;
         let report = validate_swarm_workload_harness_manifest(&manifest);
         assert!(!report.valid);
+        let backpressure_path = scenario_path(0, "counters.backpressure_state");
         assert!(
             report
                 .issues
                 .iter()
-                .any(|issue| issue.path == "scenarios[0].counters.backpressure_state")
+                .any(|issue| issue.path == backpressure_path)
         );
+        Ok(())
     }
 
     #[test]
-    fn mutating_command_plan_is_rejected() {
+    fn mutating_command_plan_is_rejected() -> Result<()> {
         let mut manifest = fixture_manifest();
-        manifest.workload_profiles[0]
+        workload_profile_mut(&mut manifest, 0)?
             .command_plan
             .mutates_host_filesystems = true;
         let report = validate_swarm_workload_harness_manifest(&manifest);
@@ -1556,6 +1579,7 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("dry-run-safe swarm workload plans"))
         );
+        Ok(())
     }
 
     fn fixture_manifest() -> SwarmWorkloadHarnessManifest {
