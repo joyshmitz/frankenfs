@@ -507,38 +507,87 @@ fn escape_markdown_table_cell(raw: &str) -> String {
 mod tests {
     use super::*;
     use crate::mounted_write_matrix::{MountedWriteMatrix, parse_mounted_write_matrix};
+    use anyhow::Context as _;
 
-    fn fixture_catalog() -> MountedWriteErrorClasses {
+    fn fixture_catalog() -> Result<MountedWriteErrorClasses> {
         parse_mounted_write_error_classes(DEFAULT_MOUNTED_WRITE_ERROR_CLASSES_JSON)
-            .expect("default mounted write error classes parses")
+            .context("default mounted write error classes must parse")
     }
 
-    fn fixture_matrix() -> MountedWriteMatrix {
+    fn fixture_matrix() -> Result<MountedWriteMatrix> {
         parse_mounted_write_matrix(include_str!(
             "../../../tests/workload-matrix/mounted_write_workload_matrix.json"
         ))
-        .expect("default mounted write matrix parses")
+        .context("default mounted write matrix must parse")
+    }
+
+    fn entry_mut(
+        catalog: &mut MountedWriteErrorClasses,
+        index: usize,
+    ) -> Result<&mut MountedWriteErrorEntry> {
+        catalog
+            .entries
+            .get_mut(index)
+            .with_context(|| format!("fixture must include entry at index {index}"))
+    }
+
+    fn entry_by_id_mut<'a>(
+        catalog: &'a mut MountedWriteErrorClasses,
+        entry_id: &str,
+    ) -> Result<&'a mut MountedWriteErrorEntry> {
+        catalog
+            .entries
+            .iter_mut()
+            .find(|entry| entry.entry_id == entry_id)
+            .with_context(|| format!("fixture must include entry_id `{entry_id}`"))
+    }
+
+    fn entry_by_class_mut<'a>(
+        catalog: &'a mut MountedWriteErrorClasses,
+        error_class: &str,
+    ) -> Result<&'a mut MountedWriteErrorEntry> {
+        catalog
+            .entries
+            .iter_mut()
+            .find(|entry| entry.error_class == error_class)
+            .with_context(|| format!("fixture must include error_class `{error_class}`"))
+    }
+
+    fn entry_matching_mut<'a>(
+        catalog: &'a mut MountedWriteErrorClasses,
+        description: &str,
+        mut predicate: impl FnMut(&MountedWriteErrorEntry) -> bool,
+    ) -> Result<&'a mut MountedWriteErrorEntry> {
+        catalog
+            .entries
+            .iter_mut()
+            .find(|entry| predicate(entry))
+            .with_context(|| format!("fixture must include {description}"))
+    }
+
+    fn supplemental_owner_bead(catalog: &MountedWriteErrorClasses) -> Result<String> {
+        catalog
+            .catalog_owner_beads
+            .iter()
+            .find(|bead| bead.as_str() != catalog.bead_id)
+            .cloned()
+            .context("fixture must declare supplemental catalog owner bead")
     }
 
     fn synthetic_broad_fallback_entry(
         catalog: &mut MountedWriteErrorClasses,
-    ) -> &mut MountedWriteErrorEntry {
-        let entry = catalog
-            .entries
-            .iter_mut()
-            .find(|e| e.entry_id == "mwerr_product_failure_btrfs_write_readback_eio")
-            .expect("btrfs write/readback product failure fixture exists");
+    ) -> Result<&mut MountedWriteErrorEntry> {
+        let entry = entry_by_id_mut(catalog, "mwerr_product_failure_btrfs_write_readback_eio")?;
         entry.error_class = "broad_fallback".to_owned();
         entry.broad_fallback_justification =
             "synthetic opaque EIO branch for validator coverage".to_owned();
         entry.follow_up_bead = "bd-0s5a3".to_owned();
-        entry
+        Ok(entry)
     }
 
     #[test]
-    fn default_catalog_validates_required_classes() {
-        let report = validate_default_mounted_write_error_classes()
-            .expect("default mounted write error classes validates");
+    fn default_catalog_validates_required_classes() -> Result<()> {
+        let report = validate_default_mounted_write_error_classes()?;
         assert_eq!(report.bead_id, "bd-rchk0.3.4");
         for class in REQUIRED_ERROR_CLASS_COVERAGE {
             assert!(
@@ -546,64 +595,65 @@ mod tests {
                 "missing class {class}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn default_catalog_references_workload_matrix_rows() {
-        let catalog = fixture_catalog();
-        let matrix = fixture_matrix();
+    fn default_catalog_references_workload_matrix_rows() -> Result<()> {
+        let catalog = fixture_catalog()?;
+        let matrix = fixture_matrix()?;
         let report = validate_mounted_write_error_classes_with_matrix(&catalog, &matrix);
         assert!(
             report.valid,
             "default catalog must reference mounted write matrix rows: {:?}",
             report.errors
         );
+        Ok(())
     }
 
     #[test]
-    fn matrix_cross_check_rejects_orphan_scenario_ids() {
-        let mut catalog = fixture_catalog();
-        catalog.entries[0].scenario_id = "mounted_write_missing_scenario".to_owned();
-        let matrix = fixture_matrix();
+    fn matrix_cross_check_rejects_orphan_scenario_ids() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        entry_mut(&mut catalog, 0)?.scenario_id = "mounted_write_missing_scenario".to_owned();
+        let matrix = fixture_matrix()?;
         let report = validate_mounted_write_error_classes_with_matrix(&catalog, &matrix);
         assert!(report.errors.iter().any(|err| {
             err.contains("unknown mounted write matrix scenario_id")
                 && err.contains("mounted_write_missing_scenario")
         }));
+        Ok(())
     }
 
     #[test]
-    fn matrix_cross_check_rejects_orphan_operation_ids() {
-        let mut catalog = fixture_catalog();
-        catalog.entries[0].operation_id = "missing_matrix_operation".to_owned();
-        let matrix = fixture_matrix();
+    fn matrix_cross_check_rejects_orphan_operation_ids() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        entry_mut(&mut catalog, 0)?.operation_id = "missing_matrix_operation".to_owned();
+        let matrix = fixture_matrix()?;
         let report = validate_mounted_write_error_classes_with_matrix(&catalog, &matrix);
         assert!(report.errors.iter().any(|err| {
             err.contains("operation_id `missing_matrix_operation`")
                 && err.contains("is not declared by mounted write matrix scenario")
         }));
+        Ok(())
     }
 
     #[test]
-    fn matrix_cross_check_rejects_accidental_stale_catalog_rows() {
-        let mut catalog = fixture_catalog();
-        let entry = catalog
-            .entries
-            .iter_mut()
-            .find(|entry| entry.entry_id == "mwerr_unsupported_overlong_xattr_name")
-            .expect("overlong xattr fixture exists");
+    fn matrix_cross_check_rejects_accidental_stale_catalog_rows() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let entry = entry_by_id_mut(&mut catalog, "mwerr_unsupported_overlong_xattr_name")?;
         entry.scenario_id = "mounted_write_ext4_xattr_modes".to_owned();
-        let matrix = fixture_matrix();
+        let matrix = fixture_matrix()?;
         let report = validate_mounted_write_error_classes_with_matrix(&catalog, &matrix);
         assert!(report.errors.iter().any(|err| {
             err.contains("mwerr_unsupported_overlong_xattr_name")
                 && err.contains("operation_id `xattr_set_overlong`")
         }));
+        Ok(())
     }
 
     #[test]
-    fn documented_synthetic_validator_rows_can_escape_matrix_cross_check() {
-        let mut catalog = fixture_catalog();
+    fn documented_synthetic_validator_rows_can_escape_matrix_cross_check() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
         catalog.entries.push(MountedWriteErrorEntry {
             entry_id: "mwerr_synthetic_validator_only".to_owned(),
             scenario_id: "synthetic_matrix_gap".to_owned(),
@@ -616,7 +666,7 @@ mod tests {
             broad_fallback_justification: "synthetic validator branch".to_owned(),
             follow_up_bead: "bd-synthetic".to_owned(),
         });
-        let matrix = fixture_matrix();
+        let matrix = fixture_matrix()?;
         let report = validate_mounted_write_error_classes_with_matrix(&catalog, &matrix);
         assert!(
             !report.errors.iter().any(|err| {
@@ -626,12 +676,12 @@ mod tests {
             "synthetic validator-only rows should bypass matrix references: {:?}",
             report.errors
         );
+        Ok(())
     }
 
     #[test]
-    fn markdown_report_includes_catalog_summary_and_errors() {
-        let mut report = validate_default_mounted_write_error_classes()
-            .expect("default mounted write error classes validates");
+    fn markdown_report_includes_catalog_summary_and_errors() -> Result<()> {
+        let mut report = validate_default_mounted_write_error_classes()?;
         report.valid = false;
         report.errors.push("example | escaped error".to_owned());
         let markdown = render_mounted_write_error_classes_markdown(&report);
@@ -643,6 +693,7 @@ mod tests {
         assert!(markdown.contains("- Valid: `false`"));
         assert!(markdown.contains("`host_capability_skip`"));
         assert!(markdown.contains("example \\| escaped error"));
+        Ok(())
     }
 
     /// bd-rchk0.73 — exact golden snapshot for the default mounted write
@@ -673,8 +724,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_default_permissions_class_is_rejected() {
-        let mut catalog = fixture_catalog();
+    fn missing_default_permissions_class_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
         catalog
             .entries
             .retain(|e| e.error_class != "default_permissions_eacces");
@@ -684,11 +735,12 @@ mod tests {
                 |err| err.contains("missing required error_class `default_permissions_eacces`")
             )
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_repair_serialization_blocked_is_rejected() {
-        let mut catalog = fixture_catalog();
+    fn missing_repair_serialization_blocked_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
         catalog
             .entries
             .retain(|e| e.error_class != "repair_serialization_blocked");
@@ -696,13 +748,14 @@ mod tests {
         assert!(report.errors.iter().any(|err| {
             err.contains("missing required error_class `repair_serialization_blocked`")
         }));
+        Ok(())
     }
 
     #[test]
-    fn duplicate_entry_id_is_rejected() {
-        let mut catalog = fixture_catalog();
-        let dup = catalog.entries[0].entry_id.clone();
-        catalog.entries[1].entry_id = dup;
+    fn duplicate_entry_id_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let dup = entry_mut(&mut catalog, 0)?.entry_id.clone();
+        entry_mut(&mut catalog, 1)?.entry_id = dup;
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(
             report
@@ -710,12 +763,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicate mounted write error entry_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn entry_id_prefix_is_enforced() {
-        let mut catalog = fixture_catalog();
-        catalog.entries[0].entry_id = "err_001".to_owned();
+    fn entry_id_prefix_is_enforced() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        entry_mut(&mut catalog, 0)?.entry_id = "err_001".to_owned();
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(
             report
@@ -723,16 +777,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must start with mwerr_"))
         );
+        Ok(())
     }
 
     #[test]
-    fn errno_must_match_error_class() {
-        let mut catalog = fixture_catalog();
-        let entry = catalog
-            .entries
-            .iter_mut()
-            .find(|e| e.error_class == "default_permissions_eacces")
-            .expect("default permissions fixture exists");
+    fn errno_must_match_error_class() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let entry = entry_by_class_mut(&mut catalog, "default_permissions_eacces")?;
         entry.raw_errno = "EIO".to_owned();
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(
@@ -741,23 +792,25 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("does not match error_class `default_permissions_eacces`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn broad_fallback_requires_justification() {
-        let mut catalog = fixture_catalog();
-        let entry = synthetic_broad_fallback_entry(&mut catalog);
+    fn broad_fallback_requires_justification() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let entry = synthetic_broad_fallback_entry(&mut catalog)?;
         entry.broad_fallback_justification = String::new();
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(report.errors.iter().any(|err| {
             err.contains("broad_fallback class must declare broad_fallback_justification")
         }));
+        Ok(())
     }
 
     #[test]
-    fn broad_fallback_requires_follow_up_bead() {
-        let mut catalog = fixture_catalog();
-        let entry = synthetic_broad_fallback_entry(&mut catalog);
+    fn broad_fallback_requires_follow_up_bead() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let entry = synthetic_broad_fallback_entry(&mut catalog)?;
         entry.follow_up_bead = String::new();
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(
@@ -766,49 +819,39 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must link a follow_up_bead"))
         );
+        Ok(())
     }
 
     #[test]
-    fn broad_fallback_requires_distinct_investigation_bead() {
-        let mut catalog = fixture_catalog();
-        let owner_bead = catalog
-            .catalog_owner_beads
-            .iter()
-            .find(|bead| bead.as_str() != catalog.bead_id)
-            .expect("fixture declares supplemental catalog owner bead")
-            .clone();
-        let entry = synthetic_broad_fallback_entry(&mut catalog);
+    fn broad_fallback_requires_distinct_investigation_bead() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let owner_bead = supplemental_owner_bead(&catalog)?;
+        let entry = synthetic_broad_fallback_entry(&mut catalog)?;
         entry.follow_up_bead = owner_bead;
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(report.errors.iter().any(|err| {
             err.contains("must name a distinct investigation bead")
                 && err.contains("catalog owner bead")
         }));
+        Ok(())
     }
 
     #[test]
-    fn non_broad_fallback_must_leave_justification_empty() {
-        let mut catalog = fixture_catalog();
-        let entry = catalog
-            .entries
-            .iter_mut()
-            .find(|e| e.error_class == "default_permissions_eacces")
-            .expect("default permissions fixture exists");
+    fn non_broad_fallback_must_leave_justification_empty() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let entry = entry_by_class_mut(&mut catalog, "default_permissions_eacces")?;
         entry.broad_fallback_justification = "leftover prose".to_owned();
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(report.errors.iter().any(|err| {
             err.contains("non-broad_fallback class must leave broad_fallback_justification empty")
         }));
+        Ok(())
     }
 
     #[test]
-    fn ok_class_requires_zero_errno() {
-        let mut catalog = fixture_catalog();
-        let entry = catalog
-            .entries
-            .iter_mut()
-            .find(|e| e.error_class == "ok")
-            .expect("ok fixture exists");
+    fn ok_class_requires_zero_errno() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let entry = entry_by_class_mut(&mut catalog, "ok")?;
         entry.raw_errno = "EINVAL".to_owned();
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(
@@ -817,16 +860,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("ok class must record raw_errno=0"))
         );
+        Ok(())
     }
 
     #[test]
-    fn ok_class_must_use_redaction_none() {
-        let mut catalog = fixture_catalog();
-        let entry = catalog
-            .entries
-            .iter_mut()
-            .find(|e| e.error_class == "ok")
-            .expect("ok fixture exists");
+    fn ok_class_must_use_redaction_none() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let entry = entry_by_class_mut(&mut catalog, "ok")?;
         entry.redaction_policy = "redact_paths".to_owned();
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(
@@ -835,16 +875,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("ok class must use redaction_policy=none"))
         );
+        Ok(())
     }
 
     #[test]
-    fn xattr_operations_require_xattr_redaction() {
-        let mut catalog = fixture_catalog();
-        let entry = catalog
-            .entries
-            .iter_mut()
-            .find(|e| e.operation_id.contains("xattr") && e.error_class != "ok")
-            .expect("xattr non-ok fixture exists");
+    fn xattr_operations_require_xattr_redaction() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let entry = entry_matching_mut(&mut catalog, "non-ok xattr entry", |entry| {
+            entry.operation_id.contains("xattr") && entry.error_class != "ok"
+        })?;
         entry.redaction_policy = "none".to_owned();
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(
@@ -853,16 +892,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("xattr operation must redact_paths_and_xattr_values"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_remediation_for_failure_is_rejected() {
-        let mut catalog = fixture_catalog();
-        let entry = catalog
-            .entries
-            .iter_mut()
-            .find(|e| e.error_class != "ok")
-            .expect("non-ok fixture exists");
+    fn missing_remediation_for_failure_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let entry = entry_matching_mut(&mut catalog, "non-ok entry", |entry| {
+            entry.error_class != "ok"
+        })?;
         entry.remediation_hint = String::new();
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(
@@ -871,12 +909,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("non-ok error class must declare a remediation_hint"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_artifact_paths_is_rejected() {
-        let mut catalog = fixture_catalog();
-        catalog.entries[0].artifact_paths.clear();
+    fn missing_artifact_paths_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        entry_mut(&mut catalog, 0)?.artifact_paths.clear();
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(
             report
@@ -884,12 +923,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one artifact path"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_redaction_policy_is_rejected() {
-        let mut catalog = fixture_catalog();
-        catalog.entries[0].redaction_policy = "publish_everything".to_owned();
+    fn unsupported_redaction_policy_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        entry_mut(&mut catalog, 0)?.redaction_policy = "publish_everything".to_owned();
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(
             report
@@ -897,16 +937,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported redaction_policy"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_follow_up_bead_is_rejected() {
-        let mut catalog = fixture_catalog();
-        let entry = catalog
-            .entries
-            .iter_mut()
-            .find(|e| e.error_class != "broad_fallback" && e.error_class != "ok")
-            .expect("non-broad-fallback fixture exists");
+    fn malformed_follow_up_bead_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let entry = entry_matching_mut(&mut catalog, "non-broad-fallback entry", |entry| {
+            entry.error_class != "broad_fallback" && entry.error_class != "ok"
+        })?;
         entry.follow_up_bead = "PROJ-99".to_owned();
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(
@@ -915,11 +954,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("follow_up_bead must look like bd-"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_entries_list_is_rejected() {
-        let mut catalog = fixture_catalog();
+    fn empty_entries_list_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
         catalog.entries.clear();
         let report = validate_mounted_write_error_classes(&catalog);
         assert!(
@@ -928,11 +968,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one entry"))
         );
+        Ok(())
     }
 
     #[test]
-    fn default_catalog_has_no_broad_fallbacks_after_classification() {
-        let report = validate_default_mounted_write_error_classes().expect("default validates");
+    fn default_catalog_has_no_broad_fallbacks_after_classification() -> Result<()> {
+        let report = validate_default_mounted_write_error_classes()?;
         assert_eq!(report.broad_fallback_count, 0);
         assert!(
             report
@@ -940,5 +981,6 @@ mod tests {
                 .iter()
                 .any(|class| class == "product_failure")
         );
+        Ok(())
     }
 }
