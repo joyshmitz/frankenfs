@@ -425,11 +425,11 @@ impl Transaction {
         BTreeMap<BlockNumber, Vec<u8>>,
         BTreeMap<BlockNumber, MergeProof>,
     ) {
-        debug_assert!(
+        assert!(
             self.cow_writes.is_empty(),
             "COW writes silently dropped by into_writes_and_merge_proofs"
         );
-        debug_assert!(
+        assert!(
             self.cow_orphans.is_empty(),
             "COW orphans silently dropped by into_writes_and_merge_proofs"
         );

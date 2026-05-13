@@ -828,6 +828,13 @@ fn write_checkpoint(
             writer.write_all(&txn_id_bytes)?;
             hasher.update(&txn_id_bytes);
 
+            if version.data.is_identical() {
+                let data_len_bytes = u32::MAX.to_le_bytes();
+                writer.write_all(&data_len_bytes)?;
+                hasher.update(&data_len_bytes);
+                continue;
+            }
+
             // Materialize compressed data: resolve Identical markers before writing.
             let materialized =
                 crate::compression::resolve_data_with(block_versions, vi, |v| &v.data)
@@ -873,7 +880,18 @@ fn read_block_version(
     let mut data_len_bytes = [0_u8; 4];
     reader.read_exact(&mut data_len_bytes)?;
     hasher.update(&data_len_bytes);
-    let data_len = u32::from_le_bytes(data_len_bytes) as usize;
+    let data_len_u32 = u32::from_le_bytes(data_len_bytes);
+
+    if data_len_u32 == u32::MAX {
+        return Ok(BlockVersion {
+            block,
+            commit_seq,
+            writer: txn_id,
+            data: crate::compression::VersionData::Identical,
+        });
+    }
+
+    let data_len = data_len_u32 as usize;
 
     if data_len as u64 > file_len {
         return Err(FfsError::Corruption {
