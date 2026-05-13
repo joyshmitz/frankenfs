@@ -1388,6 +1388,49 @@ mod tests {
 
     const REFERENCE_TIMESTAMP: &str = "2026-05-10T00:00:00Z";
 
+    fn checked_in_manifest() -> Result<TopologyRuntimeAdvisorManifest> {
+        serde_json::from_str(include_str!(
+            "../../../docs/topology-runtime-advisor-manifest.json"
+        ))
+        .context("checked-in topology advisor sample must parse")
+    }
+
+    fn first_workload_shape_mut(
+        manifest: &mut TopologyRuntimeAdvisorManifest,
+    ) -> Result<&mut TopologyWorkloadShape> {
+        manifest
+            .workload_shapes
+            .first_mut()
+            .context("fixture manifest has at least one workload shape")
+    }
+
+    fn second_workload_shape_mut(
+        manifest: &mut TopologyRuntimeAdvisorManifest,
+    ) -> Result<&mut TopologyWorkloadShape> {
+        manifest
+            .workload_shapes
+            .get_mut(1)
+            .context("fixture manifest has at least two workload shapes")
+    }
+
+    fn first_runtime_candidate_mut(
+        manifest: &mut TopologyRuntimeAdvisorManifest,
+    ) -> Result<&mut TopologyRuntimeCandidate> {
+        manifest
+            .runtime_candidates
+            .first_mut()
+            .context("fixture manifest has at least one runtime candidate")
+    }
+
+    fn first_artifact_path_mut(
+        manifest: &mut TopologyRuntimeAdvisorManifest,
+    ) -> Result<&mut String> {
+        manifest
+            .artifact_paths
+            .first_mut()
+            .context("fixture manifest has at least one artifact path")
+    }
+
     #[test]
     fn valid_manifest_renders_advisory_report() -> Result<()> {
         let manifest = fixture_manifest();
@@ -1440,11 +1483,8 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_sample_manifest_validates() {
-        let manifest: TopologyRuntimeAdvisorManifest = serde_json::from_str(include_str!(
-            "../../../docs/topology-runtime-advisor-manifest.json"
-        ))
-        .expect("checked-in topology advisor sample must parse");
+    fn checked_in_sample_manifest_validates() -> Result<()> {
+        let manifest = checked_in_manifest()?;
         let report = validate_fixture(&manifest);
 
         assert!(report.valid, "{:?}", report.errors);
@@ -1454,17 +1494,25 @@ mod tests {
         );
         assert_eq!(report.product_evidence_claim, "none");
         assert_eq!(report.release_gate_effect, "advisory_only");
+        Ok(())
     }
 
     #[test]
-    fn duplicate_workload_ids_are_rejected() {
+    fn duplicate_workload_ids_are_rejected() -> Result<()> {
         let mut manifest = fixture_manifest();
-        manifest.workload_shapes[1].workload_id = manifest.workload_shapes[0].workload_id.clone();
+        let first_workload_id = manifest
+            .workload_shapes
+            .first()
+            .context("fixture manifest has at least one workload shape")?
+            .workload_id
+            .clone();
+        second_workload_shape_mut(&mut manifest)?.workload_id = first_workload_id;
 
         let report = validate_fixture(&manifest);
 
         assert!(!report.valid);
         assert_issue(&report, "workload_shapes[1].workload_id");
+        Ok(())
     }
 
     #[test]
@@ -1529,15 +1577,15 @@ mod tests {
     }
 
     #[test]
-    fn accepted_large_host_claims_are_rejected() {
+    fn accepted_large_host_claims_are_rejected() -> Result<()> {
         let mut manifest = fixture_manifest();
         manifest.product_evidence_claim = "accepted_large_host".to_owned();
         manifest.release_gate_effect = "strengthens_public_claim".to_owned();
         manifest.fuse_capability.detail =
             "accepted_large_host proof is not allowed here".to_owned();
-        manifest.runtime_candidates[0].reason =
+        first_runtime_candidate_mut(&mut manifest)?.reason =
             "accepted_large_host promotion is forbidden".to_owned();
-        manifest.artifact_paths[0] =
+        *first_artifact_path_mut(&mut manifest)? =
             "artifacts/topology-advisor/accepted_large_host/report.json".to_owned();
 
         let report = validate_fixture(&manifest);
@@ -1549,6 +1597,7 @@ mod tests {
         assert_issue(&report, "fuse_capability.detail");
         assert_issue(&report, "runtime_candidates[0].reason");
         assert_issue(&report, "artifact_paths[0]");
+        Ok(())
     }
 
     #[test]
@@ -1568,7 +1617,7 @@ mod tests {
     }
 
     #[test]
-    fn small_host_downgrades_per_core_candidate() {
+    fn small_host_downgrades_per_core_candidate() -> Result<()> {
         let mut manifest = fixture_manifest();
         manifest.host_topology.cpu_count = 16;
         manifest.host_topology.numa_nodes = 1;
@@ -1580,12 +1629,13 @@ mod tests {
 
         assert!(report.valid, "{:?}", report.errors);
         assert_ne!(report.recommendation.as_deref(), Some("per_core"));
-        assert_candidate_rejected(&report, "per_core", "requires at least 64 CPUs");
+        assert_candidate_rejected(&report, "per_core", "requires at least 64 CPUs")?;
         assert_ledger(&report, "small_host_downgrade");
+        Ok(())
     }
 
     #[test]
-    fn read_heavy_sharded_workload_favors_per_core_on_large_host() {
+    fn read_heavy_sharded_workload_favors_per_core_on_large_host() -> Result<()> {
         let mut manifest = fixture_manifest();
         manifest.workload_shapes = vec![TopologyWorkloadShape {
             workload_id: "wide-read-fanout".to_owned(),
@@ -1602,20 +1652,22 @@ mod tests {
 
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.recommendation.as_deref(), Some("per_core"));
-        assert_candidate_not_rejected(&report, "per_core");
+        assert_candidate_not_rejected(&report, "per_core")?;
         assert_ledger(&report, "sharded_read_fanout");
+        Ok(())
     }
 
     #[test]
-    fn hot_inode_imbalance_favors_managed_over_per_core() {
+    fn hot_inode_imbalance_favors_managed_over_per_core() -> Result<()> {
         let manifest = fixture_manifest();
 
         let report = score_fixture(&manifest);
 
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.recommendation.as_deref(), Some("managed"));
-        assert_candidate_score_above(&report, "managed", "per_core");
+        assert_candidate_score_above(&report, "managed", "per_core")?;
         assert_ledger(&report, "hot_inode_imbalance");
+        Ok(())
     }
 
     /// bd-rchk0.212.6 - exact-output snapshot for the advisory scoring
@@ -1653,7 +1705,7 @@ mod tests {
     }
 
     #[test]
-    fn writeback_pressure_requires_backpressure_thresholds() {
+    fn writeback_pressure_requires_backpressure_thresholds() -> Result<()> {
         let mut manifest = fixture_manifest();
         manifest.workload_shapes = vec![TopologyWorkloadShape {
             workload_id: "dirty-writeback".to_owned(),
@@ -1671,7 +1723,7 @@ mod tests {
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.recommendation.as_deref(), Some("managed"));
         assert_ledger(&report, "writeback_backpressure");
-        let managed = candidate(&report, "managed");
+        let managed = candidate(&report, "managed")?;
         assert!(
             managed
                 .rationale
@@ -1680,13 +1732,15 @@ mod tests {
             "{:?}",
             managed.rationale
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_numeric_inputs_make_scoring_invalid() {
+    fn malformed_numeric_inputs_make_scoring_invalid() -> Result<()> {
         let mut manifest = fixture_manifest();
-        manifest.workload_shapes[0].read_ratio = f64::NAN;
-        manifest.workload_shapes[0].fsyncs_per_second = -1.0;
+        let workload = first_workload_shape_mut(&mut manifest)?;
+        workload.read_ratio = f64::NAN;
+        workload.fsyncs_per_second = -1.0;
 
         let report = score_fixture(&manifest);
 
@@ -1704,6 +1758,7 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("fsyncs_per_second"))
         );
+        Ok(())
     }
 
     #[test]
@@ -1716,9 +1771,11 @@ mod tests {
 
         sort_candidate_scores_for_recommendation(&mut scores);
 
-        assert_eq!(scores[0].runtime_candidate, "standard");
-        assert_eq!(scores[1].runtime_candidate, "managed");
-        assert_eq!(scores[2].runtime_candidate, "per_core");
+        let ordered = scores
+            .iter()
+            .map(|score| score.runtime_candidate.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ordered.as_slice(), ["standard", "managed", "per_core"]);
         assert_eq!(
             confidence_tier(&scores),
             TopologyRuntimeAdvisorConfidenceTier::Low
@@ -1822,40 +1879,43 @@ mod tests {
         report: &TopologyRuntimeAdvisorScoringReport,
         runtime_candidate: &str,
         expected_reason: &str,
-    ) {
-        let candidate = candidate(report, runtime_candidate);
+    ) -> Result<()> {
+        let candidate = candidate(report, runtime_candidate)?;
         let rejection = candidate
             .rejection_reason
             .as_deref()
-            .expect("candidate should be rejected");
+            .with_context(|| format!("{runtime_candidate} should be rejected"))?;
         assert!(
             rejection.contains(expected_reason),
             "{expected_reason} missing from {rejection}"
         );
+        Ok(())
     }
 
     fn assert_candidate_not_rejected(
         report: &TopologyRuntimeAdvisorScoringReport,
         runtime_candidate: &str,
-    ) {
+    ) -> Result<()> {
         assert!(
-            candidate(report, runtime_candidate)
+            candidate(report, runtime_candidate)?
                 .rejection_reason
                 .is_none(),
             "{runtime_candidate} should not be rejected"
         );
+        Ok(())
     }
 
     fn assert_candidate_score_above(
         report: &TopologyRuntimeAdvisorScoringReport,
         higher: &str,
         lower: &str,
-    ) {
+    ) -> Result<()> {
         assert!(
-            candidate(report, higher).score > candidate(report, lower).score,
+            candidate(report, higher)?.score > candidate(report, lower)?.score,
             "{higher} should score above {lower}: {:?}",
             report.candidate_scores
         );
+        Ok(())
     }
 
     fn assert_ledger(report: &TopologyRuntimeAdvisorScoringReport, signal: &str) {
@@ -1872,12 +1932,12 @@ mod tests {
     fn candidate<'a>(
         report: &'a TopologyRuntimeAdvisorScoringReport,
         runtime_candidate: &str,
-    ) -> &'a TopologyRuntimeAdvisorCandidateScore {
+    ) -> Result<&'a TopologyRuntimeAdvisorCandidateScore> {
         report
             .candidate_scores
             .iter()
             .find(|candidate| candidate.runtime_candidate == runtime_candidate)
-            .expect("candidate score should exist")
+            .with_context(|| format!("candidate score should exist for {runtime_candidate}"))
     }
 
     fn score_for_test(runtime_candidate: &str, score: i32) -> TopologyRuntimeAdvisorCandidateScore {
