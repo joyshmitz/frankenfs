@@ -1635,6 +1635,7 @@ fn diagnostic(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{Context, Result};
 
     #[test]
     fn default_fixture_set_covers_required_schema_surface() {
@@ -1705,10 +1706,18 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_missing_required_fields() {
+    fn validation_rejects_missing_required_fields() -> Result<()> {
         let mut fixture_set = default_readiness_action_autopilot_fixture_set();
-        fixture_set.fixtures[0].report.source_inputs.clear();
-        fixture_set.fixtures[0].report.recommendations[0]
+        let fixture = fixture_set
+            .fixtures
+            .first_mut()
+            .context("default fixture set has a first fixture")?;
+        fixture.report.source_inputs.clear();
+        fixture
+            .report
+            .recommendations
+            .first_mut()
+            .context("default first fixture has a recommendation")?
             .reproduction_command
             .clear();
 
@@ -1727,6 +1736,7 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("missing reproduction_command"))
         );
+        Ok(())
     }
 
     #[test]
@@ -1789,14 +1799,14 @@ mod tests {
     }
 
     #[test]
-    fn planner_adds_missing_input_diagnostics_to_recommendations() {
+    fn planner_adds_missing_input_diagnostics_to_recommendations() -> Result<()> {
         let result = plan_readiness_actions(&planning_input(default_source_reports(), Vec::new()));
         let xfstests = result
             .report
             .recommendations
             .iter()
             .find(|recommendation| recommendation.action_id == "run-permissioned-xfstests-baseline")
-            .expect("xfstests recommendation");
+            .context("xfstests recommendation")?;
         let diagnostic_ids: Vec<&str> = xfstests
             .diagnostics
             .iter()
@@ -1811,10 +1821,11 @@ mod tests {
                 "xfstests-real-run-ack-missing",
             ]
         );
+        Ok(())
     }
 
     #[test]
-    fn default_permissioned_reproduction_commands_point_to_existing_repo_scripts() {
+    fn default_permissioned_reproduction_commands_point_to_existing_repo_scripts() -> Result<()> {
         let fixture_set = default_readiness_action_autopilot_fixture_set();
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
 
@@ -1837,7 +1848,7 @@ mod tests {
                 .iter()
                 .flat_map(|fixture| fixture.report.recommendations.iter())
                 .find(|recommendation| recommendation.action_id == action_id)
-                .expect("permissioned recommendation");
+                .context("permissioned recommendation")?;
 
             assert!(
                 recommendation
@@ -1858,10 +1869,11 @@ mod tests {
                 "{expected_script} must exist in this checkout"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn planner_downgrades_stale_evidence_public_claims() {
+    fn planner_downgrades_stale_evidence_public_claims() -> Result<()> {
         let mut recommendation = recommendation("upgrade-writeback-cache-claim");
         recommendation.title = "Upgrade writeback-cache readiness claim".to_owned();
         recommendation.evidence_tier = ReadinessEvidenceTier::ProofBundle;
@@ -1881,7 +1893,7 @@ mod tests {
             )],
             Vec::new(),
         ));
-        let planned = planned_action(&result, "upgrade-writeback-cache-claim");
+        let planned = planned_action(&result, "upgrade-writeback-cache-claim")?;
 
         assert_eq!(
             planned.public_claim_effect,
@@ -1893,10 +1905,11 @@ mod tests {
             ReadinessActionSafetyClass::Permissioned
         );
         assert!(diagnostic_ids(planned).contains(&"planner-input-stale-proof-bundle-stale"));
+        Ok(())
     }
 
     #[test]
-    fn planner_blocks_missing_large_host_capability() {
+    fn planner_blocks_missing_large_host_capability() -> Result<()> {
         let mut recommendation = recommendation("refresh-large-host-swarm-campaign");
         recommendation.title = "Refresh large-host swarm responsiveness evidence".to_owned();
         recommendation.evidence_tier = ReadinessEvidenceTier::Smoke;
@@ -1917,7 +1930,7 @@ mod tests {
             )],
             Vec::new(),
         ));
-        let planned = planned_action(&result, "refresh-large-host-swarm-campaign");
+        let planned = planned_action(&result, "refresh-large-host-swarm-campaign")?;
 
         assert!(planned.ack_required);
         assert_eq!(
@@ -1931,10 +1944,11 @@ mod tests {
         let diagnostic_ids = diagnostic_ids(planned);
         assert!(diagnostic_ids.contains(&"planner-input-host-capability-manifest-missing"));
         assert!(diagnostic_ids.contains(&"planner-large-host-capability-missing"));
+        Ok(())
     }
 
     #[test]
-    fn planner_refuses_contradictory_artifacts() {
+    fn planner_refuses_contradictory_artifacts() -> Result<()> {
         let mut recommendation = recommendation("upgrade-release-gate-claim");
         recommendation.evidence_tier = ReadinessEvidenceTier::ProofBundle;
         recommendation.public_claim_effect = PublicClaimEffect::UpgradeEligible;
@@ -1951,7 +1965,7 @@ mod tests {
             )],
             Vec::new(),
         ));
-        let planned = planned_action(&result, "upgrade-release-gate-claim");
+        let planned = planned_action(&result, "upgrade-release-gate-claim")?;
 
         assert!(!planned.ack_required);
         assert_eq!(planned.safety_class, ReadinessActionSafetyClass::Impossible);
@@ -1959,10 +1973,11 @@ mod tests {
         assert!(
             diagnostic_ids(planned).contains(&"planner-input-release-gate-proof-contradictory")
         );
+        Ok(())
     }
 
     #[test]
-    fn planner_marks_permissioned_and_destructive_boundaries_ack_required() {
+    fn planner_marks_permissioned_and_destructive_boundaries_ack_required() -> Result<()> {
         let mut writeback = recommendation("upgrade-writeback-cache");
         writeback.title = "Upgrade writeback-cache mode".to_owned();
         writeback.reproduction_command = "cargo test -p ffs-harness writeback_cache".to_owned();
@@ -1989,9 +2004,9 @@ mod tests {
             )],
             Vec::new(),
         ));
-        let writeback = planned_action(&result, "upgrade-writeback-cache");
-        let mounted_mutation = planned_action(&result, "run-mounted-mutation");
-        let repair_writeback = planned_action(&result, "publish-repair-writeback-claim");
+        let writeback = planned_action(&result, "upgrade-writeback-cache")?;
+        let mounted_mutation = planned_action(&result, "run-mounted-mutation")?;
+        let repair_writeback = planned_action(&result, "publish-repair-writeback-claim")?;
 
         assert!(writeback.ack_required);
         assert_eq!(
@@ -2008,10 +2023,11 @@ mod tests {
             repair_writeback.safety_class,
             ReadinessActionSafetyClass::Destructive
         );
+        Ok(())
     }
 
     #[test]
-    fn planner_blocks_public_claim_upgrade_from_smoke_evidence() {
+    fn planner_blocks_public_claim_upgrade_from_smoke_evidence() -> Result<()> {
         let mut recommendation = recommendation("upgrade-smoke-readiness-claim");
         recommendation.evidence_tier = ReadinessEvidenceTier::Smoke;
         recommendation.public_claim_effect = PublicClaimEffect::UpgradeEligible;
@@ -2028,10 +2044,11 @@ mod tests {
             )],
             Vec::new(),
         ));
-        let planned = planned_action(&result, "upgrade-smoke-readiness-claim");
+        let planned = planned_action(&result, "upgrade-smoke-readiness-claim")?;
 
         assert_eq!(planned.public_claim_effect, PublicClaimEffect::BlockUpgrade);
         assert!(diagnostic_ids(planned).contains(&"planner-smoke-evidence-blocks-public-upgrade"));
+        Ok(())
     }
 
     #[test]
@@ -2134,9 +2151,13 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_smoke_upgrade_claims() {
+    fn validation_rejects_smoke_upgrade_claims() -> Result<()> {
         let mut fixture_set = default_readiness_action_autopilot_fixture_set();
-        let recommendation = &mut fixture_set.fixtures[0].report.recommendations[0];
+        let recommendation = fixture_set
+            .fixtures
+            .first_mut()
+            .and_then(|fixture| fixture.report.recommendations.first_mut())
+            .context("default fixture set has a first recommendation")?;
         recommendation.evidence_tier = ReadinessEvidenceTier::Smoke;
         recommendation.public_claim_effect = PublicClaimEffect::UpgradeEligible;
 
@@ -2148,6 +2169,7 @@ mod tests {
                 error.contains("cannot upgrade public claims from smoke evidence")
             })
         );
+        Ok(())
     }
 
     fn default_source_reports() -> Vec<ReadinessActionAutopilotReport> {
@@ -2209,13 +2231,13 @@ mod tests {
     fn planned_action<'a>(
         result: &'a ReadinessActionPlanningResult,
         action_id: &str,
-    ) -> &'a ReadinessActionRecommendation {
+    ) -> Result<&'a ReadinessActionRecommendation> {
         result
             .report
             .recommendations
             .iter()
             .find(|recommendation| recommendation.action_id == action_id)
-            .expect("planned action")
+            .context("planned action")
     }
 
     fn diagnostic_ids(recommendation: &ReadinessActionRecommendation) -> Vec<&str> {
