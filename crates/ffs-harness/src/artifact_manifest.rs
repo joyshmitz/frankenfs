@@ -2280,6 +2280,7 @@ impl ManifestBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context as _;
 
     fn sample_manifest() -> ArtifactManifest {
         ManifestBuilder::new("run-001", "ffs_smoke", "2026-03-04T12:00:00Z")
@@ -2316,6 +2317,100 @@ mod tests {
             })
             .duration_secs(2.3)
             .build()
+    }
+
+    fn scenario_catalog() -> anyhow::Result<serde_json::Value> {
+        serde_json::from_str(include_str!("../../../scripts/e2e/scenario_catalog.json"))
+            .context("scenario catalog json should parse")
+    }
+
+    fn scenario_catalog_suites(
+        catalog: &serde_json::Value,
+    ) -> anyhow::Result<&Vec<serde_json::Value>> {
+        catalog
+            .get("suites")
+            .and_then(serde_json::Value::as_array)
+            .context("scenario catalog should define suites")
+    }
+
+    fn first_artifact_mut(manifest: &mut ArtifactManifest) -> anyhow::Result<&mut ArtifactEntry> {
+        manifest
+            .artifacts
+            .first_mut()
+            .context("expected first artifact")
+    }
+
+    fn operational_context_mut(
+        manifest: &mut ArtifactManifest,
+    ) -> anyhow::Result<&mut OperationalRunContext> {
+        manifest
+            .operational_context
+            .as_mut()
+            .context("expected operational context")
+    }
+
+    fn operational_scenario_mut<'a>(
+        manifest: &'a mut ArtifactManifest,
+        scenario_id: &str,
+    ) -> anyhow::Result<&'a mut OperationalScenarioRecord> {
+        manifest
+            .operational_scenarios
+            .get_mut(scenario_id)
+            .with_context(|| format!("expected operational scenario `{scenario_id}`"))
+    }
+
+    fn scenario_outcome_mut<'a>(
+        manifest: &'a mut ArtifactManifest,
+        scenario_id: &str,
+    ) -> anyhow::Result<&'a mut ScenarioOutcome> {
+        manifest
+            .scenarios
+            .get_mut(scenario_id)
+            .with_context(|| format!("expected manifest scenario `{scenario_id}`"))
+    }
+
+    fn readiness_event<'a>(
+        manifest: &'a ArtifactManifest,
+        scenario_id: &str,
+    ) -> anyhow::Result<&'a ReadinessEventEnvelope> {
+        manifest
+            .readiness_events
+            .iter()
+            .find(|event| event.scenario_id.as_deref() == Some(scenario_id))
+            .with_context(|| format!("expected readiness event for `{scenario_id}`"))
+    }
+
+    fn readiness_event_mut<'a>(
+        manifest: &'a mut ArtifactManifest,
+        scenario_id: &str,
+    ) -> anyhow::Result<&'a mut ReadinessEventEnvelope> {
+        manifest
+            .readiness_events
+            .iter_mut()
+            .find(|event| event.scenario_id.as_deref() == Some(scenario_id))
+            .with_context(|| format!("expected readiness event for `{scenario_id}`"))
+    }
+
+    fn artifact_by_path_mut<'a>(
+        manifest: &'a mut ArtifactManifest,
+        path: &str,
+    ) -> anyhow::Result<&'a mut ArtifactEntry> {
+        manifest
+            .artifacts
+            .iter_mut()
+            .find(|artifact| artifact.path == path)
+            .with_context(|| format!("expected artifact `{path}`"))
+    }
+
+    fn fixture_row<'a>(
+        report: &'a ArtifactSchemaFixtureReport,
+        fixture_id: &str,
+    ) -> anyhow::Result<&'a ArtifactSchemaFixtureRow> {
+        report
+            .fixtures
+            .iter()
+            .find(|row| row.fixture_id == fixture_id)
+            .with_context(|| format!("expected fixture row `{fixture_id}`"))
     }
 
     // ── Schema version ───────────────────────────────────────────────
@@ -2618,25 +2713,20 @@ mod tests {
     }
 
     #[test]
-    fn scenario_id_pattern_matches_shared_catalog_contract() {
-        let catalog: serde_json::Value =
-            serde_json::from_str(include_str!("../../../scripts/e2e/scenario_catalog.json"))
-                .expect("scenario catalog json should parse");
+    fn scenario_id_pattern_matches_shared_catalog_contract() -> anyhow::Result<()> {
+        let catalog = scenario_catalog()?;
         let catalog_pattern = catalog
             .get("scenario_id_regex")
             .and_then(serde_json::Value::as_str)
-            .expect("scenario catalog should define scenario_id_regex");
+            .context("scenario catalog should define scenario_id_regex")?;
         assert_eq!(SCENARIO_ID_PATTERN, catalog_pattern);
+        Ok(())
     }
 
     #[test]
-    fn active_catalog_literal_scenario_ids_match_manifest_validator() -> serde_json::Result<()> {
-        let catalog: serde_json::Value =
-            serde_json::from_str(include_str!("../../../scripts/e2e/scenario_catalog.json"))?;
-        let suites = catalog
-            .get("suites")
-            .and_then(serde_json::Value::as_array)
-            .expect("scenario catalog should define suites");
+    fn active_catalog_literal_scenario_ids_match_manifest_validator() -> anyhow::Result<()> {
+        let catalog = scenario_catalog()?;
+        let suites = scenario_catalog_suites(&catalog)?;
 
         let mut checked = 0usize;
         let mut invalid = Vec::new();
@@ -2680,13 +2770,9 @@ mod tests {
     }
 
     #[test]
-    fn active_catalog_literal_id_patterns_match_manifest_validator() -> serde_json::Result<()> {
-        let catalog: serde_json::Value =
-            serde_json::from_str(include_str!("../../../scripts/e2e/scenario_catalog.json"))?;
-        let suites = catalog
-            .get("suites")
-            .and_then(serde_json::Value::as_array)
-            .expect("scenario catalog should define suites");
+    fn active_catalog_literal_id_patterns_match_manifest_validator() -> anyhow::Result<()> {
+        let catalog = scenario_catalog()?;
+        let suites = scenario_catalog_suites(&catalog)?;
 
         let mut checked = 0usize;
         let mut invalid = Vec::new();
@@ -2797,13 +2883,9 @@ mod tests {
     }
 
     #[test]
-    fn active_catalog_id_patterns_have_manifest_valid_samples() -> serde_json::Result<()> {
-        let catalog: serde_json::Value =
-            serde_json::from_str(include_str!("../../../scripts/e2e/scenario_catalog.json"))?;
-        let suites = catalog
-            .get("suites")
-            .and_then(serde_json::Value::as_array)
-            .expect("scenario catalog should define suites");
+    fn active_catalog_id_patterns_have_manifest_valid_samples() -> anyhow::Result<()> {
+        let catalog = scenario_catalog()?;
+        let suites = scenario_catalog_suites(&catalog)?;
 
         let mut checked = 0usize;
         let mut invalid = Vec::new();
@@ -2924,13 +3006,13 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_retention_size_budget_counts_already_selected_manifests() {
+    fn evaluate_retention_size_budget_counts_already_selected_manifests() -> anyhow::Result<()> {
         let mut old_large = make_manifest("run-old-large", "gate_a", "2025-01-01T00:00:00Z");
-        old_large.artifacts[0].size_bytes = 900;
+        first_artifact_mut(&mut old_large)?.size_bytes = 900;
         let mut new_a = make_manifest("run-new-a", "gate_a", "2026-03-02T00:00:00Z");
-        new_a.artifacts[0].size_bytes = 200;
+        first_artifact_mut(&mut new_a)?.size_bytes = 200;
         let mut new_b = make_manifest("run-new-b", "gate_a", "2026-03-03T00:00:00Z");
-        new_b.artifacts[0].size_bytes = 200;
+        first_artifact_mut(&mut new_b)?.size_bytes = 200;
 
         let policy = RetentionPolicy {
             max_age_days: 30,
@@ -2944,9 +3026,10 @@ mod tests {
 
         assert_eq!(
             prune,
-            vec![0],
+            Vec::from([0usize]),
             "old selected manifest already brings total bytes below the size budget",
         );
+        Ok(())
     }
 
     #[test]
@@ -2967,7 +3050,7 @@ mod tests {
     }
 
     #[test]
-    fn redaction_strips_absolute_paths() {
+    fn redaction_strips_absolute_paths() -> anyhow::Result<()> {
         let mut manifest = sample_manifest();
         manifest.artifacts.push(ArtifactEntry {
             path: "/home/user/artifacts/test.log".to_owned(),
@@ -2980,26 +3063,44 @@ mod tests {
         });
         let policy = RedactionPolicy::default();
         let redacted = redact_manifest(&manifest, &policy);
-        let abs_artifact = &redacted.artifacts[1];
+        let abs_artifact = redacted
+            .artifacts
+            .get(1)
+            .context("expected pushed absolute-path artifact")?;
         assert!(!abs_artifact.path.starts_with('/'));
         assert!(abs_artifact.redacted);
+        Ok(())
     }
 
     #[test]
-    fn redaction_scrubs_sensitive_metadata() {
+    fn redaction_scrubs_sensitive_metadata() -> anyhow::Result<()> {
         let mut manifest = sample_manifest();
         let mut meta = BTreeMap::new();
         meta.insert("hostname".to_owned(), "secret-host".to_owned());
         meta.insert("safe_field".to_owned(), "keep me".to_owned());
-        manifest.artifacts[0].metadata = meta;
+        first_artifact_mut(&mut manifest)?.metadata = meta;
 
         let policy = RedactionPolicy::default();
         let redacted = redact_manifest(&manifest, &policy);
+        let artifact = redacted
+            .artifacts
+            .first()
+            .context("expected redacted first artifact")?;
         assert_eq!(
-            redacted.artifacts[0].metadata["hostname"],
+            artifact
+                .metadata
+                .get("hostname")
+                .context("expected redacted hostname metadata")?,
             REDACTED_SENTINEL,
         );
-        assert_eq!(redacted.artifacts[0].metadata["safe_field"], "keep me");
+        assert_eq!(
+            artifact
+                .metadata
+                .get("safe_field")
+                .context("expected preserved safe metadata")?,
+            "keep me"
+        );
+        Ok(())
     }
 
     #[test]
@@ -3142,13 +3243,9 @@ mod tests {
     }
 
     #[test]
-    fn operational_manifest_rejects_missing_log_paths() {
+    fn operational_manifest_rejects_missing_log_paths() -> anyhow::Result<()> {
         let mut manifest = sample_operational_manifest();
-        manifest
-            .operational_scenarios
-            .get_mut("mounted_ext4_rw")
-            .expect("scenario exists")
-            .stdout_path = String::new();
+        operational_scenario_mut(&mut manifest, "mounted_ext4_rw")?.stdout_path = String::new();
 
         let errors = validate_operational_manifest(&manifest);
         assert!(errors.iter().any(|e| matches!(
@@ -3156,16 +3253,14 @@ mod tests {
             ManifestValidationError::MissingOperationalLogPath { scenario_id, field }
                 if scenario_id == "mounted_ext4_rw" && field == "stdout_path"
         )));
+        Ok(())
     }
 
     #[test]
-    fn operational_manifest_rejects_unsafe_run_log_paths() {
+    fn operational_manifest_rejects_unsafe_run_log_paths() -> anyhow::Result<()> {
         let mut manifest = sample_operational_manifest();
-        manifest
-            .operational_context
-            .as_mut()
-            .expect("context exists")
-            .stderr_path = "/tmp/frankenfs/stderr.log".to_owned();
+        operational_context_mut(&mut manifest)?.stderr_path =
+            "/tmp/frankenfs/stderr.log".to_owned();
 
         let errors = validate_operational_manifest(&manifest);
         assert!(errors.iter().any(|e| matches!(
@@ -3173,15 +3268,13 @@ mod tests {
             ManifestValidationError::MalformedArtifactPath(path)
                 if path == "/tmp/frankenfs/stderr.log"
         )));
+        Ok(())
     }
 
     #[test]
-    fn operational_manifest_rejects_whitespace_run_identity() {
+    fn operational_manifest_rejects_whitespace_run_identity() -> anyhow::Result<()> {
         let mut manifest = sample_operational_manifest();
-        let context = manifest
-            .operational_context
-            .as_mut()
-            .expect("context exists");
+        let context = operational_context_mut(&mut manifest)?;
         context.command_line = vec!["  ".to_owned(), "\t".to_owned()];
         context.worker.host = "  ".to_owned();
 
@@ -3196,16 +3289,14 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, ManifestValidationError::EmptyOperationalHost))
         );
+        Ok(())
     }
 
     #[test]
-    fn operational_manifest_rejects_actual_outcome_drift() {
+    fn operational_manifest_rejects_actual_outcome_drift() -> anyhow::Result<()> {
         let mut manifest = sample_operational_manifest();
-        manifest
-            .operational_scenarios
-            .get_mut("mounted_ext4_rw")
-            .expect("scenario exists")
-            .actual_outcome = ScenarioResult::Fail;
+        operational_scenario_mut(&mut manifest, "mounted_ext4_rw")?.actual_outcome =
+            ScenarioResult::Fail;
 
         let errors = validate_operational_manifest(&manifest);
         assert!(errors.iter().any(|e| matches!(
@@ -3214,15 +3305,13 @@ mod tests {
                 if scenario_id == "mounted_ext4_rw"
                     && reason.contains("actual_outcome")
         )));
+        Ok(())
     }
 
     #[test]
-    fn operational_manifest_rejects_ambiguous_skip_reason() {
+    fn operational_manifest_rejects_ambiguous_skip_reason() -> anyhow::Result<()> {
         let mut manifest = sample_operational_manifest();
-        let record = manifest
-            .operational_scenarios
-            .get_mut("fuse_capability_probe")
-            .expect("scenario exists");
+        let record = operational_scenario_mut(&mut manifest, "fuse_capability_probe")?;
         record.skip_reason = None;
 
         let errors = validate_operational_manifest(&manifest);
@@ -3232,15 +3321,13 @@ mod tests {
                 if scenario_id == "fuse_capability_probe"
                     && reason.contains("skip_reason")
         )));
+        Ok(())
     }
 
     #[test]
-    fn operational_manifest_rejects_fail_without_remediation() {
+    fn operational_manifest_rejects_fail_without_remediation() -> anyhow::Result<()> {
         let mut manifest = sample_operational_manifest();
-        let record = manifest
-            .operational_scenarios
-            .get_mut("writeback_crash_matrix")
-            .expect("scenario exists");
+        let record = operational_scenario_mut(&mut manifest, "writeback_crash_matrix")?;
         record.remediation_hint = None;
 
         let errors = validate_operational_manifest(&manifest);
@@ -3250,26 +3337,20 @@ mod tests {
                 if scenario_id == "writeback_crash_matrix"
                     && reason.contains("remediation_hint")
         )));
+        Ok(())
     }
 
     #[test]
-    fn operational_manifest_rejects_error_without_fail_outcome() {
+    fn operational_manifest_rejects_error_without_fail_outcome() -> anyhow::Result<()> {
         let mut manifest = sample_operational_manifest();
-        let scenario = manifest
-            .operational_scenarios
-            .get_mut("fuzz_repair_smoke")
-            .expect("scenario exists");
+        let scenario = operational_scenario_mut(&mut manifest, "fuzz_repair_smoke")?;
         scenario.classification = OperationalOutcomeClass::Error;
         scenario.actual_outcome = ScenarioResult::Skip;
         scenario.error_class = Some(OperationalErrorClass::HarnessBug);
         scenario.remediation_hint = Some("fix harness".to_owned());
         scenario.skip_reason = None;
 
-        manifest
-            .scenarios
-            .get_mut("fuzz_repair_smoke")
-            .expect("scenario exists")
-            .outcome = ScenarioResult::Skip;
+        scenario_outcome_mut(&mut manifest, "fuzz_repair_smoke")?.outcome = ScenarioResult::Skip;
 
         let errors = validate_operational_manifest(&manifest);
         assert!(errors.iter().any(|e| matches!(
@@ -3278,15 +3359,13 @@ mod tests {
                 if scenario_id == "fuzz_repair_smoke"
                     && reason.contains("FAIL actual_outcome")
         )));
+        Ok(())
     }
 
     #[test]
-    fn operational_manifest_rejects_unknown_artifact_refs() {
+    fn operational_manifest_rejects_unknown_artifact_refs() -> anyhow::Result<()> {
         let mut manifest = sample_operational_manifest();
-        manifest
-            .operational_scenarios
-            .get_mut("perf_baseline_run")
-            .expect("scenario exists")
+        operational_scenario_mut(&mut manifest, "perf_baseline_run")?
             .artifact_refs
             .push("artifacts/e2e/run/missing.json".to_owned());
 
@@ -3297,6 +3376,7 @@ mod tests {
                 if scenario_id == "perf_baseline_run"
                     && path == "artifacts/e2e/run/missing.json"
         )));
+        Ok(())
     }
 
     #[test]
@@ -3320,13 +3400,10 @@ mod tests {
     }
 
     #[test]
-    fn operational_manifest_rejects_missing_cleanup_status() {
+    fn operational_manifest_rejects_missing_cleanup_status() -> anyhow::Result<()> {
         let mut manifest = sample_operational_manifest();
-        manifest
-            .operational_scenarios
-            .get_mut("xfstests_generic_subset")
-            .expect("scenario exists")
-            .cleanup_status = CleanupStatus::NotRun;
+        operational_scenario_mut(&mut manifest, "xfstests_generic_subset")?.cleanup_status =
+            CleanupStatus::NotRun;
 
         let errors = validate_operational_manifest(&manifest);
         assert!(errors.iter().any(|e| matches!(
@@ -3334,6 +3411,7 @@ mod tests {
             ManifestValidationError::MissingCleanupStatus(id)
                 if id == "xfstests_generic_subset"
         )));
+        Ok(())
     }
 
     #[test]
@@ -3352,12 +3430,12 @@ mod tests {
     }
 
     #[test]
-    fn readiness_event_json_rejects_missing_required_fields() {
+    fn readiness_event_json_rejects_missing_required_fields() -> anyhow::Result<()> {
         let manifest = sample_operational_manifest();
         let event = manifest
             .readiness_events
             .first()
-            .expect("sample event exists");
+            .context("sample event exists")?;
 
         for field in [
             "envelope_version",
@@ -3377,26 +3455,24 @@ mod tests {
             "remediation_id",
             "reproduction_command",
         ] {
-            let mut value = serde_json::to_value(event).expect("event serializes");
+            let mut value = serde_json::to_value(event).context("event serializes")?;
             value
                 .as_object_mut()
-                .expect("event serializes as object")
+                .context("event serializes as object")?
                 .remove(field);
             assert!(
                 serde_json::from_value::<ReadinessEventEnvelope>(value).is_err(),
                 "missing required readiness event field {field} should fail deserialization"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn operational_manifest_rejects_missing_readiness_event_contract_fields() {
+    fn operational_manifest_rejects_missing_readiness_event_contract_fields() -> anyhow::Result<()>
+    {
         let mut manifest = sample_operational_manifest();
-        let event = manifest
-            .readiness_events
-            .iter_mut()
-            .find(|event| event.scenario_id.as_deref() == Some("mounted_ext4_rw"))
-            .expect("event exists");
+        let event = readiness_event_mut(&mut manifest, "mounted_ext4_rw")?;
         event.report_id.clear();
         event.run_id.clear();
         event.lane_id.clear();
@@ -3435,23 +3511,16 @@ mod tests {
                 "expected readiness event validation error containing {expected}, got {errors:?}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn operational_manifest_rejects_readiness_event_artifact_without_hash() {
+    fn operational_manifest_rejects_readiness_event_artifact_without_hash() -> anyhow::Result<()> {
         let mut manifest = sample_operational_manifest();
-        let artifact_path = manifest
-            .readiness_events
-            .iter()
-            .find(|event| event.scenario_id.as_deref() == Some("mounted_ext4_rw"))
-            .expect("event exists")
+        let artifact_path = readiness_event(&manifest, "mounted_ext4_rw")?
             .artifact_id
             .clone();
-        let artifact = manifest
-            .artifacts
-            .iter_mut()
-            .find(|artifact| artifact.path == artifact_path)
-            .expect("artifact exists");
+        let artifact = artifact_by_path_mut(&mut manifest, &artifact_path)?;
         artifact.sha256 = None;
 
         let errors = validate_operational_manifest(&manifest);
@@ -3461,23 +3530,16 @@ mod tests {
                 if event_id == "event_mounted_ext4_rw"
                     && reason.contains("missing sha256")
         )));
+        Ok(())
     }
 
     #[test]
-    fn operational_manifest_rejects_duplicate_stale_or_orphan_readiness_events() {
+    fn operational_manifest_rejects_duplicate_stale_or_orphan_readiness_events()
+    -> anyhow::Result<()> {
         let mut manifest = sample_operational_manifest();
-        let duplicate = manifest
-            .readiness_events
-            .iter()
-            .find(|event| event.scenario_id.as_deref() == Some("mounted_ext4_rw"))
-            .expect("event exists")
-            .clone();
+        let duplicate = readiness_event(&manifest, "mounted_ext4_rw")?.clone();
         manifest.readiness_events.push(duplicate);
-        let event = manifest
-            .readiness_events
-            .iter_mut()
-            .find(|event| event.scenario_id.as_deref() == Some("proof_bundle_stale"))
-            .expect("event exists");
+        let event = readiness_event_mut(&mut manifest, "proof_bundle_stale")?;
         event.envelope_version = READINESS_EVENT_ENVELOPE_VERSION + 1;
         event.parent_correlation_id = Some("missing-parent-event".to_owned());
 
@@ -3499,16 +3561,13 @@ mod tests {
                 if event_id == "event_proof_bundle_stale"
                     && reason.contains("parent_correlation_id")
         )));
+        Ok(())
     }
 
     #[test]
-    fn readiness_event_clock_skew_allows_one_day_and_rejects_older_events() {
+    fn readiness_event_clock_skew_allows_one_day_and_rejects_older_events() -> anyhow::Result<()> {
         let mut manifest = sample_operational_manifest();
-        let event = manifest
-            .readiness_events
-            .iter_mut()
-            .find(|event| event.scenario_id.as_deref() == Some("mounted_ext4_rw"))
-            .expect("event exists");
+        let event = readiness_event_mut(&mut manifest, "mounted_ext4_rw")?;
         event.created_at = "2026-03-05T00:00:00Z".to_owned();
         let errors = validate_operational_manifest(&manifest);
         assert!(
@@ -3516,11 +3575,7 @@ mod tests {
             "one-day readiness event clock skew should validate, got {errors:?}"
         );
 
-        let event = manifest
-            .readiness_events
-            .iter_mut()
-            .find(|event| event.scenario_id.as_deref() == Some("mounted_ext4_rw"))
-            .expect("event exists");
+        let event = readiness_event_mut(&mut manifest, "mounted_ext4_rw")?;
         event.created_at = "2026-03-07T00:00:00Z".to_owned();
         let errors = validate_operational_manifest(&manifest);
         assert!(errors.iter().any(|error| matches!(
@@ -3529,16 +3584,13 @@ mod tests {
                 if event_id == "event_mounted_ext4_rw"
                     && reason.contains("clock-skew tolerance")
         )));
+        Ok(())
     }
 
     #[test]
-    fn operational_manifest_rejects_malformed_readiness_event() {
+    fn operational_manifest_rejects_malformed_readiness_event() -> anyhow::Result<()> {
         let mut manifest = sample_operational_manifest();
-        let event = manifest
-            .readiness_events
-            .iter_mut()
-            .find(|event| event.scenario_id.as_deref() == Some("writeback_crash_matrix"))
-            .expect("event exists");
+        let event = readiness_event_mut(&mut manifest, "writeback_crash_matrix")?;
         event.reproduction_command.clear();
         event.raw_log_refs.push("../escape.log".to_owned());
 
@@ -3555,6 +3607,7 @@ mod tests {
                 if event_id == "event_writeback_crash_matrix"
                     && reason.contains("malformed")
         )));
+        Ok(())
     }
 
     #[test]
@@ -3944,7 +3997,8 @@ mod tests {
     }
 
     #[test]
-    fn artifact_schema_fixture_suite_accepts_positives_and_rejects_negatives_exactly() {
+    fn artifact_schema_fixture_suite_accepts_positives_and_rejects_negatives_exactly()
+    -> anyhow::Result<()> {
         let report = validate_artifact_schema_fixture_dir(
             &artifact_schema_fixture_dir(),
             "cargo test -p ffs-harness artifact_schema_fixture_suite",
@@ -3954,11 +4008,7 @@ mod tests {
         assert_eq!(report.positive_count, 1);
         assert_eq!(report.negative_count, 1);
 
-        let positive = report
-            .fixtures
-            .iter()
-            .find(|row| row.fixture_id == "positive_matrix")
-            .expect("positive fixture row should exist");
+        let positive = fixture_row(&report, "positive_matrix")?;
         assert_eq!(
             positive.observed_result,
             ArtifactSchemaFixtureExpectation::Accept
@@ -3971,11 +4021,7 @@ mod tests {
                 .contains("pass_with_experimental_caveat")
         );
 
-        let negative = report
-            .fixtures
-            .iter()
-            .find(|row| row.fixture_id == "negative_matrix")
-            .expect("negative fixture row should exist");
+        let negative = fixture_row(&report, "negative_matrix")?;
         assert_eq!(
             negative.observed_result,
             ArtifactSchemaFixtureExpectation::Reject
@@ -3984,6 +4030,7 @@ mod tests {
             negative.expected_diagnostics, negative.observed_diagnostics,
             "negative fixture diagnostics must match exact code/path pairs"
         );
+        Ok(())
     }
 
     #[test]
@@ -4100,16 +4147,12 @@ mod tests {
     }
 
     #[test]
-    fn artifact_schema_fixture_suite_covers_required_negative_diagnostics() {
+    fn artifact_schema_fixture_suite_covers_required_negative_diagnostics() -> anyhow::Result<()> {
         let report = validate_artifact_schema_fixture_dir(
             &artifact_schema_fixture_dir(),
             "cargo test -p ffs-harness artifact_schema_fixture_suite",
         );
-        let negative = report
-            .fixtures
-            .iter()
-            .find(|row| row.fixture_id == "negative_matrix")
-            .expect("negative fixture row should exist");
+        let negative = fixture_row(&report, "negative_matrix")?;
         let observed_codes = negative
             .observed_diagnostics
             .iter()
@@ -4136,6 +4179,7 @@ mod tests {
                 "missing diagnostic code {required_code}"
             );
         }
+        Ok(())
     }
 
     fn artifact_schema_fixture_dir() -> std::path::PathBuf {
