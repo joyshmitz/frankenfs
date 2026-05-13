@@ -545,16 +545,57 @@ fn is_uuid(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
 
-    fn fixture_corpus() -> BtrfsSendReceiveCorpus {
+    fn fixture_corpus() -> Result<BtrfsSendReceiveCorpus> {
         parse_btrfs_send_receive_corpus(DEFAULT_BTRFS_SEND_RECEIVE_CORPUS_JSON)
-            .expect("default btrfs send/receive corpus parses")
+            .context("default btrfs send/receive corpus parses")
+    }
+
+    fn first_case_mut(corpus: &mut BtrfsSendReceiveCorpus) -> Result<&mut BtrfsSendReceiveCase> {
+        corpus
+            .cases
+            .first_mut()
+            .context("fixture corpus includes at least one case")
+    }
+
+    fn first_two_cases_mut(
+        corpus: &mut BtrfsSendReceiveCorpus,
+    ) -> Result<(&mut BtrfsSendReceiveCase, &mut BtrfsSendReceiveCase)> {
+        let (first, rest) = corpus
+            .cases
+            .split_first_mut()
+            .context("fixture corpus includes at least one case")?;
+        let second = rest
+            .first_mut()
+            .context("fixture corpus includes at least two cases")?;
+        Ok((first, second))
+    }
+
+    fn case_by_outcome_mut<'a>(
+        corpus: &'a mut BtrfsSendReceiveCorpus,
+        expected_outcome: &str,
+    ) -> Result<&'a mut BtrfsSendReceiveCase> {
+        corpus
+            .cases
+            .iter_mut()
+            .find(|case| case.expected_outcome == expected_outcome)
+            .with_context(|| format!("fixture corpus includes outcome {expected_outcome}"))
+    }
+
+    fn case_with_parent_mut(
+        corpus: &mut BtrfsSendReceiveCorpus,
+    ) -> Result<&mut BtrfsSendReceiveCase> {
+        corpus
+            .cases
+            .iter_mut()
+            .find(|case| case.parent_snapshot.is_some())
+            .context("fixture corpus includes a case with parent snapshot")
     }
 
     #[test]
-    fn default_corpus_validates_required_subsets_and_refusals() {
-        let report = validate_default_btrfs_send_receive_corpus()
-            .expect("default btrfs send/receive corpus validates");
+    fn default_corpus_validates_required_subsets_and_refusals() -> Result<()> {
+        let report = validate_default_btrfs_send_receive_corpus()?;
         assert_eq!(report.bead_id, "bd-naww5");
         for subset in REQUIRED_SUBSETS {
             assert!(
@@ -568,12 +609,12 @@ mod tests {
                 "missing required refusal {refusal}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn render_markdown_summarizes_default_corpus() {
-        let report = validate_default_btrfs_send_receive_corpus()
-            .expect("default btrfs send/receive corpus validates");
+    fn render_markdown_summarizes_default_corpus() -> Result<()> {
+        let report = validate_default_btrfs_send_receive_corpus()?;
         let markdown = render_btrfs_send_receive_corpus_markdown(&report);
         assert!(markdown.contains("# Btrfs Send/Receive Corpus"));
         assert!(markdown.contains("`roundtrip_supported`"));
@@ -582,6 +623,7 @@ mod tests {
             "render_btrfs_send_receive_corpus_markdown_default_corpus",
             markdown
         );
+        Ok(())
     }
 
     #[test]
@@ -596,21 +638,23 @@ mod tests {
     }
 
     #[test]
-    fn fail_on_errors_rejects_invalid_report() {
-        let mut corpus = fixture_corpus();
+    fn fail_on_errors_rejects_invalid_report() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus.cases.clear();
         let report = validate_btrfs_send_receive_corpus(&corpus);
-        let err = fail_on_btrfs_send_receive_corpus_errors(&report)
-            .expect_err("invalid report should fail");
+        let Err(err) = fail_on_btrfs_send_receive_corpus_errors(&report) else {
+            anyhow::bail!("invalid report should fail");
+        };
         assert!(
             err.to_string()
                 .contains("btrfs send/receive corpus validation failed")
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_required_subset_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn missing_required_subset_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus
             .cases
             .retain(|case| case.supported_subset != "roundtrip_supported");
@@ -621,11 +665,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required supported_subset `roundtrip_supported`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_unsupported_record_refusal_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn missing_unsupported_record_refusal_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus
             .cases
             .retain(|case| case.expected_outcome != "refused_unsupported_record");
@@ -636,11 +681,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required refusal `refused_unsupported_record`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_incremental_parent_refusal_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn missing_incremental_parent_refusal_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus
             .cases
             .retain(|case| case.expected_outcome != "refused_incremental_parent_mismatch");
@@ -648,13 +694,14 @@ mod tests {
         assert!(report.errors.iter().any(|err| {
             err.contains("missing required refusal `refused_incremental_parent_mismatch`")
         }));
+        Ok(())
     }
 
     #[test]
-    fn duplicate_case_id_is_rejected() {
-        let mut corpus = fixture_corpus();
-        let dup = corpus.cases[0].case_id.clone();
-        corpus.cases[1].case_id = dup;
+    fn duplicate_case_id_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let (first, second) = first_two_cases_mut(&mut corpus)?;
+        second.case_id = first.case_id.clone();
         let report = validate_btrfs_send_receive_corpus(&corpus);
         assert!(
             report
@@ -662,12 +709,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicate btrfs send/receive case_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn case_id_prefix_is_enforced() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].case_id = "stream_001".to_owned();
+    fn case_id_prefix_is_enforced() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.case_id = "stream_001".to_owned();
         let report = validate_btrfs_send_receive_corpus(&corpus);
         assert!(
             report
@@ -675,31 +723,25 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must start with btrfs_send_recv_"))
         );
+        Ok(())
     }
 
     #[test]
-    fn outcome_must_match_subset() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_outcome == "roundtrip_success")
-            .expect("roundtrip fixture exists");
+    fn outcome_must_match_subset() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_outcome_mut(&mut corpus, "roundtrip_success")?;
         case.supported_subset = "parse_only".to_owned();
         let report = validate_btrfs_send_receive_corpus(&corpus);
         assert!(report.errors.iter().any(|err| err.contains(
             "outcome `roundtrip_success` requires supported_subset=`roundtrip_supported`"
         )));
+        Ok(())
     }
 
     #[test]
-    fn refusal_outcome_must_use_unsupported_subset() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_outcome == "refused_incremental_parent_mismatch")
-            .expect("incremental parent refusal fixture exists");
+    fn refusal_outcome_must_use_unsupported_subset() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_outcome_mut(&mut corpus, "refused_incremental_parent_mismatch")?;
         case.supported_subset = "roundtrip_supported".to_owned();
 
         let report = validate_btrfs_send_receive_corpus(&corpus);
@@ -708,12 +750,13 @@ mod tests {
                 "refusal outcome `refused_incremental_parent_mismatch` requires supported_subset=`unsupported`",
             )
         }));
+        Ok(())
     }
 
     #[test]
-    fn malformed_uuid_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].source_snapshot.uuid = "not-a-uuid".to_owned();
+    fn malformed_uuid_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.source_snapshot.uuid = "not-a-uuid".to_owned();
         let report = validate_btrfs_send_receive_corpus(&corpus);
         assert!(
             report
@@ -721,12 +764,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("source_snapshot uuid must be"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_image_hash_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].source_snapshot.image_hash = "md5:not-supported".to_owned();
+    fn malformed_image_hash_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.source_snapshot.image_hash = "md5:not-supported".to_owned();
         let report = validate_btrfs_send_receive_corpus(&corpus);
         assert!(
             report
@@ -734,16 +778,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("source_snapshot image_hash must be sha256"))
         );
+        Ok(())
     }
 
     #[test]
-    fn parent_generation_must_be_lower_than_source() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.parent_snapshot.is_some())
-            .expect("a fixture with parent exists");
+    fn parent_generation_must_be_lower_than_source() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_with_parent_mut(&mut corpus)?;
         let source_gen = case.source_snapshot.generation;
         if let Some(parent) = case.parent_snapshot.as_mut() {
             parent.generation = source_gen + 1;
@@ -752,16 +793,13 @@ mod tests {
         assert!(report.errors.iter().any(|err| {
             err.contains("parent_snapshot generation must be less than source generation")
         }));
+        Ok(())
     }
 
     #[test]
-    fn parent_uuid_must_differ_from_source() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.parent_snapshot.is_some())
-            .expect("parent fixture exists");
+    fn parent_uuid_must_differ_from_source() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_with_parent_mut(&mut corpus)?;
         let source_uuid = case.source_snapshot.uuid.clone();
         if let Some(parent) = case.parent_snapshot.as_mut() {
             parent.uuid = source_uuid;
@@ -773,16 +811,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("parent and source uuids must differ"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_record_outcome_requires_record_kind() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_outcome == "refused_unsupported_record")
-            .expect("refused_unsupported_record fixture exists");
+    fn unsupported_record_outcome_requires_record_kind() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_outcome_mut(&mut corpus, "refused_unsupported_record")?;
         case.unsupported_record = String::new();
         let report = validate_btrfs_send_receive_corpus(&corpus);
         assert!(
@@ -792,16 +827,13 @@ mod tests {
                 .any(|err| err
                     .contains("refused_unsupported_record must declare unsupported_record"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_record_outcome_rejects_unknown_kind() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_outcome == "refused_unsupported_record")
-            .expect("refused_unsupported_record fixture exists");
+    fn unsupported_record_outcome_rejects_unknown_kind() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_outcome_mut(&mut corpus, "refused_unsupported_record")?;
         case.unsupported_record = "telepathy_record".to_owned();
         let report = validate_btrfs_send_receive_corpus(&corpus);
         assert!(
@@ -810,22 +842,24 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported unsupported_record"))
         );
+        Ok(())
     }
 
     #[test]
-    fn non_unsupported_record_outcome_must_leave_record_empty() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].unsupported_record = "encoded_write".to_owned();
+    fn non_unsupported_record_outcome_must_leave_record_empty() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.unsupported_record = "encoded_write".to_owned();
         let report = validate_btrfs_send_receive_corpus(&corpus);
         assert!(report.errors.iter().any(|err| {
             err.contains("non-unsupported-record outcome must leave unsupported_record empty")
         }));
+        Ok(())
     }
 
     #[test]
-    fn unsupported_capability_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].capability_required = "telepathy".to_owned();
+    fn unsupported_capability_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.capability_required = "telepathy".to_owned();
         let report = validate_btrfs_send_receive_corpus(&corpus);
         assert!(
             report
@@ -833,12 +867,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported capability_required"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_artifact_requirement_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0]
+    fn missing_artifact_requirement_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?
             .artifact_requirements
             .retain(|r| r != "expected_stream_hash");
         let report = validate_btrfs_send_receive_corpus(&corpus);
@@ -848,12 +883,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("artifact_requirements missing `expected_stream_hash`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_chain_of_custody_hash_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].chain_of_custody.artifact_sha256 = "deadbeef".to_owned();
+    fn malformed_chain_of_custody_hash_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?
+            .chain_of_custody
+            .artifact_sha256 = "deadbeef".to_owned();
         let report = validate_btrfs_send_receive_corpus(&corpus);
         assert!(
             report
@@ -861,11 +899,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("artifact_sha256 must be sha256"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_cases_list_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn empty_cases_list_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus.cases.clear();
         let report = validate_btrfs_send_receive_corpus(&corpus);
         assert!(
@@ -874,5 +913,6 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one case"))
         );
+        Ok(())
     }
 }
