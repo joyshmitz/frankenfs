@@ -387,7 +387,11 @@ fn parse_registry_rows(markdown: &str, errors: &mut Vec<String>) -> Vec<Deferred
         return Vec::new();
     }
 
-    let header = split_table_row(table_lines[0]);
+    let Some(header_line) = table_lines.first() else {
+        errors.push("deferred parity registry must include a header row".to_owned());
+        return Vec::new();
+    };
+    let header = split_table_row(header_line);
     if header != REQUIRED_HEADERS {
         errors.push(format!(
             "deferred parity registry header mismatch: expected {REQUIRED_HEADERS:?}, got {header:?}"
@@ -428,27 +432,41 @@ fn row_from_table_line(line: &str, errors: &mut Vec<String>) -> Option<DeferredP
     {
         return None;
     }
-    if cells.len() != REQUIRED_HEADERS.len() {
+    let [
+        row_id,
+        source_bead_id,
+        source_status,
+        matched_phrase,
+        gap_class,
+        docs_claim_checked,
+        release_gate_effect,
+        decision,
+        linked_follow_up_or_non_goal,
+        required_logs,
+        required_artifacts,
+        reproduction_command,
+    ] = cells.as_slice()
+    else {
         errors.push(format!(
             "deferred parity registry row has {} cells, expected {}: {line}",
             cells.len(),
             REQUIRED_HEADERS.len()
         ));
         return None;
-    }
+    };
     Some(DeferredParityAuditRow {
-        row_id: cells[0].clone(),
-        source_bead_id: cells[1].clone(),
-        source_status: cells[2].clone(),
-        matched_phrase: cells[3].clone(),
-        gap_class: cells[4].clone(),
-        docs_claim_checked: cells[5].clone(),
-        release_gate_effect: cells[6].clone(),
-        decision: cells[7].clone(),
-        linked_follow_up_or_non_goal: cells[8].clone(),
-        required_logs: cells[9].clone(),
-        required_artifacts: cells[10].clone(),
-        reproduction_command: cells[11].clone(),
+        row_id: row_id.clone(),
+        source_bead_id: source_bead_id.clone(),
+        source_status: source_status.clone(),
+        matched_phrase: matched_phrase.clone(),
+        gap_class: gap_class.clone(),
+        docs_claim_checked: docs_claim_checked.clone(),
+        release_gate_effect: release_gate_effect.clone(),
+        decision: decision.clone(),
+        linked_follow_up_or_non_goal: linked_follow_up_or_non_goal.clone(),
+        required_logs: required_logs.clone(),
+        required_artifacts: required_artifacts.clone(),
+        reproduction_command: reproduction_command.clone(),
     })
 }
 
