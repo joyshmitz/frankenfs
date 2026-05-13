@@ -9961,6 +9961,52 @@ mod tests {
         assert!(!super::dx_hash_extends_collision_chain(0x2468, 0x3469));
     }
 
+    proptest::proptest! {
+        // bd-uv9t3 — dx_hash_extends_collision_chain equivalence-relation
+        // proptest. The function returns true when two major hashes
+        // belong to the same htree collision chain (differ only in
+        // their low bit). For htree traversal logic to be correct,
+        // the predicate must be a proper equivalence relation:
+        //   reflexive : f(a, a)       == true
+        //   symmetric : f(a, b)       == f(b, a)
+        //   transitive: f(a, b) && f(b, c) → f(a, c)
+        // Sister fixed-case test covers 3 inputs; this sweeps
+        // arbitrary u32 pairs/triples.
+
+        #[test]
+        fn dx_hash_extends_collision_chain_proptest_reflexive(a in proptest::prelude::any::<u32>()) {
+            proptest::prop_assert!(super::dx_hash_extends_collision_chain(a, a));
+        }
+
+        #[test]
+        fn dx_hash_extends_collision_chain_proptest_symmetric(
+            a in proptest::prelude::any::<u32>(),
+            b in proptest::prelude::any::<u32>(),
+        ) {
+            proptest::prop_assert_eq!(
+                super::dx_hash_extends_collision_chain(a, b),
+                super::dx_hash_extends_collision_chain(b, a),
+                "predicate must be symmetric"
+            );
+        }
+
+        #[test]
+        fn dx_hash_extends_collision_chain_proptest_transitive(
+            a in proptest::prelude::any::<u32>(),
+            b in proptest::prelude::any::<u32>(),
+            c in proptest::prelude::any::<u32>(),
+        ) {
+            if super::dx_hash_extends_collision_chain(a, b)
+                && super::dx_hash_extends_collision_chain(b, c)
+            {
+                proptest::prop_assert!(
+                    super::dx_hash_extends_collision_chain(a, c),
+                    "predicate must be transitive: a~b && b~c ⇒ a~c"
+                );
+            }
+        }
+    }
+
     #[test]
     fn effective_dirhash_version_applies_unsigned_super_flag() {
         let mut sb = make_valid_sb();
