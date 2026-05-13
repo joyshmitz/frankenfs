@@ -202,7 +202,10 @@ run_case_cargo() {
     local test_name="$1"
     shift
 
-    if [[ "$FFS_USE_RCH" == "1" ]] && command -v rch >/dev/null 2>&1; then
+    if [[ "$FFS_USE_RCH" == "1" ]]; then
+        if ! command -v rch >/dev/null 2>&1; then
+            fail_suite "$test_name" 0 "FFS_USE_RCH=1 requires rch; set FFS_USE_RCH=0 for an explicit local cargo run"
+        fi
         run_case "$test_name" rch exec -- cargo "$@"
     else
         run_case "$test_name" cargo "$@"
