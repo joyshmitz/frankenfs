@@ -1829,6 +1829,133 @@ mod tests {
             let listed = list_xattrs(&inode, Some(&external)).unwrap();
             prop_assert!(listed.is_empty(), "expected empty list, got: {:?}", listed);
         }
+
+        /// parse_xattr_name is a pure function: two identical inputs produce
+        /// identical outputs. Locks against any future caching / mutation
+        /// regression in the namespace-prefix dispatcher.
+        #[test]
+        fn proptest_parse_xattr_name_is_deterministic(
+            prefix in prop::sample::select(vec!["user.", "trusted.", "security.", "system."]),
+            suffix in xattr_suffix_strategy(),
+        ) {
+            let full = format!("{prefix}{suffix}");
+            let a = parse_xattr_name(&full);
+            let b = parse_xattr_name(&full);
+            match (a, b) {
+                (Ok(x), Ok(y)) => prop_assert_eq!(x, y),
+                (Err(_), Err(_)) => {}
+                (lhs, rhs) => prop_assert!(
+                    false,
+                    "parse_xattr_name disagreed on identical input '{}': {:?} vs {:?}",
+                    full, lhs, rhs
+                ),
+            }
+        }
+
+        /// Prefix-dispatch round-trip: each ext4 user/trusted/security/system
+        /// prefix routes to its matching kernel EXT4_XATTR_INDEX_* constant,
+        /// and the parsed name bytes equal the original suffix bytes.
+        #[test]
+        fn proptest_parse_xattr_name_prefix_dispatch_roundtrip(
+            suffix in xattr_suffix_strategy(),
+        ) {
+            let cases: [(&str, u8); 4] = [
+                ("user.",     EXT4_XATTR_INDEX_USER),
+                ("trusted.",  EXT4_XATTR_INDEX_TRUSTED),
+                ("security.", EXT4_XATTR_INDEX_SECURITY),
+                ("system.",   EXT4_XATTR_INDEX_SYSTEM),
+            ];
+            for (prefix, expected_idx) in cases {
+                let full = format!("{prefix}{suffix}");
+                let (idx, name_bytes) = parse_xattr_name(&full).unwrap();
+                prop_assert_eq!(
+                    idx, expected_idx,
+                    "prefix '{}' must route to EXT4_XATTR_INDEX={}, got {} for input '{}'",
+                    prefix, expected_idx, idx, full
+                );
+                prop_assert_eq!(
+                    name_bytes.as_slice(),
+                    suffix.as_bytes(),
+                    "parsed name bytes must equal suffix bytes",
+                );
+            }
+        }
+
+        /// Length-cap: any prefix + suffix whose suffix byte length exceeds
+        /// XATTR_NAME_MAX (255, == kernel's XATTR_NAME_MAX) must be rejected
+        /// with NameTooLong. Guards against silent truncation of long names
+        /// onto disk.
+        #[test]
+        fn proptest_parse_xattr_name_rejects_oversized(
+            prefix in prop::sample::select(vec!["user.", "trusted.", "security.", "system."]),
+            over_by in 1_usize..32,
+        ) {
+            let suffix = "a".repeat(XATTR_NAME_MAX + over_by);
+            let full = format!("{prefix}{suffix}");
+            let err = parse_xattr_name(&full)
+                .expect_err("oversize xattr name must be rejected");
+            prop_assert!(
+                matches!(err, FfsError::NameTooLong),
+                "expected FfsError::NameTooLong for {}-byte suffix, got {:?}",
+                suffix.len(), err
+            );
+        }
+
+        /// Unsupported namespace prefixes (no leading user./trusted./security./
+        /// system.) are rejected with an FfsError::Format. Locks against any
+        /// future overly-permissive prefix matcher.
+        #[test]
+        fn proptest_parse_xattr_name_rejects_unknown_namespace(
+            head in "[a-z][a-z0-9]{0,15}",
+            suffix in xattr_suffix_strategy(),
+        ) {
+            // Skip strings that happen to match a known prefix or POSIX-ACL
+            // exact-match string by construction. The strategy uses a strict
+            // ASCII subset so equality checks below are sufficient.
+            prop_assume!(head != "user");
+            prop_assume!(head != "trusted");
+            prop_assume!(head != "security");
+            prop_assume!(head != "system");
+            let full = format!("{head}.{suffix}");
+            let err = parse_xattr_name(&full)
+                .expect_err("unknown xattr namespace must be rejected");
+            prop_assert!(
+                matches!(err, FfsError::Format(_)),
+                "expected FfsError::Format for unknown namespace '{}', got {:?}",
+                full, err
+            );
+        }
+    }
+
+    /// Kernel pin: parse_xattr_name's three POSIX-ACL exact-match strings
+    /// map to the three EXT4_XATTR_INDEX_* constants drawn from
+    /// fs/ext4/xattr.h, and each returns an empty name body (the kernel
+    /// uses the index alone to dispatch). Any silent rename of these
+    /// strings or constants is an on-disk ABI break.
+    #[test]
+    fn parse_xattr_name_posix_acl_exact_match_kernel_pin() {
+        let (idx, name) = parse_xattr_name("system.posix_acl_access").unwrap();
+        assert_eq!(idx, EXT4_XATTR_INDEX_POSIX_ACL_ACCESS);
+        assert_eq!(idx, 2, "kernel fs/ext4/xattr.h: POSIX_ACL_ACCESS == 2");
+        assert!(name.is_empty(), "POSIX-ACL strings carry no trailing name");
+
+        let (idx, name) = parse_xattr_name("system.posix_acl_default").unwrap();
+        assert_eq!(idx, EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT);
+        assert_eq!(idx, 3, "kernel fs/ext4/xattr.h: POSIX_ACL_DEFAULT == 3");
+        assert!(name.is_empty());
+
+        let (idx, name) = parse_xattr_name("system.richacl").unwrap();
+        assert_eq!(idx, EXT4_XATTR_INDEX_RICHACL);
+        assert_eq!(idx, 8, "kernel fs/ext4/xattr.h: RICHACL == 8");
+        assert!(name.is_empty());
+
+        // Sibling kernel constants the dispatcher names elsewhere; pinned
+        // here so a stray renumbering in ffs-types is caught by this crate's
+        // own test surface.
+        assert_eq!(EXT4_XATTR_INDEX_USER, 1);
+        assert_eq!(EXT4_XATTR_INDEX_TRUSTED, 4);
+        assert_eq!(EXT4_XATTR_INDEX_SECURITY, 6);
+        assert_eq!(EXT4_XATTR_INDEX_SYSTEM, 7);
     }
 
     // ── Additional edge-case and boundary tests ─────────────────────────
