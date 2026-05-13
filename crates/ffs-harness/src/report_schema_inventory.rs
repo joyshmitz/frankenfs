@@ -41,6 +41,7 @@ pub struct ReportSchemaInventoryRow {
 pub enum ReportSchemaCoverageRequirement {
     Required,
     AdvisoryOnly,
+    PermissionedOnly,
     Excluded,
 }
 
@@ -68,6 +69,7 @@ pub struct ReportSchemaInventoryReport {
     pub total_rows: usize,
     pub required_rows: usize,
     pub advisory_only_rows: usize,
+    pub permissioned_only_rows: usize,
     pub covered_rows: usize,
     pub missing_rows: usize,
     pub excluded_rows: usize,
@@ -77,66 +79,154 @@ pub struct ReportSchemaInventoryReport {
 
 #[must_use]
 pub fn current_report_schema_inventory() -> ReportSchemaInventory {
+    let mut rows = advisory_report_rows();
+    rows.extend(required_report_rows());
+    rows.push(permissioned_campaign_reports_row());
+    rows.push(readiness_action_dry_run_metadata_row());
+
     ReportSchemaInventory {
         schema_version: REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION,
         inventory_id: REPORT_SCHEMA_INVENTORY_ID.to_owned(),
-        rows: vec![
-            covered_advisory_row(
-                "readiness_lab_validation_report",
-                "crates/ffs-harness/src/readiness_lab.rs",
-                "ReadinessLabValidationReport",
-                "validate-readiness-lab-contracts",
-                "readiness-lab advisory contracts and dashboard rows",
-                "readiness_lab_validation_report_json_shape",
-                "crates/ffs-harness/src/snapshots/ffs_harness__readiness_lab__tests__readiness_lab_validation_report_json_shape.snap",
-            ),
-            covered_advisory_row(
-                "readiness_lab_rch_lane_schedule_report",
-                "crates/ffs-harness/src/readiness_lab.rs",
-                "ReadinessLabRchLaneScheduleReport",
-                "plan-readiness-lab-rch-lanes",
-                "readiness-lab RCH dry-run scheduler",
-                "readiness_lab_rch_lane_schedule_report_json_shape",
-                "crates/ffs-harness/src/snapshots/ffs_harness__readiness_lab__tests__readiness_lab_rch_lane_schedule_report_json_shape.snap",
-            ),
-            covered_advisory_row(
-                "readiness_lab_numa_p99_replay_report",
-                "crates/ffs-harness/src/readiness_lab.rs",
-                "ReadinessLabNumaP99ReplayReport",
-                "readiness-lab NUMA/p99 replay",
-                "large-host swarm responsiveness advisory replay lane",
-                "readiness_lab_numa_p99_replay_report_json_shape",
-                "crates/ffs-harness/src/snapshots/ffs_harness__readiness_lab__tests__readiness_lab_numa_p99_replay_report_json_shape.snap",
-            ),
-            covered_required_row(
-                "swarm_operator_report",
-                "crates/ffs-harness/src/swarm_operator_report.rs",
-                "SwarmOperatorReport",
-                "swarm operator report renderer",
-                "proof-bundle and release-gate operator consumers",
-                "swarm_operator_report_json_shape",
-                "crates/ffs-harness/src/snapshots/ffs_harness__swarm_operator_report__tests__swarm_operator_report_json_shape.snap",
-                ReportSchemaClaimEffect::ExistingReleaseGateInput,
-            ),
-            covered_advisory_row(
-                "readiness_action_autopilot_source_reports",
-                "crates/ffs-harness/src/readiness_action_autopilot.rs",
-                "Vec<ReadinessActionAutopilotReport>",
-                "readiness-action source fixture planner",
-                "readiness-action dry-run planner",
-                "readiness_action_autopilot_report_json_shape",
-                "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_autopilot_report_json_shape.snap",
-            ),
-            excluded_row(
-                "readiness_action_dry_run_metadata",
-                "crates/ffs-harness/src/readiness_action_autopilot.rs",
-                "ReadinessActionDryRunMetadata",
-                "nested dry-run metadata helper",
-                "nested inside ReadinessActionDryRunReport",
-                "Nested metadata is not emitted as a standalone durable report; the enclosing dry-run JSON report owns the serialized artifact contract.",
-            ),
-        ],
+        rows,
     }
+}
+
+fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
+        covered_advisory_row(
+            "readiness_lab_validation_report",
+            "crates/ffs-harness/src/readiness_lab.rs",
+            "ReadinessLabValidationReport",
+            "validate-readiness-lab-contracts",
+            "readiness-lab advisory contracts and dashboard rows",
+            "readiness_lab_validation_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_lab__tests__readiness_lab_validation_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "readiness_lab_rch_lane_schedule_report",
+            "crates/ffs-harness/src/readiness_lab.rs",
+            "ReadinessLabRchLaneScheduleReport",
+            "plan-readiness-lab-rch-lanes",
+            "readiness-lab RCH dry-run scheduler",
+            "readiness_lab_rch_lane_schedule_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_lab__tests__readiness_lab_rch_lane_schedule_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "tracker_source_hygiene_report",
+            "crates/ffs-harness/src/tracker_source_hygiene.rs",
+            "TrackerSourceHygieneReport",
+            "validate-tracker-source-hygiene",
+            "source-aware tracker queue state and local graph exports",
+            "tracker_source_hygiene_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__tracker_source_hygiene__tests__tracker_source_hygiene_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "readiness_lab_numa_p99_replay_report",
+            "crates/ffs-harness/src/readiness_lab.rs",
+            "ReadinessLabNumaP99ReplayReport",
+            "readiness-lab NUMA/p99 replay",
+            "large-host swarm responsiveness advisory replay lane",
+            "readiness_lab_numa_p99_replay_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_lab__tests__readiness_lab_numa_p99_replay_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "readiness_action_autopilot_source_reports",
+            "crates/ffs-harness/src/readiness_action_autopilot.rs",
+            "Vec<ReadinessActionAutopilotReport>",
+            "readiness-action source fixture planner",
+            "readiness-action dry-run planner",
+            "readiness_action_autopilot_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_autopilot_report_json_shape.snap",
+        ),
+    ]
+}
+
+fn required_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
+        covered_required_row(
+            "swarm_operator_report",
+            "crates/ffs-harness/src/swarm_operator_report.rs",
+            "SwarmOperatorReport",
+            "swarm operator report renderer",
+            "proof-bundle and release-gate operator consumers",
+            "swarm_operator_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__swarm_operator_report__tests__swarm_operator_report_json_shape.snap",
+            ReportSchemaClaimEffect::ExistingReleaseGateInput,
+        ),
+        covered_required_row(
+            "proof_bundle_validation_report",
+            "crates/ffs-harness/src/proof_bundle.rs",
+            "ProofBundleValidationReport",
+            "validate-proof-bundle",
+            "portable release proof bundle inspection",
+            "proof_bundle_validation_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__proof_bundle__tests__proof_bundle_validation_report_json_shape.snap",
+            ReportSchemaClaimEffect::ExistingReleaseGateInput,
+        ),
+        covered_required_row(
+            "release_gate_evaluation_report",
+            "crates/ffs-harness/src/release_gate.rs",
+            "ReleaseGateEvaluationReport",
+            "release gate policy evaluator",
+            "public readiness wording gate",
+            "release_gate_evaluation_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__release_gate__tests__release_gate_evaluation_report_json_shape.snap",
+            ReportSchemaClaimEffect::ExistingReleaseGateInput,
+        ),
+        covered_required_row(
+            "operational_readiness_report",
+            "crates/ffs-harness/src/operational_readiness_report.rs",
+            "OperationalReadinessReport",
+            "operational readiness report aggregator",
+            "readiness proof and runbook consumers",
+            "operational_readiness_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__operational_readiness_report__tests__operational_readiness_report_json_shape.snap",
+            ReportSchemaClaimEffect::ExistingReleaseGateInput,
+        ),
+        covered_required_row(
+            "readiness_dashboard_report",
+            "crates/ffs-harness/src/readiness_dashboard.rs",
+            "ReadinessDashboardReport",
+            "readiness dashboard renderer",
+            "operator dashboard advisory rows",
+            "readiness_dashboard_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_dashboard__tests__readiness_dashboard_report_json_shape.snap",
+            ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange,
+        ),
+        covered_required_row(
+            "authoritative_lane_decision",
+            "crates/ffs-harness/src/authoritative_lane_manifest.rs",
+            "AuthoritativeLaneDecision",
+            "authoritative lane manifest evaluator",
+            "proof-bundle lane promotion and release gates",
+            "authoritative_lane_decision_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__authoritative_lane_manifest__tests__authoritative_lane_decision_json_shape.snap",
+            ReportSchemaClaimEffect::ExistingReleaseGateInput,
+        ),
+    ]
+}
+
+fn permissioned_campaign_reports_row() -> ReportSchemaInventoryRow {
+    covered_permissioned_row(
+        "permissioned_campaign_reports",
+        "crates/ffs-harness/src/permissioned_campaign_broker.rs",
+        "PermissionedCampaignBrokerReport + PermissionedCampaignExecutionLedgerReport + SwarmCapabilityCalibrationReport",
+        "permissioned campaign broker validators",
+        "operator handoff packets for xfstests and large-host swarm campaigns",
+        "permissioned_campaign_reports_json_shape",
+        "crates/ffs-harness/src/snapshots/ffs_harness__permissioned_campaign_broker__tests__permissioned_campaign_reports_json_shape.snap",
+    )
+}
+
+fn readiness_action_dry_run_metadata_row() -> ReportSchemaInventoryRow {
+    excluded_row(
+        "readiness_action_dry_run_metadata",
+        "crates/ffs-harness/src/readiness_action_autopilot.rs",
+        "ReadinessActionDryRunMetadata",
+        "nested dry-run metadata helper",
+        "nested inside ReadinessActionDryRunReport",
+        "Nested metadata is not emitted as a standalone durable report; the enclosing dry-run JSON report owns the serialized artifact contract.",
+    )
 }
 
 #[must_use]
@@ -147,6 +237,7 @@ pub fn validate_report_schema_inventory(
     let mut report_ids = BTreeSet::new();
     let mut required_rows = 0;
     let mut advisory_only_rows = 0;
+    let mut permissioned_only_rows = 0;
     let mut covered_rows = 0;
     let mut missing_rows = 0;
     let mut excluded_rows = 0;
@@ -173,6 +264,7 @@ pub fn validate_report_schema_inventory(
             &mut report_ids,
             &mut required_rows,
             &mut advisory_only_rows,
+            &mut permissioned_only_rows,
             &mut covered_rows,
             &mut missing_rows,
             &mut excluded_rows,
@@ -186,6 +278,7 @@ pub fn validate_report_schema_inventory(
         total_rows: inventory.rows.len(),
         required_rows,
         advisory_only_rows,
+        permissioned_only_rows,
         covered_rows,
         missing_rows,
         excluded_rows,
@@ -200,6 +293,7 @@ fn validate_row(
     report_ids: &mut BTreeSet<String>,
     required_rows: &mut usize,
     advisory_only_rows: &mut usize,
+    permissioned_only_rows: &mut usize,
     covered_rows: &mut usize,
     missing_rows: &mut usize,
     excluded_rows: &mut usize,
@@ -214,6 +308,7 @@ fn validate_row(
     match row.coverage_requirement {
         ReportSchemaCoverageRequirement::Required => *required_rows += 1,
         ReportSchemaCoverageRequirement::AdvisoryOnly => *advisory_only_rows += 1,
+        ReportSchemaCoverageRequirement::PermissionedOnly => *permissioned_only_rows += 1,
         ReportSchemaCoverageRequirement::Excluded => *excluded_rows += 1,
     }
 
@@ -292,6 +387,15 @@ fn validate_coverage_fields(row: &ReportSchemaInventoryRow, errors: &mut Vec<Str
                 ));
             }
         }
+    }
+
+    if row.coverage_requirement == ReportSchemaCoverageRequirement::PermissionedOnly
+        && row.claim_effect != ReportSchemaClaimEffect::ProductEvidenceNone
+    {
+        errors.push(format!(
+            "row `{}` is permissioned_only but claim_effect is not product_evidence_none",
+            row.report_id
+        ));
     }
 }
 
@@ -376,6 +480,31 @@ fn covered_advisory_row(
     }
 }
 
+fn covered_permissioned_row(
+    report_id: &str,
+    module_path: &str,
+    rust_type: &str,
+    producer: &str,
+    downstream_consumer: &str,
+    evidence_test: &str,
+    snapshot_path: &str,
+) -> ReportSchemaInventoryRow {
+    ReportSchemaInventoryRow {
+        coverage_requirement: ReportSchemaCoverageRequirement::PermissionedOnly,
+        claim_effect: ReportSchemaClaimEffect::ProductEvidenceNone,
+        ..covered_required_row(
+            report_id,
+            module_path,
+            rust_type,
+            producer,
+            downstream_consumer,
+            evidence_test,
+            snapshot_path,
+            ReportSchemaClaimEffect::ProductEvidenceNone,
+        )
+    }
+}
+
 fn excluded_row(
     report_id: &str,
     module_path: &str,
@@ -419,11 +548,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 6);
-        assert_eq!(report.required_rows, 1);
-        assert_eq!(report.advisory_only_rows, 4);
+        assert_eq!(report.total_rows, 13);
+        assert_eq!(report.required_rows, 6);
+        assert_eq!(report.advisory_only_rows, 5);
+        assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 5);
+        assert_eq!(report.covered_rows, 12);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -507,6 +637,7 @@ mod tests {
                 "total_rows": report.total_rows,
                 "required_rows": report.required_rows,
                 "advisory_only_rows": report.advisory_only_rows,
+                "permissioned_only_rows": report.permissioned_only_rows,
                 "covered_rows": report.covered_rows,
                 "missing_rows": report.missing_rows,
                 "excluded_rows": report.excluded_rows,
@@ -533,6 +664,14 @@ mod tests {
                 .rows
                 .iter()
                 .filter(|row| row.coverage_status == ReportSchemaCoverageStatus::Excluded)
+                .map(|row| row.report_id.as_str())
+                .collect::<Vec<_>>(),
+            "permissioned_only_report_ids": inventory
+                .rows
+                .iter()
+                .filter(|row| {
+                    row.coverage_requirement == ReportSchemaCoverageRequirement::PermissionedOnly
+                })
                 .map(|row| row.report_id.as_str())
                 .collect::<Vec<_>>(),
         });
