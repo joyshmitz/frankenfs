@@ -13611,6 +13611,23 @@ mod tests {
             prop_assert!(result.is_err(), "buffer shorter than inode_size should fail");
         }
 
+        /// bd-0g4j6 — Determinism MR for verify_inode_checksum.
+        /// Verifier runs an independent ext4_chksum chain (per-inode
+        /// seed, lo+hi extraction, extra_isize-conditional branches).
+        /// A regression that introduced non-determinism in this path
+        /// would silently corrupt mount-time inode integrity checks.
+        #[test]
+        fn ext4_proptest_verify_inode_checksum_determinism(
+            raw_inode in proptest::collection::vec(any::<u8>(), 0..=512),
+            csum_seed in any::<u32>(),
+            ino in any::<u32>(),
+            inode_size in prop_oneof![Just(128_u16), Just(160_u16), Just(256_u16)],
+        ) {
+            let a = verify_inode_checksum(&raw_inode, csum_seed, ino, inode_size);
+            let b = verify_inode_checksum(&raw_inode, csum_seed, ino, inode_size);
+            prop_assert_eq!(a, b);
+        }
+
         // ── verify_dir_block_checksum properties ───────────────────────
 
         /// verify_dir_block_checksum never panics on arbitrary bytes.
@@ -13636,6 +13653,20 @@ mod tests {
             prop_assert!(result.is_err(), "dir block < 12 bytes should fail");
         }
 
+        /// bd-0g4j6 — Determinism MR for verify_dir_block_checksum.
+        /// Invoked on every readdir against checksum-enabled fs.
+        #[test]
+        fn ext4_proptest_verify_dir_block_checksum_determinism(
+            dir_block in proptest::collection::vec(any::<u8>(), 0..=4096),
+            csum_seed in any::<u32>(),
+            ino in any::<u32>(),
+            generation in any::<u32>(),
+        ) {
+            let a = verify_dir_block_checksum(&dir_block, csum_seed, ino, generation);
+            let b = verify_dir_block_checksum(&dir_block, csum_seed, ino, generation);
+            prop_assert_eq!(a, b);
+        }
+
         // ── verify_extent_block_checksum properties ────────────────────
 
         /// verify_extent_block_checksum never panics on arbitrary bytes.
@@ -13659,6 +13690,20 @@ mod tests {
         ) {
             let result = verify_extent_block_checksum(&extent_block, csum_seed, ino, generation);
             prop_assert!(result.is_err(), "extent block < 16 bytes should fail");
+        }
+
+        /// bd-0g4j6 — Determinism MR for verify_extent_block_checksum.
+        /// Invoked on every extent-tree walk against checksum-enabled fs.
+        #[test]
+        fn ext4_proptest_verify_extent_block_checksum_determinism(
+            extent_block in proptest::collection::vec(any::<u8>(), 0..=4096),
+            csum_seed in any::<u32>(),
+            ino in any::<u32>(),
+            generation in any::<u32>(),
+        ) {
+            let a = verify_extent_block_checksum(&extent_block, csum_seed, ino, generation);
+            let b = verify_extent_block_checksum(&extent_block, csum_seed, ino, generation);
+            prop_assert_eq!(a, b);
         }
 
         // ── lookup_in_dir_block properties ─────────────────────────────
