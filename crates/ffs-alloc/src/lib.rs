@@ -4510,6 +4510,99 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
             prop_assert_eq!(bitmap_find_free(&bm, count, start), None);
             prop_assert_eq!(bitmap_find_contiguous(&bm, count, 1, start), None);
         }
+
+        /// bitmap_largest_free_run is deterministic for any (bitmap, count).
+        /// Guards against any future SIMD/vectorized rewrite that loses
+        /// referential transparency.
+        #[test]
+        fn proptest_bitmap_largest_free_run_is_deterministic(
+            (ref bm, count) in bitmap_strat(),
+        ) {
+            let a = bitmap_largest_free_run(bm, count);
+            let b = bitmap_largest_free_run(bm, count);
+            prop_assert_eq!(a, b);
+        }
+
+        /// Cross-check the BYTE_ZERO_RUNS lookup-table fast path against
+        /// a naive bit-by-bit scan over the first `count` bits via
+        /// bitmap_get. The two must agree on every input — locks the
+        /// algorithm against table or boundary-handling regressions.
+        #[test]
+        fn proptest_bitmap_largest_free_run_matches_naive_scan(
+            (ref bm, count) in bitmap_strat(),
+        ) {
+            let fast = bitmap_largest_free_run(bm, count);
+            let mut naive_best = 0_u32;
+            let mut naive_run = 0_u32;
+            for i in 0..count {
+                if bitmap_get(bm, i) {
+                    naive_run = 0;
+                } else {
+                    naive_run += 1;
+                    if naive_run > naive_best {
+                        naive_best = naive_run;
+                    }
+                }
+            }
+            prop_assert_eq!(
+                fast, naive_best,
+                "fast={}, naive={} for count={}",
+                fast, naive_best, count
+            );
+        }
+
+        /// The largest free run can never exceed `count` (the number of
+        /// bits scanned) nor the total free bit count.
+        #[test]
+        fn proptest_bitmap_largest_free_run_bounded_by_count_and_free(
+            (ref bm, count) in bitmap_strat(),
+        ) {
+            let largest = bitmap_largest_free_run(bm, count);
+            let free = bitmap_count_free(bm, count);
+            prop_assert!(
+                largest <= count,
+                "largest {} > count {}",
+                largest, count
+            );
+            prop_assert!(
+                largest <= free,
+                "largest {} > free {} (run can't exceed total free)",
+                largest, free
+            );
+        }
+
+        /// Setting a previously-free bit can never increase the largest
+        /// free run. Composition MR: monotone-decreasing in set operations.
+        #[test]
+        fn proptest_bitmap_largest_free_run_monotone_under_set(
+            (bm0, count) in bitmap_strat(),
+            idx_seed in any::<u32>(),
+        ) {
+            let before = bitmap_largest_free_run(&bm0, count);
+            let mut bm = bm0.clone();
+            let idx = idx_seed % count;
+            bitmap_set(&mut bm, idx);
+            let after = bitmap_largest_free_run(&bm, count);
+            prop_assert!(
+                after <= before,
+                "setting a bit increased largest run: before={}, after={}",
+                before, after
+            );
+        }
+
+        /// All-zero bitmap: the largest free run equals `count` exactly
+        /// (every bit in [0, count) is free, so the run spans the whole
+        /// window). This pins the lookup-table's full-byte fast path.
+        #[test]
+        fn proptest_bitmap_largest_free_run_all_zeros_equals_count(
+            byte_len in 1_usize..64,
+            count_offset in 0_u32..8,
+        ) {
+            let bm = vec![0_u8; byte_len];
+            let max_count = u32::try_from(byte_len * 8).unwrap();
+            let count = max_count.saturating_sub(count_offset).max(1);
+            prop_assert_eq!(bitmap_largest_free_run(&bm, count), count);
+        }
     }
 
     // ── Batch allocation tests ────────────────────────────────────────────
