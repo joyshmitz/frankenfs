@@ -16,7 +16,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 fn e2e_step_timer_start() -> Instant {
@@ -154,6 +154,11 @@ impl E2eLog {
     pub fn has_errors(&self) -> bool {
         self.entries.iter().any(|e| e.status == "error")
     }
+}
+
+fn lock_e2e_log(log: &Mutex<E2eLog>) -> MutexGuard<'_, E2eLog> {
+    log.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 // ── Image type ──────────────────────────────────────────────────────────────
@@ -454,7 +459,7 @@ impl E2eTestContext {
 
         // Write the structured log.
         let log_path = dir.join("e2e_log.json");
-        self.log.lock().unwrap().write_to(&log_path)?;
+        lock_e2e_log(self.log.as_ref()).write_to(&log_path)?;
 
         // Copy the image if it exists.
         if self.image_path.exists() {
@@ -520,24 +525,17 @@ impl E2eTestContext {
         output: serde_json::Value,
         duration: Duration,
     ) {
-        self.log
-            .lock()
-            .unwrap()
+        lock_e2e_log(self.log.as_ref())
             .push(E2eLogEntry::ok(&self.name, step, input, output, duration));
     }
 
     fn log_err(&self, step: &str, input: serde_json::Value, duration: Duration, error: &str) {
-        self.log
-            .lock()
-            .unwrap()
+        lock_e2e_log(self.log.as_ref())
             .push(E2eLogEntry::err(&self.name, step, input, duration, error));
     }
 
     fn log_skip(&self, step: &str, reason: &str) {
-        self.log
-            .lock()
-            .unwrap()
-            .push(E2eLogEntry::skip(&self.name, step, reason));
+        lock_e2e_log(self.log.as_ref()).push(E2eLogEntry::skip(&self.name, step, reason));
     }
 }
 
@@ -619,7 +617,7 @@ impl MountHandle {
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 // Not fatal — maybe already unmounted.
-                self.log.lock().unwrap().push(E2eLogEntry::err(
+                lock_e2e_log(self.log.as_ref()).push(E2eLogEntry::err(
                     &self.test_name,
                     "unmount",
                     serde_json::json!({"mountpoint": self.mountpoint.display().to_string()}),
@@ -635,7 +633,7 @@ impl MountHandle {
         };
 
         if status == "ok" {
-            self.log.lock().unwrap().push(E2eLogEntry::ok(
+            lock_e2e_log(self.log.as_ref()).push(E2eLogEntry::ok(
                 &self.test_name,
                 "unmount",
                 serde_json::json!({"mountpoint": self.mountpoint.display().to_string()}),
@@ -3041,6 +3039,26 @@ mod tests {
     }
 
     #[test]
+    fn e2e_log_lock_recovers_poisoned_guard() {
+        let log = Arc::new(Mutex::new(E2eLog::new()));
+        let poisoned_log = Arc::clone(&log);
+        let poison_result = panic::catch_unwind(move || {
+            let Ok(_guard) = poisoned_log.lock() else {
+                return;
+            };
+            panic::resume_unwind(Box::new("poison e2e log mutex"));
+        });
+        assert!(poison_result.is_err());
+
+        lock_e2e_log(log.as_ref()).push(E2eLogEntry::skip(
+            "test",
+            "recover_log_lock",
+            "poison recovered",
+        ));
+        assert_eq!(lock_e2e_log(log.as_ref()).entries().len(), 1);
+    }
+
+    #[test]
     fn context_creates_workdir_and_cleans_up() {
         let opts = FixtureOptions::default();
         let workdir;
@@ -3171,7 +3189,7 @@ mod tests {
         });
 
         assert!(result.is_err());
-        let has_errors = ctx.log.lock().unwrap().has_errors();
+        let has_errors = lock_e2e_log(ctx.log.as_ref()).has_errors();
         assert!(has_errors);
     }
 
