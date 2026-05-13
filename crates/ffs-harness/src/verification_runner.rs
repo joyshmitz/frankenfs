@@ -1539,6 +1539,54 @@ mod tests {
     use super::*;
     use crate::artifact_manifest::validate_manifest;
 
+    fn parsed_scenario(
+        scenarios: &[ParsedScenario],
+        index: usize,
+    ) -> Result<&ParsedScenario, String> {
+        scenarios
+            .get(index)
+            .ok_or_else(|| format!("expected parsed scenario at index {index}"))
+    }
+
+    fn scenario_outcome(
+        scenarios: &[ScenarioOutcome],
+        index: usize,
+    ) -> Result<&ScenarioOutcome, String> {
+        scenarios
+            .get(index)
+            .ok_or_else(|| format!("expected scenario outcome at index {index}"))
+    }
+
+    fn manifest_artifact(
+        manifest: &ArtifactManifest,
+        index: usize,
+    ) -> Result<&ArtifactEntry, String> {
+        manifest
+            .artifacts
+            .get(index)
+            .ok_or_else(|| format!("expected manifest artifact at index {index}"))
+    }
+
+    fn readiness_event(
+        manifest: &ArtifactManifest,
+        index: usize,
+    ) -> Result<&ReadinessEventEnvelope, String> {
+        manifest
+            .readiness_events
+            .get(index)
+            .ok_or_else(|| format!("expected readiness event at index {index}"))
+    }
+
+    fn operational_scenario<'a>(
+        manifest: &'a ArtifactManifest,
+        scenario_id: &str,
+    ) -> Result<&'a OperationalScenarioRecord, String> {
+        manifest
+            .operational_scenarios
+            .get(scenario_id)
+            .ok_or_else(|| format!("missing operational scenario `{scenario_id}`"))
+    }
+
     // ── Contract version ─────────────────────────────────────────────
 
     #[test]
@@ -1549,7 +1597,7 @@ mod tests {
     // ── parse_e2e_output ─────────────────────────────────────────────
 
     #[test]
-    fn parse_e2e_output_extracts_pass_and_fail() {
+    fn parse_e2e_output_extracts_pass_and_fail() -> Result<(), String> {
         let output = "\
 === Scenario 1 ===
 SCENARIO_RESULT|scenario_id=cli_mount_help_contract|outcome=PASS|detail=help text matches
@@ -1559,18 +1607,21 @@ SCENARIO_RESULT|scenario_id=cli_mount_invalid_timeout|outcome=FAIL|detail=exit c
         let scenarios = parse_e2e_output(output);
         assert_eq!(scenarios.len(), 2);
 
-        assert_eq!(scenarios[0].scenario_id, "cli_mount_help_contract");
-        assert_eq!(scenarios[0].outcome, ScenarioResult::Pass);
-        assert_eq!(scenarios[0].detail.as_deref(), Some("help text matches"));
-        assert_eq!(scenarios[0].line_number, 2);
+        let first = parsed_scenario(&scenarios, 0)?;
+        assert_eq!(first.scenario_id, "cli_mount_help_contract");
+        assert_eq!(first.outcome, ScenarioResult::Pass);
+        assert_eq!(first.detail.as_deref(), Some("help text matches"));
+        assert_eq!(first.line_number, 2);
 
-        assert_eq!(scenarios[1].scenario_id, "cli_mount_invalid_timeout");
-        assert_eq!(scenarios[1].outcome, ScenarioResult::Fail);
-        assert_eq!(scenarios[1].line_number, 4);
+        let second = parsed_scenario(&scenarios, 1)?;
+        assert_eq!(second.scenario_id, "cli_mount_invalid_timeout");
+        assert_eq!(second.outcome, ScenarioResult::Fail);
+        assert_eq!(second.line_number, 4);
+        Ok(())
     }
 
     #[test]
-    fn parse_e2e_output_ignores_non_markers() {
+    fn parse_e2e_output_ignores_non_markers() -> Result<(), String> {
         let output = "\
 Running test suite...
 Some random log line
@@ -1579,7 +1630,11 @@ Another log line
 ";
         let scenarios = parse_e2e_output(output);
         assert_eq!(scenarios.len(), 1);
-        assert_eq!(scenarios[0].scenario_id, "some_test_scenario");
+        assert_eq!(
+            parsed_scenario(&scenarios, 0)?.scenario_id,
+            "some_test_scenario"
+        );
+        Ok(())
     }
 
     #[test]
@@ -1596,7 +1651,7 @@ Another log line
     }
 
     #[test]
-    fn parse_e2e_output_skips_malformed_markers() {
+    fn parse_e2e_output_skips_malformed_markers() -> Result<(), String> {
         let output = "\
 SCENARIO_RESULT|outcome=PASS
 SCENARIO_RESULT|scenario_id=valid_test_marker|outcome=PASS
@@ -1605,7 +1660,11 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
         let scenarios = parse_e2e_output(output);
         // Only the valid marker with both scenario_id and outcome parses
         assert_eq!(scenarios.len(), 1);
-        assert_eq!(scenarios[0].scenario_id, "valid_test_marker");
+        assert_eq!(
+            parsed_scenario(&scenarios, 0)?.scenario_id,
+            "valid_test_marker"
+        );
+        Ok(())
     }
 
     // ── build_manifest_from_parsed ───────────────────────────────────
@@ -1644,7 +1703,7 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
     }
 
     #[test]
-    fn build_manifest_any_fail_verdict_is_fail() {
+    fn build_manifest_any_fail_verdict_is_fail() -> Result<(), String> {
         let scenarios = vec![
             ParsedScenario {
                 scenario_id: "test_happy_pass".to_owned(),
@@ -1672,7 +1731,11 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
         });
         assert_eq!(manifest.verdict, GateVerdict::Fail);
         assert_eq!(manifest.artifacts.len(), 1);
-        assert_eq!(manifest.artifacts[0].category, ArtifactCategory::E2eLog);
+        assert_eq!(
+            manifest_artifact(&manifest, 0)?.category,
+            ArtifactCategory::E2eLog
+        );
+        Ok(())
     }
 
     #[test]
@@ -2073,7 +2136,7 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
 
     #[test]
     fn build_operational_manifest_emits_valid_pass_fail_skip_and_error_records()
-    -> Result<(), &'static str> {
+    -> Result<(), String> {
         let mut timeout = scenario_input("runner_timeout_error_case", 0, None);
         timeout.timed_out = true;
         timeout.cleanup_status = CleanupStatus::PreservedArtifacts;
@@ -2122,7 +2185,7 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
             manifest
                 .operational_context
                 .as_ref()
-                .ok_or("context")?
+                .ok_or_else(|| "missing operational context".to_owned())?
                 .command_line,
             vec!["scripts/e2e/runner.sh", "--secret", "[REDACTED]"]
         );
@@ -2134,21 +2197,21 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
                 .all(|event| !event.reproduction_command.contains("[REDACTED]"))
         );
 
-        let pass = &manifest.operational_scenarios["runner_pass_smoke_case"];
+        let pass = operational_scenario(&manifest, "runner_pass_smoke_case")?;
         assert_eq!(pass.classification, OperationalOutcomeClass::Pass);
 
-        let fail = &manifest.operational_scenarios["runner_fail_smoke_case"];
+        let fail = operational_scenario(&manifest, "runner_fail_smoke_case")?;
         assert_eq!(fail.classification, OperationalOutcomeClass::Fail);
         assert_eq!(
             fail.error_class,
             Some(OperationalErrorClass::ProductFailure)
         );
 
-        let skip = &manifest.operational_scenarios["runner_skip_fuse_case"];
+        let skip = operational_scenario(&manifest, "runner_skip_fuse_case")?;
         assert_eq!(skip.classification, OperationalOutcomeClass::Skip);
         assert_eq!(skip.skip_reason, Some(SkipReason::FusePermissionDenied));
 
-        let error = &manifest.operational_scenarios["runner_timeout_error_case"];
+        let error = operational_scenario(&manifest, "runner_timeout_error_case")?;
         assert_eq!(error.classification, OperationalOutcomeClass::Error);
         assert_eq!(
             error.error_class,
@@ -2165,7 +2228,7 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
     }
 
     #[test]
-    fn operational_manifest_preserves_partial_artifact_refs_on_failure() {
+    fn operational_manifest_preserves_partial_artifact_refs_on_failure() -> Result<(), String> {
         let mut failed = scenario_input("runner_partial_artifacts_fail", 1, None);
         failed.cleanup_status = CleanupStatus::PreservedArtifacts;
         failed.extra_artifacts.push(OperationalArtifactInput {
@@ -2198,10 +2261,13 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
         assert!(errors.is_empty(), "validation errors: {errors:?}");
         assert_eq!(manifest.readiness_events.len(), 1);
         assert_eq!(
-            manifest.readiness_events[0].scenario_id.as_deref(),
+            readiness_event(&manifest, 0)?.scenario_id.as_deref(),
             Some("runner_partial_artifacts_fail")
         );
-        let scenario = &manifest.operational_scenarios["runner_partial_artifacts_fail"];
+        let scenario = manifest
+            .operational_scenarios
+            .get("runner_partial_artifacts_fail")
+            .ok_or_else(|| "missing runner_partial_artifacts_fail scenario".to_owned())?;
         assert_eq!(scenario.cleanup_status, CleanupStatus::PreservedArtifacts);
         assert!(
             scenario
@@ -2216,6 +2282,7 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
                 .any(|artifact| artifact.path.ends_with("stdout.tail")
                     && artifact.sha256.as_deref() == Some("sha256-tail"))
         );
+        Ok(())
     }
 
     // ── check_script_conformance ─────────────────────────────────────
@@ -2341,7 +2408,7 @@ SCENARIO_RESULT|scenario_id=test_legacy_case|status=PASS
     // ── merge_scenarios ──────────────────────────────────────────────
 
     #[test]
-    fn merge_scenarios_combines_all_results() {
+    fn merge_scenarios_combines_all_results() -> Result<(), String> {
         let results = vec![
             ScriptRunResult {
                 script: "a.sh".to_owned(),
@@ -2370,8 +2437,12 @@ SCENARIO_RESULT|scenario_id=test_legacy_case|status=PASS
         ];
         let merged = merge_scenarios(&results);
         assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].scenario_id, "test_from_first");
-        assert_eq!(merged[1].scenario_id, "test_from_second");
+        assert_eq!(scenario_outcome(&merged, 0)?.scenario_id, "test_from_first");
+        assert_eq!(
+            scenario_outcome(&merged, 1)?.scenario_id,
+            "test_from_second"
+        );
+        Ok(())
     }
 
     // ── RunnerConfig ─────────────────────────────────────────────────
