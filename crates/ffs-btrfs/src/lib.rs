@@ -12604,6 +12604,80 @@ mod tests {
         );
     }
 
+    /// bd-uwg89 — Kernel-conformance pin for the 23 SendCommand
+    /// discriminants per `enum btrfs_send_cmd` in fs/btrfs/send.h.
+    /// Each value maps a btrfs-send stream command type
+    /// (parse_send_stream dispatches via SendCommand::from_u16). A
+    /// regression that swapped any two values (e.g., Mkdir and Mkfile)
+    /// or shifted the range would silently corrupt every consumer
+    /// of send streams. Sister pins: bd-wmkq1 (BTRFS_SEND_STREAM_MAGIC
+    /// + VERSION), bd-q5dpf (tree objectids), bd-f0q7n (item-key types).
+    #[test]
+    fn btrfs_send_command_constants_match_kernel_header() {
+        // Values per fs/btrfs/send.h enum btrfs_send_cmd.
+        let cases: &[(&str, SendCommand, u16)] = &[
+            ("BTRFS_SEND_C_UNSPEC", SendCommand::Unspec, 0),
+            ("BTRFS_SEND_C_SUBVOL", SendCommand::Subvol, 1),
+            ("BTRFS_SEND_C_SNAPSHOT", SendCommand::Snapshot, 2),
+            ("BTRFS_SEND_C_MKFILE", SendCommand::Mkfile, 3),
+            ("BTRFS_SEND_C_MKDIR", SendCommand::Mkdir, 4),
+            ("BTRFS_SEND_C_MKNOD", SendCommand::Mknod, 5),
+            ("BTRFS_SEND_C_MKFIFO", SendCommand::Mkfifo, 6),
+            ("BTRFS_SEND_C_MKSOCK", SendCommand::Mksock, 7),
+            ("BTRFS_SEND_C_SYMLINK", SendCommand::Symlink, 8),
+            ("BTRFS_SEND_C_RENAME", SendCommand::Rename, 9),
+            ("BTRFS_SEND_C_LINK", SendCommand::Link, 10),
+            ("BTRFS_SEND_C_UNLINK", SendCommand::Unlink, 11),
+            ("BTRFS_SEND_C_RMDIR", SendCommand::Rmdir, 12),
+            ("BTRFS_SEND_C_SET_XATTR", SendCommand::SetXattr, 13),
+            ("BTRFS_SEND_C_REMOVE_XATTR", SendCommand::RemoveXattr, 14),
+            ("BTRFS_SEND_C_WRITE", SendCommand::Write, 15),
+            ("BTRFS_SEND_C_CLONE", SendCommand::Clone, 16),
+            ("BTRFS_SEND_C_TRUNCATE", SendCommand::Truncate, 17),
+            ("BTRFS_SEND_C_CHMOD", SendCommand::Chmod, 18),
+            ("BTRFS_SEND_C_CHOWN", SendCommand::Chown, 19),
+            ("BTRFS_SEND_C_UTIMES", SendCommand::Utimes, 20),
+            ("BTRFS_SEND_C_END", SendCommand::End, 21),
+            ("BTRFS_SEND_C_UPDATE_EXTENT", SendCommand::UpdateExtent, 22),
+        ];
+        for (name, cmd, expected) in cases {
+            assert_eq!(
+                *cmd as u16, *expected,
+                "{name}: discriminant must equal kernel value {expected}"
+            );
+            // Verify the from_u16 round-trip recovers the same variant.
+            assert_eq!(
+                SendCommand::from_u16(*expected),
+                Some(*cmd),
+                "{name}: SendCommand::from_u16({expected}) must round-trip"
+            );
+        }
+
+        // Pairwise distinctness (every command must map to a unique u16).
+        let values: Vec<u16> = cases.iter().map(|&(_, _, v)| v).collect();
+        let mut sorted = values.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            values.len(),
+            sorted.len(),
+            "SendCommand discriminants must be pairwise distinct"
+        );
+
+        // Contiguous 0..=22 range — no gaps, no overlaps.
+        assert_eq!(*sorted.first().unwrap(), 0);
+        assert_eq!(*sorted.last().unwrap(), 22);
+        assert_eq!(sorted.len(), 23);
+        for (i, &v) in sorted.iter().enumerate() {
+            assert_eq!(v, u16::try_from(i).unwrap(),
+                "SendCommand discriminants must be contiguous 0..=22 (gap detected)");
+        }
+
+        // from_u16 must reject 23 (one past the largest valid value).
+        assert_eq!(SendCommand::from_u16(23), None,
+            "SendCommand::from_u16(23) must reject out-of-range values");
+    }
+
     /// bd-q5dpf — Kernel-conformance pin for the 11 BTRFS_*_TREE_OBJECTID
     /// constants + BTRFS_FIRST_FREE_OBJECTID per fs/btrfs/btrfs_tree.h.
     /// These identify every btree in btrfs (root, extent, chunk, dev,
