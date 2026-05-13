@@ -1399,6 +1399,48 @@ fn release_claim_effect_label(effect: OperationalEvidenceReleaseClaimEffect) -> 
 mod tests {
     use super::*;
 
+    fn first_claim(report: &ReadinessDashboardReport) -> Result<&ReadinessDashboardClaimReport> {
+        let [first, ..] = report.claims.as_slice() else {
+            return Err(anyhow::anyhow!(
+                "dashboard report must contain at least one claim"
+            ));
+        };
+        Ok(first)
+    }
+
+    fn first_recommendation(
+        report: &ReadinessDashboardReport,
+    ) -> Result<&ReadinessDashboardRecommendation> {
+        let [first, ..] = report.recommendations.as_slice() else {
+            return Err(anyhow::anyhow!(
+                "dashboard report must contain at least one recommendation"
+            ));
+        };
+        Ok(first)
+    }
+
+    fn claim_by_id<'a>(
+        report: &'a ReadinessDashboardReport,
+        claim_id: &str,
+    ) -> Result<&'a ReadinessDashboardClaimReport> {
+        report
+            .claims
+            .iter()
+            .find(|claim| claim.claim_id == claim_id)
+            .ok_or_else(|| anyhow::anyhow!("dashboard report missing claim `{claim_id}`"))
+    }
+
+    fn first_tracker_bead(
+        beads: &[ReadinessDashboardTrackerBead],
+    ) -> Result<&ReadinessDashboardTrackerBead> {
+        let [first, ..] = beads else {
+            return Err(anyhow::anyhow!(
+                "tracker bead list must contain at least one bead"
+            ));
+        };
+        Ok(first)
+    }
+
     #[test]
     fn feature_state_mapping_covers_dashboard_claim_states() {
         let states = [
@@ -1429,25 +1471,25 @@ mod tests {
     }
 
     #[test]
-    fn missing_inputs_emit_tracker_linked_recommendation() {
+    fn missing_inputs_emit_tracker_linked_recommendation() -> Result<()> {
         let report = build_readiness_dashboard(&ReadinessDashboardConfig {
             default_remediation_bead: Some("bd-4v16z.10".to_owned()),
             ..ReadinessDashboardConfig::default()
-        })
-        .expect("dashboard without inputs");
+        })?;
 
         assert!(report.valid);
         assert_eq!(report.claim_count, 0);
         assert_eq!(report.recommendation_count, 1);
-        let recommendation = &report.recommendations[0];
+        let recommendation = first_recommendation(&report)?;
         assert_eq!(recommendation.bead_id.as_deref(), Some("bd-4v16z.10"));
         assert!(recommendation.validator_report.is_none());
         assert!(recommendation.next_safe_command.contains("bd-4v16z.10"));
+        Ok(())
     }
 
     #[test]
-    fn release_gate_report_preserves_validator_and_remediation_links() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn release_gate_report_preserves_validator_and_remediation_links() -> Result<()> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("release_gate.json");
         fs::write(
             &path,
@@ -1499,44 +1541,35 @@ mod tests {
   "warnings": [],
   "reproduction_command": "cargo run -p ffs-harness -- evaluate-release-gates --bundle bundle.json --policy policy.json"
 }"#,
-        )
-        .expect("write release gate");
+        )?;
 
         let report = build_readiness_dashboard(&ReadinessDashboardConfig {
             release_gate_reports: vec![path.clone()],
             default_remediation_bead: Some("bd-4v16z.10".to_owned()),
             ..ReadinessDashboardConfig::default()
-        })
-        .expect("dashboard");
+        })?;
 
         assert_eq!(report.claim_count, 2);
-        let validated = report
-            .claims
-            .iter()
-            .find(|claim| claim.claim_id == "release_gate:mount.rw.ext4")
-            .expect("validated claim");
+        let validated = claim_by_id(&report, "release_gate:mount.rw.ext4")?;
         assert_eq!(
             validated.claim_state,
             ReadinessDashboardClaimState::Validated
         );
-        let hidden = report
-            .claims
-            .iter()
-            .find(|claim| claim.claim_id == "release_gate:xfstests.baseline")
-            .expect("hidden claim");
+        let hidden = claim_by_id(&report, "release_gate:xfstests.baseline")?;
         assert_eq!(hidden.claim_state, ReadinessDashboardClaimState::Hidden);
         assert_eq!(hidden.controlling_lane.as_deref(), Some("xfstests"));
         assert_eq!(hidden.remediation_bead.as_deref(), Some("bd-rchk3.3"));
         assert_eq!(report.recommendation_count, 1);
         let expected_path = path.display().to_string();
         assert_eq!(
-            report.recommendations[0].validator_report.as_deref(),
+            first_recommendation(&report)?.validator_report.as_deref(),
             Some(expected_path.as_str())
         );
+        Ok(())
     }
 
     #[test]
-    fn permissioned_handoff_stays_non_product_evidence() {
+    fn permissioned_handoff_stays_non_product_evidence() -> Result<()> {
         let mut builder = DashboardBuilder::new(&ReadinessDashboardConfig {
             default_remediation_bead: Some("bd-4v16z.10".to_owned()),
             ..ReadinessDashboardConfig::default()
@@ -1553,26 +1586,20 @@ mod tests {
         });
         add_permissioned_campaign_report(&mut builder, Path::new("handoff.json"), &value);
         let report = builder.finish();
+        let claim = first_claim(&report)?;
+        let recommendation = first_recommendation(&report)?;
 
-        assert_eq!(
-            report.claims[0].claim_state,
-            ReadinessDashboardClaimState::HandoffOnly
-        );
-        assert_eq!(
-            report.claims[0].remediation_bead.as_deref(),
-            Some("bd-rchk0.53.8")
-        );
+        assert_eq!(claim.claim_state, ReadinessDashboardClaimState::HandoffOnly);
+        assert_eq!(claim.remediation_bead.as_deref(), Some("bd-rchk0.53.8"));
         assert!(
-            report.claims[0]
+            claim
                 .missing_artifacts
                 .iter()
                 .any(|artifact| artifact.contains("raw workload logs"))
         );
         assert_eq!(report.recommendation_count, 1);
-        assert_eq!(
-            report.recommendations[0].bead_id.as_deref(),
-            Some("bd-rchk0.53.8")
-        );
+        assert_eq!(recommendation.bead_id.as_deref(), Some("bd-rchk0.53.8"));
+        Ok(())
     }
 
     #[test]
@@ -1740,7 +1767,9 @@ mod tests {
                 .recommendations
                 .iter()
                 .find(|recommendation| recommendation.claim_id == claim.claim_id)
-                .expect("advisory recommendation");
+                .ok_or_else(|| {
+                    anyhow::anyhow!("missing advisory recommendation for {}", claim.claim_id)
+                })?;
             assert_eq!(
                 recommendation.severity,
                 ReadinessDashboardRecommendationSeverity::FollowUp
@@ -1789,35 +1818,31 @@ mod tests {
         })?;
 
         assert_eq!(report.source_validator_failure_count, 1);
-        assert_eq!(
-            report.claims[0].claim_state,
-            ReadinessDashboardClaimState::Blocked
-        );
-        assert_eq!(
-            report.claims[0].freshness.as_deref(),
-            Some("stale_artifact_count=1")
-        );
+        let claim = first_claim(&report)?;
+        assert_eq!(claim.claim_state, ReadinessDashboardClaimState::Blocked);
+        assert_eq!(claim.freshness.as_deref(), Some("stale_artifact_count=1"));
         assert!(
-            report.claims[0]
+            claim
                 .missing_artifacts
                 .iter()
                 .any(|artifact| artifact.contains("stale_fixture"))
         );
         assert!(
-            report.claims[0]
+            claim
                 .missing_artifacts
                 .iter()
                 .any(|artifact| artifact.contains("old-fixture"))
         );
+        let expected_path = path.display().to_string();
         assert_eq!(
-            report.recommendations[0].validator_report.as_deref(),
-            Some(path.display().to_string().as_str())
+            first_recommendation(&report)?.validator_report.as_deref(),
+            Some(expected_path.as_str())
         );
         Ok(())
     }
 
     #[test]
-    fn readiness_lab_product_claim_violation_is_blocked() {
+    fn readiness_lab_product_claim_violation_is_blocked() -> Result<()> {
         let mut builder = DashboardBuilder::new(&ReadinessDashboardConfig {
             default_remediation_bead: Some("bd-4v16z.10".to_owned()),
             ..ReadinessDashboardConfig::default()
@@ -1835,24 +1860,23 @@ mod tests {
         });
         add_readiness_lab_report(&mut builder, Path::new("bad_lab.json"), &value);
         let report = builder.finish();
+        let claim = first_claim(&report)?;
 
         assert_eq!(report.source_validator_failure_count, 1);
-        assert_eq!(
-            report.claims[0].claim_state,
-            ReadinessDashboardClaimState::Blocked
-        );
+        assert_eq!(claim.claim_state, ReadinessDashboardClaimState::Blocked);
         assert!(
-            report.claims[0]
+            claim
                 .missing_artifacts
                 .iter()
                 .any(|artifact| artifact.contains("product_evidence_claim"))
         );
         assert!(
-            report.claims[0]
+            claim
                 .evidence_basis
                 .iter()
                 .any(|basis| basis == "product_evidence_claim:product_pass_fail")
         );
+        Ok(())
     }
 
     fn mixed_sources_dashboard_report() -> ReadinessDashboardReport {
@@ -2017,8 +2041,8 @@ mod tests {
     }
 
     #[test]
-    fn tracker_jsonl_filters_local_follow_up_beads() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn tracker_jsonl_filters_local_follow_up_beads() -> Result<()> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("issues.jsonl");
         fs::write(
             &path,
@@ -2027,12 +2051,13 @@ mod tests {
                 "{\"id\":\"br-r37-c1\",\"title\":\"Foreign\",\"status\":\"open\",\"priority\":1}\n",
                 "{\"id\":\"bd-done\",\"title\":\"Closed\",\"status\":\"closed\",\"priority\":2}\n"
             ),
-        )
-        .expect("write tracker");
+        )?;
 
-        let beads = load_tracker_beads(&path).expect("tracker beads");
+        let beads = load_tracker_beads(&path)?;
         assert_eq!(beads.len(), 1);
-        assert_eq!(beads[0].issue_id, "bd-4v16z.10");
-        assert_eq!(beads[0].status, "in_progress");
+        let bead = first_tracker_bead(&beads)?;
+        assert_eq!(bead.issue_id, "bd-4v16z.10");
+        assert_eq!(bead.status, "in_progress");
+        Ok(())
     }
 }
