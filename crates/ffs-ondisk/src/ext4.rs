@@ -12633,6 +12633,26 @@ mod tests {
             prop_assert_eq!(a, b);
         }
 
+        // bd-ewh2w — Determinism MR for Ext4GroupDesc::parse_from_bytes.
+        // Block group descriptors are read once per group on every mount
+        // (hundreds-to-thousands of calls for a typical filesystem). The
+        // parser has a non-trivial 32-byte vs 64-byte size branch and
+        // combines lo+hi halves across 11 fields. Sister determinism MRs:
+        // parse_dir_block (bd-qzwuq), parse_extent_tree (bd-qzwuq),
+        // parse_xattr_block (bd-z8ko5), parse_dx_root (bd-afwgs),
+        // parse_inode_extent_tree (bd-z8ko5), parse_ibody_xattrs
+        // (bd-niw7j), Ext4Inode::parse_from_bytes (bd-3fkbj),
+        // Ext4Superblock::parse_superblock_region (bd-3fkbj).
+        #[test]
+        fn ext4_proptest_ext4_group_desc_parse_from_bytes_determinism(
+            bytes in proptest::collection::vec(any::<u8>(), 64..=64),
+            desc_size in prop_oneof![Just(32_u16), Just(64_u16)],
+        ) {
+            let a = Ext4GroupDesc::parse_from_bytes(&bytes, desc_size);
+            let b = Ext4GroupDesc::parse_from_bytes(&bytes, desc_size);
+            prop_assert_eq!(a, b);
+        }
+
         #[test]
         fn ext4_proptest_iter_dir_block_no_panic(
             block in proptest::collection::vec(any::<u8>(), 0..=4096),
