@@ -118,7 +118,12 @@ fn parse_inventory_rows(markdown: &str, errors: &mut Vec<String>) -> Vec<OpenEnd
         return Vec::new();
     }
 
-    let header = split_table_row(table_lines[0]);
+    let Some((header_line, body_lines)) = table_lines.split_first() else {
+        errors.push("inventory table must include header, separator, and rows".to_owned());
+        return Vec::new();
+    };
+
+    let header = split_table_row(header_line);
     if header != REQUIRED_HEADERS {
         errors.push(format!(
             "inventory table header mismatch: expected {REQUIRED_HEADERS:?}, got {header:?}"
@@ -126,32 +131,46 @@ fn parse_inventory_rows(markdown: &str, errors: &mut Vec<String>) -> Vec<OpenEnd
         return Vec::new();
     }
 
-    table_lines
+    body_lines
         .iter()
-        .skip(2)
+        .skip(1)
         .filter_map(|line| {
             let cells = split_table_row(line);
-            if cells.len() != REQUIRED_HEADERS.len() {
+            let [
+                id,
+                source_location,
+                risk_surface,
+                current_evidence,
+                required_proof_type,
+                expected_unit_coverage,
+                expected_e2e_fuzz_smoke_coverage,
+                log_artifact_expectations,
+                decision,
+                linked_bead_or_artifact,
+                owner_status,
+                non_applicability_rationale,
+            ] = cells.as_slice()
+            else {
                 errors.push(format!(
                     "inventory row has {} cells, expected {}: {line}",
                     cells.len(),
                     REQUIRED_HEADERS.len()
                 ));
                 return None;
-            }
+            };
             Some(OpenEndedInventoryRow {
-                id: cells[0].clone(),
-                source_location: cells[1].clone(),
-                risk_surface: cells[2].clone(),
-                current_evidence: cells[3].clone(),
-                required_proof_type: cells[4].clone(),
-                expected_unit_coverage: cells[5].clone(),
-                expected_e2e_fuzz_smoke_coverage: cells[6].clone(),
-                log_artifact_expectations: cells[7].clone(),
-                decision: cells[8].clone(),
-                linked_bead_or_artifact: cells[9].clone(),
-                owner_status: cells[10].clone(),
-                non_applicability_rationale: cells[11].clone(),
+                id: id.clone(),
+                source_location: source_location.clone(),
+                risk_surface: risk_surface.clone(),
+                current_evidence: current_evidence.clone(),
+                required_proof_type: required_proof_type.clone(),
+                expected_unit_coverage: expected_unit_coverage.clone(),
+                expected_e2e_fuzz_smoke_coverage: expected_e2e_fuzz_smoke_coverage.clone(),
+                log_artifact_expectations: log_artifact_expectations.clone(),
+                decision: decision.clone(),
+                linked_bead_or_artifact: linked_bead_or_artifact.clone(),
+                owner_status: owner_status.clone(),
+                non_applicability_rationale: non_applicability_rationale.clone(),
             })
         })
         .collect()
@@ -1094,16 +1113,19 @@ fn glob_matches(pattern: &str, path: &str) -> bool {
 }
 
 fn glob_segments_match(pattern: &[&str], path: &[&str]) -> bool {
-    if pattern.is_empty() {
+    let Some((pattern_head, pattern_tail)) = pattern.split_first() else {
         return path.is_empty();
+    };
+    if *pattern_head == "**" {
+        return glob_segments_match(pattern_tail, path)
+            || path
+                .split_first()
+                .is_some_and(|(_, path_tail)| glob_segments_match(pattern, path_tail));
     }
-    if pattern[0] == "**" {
-        return glob_segments_match(&pattern[1..], path)
-            || (!path.is_empty() && glob_segments_match(pattern, &path[1..]));
-    }
-    !path.is_empty()
-        && glob_segment_match(pattern[0], path[0])
-        && glob_segments_match(&pattern[1..], &path[1..])
+    let Some((path_head, path_tail)) = path.split_first() else {
+        return false;
+    };
+    glob_segment_match(pattern_head, path_head) && glob_segments_match(pattern_tail, path_tail)
 }
 
 fn glob_segment_match(pattern: &str, segment: &str) -> bool {
@@ -1126,7 +1148,10 @@ fn glob_segment_match(pattern: &str, segment: &str) -> bool {
             };
             remainder = stripped;
         } else if let Some(position) = remainder.find(part) {
-            remainder = &remainder[position + part.len()..];
+            let Some(stripped) = remainder.get(position + part.len()..) else {
+                return false;
+            };
+            remainder = stripped;
         } else {
             return false;
         }
