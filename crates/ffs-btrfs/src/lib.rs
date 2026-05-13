@@ -3956,14 +3956,14 @@ pub enum SendAttr {
 }
 
 /// A parsed command from a btrfs send stream.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendStreamCommand {
     pub cmd: SendCommand,
     pub attrs: Vec<(u16, Vec<u8>)>,
 }
 
 /// Result of parsing a btrfs send stream.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SendStreamParseResult {
     pub version: u32,
     pub commands: Vec<SendStreamCommand>,
@@ -12544,6 +12544,30 @@ mod tests {
 
         let err = parse_send_stream(&data).unwrap_err();
         assert!(matches!(err, ffs_types::ParseError::InvalidField { .. }));
+    }
+
+    // bd-d6o7c — Raw-bytes determinism MR for parse_send_stream.
+    // parse_send_stream is invoked for every btrfs send/receive
+    // workflow and dispatches CRC32C verification, command-type
+    // recognition (via SendCommand::from_u16), and attribute parsing
+    // (parse_send_stream_attrs) — significant surface area for
+    // non-determinism. Sister parsers parse_root_item (bd-fs41s),
+    // parse_xattr_items (bd-fhznm), parse_inode_refs (bd-9f8ef),
+    // parse_root_ref (bd-x2320), parse_dir_items (bd-7pr5k),
+    // parse_inode_item, parse_extent_data (bd-whybk) all have
+    // raw-bytes determinism MRs. A regression that introduced
+    // HashMap iteration, allocator-address dependency, or any non-
+    // deterministic per-call state would silently surface only under
+    // specific scheduling.
+    proptest::proptest! {
+        #[test]
+        fn proptest_parse_send_stream_raw_bytes_determinism(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=256),
+        ) {
+            let a = parse_send_stream(&bytes);
+            let b = parse_send_stream(&bytes);
+            proptest::prop_assert_eq!(a, b);
+        }
     }
 
     /// bd-wmkq1 — Kernel-conformance pin for BTRFS_SEND_STREAM_MAGIC
