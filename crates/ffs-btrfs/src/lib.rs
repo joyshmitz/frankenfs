@@ -12522,6 +12522,93 @@ mod tests {
         assert!(matches!(err, ffs_types::ParseError::InvalidField { .. }));
     }
 
+    /// bd-q5dpf — Kernel-conformance pin for the 11 BTRFS_*_TREE_OBJECTID
+    /// constants + BTRFS_FIRST_FREE_OBJECTID per fs/btrfs/btrfs_tree.h.
+    /// These identify every btree in btrfs (root, extent, chunk, dev,
+    /// fs, csum, quota, uuid, free_space, block_group, plus the v1
+    /// root_tree_dir directory entry inside the root tree). Every
+    /// chunk-tree/root-tree/extent-tree/csum-tree lookup keys on these
+    /// values. A regression that drifted any value would silently
+    /// mis-route every tree operation — e.g., swapping the CHUNK and
+    /// DEV tree IDs would make every chunk lookup hit the device-tree
+    /// root and silently corrupt logical→physical address translation.
+    ///
+    /// Sister pins: bd-f0q7n (item-key types), bd-eiblh (ext4 incompat),
+    /// bd-up9ff (compat/ro_compat), bd-wa27v (xattr), bd-mo92w
+    /// (DX_HASH), bd-7stug (super flags).
+    #[test]
+    fn btrfs_tree_objectid_constants_match_btrfs_tree_h() {
+        // Per fs/btrfs/btrfs_tree.h:
+        //   #define BTRFS_ROOT_TREE_OBJECTID       1ULL
+        //   #define BTRFS_EXTENT_TREE_OBJECTID     2ULL
+        //   #define BTRFS_CHUNK_TREE_OBJECTID      3ULL
+        //   #define BTRFS_DEV_TREE_OBJECTID        4ULL
+        //   #define BTRFS_FS_TREE_OBJECTID         5ULL
+        //   #define BTRFS_ROOT_TREE_DIR_OBJECTID   6ULL
+        //   #define BTRFS_CSUM_TREE_OBJECTID       7ULL
+        //   #define BTRFS_QUOTA_TREE_OBJECTID      8ULL
+        //   #define BTRFS_UUID_TREE_OBJECTID       9ULL
+        //   #define BTRFS_FREE_SPACE_TREE_OBJECTID 10ULL
+        //   #define BTRFS_BLOCK_GROUP_TREE_OBJECTID 11ULL
+        //   #define BTRFS_FIRST_FREE_OBJECTID      256ULL
+        let cases: &[(&str, u64, u64)] = &[
+            ("ROOT_TREE", BTRFS_ROOT_TREE_OBJECTID, 1),
+            ("EXTENT_TREE", BTRFS_EXTENT_TREE_OBJECTID, 2),
+            ("CHUNK_TREE", BTRFS_CHUNK_TREE_OBJECTID, 3),
+            ("DEV_TREE", BTRFS_DEV_TREE_OBJECTID, 4),
+            ("FS_TREE", BTRFS_FS_TREE_OBJECTID, 5),
+            (
+                "ROOT_TREE_DIR",
+                BTRFS_ROOT_TREE_DIR_OBJECTID,
+                6,
+            ),
+            ("CSUM_TREE", BTRFS_CSUM_TREE_OBJECTID, 7),
+            ("QUOTA_TREE", BTRFS_QUOTA_TREE_OBJECTID, 8),
+            ("UUID_TREE", BTRFS_UUID_TREE_OBJECTID, 9),
+            (
+                "FREE_SPACE_TREE",
+                BTRFS_FREE_SPACE_TREE_OBJECTID,
+                10,
+            ),
+            (
+                "BLOCK_GROUP_TREE",
+                BTRFS_BLOCK_GROUP_TREE_OBJECTID,
+                11,
+            ),
+            ("FIRST_FREE", BTRFS_FIRST_FREE_OBJECTID, 256),
+        ];
+        for (name, actual, expected) in cases {
+            assert_eq!(
+                actual, expected,
+                "BTRFS_{name}_OBJECTID must equal kernel value {expected}"
+            );
+        }
+
+        // Pairwise distinctness: every objectid must be unique. A
+        // regression that aliased two would silently route both tree
+        // lookups to the same key.
+        let values: Vec<u64> = cases.iter().map(|&(_, v, _)| v).collect();
+        let mut sorted = values.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            values.len(),
+            sorted.len(),
+            "BTRFS_*_TREE_OBJECTID values must be pairwise distinct"
+        );
+
+        // Reserved range contract: the named tree objectids occupy
+        // 1..=11 contiguously, then FIRST_FREE_OBJECTID=256 marks the
+        // boundary above which user-allocated objectids begin. The
+        // kernel reserves 11 < x < 256 for future tree IDs.
+        const {
+            assert!(BTRFS_ROOT_TREE_OBJECTID == 1);
+            assert!(BTRFS_BLOCK_GROUP_TREE_OBJECTID == 11);
+            assert!(BTRFS_FIRST_FREE_OBJECTID == 256);
+            assert!(BTRFS_BLOCK_GROUP_TREE_OBJECTID < BTRFS_FIRST_FREE_OBJECTID);
+        }
+    }
+
     /// bd-f0q7n — Kernel-conformance pin for the on-disk item-key
     /// type field constants declared as `BTRFS_ITEM_*` in this crate.
     /// Each value mirrors a kernel macro from `fs/btrfs/btrfs_tree.h`.
