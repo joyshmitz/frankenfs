@@ -12587,6 +12587,23 @@ mod tests {
             }
         }
 
+        // bd-niw7j — Determinism MR for parse_ibody_xattrs. Reads the
+        // inline-xattr region of an Ext4Inode (xattr_ibody slice
+        // [128 + extra_isize ..]). Runs on every getxattr/listxattr
+        // where the inode has inline xattrs. Sister parsers
+        // (parse_xattr_block, parse_inode_extent_tree, parse_dir_block,
+        // parse_extent_tree, parse_dx_root) all have determinism MRs.
+        #[test]
+        fn ext4_proptest_parse_ibody_xattrs_determinism(
+            inode_bytes in proptest::collection::vec(any::<u8>(), 128..=256),
+        ) {
+            if let Ok(inode) = Ext4Inode::parse_from_bytes(&inode_bytes) {
+                let a = parse_ibody_xattrs(&inode);
+                let b = parse_ibody_xattrs(&inode);
+                prop_assert_eq!(a, b);
+            }
+        }
+
         // bd-3fkbj — Determinism MR for Ext4Inode::parse_from_bytes.
         // Companion to parse_inode_extent_tree_determinism: that
         // exercises post-parse extent-tree derivation; this exercises
