@@ -327,16 +327,75 @@ fn is_valid_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
 
-    fn fixture_manifest() -> LowPrivilegeDemoManifest {
+    fn fixture_manifest() -> Result<LowPrivilegeDemoManifest> {
         parse_low_privilege_demo_manifest(DEFAULT_LOW_PRIVILEGE_DEMO_JSON)
-            .expect("default low-privilege demo manifest parses")
+            .context("default low-privilege demo manifest parses")
+    }
+
+    fn first_lane_mut(
+        manifest: &mut LowPrivilegeDemoManifest,
+    ) -> Result<&mut LowPrivilegeDemoLane> {
+        manifest
+            .lanes
+            .first_mut()
+            .context("fixture manifest includes at least one lane")
+    }
+
+    fn first_two_lanes_mut(
+        manifest: &mut LowPrivilegeDemoManifest,
+    ) -> Result<(&mut LowPrivilegeDemoLane, &mut LowPrivilegeDemoLane)> {
+        let (first, rest) = manifest
+            .lanes
+            .split_first_mut()
+            .context("fixture manifest includes at least one lane")?;
+        let second = rest
+            .first_mut()
+            .context("fixture manifest includes at least two lanes")?;
+        Ok((first, second))
+    }
+
+    fn lane_by_capability_mut<'a>(
+        manifest: &'a mut LowPrivilegeDemoManifest,
+        capability_requirement: &str,
+    ) -> Result<&'a mut LowPrivilegeDemoLane> {
+        manifest
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.capability_requirement == capability_requirement)
+            .with_context(|| {
+                format!("fixture manifest includes capability_requirement {capability_requirement}")
+            })
+    }
+
+    fn lane_by_outcome_mut<'a>(
+        manifest: &'a mut LowPrivilegeDemoManifest,
+        expected_outcome: &str,
+    ) -> Result<&'a mut LowPrivilegeDemoLane> {
+        manifest
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.expected_outcome == expected_outcome)
+            .with_context(|| {
+                format!("fixture manifest includes expected_outcome {expected_outcome}")
+            })
+    }
+
+    fn lane_by_execution_kind_mut<'a>(
+        manifest: &'a mut LowPrivilegeDemoManifest,
+        execution_kind: &str,
+    ) -> Result<&'a mut LowPrivilegeDemoLane> {
+        manifest
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.execution_kind == execution_kind)
+            .with_context(|| format!("fixture manifest includes execution_kind {execution_kind}"))
     }
 
     #[test]
-    fn default_manifest_validates_required_coverage() {
-        let report = validate_default_low_privilege_demo_manifest()
-            .expect("default low-privilege demo manifest validates");
+    fn default_manifest_validates_required_coverage() -> Result<()> {
+        let report = validate_default_low_privilege_demo_manifest()?;
         assert_eq!(report.bead_id, "bd-rchk0.5.13");
         for kind in REQUIRED_LOW_PRIVILEGE_KINDS {
             assert!(
@@ -350,6 +409,7 @@ mod tests {
                 "missing host-skipped kind {kind}"
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -364,8 +424,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_low_privilege_kind_is_rejected() {
-        let mut manifest = fixture_manifest();
+    fn missing_low_privilege_kind_is_rejected() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
         manifest.lanes.retain(|lane| {
             !(lane.execution_kind == "parser_unit" && lane.expected_outcome == "executed")
         });
@@ -376,11 +436,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must execute `parser_unit` at capability=none"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_repair_dry_run_kind_is_rejected() {
-        let mut manifest = fixture_manifest();
+    fn missing_repair_dry_run_kind_is_rejected() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
         manifest.lanes.retain(|lane| {
             !(lane.execution_kind == "repair_dry_run" && lane.expected_outcome == "executed")
         });
@@ -391,11 +452,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must execute `repair_dry_run`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_host_skipped_mounted_lane_is_rejected() {
-        let mut manifest = fixture_manifest();
+    fn missing_host_skipped_mounted_lane_is_rejected() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
         manifest.lanes.retain(|lane| {
             !(lane.execution_kind == "mounted_smoke" && lane.expected_outcome == "host_skipped")
         });
@@ -406,13 +468,14 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must record a host-skipped `mounted_smoke` lane"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_lane_id_is_rejected() {
-        let mut manifest = fixture_manifest();
-        let dup = manifest.lanes[0].lane_id.clone();
-        manifest.lanes[1].lane_id = dup;
+    fn duplicate_lane_id_is_rejected() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        let (first, second) = first_two_lanes_mut(&mut manifest)?;
+        second.lane_id = first.lane_id.clone();
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
             report
@@ -420,12 +483,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicate low-privilege demo lane_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn lane_id_prefix_is_enforced() {
-        let mut manifest = fixture_manifest();
-        manifest.lanes[0].lane_id = "demo_001".to_owned();
+    fn lane_id_prefix_is_enforced() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        first_lane_mut(&mut manifest)?.lane_id = "demo_001".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
             report
@@ -433,12 +497,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must start with lpd_"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_execution_kind_is_rejected() {
-        let mut manifest = fixture_manifest();
-        manifest.lanes[0].execution_kind = "telepathy_lane".to_owned();
+    fn unsupported_execution_kind_is_rejected() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        first_lane_mut(&mut manifest)?.execution_kind = "telepathy_lane".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
             report
@@ -446,12 +511,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported execution_kind"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_capability_requirement_is_rejected() {
-        let mut manifest = fixture_manifest();
-        manifest.lanes[0].capability_requirement = "magic".to_owned();
+    fn unsupported_capability_requirement_is_rejected() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        first_lane_mut(&mut manifest)?.capability_requirement = "magic".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
             report
@@ -459,12 +525,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported capability_requirement"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_expected_outcome_is_rejected() {
-        let mut manifest = fixture_manifest();
-        manifest.lanes[0].expected_outcome = "kinda_ran".to_owned();
+    fn unsupported_expected_outcome_is_rejected() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        first_lane_mut(&mut manifest)?.expected_outcome = "kinda_ran".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
             report
@@ -472,16 +539,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported expected_outcome"))
         );
+        Ok(())
     }
 
     #[test]
-    fn capability_none_cannot_expect_host_skipped() {
-        let mut manifest = fixture_manifest();
-        let lane = manifest
-            .lanes
-            .iter_mut()
-            .find(|l| l.capability_requirement == "none")
-            .expect("low-privilege lane exists");
+    fn capability_none_cannot_expect_host_skipped() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        let lane = lane_by_capability_mut(&mut manifest, "none")?;
         lane.expected_outcome = "host_skipped".to_owned();
         lane.host_skip_reason = "would never happen".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
@@ -491,32 +555,26 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("capability=none cannot expect host_skipped outcome"))
         );
+        Ok(())
     }
 
     #[test]
-    fn capability_none_cannot_expect_capability_blocked() {
-        let mut manifest = fixture_manifest();
-        let lane = manifest
-            .lanes
-            .iter_mut()
-            .find(|l| l.capability_requirement == "none")
-            .expect("low-privilege lane exists");
+    fn capability_none_cannot_expect_capability_blocked() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        let lane = lane_by_capability_mut(&mut manifest, "none")?;
         lane.expected_outcome = "capability_blocked".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(report
             .errors
             .iter()
             .any(|err| err.contains("capability=none cannot expect capability_blocked outcome")));
+        Ok(())
     }
 
     #[test]
-    fn host_skipped_outcome_requires_skip_reason() {
-        let mut manifest = fixture_manifest();
-        let lane = manifest
-            .lanes
-            .iter_mut()
-            .find(|l| l.expected_outcome == "host_skipped")
-            .expect("host-skipped lane exists");
+    fn host_skipped_outcome_requires_skip_reason() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        let lane = lane_by_outcome_mut(&mut manifest, "host_skipped")?;
         lane.host_skip_reason = String::new();
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
@@ -525,16 +583,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("host_skipped outcome must declare host_skip_reason"))
         );
+        Ok(())
     }
 
     #[test]
-    fn non_host_skipped_must_leave_skip_reason_empty() {
-        let mut manifest = fixture_manifest();
-        let lane = manifest
-            .lanes
-            .iter_mut()
-            .find(|l| l.expected_outcome == "executed")
-            .expect("executed lane exists");
+    fn non_host_skipped_must_leave_skip_reason_empty() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        let lane = lane_by_outcome_mut(&mut manifest, "executed")?;
         lane.host_skip_reason = "leftover prose".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
@@ -544,16 +599,13 @@ mod tests {
                 .any(|err| err
                     .contains("non-host_skipped outcome must leave host_skip_reason empty"))
         );
+        Ok(())
     }
 
     #[test]
-    fn mounted_smoke_cannot_claim_capability_none() {
-        let mut manifest = fixture_manifest();
-        let lane = manifest
-            .lanes
-            .iter_mut()
-            .find(|l| l.execution_kind == "mounted_smoke")
-            .expect("mounted lane exists");
+    fn mounted_smoke_cannot_claim_capability_none() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        let lane = lane_by_execution_kind_mut(&mut manifest, "mounted_smoke")?;
         lane.capability_requirement = "none".to_owned();
         lane.expected_outcome = "executed".to_owned();
         lane.host_skip_reason = String::new();
@@ -564,16 +616,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("mounted_smoke cannot claim capability=none"))
         );
+        Ok(())
     }
 
     #[test]
-    fn parser_unit_must_run_at_capability_none() {
-        let mut manifest = fixture_manifest();
-        let lane = manifest
-            .lanes
-            .iter_mut()
-            .find(|l| l.execution_kind == "parser_unit")
-            .expect("parser unit lane exists");
+    fn parser_unit_must_run_at_capability_none() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        let lane = lane_by_execution_kind_mut(&mut manifest, "parser_unit")?;
         lane.capability_requirement = "fuse".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
@@ -582,12 +631,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("parser_unit must run at capability=none"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_fixture_hash_is_rejected() {
-        let mut manifest = fixture_manifest();
-        manifest.lanes[0].fixture_hash = "md5:not-supported".to_owned();
+    fn malformed_fixture_hash_is_rejected() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        first_lane_mut(&mut manifest)?.fixture_hash = "md5:not-supported".to_owned();
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
             report
@@ -595,11 +645,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("fixture_hash must be sha256"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_environment_metadata_is_rejected() {
-        let mut manifest = fixture_manifest();
+    fn missing_environment_metadata_is_rejected() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
         manifest.git_sha = String::new();
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
@@ -608,11 +659,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing git_sha"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_kernel_metadata_is_rejected() {
-        let mut manifest = fixture_manifest();
+    fn missing_kernel_metadata_is_rejected() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
         manifest.kernel = String::new();
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
@@ -621,12 +673,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing kernel"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_reproduction_command_is_rejected() {
-        let mut manifest = fixture_manifest();
-        manifest.lanes[0].reproduction_command = String::new();
+    fn missing_reproduction_command_is_rejected() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        first_lane_mut(&mut manifest)?.reproduction_command = String::new();
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
             report
@@ -634,12 +687,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing reproduction_command"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_capability_check_command_is_rejected() {
-        let mut manifest = fixture_manifest();
-        manifest.lanes[0].capability_check_command = String::new();
+    fn missing_capability_check_command_is_rejected() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        first_lane_mut(&mut manifest)?.capability_check_command = String::new();
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
             report
@@ -647,11 +701,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing capability_check_command"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_lanes_list_is_rejected() {
-        let mut manifest = fixture_manifest();
+    fn empty_lanes_list_is_rejected() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
         manifest.lanes.clear();
         let report = validate_low_privilege_demo_manifest(&manifest);
         assert!(
@@ -660,5 +715,6 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one lane"))
         );
+        Ok(())
     }
 }
