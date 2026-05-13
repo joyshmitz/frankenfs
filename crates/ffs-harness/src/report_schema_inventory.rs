@@ -66,6 +66,7 @@ pub enum ReportSchemaClaimEffect {
 pub struct ReportSchemaInventoryReport {
     pub schema_version: u32,
     pub inventory_id: String,
+    pub valid: bool,
     pub total_rows: usize,
     pub required_rows: usize,
     pub advisory_only_rows: usize,
@@ -74,6 +75,23 @@ pub struct ReportSchemaInventoryReport {
     pub missing_rows: usize,
     pub excluded_rows: usize,
     pub report_ids: Vec<String>,
+    pub row_results: Vec<ReportSchemaInventoryRowResult>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportSchemaInventoryRowResult {
+    pub report_id: String,
+    pub module_path: String,
+    pub rust_type: String,
+    pub downstream_consumer: String,
+    pub coverage_requirement: ReportSchemaCoverageRequirement,
+    pub coverage_status: ReportSchemaCoverageStatus,
+    pub evidence_test: String,
+    pub snapshot_path: String,
+    pub exclusion_reason: String,
+    pub claim_effect: ReportSchemaClaimEffect,
+    pub missing_evidence: Vec<String>,
     pub errors: Vec<String>,
 }
 
@@ -241,6 +259,7 @@ pub fn validate_report_schema_inventory(
     let mut covered_rows = 0;
     let mut missing_rows = 0;
     let mut excluded_rows = 0;
+    let mut row_results = Vec::new();
 
     if inventory.schema_version != REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION {
         errors.push(format!(
@@ -259,7 +278,7 @@ pub fn validate_report_schema_inventory(
     }
 
     for row in &inventory.rows {
-        validate_row(
+        let row_result = validate_row(
             row,
             &mut report_ids,
             &mut required_rows,
@@ -268,13 +287,17 @@ pub fn validate_report_schema_inventory(
             &mut covered_rows,
             &mut missing_rows,
             &mut excluded_rows,
-            &mut errors,
         );
+        errors.extend(row_result.errors.iter().cloned());
+        row_results.push(row_result);
     }
+    row_results.sort_by(|left, right| left.report_id.cmp(&right.report_id));
+    errors.sort();
 
     ReportSchemaInventoryReport {
         schema_version: inventory.schema_version,
         inventory_id: inventory.inventory_id.clone(),
+        valid: errors.is_empty(),
         total_rows: inventory.rows.len(),
         required_rows,
         advisory_only_rows,
@@ -283,6 +306,7 @@ pub fn validate_report_schema_inventory(
         missing_rows,
         excluded_rows,
         report_ids: report_ids.into_iter().collect(),
+        row_results,
         errors,
     }
 }
@@ -297,8 +321,10 @@ fn validate_row(
     covered_rows: &mut usize,
     missing_rows: &mut usize,
     excluded_rows: &mut usize,
-    errors: &mut Vec<String>,
-) {
+) -> ReportSchemaInventoryRowResult {
+    let mut errors = Vec::new();
+    let mut missing_evidence = Vec::new();
+
     if row.report_id.trim().is_empty() {
         errors.push("report schema row missing report_id".to_owned());
     } else if !report_ids.insert(row.report_id.clone()) {
@@ -318,31 +344,54 @@ fn validate_row(
         ReportSchemaCoverageStatus::Excluded => {}
     }
 
-    validate_non_empty(row, "module_path", &row.module_path, errors);
-    validate_non_empty(row, "rust_type", &row.rust_type, errors);
-    validate_non_empty(row, "producer", &row.producer, errors);
-    validate_non_empty(row, "downstream_consumer", &row.downstream_consumer, errors);
-    validate_safe_relative_path(row, "module_path", &row.module_path, errors);
+    validate_non_empty(row, "module_path", &row.module_path, &mut errors);
+    validate_non_empty(row, "rust_type", &row.rust_type, &mut errors);
+    validate_non_empty(row, "producer", &row.producer, &mut errors);
+    validate_non_empty(
+        row,
+        "downstream_consumer",
+        &row.downstream_consumer,
+        &mut errors,
+    );
+    validate_safe_relative_path(row, "module_path", &row.module_path, &mut errors);
 
     if !row.snapshot_path.is_empty() {
-        validate_safe_relative_path(row, "snapshot_path", &row.snapshot_path, errors);
+        validate_safe_relative_path(row, "snapshot_path", &row.snapshot_path, &mut errors);
     }
 
-    validate_coverage_fields(row, errors);
+    validate_coverage_fields(row, &mut missing_evidence, &mut errors);
+    validate_claim_effect(row, &mut missing_evidence, &mut errors);
+    missing_evidence.sort();
+    missing_evidence.dedup();
+    errors.sort();
+
+    ReportSchemaInventoryRowResult {
+        report_id: row.report_id.clone(),
+        module_path: row.module_path.clone(),
+        rust_type: row.rust_type.clone(),
+        downstream_consumer: row.downstream_consumer.clone(),
+        coverage_requirement: row.coverage_requirement,
+        coverage_status: row.coverage_status,
+        evidence_test: row.evidence_test.clone(),
+        snapshot_path: row.snapshot_path.clone(),
+        exclusion_reason: row.exclusion_reason.clone(),
+        claim_effect: row.claim_effect,
+        missing_evidence,
+        errors,
+    }
 }
 
-fn validate_coverage_fields(row: &ReportSchemaInventoryRow, errors: &mut Vec<String>) {
+fn validate_coverage_fields(
+    row: &ReportSchemaInventoryRow,
+    missing_evidence: &mut Vec<String>,
+    errors: &mut Vec<String>,
+) {
     match (row.coverage_requirement, row.coverage_status) {
         (ReportSchemaCoverageRequirement::Excluded, ReportSchemaCoverageStatus::Excluded) => {
             if row.exclusion_reason.trim().is_empty() {
+                missing_evidence.push("explicit_exclusion_reason".to_owned());
                 errors.push(format!(
                     "row `{}` is excluded but missing exclusion_reason",
-                    row.report_id
-                ));
-            }
-            if row.claim_effect != ReportSchemaClaimEffect::InternalOnly {
-                errors.push(format!(
-                    "row `{}` is excluded but claim_effect is not internal_only",
                     row.report_id
                 ));
             }
@@ -361,12 +410,21 @@ fn validate_coverage_fields(row: &ReportSchemaInventoryRow, errors: &mut Vec<Str
         }
         (_, ReportSchemaCoverageStatus::Covered) => {
             if row.evidence_test.trim().is_empty() {
+                missing_evidence.push("typed_serde_round_trip_evidence".to_owned());
+                missing_evidence.push("valid_evidence_test_name".to_owned());
                 errors.push(format!(
                     "row `{}` is covered but missing evidence_test",
                     row.report_id
                 ));
+            } else if !is_valid_rust_test_name(&row.evidence_test) {
+                missing_evidence.push("valid_evidence_test_name".to_owned());
+                errors.push(format!(
+                    "row `{}` evidence_test is not a valid rust test name: `{}`",
+                    row.report_id, row.evidence_test
+                ));
             }
             if row.snapshot_path.trim().is_empty() {
+                missing_evidence.push("compact_json_shape_snapshot".to_owned());
                 errors.push(format!(
                     "row `{}` is covered but missing snapshot_path",
                     row.report_id
@@ -380,6 +438,14 @@ fn validate_coverage_fields(row: &ReportSchemaInventoryRow, errors: &mut Vec<Str
             }
         }
         (_, ReportSchemaCoverageStatus::Missing) => {
+            if row.coverage_requirement == ReportSchemaCoverageRequirement::Required {
+                missing_evidence.push("typed_serde_round_trip_evidence".to_owned());
+                missing_evidence.push("compact_json_shape_snapshot".to_owned());
+                errors.push(format!(
+                    "row `{}` is a required public report but remains uncovered",
+                    row.report_id
+                ));
+            }
             if !row.evidence_test.trim().is_empty() || !row.snapshot_path.trim().is_empty() {
                 errors.push(format!(
                     "row `{}` is missing but already names evidence",
@@ -388,15 +454,67 @@ fn validate_coverage_fields(row: &ReportSchemaInventoryRow, errors: &mut Vec<Str
             }
         }
     }
+}
 
-    if row.coverage_requirement == ReportSchemaCoverageRequirement::PermissionedOnly
-        && row.claim_effect != ReportSchemaClaimEffect::ProductEvidenceNone
-    {
-        errors.push(format!(
-            "row `{}` is permissioned_only but claim_effect is not product_evidence_none",
-            row.report_id
-        ));
+fn validate_claim_effect(
+    row: &ReportSchemaInventoryRow,
+    missing_evidence: &mut Vec<String>,
+    errors: &mut Vec<String>,
+) {
+    match row.coverage_requirement {
+        ReportSchemaCoverageRequirement::Required => {
+            if matches!(
+                row.claim_effect,
+                ReportSchemaClaimEffect::ProductEvidenceNone | ReportSchemaClaimEffect::InternalOnly
+            ) {
+                missing_evidence.push("valid_claim_effect".to_owned());
+                errors.push(format!(
+                    "row `{}` is required but claim_effect is not public-facing",
+                    row.report_id
+                ));
+            }
+        }
+        ReportSchemaCoverageRequirement::AdvisoryOnly => {
+            if row.claim_effect != ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange {
+                missing_evidence.push("valid_claim_effect".to_owned());
+                errors.push(format!(
+                    "row `{}` is advisory_only but claim_effect is not advisory_only_no_public_readiness_change",
+                    row.report_id
+                ));
+            }
+        }
+        ReportSchemaCoverageRequirement::PermissionedOnly => {
+            if row.claim_effect != ReportSchemaClaimEffect::ProductEvidenceNone {
+                missing_evidence.push("valid_claim_effect".to_owned());
+                errors.push(format!(
+                    "row `{}` is permissioned_only but claim_effect is not product_evidence_none",
+                    row.report_id
+                ));
+            }
+        }
+        ReportSchemaCoverageRequirement::Excluded => {
+            if row.claim_effect != ReportSchemaClaimEffect::InternalOnly {
+                missing_evidence.push("valid_claim_effect".to_owned());
+                errors.push(format!(
+                    "row `{}` is excluded but claim_effect is not internal_only",
+                    row.report_id
+                ));
+            }
+        }
     }
+}
+
+fn is_valid_rust_test_name(value: &str) -> bool {
+    let trimmed = value.trim();
+    let Some(first) = trimmed.chars().next() else {
+        return false;
+    };
+    first.is_ascii_lowercase()
+        && !trimmed.ends_with('_')
+        && !trimmed.contains("__")
+        && trimmed
+            .chars()
+            .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_')
 }
 
 fn validate_non_empty(
@@ -534,11 +652,23 @@ mod tests {
     use anyhow::{Result, bail};
     use serde_json::json;
 
+    fn row_result<'a>(
+        report: &'a ReportSchemaInventoryReport,
+        report_id: &str,
+    ) -> &'a ReportSchemaInventoryRowResult {
+        report
+            .row_results
+            .iter()
+            .find(|row| row.report_id == report_id)
+            .expect("row result should exist")
+    }
+
     #[test]
     fn default_report_schema_inventory_is_valid() {
         let inventory = current_report_schema_inventory();
         let report = validate_report_schema_inventory(&inventory);
 
+        assert!(report.valid);
         assert!(
             report.errors.is_empty(),
             "default inventory should be valid: {:?}",
@@ -560,6 +690,12 @@ mod tests {
                 .report_ids
                 .contains(&"swarm_operator_report".to_owned())
         );
+        assert_eq!(report.row_results.len(), report.total_rows);
+        assert_eq!(
+            report.row_results[0].report_id,
+            "authoritative_lane_decision"
+        );
+        assert!(report.row_results.iter().all(|row| row.errors.is_empty()));
     }
 
     #[test]
@@ -576,6 +712,74 @@ mod tests {
                 .any(|error| error.contains("duplicate report_id")),
             "{:?}",
             report.errors
+        );
+    }
+
+    #[test]
+    fn covered_rows_require_snapshot_and_test_evidence() {
+        let mut inventory = current_report_schema_inventory();
+        inventory.rows[0].evidence_test.clear();
+        inventory.rows[0].snapshot_path.clear();
+        let report_id = inventory.rows[0].report_id.clone();
+
+        let report = validate_report_schema_inventory(&inventory);
+        let result = row_result(&report, &report_id);
+
+        assert!(!report.valid);
+        assert!(
+            result
+                .missing_evidence
+                .contains(&"typed_serde_round_trip_evidence".to_owned()),
+            "{result:?}"
+        );
+        assert!(
+            result
+                .missing_evidence
+                .contains(&"compact_json_shape_snapshot".to_owned()),
+            "{result:?}"
+        );
+        assert!(
+            result
+                .missing_evidence
+                .contains(&"valid_evidence_test_name".to_owned()),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_evidence_test_name_fails() {
+        let mut inventory = current_report_schema_inventory();
+        inventory.rows[0].evidence_test = "Bad-Test-Name".to_owned();
+        let report_id = inventory.rows[0].report_id.clone();
+
+        let report = validate_report_schema_inventory(&inventory);
+        let result = row_result(&report, &report_id);
+
+        assert!(!report.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("valid rust test name")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_claim_effect_fails() {
+        let mut inventory = current_report_schema_inventory();
+        inventory.rows[0].claim_effect = ReportSchemaClaimEffect::ExistingReleaseGateInput;
+        let report_id = inventory.rows[0].report_id.clone();
+
+        let report = validate_report_schema_inventory(&inventory);
+        let result = row_result(&report, &report_id);
+
+        assert!(!report.valid);
+        assert!(
+            result
+                .missing_evidence
+                .contains(&"valid_claim_effect".to_owned()),
+            "{result:?}"
         );
     }
 
@@ -619,6 +823,55 @@ mod tests {
     }
 
     #[test]
+    fn required_missing_rows_fail_with_row_context() {
+        let mut inventory = current_report_schema_inventory();
+        let row = inventory
+            .rows
+            .iter_mut()
+            .find(|row| row.coverage_requirement == ReportSchemaCoverageRequirement::Required)
+            .expect("fixture includes a required row");
+        row.coverage_status = ReportSchemaCoverageStatus::Missing;
+        row.evidence_test.clear();
+        row.snapshot_path.clear();
+        let report_id = row.report_id.clone();
+
+        let report = validate_report_schema_inventory(&inventory);
+        let result = row_result(&report, &report_id);
+
+        assert!(!report.valid);
+        assert_eq!(report.missing_rows, 1);
+        assert_eq!(
+            result.module_path,
+            "crates/ffs-harness/src/swarm_operator_report.rs"
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("required public report")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn report_results_are_deterministically_ordered() {
+        let mut inventory = current_report_schema_inventory();
+        inventory.rows.reverse();
+
+        let report = validate_report_schema_inventory(&inventory);
+        let row_ids = report
+            .row_results
+            .iter()
+            .map(|row| row.report_id.as_str())
+            .collect::<Vec<_>>();
+        let mut sorted_ids = row_ids.clone();
+        sorted_ids.sort_unstable();
+
+        assert_eq!(row_ids, sorted_ids);
+        assert_eq!(report.report_ids, sorted_ids);
+    }
+
+    #[test]
     fn report_schema_inventory_shape() -> Result<()> {
         let inventory = current_report_schema_inventory();
         let report = validate_report_schema_inventory(&inventory);
@@ -633,6 +886,7 @@ mod tests {
         let shape = json!({
             "schema_version": inventory.schema_version,
             "inventory_id": inventory.inventory_id,
+            "report_valid": report.valid,
             "counts": {
                 "total_rows": report.total_rows,
                 "required_rows": report.required_rows,
@@ -653,6 +907,19 @@ mod tests {
                 "evidence_test": inventory.rows[0].evidence_test,
                 "snapshot_path": inventory.rows[0].snapshot_path,
                 "claim_effect": inventory.rows[0].claim_effect,
+            },
+            "first_row_result": {
+                "report_id": report.row_results[0].report_id,
+                "coverage_requirement": report.row_results[0].coverage_requirement,
+                "coverage_status": report.row_results[0].coverage_status,
+                "module_path": report.row_results[0].module_path,
+                "rust_type": report.row_results[0].rust_type,
+                "downstream_consumer": report.row_results[0].downstream_consumer,
+                "evidence_test": report.row_results[0].evidence_test,
+                "snapshot_path": report.row_results[0].snapshot_path,
+                "claim_effect": report.row_results[0].claim_effect,
+                "missing_evidence": report.row_results[0].missing_evidence,
+                "errors": report.row_results[0].errors,
             },
             "required_report_ids": inventory
                 .rows
