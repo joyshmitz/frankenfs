@@ -106,13 +106,10 @@ fn create_minimal_ext4_image(dir: &Path, size_mb: u32) -> std::path::PathBuf {
 }
 
 fn run_ffs_cli(args: &[&str]) -> std::process::Output {
-    let cargo_target_dir =
-        std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_string());
+    let bin_path = env!("CARGO_BIN_EXE_ffs-cli");
 
-    Command::new("cargo")
-        .args(["run", "-p", "ffs-cli", "--"])
+    Command::new(bin_path)
         .args(args)
-        .env("CARGO_TARGET_DIR", cargo_target_dir)
         .output()
         .expect("failed to execute ffs-cli")
 }
