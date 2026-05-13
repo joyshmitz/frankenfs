@@ -490,15 +490,59 @@ fn is_valid_sha256(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn fixture_corpus() -> FaultInjectionCorpus {
+    fn fixture_corpus() -> Result<FaultInjectionCorpus> {
         parse_fault_injection_corpus(DEFAULT_FAULT_INJECTION_CORPUS_JSON)
-            .expect("default fault injection corpus parses")
+    }
+
+    fn first_case_mut(corpus: &mut FaultInjectionCorpus) -> Result<&mut FaultInjectionCase> {
+        let [first, ..] = corpus.cases.as_mut_slice() else {
+            bail!("fixture corpus must contain at least one case");
+        };
+        Ok(first)
+    }
+
+    fn first_two_cases_mut(
+        corpus: &mut FaultInjectionCorpus,
+    ) -> Result<(&mut FaultInjectionCase, &mut FaultInjectionCase)> {
+        let [first, second, ..] = corpus.cases.as_mut_slice() else {
+            bail!("fixture corpus must contain at least two cases");
+        };
+        Ok((first, second))
+    }
+
+    fn case_with_repair_class_mut<'a>(
+        corpus: &'a mut FaultInjectionCorpus,
+        repair_class: &str,
+    ) -> Result<&'a mut FaultInjectionCase> {
+        corpus
+            .cases
+            .iter_mut()
+            .find(|case| case.expected_repair_class == repair_class)
+            .ok_or_else(|| anyhow::anyhow!("fixture corpus missing {repair_class} case"))
+    }
+
+    fn case_with_fault_kind_mut<'a>(
+        corpus: &'a mut FaultInjectionCorpus,
+        fault_kind: &str,
+    ) -> Result<&'a mut FaultInjectionCase> {
+        corpus
+            .cases
+            .iter_mut()
+            .find(|case| case.fault_kind == fault_kind)
+            .ok_or_else(|| anyhow::anyhow!("fixture corpus missing {fault_kind} case"))
+    }
+
+    fn adversarial_case_mut(corpus: &mut FaultInjectionCorpus) -> Result<&mut FaultInjectionCase> {
+        corpus
+            .cases
+            .iter_mut()
+            .find(|case| case.adversarial)
+            .ok_or_else(|| anyhow::anyhow!("fixture corpus missing adversarial case"))
     }
 
     #[test]
-    fn default_corpus_validates_required_coverage() {
-        let report = validate_default_fault_injection_corpus()
-            .expect("default fault injection corpus validates");
+    fn default_corpus_validates_required_coverage() -> Result<()> {
+        let report = validate_default_fault_injection_corpus()?;
         assert_eq!(report.bead_id, "bd-rchk0.5.3");
         for kind in REQUIRED_FAULT_COVERAGE {
             assert!(
@@ -513,12 +557,12 @@ mod tests {
             );
         }
         assert!(report.adversarial_count >= 1);
+        Ok(())
     }
 
     #[test]
-    fn render_markdown_summarizes_default_corpus() {
-        let report = validate_default_fault_injection_corpus()
-            .expect("default fault injection corpus validates");
+    fn render_markdown_summarizes_default_corpus() -> Result<()> {
+        let report = validate_default_fault_injection_corpus()?;
         let markdown = render_fault_injection_corpus_markdown(&report);
         assert!(markdown.contains("# Fault Injection Corpus"));
         assert!(markdown.contains("`adversarial_seed`"));
@@ -527,6 +571,7 @@ mod tests {
             "render_fault_injection_corpus_markdown_default_corpus",
             markdown
         );
+        Ok(())
     }
 
     #[test]
@@ -541,21 +586,23 @@ mod tests {
     }
 
     #[test]
-    fn fail_on_errors_rejects_invalid_report() {
-        let mut corpus = fixture_corpus();
+    fn fail_on_errors_rejects_invalid_report() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus.cases.clear();
         let report = validate_fault_injection_corpus(&corpus);
-        let err =
-            fail_on_fault_injection_corpus_errors(&report).expect_err("invalid report should fail");
+        let Err(err) = fail_on_fault_injection_corpus_errors(&report) else {
+            bail!("invalid report should fail");
+        };
         assert!(
             err.to_string()
                 .contains("fault injection corpus validation failed")
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_bit_flip_kind_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn missing_bit_flip_kind_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus.cases.retain(|c| c.fault_kind != "bit_flip");
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
@@ -564,11 +611,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required fault_kind `bit_flip`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_unsafe_class_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn missing_unsafe_class_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus
             .cases
             .retain(|c| c.expected_repair_class != "unsafe_to_repair");
@@ -578,13 +626,15 @@ mod tests {
                 |err| err.contains("missing required expected_repair_class `unsafe_to_repair`")
             )
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_case_id_is_rejected() {
-        let mut corpus = fixture_corpus();
-        let dup = corpus.cases[0].case_id.clone();
-        corpus.cases[1].case_id = dup;
+    fn duplicate_case_id_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let (first, second) = first_two_cases_mut(&mut corpus)?;
+        let dup = first.case_id.clone();
+        second.case_id = dup;
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
             report
@@ -592,12 +642,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicate fault injection case_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn case_id_prefix_is_enforced() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].case_id = "case_001".to_owned();
+    fn case_id_prefix_is_enforced() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.case_id = "case_001".to_owned();
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
             report
@@ -605,12 +656,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must start with fic_"))
         );
+        Ok(())
     }
 
     #[test]
-    fn zero_seed_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].seed = 0;
+    fn zero_seed_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.seed = 0;
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
             report
@@ -618,13 +670,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("seed must be positive"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_seed_is_rejected() {
-        let mut corpus = fixture_corpus();
-        let seed = corpus.cases[0].seed;
-        corpus.cases[1].seed = seed;
+    fn duplicate_seed_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let (first, second) = first_two_cases_mut(&mut corpus)?;
+        let seed = first.seed;
+        second.seed = seed;
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
             report
@@ -632,12 +686,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("is not unique across the corpus"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_fault_kind_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].fault_kind = "alien_radiation".to_owned();
+    fn unsupported_fault_kind_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.fault_kind = "alien_radiation".to_owned();
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
             report
@@ -645,12 +700,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported fault_kind"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_logical_structure_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].affected_logical_structure = "vibes_block".to_owned();
+    fn unsupported_logical_structure_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.affected_logical_structure = "vibes_block".to_owned();
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
             report
@@ -658,12 +714,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported affected_logical_structure"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_offsets_list_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].affected_offsets.clear();
+    fn empty_offsets_list_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.affected_offsets.clear();
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
             report
@@ -671,22 +728,24 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one affected_offset"))
         );
+        Ok(())
     }
 
     #[test]
-    fn non_increasing_offsets_are_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].affected_offsets = vec![100, 50];
+    fn non_increasing_offsets_are_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.affected_offsets = vec![100, 50];
         let report = validate_fault_injection_corpus(&corpus);
         assert!(report.errors.iter().any(|err| {
             err.contains("affected_offsets must be strictly increasing for deterministic replay")
         }));
+        Ok(())
     }
 
     #[test]
-    fn zero_repair_symbol_budget_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].repair_symbol_budget = 0;
+    fn zero_repair_symbol_budget_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.repair_symbol_budget = 0;
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
             report
@@ -694,12 +753,14 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("repair_symbol_budget must be positive"))
         );
+        Ok(())
     }
 
     #[test]
-    fn symbols_supplied_exceeds_budget_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].symbols_supplied = corpus.cases[0].repair_symbol_budget + 5;
+    fn symbols_supplied_exceeds_budget_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = first_case_mut(&mut corpus)?;
+        case.symbols_supplied = case.repair_symbol_budget + 5;
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
             report
@@ -707,16 +768,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("symbols_supplied exceeds repair_symbol_budget"))
         );
+        Ok(())
     }
 
     #[test]
-    fn clean_repair_must_supply_required_symbols() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_repair_class == "clean_repair")
-            .expect("clean repair fixture exists");
+    fn clean_repair_must_supply_required_symbols() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_with_repair_class_mut(&mut corpus, "clean_repair")?;
         case.symbols_supplied = case.symbols_required_for_recovery - 1;
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
@@ -725,61 +783,49 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("clean_repair must supply at least the required symbols"))
         );
+        Ok(())
     }
 
     #[test]
-    fn clean_repair_must_meet_min_confidence() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_repair_class == "clean_repair")
-            .expect("clean repair fixture exists");
+    fn clean_repair_must_meet_min_confidence() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_with_repair_class_mut(&mut corpus, "clean_repair")?;
         case.expected_confidence_lower_bound = 0.5;
         let report = validate_fault_injection_corpus(&corpus);
         assert!(report.errors.iter().any(|err| {
             err.contains("clean_repair must declare expected_confidence_lower_bound >=")
         }));
+        Ok(())
     }
 
     #[test]
-    fn detection_only_must_declare_zero_confidence() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_repair_class == "detection_only")
-            .expect("detection only fixture exists");
+    fn detection_only_must_declare_zero_confidence() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_with_repair_class_mut(&mut corpus, "detection_only")?;
         case.expected_confidence_lower_bound = 0.5;
         let report = validate_fault_injection_corpus(&corpus);
         assert!(report.errors.iter().any(|err| {
             err.contains("detection_only must declare expected_confidence_lower_bound = 0.0")
         }));
+        Ok(())
     }
 
     #[test]
-    fn false_positive_confidence_must_be_below_5_percent() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_repair_class == "false_positive")
-            .expect("false positive fixture exists");
+    fn false_positive_confidence_must_be_below_5_percent() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_with_repair_class_mut(&mut corpus, "false_positive")?;
         case.expected_confidence_lower_bound = 0.5;
         let report = validate_fault_injection_corpus(&corpus);
         assert!(report.errors.iter().any(|err| {
             err.contains("false_positive must declare expected_confidence_lower_bound <= 0.05")
         }));
+        Ok(())
     }
 
     #[test]
-    fn adversarial_must_classify_as_detection_or_unsafe() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.adversarial)
-            .expect("adversarial fixture exists");
+    fn adversarial_must_classify_as_detection_or_unsafe() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = adversarial_case_mut(&mut corpus)?;
         case.expected_repair_class = "clean_repair".to_owned();
         case.expected_confidence_lower_bound = 0.99;
         case.symbols_supplied = case.symbols_required_for_recovery;
@@ -787,16 +833,13 @@ mod tests {
         assert!(report.errors.iter().any(|err| {
             err.contains("adversarial cases must classify as detection_only or unsafe_to_repair")
         }));
+        Ok(())
     }
 
     #[test]
-    fn adversarial_seed_kind_must_set_adversarial_flag() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.fault_kind == "adversarial_seed")
-            .expect("adversarial seed fixture exists");
+    fn adversarial_seed_kind_must_set_adversarial_flag() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_with_fault_kind_mut(&mut corpus, "adversarial_seed")?;
         case.adversarial = false;
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
@@ -805,16 +848,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("fault_kind=adversarial_seed must set adversarial=true"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsafe_to_repair_must_link_follow_up_bead() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_repair_class == "unsafe_to_repair")
-            .expect("unsafe fixture exists");
+    fn unsafe_to_repair_must_link_follow_up_bead() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_with_repair_class_mut(&mut corpus, "unsafe_to_repair")?;
         case.follow_up_bead = String::new();
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
@@ -823,12 +863,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsafe_to_repair must link a follow_up_bead"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_image_hash_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].original_image_hash = "md5:not-supported".to_owned();
+    fn malformed_image_hash_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.original_image_hash = "md5:not-supported".to_owned();
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
             report
@@ -836,12 +877,14 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("original_image_hash must be sha256"))
         );
+        Ok(())
     }
 
     #[test]
-    fn corrupted_hash_must_differ_from_original() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].corrupted_image_hash = corpus.cases[0].original_image_hash.clone();
+    fn corrupted_hash_must_differ_from_original() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = first_case_mut(&mut corpus)?;
+        case.corrupted_image_hash = case.original_image_hash.clone();
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
             report
@@ -849,12 +892,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must differ from original_image_hash"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_replay_command_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].replay_command = String::new();
+    fn missing_replay_command_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.replay_command = String::new();
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
             report
@@ -862,19 +906,21 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing replay_command"))
         );
+        Ok(())
     }
 
     #[test]
-    fn lax_min_confidence_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn lax_min_confidence_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus.min_confidence_lower_bound_for_clean_repair = 0.1;
         let report = validate_fault_injection_corpus(&corpus);
         assert!(report.errors.iter().any(|err| err.contains("too lax")));
+        Ok(())
     }
 
     #[test]
-    fn out_of_range_min_confidence_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn out_of_range_min_confidence_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus.min_confidence_lower_bound_for_clean_repair = 1.5;
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
@@ -883,11 +929,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must be in [0.0, 1.0]"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_cases_list_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn empty_cases_list_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus.cases.clear();
         let report = validate_fault_injection_corpus(&corpus);
         assert!(
@@ -896,5 +943,6 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one case"))
         );
+        Ok(())
     }
 }
