@@ -377,6 +377,18 @@ mod tests {
             })
     }
 
+    fn drill_by_id<'a>(
+        drills: &'a [DrillScenario],
+        id: &str,
+    ) -> std::io::Result<&'a DrillScenario> {
+        drills.iter().find(|drill| drill.id == id).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("canonical drills include {id}"),
+            )
+        })
+    }
+
     #[test]
     fn has_all_three_drill_scenarios() {
         let drills = canonical_drills();
@@ -442,8 +454,7 @@ mod tests {
     fn replay_drill_passes() -> std::io::Result<()> {
         let root = repo_root()?;
         let drills = canonical_drills();
-        let replay = &drills[0];
-        assert_eq!(replay.id, "drill-replay-anomaly");
+        let replay = drill_by_id(&drills, "drill-replay-anomaly")?;
         let result = execute_drill(replay, &root);
         for check in &result.checks {
             assert!(
@@ -459,8 +470,7 @@ mod tests {
     fn corruption_drill_passes() -> std::io::Result<()> {
         let root = repo_root()?;
         let drills = canonical_drills();
-        let corruption = &drills[1];
-        assert_eq!(corruption.id, "drill-corruption-partial-repair");
+        let corruption = drill_by_id(&drills, "drill-corruption-partial-repair")?;
         let result = execute_drill(corruption, &root);
         for check in &result.checks {
             assert!(
@@ -476,8 +486,7 @@ mod tests {
     fn pressure_drill_passes() -> std::io::Result<()> {
         let root = repo_root()?;
         let drills = canonical_drills();
-        let pressure = &drills[2];
-        assert_eq!(pressure.id, "drill-sustained-pressure");
+        let pressure = drill_by_id(&drills, "drill-sustained-pressure")?;
         let result = execute_drill(pressure, &root);
         for check in &result.checks {
             assert!(
