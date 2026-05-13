@@ -1497,13 +1497,103 @@ pub fn fail_on_mounted_write_matrix_errors(report: &MountedWriteMatrixReport) ->
 mod tests {
     use super::*;
 
-    fn valid_matrix() -> MountedWriteMatrix {
-        parse_mounted_write_matrix(DEFAULT_MATRIX_JSON).expect("default matrix parses")
+    fn valid_matrix() -> Result<MountedWriteMatrix> {
+        parse_mounted_write_matrix(DEFAULT_MATRIX_JSON)
+    }
+
+    fn mounted_scenario_mut(
+        matrix: &mut MountedWriteMatrix,
+        index: usize,
+    ) -> Result<&mut MountedWriteScenario> {
+        matrix
+            .scenarios
+            .get_mut(index)
+            .with_context(|| format!("expected mounted write scenario at index {index}"))
+    }
+
+    fn unsupported_mounted_scenario_mut(
+        matrix: &mut MountedWriteMatrix,
+    ) -> Result<&mut MountedWriteScenario> {
+        matrix
+            .scenarios
+            .iter_mut()
+            .find(|scenario| !scenario.workload.unsupported_operations.is_empty())
+            .context("expected unsupported mounted write scenario")
+    }
+
+    fn first_namespace_scenario(matrix: &mut MountedWriteMatrix) -> Result<&mut NamespaceScenario> {
+        matrix
+            .namespace_scenarios
+            .first_mut()
+            .context("expected namespace scenario in fixture")
+    }
+
+    fn namespace_scenario_by_kind_mut<'a>(
+        matrix: &'a mut MountedWriteMatrix,
+        namespace_operation_kind: &str,
+    ) -> Result<&'a mut NamespaceScenario> {
+        matrix
+            .namespace_scenarios
+            .iter_mut()
+            .find(|scenario| scenario.namespace_operation_kind == namespace_operation_kind)
+            .with_context(|| {
+                format!("expected namespace scenario `{namespace_operation_kind}` in fixture")
+            })
+    }
+
+    fn namespace_scenario_by_outcome_mut<'a>(
+        matrix: &'a mut MountedWriteMatrix,
+        outcome_class: &str,
+    ) -> Result<&'a mut NamespaceScenario> {
+        matrix
+            .namespace_scenarios
+            .iter_mut()
+            .find(|scenario| scenario.expected_outcome.outcome_class == outcome_class)
+            .with_context(|| format!("expected namespace outcome `{outcome_class}` in fixture"))
+    }
+
+    fn first_multi_handle_scenario(
+        matrix: &mut MountedWriteMatrix,
+    ) -> Result<&mut MultiHandleScenario> {
+        matrix
+            .multi_handle_scenarios
+            .first_mut()
+            .context("expected multi-handle scenario in fixture")
+    }
+
+    fn rejected_multi_handle_scenario(
+        matrix: &mut MountedWriteMatrix,
+    ) -> Result<&mut MultiHandleScenario> {
+        matrix
+            .multi_handle_scenarios
+            .iter_mut()
+            .find(|scenario| scenario.expected_outcome.outcome_class == "unsupported_rejected")
+            .context("expected rejected multi-handle scenario in fixture")
+    }
+
+    fn handle_operation_mut(
+        scenario: &mut MultiHandleScenario,
+        index: usize,
+    ) -> Result<&mut HandleOperation> {
+        scenario
+            .operation_trace
+            .get_mut(index)
+            .with_context(|| format!("expected handle operation at index {index}"))
+    }
+
+    fn handle_spec_mut(
+        scenario: &mut MultiHandleScenario,
+        index: usize,
+    ) -> Result<&mut HandleSpec> {
+        scenario
+            .handles
+            .get_mut(index)
+            .with_context(|| format!("expected handle spec at index {index}"))
     }
 
     #[test]
-    fn default_matrix_validates_required_write_workload_contract() {
-        let report = validate_default_mounted_write_matrix().expect("default matrix validates");
+    fn default_matrix_validates_required_write_workload_contract() -> Result<()> {
+        let report = validate_default_mounted_write_matrix()?;
         assert_eq!(report.scenario_count, 14);
         assert_eq!(report.filesystems, vec!["btrfs", "ext4"]);
         assert!(
@@ -1565,6 +1655,7 @@ mod tests {
         assert!(report.output_formats.contains(&"json".to_owned()));
         assert!(report.output_formats.contains(&"csv".to_owned()));
         assert!(report.max_concurrency >= 4);
+        Ok(())
     }
 
     #[test]
@@ -1579,8 +1670,8 @@ mod tests {
     }
 
     #[test]
-    fn result_contract_requires_csv_and_json() {
-        let mut matrix = valid_matrix();
+    fn result_contract_requires_csv_and_json() -> Result<()> {
+        let mut matrix = valid_matrix()?;
         matrix
             .results_contract
             .formats
@@ -1592,16 +1683,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("csv format"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_operations_require_no_partial_mutation() {
-        let mut matrix = valid_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|scenario| !scenario.workload.unsupported_operations.is_empty())
-            .expect("unsupported scenario exists");
+    fn unsupported_operations_require_no_partial_mutation() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = unsupported_mounted_scenario_mut(&mut matrix)?;
         scenario.workload.no_partial_mutation = false;
         scenario.expected_outcome.no_partial_mutation = false;
         let report = validate_mounted_write_matrix(&matrix);
@@ -1611,11 +1699,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("no_partial_mutation"))
         );
+        Ok(())
     }
 
     #[test]
-    fn required_operation_coverage_is_enforced() {
-        let mut matrix = valid_matrix();
+    fn required_operation_coverage_is_enforced() -> Result<()> {
+        let mut matrix = valid_matrix()?;
         for scenario in &mut matrix.scenarios {
             scenario
                 .workload
@@ -1629,11 +1718,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("xattr_set_get"))
         );
+        Ok(())
     }
 
     #[test]
-    fn result_contract_requires_proof_fields() {
-        let mut matrix = valid_matrix();
+    fn result_contract_requires_proof_fields() -> Result<()> {
+        let mut matrix = valid_matrix()?;
         matrix
             .results_contract
             .required_fields
@@ -1645,12 +1735,15 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("required field expected_error_class"))
         );
+        Ok(())
     }
 
     #[test]
-    fn scenario_proof_hash_must_be_lowercase_sha256() {
-        let mut matrix = valid_matrix();
-        matrix.scenarios[0].proof.image_fixture_hash =
+    fn scenario_proof_hash_must_be_lowercase_sha256() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        mounted_scenario_mut(&mut matrix, 0)?
+            .proof
+            .image_fixture_hash =
             "sha256:ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned();
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
@@ -1659,21 +1752,15 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("image_fixture_hash"))
         );
+        Ok(())
     }
 
     #[test]
-    fn scenario_proof_survivor_set_must_not_be_empty() {
-        let mut matrix = valid_matrix();
-        matrix.scenarios[0]
-            .proof
-            .expected_survivor_set
-            .present_paths
-            .clear();
-        matrix.scenarios[0]
-            .proof
-            .expected_survivor_set
-            .absent_paths
-            .clear();
+    fn scenario_proof_survivor_set_must_not_be_empty() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = mounted_scenario_mut(&mut matrix, 0)?;
+        scenario.proof.expected_survivor_set.present_paths.clear();
+        scenario.proof.expected_survivor_set.absent_paths.clear();
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
             report
@@ -1681,12 +1768,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("expected_survivor_set"))
         );
+        Ok(())
     }
 
     #[test]
-    fn scenario_proof_artifact_requirements_are_required() {
-        let mut matrix = valid_matrix();
-        matrix.scenarios[0]
+    fn scenario_proof_artifact_requirements_are_required() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        mounted_scenario_mut(&mut matrix, 0)?
             .proof
             .artifact_requirements
             .retain(|requirement| requirement != "reopen_state");
@@ -1697,11 +1785,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("artifact_requirements missing reopen_state"))
         );
+        Ok(())
     }
 
     #[test]
-    fn required_host_skip_proof_class_is_enforced() {
-        let mut matrix = valid_matrix();
+    fn required_host_skip_proof_class_is_enforced() -> Result<()> {
+        let mut matrix = valid_matrix()?;
         matrix
             .scenarios
             .retain(|scenario| scenario.proof.scenario_class != "host_skip");
@@ -1712,13 +1801,14 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("matrix missing scenario proof class host_skip"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_scenario_ids_are_rejected() {
-        let mut matrix = valid_matrix();
-        let duplicate = matrix.scenarios[0].scenario_id.clone();
-        matrix.scenarios[1].scenario_id = duplicate;
+    fn duplicate_scenario_ids_are_rejected() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let duplicate = mounted_scenario_mut(&mut matrix, 0)?.scenario_id.clone();
+        mounted_scenario_mut(&mut matrix, 1)?.scenario_id = duplicate;
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
             report
@@ -1726,11 +1816,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("duplicate scenario_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn default_matrix_carries_required_multi_handle_coverage() {
-        let report = validate_default_mounted_write_matrix().expect("default matrix validates");
+    fn default_matrix_carries_required_multi_handle_coverage() -> Result<()> {
+        let report = validate_default_mounted_write_matrix()?;
         assert_eq!(report.schema_version, MATRIX_SCHEMA_VERSION);
         assert!(
             report.multi_handle_scenario_count >= REQUIRED_MULTI_HANDLE_KINDS.len(),
@@ -1746,11 +1837,12 @@ mod tests {
         assert_eq!(report.multi_handle_filesystems, vec!["btrfs", "ext4"]);
         assert!(report.multi_handle_max_handles >= 2);
         assert!(report.multi_handle_unsupported_count >= 1);
+        Ok(())
     }
 
     #[test]
-    fn default_matrix_carries_namespace_atomicity_coverage() {
-        let report = validate_default_mounted_write_matrix().expect("default matrix validates");
+    fn default_matrix_carries_namespace_atomicity_coverage() -> Result<()> {
+        let report = validate_default_mounted_write_matrix()?;
         assert!(
             report.namespace_scenario_count >= REQUIRED_NAMESPACE_OPERATION_KINDS.len(),
             "need at least one namespace scenario per required operation kind, got {}",
@@ -1776,19 +1868,13 @@ mod tests {
         }
         assert_eq!(report.namespace_filesystems, vec!["btrfs", "ext4"]);
         assert!(report.namespace_no_partial_mutation_count >= 1);
-    }
-
-    fn first_namespace_scenario(matrix: &mut MountedWriteMatrix) -> &mut NamespaceScenario {
-        matrix
-            .namespace_scenarios
-            .first_mut()
-            .expect("at least one namespace scenario in fixture")
+        Ok(())
     }
 
     #[test]
-    fn namespace_scenario_requires_parent_directory_id() {
-        let mut matrix = valid_matrix();
-        let scenario = first_namespace_scenario(&mut matrix);
+    fn namespace_scenario_requires_parent_directory_id() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = first_namespace_scenario(&mut matrix)?;
         scenario.parent_directory_id.clear();
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
@@ -1797,12 +1883,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("parent_directory_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn namespace_scenario_requires_child_path_id() {
-        let mut matrix = valid_matrix();
-        let scenario = first_namespace_scenario(&mut matrix);
+    fn namespace_scenario_requires_child_path_id() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = first_namespace_scenario(&mut matrix)?;
         scenario.child_path_id.clear();
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
@@ -1811,12 +1898,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("child_path_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn namespace_scenario_requires_expected_link_count() {
-        let mut matrix = valid_matrix();
-        let scenario = first_namespace_scenario(&mut matrix);
+    fn namespace_scenario_requires_expected_link_count() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = first_namespace_scenario(&mut matrix)?;
         scenario.expected_link_count = None;
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
@@ -1825,16 +1913,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("expected_link_count"))
         );
+        Ok(())
     }
 
     #[test]
-    fn namespace_xattr_scenario_requires_xattr_keys() {
-        let mut matrix = valid_matrix();
-        let scenario = matrix
-            .namespace_scenarios
-            .iter_mut()
-            .find(|scenario| scenario.namespace_operation_kind == "xattr_namespace_update")
-            .expect("xattr namespace scenario in fixture");
+    fn namespace_xattr_scenario_requires_xattr_keys() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = namespace_scenario_by_kind_mut(&mut matrix, "xattr_namespace_update")?;
         scenario.xattr_keys.clear();
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
@@ -1843,16 +1928,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("xattr_keys"))
         );
+        Ok(())
     }
 
     #[test]
-    fn namespace_unsupported_requires_no_partial_mutation() {
-        let mut matrix = valid_matrix();
-        let scenario = matrix
-            .namespace_scenarios
-            .iter_mut()
-            .find(|scenario| scenario.expected_outcome.outcome_class == "unsupported_rejected")
-            .expect("unsupported namespace scenario in fixture");
+    fn namespace_unsupported_requires_no_partial_mutation() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = namespace_scenario_by_outcome_mut(&mut matrix, "unsupported_rejected")?;
         scenario.no_partial_mutation_check = false;
         scenario.expected_outcome.no_partial_mutation = false;
         let report = validate_mounted_write_matrix(&matrix);
@@ -1862,11 +1944,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("no_partial_mutation_check"))
         );
+        Ok(())
     }
 
     #[test]
-    fn namespace_required_operation_kinds_are_enforced() {
-        let mut matrix = valid_matrix();
+    fn namespace_required_operation_kinds_are_enforced() -> Result<()> {
+        let mut matrix = valid_matrix()?;
         matrix
             .namespace_scenarios
             .retain(|scenario| scenario.namespace_operation_kind != "rename_overwrite");
@@ -1877,11 +1960,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("rename_overwrite"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_multi_handle_scenarios_are_rejected() {
-        let mut matrix = valid_matrix();
+    fn empty_multi_handle_scenarios_are_rejected() -> Result<()> {
+        let mut matrix = valid_matrix()?;
         matrix.multi_handle_scenarios.clear();
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
@@ -1890,19 +1974,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("multi_handle_scenarios"))
         );
-    }
-
-    fn first_multi_handle_scenario(matrix: &mut MountedWriteMatrix) -> &mut MultiHandleScenario {
-        matrix
-            .multi_handle_scenarios
-            .first_mut()
-            .expect("at least one multi-handle scenario in fixture")
+        Ok(())
     }
 
     #[test]
-    fn multi_handle_scenario_must_have_at_least_two_handles() {
-        let mut matrix = valid_matrix();
-        let scenario = first_multi_handle_scenario(&mut matrix);
+    fn multi_handle_scenario_must_have_at_least_two_handles() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = first_multi_handle_scenario(&mut matrix)?;
         scenario.handles.truncate(1);
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
@@ -1911,12 +1989,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("at least two handles"))
         );
+        Ok(())
     }
 
     #[test]
-    fn multi_handle_scenario_id_prefix_is_enforced() {
-        let mut matrix = valid_matrix();
-        let scenario = first_multi_handle_scenario(&mut matrix);
+    fn multi_handle_scenario_id_prefix_is_enforced() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = first_multi_handle_scenario(&mut matrix)?;
         scenario.scenario_id = "mounted_write_does_not_match".to_owned();
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
@@ -1925,13 +2004,14 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("must start with mounted_write_multihandle_"))
         );
+        Ok(())
     }
 
     #[test]
-    fn multi_handle_operation_must_reference_known_handle() {
-        let mut matrix = valid_matrix();
-        let scenario = first_multi_handle_scenario(&mut matrix);
-        scenario.operation_trace[0].handle_id = "h_unknown".to_owned();
+    fn multi_handle_operation_must_reference_known_handle() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = first_multi_handle_scenario(&mut matrix)?;
+        handle_operation_mut(scenario, 0)?.handle_id = "h_unknown".to_owned();
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
             report
@@ -1939,14 +2019,16 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("references unknown handle"))
         );
+        Ok(())
     }
 
     #[test]
-    fn multi_handle_operation_steps_must_strictly_increase() {
-        let mut matrix = valid_matrix();
-        let scenario = first_multi_handle_scenario(&mut matrix);
+    fn multi_handle_operation_steps_must_strictly_increase() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = first_multi_handle_scenario(&mut matrix)?;
         assert!(scenario.operation_trace.len() >= 2);
-        scenario.operation_trace[1].step = scenario.operation_trace[0].step;
+        let first_step = handle_operation_mut(scenario, 0)?.step;
+        handle_operation_mut(scenario, 1)?.step = first_step;
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
             report
@@ -1955,13 +2037,14 @@ mod tests {
                 .any(|error| error.contains("duplicate step")
                     || error.contains("strictly increasing"))
         );
+        Ok(())
     }
 
     #[test]
-    fn multi_handle_open_flags_are_validated() {
-        let mut matrix = valid_matrix();
-        let scenario = first_multi_handle_scenario(&mut matrix);
-        scenario.handles[0].open_flags = vec!["O_BANANA".to_owned()];
+    fn multi_handle_open_flags_are_validated() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = first_multi_handle_scenario(&mut matrix)?;
+        handle_spec_mut(scenario, 0)?.open_flags = vec!["O_BANANA".to_owned()];
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
             report
@@ -1969,12 +2052,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("unsupported open_flag"))
         );
+        Ok(())
     }
 
     #[test]
-    fn multi_handle_reopen_kind_is_validated() {
-        let mut matrix = valid_matrix();
-        let scenario = first_multi_handle_scenario(&mut matrix);
+    fn multi_handle_reopen_kind_is_validated() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = first_multi_handle_scenario(&mut matrix)?;
         scenario.reopen.kind = "remount_lazy_unsupported".to_owned();
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
@@ -1983,12 +2067,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("unsupported reopen.kind"))
         );
+        Ok(())
     }
 
     #[test]
-    fn multi_handle_cleanup_policy_is_validated() {
-        let mut matrix = valid_matrix();
-        let scenario = first_multi_handle_scenario(&mut matrix);
+    fn multi_handle_cleanup_policy_is_validated() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = first_multi_handle_scenario(&mut matrix)?;
         scenario.cleanup_policy = "abandon".to_owned();
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
@@ -1997,12 +2082,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("unsupported cleanup_policy"))
         );
+        Ok(())
     }
 
     #[test]
-    fn multi_handle_artifact_requirements_are_required() {
-        let mut matrix = valid_matrix();
-        let scenario = first_multi_handle_scenario(&mut matrix);
+    fn multi_handle_artifact_requirements_are_required() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = first_multi_handle_scenario(&mut matrix)?;
         scenario.artifact_requirements.clear();
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
@@ -2011,16 +2097,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("artifact_requirements missing"))
         );
+        Ok(())
     }
 
     #[test]
-    fn multi_handle_unsupported_outcome_requires_follow_up_bead() {
-        let mut matrix = valid_matrix();
-        let scenario = matrix
-            .multi_handle_scenarios
-            .iter_mut()
-            .find(|s| s.expected_outcome.outcome_class == "unsupported_rejected")
-            .expect("rejected multi-handle scenario in fixture");
+    fn multi_handle_unsupported_outcome_requires_follow_up_bead() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = rejected_multi_handle_scenario(&mut matrix)?;
         scenario.expected_outcome.follow_up_bead = String::new();
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
@@ -2029,16 +2112,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("follow_up_bead"))
         );
+        Ok(())
     }
 
     #[test]
-    fn multi_handle_unsupported_outcome_requires_no_partial_mutation() {
-        let mut matrix = valid_matrix();
-        let scenario = matrix
-            .multi_handle_scenarios
-            .iter_mut()
-            .find(|s| s.expected_outcome.outcome_class == "unsupported_rejected")
-            .expect("rejected multi-handle scenario in fixture");
+    fn multi_handle_unsupported_outcome_requires_no_partial_mutation() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = rejected_multi_handle_scenario(&mut matrix)?;
         scenario.expected_outcome.no_partial_mutation = false;
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
@@ -2047,11 +2127,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("must guarantee no_partial_mutation"))
         );
+        Ok(())
     }
 
     #[test]
-    fn multi_handle_required_kinds_are_enforced() {
-        let mut matrix = valid_matrix();
+    fn multi_handle_required_kinds_are_enforced() -> Result<()> {
+        let mut matrix = valid_matrix()?;
         matrix
             .multi_handle_scenarios
             .retain(|s| s.kind != "open_unlink");
@@ -2062,11 +2143,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("missing required kind open_unlink"))
         );
+        Ok(())
     }
 
     #[test]
-    fn multi_handle_results_contract_requires_handle_fields() {
-        let mut matrix = valid_matrix();
+    fn multi_handle_results_contract_requires_handle_fields() -> Result<()> {
+        let mut matrix = valid_matrix()?;
         matrix
             .results_contract
             .required_fields
@@ -2078,11 +2160,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("multi-handle required field handle_ids"))
         );
+        Ok(())
     }
 
     #[test]
-    fn multi_handle_results_contract_requires_artifact_path() {
-        let mut matrix = valid_matrix();
+    fn multi_handle_results_contract_requires_artifact_path() -> Result<()> {
+        let mut matrix = valid_matrix()?;
         matrix
             .results_contract
             .artifact_paths
@@ -2094,14 +2177,15 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("multi-handle artifact path"))
         );
+        Ok(())
     }
 
     #[test]
-    fn multi_handle_duplicate_handle_id_is_rejected() {
-        let mut matrix = valid_matrix();
-        let scenario = first_multi_handle_scenario(&mut matrix);
-        let dup = scenario.handles[0].handle_id.clone();
-        scenario.handles[1].handle_id = dup;
+    fn multi_handle_duplicate_handle_id_is_rejected() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = first_multi_handle_scenario(&mut matrix)?;
+        let dup = handle_spec_mut(scenario, 0)?.handle_id.clone();
+        handle_spec_mut(scenario, 1)?.handle_id = dup;
         let report = validate_mounted_write_matrix(&matrix);
         assert!(
             report
@@ -2109,12 +2193,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("duplicate handle_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn multi_handle_survivor_set_must_not_be_empty() {
-        let mut matrix = valid_matrix();
-        let scenario = first_multi_handle_scenario(&mut matrix);
+    fn multi_handle_survivor_set_must_not_be_empty() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let scenario = first_multi_handle_scenario(&mut matrix)?;
         scenario.survivor_set.present_paths.clear();
         scenario.survivor_set.absent_paths.clear();
         let report = validate_mounted_write_matrix(&matrix);
@@ -2124,5 +2209,6 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("survivor_set"))
         );
+        Ok(())
     }
 }
