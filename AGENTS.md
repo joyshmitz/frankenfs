@@ -442,6 +442,21 @@ FrankenFS must include:
 
 1. Read `AGENTS.md` and `README.md` fully.
 2. Get oriented: run `git status --porcelain`, `bv --robot-next`, `br ready --json`.
+   If raw `br`/`bv` output hangs, includes foreign-looking rows, or promotes
+   permissioned work without the required ACK, consult
+   [docs/tracker-hygiene.md](docs/tracker-hygiene.md) and run the source-aware
+   queue-state check before claiming anything:
+   ```bash
+   TRACKER_SOURCE_HYGIENE_DEFAULT_FIXTURE_SELF_CHECK=0 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
+   ```
+   Use the local script for live tracker triage because it reads the current
+   workspace JSONL directly. Route cargo-based validator runs through `rch`
+   when you need the Rust harness gate, but do not trust a remote worker's stale
+   tracker snapshot as the local claimability source.
+   Treat `source_aware_queue_state.verdict`, `claimable_ids`,
+   `permission_gated_ids`, and `excluded_foreign_open_count` as the safe
+   claimability signal under tracker pollution. Do not delete, rewrite, close,
+   or rename foreign-looking rows merely because they appear in raw triage.
 3. Claim exactly one bead and announce it to other agents (Agent Mail thread = bead ID).
 4. Make the smallest correct change set that advances parity, specs, or conformance.
 5. Run gates (fmt/check/clippy/test) before claiming "done".
@@ -606,6 +621,17 @@ Beads provides a lightweight, dependency-aware issue database and CLI (`br` - be
    ```bash
    br ready --json  # Choose highest priority, no blockers
    ```
+   If this is stale, hangs, or includes foreign project rows, use the
+   source-aware tracker hygiene report before claiming work:
+   ```bash
+   TRACKER_SOURCE_HYGIENE_DEFAULT_FIXTURE_SELF_CHECK=0 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
+   ```
+   For the Rust validator path, use `rch exec -- cargo run -p ffs-harness --`
+   rather than local cargo, and compare its tracker snapshot to the local JSONL
+   before relying on it for claims.
+   Claim only IDs listed in `source_aware_queue_state.claimable_ids`.
+   Permission-gated IDs require the exact ACKs listed in the report, and
+   foreign-looking IDs require owner handoff rather than local mutation.
 
 2. **Reserve edit surface (Mail):**
    ```
@@ -650,7 +676,7 @@ bv is a graph-aware triage engine for Beads projects (`.beads/beads.jsonl`). It 
 
 ### The Workflow: Start With Triage
 
-**`bv --robot-triage` is your single entry point.** It returns:
+**`bv --robot-triage` is your single entry point when the tracker is source-clean.** It returns:
 - `quick_ref`: at-a-glance counts + top 3 picks
 - `recommendations`: ranked actionable items with scores, reasons, unblock info
 - `quick_wins`: low-effort high-impact items
@@ -662,6 +688,13 @@ bv is a graph-aware triage engine for Beads projects (`.beads/beads.jsonl`). It 
 bv --robot-triage        # THE MEGA-COMMAND: start here
 bv --robot-next          # Minimal: just the single top pick + claim command
 ```
+
+If `bv` recommendations include foreign-looking rows or permissioned rows that
+cannot be executed in the current environment, treat `bv` as graph context only
+and switch to the source-aware queue-state workflow in
+[docs/tracker-hygiene.md](docs/tracker-hygiene.md). Raw graph rank is not a
+claim signal when `source_aware_queue_state.verdict` says there is no safe
+local claimable work.
 
 ### Command Reference
 
