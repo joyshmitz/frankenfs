@@ -2017,6 +2017,67 @@ mod tests {
             prop_assert_eq!(read_back, val);
         }
 
+        /// val.to_le_bytes() stamped at offset reads back equal via
+        /// read_le_u64. Fills the u16/u32 → u64 asymmetry in this
+        /// crate's proptest coverage (the project has no
+        /// write_le_u64 helper, so the test stamps the bytes
+        /// directly with the standard library).
+        #[test]
+        fn proptest_read_le_u64_roundtrip(val in any::<u64>(), offset in 0_usize..100) {
+            let mut buf = vec![0_u8; offset + 8];
+            buf[offset..offset + 8].copy_from_slice(&val.to_le_bytes());
+            let read_back = read_le_u64(&buf, offset).unwrap();
+            prop_assert_eq!(read_back, val);
+        }
+
+        /// read_le_u64 is deterministic: same (data, offset) yields
+        /// the same Result.
+        #[test]
+        fn proptest_read_le_u64_is_deterministic(
+            data in prop::collection::vec(any::<u8>(), 0..256),
+            offset in 0_usize..256,
+        ) {
+            let a = read_le_u64(&data, offset).map_err(|e| e.to_string());
+            let b = read_le_u64(&data, offset).map_err(|e| e.to_string());
+            prop_assert_eq!(a, b);
+        }
+
+        /// Any 8-byte read whose end exceeds the slice length is
+        /// rejected with InsufficientData carrying needed=8.
+        #[test]
+        fn proptest_read_le_u64_rejects_short(
+            data in prop::collection::vec(any::<u8>(), 0..16),
+            extra in 0_usize..8,
+        ) {
+            // Pick the smallest offset that places offset+8 just past
+            // the end of the slice: short = data.len()-7..data.len()
+            // are all out-of-range. Skip when data is too small to
+            // form a non-degenerate test.
+            prop_assume!(data.len() < 8 || extra > 0);
+            let offset = data.len().saturating_sub(7).saturating_add(extra);
+            let err = read_le_u64(&data, offset)
+                .expect_err("short read must be rejected");
+            prop_assert!(
+                matches!(err, ParseError::InsufficientData { needed: 8, .. }),
+                "expected InsufficientData {{ needed: 8 }}, got {:?}", err
+            );
+        }
+
+        /// Reading at offset == usize::MAX overflows offset+8 and must
+        /// be rejected with InvalidField (overflow), not panic.
+        #[test]
+        fn proptest_read_le_u64_offset_overflow_rejected(
+            data in prop::collection::vec(any::<u8>(), 0..16),
+        ) {
+            let offset = usize::MAX - 4; // offset + 8 overflows usize
+            let err = read_le_u64(&data, offset)
+                .expect_err("offset overflow must be rejected");
+            prop_assert!(
+                matches!(err, ParseError::InvalidField { field: "offset", reason: "overflow" }),
+                "expected InvalidField overflow, got {:?}", err
+            );
+        }
+
         /// ext4_block_size_from_log produces valid block sizes for log values 0..=6.
         #[test]
         fn proptest_ext4_block_size_from_log_valid(log_val in 0_u32..=6) {
