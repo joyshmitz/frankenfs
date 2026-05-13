@@ -8076,7 +8076,7 @@ fn generate_fixture(args: &[String]) -> Result<()> {
         );
     }
 
-    let image_path = Path::new(&args[0]);
+    let image_path = Path::new(args.first().context("generate-fixture requires <image>")?);
     let image_data =
         fs::read(image_path).with_context(|| format!("failed to read {}", image_path.display()))?;
 
