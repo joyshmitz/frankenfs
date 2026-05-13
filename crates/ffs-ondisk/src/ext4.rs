@@ -9587,6 +9587,32 @@ mod tests {
             let twice = super::normalize_dx_major_hash(once);
             proptest::prop_assert_eq!(once, twice);
         }
+
+        // bd-ldp92 — Zero-seed-equivalence MR for dx_hash_half_md4 and
+        // dx_hash_tea. The ext4 kernel falls back to DX_HASH_DEFAULT_SEED
+        // when s_hash_seed is all-zero. The fixed-case test
+        // dx_hash_uses_ext4_default_seed_when_superblock_seed_is_zero
+        // covers ONE name ("default-seed-check"); this sweeps arbitrary
+        // names across both signed and unsigned char modes to catch a
+        // regression that hardcoded the zero-seed fast path for a specific
+        // name length or character class.
+        #[test]
+        fn ext4_proptest_dx_hash_zero_seed_falls_back_to_default(
+            name in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=128),
+            signed in proptest::prelude::any::<bool>(),
+        ) {
+            let zero_seed = [0_u32; 4];
+            proptest::prop_assert_eq!(
+                super::dx_hash_half_md4(&name, &zero_seed, signed),
+                super::dx_hash_half_md4(&name, &DX_HASH_DEFAULT_SEED, signed),
+                "half_md4: zero seed must produce identical output to DX_HASH_DEFAULT_SEED"
+            );
+            proptest::prop_assert_eq!(
+                super::dx_hash_tea(&name, &zero_seed, signed),
+                super::dx_hash_tea(&name, &DX_HASH_DEFAULT_SEED, signed),
+                "tea: zero seed must produce identical output to DX_HASH_DEFAULT_SEED"
+            );
+        }
     }
 
     #[test]
