@@ -14840,6 +14840,57 @@ mod tests {
             }
         }
 
+        /// bd-c6zvd — Ext4Superblock::group_desc_checksum_kind dispatch
+        /// contract:
+        ///   * MetadataCsum  iff METADATA_CSUM ro_compat is set
+        ///   * GdtCsum       iff GDT_CSUM ro_compat is set AND NOT MetadataCsum
+        ///   * None          otherwise
+        ///
+        /// Pins the 3-way mutually-exclusive dispatcher used by every
+        /// stamp_group_desc_checksum / verify_group_desc_checksum call.
+        /// A regression that flipped the GdtCsum precedence (returning
+        /// GdtCsum even when METADATA_CSUM is set) would silently corrupt
+        /// every group_desc checksum verification on a metadata_csum
+        /// filesystem — and the stamp/verify roundtrip MR wouldn't catch
+        /// it because both sides use the same dispatcher.
+        #[test]
+        fn ext4_proptest_group_desc_checksum_kind_dispatch(
+            has_meta in any::<bool>(),
+            has_gdt in any::<bool>(),
+        ) {
+            // Compose the ro_compat field with the two relevant flags.
+            let incompat = Ext4IncompatFeatures::FILETYPE.0 | Ext4IncompatFeatures::EXTENTS.0;
+            let mut sb = make_proptest_valid_ext4_superblock(
+                2, 8192, 4096, 64, incompat, b"ck-dispatch",
+            );
+            let mut ro_compat = 0_u32;
+            if has_meta { ro_compat |= Ext4RoCompatFeatures::METADATA_CSUM.0; }
+            if has_gdt  { ro_compat |= Ext4RoCompatFeatures::GDT_CSUM.0; }
+            sb[0x64..0x68].copy_from_slice(&ro_compat.to_le_bytes());
+            let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse sb");
+
+            let kind = parsed.group_desc_checksum_kind();
+            let expected = if has_meta {
+                Ext4GroupDescChecksumKind::MetadataCsum
+            } else if has_gdt {
+                Ext4GroupDescChecksumKind::GdtCsum
+            } else {
+                Ext4GroupDescChecksumKind::None
+            };
+            prop_assert_eq!(kind, expected,
+                "dispatch (meta={}, gdt={}) must yield {:?}", has_meta, has_gdt, expected);
+
+            // Mutual exclusivity: the three booleans (has_metadata_csum,
+            // has_gdt_csum, kind == None) must always sum to exactly 1.
+            let is_meta = parsed.has_metadata_csum();
+            let is_gdt  = parsed.has_gdt_csum();
+            let is_none = matches!(kind, Ext4GroupDescChecksumKind::None);
+            let true_count = usize::from(is_meta) + usize::from(is_gdt) + usize::from(is_none);
+            prop_assert_eq!(true_count, 1,
+                "exactly one of {{has_metadata_csum, has_gdt_csum, kind==None}} must be true \
+                 (meta={}, gdt={}, none={})", is_meta, is_gdt, is_none);
+        }
+
         // ── Ext4Extent properties ────────────────────────────────────
 
         /// actual_len is always in [1, EXT_INIT_MAX_LEN].
