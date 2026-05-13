@@ -7241,6 +7241,70 @@ mod tests {
         assert_eq!(entry.name, b"hello", "name @ offset 8..");
     }
 
+    /// bd-z22lc — Kernel-conformance pin for the ext4 checksum-offset
+    /// constants:
+    ///   GD_CHECKSUM_OFFSET       = offsetof(struct ext4_group_desc, bg_checksum)       = 0x1E
+    ///   INODE_CHECKSUM_LO_OFFSET = offsetof(struct ext4_inode,      i_checksum_lo)     = 0x7C
+    ///   INODE_CHECKSUM_HI_OFFSET = offsetof(struct ext4_inode,      i_checksum_hi)     = 0x82
+    ///
+    /// These are the byte offsets at which the per-structure CRC32C is
+    /// read/written. A regression that drifted any by even one byte would
+    /// silently break both checksum verification (read garbage as csum) and
+    /// stamping (write csum into wrong field). The existing stamp/verify
+    /// roundtrip MRs would NOT catch this because the same bad offset is
+    /// used on both sides — they confirm round-trip consistency but not
+    /// kernel-conformance of the offset itself.
+    ///
+    /// Pairs with ext4_super_block_kernel_offsets_match_ext4_h,
+    /// ext4_inode_kernel_offsets_match_ext4_h (which pins many neighboring
+    /// inode-field offsets but not i_checksum_lo / i_checksum_hi).
+    #[test]
+    fn ext4_checksum_offset_constants_match_kernel_header() {
+        // Per fs/ext4/ext4.h struct ext4_group_desc.bg_checksum offset.
+        assert_eq!(
+            GD_CHECKSUM_OFFSET, 0x1E,
+            "GD_CHECKSUM_OFFSET must equal offsetof(struct ext4_group_desc, bg_checksum)"
+        );
+
+        // Per fs/ext4/ext4.h struct ext4_inode.i_checksum_lo offset
+        // (the LE u16 storing low 16 bits of the inode CRC32C).
+        assert_eq!(
+            INODE_CHECKSUM_LO_OFFSET, 0x7C,
+            "INODE_CHECKSUM_LO_OFFSET must equal offsetof(struct ext4_inode, i_checksum_lo)"
+        );
+
+        // Per fs/ext4/ext4.h struct ext4_inode.i_checksum_hi offset
+        // (the LE u16 storing high 16 bits of the inode CRC32C; only
+        // present when i_extra_isize >= 0x86 - 0x80 = 6).
+        assert_eq!(
+            INODE_CHECKSUM_HI_OFFSET, 0x82,
+            "INODE_CHECKSUM_HI_OFFSET must equal offsetof(struct ext4_inode, i_checksum_hi)"
+        );
+
+        // Layout invariants:
+        //  - HI follows LO+ 2 bytes of padding (i_pad1 at 0x7E).
+        //  - Both are 16-bit fields, so each occupies 2 bytes.
+        assert_eq!(
+            INODE_CHECKSUM_HI_OFFSET - INODE_CHECKSUM_LO_OFFSET, 6,
+            "INODE_CHECKSUM_HI - INODE_CHECKSUM_LO == 6 \
+             (lo:u16 @0x7C, i_pad1:u16 @0x7E, i_isize_high:u16 @0x80, hi:u16 @0x82)"
+        );
+
+        // bg_checksum fits within the 32-byte group descriptor:
+        // GD_CHECKSUM_OFFSET (0x1E) + 2 == 0x20.
+        assert_eq!(
+            GD_CHECKSUM_OFFSET + 2, 0x20,
+            "bg_checksum is u16 at the end of the 32-byte group descriptor"
+        );
+
+        // i_checksum_lo + 2 leaves the next field (0x7E) starting at i_pad1.
+        // i_checksum_hi + 2 == 0x84 — within the 256-byte ext4_inode region.
+        assert!(
+            INODE_CHECKSUM_HI_OFFSET + 2 <= 256,
+            "i_checksum_hi must fit within the maximum ext4 inode size"
+        );
+    }
+
     #[test]
     #[allow(clippy::cast_possible_truncation)]
     fn parse_dir_block_with_checksum_tail() {
