@@ -420,3 +420,114 @@ proptest! {
         );
     }
 }
+
+// ── btrfs INODE_REF payload round-trip MRs (bd-2nko1) ────────────────────────
+//
+// Mirrors the libfuzzer-only invariants from
+// fuzz/fuzz_targets/fuzz_btrfs_inode_ref_payload.rs into the regular cargo
+// test surface so they execute on every CI run, without needing cargo-fuzz
+// infrastructure. The btrfs INODE_REF on-disk payload encodes a sequence of
+// (index: LE u64, name_len: LE u16, name: bytes) records; identical bodies
+// from two different paths must round-trip and serialize to the same bytes.
+
+use ffs_core::{fuzz_btrfs_parse_inode_ref_payload, fuzz_btrfs_serialize_inode_ref_payload};
+
+fn inode_ref_entry_strategy() -> impl Strategy<Value = (u64, Vec<u8>)> {
+    (any::<u64>(), prop::collection::vec(any::<u8>(), 1..=64))
+}
+
+proptest! {
+    /// parse(serialize(entries)) == entries for any well-formed entry list.
+    /// Locks the inner round-trip property: serialization is a left-inverse
+    /// of parsing on the structured-input side.
+    #[test]
+    fn proptest_btrfs_inode_ref_parse_serialize_roundtrip(
+        entries in prop::collection::vec(inode_ref_entry_strategy(), 1..=8),
+    ) {
+        let payload = fuzz_btrfs_serialize_inode_ref_payload(&entries)
+            .expect("nonempty-name entries must serialize");
+        let parsed = fuzz_btrfs_parse_inode_ref_payload(&payload)
+            .expect("serialized payload must reparse");
+        prop_assert_eq!(parsed, entries);
+    }
+
+    /// serialize(parse(payload)) == payload for any payload that parses.
+    /// Locks the bijection property on the encoded form: parsing is a
+    /// left-inverse of serialization on the on-disk byte side.
+    #[test]
+    fn proptest_btrfs_inode_ref_serialize_parse_bijection_on_encoded(
+        entries in prop::collection::vec(inode_ref_entry_strategy(), 1..=8),
+    ) {
+        let payload = fuzz_btrfs_serialize_inode_ref_payload(&entries)
+            .expect("nonempty-name entries must serialize");
+        let parsed = fuzz_btrfs_parse_inode_ref_payload(&payload)
+            .expect("serialized payload must reparse");
+        let re_encoded = fuzz_btrfs_serialize_inode_ref_payload(&parsed)
+            .expect("reparsed entries must reserialize");
+        prop_assert_eq!(re_encoded, payload);
+    }
+
+    /// Parsing is deterministic: same payload yields the same Result.
+    /// Locks against any future caching or mutation regression. Tested
+    /// over arbitrary bytes (not just structurally valid ones) because the
+    /// libfuzzer harness applies the same property to arbitrary inputs.
+    #[test]
+    fn proptest_btrfs_inode_ref_parse_is_deterministic(
+        payload in prop::collection::vec(any::<u8>(), 0..=512),
+    ) {
+        let a = fuzz_btrfs_parse_inode_ref_payload(&payload)
+            .map_err(|e| e.to_string());
+        let b = fuzz_btrfs_parse_inode_ref_payload(&payload)
+            .map_err(|e| e.to_string());
+        prop_assert_eq!(a, b);
+    }
+
+    /// Serialization is deterministic.
+    #[test]
+    fn proptest_btrfs_inode_ref_serialize_is_deterministic(
+        entries in prop::collection::vec(inode_ref_entry_strategy(), 1..=8),
+    ) {
+        let a = fuzz_btrfs_serialize_inode_ref_payload(&entries)
+            .expect("nonempty-name entries must serialize");
+        let b = fuzz_btrfs_serialize_inode_ref_payload(&entries)
+            .expect("nonempty-name entries must serialize");
+        prop_assert_eq!(a, b);
+    }
+
+    /// Length-accounting invariant: each successfully parsed entry
+    /// contributes exactly `10 + name.len()` bytes to the payload
+    /// (8-byte index + 2-byte name_len + name body).
+    #[test]
+    fn proptest_btrfs_inode_ref_length_accounting(
+        entries in prop::collection::vec(inode_ref_entry_strategy(), 1..=8),
+    ) {
+        let payload = fuzz_btrfs_serialize_inode_ref_payload(&entries)
+            .expect("nonempty-name entries must serialize");
+        let parsed = fuzz_btrfs_parse_inode_ref_payload(&payload)
+            .expect("serialized payload must reparse");
+        let total_name_bytes: usize = parsed.iter().map(|(_, n)| n.len()).sum();
+        prop_assert_eq!(
+            parsed.len().saturating_mul(10) + total_name_bytes,
+            payload.len(),
+            "10*entries + total name bytes must equal payload length",
+        );
+        prop_assert!(
+            parsed.iter().all(|(_, n)| !n.is_empty()),
+            "successful parse must not contain empty names",
+        );
+    }
+
+    /// Serializing an entry with an empty name is rejected with
+    /// FfsError::Format. Mirrors the ZeroLengthName fuzz mode.
+    #[test]
+    fn proptest_btrfs_inode_ref_serialize_rejects_empty_name(
+        index in any::<u64>(),
+    ) {
+        let err = fuzz_btrfs_serialize_inode_ref_payload(&[(index, Vec::new())])
+            .expect_err("empty name must be rejected");
+        prop_assert!(
+            matches!(err, FfsError::Format(_)),
+            "expected FfsError::Format for empty name, got {:?}", err
+        );
+    }
+}
