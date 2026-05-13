@@ -268,6 +268,17 @@ Structured logs are the authoritative audit trail.
 mod tests {
     use super::*;
 
+    fn repo_root() -> std::io::Result<&'static str> {
+        env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/ffs-harness")
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "harness must be in crates/ffs-harness",
+                )
+            })
+    }
+
     #[test]
     fn canonical_expectations_cover_all_dimensions() {
         let expectations = canonical_expectations();
@@ -280,10 +291,8 @@ mod tests {
     }
 
     #[test]
-    fn all_expectations_pass_against_repo() {
-        let repo_root = env!("CARGO_MANIFEST_DIR")
-            .strip_suffix("/crates/ffs-harness")
-            .expect("harness must be in crates/ffs-harness");
+    fn all_expectations_pass_against_repo() -> std::io::Result<()> {
+        let repo_root = repo_root()?;
         let verdict = check_all(repo_root);
 
         for result in &verdict.results {
@@ -294,15 +303,14 @@ mod tests {
             );
         }
         assert_eq!(verdict.failed, 0);
+        Ok(())
     }
 
     #[test]
-    fn degradation_level_has_five_variants_in_core() {
-        let repo_root = env!("CARGO_MANIFEST_DIR")
-            .strip_suffix("/crates/ffs-harness")
-            .expect("harness must be in crates/ffs-harness");
+    fn degradation_level_has_five_variants_in_core() -> std::io::Result<()> {
+        let repo_root = repo_root()?;
         let path = format!("{repo_root}/crates/ffs-core/src/degradation.rs");
-        let contents = std::fs::read_to_string(&path).expect("read degradation.rs");
+        let contents = std::fs::read_to_string(&path)?;
 
         let variants = ["Normal", "Warning", "Degraded", "Critical", "Emergency"];
         for v in &variants {
@@ -311,15 +319,14 @@ mod tests {
                 "DegradationLevel missing variant {v} in degradation.rs"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn tui_displays_all_degradation_levels() {
-        let repo_root = env!("CARGO_MANIFEST_DIR")
-            .strip_suffix("/crates/ffs-harness")
-            .expect("harness must be in crates/ffs-harness");
+    fn tui_displays_all_degradation_levels() -> std::io::Result<()> {
+        let repo_root = repo_root()?;
         let path = format!("{repo_root}/crates/ffs-tui/src/lib.rs");
-        let contents = std::fs::read_to_string(&path).expect("read ffs-tui/lib.rs");
+        let contents = std::fs::read_to_string(&path)?;
 
         // TUI must handle all 5 levels in degradation_level_label
         for level in ["Normal", "Warning", "Degraded", "Critical", "Emergency"] {
@@ -328,15 +335,14 @@ mod tests {
                 "TUI missing DegradationLevel::{level} in label function"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn structured_log_emits_degradation_transition() {
-        let repo_root = env!("CARGO_MANIFEST_DIR")
-            .strip_suffix("/crates/ffs-harness")
-            .expect("harness must be in crates/ffs-harness");
+    fn structured_log_emits_degradation_transition() -> std::io::Result<()> {
+        let repo_root = repo_root()?;
         let path = format!("{repo_root}/crates/ffs-core/src/degradation.rs");
-        let contents = std::fs::read_to_string(&path).expect("read degradation.rs");
+        let contents = std::fs::read_to_string(&path)?;
 
         assert!(
             contents.contains("degradation_transition"),
@@ -347,15 +353,14 @@ mod tests {
             contents.contains("from") && contents.contains("to"),
             "degradation_transition must include from/to fields"
         );
+        Ok(())
     }
 
     #[test]
-    fn pressure_counters_exist_in_fuse_metrics() {
-        let repo_root = env!("CARGO_MANIFEST_DIR")
-            .strip_suffix("/crates/ffs-harness")
-            .expect("harness must be in crates/ffs-harness");
+    fn pressure_counters_exist_in_fuse_metrics() -> std::io::Result<()> {
+        let repo_root = repo_root()?;
         let path = format!("{repo_root}/crates/ffs-fuse/src/lib.rs");
-        let contents = std::fs::read_to_string(&path).expect("read ffs-fuse/lib.rs");
+        let contents = std::fs::read_to_string(&path)?;
 
         assert!(
             contents.contains("requests_throttled"),
@@ -365,15 +370,14 @@ mod tests {
             contents.contains("requests_shed"),
             "ffs-fuse must track requests_shed"
         );
+        Ok(())
     }
 
     #[test]
-    fn runtime_mode_variants_in_cli() {
-        let repo_root = env!("CARGO_MANIFEST_DIR")
-            .strip_suffix("/crates/ffs-harness")
-            .expect("harness must be in crates/ffs-harness");
+    fn runtime_mode_variants_in_cli() -> std::io::Result<()> {
+        let repo_root = repo_root()?;
         let path = format!("{repo_root}/crates/ffs-cli/src/main.rs");
-        let contents = std::fs::read_to_string(&path).expect("read ffs-cli/main.rs");
+        let contents = std::fs::read_to_string(&path)?;
 
         for mode in ["Standard", "Managed", "PerCore"] {
             assert!(
@@ -381,15 +385,14 @@ mod tests {
                 "CLI missing runtime mode variant {mode}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn wal_replay_markers_in_mvcc() {
-        let repo_root = env!("CARGO_MANIFEST_DIR")
-            .strip_suffix("/crates/ffs-harness")
-            .expect("harness must be in crates/ffs-harness");
+    fn wal_replay_markers_in_mvcc() -> std::io::Result<()> {
+        let repo_root = repo_root()?;
         let path = format!("{repo_root}/crates/ffs-mvcc/src/wal_replay.rs");
-        let contents = std::fs::read_to_string(&path).expect("read wal_replay.rs");
+        let contents = std::fs::read_to_string(&path)?;
 
         assert!(
             contents.contains("wal_replay_start"),
@@ -399,6 +402,7 @@ mod tests {
             contents.contains("wal_replay_done"),
             "wal_replay.rs must emit wal_replay_done marker"
         );
+        Ok(())
     }
 
     #[test]
