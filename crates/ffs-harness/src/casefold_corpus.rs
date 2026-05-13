@@ -501,14 +501,73 @@ fn is_lower_hex(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{Context, bail};
 
-    fn fixture_corpus() -> CasefoldCorpus {
-        parse_casefold_corpus(DEFAULT_CASEFOLD_CORPUS_JSON).expect("default casefold corpus parses")
+    fn fixture_corpus() -> Result<CasefoldCorpus> {
+        parse_casefold_corpus(DEFAULT_CASEFOLD_CORPUS_JSON)
+            .context("default casefold corpus parses")
+    }
+
+    fn first_case_mut(corpus: &mut CasefoldCorpus) -> Result<&mut CasefoldCase> {
+        corpus
+            .cases
+            .first_mut()
+            .context("fixture corpus includes at least one case")
+    }
+
+    fn first_two_cases_mut(
+        corpus: &mut CasefoldCorpus,
+    ) -> Result<(&mut CasefoldCase, &mut CasefoldCase)> {
+        let (first, rest) = corpus
+            .cases
+            .split_first_mut()
+            .context("fixture corpus includes at least one case")?;
+        let second = rest
+            .first_mut()
+            .context("fixture corpus includes at least two cases")?;
+        Ok((first, second))
+    }
+
+    fn case_by_normalized_class_mut<'a>(
+        corpus: &'a mut CasefoldCorpus,
+        normalized_class: &str,
+    ) -> Result<&'a mut CasefoldCase> {
+        corpus
+            .cases
+            .iter_mut()
+            .find(|case| case.normalized_class == normalized_class)
+            .with_context(|| format!("fixture corpus includes normalized_class {normalized_class}"))
+    }
+
+    fn case_by_expected_outcome_mut<'a>(
+        corpus: &'a mut CasefoldCorpus,
+        expected_outcome: &str,
+    ) -> Result<&'a mut CasefoldCase> {
+        corpus
+            .cases
+            .iter_mut()
+            .find(|case| case.expected_outcome == expected_outcome)
+            .with_context(|| format!("fixture corpus includes expected_outcome {expected_outcome}"))
+    }
+
+    fn case_by_kernel_status_mut<'a>(
+        corpus: &'a mut CasefoldCorpus,
+        kernel_comparison_status: &str,
+    ) -> Result<&'a mut CasefoldCase> {
+        corpus
+            .cases
+            .iter_mut()
+            .find(|case| case.kernel_comparison_status == kernel_comparison_status)
+            .with_context(|| {
+                format!(
+                    "fixture corpus includes kernel_comparison_status {kernel_comparison_status}"
+                )
+            })
     }
 
     #[test]
-    fn default_corpus_validates_required_coverage() {
-        let report = validate_default_casefold_corpus().expect("default casefold corpus validates");
+    fn default_corpus_validates_required_coverage() -> Result<()> {
+        let report = validate_default_casefold_corpus()?;
         assert_eq!(report.bead_id, "bd-9er6s");
         for op in REQUIRED_OPERATION_COVERAGE {
             assert!(
@@ -522,16 +581,18 @@ mod tests {
                 "missing outcome {outcome}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn render_markdown_summarizes_default_corpus() {
-        let report = validate_default_casefold_corpus().expect("default casefold corpus validates");
+    fn render_markdown_summarizes_default_corpus() -> Result<()> {
+        let report = validate_default_casefold_corpus()?;
         let markdown = render_casefold_corpus_markdown(&report);
         assert!(markdown.contains("# Ext4 Casefold Corpus"));
         assert!(markdown.contains("`cross_directory_rename`"));
         assert!(markdown.contains("`invalid_encoding_refused`"));
         insta::assert_snapshot!("render_casefold_corpus_markdown_default_corpus", markdown);
+        Ok(())
     }
 
     #[test]
@@ -546,20 +607,24 @@ mod tests {
     }
 
     #[test]
-    fn fail_on_errors_rejects_invalid_report() {
-        let mut corpus = fixture_corpus();
+    fn fail_on_errors_rejects_invalid_report() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus.cases.clear();
         let report = validate_casefold_corpus(&corpus);
-        let err = fail_on_casefold_corpus_errors(&report).expect_err("invalid report should fail");
+        let err = match fail_on_casefold_corpus_errors(&report) {
+            Ok(()) => bail!("invalid report should fail"),
+            Err(err) => err,
+        };
         assert!(
             err.to_string()
                 .contains("casefold corpus validation failed")
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_required_operation_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn missing_required_operation_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus
             .cases
             .retain(|c| c.operation_kind != "cross_directory_rename");
@@ -570,11 +635,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required operation `cross_directory_rename`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_required_outcome_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn missing_required_outcome_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus
             .cases
             .retain(|c| c.expected_outcome != "invalid_encoding_refused");
@@ -585,11 +651,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required outcome `invalid_encoding_refused`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_collision_outcome_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn missing_collision_outcome_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus
             .cases
             .retain(|c| c.expected_outcome != "create_collision_refused");
@@ -600,13 +667,14 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required outcome `create_collision_refused`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_case_id_is_rejected() {
-        let mut corpus = fixture_corpus();
-        let dup = corpus.cases[0].case_id.clone();
-        corpus.cases[1].case_id = dup;
+    fn duplicate_case_id_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let (first, second) = first_two_cases_mut(&mut corpus)?;
+        second.case_id = first.case_id.clone();
         let report = validate_casefold_corpus(&corpus);
         assert!(
             report
@@ -614,12 +682,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicate casefold case_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn case_id_prefix_is_enforced() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].case_id = "fold_001".to_owned();
+    fn case_id_prefix_is_enforced() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.case_id = "fold_001".to_owned();
         let report = validate_casefold_corpus(&corpus);
         assert!(
             report
@@ -627,12 +696,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must start with casefold_"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_source_hex_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].source_name_bytes_hex = "not-hex".to_owned();
+    fn malformed_source_hex_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.source_name_bytes_hex = "not-hex".to_owned();
         let report = validate_casefold_corpus(&corpus);
         assert!(
             report
@@ -640,12 +710,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("source_name_bytes_hex must be lowercase hex"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_source_hex_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].source_name_bytes_hex = String::new();
+    fn empty_source_hex_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.source_name_bytes_hex = String::new();
         let report = validate_casefold_corpus(&corpus);
         assert!(
             report
@@ -653,47 +724,38 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("source_name_bytes_hex must not be empty"))
         );
+        Ok(())
     }
 
     #[test]
-    fn invalid_utf8_class_must_expect_refusal() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.normalized_class == "invalid_utf8")
-            .expect("invalid_utf8 fixture exists");
+    fn invalid_utf8_class_must_expect_refusal() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_normalized_class_mut(&mut corpus, "invalid_utf8")?;
         case.expected_outcome = "lookup_miss".to_owned();
         case.operation_kind = "lookup".to_owned();
         let report = validate_casefold_corpus(&corpus);
         assert!(report.errors.iter().any(|err| {
             err.contains("invalid_utf8 normalized_class must expect invalid_encoding_refused")
         }));
+        Ok(())
     }
 
     #[test]
-    fn overlong_class_requires_long_normalized_form() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.normalized_class == "overlong_normalized_name")
-            .expect("overlong fixture exists");
+    fn overlong_class_requires_long_normalized_form() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_normalized_class_mut(&mut corpus, "overlong_normalized_name")?;
         case.normalized_form_bytes_hex = "1234".to_owned();
         let report = validate_casefold_corpus(&corpus);
         assert!(report.errors.iter().any(|err| err.contains(
             "overlong_normalized_name must declare a normalized form longer than 255 bytes"
         )));
+        Ok(())
     }
 
     #[test]
-    fn outcome_must_match_operation() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_outcome == "lookup_hit")
-            .expect("lookup_hit fixture exists");
+    fn outcome_must_match_operation() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_expected_outcome_mut(&mut corpus, "lookup_hit")?;
         case.operation_kind = "create".to_owned();
         let report = validate_casefold_corpus(&corpus);
         assert!(
@@ -702,16 +764,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("outcome `lookup_hit` requires operation_kind `lookup`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_kernel_status_requires_rationale() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.kernel_comparison_status == "kernel_unsupported_submode")
-            .expect("unsupported submode fixture exists");
+    fn unsupported_kernel_status_requires_rationale() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_kernel_status_mut(&mut corpus, "kernel_unsupported_submode")?;
         case.unsupported_rationale = String::new();
         let report = validate_casefold_corpus(&corpus);
         assert!(
@@ -719,22 +778,24 @@ mod tests {
                 |err| err.contains("kernel_unsupported_submode requires unsupported_rationale")
             )
         );
+        Ok(())
     }
 
     #[test]
-    fn non_unsupported_kernel_status_must_leave_rationale_empty() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0].unsupported_rationale = "non-empty".to_owned();
+    fn non_unsupported_kernel_status_must_leave_rationale_empty() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?.unsupported_rationale = "non-empty".to_owned();
         let report = validate_casefold_corpus(&corpus);
         assert!(report.errors.iter().any(|err| {
             err.contains("non-unsupported kernel status must leave unsupported_rationale empty")
         }));
+        Ok(())
     }
 
     #[test]
-    fn missing_required_feature_flag_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0]
+    fn missing_required_feature_flag_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?
             .feature_flags
             .retain(|flag| flag != "EXT4_FEATURE_INCOMPAT_CASEFOLD");
         let report = validate_casefold_corpus(&corpus);
@@ -744,12 +805,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("feature_flags missing `EXT4_FEATURE_INCOMPAT_CASEFOLD`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_artifact_requirement_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.cases[0]
+    fn missing_artifact_requirement_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_case_mut(&mut corpus)?
             .artifact_requirements
             .retain(|r| r != "expected_outcome");
         let report = validate_casefold_corpus(&corpus);
@@ -759,56 +821,48 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("artifact_requirements missing `expected_outcome`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn htree_interaction_only_on_supported_outcomes() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_outcome == "invalid_encoding_refused")
-            .expect("invalid_encoding fixture exists");
+    fn htree_interaction_only_on_supported_outcomes() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_expected_outcome_mut(&mut corpus, "invalid_encoding_refused")?;
         case.htree_interaction = true;
         let report = validate_casefold_corpus(&corpus);
         assert!(report.errors.iter().any(|err| {
             err.contains("htree_interaction can only annotate lookup/create/rename outcomes")
         }));
+        Ok(())
     }
 
     #[test]
-    fn invalid_encoding_outcome_requires_invalid_utf8_class() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_outcome == "invalid_encoding_refused")
-            .expect("invalid_encoding fixture exists");
+    fn invalid_encoding_outcome_requires_invalid_utf8_class() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_expected_outcome_mut(&mut corpus, "invalid_encoding_refused")?;
         case.normalized_class = "ascii_lower".to_owned();
         let report = validate_casefold_corpus(&corpus);
         assert!(report.errors.iter().any(|err| err.contains(
             "invalid_encoding_refused requires invalid_utf8 or overlong_normalized_name class"
         )));
+        Ok(())
     }
 
     #[test]
-    fn mount_feature_outcome_requires_mount_check_operation() {
-        let mut corpus = fixture_corpus();
-        let case = corpus
-            .cases
-            .iter_mut()
-            .find(|c| c.expected_outcome == "mount_feature_accepted")
-            .expect("mount feature fixture exists");
+    fn mount_feature_outcome_requires_mount_check_operation() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let case = case_by_expected_outcome_mut(&mut corpus, "mount_feature_accepted")?;
         case.operation_kind = "lookup".to_owned();
         let report = validate_casefold_corpus(&corpus);
         assert!(report.errors.iter().any(|err| {
             err.contains("mount_feature_accepted requires mount_feature_check operation")
         }));
+        Ok(())
     }
 
     #[test]
-    fn empty_cases_list_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn empty_cases_list_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus.cases.clear();
         let report = validate_casefold_corpus(&corpus);
         assert!(
@@ -817,5 +871,6 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one case"))
         );
+        Ok(())
     }
 }
