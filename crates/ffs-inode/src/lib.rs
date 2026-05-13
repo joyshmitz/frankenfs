@@ -3089,6 +3089,89 @@ mod tests {
                 "bump_inode_version called {} times must add {} mod 2^64", n, n);
         }
 
+        // bd-wgvh5 — touch_* version-bump dispatch invariant.
+        // NFS coherence depends on:
+        //   touch_atime         : MUST NOT bump i_version (lazy attr)
+        //   touch_mtime_ctime   : MUST bump i_version by exactly 1
+        //   touch_ctime         : MUST bump i_version by exactly 1
+        // Fixed-input touch_atime_does_not_modify_ctime_mtime test
+        // confirms TIMESTAMP isolation but NOT version isolation.
+        // A regression that started bumping version on atime would
+        // silently invalidate every NFS client cache and trigger
+        // spurious revalidation storms.
+
+        #[test]
+        fn ext4_proptest_touch_atime_does_not_bump_version(
+            initial_lo in any::<u32>(),
+            initial_hi in any::<u32>(),
+            secs in any::<u64>(),
+            nsec in any::<u32>(),
+        ) {
+            let mut inode = Ext4Inode {
+                mode: 0o100_644, uid: 0, gid: 0, size: 0,
+                links_count: 1, blocks: 0, flags: 0,
+                version: initial_lo, generation: 0,
+                file_acl: 0, atime: 0, ctime: 0, mtime: 0, dtime: 0,
+                atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
+                crtime: 0, crtime_extra: 0, extra_isize: 32,
+                checksum: 0, version_hi: initial_hi, projid: 0,
+                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+            };
+            touch_atime(&mut inode, secs, nsec);
+            prop_assert_eq!(inode.version, initial_lo,
+                "touch_atime must not modify version (lo)");
+            prop_assert_eq!(inode.version_hi, initial_hi,
+                "touch_atime must not modify version_hi");
+        }
+
+        #[test]
+        fn ext4_proptest_touch_mtime_ctime_bumps_version_by_one(
+            initial_lo in any::<u32>(),
+            initial_hi in any::<u32>(),
+            secs in any::<u64>(),
+            nsec in any::<u32>(),
+        ) {
+            let mut inode = Ext4Inode {
+                mode: 0o100_644, uid: 0, gid: 0, size: 0,
+                links_count: 1, blocks: 0, flags: 0,
+                version: initial_lo, generation: 0,
+                file_acl: 0, atime: 0, ctime: 0, mtime: 0, dtime: 0,
+                atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
+                crtime: 0, crtime_extra: 0, extra_isize: 32,
+                checksum: 0, version_hi: initial_hi, projid: 0,
+                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+            };
+            let initial = u64::from(initial_lo) | (u64::from(initial_hi) << 32);
+            touch_mtime_ctime(&mut inode, secs, nsec);
+            let after = u64::from(inode.version) | (u64::from(inode.version_hi) << 32);
+            prop_assert_eq!(after, initial.wrapping_add(1),
+                "touch_mtime_ctime must bump version by exactly 1");
+        }
+
+        #[test]
+        fn ext4_proptest_touch_ctime_bumps_version_by_one(
+            initial_lo in any::<u32>(),
+            initial_hi in any::<u32>(),
+            secs in any::<u64>(),
+            nsec in any::<u32>(),
+        ) {
+            let mut inode = Ext4Inode {
+                mode: 0o100_644, uid: 0, gid: 0, size: 0,
+                links_count: 1, blocks: 0, flags: 0,
+                version: initial_lo, generation: 0,
+                file_acl: 0, atime: 0, ctime: 0, mtime: 0, dtime: 0,
+                atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
+                crtime: 0, crtime_extra: 0, extra_isize: 32,
+                checksum: 0, version_hi: initial_hi, projid: 0,
+                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+            };
+            let initial = u64::from(initial_lo) | (u64::from(initial_hi) << 32);
+            touch_ctime(&mut inode, secs, nsec);
+            let after = u64::from(inode.version) | (u64::from(inode.version_hi) << 32);
+            prop_assert_eq!(after, initial.wrapping_add(1),
+                "touch_ctime must bump version by exactly 1");
+        }
+
         /// Bijection contract: `serialize_inode` followed by
         /// `Ext4Inode::parse_from_bytes` must round-trip an inode that
         /// already has the on-disk shape (extent_bytes = 60, xattr_ibody
