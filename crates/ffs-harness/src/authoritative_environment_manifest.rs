@@ -428,6 +428,15 @@ mod tests {
         }
     }
 
+    fn first_mkfs_version_mut(
+        manifest: &mut AuthoritativeEnvironmentManifest,
+    ) -> Result<&mut MkfsVersion, &'static str> {
+        manifest
+            .mkfs_versions
+            .first_mut()
+            .ok_or("manifest includes at least one mkfs version")
+    }
+
     #[test]
     fn happy_authoritative_environment_passes() {
         let manifest = happy_manifest();
@@ -583,11 +592,12 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_mkfs_version_is_rejected() {
+    fn incomplete_mkfs_version_is_rejected() -> Result<(), &'static str> {
         let mut manifest = happy_manifest();
-        manifest.mkfs_versions[0].version = String::new();
+        first_mkfs_version_mut(&mut manifest)?.version = String::new();
         let decision = evaluate_authoritative_environment(&manifest, &manifest.clone());
         assert_eq!(reason(&decision), Some("incomplete_mkfs_version"));
+        Ok(())
     }
 
     #[test]
