@@ -6033,6 +6033,70 @@ mod tests {
     }
 
     #[test]
+    fn readiness_lab_rch_lane_schedule_report_json_shape() -> serde_json::Result<()> {
+        let report = plan_rch_lanes(&sample_rch_lane_schedule_manifest());
+        assert!(report.valid);
+
+        let full_json = serde_json::to_string_pretty(&report)?;
+        let decoded: ReadinessLabRchLaneScheduleReport = serde_json::from_str(&full_json)?;
+
+        assert_eq!(decoded, report);
+        assert_eq!(decoded.lane_count, 5);
+        assert_eq!(decoded.planned_lane_count, 4);
+        assert_eq!(decoded.coalesced_duplicate_count, 1);
+        assert_eq!(decoded.target_dir_conflict_count, 0);
+        assert_eq!(decoded.missing_evidence_count, 0);
+        assert_eq!(decoded.local_fallback_violation_count, 0);
+        assert!(decoded.dry_run_only);
+        assert_eq!(decoded.product_evidence_claim, "none");
+
+        let rows = report
+            .rows
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "ordinal": row.ordinal,
+                    "lane_id": row.lane_id,
+                    "lane_kind": row.lane_kind,
+                    "target_dir": row.target_dir,
+                    "artifact_path": row.artifact_path,
+                    "dependency_count": row.dependencies.len(),
+                    "required_evidence_count": row.required_evidence_ids.len(),
+                    "env_allowlist": row.env_allowlist,
+                    "estimated_cost_units": row.estimated_cost_units,
+                    "worker_hint": row.worker_hint,
+                    "coalesced_from": row.coalesced_from,
+                })
+            })
+            .collect::<Vec<_>>();
+        let shape = serde_json::json!({
+            "schema_version": report.schema_version,
+            "plan_id": report.plan_id,
+            "manifest_path": report.manifest_path,
+            "valid": report.valid,
+            "dry_run_only": report.dry_run_only,
+            "product_evidence_claim": report.product_evidence_claim,
+            "release_gate_effect": report.release_gate_effect,
+            "source_bead": report.source_bead,
+            "artifact_root": report.artifact_root,
+            "lane_count": report.lane_count,
+            "planned_lane_count": report.planned_lane_count,
+            "coalesced_duplicate_count": report.coalesced_duplicate_count,
+            "target_dir_conflict_count": report.target_dir_conflict_count,
+            "missing_evidence_count": report.missing_evidence_count,
+            "local_fallback_violation_count": report.local_fallback_violation_count,
+            "rows": rows,
+            "errors": report.errors,
+            "warnings": report.warnings,
+        });
+        insta::assert_snapshot!(
+            "readiness_lab_rch_lane_schedule_report_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
+    }
+
+    #[test]
     fn rch_lane_scheduler_rejects_shared_target_dir_and_missing_evidence() {
         let mut manifest = sample_rch_lane_schedule_manifest();
         manifest.lanes[1].target_dir = manifest.lanes[0].target_dir.clone();

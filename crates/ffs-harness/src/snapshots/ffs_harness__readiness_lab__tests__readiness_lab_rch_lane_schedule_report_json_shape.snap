@@ -1,0 +1,87 @@
+---
+source: crates/ffs-harness/src/readiness_lab.rs
+expression: "serde_json::to_string_pretty(&shape)?"
+---
+{
+  "schema_version": 1,
+  "plan_id": "readiness-lab-rch-plan",
+  "manifest_path": "rch-lanes.json",
+  "valid": true,
+  "dry_run_only": true,
+  "product_evidence_claim": "none",
+  "release_gate_effect": "RCH lane scheduler output is advisory dry-run planning only; it never executes cargo lanes and cannot promote readiness claims",
+  "source_bead": "bd-hejjl",
+  "artifact_root": "artifacts/readiness-lab/rch-schedule",
+  "lane_count": 5,
+  "planned_lane_count": 4,
+  "coalesced_duplicate_count": 1,
+  "target_dir_conflict_count": 0,
+  "missing_evidence_count": 0,
+  "local_fallback_violation_count": 0,
+  "rows": [
+    {
+      "ordinal": 1,
+      "lane_id": "check",
+      "lane_kind": "cargo_check",
+      "target_dir": "/data/tmp/rch_target_frankenfs_readiness_lab_check",
+      "artifact_path": "artifacts/readiness-lab/rch-schedule/check.json",
+      "dependency_count": 0,
+      "required_evidence_count": 1,
+      "env_allowlist": [
+        "CARGO_TARGET_DIR"
+      ],
+      "estimated_cost_units": 2,
+      "worker_hint": "worker-a",
+      "coalesced_from": [
+        "check-duplicate"
+      ]
+    },
+    {
+      "ordinal": 2,
+      "lane_id": "test",
+      "lane_kind": "cargo_test",
+      "target_dir": "/data/tmp/rch_target_frankenfs_readiness_lab_test",
+      "artifact_path": "artifacts/readiness-lab/rch-schedule/test.json",
+      "dependency_count": 1,
+      "required_evidence_count": 1,
+      "env_allowlist": [
+        "CARGO_TARGET_DIR"
+      ],
+      "estimated_cost_units": 4,
+      "worker_hint": "worker-a",
+      "coalesced_from": []
+    },
+    {
+      "ordinal": 3,
+      "lane_id": "clippy",
+      "lane_kind": "cargo_clippy",
+      "target_dir": "/data/tmp/rch_target_frankenfs_readiness_lab_clippy",
+      "artifact_path": "artifacts/readiness-lab/rch-schedule/clippy.json",
+      "dependency_count": 1,
+      "required_evidence_count": 1,
+      "env_allowlist": [
+        "CARGO_TARGET_DIR"
+      ],
+      "estimated_cost_units": 6,
+      "worker_hint": "worker-a",
+      "coalesced_from": []
+    },
+    {
+      "ordinal": 4,
+      "lane_id": "dashboard",
+      "lane_kind": "readiness_dashboard",
+      "target_dir": "/data/tmp/rch_target_frankenfs_readiness_lab_dashboard",
+      "artifact_path": "artifacts/readiness-lab/rch-schedule/dashboard.json",
+      "dependency_count": 2,
+      "required_evidence_count": 1,
+      "env_allowlist": [
+        "CARGO_TARGET_DIR"
+      ],
+      "estimated_cost_units": 3,
+      "worker_hint": "worker-a",
+      "coalesced_from": []
+    }
+  ],
+  "errors": [],
+  "warnings": []
+}
