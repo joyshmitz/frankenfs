@@ -6570,6 +6570,105 @@ mod tests {
     }
 
     #[test]
+    fn readiness_lab_numa_p99_replay_report_json_shape() -> serde_json::Result<()> {
+        let report = validate_numa_p99_replay(&sample_numa_p99_replay_manifest());
+        assert!(report.valid);
+        assert!(report.replay_only);
+
+        let full_json = serde_json::to_string_pretty(&report)?;
+        let decoded: ReadinessLabNumaP99ReplayReport = serde_json::from_str(&full_json)?;
+        assert_eq!(decoded, report);
+        assert_eq!(
+            decoded.product_evidence_claim,
+            READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM
+        );
+        assert!(
+            decoded
+                .release_gate_effect
+                .contains("public readiness unchanged")
+        );
+        assert!(
+            decoded
+                .rows
+                .iter()
+                .any(|row| row.fixture_shape == "skewed_numa"
+                    && row.dominant_component == "numa_remote_access"
+                    && row.product_evidence_claim == READINESS_LAB_NO_PRODUCT_EVIDENCE_CLAIM)
+        );
+
+        let row_shapes: Vec<_> = report
+            .rows
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "fixture_id": row.fixture_id,
+                    "fixture_shape": row.fixture_shape,
+                    "dominant_component": row.dominant_component,
+                })
+            })
+            .collect();
+        let skewed_row = report
+            .rows
+            .iter()
+            .find(|row| row.fixture_shape == "skewed_numa")
+            .expect("sample fixture set includes skewed NUMA row");
+        let representative_row = serde_json::json!({
+            "fixture_id": skewed_row.fixture_id,
+            "fixture_shape": skewed_row.fixture_shape,
+            "classification": skewed_row.classification,
+            "product_evidence_claim": skewed_row.product_evidence_claim,
+            "release_gate_effect": skewed_row.release_gate_effect,
+            "logical_cpus": skewed_row.logical_cpus,
+            "numa_nodes": skewed_row.numa_nodes,
+            "worker_count": skewed_row.worker_count,
+            "hot_shard_count": skewed_row.hot_shard_count,
+            "memory_pressure_percent": skewed_row.memory_pressure_percent,
+            "duration_ms": skewed_row.duration_ms,
+            "p50_latency_us": skewed_row.p50_latency_us,
+            "p95_latency_us": skewed_row.p95_latency_us,
+            "p99_latency_us": skewed_row.p99_latency_us,
+            "component_p99_sum_us": skewed_row.component_p99_sum_us,
+            "dominant_component": skewed_row.dominant_component,
+            "dominant_component_p99_us": skewed_row.dominant_component_p99_us,
+            "queue_depth_p99": skewed_row.queue_depth_p99,
+            "raw_log_path": skewed_row.raw_log_path,
+            "reproduction_command": skewed_row.reproduction_command,
+            "finding_count": skewed_row.finding_count,
+        });
+
+        let shape = serde_json::json!({
+            "schema_version": report.schema_version,
+            "replay_id": report.replay_id,
+            "manifest_path": report.manifest_path,
+            "valid": report.valid,
+            "replay_only": report.replay_only,
+            "product_evidence_claim": report.product_evidence_claim,
+            "release_gate_effect": report.release_gate_effect,
+            "source_bead": report.source_bead,
+            "fixture_count": report.fixture_count,
+            "row_count": report.row_count,
+            "invalid_fixture_count": report.invalid_fixture_count,
+            "missing_shape_count": report.missing_shape_count,
+            "missing_p99_bucket_count": report.missing_p99_bucket_count,
+            "malformed_histogram_count": report.malformed_histogram_count,
+            "impossible_cpu_count": report.impossible_cpu_count,
+            "negative_duration_count": report.negative_duration_count,
+            "stale_fixture_count": report.stale_fixture_count,
+            "future_fixture_count": report.future_fixture_count,
+            "shape_counts": report.shape_counts,
+            "row_shapes": row_shapes,
+            "representative_row": representative_row,
+            "errors": report.errors,
+            "warnings": report.warnings,
+        });
+        insta::assert_snapshot!(
+            "readiness_lab_numa_p99_replay_report_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
+    }
+
+    #[test]
     fn checked_in_numa_p99_replay_fixture_manifest_validates() {
         let manifest = serde_json::from_str::<ReadinessLabNumaP99ReplayManifest>(include_str!(
             "../../../tests/readiness-lab/numa_p99_replay_fixtures.json"
