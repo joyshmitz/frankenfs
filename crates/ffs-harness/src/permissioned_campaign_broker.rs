@@ -4402,7 +4402,7 @@ mod tests {
     }
 
     #[test]
-    fn xfstests_rehearsal_permissioned_run_must_name_scoped_env() {
+    fn xfstests_rehearsal_permissioned_run_must_name_scoped_env() -> Result<(), &'static str> {
         let mut manifest = valid_xfstests_manifest();
         let permissioned_run = manifest
             .exact_commands
@@ -4410,11 +4410,12 @@ mod tests {
             .find(|command| {
                 command.command_role == PermissionedCampaignCommandRole::PermissionedRun
             })
-            .expect("permissioned run command");
+            .ok_or("permissioned run command")?;
         permissioned_run.exact_command = format!(
             "{XFSTESTS_REAL_RUN_ACK_ENV}={XFSTESTS_REAL_RUN_ACK_VALUE} scripts/e2e/ffs_xfstests_e2e.sh"
         );
         assert_issue(&manifest, "incomplete_xfstests_permissioned_run_command");
+        Ok(())
     }
 
     #[test]

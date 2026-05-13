@@ -387,16 +387,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checked_in_swarm_operator_report_validates() {
+    fn checked_in_swarm_operator_report_validates() -> Result<()> {
         let report: SwarmOperatorReport = serde_json::from_str(include_str!(
             "../../../benchmarks/swarm_operator_report.json"
-        ))
-        .expect("checked-in report parses");
+        ))?;
         let validation = validate_swarm_operator_report(&report);
 
         assert!(validation.valid, "{:?}", validation.errors);
         assert_eq!(validation.card_count, REQUIRED_CARD_IDS.len());
         assert_eq!(validation.required_card_count, REQUIRED_CARD_IDS.len());
+        Ok(())
     }
 
     #[test]

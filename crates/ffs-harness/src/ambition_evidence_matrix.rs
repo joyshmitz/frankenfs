@@ -2088,7 +2088,7 @@ mod tests {
     }
 
     #[test]
-    fn dependency_gate_map_records_parent_prerequisites_and_order() {
+    fn dependency_gate_map_records_parent_prerequisites_and_order() -> Result<(), &'static str> {
         let report = analyze_ambition_evidence_matrix(
             &fixture_issues(),
             &[DEFAULT_ARTIFACT_PATH.to_owned()],
@@ -2105,7 +2105,7 @@ mod tests {
             .dependency_gate_map
             .iter()
             .find(|gate| gate.source_bead_id == "bd-rchk0.5.10")
-            .expect("missing parent dependency gate");
+            .ok_or("missing parent dependency gate")?;
         for (required_id, _, _) in KEY_OPERATIONAL_PREREQUISITES {
             assert!(
                 parent_gate
@@ -2116,6 +2116,7 @@ mod tests {
             );
         }
         assert!(parent_gate.tracker_limitation.contains("dotted child IDs"));
+        Ok(())
     }
 
     #[test]

@@ -1019,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_cover_required_schema_fields_and_states() {
+    fn rows_cover_required_schema_fields_and_states() -> Result<(), &'static str> {
         let rows = support_state_rows();
         let errors = validate_support_state_rows(&rows);
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
@@ -1030,11 +1030,12 @@ mod tests {
         let sample = rows
             .iter()
             .find(|row| row.feature_id.eq("btrfs_send_receive_streams"))
-            .expect("send/receive row");
+            .ok_or("send/receive row")?;
         assert_eq!(sample.support_state, "parse_only");
         assert_eq!(sample.owner_bead, "bd-naww5");
         assert!(sample.required_logs.contains("feature_id"));
         assert!(sample.docs_wording_id.starts_with("support."));
+        Ok(())
     }
 
     #[test]

@@ -2072,7 +2072,8 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
     }
 
     #[test]
-    fn build_operational_manifest_emits_valid_pass_fail_skip_and_error_records() {
+    fn build_operational_manifest_emits_valid_pass_fail_skip_and_error_records()
+    -> Result<(), &'static str> {
         let mut timeout = scenario_input("runner_timeout_error_case", 0, None);
         timeout.timed_out = true;
         timeout.cleanup_status = CleanupStatus::PreservedArtifacts;
@@ -2121,7 +2122,7 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
             manifest
                 .operational_context
                 .as_ref()
-                .expect("context")
+                .ok_or("context")?
                 .command_line,
             vec!["scripts/e2e/runner.sh", "--secret", "[REDACTED]"]
         );
@@ -2160,6 +2161,7 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
                 .iter()
                 .any(|path| path.ends_with("repro.json"))
         );
+        Ok(())
     }
 
     #[test]
