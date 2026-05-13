@@ -1490,6 +1490,38 @@ mod tests {
         }
     }
 
+    fn first_retention_policy_mut(
+        config: &mut ProofOverheadBudgetConfig,
+    ) -> Result<&mut RetentionArtifactClassPolicy> {
+        config
+            .retention
+            .artifact_class_policies
+            .first_mut()
+            .context("missing retention artifact class policy")
+    }
+
+    fn first_observed_artifact_mut(
+        observed: &mut ObservedProofMetrics,
+    ) -> Result<&mut ObservedArtifact> {
+        observed
+            .artifacts
+            .first_mut()
+            .context("missing first observed artifact")
+    }
+
+    fn first_two_observed_artifacts_mut(
+        observed: &mut ObservedProofMetrics,
+    ) -> Result<(&mut ObservedArtifact, &mut ObservedArtifact)> {
+        let (first, rest) = observed
+            .artifacts
+            .split_first_mut()
+            .context("missing first observed artifact")?;
+        let second = rest
+            .first_mut()
+            .context("missing second observed artifact")?;
+        Ok((first, second))
+    }
+
     fn decision_for(report: &ProofOverheadBudgetReport, metric: &str) -> BudgetDecision {
         report
             .metric_results
@@ -1727,18 +1759,15 @@ mod tests {
     }
 
     #[test]
-    fn retention_policy_schema_rejects_missing_class_controls() {
+    fn retention_policy_schema_rejects_missing_class_controls() -> Result<()> {
         let mut config = budget_config();
         config.retention.retention_count = 0;
-        config.retention.artifact_class_policies[0].retention_days = 0;
-        config.retention.artifact_class_policies[0].retention_count = 0;
-        config.retention.artifact_class_policies[0].max_size_bytes = 0;
-        config.retention.artifact_class_policies[0]
-            .redaction_policy_version
-            .clear();
-        config.retention.artifact_class_policies[0]
-            .mandatory_fields
-            .clear();
+        let policy = first_retention_policy_mut(&mut config)?;
+        policy.retention_days = 0;
+        policy.retention_count = 0;
+        policy.max_size_bytes = 0;
+        policy.redaction_policy_version.clear();
+        policy.mandatory_fields.clear();
 
         let errors = validate_proof_overhead_budget_config(&config);
 
@@ -1766,13 +1795,15 @@ mod tests {
                 .iter()
                 .any(|error| { error.contains("proof_bundle mandatory_fields must not be empty") })
         );
+        Ok(())
     }
 
     #[test]
-    fn observed_artifact_validation_rejects_compression_corruption() {
+    fn observed_artifact_validation_rejects_compression_corruption() -> Result<()> {
         let config = budget_config();
         let mut observed = observed_metrics();
-        observed.artifacts[0].compressed_size_bytes = Some(observed.artifacts[0].size_bytes + 1);
+        let artifact = first_observed_artifact_mut(&mut observed)?;
+        artifact.compressed_size_bytes = Some(artifact.size_bytes + 1);
 
         let report = evaluate_proof_overhead_budget(&config, &observed);
 
@@ -1783,16 +1814,16 @@ mod tests {
                 .iter()
                 .any(|error| { error.contains("compressed_size_bytes exceeds original size") })
         );
+        Ok(())
     }
 
     #[test]
-    fn observed_artifact_validation_rejects_redaction_mismatch_and_mandatory_drop() {
+    fn observed_artifact_validation_rejects_redaction_mismatch_and_mandatory_drop() -> Result<()> {
         let config = budget_config();
         let mut observed = observed_metrics();
-        observed.artifacts[0].redaction_policy_version = "redact-v0".to_owned();
-        observed.artifacts[0]
-            .dropped_fields
-            .push("scenario_id".to_owned());
+        let artifact = first_observed_artifact_mut(&mut observed)?;
+        artifact.redaction_policy_version = "redact-v0".to_owned();
+        artifact.dropped_fields.push("scenario_id".to_owned());
 
         let report = evaluate_proof_overhead_budget(&config, &observed);
 
@@ -1809,14 +1840,16 @@ mod tests {
                 .iter()
                 .any(|error| { error.contains("dropped mandatory field scenario_id") })
         );
+        Ok(())
     }
 
     #[test]
-    fn observed_artifact_validation_rejects_cleanup_and_validator_failures() {
+    fn observed_artifact_validation_rejects_cleanup_and_validator_failures() -> Result<()> {
         let config = budget_config();
         let mut observed = observed_metrics();
-        observed.artifacts[0].validator_result = "fail".to_owned();
-        observed.artifacts[1].cleanup_status = "failed".to_owned();
+        let (first, second) = first_two_observed_artifacts_mut(&mut observed)?;
+        first.validator_result = "fail".to_owned();
+        second.cleanup_status = "failed".to_owned();
 
         let report = evaluate_proof_overhead_budget(&config, &observed);
 
@@ -1833,6 +1866,7 @@ mod tests {
                 .iter()
                 .any(|error| { error.contains("cleanup_status=failed is not release-gate safe") })
         );
+        Ok(())
     }
 
     #[test]
