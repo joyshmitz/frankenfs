@@ -394,10 +394,10 @@ fn parse_coverage_domains(
         }
 
         let cols: Vec<&str> = trimmed.split('|').map(str::trim).collect();
-        if cols.len() < 5 {
+        let [_, domain_col, implemented_col, total_col, coverage_col, ..] = cols.as_slice() else {
             continue;
-        }
-        let domain = strip_markdown(cols[1]);
+        };
+        let domain = strip_markdown(domain_col);
         if domain.is_empty()
             || domain.eq_ignore_ascii_case("domain")
             || domain.eq_ignore_ascii_case("overall")
@@ -405,14 +405,14 @@ fn parse_coverage_domains(
         {
             continue;
         }
-        let implemented = strip_markdown(cols[2]).parse::<u32>();
-        let total = strip_markdown(cols[3]).parse::<u32>();
+        let implemented = strip_markdown(implemented_col).parse::<u32>();
+        let total = strip_markdown(total_col).parse::<u32>();
         match (implemented, total) {
             (Ok(implemented), Ok(total)) => rows.push(SupportStateCoverageDomain {
                 domain: domain.to_owned(),
                 implemented,
                 total_tracked: total,
-                coverage: strip_markdown(cols[4]).to_owned(),
+                coverage: strip_markdown(coverage_col).to_owned(),
                 count_claim_scope:
                     "implementation inventory only; readiness comes from support_state rows"
                         .to_owned(),
