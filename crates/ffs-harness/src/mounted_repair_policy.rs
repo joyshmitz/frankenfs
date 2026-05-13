@@ -459,16 +459,57 @@ fn is_valid_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
 
-    fn fixture_policy() -> MountedRepairPolicy {
+    fn fixture_policy() -> Result<MountedRepairPolicy> {
         parse_mounted_repair_policy(DEFAULT_MOUNTED_REPAIR_POLICY_JSON)
-            .expect("default mounted repair policy parses")
+    }
+
+    fn first_scenario_mut(policy: &mut MountedRepairPolicy) -> Result<&mut MountedRepairScenario> {
+        policy
+            .scenarios
+            .first_mut()
+            .context("missing mounted repair policy scenario")
+    }
+
+    fn first_two_scenarios_mut(
+        policy: &mut MountedRepairPolicy,
+    ) -> Result<(&mut MountedRepairScenario, &mut MountedRepairScenario)> {
+        let (first, rest) = policy
+            .scenarios
+            .split_first_mut()
+            .context("missing first mounted repair policy scenario")?;
+        let second = rest
+            .first_mut()
+            .context("missing second mounted repair policy scenario")?;
+        Ok((first, second))
+    }
+
+    fn scenario_by_kind_mut<'a>(
+        policy: &'a mut MountedRepairPolicy,
+        kind: &str,
+    ) -> Result<&'a mut MountedRepairScenario> {
+        policy
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.kind == kind)
+            .with_context(|| format!("mounted repair scenario kind `{kind}` exists"))
+    }
+
+    fn scenario_by_outcome_mut<'a>(
+        policy: &'a mut MountedRepairPolicy,
+        expected_outcome: &str,
+    ) -> Result<&'a mut MountedRepairScenario> {
+        policy
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.expected_outcome == expected_outcome)
+            .with_context(|| format!("mounted repair scenario outcome `{expected_outcome}` exists"))
     }
 
     #[test]
-    fn default_policy_validates_required_kinds() {
-        let report = validate_default_mounted_repair_policy()
-            .expect("default mounted repair policy validates");
+    fn default_policy_validates_required_kinds() -> Result<()> {
+        let report = validate_default_mounted_repair_policy()?;
         assert_eq!(report.bead_id, "bd-rchk7.3");
         for kind in REQUIRED_KINDS {
             assert!(
@@ -476,6 +517,7 @@ mod tests {
                 "missing required kind {kind}"
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -489,8 +531,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_default_scrub_kind_is_rejected() {
-        let mut policy = fixture_policy();
+    fn missing_default_scrub_kind_is_rejected() -> Result<()> {
+        let mut policy = fixture_policy()?;
         policy
             .scenarios
             .retain(|s| s.kind != "default_ro_scrub_detect_only");
@@ -501,11 +543,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required kind `default_ro_scrub_detect_only`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_rw_rejection_kind_is_rejected() {
-        let mut policy = fixture_policy();
+    fn missing_rw_rejection_kind_is_rejected() -> Result<()> {
+        let mut policy = fixture_policy()?;
         policy
             .scenarios
             .retain(|s| s.kind != "rw_background_repair_rejected");
@@ -516,13 +559,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required kind `rw_background_repair_rejected`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_scenario_id_is_rejected() {
-        let mut policy = fixture_policy();
-        let dup = policy.scenarios[0].scenario_id.clone();
-        policy.scenarios[1].scenario_id = dup;
+    fn duplicate_scenario_id_is_rejected() -> Result<()> {
+        let mut policy = fixture_policy()?;
+        let (first, second) = first_two_scenarios_mut(&mut policy)?;
+        let dup = first.scenario_id.clone();
+        second.scenario_id = dup;
         let report = validate_mounted_repair_policy(&policy);
         assert!(
             report
@@ -530,12 +575,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicate mounted repair policy scenario_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn scenario_id_prefix_is_enforced() {
-        let mut policy = fixture_policy();
-        policy.scenarios[0].scenario_id = "policy_001".to_owned();
+    fn scenario_id_prefix_is_enforced() -> Result<()> {
+        let mut policy = fixture_policy()?;
+        first_scenario_mut(&mut policy)?.scenario_id = "policy_001".to_owned();
         let report = validate_mounted_repair_policy(&policy);
         assert!(
             report
@@ -543,16 +589,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must start with mounted_repair_"))
         );
+        Ok(())
     }
 
     #[test]
-    fn default_scrub_must_be_read_only() {
-        let mut policy = fixture_policy();
-        let scenario = policy
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "default_ro_scrub_detect_only")
-            .expect("default scrub fixture exists");
+    fn default_scrub_must_be_read_only() -> Result<()> {
+        let mut policy = fixture_policy()?;
+        let scenario = scenario_by_kind_mut(&mut policy, "default_ro_scrub_detect_only")?;
         scenario.mount_mode = "read_write".to_owned();
         let report = validate_mounted_repair_policy(&policy);
         assert!(
@@ -561,16 +604,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("default_ro_scrub_detect_only must be read_only"))
         );
+        Ok(())
     }
 
     #[test]
-    fn default_scrub_cannot_pass_background_repair() {
-        let mut policy = fixture_policy();
-        let scenario = policy
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "default_ro_scrub_detect_only")
-            .expect("default scrub fixture exists");
+    fn default_scrub_cannot_pass_background_repair() -> Result<()> {
+        let mut policy = fixture_policy()?;
+        let scenario = scenario_by_kind_mut(&mut policy, "default_ro_scrub_detect_only")?;
         scenario.cli_flags.push("--background-repair".to_owned());
         let report = validate_mounted_repair_policy(&policy);
         assert!(
@@ -579,32 +619,26 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must not pass --background-repair"))
         );
+        Ok(())
     }
 
     #[test]
-    fn ro_background_repair_requires_ledger_present() {
-        let mut policy = fixture_policy();
-        let scenario = policy
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "ro_background_repair_with_ledger")
-            .expect("ro repair fixture exists");
+    fn ro_background_repair_requires_ledger_present() -> Result<()> {
+        let mut policy = fixture_policy()?;
+        let scenario = scenario_by_kind_mut(&mut policy, "ro_background_repair_with_ledger")?;
         scenario.ledger_present = false;
         scenario.ledger_id = String::new();
         let report = validate_mounted_repair_policy(&policy);
         assert!(report.errors.iter().any(|err| {
             err.contains("ro_background_repair_with_ledger requires ledger_present=true")
         }));
+        Ok(())
     }
 
     #[test]
-    fn rw_repair_must_be_read_write() {
-        let mut policy = fixture_policy();
-        let scenario = policy
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "rw_background_repair_rejected")
-            .expect("rw rejection fixture exists");
+    fn rw_repair_must_be_read_write() -> Result<()> {
+        let mut policy = fixture_policy()?;
+        let scenario = scenario_by_kind_mut(&mut policy, "rw_background_repair_rejected")?;
         scenario.mount_mode = "read_only".to_owned();
         let report = validate_mounted_repair_policy(&policy);
         assert!(
@@ -613,31 +647,25 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("rw_background_repair_rejected must be read_write"))
         );
+        Ok(())
     }
 
     #[test]
-    fn outcome_must_match_kind() {
-        let mut policy = fixture_policy();
-        let scenario = policy
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "default_ro_scrub_detect_only")
-            .expect("default scrub fixture exists");
+    fn outcome_must_match_kind() -> Result<()> {
+        let mut policy = fixture_policy()?;
+        let scenario = scenario_by_kind_mut(&mut policy, "default_ro_scrub_detect_only")?;
         scenario.expected_outcome = "repaired_with_symbol_refresh".to_owned();
         let report = validate_mounted_repair_policy(&policy);
         assert!(report.errors.iter().any(|err| {
             err.contains("default_ro_scrub_detect_only` requires expected_outcome=`detect_only`")
         }));
+        Ok(())
     }
 
     #[test]
-    fn rejection_outcome_requires_rejection_reason() {
-        let mut policy = fixture_policy();
-        let scenario = policy
-            .scenarios
-            .iter_mut()
-            .find(|s| s.expected_outcome == "refused_rw_background_repair")
-            .expect("rw rejection fixture exists");
+    fn rejection_outcome_requires_rejection_reason() -> Result<()> {
+        let mut policy = fixture_policy()?;
+        let scenario = scenario_by_outcome_mut(&mut policy, "refused_rw_background_repair")?;
         scenario.rejection_reason = String::new();
         let report = validate_mounted_repair_policy(&policy);
         assert!(
@@ -646,16 +674,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("refusal must declare a supported rejection_reason"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_rejection_reason_is_rejected() {
-        let mut policy = fixture_policy();
-        let scenario = policy
-            .scenarios
-            .iter_mut()
-            .find(|s| s.expected_outcome == "refused_rw_background_repair")
-            .expect("rw rejection fixture exists");
+    fn unsupported_rejection_reason_is_rejected() -> Result<()> {
+        let mut policy = fixture_policy()?;
+        let scenario = scenario_by_outcome_mut(&mut policy, "refused_rw_background_repair")?;
         scenario.rejection_reason = "spooky_action".to_owned();
         let report = validate_mounted_repair_policy(&policy);
         assert!(
@@ -664,16 +689,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("supported rejection_reason"))
         );
+        Ok(())
     }
 
     #[test]
-    fn non_rejection_outcome_must_leave_rejection_empty() {
-        let mut policy = fixture_policy();
-        let scenario = policy
-            .scenarios
-            .iter_mut()
-            .find(|s| s.expected_outcome == "detect_only")
-            .expect("detect-only fixture exists");
+    fn non_rejection_outcome_must_leave_rejection_empty() -> Result<()> {
+        let mut policy = fixture_policy()?;
+        let scenario = scenario_by_outcome_mut(&mut policy, "detect_only")?;
         scenario.rejection_reason = "rw_serialization_unsupported".to_owned();
         let report = validate_mounted_repair_policy(&policy);
         assert!(
@@ -682,16 +704,17 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("non-rejection outcome must leave rejection_reason empty"))
         );
+        Ok(())
     }
 
     #[test]
-    fn ledger_present_requires_ledger_id() {
-        let mut policy = fixture_policy();
+    fn ledger_present_requires_ledger_id() -> Result<()> {
+        let mut policy = fixture_policy()?;
         let scenario = policy
             .scenarios
             .iter_mut()
-            .find(|s| s.ledger_present)
-            .expect("ledger fixture exists");
+            .find(|scenario| scenario.ledger_present)
+            .context("ledger fixture exists")?;
         scenario.ledger_id = String::new();
         let report = validate_mounted_repair_policy(&policy);
         assert!(
@@ -700,12 +723,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("ledger_present=true requires ledger_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_pre_image_hash_is_rejected() {
-        let mut policy = fixture_policy();
-        policy.scenarios[0].pre_image_hash = "md5:not-supported".to_owned();
+    fn malformed_pre_image_hash_is_rejected() -> Result<()> {
+        let mut policy = fixture_policy()?;
+        first_scenario_mut(&mut policy)?.pre_image_hash = "md5:not-supported".to_owned();
         let report = validate_mounted_repair_policy(&policy);
         assert!(
             report
@@ -713,16 +737,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("pre_image_hash must be sha256"))
         );
+        Ok(())
     }
 
     #[test]
-    fn repair_lifecycle_requires_full_transition_set() {
-        let mut policy = fixture_policy();
-        let scenario = policy
-            .scenarios
-            .iter_mut()
-            .find(|s| s.expected_outcome == "repaired_with_symbol_refresh")
-            .expect("repair fixture exists");
+    fn repair_lifecycle_requires_full_transition_set() -> Result<()> {
+        let mut policy = fixture_policy()?;
+        let scenario = scenario_by_outcome_mut(&mut policy, "repaired_with_symbol_refresh")?;
         scenario
             .expected_ledger_transitions
             .retain(|transition| transition != "symbols_refreshed");
@@ -733,31 +754,25 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing transition `symbols_refreshed`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn repair_lifecycle_requires_symbol_increment() {
-        let mut policy = fixture_policy();
-        let scenario = policy
-            .scenarios
-            .iter_mut()
-            .find(|s| s.expected_outcome == "repaired_with_symbol_refresh")
-            .expect("repair fixture exists");
+    fn repair_lifecycle_requires_symbol_increment() -> Result<()> {
+        let mut policy = fixture_policy()?;
+        let scenario = scenario_by_outcome_mut(&mut policy, "repaired_with_symbol_refresh")?;
         scenario.expected_symbol_generation_increment = 0;
         let report = validate_mounted_repair_policy(&policy);
         assert!(report.errors.iter().any(|err| {
             err.contains("repair lifecycle requires expected_symbol_generation_increment > 0")
         }));
+        Ok(())
     }
 
     #[test]
-    fn detect_only_must_not_record_repair_transition() {
-        let mut policy = fixture_policy();
-        let scenario = policy
-            .scenarios
-            .iter_mut()
-            .find(|s| s.expected_outcome == "detect_only")
-            .expect("detect-only fixture exists");
+    fn detect_only_must_not_record_repair_transition() -> Result<()> {
+        let mut policy = fixture_policy()?;
+        let scenario = scenario_by_outcome_mut(&mut policy, "detect_only")?;
         scenario
             .expected_ledger_transitions
             .push("repair_applied".to_owned());
@@ -765,23 +780,25 @@ mod tests {
         assert!(report.errors.iter().any(|err| {
             err.contains("detect_only must not record repair_applied/symbols_refreshed")
         }));
+        Ok(())
     }
 
     #[test]
-    fn missing_artifact_requirement_is_rejected() {
-        let mut policy = fixture_policy();
-        policy.scenarios[0]
+    fn missing_artifact_requirement_is_rejected() -> Result<()> {
+        let mut policy = fixture_policy()?;
+        first_scenario_mut(&mut policy)?
             .artifact_requirements
             .retain(|r| r != "expected_ledger_transitions");
         let report = validate_mounted_repair_policy(&policy);
         assert!(report.errors.iter().any(|err| {
             err.contains("artifact_requirements missing `expected_ledger_transitions`")
         }));
+        Ok(())
     }
 
     #[test]
-    fn empty_scenarios_list_is_rejected() {
-        let mut policy = fixture_policy();
+    fn empty_scenarios_list_is_rejected() -> Result<()> {
+        let mut policy = fixture_policy()?;
         policy.scenarios.clear();
         let report = validate_mounted_repair_policy(&policy);
         assert!(
@@ -790,5 +807,6 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one scenario"))
         );
+        Ok(())
     }
 }
