@@ -262,7 +262,10 @@ PY
 }
 
 run_cargo() {
-    if [[ "$FFS_USE_RCH" == "1" ]] && command -v rch >/dev/null 2>&1; then
+    if [[ "$FFS_USE_RCH" == "1" ]]; then
+        if ! command -v rch >/dev/null 2>&1; then
+            e2e_fail "FFS_USE_RCH=1 requires rch; set FFS_USE_RCH=0 for an explicit local cargo run"
+        fi
         e2e_assert rch exec -- cargo "$@"
     else
         e2e_assert cargo "$@"
