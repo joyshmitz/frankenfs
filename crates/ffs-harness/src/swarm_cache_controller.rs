@@ -875,6 +875,25 @@ fn validate_non_empty_paths(field: &str, paths: &[String], errors: &mut Vec<Stri
 mod tests {
     use super::*;
 
+    fn scenario_mut(
+        contract: &mut SwarmCacheControllerContract,
+        index: usize,
+    ) -> Result<&mut SwarmCacheScenario> {
+        contract
+            .scenarios
+            .get_mut(index)
+            .with_context(|| format!("contract includes scenario {index}"))
+    }
+
+    fn first_measurement_mut(
+        scenario: &mut SwarmCacheScenario,
+    ) -> Result<&mut CacheCandidateMeasurement> {
+        scenario
+            .measurements
+            .first_mut()
+            .context("scenario includes first measurement")
+    }
+
     #[test]
     fn valid_contract_accepts_large_host_and_small_host_downgrade() {
         let report = validate_swarm_cache_controller_contract(&sample_contract());
@@ -887,11 +906,10 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_swarm_cache_controller_contract_validates() {
+    fn checked_in_swarm_cache_controller_contract_validates() -> Result<()> {
         let contract = load_swarm_cache_controller_contract(Path::new(&workspace_path(
             DEFAULT_SWARM_CACHE_CONTROLLER_CONTRACT,
-        )))
-        .expect("load checked-in cache controller contract");
+        )))?;
         let report = validate_swarm_cache_controller_contract(&contract);
 
         assert!(
@@ -904,6 +922,7 @@ mod tests {
         assert_eq!(report.small_host_downgrade_count, 1);
         assert_eq!(report.authoritative_claim_count, 1);
         assert!(report.errors.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -926,11 +945,10 @@ mod tests {
     /// boolean formatting, best-p99 candidate rendering, and omitted Errors
     /// section for the committed cache-controller contract.
     #[test]
-    fn render_swarm_cache_controller_markdown_checked_in_contract_snapshot() {
+    fn render_swarm_cache_controller_markdown_checked_in_contract_snapshot() -> Result<()> {
         let contract = load_swarm_cache_controller_contract(Path::new(&workspace_path(
             DEFAULT_SWARM_CACHE_CONTROLLER_CONTRACT,
-        )))
-        .expect("load checked-in cache controller contract");
+        )))?;
         let report = validate_swarm_cache_controller_contract(&contract);
         let markdown = render_swarm_cache_controller_markdown(&report);
 
@@ -938,13 +956,15 @@ mod tests {
             "render_swarm_cache_controller_markdown_checked_in_contract",
             markdown
         );
+        Ok(())
     }
 
     #[test]
-    fn small_host_cannot_claim_authoritative_measurement() {
+    fn small_host_cannot_claim_authoritative_measurement() -> Result<()> {
         let mut contract = sample_contract();
-        contract.scenarios[1].release_claim_state = CacheReleaseClaimState::MeasuredAuthoritative;
-        contract.scenarios[1].measurements[0].release_claim_state =
+        let scenario = scenario_mut(&mut contract, 1)?;
+        scenario.release_claim_state = CacheReleaseClaimState::MeasuredAuthoritative;
+        first_measurement_mut(scenario)?.release_claim_state =
             CacheReleaseClaimState::MeasuredAuthoritative;
 
         let report = validate_swarm_cache_controller_contract(&contract);
@@ -956,6 +976,7 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("below the 64-core/256GB target"))
         );
+        Ok(())
     }
 
     #[test]
@@ -977,10 +998,11 @@ mod tests {
     }
 
     #[test]
-    fn dirty_watermarks_must_be_ordered() {
+    fn dirty_watermarks_must_be_ordered() -> Result<()> {
         let mut contract = sample_contract();
-        contract.scenarios[0].backpressure.dirty_high_watermark = 0.95;
-        contract.scenarios[0].backpressure.dirty_critical_watermark = 0.80;
+        let scenario = scenario_mut(&mut contract, 0)?;
+        scenario.backpressure.dirty_high_watermark = 0.95;
+        scenario.backpressure.dirty_critical_watermark = 0.80;
 
         let report = validate_swarm_cache_controller_contract(&contract);
 
@@ -991,6 +1013,7 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("dirty_high_watermark must be below"))
         );
+        Ok(())
     }
 
     fn sample_contract() -> SwarmCacheControllerContract {
