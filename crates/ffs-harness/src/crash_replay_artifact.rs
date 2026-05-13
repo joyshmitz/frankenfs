@@ -529,9 +529,8 @@ fn is_valid_sha256(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn fixture_artifact() -> CrashReplayArtifact {
+    fn fixture_artifact() -> Result<CrashReplayArtifact> {
         parse_crash_replay_artifact(DEFAULT_CRASH_REPLAY_ARTIFACT_JSON)
-            .expect("default crash replay artifact parses")
     }
 
     fn fixture_permissioned_context() -> PermissionedCrashReplayContext {
@@ -557,23 +556,32 @@ mod tests {
         }
     }
 
-    fn fixture_permissioned_artifact(crash_taxonomy: &str) -> CrashReplayArtifact {
-        let mut artifact = fixture_artifact();
+    fn fixture_permissioned_artifact(crash_taxonomy: &str) -> Result<CrashReplayArtifact> {
+        let mut artifact = fixture_artifact()?;
         artifact.bead_id = "bd-8bg7c.1".to_owned();
         artifact.lane_type = "mounted_e2e".to_owned();
         artifact.crash_taxonomy = crash_taxonomy.to_owned();
         artifact.permissioned_context = Some(fixture_permissioned_context());
+        Ok(artifact)
+    }
+
+    fn permissioned_context_mut(
+        artifact: &mut CrashReplayArtifact,
+    ) -> Result<&mut PermissionedCrashReplayContext> {
         artifact
+            .permissioned_context
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("permissioned context"))
     }
 
     #[test]
-    fn default_artifact_validates() {
-        let report = validate_default_crash_replay_artifact()
-            .expect("default crash replay artifact validates");
+    fn default_artifact_validates() -> Result<()> {
+        let report = validate_default_crash_replay_artifact()?;
         assert_eq!(report.schema_version, CRASH_REPLAY_ARTIFACT_SCHEMA_VERSION);
         assert_eq!(report.bead_id, "bd-nk49l");
         assert_eq!(report.oracle_verdict, "exact_match");
         assert!(!report.fail_closed);
+        Ok(())
     }
 
     #[test]
@@ -587,8 +595,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_schedule_id_is_rejected() {
-        let mut artifact = fixture_artifact();
+    fn missing_schedule_id_is_rejected() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         artifact.schedule_id = String::new();
         let report = validate_crash_replay_artifact(&artifact);
         assert!(
@@ -597,11 +605,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing schedule_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn zero_seed_is_rejected() {
-        let mut artifact = fixture_artifact();
+    fn zero_seed_is_rejected() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         artifact.seed = 0;
         let report = validate_crash_replay_artifact(&artifact);
         assert!(
@@ -610,11 +619,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("seed must be positive"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_lane_type_is_rejected() {
-        let mut artifact = fixture_artifact();
+    fn unsupported_lane_type_is_rejected() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         artifact.lane_type = "speculative_simulation".to_owned();
         let report = validate_crash_replay_artifact(&artifact);
         assert!(
@@ -623,11 +633,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported lane_type"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_crash_taxonomy_is_rejected() {
-        let mut artifact = fixture_artifact();
+    fn unsupported_crash_taxonomy_is_rejected() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         artifact.crash_taxonomy = "vibes_taxonomy".to_owned();
         let report = validate_crash_replay_artifact(&artifact);
         assert!(
@@ -636,11 +647,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported crash_taxonomy"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_oracle_verdict_is_rejected() {
-        let mut artifact = fixture_artifact();
+    fn unsupported_oracle_verdict_is_rejected() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         artifact.oracle_verdict = "kinda_passed".to_owned();
         let report = validate_crash_replay_artifact(&artifact);
         assert!(
@@ -649,11 +661,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported oracle_verdict"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_minimization_status_is_rejected() {
-        let mut artifact = fixture_artifact();
+    fn unsupported_minimization_status_is_rejected() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         artifact.minimization_status = "guesswork".to_owned();
         let report = validate_crash_replay_artifact(&artifact);
         assert!(
@@ -662,11 +675,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported minimization_status"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_pre_crash_hash_is_rejected() {
-        let mut artifact = fixture_artifact();
+    fn malformed_pre_crash_hash_is_rejected() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         artifact.pre_crash_image_hash = "md5:not-supported".to_owned();
         let report = validate_crash_replay_artifact(&artifact);
         assert!(
@@ -675,11 +689,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("pre_crash_image_hash must be sha256"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_post_replay_hash_is_rejected_for_non_skip_lane() {
-        let mut artifact = fixture_artifact();
+    fn missing_post_replay_hash_is_rejected_for_non_skip_lane() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         artifact.post_replay_image_hash = String::new();
         let report = validate_crash_replay_artifact(&artifact);
         assert!(
@@ -688,11 +703,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("post_replay_image_hash must be sha256"))
         );
+        Ok(())
     }
 
     #[test]
-    fn host_skip_lane_does_not_require_post_replay_hash() {
-        let mut artifact = fixture_artifact();
+    fn host_skip_lane_does_not_require_post_replay_hash() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         artifact.lane_type = "host_skip".to_owned();
         artifact.oracle_verdict = "unsupported_host_skip".to_owned();
         artifact.post_replay_image_hash = String::new();
@@ -704,11 +720,12 @@ mod tests {
             "host skip should not require post_replay_image_hash: {:?}",
             report.errors
         );
+        Ok(())
     }
 
     #[test]
-    fn mounted_e2e_lane_requires_permissioned_context() {
-        let mut artifact = fixture_artifact();
+    fn mounted_e2e_lane_requires_permissioned_context() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         artifact.lane_type = "mounted_e2e".to_owned();
         artifact.permissioned_context = None;
         let report = validate_crash_replay_artifact(&artifact);
@@ -718,26 +735,25 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("mounted_e2e lane must declare permissioned_context"))
         );
+        Ok(())
     }
 
     #[test]
-    fn permissioned_mounted_write_reopen_artifact_validates() {
-        let artifact = fixture_permissioned_artifact("mounted_write_reopen");
+    fn permissioned_mounted_write_reopen_artifact_validates() -> Result<()> {
+        let artifact = fixture_permissioned_artifact("mounted_write_reopen")?;
         let report = validate_crash_replay_artifact(&artifact);
         assert!(
             report.valid,
             "permissioned mounted write/reopen context should validate: {:?}",
             report.errors
         );
+        Ok(())
     }
 
     #[test]
-    fn permissioned_context_rejects_missing_artifact_paths() {
-        let mut artifact = fixture_permissioned_artifact("mounted_write_reopen");
-        let context = artifact
-            .permissioned_context
-            .as_mut()
-            .expect("permissioned context");
+    fn permissioned_context_rejects_missing_artifact_paths() -> Result<()> {
+        let mut artifact = fixture_permissioned_artifact("mounted_write_reopen")?;
+        let context = permissioned_context_mut(&mut artifact)?;
         context.host_capability_proof.clear();
         context.stdout_path.clear();
         let report = validate_crash_replay_artifact(&artifact);
@@ -753,15 +769,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("permissioned_context missing stdout_path"))
         );
+        Ok(())
     }
 
     #[test]
-    fn permissioned_context_rejects_bad_image_hash_and_cleanup_status() {
-        let mut artifact = fixture_permissioned_artifact("mounted_write_reopen");
-        let context = artifact
-            .permissioned_context
-            .as_mut()
-            .expect("permissioned context");
+    fn permissioned_context_rejects_bad_image_hash_and_cleanup_status() -> Result<()> {
+        let mut artifact = fixture_permissioned_artifact("mounted_write_reopen")?;
+        let context = permissioned_context_mut(&mut artifact)?;
         context.image_hash = "sha1:not-supported".to_owned();
         context.cleanup_status = "maybe_clean".to_owned();
         let report = validate_crash_replay_artifact(&artifact);
@@ -777,15 +791,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported cleanup_status"))
         );
+        Ok(())
     }
 
     #[test]
-    fn permissioned_daemon_pid_requires_termination_method() {
-        let mut artifact = fixture_permissioned_artifact("mounted_write_reopen");
-        artifact
-            .permissioned_context
-            .as_mut()
-            .expect("permissioned context")
+    fn permissioned_daemon_pid_requires_termination_method() -> Result<()> {
+        let mut artifact = fixture_permissioned_artifact("mounted_write_reopen")?;
+        permissioned_context_mut(&mut artifact)?
             .termination_method
             .clear();
         let report = validate_crash_replay_artifact(&artifact);
@@ -795,11 +807,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("daemon_pid requires termination_method"))
         );
+        Ok(())
     }
 
     #[test]
-    fn repair_interruption_requires_repair_ledger_artifact() {
-        let artifact = fixture_permissioned_artifact("repair_interruption");
+    fn repair_interruption_requires_repair_ledger_artifact() -> Result<()> {
+        let artifact = fixture_permissioned_artifact("repair_interruption")?;
         let report = validate_crash_replay_artifact(&artifact);
         assert!(
             report
@@ -807,27 +820,26 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("repair_interruption lane must declare repair_ledger_path"))
         );
+        Ok(())
     }
 
     #[test]
-    fn repair_interruption_accepts_repair_ledger_artifact() {
-        let mut artifact = fixture_permissioned_artifact("repair_interruption");
-        artifact
-            .permissioned_context
-            .as_mut()
-            .expect("permissioned context")
-            .repair_ledger_path = "artifacts/crash-replay/repair_ledger.jsonl".to_owned();
+    fn repair_interruption_accepts_repair_ledger_artifact() -> Result<()> {
+        let mut artifact = fixture_permissioned_artifact("repair_interruption")?;
+        permissioned_context_mut(&mut artifact)?.repair_ledger_path =
+            "artifacts/crash-replay/repair_ledger.jsonl".to_owned();
         let report = validate_crash_replay_artifact(&artifact);
         assert!(
             report.valid,
             "permissioned repair interruption context should validate: {:?}",
             report.errors
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_operation_trace_is_rejected_for_non_skip_lane() {
-        let mut artifact = fixture_artifact();
+    fn empty_operation_trace_is_rejected_for_non_skip_lane() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         artifact.operation_trace.clear();
         let report = validate_crash_replay_artifact(&artifact);
         assert!(
@@ -836,14 +848,16 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must declare operation_trace"))
         );
+        Ok(())
     }
 
     #[test]
-    fn operation_trace_steps_must_increase() {
-        let mut artifact = fixture_artifact();
-        if artifact.operation_trace.len() >= 2 {
-            artifact.operation_trace[1].step = artifact.operation_trace[0].step;
-        }
+    fn operation_trace_steps_must_increase() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
+        let [first, second, ..] = artifact.operation_trace.as_mut_slice() else {
+            anyhow::bail!("fixture operation trace must have at least two steps");
+        };
+        second.step = first.step;
         let report = validate_crash_replay_artifact(&artifact);
         assert!(
             report
@@ -851,11 +865,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("strictly increasing"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_crash_point_marker_is_rejected() {
-        let mut artifact = fixture_artifact();
+    fn missing_crash_point_marker_is_rejected() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         for step in &mut artifact.operation_trace {
             step.crash_point_after = false;
         }
@@ -866,11 +881,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("declare a crash_point_after step"))
         );
+        Ok(())
     }
 
     #[test]
-    fn failing_verdict_requires_follow_up_bead_or_skip_reason() {
-        let mut artifact = fixture_artifact();
+    fn failing_verdict_requires_follow_up_bead_or_skip_reason() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         artifact.oracle_verdict = "missing_file".to_owned();
         artifact.follow_up_bead = String::new();
         artifact.follow_up_skip_reason = String::new();
@@ -881,11 +897,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must declare follow_up_bead or follow_up_skip_reason"))
         );
+        Ok(())
     }
 
     #[test]
-    fn passing_verdict_must_not_carry_follow_up_bead() {
-        let mut artifact = fixture_artifact();
+    fn passing_verdict_must_not_carry_follow_up_bead() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         artifact.follow_up_bead = "bd-followup".to_owned();
         let report = validate_crash_replay_artifact(&artifact);
         assert!(
@@ -894,11 +911,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("passing verdict must leave follow_up_bead empty"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_follow_up_bead_is_rejected() {
-        let mut artifact = fixture_artifact();
+    fn malformed_follow_up_bead_is_rejected() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         artifact.oracle_verdict = "missing_file".to_owned();
         artifact.follow_up_bead = "PROJ-99".to_owned();
         let report = validate_crash_replay_artifact(&artifact);
@@ -908,15 +926,17 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("follow_up_bead must look like bd-"))
         );
+        Ok(())
     }
 
     #[test]
-    fn fail_closed_flag_is_set_for_replay_failure() {
-        let mut artifact = fixture_artifact();
+    fn fail_closed_flag_is_set_for_replay_failure() -> Result<()> {
+        let mut artifact = fixture_artifact()?;
         artifact.oracle_verdict = "replay_failure".to_owned();
         artifact.follow_up_bead = "bd-replay-followup".to_owned();
         let report = validate_crash_replay_artifact(&artifact);
         assert!(report.fail_closed);
+        Ok(())
     }
 
     fn entry(path: &str, byte_size: u64, xattrs: &[&str], mode: &str) -> SurvivorEntry {
