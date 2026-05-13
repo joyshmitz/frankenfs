@@ -1103,6 +1103,28 @@ mod tests {
         }
     }
 
+    fn arbitration_mut<'a>(
+        report: &'a mut CrossOracleArbitrationReport,
+        arbitration_id: &str,
+    ) -> Result<&'a mut CrossOracleArbitration> {
+        report
+            .arbitrations
+            .iter_mut()
+            .find(|arbitration| arbitration.arbitration_id == arbitration_id)
+            .with_context(|| format!("sample report includes arbitration {arbitration_id}"))
+    }
+
+    fn source_oracle_mut<'a>(
+        arbitration: &'a mut CrossOracleArbitration,
+        oracle_id: &str,
+    ) -> Result<&'a mut CrossOracleEvidence> {
+        arbitration
+            .source_oracles
+            .iter_mut()
+            .find(|source| source.oracle_id == oracle_id)
+            .with_context(|| format!("sample arbitration includes source oracle {oracle_id}"))
+    }
+
     #[test]
     fn valid_report_covers_all_categories_and_oracle_inputs() {
         let validation = validate_cross_oracle_arbitration_report(&valid_report());
@@ -1139,9 +1161,11 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_high_risk_conflicts_must_fail_closed() {
+    fn unresolved_high_risk_conflicts_must_fail_closed() -> Result<()> {
         let mut report = valid_report();
-        report.arbitrations[2].release_gate_impact.effect = CrossOracleReleaseGateEffect::Downgrade;
+        arbitration_mut(&mut report, "arb_frankenfs_product_bug")?
+            .release_gate_impact
+            .effect = CrossOracleReleaseGateEffect::Downgrade;
 
         let validation = validate_cross_oracle_arbitration_report(&report);
 
@@ -1150,12 +1174,13 @@ mod tests {
             error.contains("arb_frankenfs_product_bug")
                 && error.contains("unresolved high-risk public claim must fail closed")
         }));
+        Ok(())
     }
 
     #[test]
-    fn stale_or_missing_evidence_requires_gap_aware_classification() {
+    fn stale_or_missing_evidence_requires_gap_aware_classification() -> Result<()> {
         let mut report = valid_report();
-        report.arbitrations[7].classification =
+        arbitration_mut(&mut report, "arb_repair_oracle_gap")?.classification =
             CrossOracleDisagreementCategory::FrankenFsProductBug;
 
         let validation = validate_cross_oracle_arbitration_report(&report);
@@ -1164,12 +1189,13 @@ mod tests {
         assert!(validation.errors.iter().any(|error| {
             error.contains("arb_repair_oracle_gap") && error.contains("cannot absorb evidence gaps")
         }));
+        Ok(())
     }
 
     #[test]
-    fn missing_log_fields_and_source_artifacts_fail_closed() {
+    fn missing_log_fields_and_source_artifacts_fail_closed() -> Result<()> {
         let mut report = valid_report();
-        let arbitration = &mut report.arbitrations[0];
+        let arbitration = arbitration_mut(&mut report, "arb_model_bug")?;
         arbitration
             .log_fields
             .retain(|field| field != "artifact_hashes");
@@ -1186,12 +1212,17 @@ mod tests {
         assert!(validation.errors.iter().any(|error| {
             error.contains("arb_model_bug") && error.contains("missing source artifact")
         }));
+        Ok(())
     }
 
     #[test]
-    fn missing_oracle_uses_explicit_missing_hash() {
+    fn missing_oracle_uses_explicit_missing_hash() -> Result<()> {
         let mut report = valid_report();
-        report.arbitrations[7].source_oracles[0].artifact_sha256 = HASH_A.to_owned();
+        source_oracle_mut(
+            arbitration_mut(&mut report, "arb_repair_oracle_gap")?,
+            "repair_missing",
+        )?
+        .artifact_sha256 = HASH_A.to_owned();
 
         let validation = validate_cross_oracle_arbitration_report(&report);
 
@@ -1199,6 +1230,7 @@ mod tests {
         assert!(validation.errors.iter().any(|error| {
             error.contains("repair_missing") && error.contains("artifact_sha256=missing")
         }));
+        Ok(())
     }
 
     #[test]
