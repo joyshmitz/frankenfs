@@ -748,6 +748,7 @@ mod tests {
         ReadinessEventEnvelope, ReadinessEventSeverity, SCHEMA_VERSION, ScenarioOutcome,
         ScenarioResult, SkipReason, WorkerContext,
     };
+    use anyhow::Context;
     use std::fs;
     use tempfile::TempDir;
 
@@ -755,21 +756,48 @@ mod tests {
         dir: TempDir,
     }
 
+    fn first_selection(index: &OperationalEvidenceIndex) -> Result<&OperationalEvidenceSelection> {
+        index.selections.first().context("expected selected record")
+    }
+
+    fn first_record(index: &OperationalEvidenceIndex) -> Result<&OperationalEvidenceRecord> {
+        index.records.first().context("expected evidence record")
+    }
+
+    fn duplicate_run_id(
+        index: &OperationalEvidenceIndex,
+        index_offset: usize,
+    ) -> Result<&OperationalEvidenceDuplicateRunId> {
+        index
+            .duplicate_run_ids
+            .get(index_offset)
+            .with_context(|| format!("expected duplicate run id at index {index_offset}"))
+    }
+
+    fn first_readiness_event_mut(
+        manifest: &mut ArtifactManifest,
+    ) -> Result<&mut ReadinessEventEnvelope> {
+        manifest
+            .readiness_events
+            .first_mut()
+            .context("expected sample readiness event")
+    }
+
     impl EvidenceFixture {
-        fn new() -> Self {
-            Self {
-                dir: TempDir::new().expect("tempdir"),
-            }
+        fn new() -> Result<Self> {
+            Ok(Self {
+                dir: TempDir::new().context("create evidence tempdir")?,
+            })
         }
 
-        fn index(&self, current_git_sha: Option<&str>) -> OperationalEvidenceIndex {
+        fn index(&self, current_git_sha: Option<&str>) -> Result<OperationalEvidenceIndex> {
             let config = OperationalEvidenceIndexConfig {
                 artifacts_dir: self.dir.path().to_path_buf(),
                 current_git_sha: current_git_sha.map(str::to_owned),
                 max_artifact_age_days: None,
                 recency_reference_epoch_days: None,
             };
-            build_operational_evidence_index(&config).expect("index builds")
+            build_operational_evidence_index(&config)
         }
 
         fn index_with_recency(
@@ -777,36 +805,37 @@ mod tests {
             current_git_sha: Option<&str>,
             max_artifact_age_days: u32,
             reference_epoch_days: u32,
-        ) -> OperationalEvidenceIndex {
+        ) -> Result<OperationalEvidenceIndex> {
             let config = OperationalEvidenceIndexConfig {
                 artifacts_dir: self.dir.path().to_path_buf(),
                 current_git_sha: current_git_sha.map(str::to_owned),
                 max_artifact_age_days: Some(max_artifact_age_days),
                 recency_reference_epoch_days: Some(reference_epoch_days),
             };
-            build_operational_evidence_index(&config).expect("index builds")
+            build_operational_evidence_index(&config)
         }
 
-        fn write_manifest(&self, name: &str, manifest: &ArtifactManifest) {
-            fs::write(
-                self.dir.path().join(name),
-                serde_json::to_string_pretty(manifest).expect("manifest serializes"),
-            )
-            .expect("write manifest");
+        fn write_manifest(&self, name: &str, manifest: &ArtifactManifest) -> Result<()> {
+            let path = self.dir.path().join(name);
+            let json = serde_json::to_string_pretty(manifest)
+                .with_context(|| format!("serialize manifest `{name}`"))?;
+            fs::write(&path, json).with_context(|| format!("write manifest {}", path.display()))
         }
 
-        fn touch(&self, path: &str) {
+        fn touch(&self, path: &str) -> Result<()> {
             let path = self.dir.path().join(path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).expect("create parent");
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create fixture parent {}", parent.display()))?;
             }
-            fs::write(path, "log\n").expect("write fixture file");
+            fs::write(&path, "log\n")
+                .with_context(|| format!("write fixture file {}", path.display()))
         }
     }
 
     #[test]
-    fn selects_newest_authoritative_artifact_and_preserves_conflict() {
-        let fixture = EvidenceFixture::new();
+    fn selects_newest_authoritative_artifact_and_preserves_conflict() -> Result<()> {
+        let fixture = EvidenceFixture::new()?;
         let old = sample_manifest(SampleManifestInput {
             run_id: "run_20260501",
             scenario_id: "mounted_ext4_rw",
@@ -833,24 +862,25 @@ mod tests {
             cpu_count: 64,
             memory_gib: 256,
         });
-        touch_manifest_logs(&fixture, &old);
-        touch_manifest_logs(&fixture, &new);
-        fixture.write_manifest("old.json", &old);
-        fixture.write_manifest("new.json", &new);
+        touch_manifest_logs(&fixture, &old)?;
+        touch_manifest_logs(&fixture, &new)?;
+        fixture.write_manifest("old.json", &old)?;
+        fixture.write_manifest("new.json", &new)?;
 
-        let index = fixture.index(Some("abc123"));
+        let index = fixture.index(Some("abc123"))?;
 
         assert_eq!(index.conflict_count, 1);
         assert_eq!(index.selected_record_count, 1);
-        let selection = index.selections.first().expect("selection");
+        let selection = first_selection(&index)?;
         assert_eq!(selection.selected_run_id, "run_20260509");
         assert_eq!(selection.selected_outcome, OperationalEvidenceOutcome::Pass);
         assert_eq!(selection.superseded_record_ids.len(), 1);
+        Ok(())
     }
 
     #[test]
-    fn duplicate_run_ids_are_reported_without_hiding_records() {
-        let fixture = EvidenceFixture::new();
+    fn duplicate_run_ids_are_reported_without_hiding_records() -> Result<()> {
+        let fixture = EvidenceFixture::new()?;
         for scenario_id in ["xfstests_generic_001", "xfstests_generic_002"] {
             let manifest = sample_manifest(SampleManifestInput {
                 run_id: "run_duplicate",
@@ -865,21 +895,23 @@ mod tests {
                 cpu_count: 64,
                 memory_gib: 256,
             });
-            touch_manifest_logs(&fixture, &manifest);
-            fixture.write_manifest(&format!("{scenario_id}.json"), &manifest);
+            touch_manifest_logs(&fixture, &manifest)?;
+            fixture.write_manifest(&format!("{scenario_id}.json"), &manifest)?;
         }
 
-        let index = fixture.index(Some("abc123"));
+        let index = fixture.index(Some("abc123"))?;
 
         assert_eq!(index.source_record_count, 2);
         assert_eq!(index.duplicate_run_id_count, 1);
-        assert_eq!(index.duplicate_run_ids[0].run_id, "run_duplicate");
-        assert_eq!(index.duplicate_run_ids[0].record_ids.len(), 2);
+        let duplicate = duplicate_run_id(&index, 0)?;
+        assert_eq!(duplicate.run_id, "run_duplicate");
+        assert_eq!(duplicate.record_ids.len(), 2);
+        Ok(())
     }
 
     #[test]
-    fn stale_git_shas_and_missing_raw_logs_are_non_authoritative() {
-        let fixture = EvidenceFixture::new();
+    fn stale_git_shas_and_missing_raw_logs_are_non_authoritative() -> Result<()> {
+        let fixture = EvidenceFixture::new()?;
         let stale = sample_manifest(SampleManifestInput {
             run_id: "run_stale_sha",
             scenario_id: "proof_bundle_stale",
@@ -906,11 +938,11 @@ mod tests {
             cpu_count: 64,
             memory_gib: 256,
         });
-        touch_manifest_logs(&fixture, &stale);
-        fixture.write_manifest("stale.json", &stale);
-        fixture.write_manifest("missing.json", &missing_logs);
+        touch_manifest_logs(&fixture, &stale)?;
+        fixture.write_manifest("stale.json", &stale)?;
+        fixture.write_manifest("missing.json", &missing_logs)?;
 
-        let index = fixture.index(Some("abc123"));
+        let index = fixture.index(Some("abc123"))?;
 
         assert_eq!(index.stale_record_count, 1);
         assert_eq!(index.missing_raw_log_record_count, 1);
@@ -933,11 +965,12 @@ mod tests {
                     OperationalEvidenceReleaseClaimEffect::Downgrades
                 )
         }));
+        Ok(())
     }
 
     #[test]
-    fn host_capability_skips_are_downgraded_for_release_claims() {
-        let fixture = EvidenceFixture::new();
+    fn host_capability_skips_are_downgraded_for_release_claims() -> Result<()> {
+        let fixture = EvidenceFixture::new()?;
         let manifest = sample_manifest(SampleManifestInput {
             run_id: "run_host_skip",
             scenario_id: "fuse_permission_probe",
@@ -951,11 +984,11 @@ mod tests {
             cpu_count: 2,
             memory_gib: 4,
         });
-        touch_manifest_logs(&fixture, &manifest);
-        fixture.write_manifest("skip.json", &manifest);
+        touch_manifest_logs(&fixture, &manifest)?;
+        fixture.write_manifest("skip.json", &manifest)?;
 
-        let index = fixture.index(Some("abc123"));
-        let record = index.records.first().expect("record");
+        let index = fixture.index(Some("abc123"))?;
+        let record = first_record(&index)?;
 
         assert_eq!(
             record.host_class,
@@ -967,10 +1000,11 @@ mod tests {
         );
         assert!(!record.authoritative);
         assert_eq!(index.host_downgrade_count, 1);
+        Ok(())
     }
 
     #[test]
-    fn undersized_numeric_large_host_fingerprints_are_downgraded() {
+    fn undersized_numeric_large_host_fingerprints_are_downgraded() -> Result<()> {
         let cases = [
             ("permissioned-host|32cpu|128GiB", 32, 128),
             ("permissioned-host|64cpu|128GiB", 64, 128),
@@ -980,7 +1014,7 @@ mod tests {
         ];
 
         for (host_fingerprint, cpu_count, memory_gib) in cases {
-            let fixture = EvidenceFixture::new();
+            let fixture = EvidenceFixture::new()?;
             let mut manifest = sample_manifest(SampleManifestInput {
                 run_id: "run_undersized_host",
                 scenario_id: "swarm_workload_harness",
@@ -994,12 +1028,13 @@ mod tests {
                 cpu_count,
                 memory_gib,
             });
-            manifest.readiness_events[0].host_fingerprint = host_fingerprint.to_owned();
-            touch_manifest_logs(&fixture, &manifest);
-            fixture.write_manifest("undersized.json", &manifest);
+            first_readiness_event_mut(&mut manifest)?.host_fingerprint =
+                host_fingerprint.to_owned();
+            touch_manifest_logs(&fixture, &manifest)?;
+            fixture.write_manifest("undersized.json", &manifest)?;
 
-            let index = fixture.index(Some("abc123"));
-            let record = index.records.first().expect("record");
+            let index = fixture.index(Some("abc123"))?;
+            let record = first_record(&index)?;
 
             assert_eq!(
                 record.host_class,
@@ -1014,11 +1049,12 @@ mod tests {
             assert!(!record.authoritative);
             assert_eq!(index.selected_record_count, 0);
         }
+        Ok(())
     }
 
     #[test]
-    fn numeric_large_host_fingerprint_remains_authoritative() {
-        let fixture = EvidenceFixture::new();
+    fn numeric_large_host_fingerprint_remains_authoritative() -> Result<()> {
+        let fixture = EvidenceFixture::new()?;
         let mut manifest = sample_manifest(SampleManifestInput {
             run_id: "run_large_host",
             scenario_id: "swarm_workload_harness",
@@ -1032,13 +1068,13 @@ mod tests {
             cpu_count: 64,
             memory_gib: 256,
         });
-        manifest.readiness_events[0].host_fingerprint =
+        first_readiness_event_mut(&mut manifest)?.host_fingerprint =
             "permissioned-host|logical_cpus=64|memory_gib=256".to_owned();
-        touch_manifest_logs(&fixture, &manifest);
-        fixture.write_manifest("large.json", &manifest);
+        touch_manifest_logs(&fixture, &manifest)?;
+        fixture.write_manifest("large.json", &manifest)?;
 
-        let index = fixture.index(Some("abc123"));
-        let record = index.records.first().expect("record");
+        let index = fixture.index(Some("abc123"))?;
+        let record = first_record(&index)?;
 
         assert_eq!(
             record.host_class,
@@ -1050,11 +1086,12 @@ mod tests {
         );
         assert!(record.authoritative);
         assert_eq!(index.selected_record_count, 1);
+        Ok(())
     }
 
     #[test]
-    fn max_age_marks_old_artifacts_stale() {
-        let fixture = EvidenceFixture::new();
+    fn max_age_marks_old_artifacts_stale() -> Result<()> {
+        let fixture = EvidenceFixture::new()?;
         let manifest = sample_manifest(SampleManifestInput {
             run_id: "run_old",
             scenario_id: "release_gate_old",
@@ -1068,23 +1105,24 @@ mod tests {
             cpu_count: 64,
             memory_gib: 256,
         });
-        touch_manifest_logs(&fixture, &manifest);
-        fixture.write_manifest("old.json", &manifest);
+        touch_manifest_logs(&fixture, &manifest)?;
+        fixture.write_manifest("old.json", &manifest)?;
 
         let reference_epoch_days =
             crate::artifact_manifest::parse_manifest_timestamp_epoch_days("2026-05-09T00:00:00Z")
-                .expect("reference timestamp parses");
-        let index = fixture.index_with_recency(Some("abc123"), 3, reference_epoch_days);
-        let record = index.records.first().expect("record");
+                .context("parse reference timestamp")?;
+        let index = fixture.index_with_recency(Some("abc123"), 3, reference_epoch_days)?;
+        let record = first_record(&index)?;
 
         assert_eq!(record.freshness, OperationalEvidenceFreshness::Stale);
         assert!(record.stale_artifact);
         assert!(!record.authoritative);
+        Ok(())
     }
 
     #[test]
-    fn markdown_renders_latest_truth_and_diagnostics() {
-        let fixture = EvidenceFixture::new();
+    fn markdown_renders_latest_truth_and_diagnostics() -> Result<()> {
+        let fixture = EvidenceFixture::new()?;
         let manifest = sample_manifest(SampleManifestInput {
             run_id: "run_20260509",
             scenario_id: "release_gate_green",
@@ -1098,16 +1136,17 @@ mod tests {
             cpu_count: 64,
             memory_gib: 256,
         });
-        touch_manifest_logs(&fixture, &manifest);
-        fixture.write_manifest("green.json", &manifest);
+        touch_manifest_logs(&fixture, &manifest)?;
+        fixture.write_manifest("green.json", &manifest)?;
 
-        let index = fixture.index(Some("abc123"));
+        let index = fixture.index(Some("abc123"))?;
         let markdown = render_operational_evidence_index_markdown(&index);
 
         assert!(markdown.contains("# FrankenFS Operational Evidence Index"));
         assert!(markdown.contains("## Latest Truth"));
         assert!(markdown.contains("release_gate_green"));
         assert!(markdown.contains("Strengthens"));
+        Ok(())
     }
 
     /// bd-rchk0.53.20 - exact-output snapshot for the latest-truth
@@ -1454,14 +1493,15 @@ mod tests {
         }
     }
 
-    fn touch_manifest_logs(fixture: &EvidenceFixture, manifest: &ArtifactManifest) {
+    fn touch_manifest_logs(fixture: &EvidenceFixture, manifest: &ArtifactManifest) -> Result<()> {
         if let Some(context) = &manifest.operational_context {
-            fixture.touch(&context.stdout_path);
-            fixture.touch(&context.stderr_path);
+            fixture.touch(&context.stdout_path)?;
+            fixture.touch(&context.stderr_path)?;
         }
         for record in manifest.operational_scenarios.values() {
-            fixture.touch(&record.stdout_path);
-            fixture.touch(&record.stderr_path);
+            fixture.touch(&record.stdout_path)?;
+            fixture.touch(&record.stderr_path)?;
         }
+        Ok(())
     }
 }
