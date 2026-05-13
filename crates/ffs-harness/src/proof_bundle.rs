@@ -2226,8 +2226,8 @@ mod tests {
         manifest: ProofBundleManifest,
     }
 
-    fn sample_bundle() -> SampleBundle {
-        let root = tempfile::tempdir().expect("tempdir");
+    fn sample_bundle() -> Result<SampleBundle> {
+        let root = tempfile::tempdir()?;
         let mut lanes = Vec::new();
         for (index, lane_id) in REQUIRED_PROOF_BUNDLE_LANES.iter().enumerate() {
             let raw_log_path = format!("logs/{lane_id}.log");
@@ -2237,23 +2237,21 @@ mod tests {
             let p99_artifact_path = format!("artifacts/{lane_id}_p99_attribution.json");
             let runner_artifact_path = format!("artifacts/{lane_id}_runner.json");
 
-            write_file(root.path(), &raw_log_path, &format!("{lane_id} raw log\n"));
-            write_file(root.path(), &summary_path, &format!("# {lane_id}\n"));
+            write_file(root.path(), &raw_log_path, &format!("{lane_id} raw log\n"))?;
+            write_file(root.path(), &summary_path, &format!("# {lane_id}\n"))?;
             write_file(
                 root.path(),
                 &input_path,
                 &format!("{{\"lane\":\"{lane_id}\"}}\n"),
-            );
+            )?;
             write_file(
                 root.path(),
                 &artifact_path,
                 &format!("{{\"artifact\":\"{lane_id}\"}}\n"),
-            );
+            )?;
 
-            let raw_log_hash =
-                sha256_file_hex(&root.path().join(&raw_log_path)).expect("raw log hash");
-            let artifact_hash =
-                sha256_file_hex(&root.path().join(&artifact_path)).expect("artifact hash");
+            let raw_log_hash = sha256_file_hex(&root.path().join(&raw_log_path))?;
+            let artifact_hash = sha256_file_hex(&root.path().join(&artifact_path))?;
             let status = if *lane_id == ADAPTIVE_RUNTIME_LANE {
                 ProofBundleOutcome::Pass
             } else {
@@ -2330,9 +2328,8 @@ mod tests {
                     root.path(),
                     &p99_artifact_path,
                     &format!("{{\"p99_attribution\":\"{lane_id}\"}}\n"),
-                );
-                let p99_artifact_hash =
-                    sha256_file_hex(&root.path().join(&p99_artifact_path)).expect("artifact hash");
+                )?;
+                let p99_artifact_hash = sha256_file_hex(&root.path().join(&p99_artifact_path))?;
                 metadata.insert(
                     "p99_attribution_artifact".to_owned(),
                     p99_artifact_path.clone(),
@@ -2349,10 +2346,9 @@ mod tests {
                     root.path(),
                     &runner_artifact_path,
                     &format!("{{\"runner\":\"{lane_id}\"}}\n"),
-                );
+                )?;
                 let runner_artifact_hash =
-                    sha256_file_hex(&root.path().join(&runner_artifact_path))
-                        .expect("runner artifact hash");
+                    sha256_file_hex(&root.path().join(&runner_artifact_path))?;
                 metadata.insert(
                     "scenario_id".to_owned(),
                     "adaptive_runtime_accepted_large_host".to_owned(),
@@ -2424,7 +2420,7 @@ mod tests {
             integrity: None,
         };
         manifest.integrity = Some(integrity_for(&manifest));
-        SampleBundle { root, manifest }
+        Ok(SampleBundle { root, manifest })
     }
 
     fn integrity_for(manifest: &ProofBundleManifest) -> ProofBundleIntegrityPolicy {
@@ -2435,12 +2431,13 @@ mod tests {
         }
     }
 
-    fn write_file(root: &Path, relative: &str, text: &str) {
+    fn write_file(root: &Path, relative: &str, text: &str) -> Result<()> {
         let path = root.join(relative);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("parent dir");
+            fs::create_dir_all(parent)?;
         }
-        fs::write(path, text).expect("write fixture");
+        fs::write(path, text)?;
+        Ok(())
     }
 
     fn validate_sample(sample: &SampleBundle) -> ProofBundleValidationReport {
@@ -2453,19 +2450,101 @@ mod tests {
         )
     }
 
+    fn first_lane_mut(manifest: &mut ProofBundleManifest) -> Result<&mut ProofBundleLane> {
+        manifest
+            .lanes
+            .first_mut()
+            .context("fixture manifest has at least one lane")
+    }
+
+    fn second_lane_mut(manifest: &mut ProofBundleManifest) -> Result<&mut ProofBundleLane> {
+        manifest
+            .lanes
+            .get_mut(1)
+            .context("fixture manifest has at least two lanes")
+    }
+
+    fn first_artifact_mut(lane: &mut ProofBundleLane) -> Result<&mut ProofBundleArtifact> {
+        lane.artifacts
+            .first_mut()
+            .context("fixture lane has at least one artifact")
+    }
+
+    fn first_scenario_id_mut(lane: &mut ProofBundleLane) -> Result<&mut String> {
+        lane.scenario_ids
+            .first_mut()
+            .context("fixture lane has at least one scenario id")
+    }
+
+    fn integrity_mut(
+        manifest: &mut ProofBundleManifest,
+    ) -> Result<&mut ProofBundleIntegrityPolicy> {
+        manifest
+            .integrity
+            .as_mut()
+            .context("fixture manifest has integrity policy")
+    }
+
+    fn artifact_report_by_lane<'a>(
+        report: &'a ProofBundleValidationReport,
+        lane_id: &str,
+    ) -> Result<&'a ProofBundleArtifactReport> {
+        report
+            .artifact_reports
+            .iter()
+            .find(|artifact| artifact.lane_id == lane_id)
+            .with_context(|| format!("artifact report should exist for lane {lane_id}"))
+    }
+
+    fn lane_provenance_by_lane<'a>(
+        report: &'a ProofBundleValidationReport,
+        lane_id: &str,
+    ) -> Result<&'a ProofBundleLaneProvenanceReport> {
+        report
+            .lane_provenance
+            .iter()
+            .find(|provenance| provenance.lane_id == lane_id)
+            .with_context(|| format!("lane provenance should exist for {lane_id}"))
+    }
+
+    fn swarm_evidence_by_lane<'a>(
+        report: &'a ProofBundleValidationReport,
+        lane_id: &str,
+    ) -> Result<&'a ProofBundleSwarmEvidenceReport> {
+        report
+            .swarm_evidence
+            .iter()
+            .find(|evidence| evidence.lane_id == lane_id)
+            .with_context(|| format!("swarm evidence should exist for lane {lane_id}"))
+    }
+
+    fn adaptive_runtime_evidence_by_lane<'a>(
+        report: &'a ProofBundleValidationReport,
+        lane_id: &str,
+    ) -> Result<&'a ProofBundleAdaptiveRuntimeEvidenceReport> {
+        report
+            .adaptive_runtime_evidence
+            .iter()
+            .find(|evidence| evidence.lane_id == lane_id)
+            .with_context(|| format!("adaptive runtime evidence should exist for lane {lane_id}"))
+    }
+
     fn swarm_lane_mut<'a>(
         manifest: &'a mut ProofBundleManifest,
         lane_id: &str,
-    ) -> &'a mut ProofBundleLane {
+    ) -> Result<&'a mut ProofBundleLane> {
         manifest
             .lanes
             .iter_mut()
             .find(|lane| lane.lane_id == lane_id)
-            .expect("swarm lane")
+            .with_context(|| format!("proof bundle lane should exist: {lane_id}"))
     }
 
-    fn set_swarm_lane_for_large_host(manifest: &mut ProofBundleManifest, lane_id: &str) {
-        let lane = swarm_lane_mut(manifest, lane_id);
+    fn set_swarm_lane_for_large_host(
+        manifest: &mut ProofBundleManifest,
+        lane_id: &str,
+    ) -> Result<()> {
+        let lane = swarm_lane_mut(manifest, lane_id)?;
         lane.status = ProofBundleOutcome::Pass;
         lane.metadata.insert(
             "host_class".to_owned(),
@@ -2476,10 +2555,14 @@ mod tests {
             "authoritative_large_host".to_owned(),
         );
         lane.metadata.remove("downgrade_reason");
+        Ok(())
     }
 
-    fn set_swarm_lane_for_small_host_smoke(manifest: &mut ProofBundleManifest, lane_id: &str) {
-        let lane = swarm_lane_mut(manifest, lane_id);
+    fn set_swarm_lane_for_small_host_smoke(
+        manifest: &mut ProofBundleManifest,
+        lane_id: &str,
+    ) -> Result<()> {
+        let lane = swarm_lane_mut(manifest, lane_id)?;
         lane.status = ProofBundleOutcome::Skip;
         lane.metadata
             .insert("host_class".to_owned(), "developer_smoke".to_owned());
@@ -2489,14 +2572,17 @@ mod tests {
             "downgrade_reason".to_owned(),
             "developer smoke host cannot support release wording".to_owned(),
         );
+        Ok(())
     }
 
-    fn adaptive_runtime_lane_mut(manifest: &mut ProofBundleManifest) -> &mut ProofBundleLane {
+    fn adaptive_runtime_lane_mut(
+        manifest: &mut ProofBundleManifest,
+    ) -> Result<&mut ProofBundleLane> {
         manifest
             .lanes
             .iter_mut()
             .find(|lane| lane.lane_id == ADAPTIVE_RUNTIME_LANE)
-            .expect("adaptive runtime lane")
+            .context("adaptive runtime lane")
     }
 
     fn attach_permissioned_campaign_packet(sample: &mut SampleBundle, lane_id: &str) -> Result<()> {
@@ -2505,7 +2591,7 @@ mod tests {
             sample.root.path(),
             &packet_path,
             "{\"authorization_notice\":\"not executed evidence\"}\n",
-        );
+        )?;
         let packet_hash = sha256_file_hex(&sample.root.path().join(&packet_path))?;
         let lane = sample
             .manifest
@@ -2532,8 +2618,8 @@ mod tests {
     }
 
     #[test]
-    fn valid_sample_bundle_passes() {
-        let sample = sample_bundle();
+    fn valid_sample_bundle_passes() -> Result<()> {
+        let sample = sample_bundle()?;
         let report = validate_sample(&sample);
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.totals.lanes, REQUIRED_PROOF_BUNDLE_LANES.len());
@@ -2547,6 +2633,7 @@ mod tests {
         );
         assert_eq!(report.swarm_evidence.len(), 2);
         assert_eq!(report.adaptive_runtime_evidence.len(), 1);
+        Ok(())
     }
 
     #[test]
@@ -2576,8 +2663,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_required_lane_is_rejected() {
-        let mut sample = sample_bundle();
+    fn missing_required_lane_is_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
         sample
             .manifest
             .lanes
@@ -2589,11 +2676,12 @@ mod tests {
                 .missing_required_lanes
                 .contains(&"known_deferrals".to_owned())
         );
+        Ok(())
     }
 
     #[test]
-    fn stale_sha_and_schema_are_rejected() {
-        let mut sample = sample_bundle();
+    fn stale_sha_and_schema_are_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
         sample.manifest.schema_version = 0;
         let report = validate_proof_bundle_manifest(
             &sample.manifest,
@@ -2610,11 +2698,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("stale schema_version"))
         );
+        Ok(())
     }
 
     #[test]
-    fn stale_timestamp_is_rejected() {
-        let mut sample = sample_bundle();
+    fn stale_timestamp_is_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
         sample.manifest.generated_at = "2000-01-01T00:00:00Z".to_owned();
         let report = validate_proof_bundle_manifest(
             &sample.manifest,
@@ -2625,11 +2714,12 @@ mod tests {
         );
         assert!(!report.valid);
         assert!(report.stale_timestamp.is_some());
+        Ok(())
     }
 
     #[test]
-    fn future_timestamp_is_rejected() {
-        let mut sample = sample_bundle();
+    fn future_timestamp_is_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
         sample.manifest.generated_at = "2999-01-01T00:00:00Z".to_owned();
         let report = validate_proof_bundle_manifest(
             &sample.manifest,
@@ -2644,22 +2734,24 @@ mod tests {
             error
                 .contains("future generated_at 2999-01-01T00:00:00Z is after the current timestamp")
         }));
+        Ok(())
     }
 
     #[test]
-    fn artifact_hash_mismatch_is_rejected() {
-        let mut sample = sample_bundle();
-        sample.manifest.lanes[0].artifacts[0].sha256 =
+    fn artifact_hash_mismatch_is_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        first_artifact_mut(first_lane_mut(&mut sample.manifest)?)?.sha256 =
             "0000000000000000000000000000000000000000000000000000000000000000".to_owned();
         let report = validate_sample(&sample);
         assert!(!report.valid);
         assert_eq!(report.artifact_hash_mismatches.len(), 1);
+        Ok(())
     }
 
     #[test]
-    fn broken_links_are_rejected() {
-        let mut sample = sample_bundle();
-        sample.manifest.lanes[0].raw_log_path = "logs/missing.log".to_owned();
+    fn broken_links_are_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        first_lane_mut(&mut sample.manifest)?.raw_log_path = "logs/missing.log".to_owned();
         let report = validate_sample(&sample);
         assert!(!report.valid);
         assert!(
@@ -2668,12 +2760,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("broken link"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_raw_log_hash_is_rejected() {
-        let mut sample = sample_bundle();
-        sample.manifest.lanes[0].raw_log_sha256.clear();
+    fn missing_raw_log_hash_is_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        first_lane_mut(&mut sample.manifest)?.raw_log_sha256.clear();
         let report = validate_sample(&sample);
         assert!(!report.valid);
         assert!(
@@ -2682,12 +2775,13 @@ mod tests {
                 .iter()
                 .any(|error| { error.contains("raw_log_sha256") && error.contains("SHA-256 hex") })
         );
+        Ok(())
     }
 
     #[test]
-    fn raw_log_hash_mismatch_is_rejected() {
-        let mut sample = sample_bundle();
-        sample.manifest.lanes[0].raw_log_sha256 =
+    fn raw_log_hash_mismatch_is_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        first_lane_mut(&mut sample.manifest)?.raw_log_sha256 =
             "0000000000000000000000000000000000000000000000000000000000000000".to_owned();
         let report = validate_sample(&sample);
         assert!(!report.valid);
@@ -2698,43 +2792,47 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("raw log hash mismatch"))
         );
+        Ok(())
     }
 
     #[test]
-    fn relative_parent_traversal_is_rejected() {
-        let mut sample = sample_bundle();
-        sample.manifest.lanes[0].summary_path = "../outside-summary.md".to_owned();
+    fn relative_parent_traversal_is_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        first_lane_mut(&mut sample.manifest)?.summary_path = "../outside-summary.md".to_owned();
         let report = validate_sample(&sample);
         assert!(!report.valid);
         assert!(report.broken_links.iter().any(|link| {
             link.field == "summary_path" && link.diagnostic.contains("parent traversal")
         }));
+        Ok(())
     }
 
     #[test]
-    fn absolute_paths_are_rejected_by_default() {
-        let mut sample = sample_bundle();
-        sample.manifest.lanes[0].summary_path = "/tmp/frankenfs-proof-summary.md".to_owned();
+    fn absolute_paths_are_rejected_by_default() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        first_lane_mut(&mut sample.manifest)?.summary_path =
+            "/tmp/frankenfs-proof-summary.md".to_owned();
         let report = validate_sample(&sample);
         assert!(!report.valid);
         assert!(report.broken_links.iter().any(|link| {
             link.field == "summary_path" && link.diagnostic.contains("path must be relative")
         }));
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn symlink_escape_is_rejected() {
-        let mut sample = sample_bundle();
-        let outside = tempfile::tempdir().expect("outside tempdir");
+    fn symlink_escape_is_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        let outside = tempfile::tempdir()?;
         let outside_raw = outside.path().join("outside.log");
-        fs::write(&outside_raw, "escaped raw log\n").expect("outside raw log");
+        fs::write(&outside_raw, "escaped raw log\n")?;
         let escaped_link = sample.root.path().join("logs/escaped.log");
-        std::os::unix::fs::symlink(&outside_raw, &escaped_link).expect("symlink");
+        std::os::unix::fs::symlink(&outside_raw, &escaped_link)?;
 
-        sample.manifest.lanes[0].raw_log_path = "logs/escaped.log".to_owned();
-        sample.manifest.lanes[0].raw_log_sha256 =
-            sha256_file_hex(&outside_raw).expect("outside raw log hash");
+        let first_lane = first_lane_mut(&mut sample.manifest)?;
+        first_lane.raw_log_path = "logs/escaped.log".to_owned();
+        first_lane.raw_log_sha256 = sha256_file_hex(&outside_raw)?;
         sample.manifest.integrity = Some(integrity_for(&sample.manifest));
 
         let report = validate_sample(&sample);
@@ -2745,21 +2843,23 @@ mod tests {
                     .diagnostic
                     .contains("escapes proof bundle root after symlink resolution")
         }));
+        Ok(())
     }
 
     #[test]
-    fn duplicate_scenario_ids_are_rejected() {
-        let mut sample = sample_bundle();
-        let duplicate = sample.manifest.lanes[0].scenario_ids[0].clone();
-        sample.manifest.lanes[1].scenario_ids[0] = duplicate;
+    fn duplicate_scenario_ids_are_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        let duplicate = first_scenario_id_mut(first_lane_mut(&mut sample.manifest)?)?.clone();
+        *first_scenario_id_mut(second_lane_mut(&mut sample.manifest)?)? = duplicate;
         let report = validate_sample(&sample);
         assert!(!report.valid);
         assert_eq!(report.duplicate_scenario_ids.len(), 1);
+        Ok(())
     }
 
     #[test]
-    fn redaction_cannot_remove_reproduction_command() {
-        let mut sample = sample_bundle();
+    fn redaction_cannot_remove_reproduction_command() -> Result<()> {
+        let mut sample = sample_bundle()?;
         sample.manifest.redaction.redacted_fields = vec!["reproduction_command".to_owned()];
         sample
             .manifest
@@ -2774,11 +2874,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("reproduction_command"))
         );
+        Ok(())
     }
 
     #[test]
     fn missing_redaction_policy_is_reported_and_blocks_lane_provenance() -> Result<()> {
-        let sample = sample_bundle();
+        let sample = sample_bundle()?;
         let mut manifest_value = serde_json::to_value(&sample.manifest)?;
         manifest_value
             .as_object_mut()
@@ -2810,14 +2911,9 @@ mod tests {
     }
 
     #[test]
-    fn artifact_hash_chain_mismatch_is_rejected() {
-        let mut sample = sample_bundle();
-        sample
-            .manifest
-            .integrity
-            .as_mut()
-            .expect("integrity")
-            .artifact_hash_chain_sha256 =
+    fn artifact_hash_chain_mismatch_is_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        integrity_mut(&mut sample.manifest)?.artifact_hash_chain_sha256 =
             "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
         let report = validate_sample(&sample);
         assert!(!report.valid);
@@ -2828,12 +2924,13 @@ mod tests {
                 .any(|error| error.contains("artifact hash-chain mismatch"))
         );
         assert!(report.artifact_hash_chain.is_some());
+        Ok(())
     }
 
     #[test]
-    fn artifact_count_and_redaction_version_are_integrity_checked() {
-        let mut sample = sample_bundle();
-        let integrity = sample.manifest.integrity.as_mut().expect("integrity");
+    fn artifact_count_and_redaction_version_are_integrity_checked() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        let integrity = integrity_mut(&mut sample.manifest)?;
         integrity.artifact_count += 1;
         integrity.redaction_policy_version = "wrong-redaction-version".to_owned();
         let report = validate_sample(&sample);
@@ -2850,29 +2947,27 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("redaction_policy_version"))
         );
+        Ok(())
     }
 
     #[test]
-    fn artifact_reports_preserve_lane_path_hash_and_role() {
-        let sample = sample_bundle();
+    fn artifact_reports_preserve_lane_path_hash_and_role() -> Result<()> {
+        let sample = sample_bundle()?;
         let report = validate_sample(&sample);
         assert_eq!(
             report.artifact_reports.len(),
             manifest_artifact_count(&sample.manifest)
         );
-        let conformance = report
-            .artifact_reports
-            .iter()
-            .find(|artifact| artifact.lane_id == "conformance")
-            .expect("conformance artifact");
+        let conformance = artifact_report_by_lane(&report, "conformance")?;
         assert_eq!(conformance.path, "artifacts/conformance.json");
         assert_eq!(conformance.sha256.len(), 64);
         assert_eq!(conformance.role, "primary_evidence");
+        Ok(())
     }
 
     #[test]
     fn lane_provenance_classifies_claim_effects() -> Result<()> {
-        let mut sample = sample_bundle();
+        let mut sample = sample_bundle()?;
         let conformance = sample
             .manifest
             .lanes
@@ -2882,7 +2977,7 @@ mod tests {
         conformance.status = ProofBundleOutcome::Pass;
 
         attach_permissioned_campaign_packet(&mut sample, "xfstests")?;
-        set_swarm_lane_for_small_host_smoke(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
+        set_swarm_lane_for_small_host_smoke(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE)?;
         let fuse = sample
             .manifest
             .lanes
@@ -2968,7 +3063,7 @@ mod tests {
 
     #[test]
     fn permissioned_broker_packet_is_allowed_as_blocker_context() -> Result<()> {
-        let mut sample = sample_bundle();
+        let mut sample = sample_bundle()?;
         attach_permissioned_campaign_packet(&mut sample, "xfstests")?;
 
         let report = validate_sample(&sample);
@@ -2983,7 +3078,7 @@ mod tests {
 
     #[test]
     fn xfstests_broker_packet_cannot_mark_lane_pass() -> Result<()> {
-        let mut sample = sample_bundle();
+        let mut sample = sample_bundle()?;
         let lane = sample
             .manifest
             .lanes
@@ -3005,7 +3100,7 @@ mod tests {
 
     #[test]
     fn permissioned_broker_packet_requires_explicit_boundary_metadata() -> Result<()> {
-        let mut sample = sample_bundle();
+        let mut sample = sample_bundle()?;
         attach_permissioned_campaign_packet(&mut sample, "xfstests")?;
         let lane = sample
             .manifest
@@ -3035,7 +3130,7 @@ mod tests {
 
     #[test]
     fn permissioned_broker_packet_rejects_non_ready_status_metadata() -> Result<()> {
-        let mut sample = sample_bundle();
+        let mut sample = sample_bundle()?;
         attach_permissioned_campaign_packet(&mut sample, "xfstests")?;
         let lane = sample
             .manifest
@@ -3061,8 +3156,8 @@ mod tests {
 
     #[test]
     fn swarm_broker_packet_cannot_back_authoritative_release_claim() -> Result<()> {
-        let mut sample = sample_bundle();
-        set_swarm_lane_for_large_host(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
+        let mut sample = sample_bundle()?;
+        set_swarm_lane_for_large_host(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE)?;
         attach_permissioned_campaign_packet(&mut sample, SWARM_WORKLOAD_HARNESS_LANE)?;
 
         let report = validate_sample(&sample);
@@ -3076,48 +3171,37 @@ mod tests {
     }
 
     #[test]
-    fn accepted_large_host_swarm_evidence_is_preserved() {
-        let mut sample = sample_bundle();
-        set_swarm_lane_for_large_host(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
-        set_swarm_lane_for_large_host(&mut sample.manifest, SWARM_TAIL_LATENCY_LANE);
+    fn accepted_large_host_swarm_evidence_is_preserved() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        set_swarm_lane_for_large_host(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE)?;
+        set_swarm_lane_for_large_host(&mut sample.manifest, SWARM_TAIL_LATENCY_LANE)?;
         sample.manifest.integrity = Some(integrity_for(&sample.manifest));
 
         let report = validate_sample(&sample);
 
         assert!(report.valid, "{:?}", report.errors);
-        let workload = report
-            .swarm_evidence
-            .iter()
-            .find(|evidence| evidence.lane_id == SWARM_WORKLOAD_HARNESS_LANE)
-            .expect("workload evidence");
+        let workload = swarm_evidence_by_lane(&report, SWARM_WORKLOAD_HARNESS_LANE)?;
         assert_eq!(workload.status, ProofBundleOutcome::Pass);
         assert_eq!(workload.host_class, "permissioned_large_host");
         assert_eq!(workload.release_claim, "authoritative_large_host");
         assert_eq!(workload.freshness, "fresh");
         assert_eq!(workload.manifest_hash.len(), 64);
 
-        let tail_latency = report
-            .swarm_evidence
-            .iter()
-            .find(|evidence| evidence.lane_id == SWARM_TAIL_LATENCY_LANE)
-            .expect("tail latency evidence");
+        let tail_latency = swarm_evidence_by_lane(&report, SWARM_TAIL_LATENCY_LANE)?;
         assert_eq!(
             tail_latency.p99_attribution_artifact.as_deref(),
             Some("artifacts/swarm_tail_latency_p99_attribution.json")
         );
+        Ok(())
     }
 
     #[test]
-    fn accepted_adaptive_runtime_evidence_is_preserved() {
-        let sample = sample_bundle();
+    fn accepted_adaptive_runtime_evidence_is_preserved() -> Result<()> {
+        let sample = sample_bundle()?;
         let report = validate_sample(&sample);
 
         assert!(report.valid, "{:?}", report.errors);
-        let evidence = report
-            .adaptive_runtime_evidence
-            .iter()
-            .find(|evidence| evidence.lane_id == ADAPTIVE_RUNTIME_LANE)
-            .expect("adaptive runtime evidence");
+        let evidence = adaptive_runtime_evidence_by_lane(&report, ADAPTIVE_RUNTIME_LANE)?;
         assert_eq!(evidence.status, ProofBundleOutcome::Pass);
         assert_eq!(evidence.scenario_id, "adaptive_runtime_accepted_large_host");
         assert_eq!(evidence.run_id, "adaptive-runtime-run-20260507T000000Z");
@@ -3128,12 +3212,13 @@ mod tests {
             evidence.runner_report,
             "artifacts/adaptive_runtime_runner.json"
         );
+        Ok(())
     }
 
     #[test]
-    fn stale_adaptive_runtime_manifest_is_rejected() {
-        let mut sample = sample_bundle();
-        let lane = adaptive_runtime_lane_mut(&mut sample.manifest);
+    fn stale_adaptive_runtime_manifest_is_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        let lane = adaptive_runtime_lane_mut(&mut sample.manifest)?;
         lane.metadata
             .insert("freshness".to_owned(), "stale".to_owned());
 
@@ -3145,12 +3230,13 @@ mod tests {
                 && error.contains("scenario_id=adaptive_runtime_accepted_large_host")
                 && error.contains("run_id=adaptive-runtime-run-20260507T000000Z")
         }));
+        Ok(())
     }
 
     #[test]
-    fn small_host_adaptive_runtime_evidence_fails_closed() {
-        let mut sample = sample_bundle();
-        let lane = adaptive_runtime_lane_mut(&mut sample.manifest);
+    fn small_host_adaptive_runtime_evidence_fails_closed() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        let lane = adaptive_runtime_lane_mut(&mut sample.manifest)?;
         lane.status = ProofBundleOutcome::Skip;
         lane.metadata.insert(
             "release_claim_state".to_owned(),
@@ -3170,12 +3256,13 @@ mod tests {
             error.contains("release_claim_state=small_host_smoke rejected")
                 && error.contains("adaptive-runtime-run-20260507T000000Z")
         }));
+        Ok(())
     }
 
     #[test]
-    fn capability_downgraded_adaptive_runtime_evidence_fails_closed() {
-        let mut sample = sample_bundle();
-        let lane = adaptive_runtime_lane_mut(&mut sample.manifest);
+    fn capability_downgraded_adaptive_runtime_evidence_fails_closed() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        let lane = adaptive_runtime_lane_mut(&mut sample.manifest)?;
         lane.status = ProofBundleOutcome::Skip;
         lane.metadata.insert(
             "release_claim_state".to_owned(),
@@ -3196,12 +3283,13 @@ mod tests {
         assert!(report.errors.iter().any(|error| {
             error.contains("release_claim_state=capability_downgraded_smoke rejected")
         }));
+        Ok(())
     }
 
     #[test]
-    fn failed_cleanup_adaptive_runtime_evidence_fails_closed() {
-        let mut sample = sample_bundle();
-        let lane = adaptive_runtime_lane_mut(&mut sample.manifest);
+    fn failed_cleanup_adaptive_runtime_evidence_fails_closed() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        let lane = adaptive_runtime_lane_mut(&mut sample.manifest)?;
         lane.status = ProofBundleOutcome::Fail;
         lane.metadata
             .insert("cleanup_status".to_owned(), "failed".to_owned());
@@ -3221,13 +3309,14 @@ mod tests {
             error.contains("cleanup_status=failed rejected")
                 && error.contains("scenario_id=adaptive_runtime_accepted_large_host")
         }));
+        Ok(())
     }
 
     #[test]
-    fn accepted_small_host_swarm_smoke_is_downgraded() {
-        let mut sample = sample_bundle();
-        set_swarm_lane_for_small_host_smoke(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
-        set_swarm_lane_for_small_host_smoke(&mut sample.manifest, SWARM_TAIL_LATENCY_LANE);
+    fn accepted_small_host_swarm_smoke_is_downgraded() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        set_swarm_lane_for_small_host_smoke(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE)?;
+        set_swarm_lane_for_small_host_smoke(&mut sample.manifest, SWARM_TAIL_LATENCY_LANE)?;
         sample.manifest.integrity = Some(integrity_for(&sample.manifest));
 
         let report = validate_sample(&sample);
@@ -3239,12 +3328,13 @@ mod tests {
                 && evidence.release_claim == "small_host_smoke"
                 && evidence.downgrade_reason.is_some()
         }));
+        Ok(())
     }
 
     #[test]
-    fn stale_swarm_artifact_is_rejected() {
-        let mut sample = sample_bundle();
-        let lane = swarm_lane_mut(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
+    fn stale_swarm_artifact_is_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        let lane = swarm_lane_mut(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE)?;
         lane.metadata
             .insert("freshness".to_owned(), "stale".to_owned());
 
@@ -3257,12 +3347,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("stale swarm artifact"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_p99_ledger_is_rejected() {
-        let mut sample = sample_bundle();
-        let lane = swarm_lane_mut(&mut sample.manifest, SWARM_TAIL_LATENCY_LANE);
+    fn missing_p99_ledger_is_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        let lane = swarm_lane_mut(&mut sample.manifest, SWARM_TAIL_LATENCY_LANE)?;
         lane.artifacts
             .retain(|artifact| artifact.role != SWARM_P99_ATTRIBUTION_ROLE);
         sample.manifest.integrity = Some(integrity_for(&sample.manifest));
@@ -3273,13 +3364,14 @@ mod tests {
         assert!(report.errors.iter().any(|error| {
             error.contains("p99_attribution_artifact") && error.contains(SWARM_P99_ATTRIBUTION_ROLE)
         }));
+        Ok(())
     }
 
     #[test]
-    fn swarm_host_class_mismatch_is_rejected() {
-        let mut sample = sample_bundle();
-        set_swarm_lane_for_large_host(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
-        let lane = swarm_lane_mut(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
+    fn swarm_host_class_mismatch_is_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        set_swarm_lane_for_large_host(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE)?;
+        let lane = swarm_lane_mut(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE)?;
         lane.metadata
             .insert("host_class".to_owned(), "developer_smoke".to_owned());
         sample.manifest.integrity = Some(integrity_for(&sample.manifest));
@@ -3293,12 +3385,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("authoritative pass requires large host_class"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_swarm_raw_log_is_rejected() {
-        let mut sample = sample_bundle();
-        let lane = swarm_lane_mut(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE);
+    fn missing_swarm_raw_log_is_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        let lane = swarm_lane_mut(&mut sample.manifest, SWARM_WORKLOAD_HARNESS_LANE)?;
         lane.raw_log_path = "logs/missing-swarm-workload.log".to_owned();
 
         let report = validate_sample(&sample);
@@ -3307,21 +3400,22 @@ mod tests {
         assert!(report.broken_links.iter().any(
             |link| link.lane_id == SWARM_WORKLOAD_HARNESS_LANE && link.field == "raw_log_path"
         ));
+        Ok(())
     }
 
     #[test]
-    fn redaction_leaks_are_rejected_from_artifacts_and_summaries() {
-        let sample = sample_bundle();
+    fn redaction_leaks_are_rejected_from_artifacts_and_summaries() -> Result<()> {
+        let sample = sample_bundle()?;
         write_file(
             sample.root.path(),
             "summaries/conformance.md",
             "# conformance\nSECRET_TOKEN\n",
-        );
+        )?;
         write_file(
             sample.root.path(),
             "artifacts/conformance.json",
             "{\"token\":\"SECRET_TOKEN\"}\n",
-        );
+        )?;
         let report = validate_sample(&sample);
         assert!(!report.valid);
         assert_eq!(report.redaction_leaks.len(), 2);
@@ -3331,31 +3425,23 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("redaction leak"))
         );
+        Ok(())
     }
 
     #[test]
-    fn redaction_leak_turns_passing_lane_into_evidence_production_failure() {
-        let mut sample = sample_bundle();
-        let lane = sample
-            .manifest
-            .lanes
-            .iter_mut()
-            .find(|lane| lane.lane_id == "conformance")
-            .expect("conformance lane");
+    fn redaction_leak_turns_passing_lane_into_evidence_production_failure() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        let lane = swarm_lane_mut(&mut sample.manifest, "conformance")?;
         lane.status = ProofBundleOutcome::Pass;
         write_file(
             sample.root.path(),
             "summaries/conformance.md",
             "# conformance\nSECRET_TOKEN\n",
-        );
+        )?;
 
         let report = validate_sample(&sample);
 
-        let conformance = report
-            .lane_provenance
-            .iter()
-            .find(|provenance| provenance.lane_id == "conformance")
-            .expect("conformance provenance");
+        let conformance = lane_provenance_by_lane(&report, "conformance")?;
         assert_eq!(
             conformance.provenance_class,
             ProofBundleProvenanceClass::RedactionFailure
@@ -3369,16 +3455,17 @@ mod tests {
                 .rationale
                 .contains("evidence production failed before product readiness")
         );
+        Ok(())
     }
 
     #[test]
-    fn env_like_secret_markers_are_rejected_without_policy_entry() {
-        let sample = sample_bundle();
+    fn env_like_secret_markers_are_rejected_without_policy_entry() -> Result<()> {
+        let sample = sample_bundle()?;
         write_file(
             sample.root.path(),
             "summaries/conformance.md",
             "# conformance\nAWS_SECRET_ACCESS_KEY=unredacted\n",
-        );
+        )?;
 
         let report = validate_sample(&sample);
 
@@ -3386,11 +3473,12 @@ mod tests {
         assert!(report.redaction_leaks.iter().any(|leak| {
             leak.path == "summaries/conformance.md" && leak.marker == "AWS_SECRET_ACCESS_KEY="
         }));
+        Ok(())
     }
 
     #[test]
-    fn reproduction_command_env_secret_marker_is_rejected() {
-        let mut sample = sample_bundle();
+    fn reproduction_command_env_secret_marker_is_rejected() -> Result<()> {
+        let mut sample = sample_bundle()?;
         sample.manifest.redaction.reproduction_command =
             "AWS_SECRET_ACCESS_KEY=unredacted cargo run -p ffs-harness -- validate-proof-bundle --bundle manifest.json"
                 .to_owned();
@@ -3401,11 +3489,12 @@ mod tests {
         assert!(report.redaction_errors.iter().any(|error| {
             error.contains("reproduction_command") && error.contains("AWS_SECRET_ACCESS_KEY=")
         }));
+        Ok(())
     }
 
     #[test]
-    fn redacted_artifact_placeholder_can_be_required() {
-        let mut sample = sample_bundle();
+    fn redacted_artifact_placeholder_can_be_required() -> Result<()> {
+        let mut sample = sample_bundle()?;
         sample
             .manifest
             .redaction
@@ -3426,20 +3515,20 @@ mod tests {
                         sample.root.path(),
                         &artifact.path,
                         "{\"redacted\":\"[REDACTED]\"}\n",
-                    );
-                    artifact.sha256 =
-                        sha256_file_hex(&sample.root.path().join(&artifact.path)).expect("hash");
+                    )?;
+                    artifact.sha256 = sha256_file_hex(&sample.root.path().join(&artifact.path))?;
                 }
             }
         }
         sample.manifest.integrity = Some(integrity_for(&sample.manifest));
         let report = validate_sample(&sample);
         assert!(report.valid, "{:?}", report.errors);
+        Ok(())
     }
 
     #[test]
-    fn summary_contains_totals_lanes_logs_and_artifacts() {
-        let sample = sample_bundle();
+    fn summary_contains_totals_lanes_logs_and_artifacts() -> Result<()> {
+        let sample = sample_bundle()?;
         let report = validate_sample(&sample);
         let summary = render_proof_bundle_markdown(&report);
         assert!(summary.contains("Totals: pass=5 fail=3 skip=3 error=3"));
@@ -3457,11 +3546,12 @@ mod tests {
         assert!(summary.contains("Adaptive Runtime Evidence"));
         assert!(summary.contains("adaptive-runtime-run-20260507T000000Z"));
         assert!(summary.contains("Artifact hash chain"));
+        Ok(())
     }
 
     #[test]
-    fn render_proof_bundle_markdown_sample_bundle_snapshot() {
-        let sample = sample_bundle();
+    fn render_proof_bundle_markdown_sample_bundle_snapshot() -> Result<()> {
+        let sample = sample_bundle()?;
         let mut report = validate_sample(&sample);
         let bundle_root = sample.root.path().display().to_string();
         report.manifest_path = report.manifest_path.replace(&bundle_root, "$BUNDLE");
@@ -3474,11 +3564,12 @@ mod tests {
         assert!(markdown.contains("## Swarm Evidence"));
         assert!(markdown.contains("## Adaptive Runtime Evidence"));
         insta::assert_snapshot!("render_proof_bundle_markdown_sample_bundle", markdown);
+        Ok(())
     }
 
     #[test]
     fn proof_bundle_validation_report_json_shape() -> Result<()> {
-        let sample = sample_bundle();
+        let sample = sample_bundle()?;
         let mut report = validate_sample(&sample);
         let bundle_root = sample.root.path().display().to_string();
         report.manifest_path = report.manifest_path.replace(&bundle_root, "$BUNDLE");
@@ -3491,13 +3582,14 @@ mod tests {
     }
 
     #[test]
-    fn summary_separates_pass_skip_fail_and_error_outcomes() {
-        let sample = sample_bundle();
+    fn summary_separates_pass_skip_fail_and_error_outcomes() -> Result<()> {
+        let sample = sample_bundle()?;
         let report = validate_sample(&sample);
         let summary = render_proof_bundle_markdown(&report);
 
         for label in ["`pass`", "`skip`", "`fail`", "`error`"] {
             assert!(summary.contains(label), "summary missing {label}");
         }
+        Ok(())
     }
 }
