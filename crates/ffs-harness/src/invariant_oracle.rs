@@ -1439,6 +1439,22 @@ mod tests {
         }
     }
 
+    fn first_violation(report: &InvariantOracleReport) -> Result<&InvariantViolationReport> {
+        report
+            .violations
+            .first()
+            .context("missing invariant violation")
+    }
+
+    fn first_violation_mut(
+        report: &mut InvariantOracleReport,
+    ) -> Result<&mut InvariantViolationReport> {
+        report
+            .violations
+            .first_mut()
+            .context("missing invariant violation")
+    }
+
     #[test]
     fn parses_trace_schema_and_replays_deterministically() -> anyhow::Result<()> {
         let trace = valid_trace();
@@ -1482,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn expected_invariant_failure_is_reported_without_failing_trace() {
+    fn expected_invariant_failure_is_reported_without_failing_trace() -> Result<()> {
         let mut trace = valid_trace();
         let mut bad = op(
             3,
@@ -1500,22 +1516,21 @@ mod tests {
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.expected_failure_count, 1);
         assert_eq!(report.unexpected_failure_count, 0);
+        let violation = first_violation(&report)?;
+        assert_eq!(violation.violated_invariant, "file_size_matches_model");
         assert_eq!(
-            report.violations[0].violated_invariant,
-            "file_size_matches_model"
-        );
-        assert_eq!(
-            report.violations[0].failure_class,
+            violation.failure_class,
             InvariantFailureClass::ProductionBug
         );
         assert_eq!(
-            report.violations[0].classification,
+            violation.classification,
             InvariantFailureClass::ProductionBug.label()
         );
-        assert!(is_sha256_hex(&report.violations[0].pre_state_hash));
-        assert!(is_sha256_hex(&report.violations[0].post_state_hash));
-        assert!(report.violations[0].expected_invariant_result);
-        assert!(!report.violations[0].observed_invariant_result);
+        assert!(is_sha256_hex(&violation.pre_state_hash));
+        assert!(is_sha256_hex(&violation.post_state_hash));
+        assert!(violation.expected_invariant_result);
+        assert!(!violation.observed_invariant_result);
+        Ok(())
     }
 
     #[test]
@@ -1535,7 +1550,7 @@ mod tests {
     }
 
     #[test]
-    fn minimizer_keeps_prefix_through_failing_operation() {
+    fn minimizer_keeps_prefix_through_failing_operation() -> Result<()> {
         let mut trace = valid_trace();
         let mut bad = op(
             3,
@@ -1549,7 +1564,7 @@ mod tests {
         bad.failure_class = Some(InvariantFailureClass::ProductionBug);
         trace.operations.push(bad);
         let report = validate_invariant_trace(&trace);
-        let minimized = &report.violations[0].minimized_trace;
+        let minimized = &first_violation(&report)?.minimized_trace;
         assert_eq!(minimized.original_trace_len, 4);
         assert_eq!(minimized.minimized_trace_len, 4);
         assert_eq!(
@@ -1563,6 +1578,7 @@ mod tests {
                 .iter()
                 .any(|step| step.contains("failing operation index 3"))
         );
+        Ok(())
     }
 
     #[test]
@@ -1579,7 +1595,7 @@ mod tests {
     }
 
     #[test]
-    fn report_consumer_rejects_missing_classification() {
+    fn report_consumer_rejects_missing_classification() -> Result<()> {
         let mut trace = valid_trace();
         let mut bad = op(
             3,
@@ -1593,17 +1609,18 @@ mod tests {
         bad.failure_class = Some(InvariantFailureClass::ProductionBug);
         trace.operations.push(bad);
         let mut report = validate_invariant_trace(&trace);
-        report.violations[0].classification.clear();
+        first_violation_mut(&mut report)?.classification.clear();
         let errors = validate_invariant_oracle_report(&report);
         assert!(
             errors
                 .iter()
                 .any(|error| error.contains("classification must be production_bug"))
         );
+        Ok(())
     }
 
     #[test]
-    fn report_consumer_rejects_non_minimized_without_follow_up() {
+    fn report_consumer_rejects_non_minimized_without_follow_up() -> Result<()> {
         let mut trace = valid_trace();
         let mut bad = op(
             3,
@@ -1617,13 +1634,14 @@ mod tests {
         bad.failure_class = Some(InvariantFailureClass::ProductionBug);
         trace.operations.push(bad);
         let mut report = validate_invariant_trace(&trace);
-        report.violations[0].minimized_trace.minimized = false;
+        first_violation_mut(&mut report)?.minimized_trace.minimized = false;
         let errors = validate_invariant_oracle_report(&report);
         assert!(
             errors
                 .iter()
                 .any(|error| error.contains("non-minimized failure requires follow-up bead"))
         );
+        Ok(())
     }
 
     #[test]
@@ -1698,7 +1716,7 @@ mod tests {
     }
 
     #[test]
-    fn extent_ownership_rejects_overlapping_live_ranges() {
+    fn extent_ownership_rejects_overlapping_live_ranges() -> Result<()> {
         let mut trace = valid_trace();
         let mut first_extent = op(
             3,
@@ -1752,9 +1770,10 @@ mod tests {
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.expected_failure_count, 1);
         assert_eq!(
-            report.violations[0].violated_invariant,
+            first_violation(&report)?.violated_invariant,
             "extent_range_does_not_overlap"
         );
+        Ok(())
     }
 
     #[test]
@@ -1795,7 +1814,7 @@ mod tests {
     }
 
     #[test]
-    fn repair_writeback_requires_mounted_mutation_authority() {
+    fn repair_writeback_requires_mounted_mutation_authority() -> Result<()> {
         let mut trace = valid_trace();
         let accepted = with_counts(state(&[("/alpha", 5)], &["/alpha"]), 0, 1);
         let mut repair = op(
@@ -1825,9 +1844,10 @@ mod tests {
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.expected_failure_count, 1);
         assert_eq!(
-            report.violations[0].violated_invariant,
+            first_violation(&report)?.violated_invariant,
             "repair_writeback_uses_mutation_authority"
         );
+        Ok(())
     }
 
     #[test]
