@@ -1,0 +1,34 @@
+---
+source: crates/ffs-harness/src/report_schema_inventory.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "inventory_id": "ffs_harness_serialized_report_schema_inventory_v1",
+  "counts": {
+    "total_rows": 6,
+    "required_rows": 1,
+    "advisory_only_rows": 4,
+    "covered_rows": 5,
+    "missing_rows": 0,
+    "excluded_rows": 1
+  },
+  "first_row": {
+    "report_id": "readiness_lab_validation_report",
+    "module_path": "crates/ffs-harness/src/readiness_lab.rs",
+    "rust_type": "ReadinessLabValidationReport",
+    "producer": "validate-readiness-lab-contracts",
+    "downstream_consumer": "readiness-lab advisory contracts and dashboard rows",
+    "coverage_requirement": "advisory_only",
+    "coverage_status": "covered",
+    "evidence_test": "readiness_lab_validation_report_json_shape",
+    "snapshot_path": "crates/ffs-harness/src/snapshots/ffs_harness__readiness_lab__tests__readiness_lab_validation_report_json_shape.snap",
+    "claim_effect": "advisory_only_no_public_readiness_change"
+  },
+  "required_report_ids": [
+    "swarm_operator_report"
+  ],
+  "excluded_report_ids": [
+    "readiness_action_dry_run_metadata"
+  ]
+}
