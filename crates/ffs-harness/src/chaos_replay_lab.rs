@@ -459,15 +459,52 @@ pub fn render_chaos_replay_lab_markdown(report: &ChaosReplayLabReport) -> String
 mod tests {
     use super::*;
 
-    fn fixture_lab() -> ChaosReplayLab {
+    fn fixture_lab() -> Result<ChaosReplayLab> {
         parse_chaos_replay_lab(DEFAULT_CHAOS_REPLAY_LAB_JSON)
-            .expect("default chaos replay lab parses")
+    }
+
+    fn first_schedule_mut(lab: &mut ChaosReplayLab) -> Result<&mut ChaosSchedule> {
+        let [first, ..] = lab.schedules.as_mut_slice() else {
+            bail!("fixture lab must contain at least one schedule");
+        };
+        Ok(first)
+    }
+
+    fn first_two_schedules_mut(
+        lab: &mut ChaosReplayLab,
+    ) -> Result<(&mut ChaosSchedule, &mut ChaosSchedule)> {
+        let [first, second, ..] = lab.schedules.as_mut_slice() else {
+            bail!("fixture lab must contain at least two schedules");
+        };
+        Ok((first, second))
+    }
+
+    fn schedule_matching_mut<'a, F>(
+        lab: &'a mut ChaosReplayLab,
+        description: &str,
+        mut predicate: F,
+    ) -> Result<&'a mut ChaosSchedule>
+    where
+        F: FnMut(&ChaosSchedule) -> bool,
+    {
+        lab.schedules
+            .iter_mut()
+            .find(|schedule| predicate(schedule))
+            .ok_or_else(|| anyhow::anyhow!("fixture lab missing {description} schedule"))
+    }
+
+    fn first_two_steps_mut(
+        schedule: &mut ChaosSchedule,
+    ) -> Result<(&mut ScheduleStep, &mut ScheduleStep)> {
+        let [first, second, ..] = schedule.operation_trace.as_mut_slice() else {
+            bail!("fixture schedule must contain at least two operation steps");
+        };
+        Ok((first, second))
     }
 
     #[test]
-    fn default_lab_validates_required_taxonomy_coverage() {
-        let report =
-            validate_default_chaos_replay_lab().expect("default chaos replay lab validates");
+    fn default_lab_validates_required_taxonomy_coverage() -> Result<()> {
+        let report = validate_default_chaos_replay_lab()?;
         assert_eq!(report.bead_id, "bd-rchk0.5.5");
         for taxonomy in REQUIRED_CRASH_TAXONOMY_COVERAGE {
             assert!(
@@ -475,11 +512,12 @@ mod tests {
                 "missing taxonomy {taxonomy}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn missing_pre_commit_crash_is_rejected() {
-        let mut lab = fixture_lab();
+    fn missing_pre_commit_crash_is_rejected() -> Result<()> {
+        let mut lab = fixture_lab()?;
         lab.schedules
             .retain(|s| s.crash_taxonomy != "pre_commit_crash");
         let report = validate_chaos_replay_lab(&lab);
@@ -489,11 +527,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required crash_taxonomy `pre_commit_crash`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_repair_interruption_is_rejected() {
-        let mut lab = fixture_lab();
+    fn missing_repair_interruption_is_rejected() -> Result<()> {
+        let mut lab = fixture_lab()?;
         lab.schedules
             .retain(|s| s.crash_taxonomy != "repair_interruption");
         let report = validate_chaos_replay_lab(&lab);
@@ -503,13 +542,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required crash_taxonomy `repair_interruption`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_schedule_id_is_rejected() {
-        let mut lab = fixture_lab();
-        let dup = lab.schedules[0].schedule_id.clone();
-        lab.schedules[1].schedule_id = dup;
+    fn duplicate_schedule_id_is_rejected() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        let (first, second) = first_two_schedules_mut(&mut lab)?;
+        let dup = first.schedule_id.clone();
+        second.schedule_id = dup;
         let report = validate_chaos_replay_lab(&lab);
         assert!(
             report
@@ -517,12 +558,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicate chaos schedule_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn schedule_id_prefix_is_enforced() {
-        let mut lab = fixture_lab();
-        lab.schedules[0].schedule_id = "schedule_001".to_owned();
+    fn schedule_id_prefix_is_enforced() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        first_schedule_mut(&mut lab)?.schedule_id = "schedule_001".to_owned();
         let report = validate_chaos_replay_lab(&lab);
         assert!(
             report
@@ -530,12 +572,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must start with chaos_"))
         );
+        Ok(())
     }
 
     #[test]
-    fn zero_seed_is_rejected() {
-        let mut lab = fixture_lab();
-        lab.schedules[0].seed = 0;
+    fn zero_seed_is_rejected() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        first_schedule_mut(&mut lab)?.seed = 0;
         let report = validate_chaos_replay_lab(&lab);
         assert!(
             report
@@ -543,13 +586,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("seed must be positive"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_seed_is_rejected() {
-        let mut lab = fixture_lab();
-        let seed = lab.schedules[0].seed;
-        lab.schedules[1].seed = seed;
+    fn duplicate_seed_is_rejected() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        let (first, second) = first_two_schedules_mut(&mut lab)?;
+        let seed = first.seed;
+        second.seed = seed;
         let report = validate_chaos_replay_lab(&lab);
         assert!(
             report
@@ -557,12 +602,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("is not unique across the lab"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_lane_is_rejected() {
-        let mut lab = fixture_lab();
-        lab.schedules[0].lane = "rust_belt".to_owned();
+    fn unsupported_lane_is_rejected() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        first_schedule_mut(&mut lab)?.lane = "rust_belt".to_owned();
         let report = validate_chaos_replay_lab(&lab);
         assert!(
             report
@@ -570,12 +616,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported lane"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_crash_taxonomy_is_rejected() {
-        let mut lab = fixture_lab();
-        lab.schedules[0].crash_taxonomy = "vibes_taxonomy".to_owned();
+    fn unsupported_crash_taxonomy_is_rejected() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        first_schedule_mut(&mut lab)?.crash_taxonomy = "vibes_taxonomy".to_owned();
         let report = validate_chaos_replay_lab(&lab);
         assert!(
             report
@@ -583,12 +630,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported crash_taxonomy"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_repair_policy_is_rejected() {
-        let mut lab = fixture_lab();
-        lab.schedules[0].repair_policy = "duct_tape".to_owned();
+    fn unsupported_repair_policy_is_rejected() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        first_schedule_mut(&mut lab)?.repair_policy = "duct_tape".to_owned();
         let report = validate_chaos_replay_lab(&lab);
         assert!(
             report
@@ -596,12 +644,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported repair_policy"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_minimization_status_is_rejected() {
-        let mut lab = fixture_lab();
-        lab.schedules[0].minimization_status = "guesswork".to_owned();
+    fn unsupported_minimization_status_is_rejected() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        first_schedule_mut(&mut lab)?.minimization_status = "guesswork".to_owned();
         let report = validate_chaos_replay_lab(&lab);
         assert!(
             report
@@ -609,16 +658,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported minimization_status"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_operation_trace_is_rejected_for_non_skip_lane() {
-        let mut lab = fixture_lab();
-        let schedule = lab
-            .schedules
-            .iter_mut()
-            .find(|s| s.lane != "host_skip")
-            .expect("non-skip schedule exists");
+    fn empty_operation_trace_is_rejected_for_non_skip_lane() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        let schedule = schedule_matching_mut(&mut lab, "non-skip", |s| s.lane != "host_skip")?;
         schedule.operation_trace.clear();
         let report = validate_chaos_replay_lab(&lab);
         assert!(
@@ -627,15 +673,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("operation_trace must not be empty"))
         );
+        Ok(())
     }
 
     #[test]
-    fn operation_trace_steps_must_increase() {
-        let mut lab = fixture_lab();
-        let schedule = &mut lab.schedules[0];
-        if schedule.operation_trace.len() >= 2 {
-            schedule.operation_trace[1].step = schedule.operation_trace[0].step;
-        }
+    fn operation_trace_steps_must_increase() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        let schedule = first_schedule_mut(&mut lab)?;
+        let (first, second) = first_two_steps_mut(schedule)?;
+        second.step = first.step;
         let report = validate_chaos_replay_lab(&lab);
         assert!(
             report
@@ -643,12 +689,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("strictly increasing") || err.contains("duplicate step"))
         );
+        Ok(())
     }
 
     #[test]
-    fn crash_point_must_match_a_trace_step() {
-        let mut lab = fixture_lab();
-        lab.schedules[0].crash_point_after_step = 9999;
+    fn crash_point_must_match_a_trace_step() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        first_schedule_mut(&mut lab)?.crash_point_after_step = 9999;
         let report = validate_chaos_replay_lab(&lab);
         assert!(
             report
@@ -656,16 +703,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("does not match any trace step"))
         );
+        Ok(())
     }
 
     #[test]
-    fn post_commit_taxonomy_requires_commit_boundary() {
-        let mut lab = fixture_lab();
-        let schedule = lab
-            .schedules
-            .iter_mut()
-            .find(|s| s.crash_taxonomy == "post_commit_pre_flush_crash")
-            .expect("post-commit schedule exists");
+    fn post_commit_taxonomy_requires_commit_boundary() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        let schedule = schedule_matching_mut(&mut lab, "post-commit", |s| {
+            s.crash_taxonomy == "post_commit_pre_flush_crash"
+        })?;
         for step in &mut schedule.operation_trace {
             step.commit_boundary = false;
         }
@@ -676,31 +722,25 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("requires at least one commit boundary in the trace"))
         );
+        Ok(())
     }
 
     #[test]
-    fn host_skip_lane_must_classify_as_host_skip() {
-        let mut lab = fixture_lab();
-        let schedule = lab
-            .schedules
-            .iter_mut()
-            .find(|s| s.lane == "host_skip")
-            .expect("host_skip schedule exists");
+    fn host_skip_lane_must_classify_as_host_skip() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        let schedule = schedule_matching_mut(&mut lab, "host_skip", |s| s.lane == "host_skip")?;
         schedule.expected_survivor_kind = "exact_match_post_commit".to_owned();
         let report = validate_chaos_replay_lab(&lab);
         assert!(report.errors.iter().any(|err| {
             err.contains("host_skip lane must classify expected_survivor_kind=host_skip")
         }));
+        Ok(())
     }
 
     #[test]
-    fn host_skip_lane_requires_skip_reason() {
-        let mut lab = fixture_lab();
-        let schedule = lab
-            .schedules
-            .iter_mut()
-            .find(|s| s.lane == "host_skip")
-            .expect("host_skip schedule exists");
+    fn host_skip_lane_requires_skip_reason() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        let schedule = schedule_matching_mut(&mut lab, "host_skip", |s| s.lane == "host_skip")?;
         schedule.host_skip_reason = String::new();
         let report = validate_chaos_replay_lab(&lab);
         assert!(
@@ -709,16 +749,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must declare host_skip_reason"))
         );
+        Ok(())
     }
 
     #[test]
-    fn non_host_skip_must_leave_skip_reason_empty() {
-        let mut lab = fixture_lab();
-        let schedule = lab
-            .schedules
-            .iter_mut()
-            .find(|s| s.lane != "host_skip")
-            .expect("non-skip schedule exists");
+    fn non_host_skip_must_leave_skip_reason_empty() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        let schedule = schedule_matching_mut(&mut lab, "non-skip", |s| s.lane != "host_skip")?;
         schedule.host_skip_reason = "leftover".to_owned();
         let report = validate_chaos_replay_lab(&lab);
         assert!(
@@ -727,28 +764,26 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("non-host_skip lane must leave host_skip_reason empty"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_survivor_set_is_rejected() {
-        let mut lab = fixture_lab();
-        let schedule = lab
-            .schedules
-            .iter_mut()
-            .find(|s| s.lane != "host_skip")
-            .expect("non-skip schedule exists");
+    fn empty_survivor_set_is_rejected() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        let schedule = schedule_matching_mut(&mut lab, "non-skip", |s| s.lane != "host_skip")?;
         schedule.expected_survivor_paths.clear();
         schedule.expected_absent_paths.clear();
         let report = validate_chaos_replay_lab(&lab);
         assert!(report.errors.iter().any(|err| {
             err.contains("must declare at least one expected_survivor_path or expected_absent_path")
         }));
+        Ok(())
     }
 
     #[test]
-    fn missing_raw_log_path_is_rejected() {
-        let mut lab = fixture_lab();
-        lab.schedules[0].raw_log_path = String::new();
+    fn missing_raw_log_path_is_rejected() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        first_schedule_mut(&mut lab)?.raw_log_path = String::new();
         let report = validate_chaos_replay_lab(&lab);
         assert!(
             report
@@ -756,12 +791,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing raw_log_path"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_replay_command_is_rejected() {
-        let mut lab = fixture_lab();
-        lab.schedules[0].replay_command = String::new();
+    fn missing_replay_command_is_rejected() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        first_schedule_mut(&mut lab)?.replay_command = String::new();
         let report = validate_chaos_replay_lab(&lab);
         assert!(
             report
@@ -769,12 +805,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing replay_command"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_follow_up_bead_is_rejected() {
-        let mut lab = fixture_lab();
-        lab.schedules[0].follow_up_bead = "PROJ-99".to_owned();
+    fn malformed_follow_up_bead_is_rejected() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        first_schedule_mut(&mut lab)?.follow_up_bead = "PROJ-99".to_owned();
         let report = validate_chaos_replay_lab(&lab);
         assert!(
             report
@@ -782,41 +819,40 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("follow_up_bead must look like bd-"))
         );
+        Ok(())
     }
 
     #[test]
-    fn repair_interruption_taxonomy_requires_interrupted_repair_policy() {
-        let mut lab = fixture_lab();
-        let schedule = lab
-            .schedules
-            .iter_mut()
-            .find(|s| s.crash_taxonomy == "repair_interruption")
-            .expect("repair interruption schedule exists");
+    fn repair_interruption_taxonomy_requires_interrupted_repair_policy() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        let schedule = schedule_matching_mut(&mut lab, "repair interruption", |s| {
+            s.crash_taxonomy == "repair_interruption"
+        })?;
         schedule.repair_policy = "ledger_repair".to_owned();
         let report = validate_chaos_replay_lab(&lab);
         assert!(report.errors.iter().any(|err| err.contains(
             "repair_interruption crash_taxonomy requires repair_policy=interrupted_repair"
         )));
+        Ok(())
     }
 
     #[test]
-    fn allowed_repaired_divergence_requires_real_repair_policy() {
-        let mut lab = fixture_lab();
-        let schedule = lab
-            .schedules
-            .iter_mut()
-            .find(|s| s.expected_survivor_kind == "allowed_repaired_divergence")
-            .expect("repaired divergence schedule exists");
+    fn allowed_repaired_divergence_requires_real_repair_policy() -> Result<()> {
+        let mut lab = fixture_lab()?;
+        let schedule = schedule_matching_mut(&mut lab, "repaired divergence", |s| {
+            s.expected_survivor_kind == "allowed_repaired_divergence"
+        })?;
         schedule.repair_policy = "no_repair".to_owned();
         let report = validate_chaos_replay_lab(&lab);
         assert!(report.errors.iter().any(|err| err.contains(
             "allowed_repaired_divergence requires a repair_policy other than no_repair"
         )));
+        Ok(())
     }
 
     #[test]
-    fn empty_schedules_list_is_rejected() {
-        let mut lab = fixture_lab();
+    fn empty_schedules_list_is_rejected() -> Result<()> {
+        let mut lab = fixture_lab()?;
         lab.schedules.clear();
         let report = validate_chaos_replay_lab(&lab);
         assert!(
@@ -825,14 +861,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one schedule"))
         );
+        Ok(())
     }
 
     #[test]
-    fn render_chaos_replay_lab_markdown_default_lab() {
-        let report =
-            validate_default_chaos_replay_lab().expect("default chaos replay lab validates");
+    fn render_chaos_replay_lab_markdown_default_lab() -> Result<()> {
+        let report = validate_default_chaos_replay_lab()?;
         let markdown = render_chaos_replay_lab_markdown(&report);
         insta::assert_snapshot!("render_chaos_replay_lab_markdown_default_lab", markdown);
+        Ok(())
     }
 
     #[test]
@@ -847,15 +884,16 @@ mod tests {
     }
 
     #[test]
-    fn fail_on_errors_rejects_invalid_report() {
-        let mut report = validate_default_chaos_replay_lab()
-            .expect("default chaos replay lab validates before mutation");
+    fn fail_on_errors_rejects_invalid_report() -> Result<()> {
+        let mut report = validate_default_chaos_replay_lab()?;
         report.valid = false;
         report
             .errors
             .push("fixture mutation erased replay command".to_owned());
-        let err =
-            fail_on_chaos_replay_lab_errors(&report).expect_err("invalid report must fail closed");
+        let Err(err) = fail_on_chaos_replay_lab_errors(&report) else {
+            bail!("invalid report must fail closed");
+        };
         assert!(err.to_string().contains("chaos replay lab failed"));
+        Ok(())
     }
 }
