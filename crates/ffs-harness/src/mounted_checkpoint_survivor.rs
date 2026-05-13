@@ -453,23 +453,23 @@ pub fn render_mounted_checkpoint_survivor_markdown(
     report: &MountedCheckpointSurvivorReport,
 ) -> String {
     let mut out = String::new();
-    writeln!(&mut out, "# Mounted Checkpoint Survivor").expect("write to string");
-    writeln!(&mut out).expect("write to string");
-    writeln!(&mut out, "- matrix: `{}`", report.matrix_id).expect("write to string");
-    writeln!(&mut out, "- schema version: `{}`", report.schema_version).expect("write to string");
-    writeln!(&mut out, "- bead: `{}`", report.bead_id).expect("write to string");
-    writeln!(&mut out, "- valid: `{}`", report.valid).expect("write to string");
-    writeln!(&mut out, "- scenarios: `{}`", report.scenario_count).expect("write to string");
-    writeln!(&mut out).expect("write to string");
-    writeln!(&mut out, "## Lifecycle Kinds").expect("write to string");
+    let _ = writeln!(&mut out, "# Mounted Checkpoint Survivor");
+    let _ = writeln!(&mut out);
+    let _ = writeln!(&mut out, "- matrix: `{}`", report.matrix_id);
+    let _ = writeln!(&mut out, "- schema version: `{}`", report.schema_version);
+    let _ = writeln!(&mut out, "- bead: `{}`", report.bead_id);
+    let _ = writeln!(&mut out, "- valid: `{}`", report.valid);
+    let _ = writeln!(&mut out, "- scenarios: `{}`", report.scenario_count);
+    let _ = writeln!(&mut out);
+    let _ = writeln!(&mut out, "## Lifecycle Kinds");
     for kind in &report.kinds_seen {
-        writeln!(&mut out, "- `{kind}`").expect("write to string");
+        let _ = writeln!(&mut out, "- `{kind}`");
     }
     if !report.errors.is_empty() {
-        writeln!(&mut out).expect("write to string");
-        writeln!(&mut out, "## Errors").expect("write to string");
+        let _ = writeln!(&mut out);
+        let _ = writeln!(&mut out, "## Errors");
         for error in &report.errors {
-            writeln!(&mut out, "- {error}").expect("write to string");
+            let _ = writeln!(&mut out, "- {error}");
         }
     }
     out
