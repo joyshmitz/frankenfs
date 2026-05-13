@@ -705,7 +705,7 @@ pub fn parse_root_ref(data: &[u8]) -> Result<BtrfsRootRef, ParseError> {
     let name_end = 18 + usize::from(name_len);
     if data.len() < name_end {
         return Err(ParseError::InsufficientData {
-            needed: name_end,
+            needed: name_end - 18,
             offset: 18,
             actual: data.len() - 18,
         });
@@ -754,9 +754,9 @@ pub fn parse_inode_refs(data: &[u8]) -> Result<Vec<BtrfsInodeRef>, ParseError> {
             })?;
         if name_end > data.len() {
             return Err(ParseError::InsufficientData {
-                needed: name_end,
+                needed: name_end - cur,
                 offset: cur,
-                actual: data.len(),
+                actual: data.len() - cur,
             });
         }
 
@@ -1061,9 +1061,9 @@ pub fn parse_dir_items(data: &[u8]) -> Result<Vec<BtrfsDirItem>, ParseError> {
 
         if name_end > data.len() {
             return Err(ParseError::InsufficientData {
-                needed: name_end,
+                needed: name_end - cur,
                 offset: cur,
-                actual: data.len(),
+                actual: data.len() - cur,
             });
         }
 
@@ -8259,6 +8259,41 @@ mod tests {
             proptest::prop_assert_eq!(parsed, originals);
         }
 
+        // bd-7pr5k — MR-4 Determinism. parse_dir_items called twice
+        // on the same payload must return identical results. Cheap
+        // check that the parser does not depend on any hidden state
+        // (allocator addresses, hash iteration order, time). Sister
+        // parsers parse_xattr_items, parse_inode_refs, parse_inode_item,
+        // parse_root_item, parse_extent_data all have determinism MRs.
+        #[test]
+        fn dir_item_proptest_determinism(
+            entries in proptest::collection::vec(
+                (
+                    proptest::prelude::any::<u64>(),
+                    proptest::prelude::any::<u8>(),
+                    proptest::prelude::any::<u64>(),
+                    proptest::prelude::any::<u8>(),
+                    proptest::collection::vec(proptest::prelude::any::<u8>(), 1..=32),
+                ),
+                1..=8,
+            ),
+        ) {
+            let mut payload = Vec::new();
+            for (objid, ktype, koffset, ftype, name) in &entries {
+                let entry = BtrfsDirItem {
+                    child_objectid: *objid,
+                    child_key_type: *ktype,
+                    child_key_offset: *koffset,
+                    file_type: *ftype,
+                    name: name.clone(),
+                };
+                payload.extend_from_slice(&entry.try_to_bytes().expect("non-empty name encodes"));
+            }
+            let a = parse_dir_items(&payload).expect("first parse");
+            let b = parse_dir_items(&payload).expect("second parse");
+            proptest::prop_assert_eq!(a, b);
+        }
+
         // MR-3 inner-truncation rejection: removing any non-zero
         // suffix from a valid encoding must produce an error rather
         // than a panic or buffer over-read.
@@ -12202,7 +12237,7 @@ mod tests {
 
         let mut truncated_name = vec![0_u8; 20];
         truncated_name[16..18].copy_from_slice(&5_u16.to_le_bytes());
-        assert_insufficient_data(parse_root_ref(&truncated_name), 23, 18, 2);
+        assert_insufficient_data(parse_root_ref(&truncated_name), 5, 18, 2);
     }
 
     // ── RAID6 parity wraparound regression test ────────────────────
