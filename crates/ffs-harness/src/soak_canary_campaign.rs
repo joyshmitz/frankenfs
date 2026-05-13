@@ -1662,16 +1662,48 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn sample_manifest() -> SoakCanaryCampaignManifest {
+    fn sample_manifest() -> Result<SoakCanaryCampaignManifest> {
         serde_json::from_str(include_str!(
             "../../../benchmarks/soak_canary_campaign_manifest.json"
         ))
-        .expect("checked-in soak/canary manifest parses")
+        .context("checked-in soak/canary manifest parses")
+    }
+
+    fn first_profile(manifest: &SoakCanaryCampaignManifest) -> Result<&CampaignProfile> {
+        manifest
+            .profiles
+            .first()
+            .context("checked-in soak/canary manifest has at least one profile")
+    }
+
+    fn first_profile_mut(
+        manifest: &mut SoakCanaryCampaignManifest,
+    ) -> Result<&mut CampaignProfile> {
+        manifest
+            .profiles
+            .first_mut()
+            .context("checked-in soak/canary manifest has at least one profile")
+    }
+
+    fn first_workload(manifest: &SoakCanaryCampaignManifest) -> Result<&CampaignWorkload> {
+        manifest
+            .workloads
+            .first()
+            .context("checked-in soak/canary manifest has at least one workload")
+    }
+
+    fn first_workload_mut(
+        manifest: &mut SoakCanaryCampaignManifest,
+    ) -> Result<&mut CampaignWorkload> {
+        manifest
+            .workloads
+            .first_mut()
+            .context("checked-in soak/canary manifest has at least one workload")
     }
 
     #[test]
-    fn checked_in_manifest_validates_and_expands_commands() {
-        let manifest = sample_manifest();
+    fn checked_in_manifest_validates_and_expands_commands() -> Result<()> {
+        let manifest = sample_manifest()?;
         let report = validate_soak_canary_campaign_manifest(&manifest, "artifacts/soak/dry-run");
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.profile_count, 4);
@@ -1703,21 +1735,23 @@ mod tests {
             && (row.command.contains("--profile smoke")
                 || row.command.contains("--campaign-profile smoke"))
             && row.command.contains("artifacts/soak/dry-run")));
+        Ok(())
     }
 
     #[test]
-    fn profile_parser_rejects_unknown_profiles() {
+    fn profile_parser_rejects_unknown_profiles() -> Result<()> {
         assert_eq!(
-            CampaignProfileId::parse("nightly").expect("known profile parses"),
+            CampaignProfileId::parse("nightly")?,
             CampaignProfileId::Nightly
         );
         assert!(CampaignProfileId::parse("forever").is_err());
+        Ok(())
     }
 
     #[test]
-    fn rejects_zero_profile_duration() {
-        let mut manifest = sample_manifest();
-        manifest.profiles[0].duration_seconds = 0;
+    fn rejects_zero_profile_duration() -> Result<()> {
+        let mut manifest = sample_manifest()?;
+        first_profile_mut(&mut manifest)?.duration_seconds = 0;
         let report = validate_soak_canary_campaign_manifest(&manifest, "artifacts/soak");
         assert!(!report.valid);
         assert!(
@@ -1726,11 +1760,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("duration_seconds must be positive"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_required_log_field() {
-        let mut manifest = sample_manifest();
+    fn rejects_missing_required_log_field() -> Result<()> {
+        let mut manifest = sample_manifest()?;
         manifest
             .required_log_fields
             .retain(|field| field != "reproduction_command");
@@ -1742,12 +1777,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("required_log_fields missing reproduction_command"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_unknown_capability_reference() {
-        let mut manifest = sample_manifest();
-        manifest.workloads[0]
+    fn rejects_unknown_capability_reference() -> Result<()> {
+        let mut manifest = sample_manifest()?;
+        first_workload_mut(&mut manifest)?
             .required_capabilities
             .push("ambient_mutation".to_owned());
         let report = validate_soak_canary_campaign_manifest(&manifest, "artifacts/soak");
@@ -1758,19 +1794,16 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("unknown capability ambient_mutation"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_flakes_without_follow_up_and_repro_pack() {
-        let mut manifest = sample_manifest();
-        manifest.workloads[0].failure_threshold.max_flakes = 1;
-        manifest.workloads[0]
-            .failure_threshold
-            .follow_up_bead
-            .clear();
-        manifest.workloads[0]
-            .failure_threshold
-            .preserve_repro_artifacts = false;
+    fn rejects_flakes_without_follow_up_and_repro_pack() -> Result<()> {
+        let mut manifest = sample_manifest()?;
+        let workload = first_workload_mut(&mut manifest)?;
+        workload.failure_threshold.max_flakes = 1;
+        workload.failure_threshold.follow_up_bead.clear();
+        workload.failure_threshold.preserve_repro_artifacts = false;
         let report = validate_soak_canary_campaign_manifest(&manifest, "artifacts/soak");
         assert!(!report.valid);
         assert!(
@@ -1785,13 +1818,14 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("must preserve repro artifacts"))
         );
+        Ok(())
     }
 
     #[test]
-    fn threshold_evaluation_classifies_pass_fail_skip_error_and_flake() {
-        let manifest = sample_manifest();
-        let profile = &manifest.profiles[0];
-        let workload = &manifest.workloads[0];
+    fn threshold_evaluation_classifies_pass_fail_skip_error_and_flake() -> Result<()> {
+        let manifest = sample_manifest()?;
+        let profile = first_profile(&manifest)?;
+        let workload = first_workload(&manifest)?;
         let cases = [
             (
                 CampaignObservationStats {
@@ -1835,13 +1869,14 @@ mod tests {
             assert!(evaluation.repro_artifacts_required);
             assert_eq!(evaluation.follow_up_bead, "bd-t21em");
         }
+        Ok(())
     }
 
     #[test]
-    fn stop_condition_precedence_classifies_resource_budget_first() {
-        let manifest = sample_manifest();
-        let profile = &manifest.profiles[0];
-        let workload = &manifest.workloads[0];
+    fn stop_condition_precedence_classifies_resource_budget_first() -> Result<()> {
+        let manifest = sample_manifest()?;
+        let profile = first_profile(&manifest)?;
+        let workload = first_workload(&manifest)?;
         let evaluation = evaluate_stop_condition(
             &manifest.classification_policy,
             profile,
@@ -1874,13 +1909,14 @@ mod tests {
             CampaignRootCauseClass::ResourceExhaustion
         );
         assert_eq!(evaluation.release_gate_impact, "block_release_gate");
+        Ok(())
     }
 
     #[test]
-    fn classifies_stale_baseline_and_known_vs_new_flakes() {
-        let manifest = sample_manifest();
-        let profile = &manifest.profiles[0];
-        let workload = &manifest.workloads[0];
+    fn classifies_stale_baseline_and_known_vs_new_flakes() -> Result<()> {
+        let manifest = sample_manifest()?;
+        let profile = first_profile(&manifest)?;
+        let workload = first_workload(&manifest)?;
         let resource_usage = CampaignResourceUsage {
             cpu_percent: 1,
             memory_mib: 1,
@@ -1955,17 +1991,22 @@ mod tests {
             CampaignRootCauseClass::NewRecurringFlake
         );
         assert_eq!(new_flake.release_gate_impact, "block_release_gate");
+        Ok(())
     }
 
     #[test]
-    fn rejects_incomplete_classification_policy() {
-        let mut manifest = sample_manifest();
+    fn rejects_incomplete_classification_policy() -> Result<()> {
+        let mut manifest = sample_manifest()?;
         manifest.classification_policy.stale_baseline_max_age_hours = 0;
         manifest
             .classification_policy
             .stop_condition_precedence
             .retain(|reason| *reason != CampaignStopReason::Timeout);
-        manifest.classification_policy.known_flake_quarantines[0]
+        manifest
+            .classification_policy
+            .known_flake_quarantines
+            .first_mut()
+            .context("checked-in soak/canary manifest has at least one known flake quarantine")?
             .reproduction_pack
             .clear();
 
@@ -1988,6 +2029,7 @@ mod tests {
                 .iter()
                 .any(|error| { error.contains("known_flake_quarantine.reproduction_pack") })
         );
+        Ok(())
     }
 
     #[test]
@@ -2059,8 +2101,8 @@ mod tests {
     }
 
     #[test]
-    fn long_profiles_document_rch_ci_and_manual_hosts() {
-        let manifest = sample_manifest();
+    fn long_profiles_document_rch_ci_and_manual_hosts() -> Result<()> {
+        let manifest = sample_manifest()?;
         for profile in manifest
             .profiles
             .iter()
@@ -2069,7 +2111,7 @@ mod tests {
             let context = profile
                 .long_run_context
                 .as_ref()
-                .expect("long profile has context");
+                .context("long profile has context")?;
             for host in ["rch", "ci", "manual_permissioned"] {
                 assert!(context.intended_hosts.iter().any(|value| value == host));
             }
@@ -2083,22 +2125,24 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn report_markdown_preserves_consumers_and_follow_up() {
-        let manifest = sample_manifest();
+    fn report_markdown_preserves_consumers_and_follow_up() -> Result<()> {
+        let manifest = sample_manifest()?;
         let report = validate_soak_canary_campaign_manifest(&manifest, "artifacts/soak");
         let markdown = render_soak_canary_campaign_markdown(&report);
         assert!(markdown.contains("operator_proof_bundle"));
         assert!(markdown.contains("release_gate_evaluator"));
         assert!(markdown.contains("bd-t21em"));
         assert!(markdown.contains("HEARTBEAT|"));
+        Ok(())
     }
 
     #[test]
-    fn render_soak_canary_campaign_markdown_checked_in_manifest_snapshot() {
-        let manifest = sample_manifest();
+    fn render_soak_canary_campaign_markdown_checked_in_manifest_snapshot() -> Result<()> {
+        let manifest = sample_manifest()?;
         let report = validate_soak_canary_campaign_manifest(&manifest, "artifacts/soak");
         assert!(report.valid, "{:?}", report.errors);
         assert!(
@@ -2118,11 +2162,12 @@ mod tests {
             "render_soak_canary_campaign_markdown_checked_in_manifest",
             markdown
         );
+        Ok(())
     }
 
     #[test]
-    fn soak_canary_campaign_report_json_shape() -> serde_json::Result<()> {
-        let manifest = sample_manifest();
+    fn soak_canary_campaign_report_json_shape() -> Result<()> {
+        let manifest = sample_manifest()?;
         let report = validate_soak_canary_campaign_manifest(&manifest, "artifacts/soak");
         assert!(report.valid, "{:?}", report.errors);
 
@@ -2199,8 +2244,8 @@ mod tests {
     }
 
     #[test]
-    fn sample_artifact_manifest_exposes_proof_bundle_and_release_gate_metadata() {
-        let manifest = sample_manifest();
+    fn sample_artifact_manifest_exposes_proof_bundle_and_release_gate_metadata() -> Result<()> {
+        let manifest = sample_manifest()?;
         let evaluations = sample_failure_evaluations(&manifest);
         let artifact =
             build_soak_canary_sample_artifact_manifest(&manifest, "artifacts/soak", &evaluations);
@@ -2225,6 +2270,7 @@ mod tests {
                 .get("classification")
                 .is_some_and(|value| value == "resource_exhaustion")
         }));
+        Ok(())
     }
 
     #[test]
