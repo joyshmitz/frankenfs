@@ -478,19 +478,79 @@ pub fn render_mounted_checkpoint_survivor_markdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
 
-    fn fixture_matrix() -> MountedCheckpointSurvivorMatrix {
+    fn fixture_matrix() -> Result<MountedCheckpointSurvivorMatrix> {
         parse_mounted_checkpoint_survivor(DEFAULT_MOUNTED_CHECKPOINT_SURVIVOR_JSON)
-            .expect("default mounted checkpoint survivor matrix parses")
+            .context("default mounted checkpoint survivor matrix parses")
+    }
+
+    fn first_scenario_mut(
+        matrix: &mut MountedCheckpointSurvivorMatrix,
+    ) -> Result<&mut MountedCheckpointScenario> {
+        matrix
+            .scenarios
+            .first_mut()
+            .context("fixture matrix includes at least one scenario")
+    }
+
+    fn first_two_scenarios_mut(
+        matrix: &mut MountedCheckpointSurvivorMatrix,
+    ) -> Result<(
+        &mut MountedCheckpointScenario,
+        &mut MountedCheckpointScenario,
+    )> {
+        let (first, rest) = matrix
+            .scenarios
+            .split_first_mut()
+            .context("fixture matrix includes at least one scenario")?;
+        let second = rest
+            .first_mut()
+            .context("fixture matrix includes at least two scenarios")?;
+        Ok((first, second))
+    }
+
+    fn scenario_by_kind_mut<'a>(
+        matrix: &'a mut MountedCheckpointSurvivorMatrix,
+        kind: &str,
+    ) -> Result<&'a mut MountedCheckpointScenario> {
+        matrix
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.kind == kind)
+            .with_context(|| format!("fixture matrix includes kind {kind}"))
+    }
+
+    fn scenario_by_process_control_mut<'a>(
+        matrix: &'a mut MountedCheckpointSurvivorMatrix,
+        process_control: &str,
+    ) -> Result<&'a mut MountedCheckpointScenario> {
+        matrix
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.process_control == process_control)
+            .with_context(|| format!("fixture matrix includes process_control {process_control}"))
+    }
+
+    fn first_two_trace_steps_mut(
+        scenario: &mut MountedCheckpointScenario,
+    ) -> Result<(&mut TraceStep, &mut TraceStep)> {
+        let (first, rest) = scenario
+            .operation_trace
+            .split_first_mut()
+            .context("fixture scenario includes at least one trace step")?;
+        let second = rest
+            .first_mut()
+            .context("fixture scenario includes at least two trace steps")?;
+        Ok((first, second))
     }
 
     #[test]
-    fn default_matrix_report_snapshot() {
-        let report = validate_default_mounted_checkpoint_survivor()
-            .expect("default mounted checkpoint survivor validates");
-        let json = serde_json::to_string_pretty(&report)
-            .expect("default mounted checkpoint survivor report serializes");
+    fn default_matrix_report_snapshot() -> Result<()> {
+        let report = validate_default_mounted_checkpoint_survivor()?;
+        let json = serde_json::to_string_pretty(&report)?;
         insta::assert_snapshot!("default_matrix_report_snapshot", json);
+        Ok(())
     }
 
     #[test]
@@ -505,34 +565,35 @@ mod tests {
     }
 
     #[test]
-    fn render_mounted_checkpoint_survivor_markdown_default_matrix() {
-        let report = validate_default_mounted_checkpoint_survivor()
-            .expect("default mounted checkpoint survivor validates");
+    fn render_mounted_checkpoint_survivor_markdown_default_matrix() -> Result<()> {
+        let report = validate_default_mounted_checkpoint_survivor()?;
         let markdown = render_mounted_checkpoint_survivor_markdown(&report);
         insta::assert_snapshot!(
             "render_mounted_checkpoint_survivor_markdown_default_matrix",
             markdown
         );
+        Ok(())
     }
 
     #[test]
-    fn fail_on_errors_rejects_invalid_report() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].artifact_paths.clear();
+    fn fail_on_errors_rejects_invalid_report() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.artifact_paths.clear();
         let report = validate_mounted_checkpoint_survivor(&matrix);
-        let err = fail_on_mounted_checkpoint_survivor_errors(&report)
-            .expect_err("invalid report fails closed");
+        let Err(err) = fail_on_mounted_checkpoint_survivor_errors(&report) else {
+            anyhow::bail!("invalid report fails closed");
+        };
         assert!(
             err.to_string()
                 .contains("mounted checkpoint survivor matrix failed")
         );
         assert!(err.to_string().contains("artifact_path"));
+        Ok(())
     }
 
     #[test]
-    fn default_matrix_validates_required_kinds() {
-        let report = validate_default_mounted_checkpoint_survivor()
-            .expect("default mounted checkpoint survivor validates");
+    fn default_matrix_validates_required_kinds() -> Result<()> {
+        let report = validate_default_mounted_checkpoint_survivor()?;
         assert_eq!(report.bead_id, "bd-zm0wr");
         for kind in REQUIRED_LIFECYCLE_KINDS {
             assert!(
@@ -540,11 +601,12 @@ mod tests {
                 "missing required kind {kind}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn missing_clean_unmount_kind_is_rejected() {
-        let mut matrix = fixture_matrix();
+    fn missing_clean_unmount_kind_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
         matrix.scenarios.retain(|s| s.kind != "clean_unmount");
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
@@ -553,11 +615,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required kind `clean_unmount`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_post_fsync_kind_is_rejected() {
-        let mut matrix = fixture_matrix();
+    fn missing_post_fsync_kind_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
         matrix
             .scenarios
             .retain(|s| s.kind != "process_termination_post_fsync");
@@ -568,13 +631,14 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required kind `process_termination_post_fsync`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_scenario_id_is_rejected() {
-        let mut matrix = fixture_matrix();
-        let dup = matrix.scenarios[0].scenario_id.clone();
-        matrix.scenarios[1].scenario_id = dup;
+    fn duplicate_scenario_id_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let (first, second) = first_two_scenarios_mut(&mut matrix)?;
+        second.scenario_id = first.scenario_id.clone();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
             report
@@ -582,13 +646,14 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicate mounted checkpoint scenario_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_checkpoint_id_is_rejected() {
-        let mut matrix = fixture_matrix();
-        let dup = matrix.scenarios[0].checkpoint_id.clone();
-        matrix.scenarios[1].checkpoint_id = dup;
+    fn duplicate_checkpoint_id_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let (first, second) = first_two_scenarios_mut(&mut matrix)?;
+        second.checkpoint_id = first.checkpoint_id.clone();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
             report
@@ -596,12 +661,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("checkpoint_id") && err.contains("not unique"))
         );
+        Ok(())
     }
 
     #[test]
-    fn scenario_id_prefix_is_enforced() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].scenario_id = "checkpoint_001".to_owned();
+    fn scenario_id_prefix_is_enforced() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.scenario_id = "checkpoint_001".to_owned();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
             report
@@ -609,12 +675,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must start with mounted_checkpoint_"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_kind_is_rejected() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].kind = "remote_alien_termination".to_owned();
+    fn unsupported_kind_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.kind = "remote_alien_termination".to_owned();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
             report
@@ -622,12 +689,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported kind"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_pre_operation_image_hash_is_rejected() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].pre_operation_image_hash = "md5:not-supported".to_owned();
+    fn malformed_pre_operation_image_hash_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.pre_operation_image_hash = "md5:not-supported".to_owned();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
             report
@@ -635,12 +703,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("pre_operation_image_hash must be sha256"))
         );
+        Ok(())
     }
 
     #[test]
-    fn operation_trace_must_be_non_empty() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].operation_trace.clear();
+    fn operation_trace_must_be_non_empty() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.operation_trace.clear();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
             report
@@ -648,15 +717,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("operation_trace must not be empty"))
         );
+        Ok(())
     }
 
     #[test]
-    fn operation_trace_steps_must_increase() {
-        let mut matrix = fixture_matrix();
-        let scenario = &mut matrix.scenarios[0];
-        if scenario.operation_trace.len() >= 2 {
-            scenario.operation_trace[1].step = scenario.operation_trace[0].step;
-        }
+    fn operation_trace_steps_must_increase() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = first_scenario_mut(&mut matrix)?;
+        let (first, second) = first_two_trace_steps_mut(scenario)?;
+        second.step = first.step;
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
             report
@@ -664,16 +733,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("strictly increasing") || err.contains("duplicate step"))
         );
+        Ok(())
     }
 
     #[test]
-    fn crash_point_must_match_a_trace_step() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "process_termination_post_fsync")
-            .expect("post-fsync scenario exists");
+    fn crash_point_must_match_a_trace_step() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_kind_mut(&mut matrix, "process_termination_post_fsync")?;
         scenario.crash_or_unmount_point_step = 9999;
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
@@ -682,16 +748,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("does not match any operation_trace step"))
         );
+        Ok(())
     }
 
     #[test]
-    fn fsyncdir_boundary_kind_must_include_fsyncdir_step() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "fsyncdir_boundary")
-            .expect("fsyncdir fixture exists");
+    fn fsyncdir_boundary_kind_must_include_fsyncdir_step() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_kind_mut(&mut matrix, "fsyncdir_boundary")?;
         for step in &mut scenario.operation_trace {
             step.fsyncdir_boundary = false;
         }
@@ -702,16 +765,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("fsyncdir_boundary kind must include an fsyncdir step"))
         );
+        Ok(())
     }
 
     #[test]
-    fn post_fsync_kind_requires_fsync_step() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "process_termination_post_fsync")
-            .expect("post-fsync fixture exists");
+    fn post_fsync_kind_requires_fsync_step() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_kind_mut(&mut matrix, "process_termination_post_fsync")?;
         for step in &mut scenario.operation_trace {
             step.fsync_boundary = false;
         }
@@ -721,16 +781,13 @@ mod tests {
                 |err| err.contains("process_termination_post_fsync must include an fsync step")
             )
         );
+        Ok(())
     }
 
     #[test]
-    fn clean_unmount_must_use_clean_signal() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "clean_unmount")
-            .expect("clean unmount fixture exists");
+    fn clean_unmount_must_use_clean_signal() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_kind_mut(&mut matrix, "clean_unmount")?;
         scenario.process_control = "sigterm_then_sigkill".to_owned();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
@@ -739,16 +796,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("clean_unmount must use process_control=clean_signal"))
         );
+        Ok(())
     }
 
     #[test]
-    fn clean_unmount_must_classify_as_expected() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "clean_unmount")
-            .expect("clean unmount fixture exists");
+    fn clean_unmount_must_classify_as_expected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_kind_mut(&mut matrix, "clean_unmount")?;
         scenario.recovery_classification = "host_limitation".to_owned();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
@@ -757,31 +811,25 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("clean_unmount must classify as expected_survivor_set"))
         );
+        Ok(())
     }
 
     #[test]
-    fn kill_minus_nine_refusal_cannot_claim_expected_survivors() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.process_control == "kill_minus_nine_refused")
-            .expect("kill -9 refused fixture exists");
+    fn kill_minus_nine_refusal_cannot_claim_expected_survivors() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_process_control_mut(&mut matrix, "kill_minus_nine_refused")?;
         scenario.recovery_classification = "expected_survivor_set".to_owned();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(report.errors.iter().any(|err| {
             err.contains("kill_minus_nine_refused cannot also claim expected_survivor_set")
         }));
+        Ok(())
     }
 
     #[test]
-    fn crash_lifecycle_must_preserve_partial_artifacts() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "process_termination_post_fsync")
-            .expect("post-fsync fixture exists");
+    fn crash_lifecycle_must_preserve_partial_artifacts() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_kind_mut(&mut matrix, "process_termination_post_fsync")?;
         scenario.partial_artifact_policy = "discard_on_pass".to_owned();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
@@ -790,12 +838,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("crash lifecycle must preserve partial artifacts"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_recovery_command_is_rejected() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].recovery_command = String::new();
+    fn empty_recovery_command_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.recovery_command = String::new();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
             report
@@ -803,12 +852,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("recovery_command must not be empty"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_partial_artifact_policy_is_rejected() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].partial_artifact_policy = "throw_them_away".to_owned();
+    fn unsupported_partial_artifact_policy_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.partial_artifact_policy = "throw_them_away".to_owned();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
             report
@@ -816,12 +866,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported partial_artifact_policy"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_artifact_paths_is_rejected() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].artifact_paths.clear();
+    fn empty_artifact_paths_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.artifact_paths.clear();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
             report
@@ -829,19 +880,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one artifact_path"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_survivor_set_is_rejected() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0]
-            .expected_survivor_set
-            .present_paths
-            .clear();
-        matrix.scenarios[0]
-            .expected_survivor_set
-            .absent_paths
-            .clear();
+    fn empty_survivor_set_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = first_scenario_mut(&mut matrix)?;
+        scenario.expected_survivor_set.present_paths.clear();
+        scenario.expected_survivor_set.absent_paths.clear();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
             report
@@ -849,11 +896,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("expected_survivor_set must declare"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_scenarios_list_is_rejected() {
-        let mut matrix = fixture_matrix();
+    fn empty_scenarios_list_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
         matrix.scenarios.clear();
         let report = validate_mounted_checkpoint_survivor(&matrix);
         assert!(
@@ -862,5 +910,6 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one scenario"))
         );
+        Ok(())
     }
 }
