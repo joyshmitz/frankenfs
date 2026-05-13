@@ -757,16 +757,22 @@ fn is_reserved(reserved: &[u32], rel_block: u32) -> bool {
 /// reside in group 0.
 #[must_use]
 pub fn reserved_inodes_in_group(geo: &FsGeometry, group: GroupNumber) -> Vec<u32> {
-    if group.0 != 0 {
+    // Total number of reserved inodes across the entire filesystem
+    // s_first_ino is 1-based. Reserved are [1, first_inode).
+    let total_reserved = geo.first_inode.saturating_sub(1);
+
+    // The number of inodes before this group.
+    let inodes_before = group.0 * geo.inodes_per_group;
+
+    if inodes_before >= total_reserved {
         return Vec::new();
     }
-    let mut reserved = Vec::new();
-    // s_first_ino is 1-based. Reserved are [1, first_inode).
-    // Bitmap indices are 0-based: [0, first_inode - 1).
-    let limit = geo
-        .first_inode
-        .saturating_sub(1)
-        .min(geo.inodes_in_group(group));
+
+    // The number of reserved inodes that fall into this group.
+    let remaining_reserved = total_reserved - inodes_before;
+
+    let limit = remaining_reserved.min(geo.inodes_in_group(group));
+    let mut reserved = Vec::with_capacity(limit as usize);
     for i in 0..limit {
         reserved.push(i);
     }
@@ -1323,20 +1329,26 @@ pub fn alloc_blocks_batch_persist(
 
     // Build ordered group list: goal group first, then nearby, then full scan.
     let mut group_order = Vec::with_capacity(geo.group_count as usize);
+
+    let start_scan = goal_group.0.saturating_sub(8);
+    let end_scan = (goal_group.0.saturating_add(8) + 1).min(geo.group_count);
+
     group_order.push(goal_group);
     for delta in 1..=8u32 {
-        for dir in [1i64, -1i64] {
-            let g = i64::from(goal_group.0) + dir * i64::from(delta);
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            if g >= 0 && (g as u32) < geo.group_count {
-                group_order.push(GroupNumber(g as u32));
-            }
+        let next = goal_group.0.wrapping_add(delta);
+        if next < end_scan {
+            group_order.push(GroupNumber(next));
+        }
+        let prev = goal_group.0.wrapping_sub(delta);
+        if prev >= start_scan && prev < geo.group_count {
+            // prev >= start_scan is enough, but prev < geo.group_count handles wrap-around.
+            group_order.push(GroupNumber(prev));
         }
     }
+
     for g in 0..geo.group_count {
-        let group = GroupNumber(g);
-        if !group_order.contains(&group) {
-            group_order.push(group);
+        if g < start_scan || g >= end_scan {
+            group_order.push(GroupNumber(g));
         }
     }
 
