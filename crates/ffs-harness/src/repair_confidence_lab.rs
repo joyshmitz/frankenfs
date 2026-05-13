@@ -1383,9 +1383,9 @@ mod tests {
     const CHECKED_IN_SPEC_JSON: &str =
         include_str!("../../../docs/repair-confidence-mutation-safety.json");
 
-    fn checked_in_spec() -> RepairConfidenceLabSpec {
+    fn checked_in_spec() -> Result<RepairConfidenceLabSpec> {
         serde_json::from_str(CHECKED_IN_SPEC_JSON)
-            .expect("checked-in repair confidence lab is valid JSON")
+            .context("checked-in repair confidence lab is valid JSON")
     }
 
     fn report_for(mut spec: RepairConfidenceLabSpec) -> RepairConfidenceLabReport {
@@ -1393,9 +1393,55 @@ mod tests {
         validate_repair_confidence_lab(&spec)
     }
 
+    fn calibration_report<'a>(
+        reports: &BTreeMap<&str, &'a RepairCalibrationCaseReport>,
+        corpus_id: &str,
+    ) -> Result<&'a RepairCalibrationCaseReport> {
+        reports
+            .get(corpus_id)
+            .copied()
+            .with_context(|| format!("fixture includes calibration case {corpus_id}"))
+    }
+
+    fn calibration_case_mut<'a>(
+        spec: &'a mut RepairConfidenceLabSpec,
+        corpus_id: &str,
+    ) -> Result<&'a mut RepairCalibrationCase> {
+        spec.calibration_corpus
+            .iter_mut()
+            .find(|case| case.corpus_id == corpus_id)
+            .with_context(|| format!("fixture includes calibration case {corpus_id}"))
+    }
+
+    fn scenario_with_outcome_mut(
+        spec: &mut RepairConfidenceLabSpec,
+        outcome: RepairConfidenceOutcome,
+    ) -> Result<&mut RepairConfidenceScenario> {
+        spec.scenarios
+            .iter_mut()
+            .find(|scenario| scenario.expected_outcome == outcome)
+            .with_context(|| format!("fixture includes {outcome:?} repair scenario"))
+    }
+
+    fn first_scenario_mut(
+        spec: &mut RepairConfidenceLabSpec,
+    ) -> Result<&mut RepairConfidenceScenario> {
+        spec.scenarios
+            .first_mut()
+            .context("fixture includes at least one repair confidence scenario")
+    }
+
+    fn first_threshold_mut(
+        spec: &mut RepairConfidenceLabSpec,
+    ) -> Result<&mut MutationSafetyThreshold> {
+        spec.thresholds
+            .first_mut()
+            .context("fixture includes at least one mutation safety threshold")
+    }
+
     #[test]
-    fn checked_in_lab_validates_required_contract() {
-        let spec = checked_in_spec();
+    fn checked_in_lab_validates_required_contract() -> Result<()> {
+        let spec = checked_in_spec()?;
         let report = validate_repair_confidence_lab(&spec);
         assert!(report.valid, "{:#?}", report.errors);
         assert_eq!(report.scenario_count, 5);
@@ -1406,11 +1452,12 @@ mod tests {
         assert!(report.missing_required_calibration_classes.is_empty());
         assert!(report.missing_required_refusal_reasons.is_empty());
         assert!(report.missing_required_log_fields.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn render_repair_confidence_lab_markdown_checked_in_spec_snapshot() {
-        let spec = checked_in_spec();
+    fn render_repair_confidence_lab_markdown_checked_in_spec_snapshot() -> Result<()> {
+        let spec = checked_in_spec()?;
         let report = validate_repair_confidence_lab(&spec);
         assert!(report.valid, "{:#?}", report.errors);
         assert_eq!(report.scenario_count, 5);
@@ -1423,11 +1470,12 @@ mod tests {
             "render_repair_confidence_lab_markdown_checked_in_spec",
             markdown
         );
+        Ok(())
     }
 
     #[test]
     fn repair_confidence_lab_report_json_shape() -> Result<()> {
-        let spec = checked_in_spec();
+        let spec = checked_in_spec()?;
         let report = validate_repair_confidence_lab(&spec);
         assert!(report.valid, "{:#?}", report.errors);
 
@@ -1539,8 +1587,8 @@ mod tests {
     }
 
     #[test]
-    fn calibration_corpus_covers_recovery_refusal_and_verification() {
-        let spec = checked_in_spec();
+    fn calibration_corpus_covers_recovery_refusal_and_verification() -> Result<()> {
+        let spec = checked_in_spec()?;
         let report = validate_repair_confidence_lab(&spec);
         let reports = report
             .calibration_reports
@@ -1549,25 +1597,27 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
 
         assert_eq!(
-            reports["cal_recoverable_single_block"].observed_outcome,
+            calibration_report(&reports, "cal_recoverable_single_block")?.observed_outcome,
             RepairConfidenceOutcome::DryRunSuccess
         );
         assert_eq!(
-            reports["cal_recoverable_multi_block"].observed_outcome,
+            calibration_report(&reports, "cal_recoverable_multi_block")?.observed_outcome,
             RepairConfidenceOutcome::MutatingRepairVerified
         );
         assert_eq!(
-            reports["cal_unrecoverable_beyond_budget"]
+            calibration_report(&reports, "cal_unrecoverable_beyond_budget")?
                 .refusal_reason
                 .as_deref(),
             Some("beyond_symbol_budget")
         );
         assert_eq!(
-            reports["cal_wrong_image_ledger"].refusal_reason.as_deref(),
+            calibration_report(&reports, "cal_wrong_image_ledger")?
+                .refusal_reason
+                .as_deref(),
             Some("wrong_image_ledger")
         );
         assert_eq!(
-            reports["cal_verification_failure"].observed_outcome,
+            calibration_report(&reports, "cal_verification_failure")?.observed_outcome,
             RepairConfidenceOutcome::FailedVerification
         );
         assert!(reports.values().all(|case| {
@@ -1575,11 +1625,12 @@ mod tests {
                 && case.log_line.contains("ledger_row_ids=")
                 && case.log_line.contains("reproduction_command=")
         }));
+        Ok(())
     }
 
     #[test]
-    fn calibration_rejects_missing_required_class_and_refusal_reason() {
-        let mut spec = checked_in_spec();
+    fn calibration_rejects_missing_required_class_and_refusal_reason() -> Result<()> {
+        let mut spec = checked_in_spec()?;
         spec.calibration_corpus
             .retain(|case| case.corruption_class != "wrong_image_ledger");
         let report = report_for(spec);
@@ -1594,16 +1645,13 @@ mod tests {
                 .missing_required_refusal_reasons
                 .contains(&"wrong_image_ledger".to_owned())
         );
+        Ok(())
     }
 
     #[test]
-    fn calibration_rejects_bad_decoder_and_ledger_expectation() {
-        let mut spec = checked_in_spec();
-        let case = spec
-            .calibration_corpus
-            .iter_mut()
-            .find(|case| case.corpus_id == "cal_wrong_image_ledger")
-            .expect("fixture includes wrong-image calibration case");
+    fn calibration_rejects_bad_decoder_and_ledger_expectation() -> Result<()> {
+        let mut spec = checked_in_spec()?;
+        let case = calibration_case_mut(&mut spec, "cal_wrong_image_ledger")?;
         case.decoder_parameters.data_symbols = 99;
         case.ledger_expectation.require_image_hash_match = true;
         let report = report_for(spec);
@@ -1620,21 +1668,14 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("wrong-image ledger"))
         );
+        Ok(())
     }
 
     #[test]
-    fn mutating_repair_requires_verified_thresholds() {
-        let mut spec = checked_in_spec();
-        let scenario = spec
-            .scenarios
-            .iter_mut()
-            .find(|scenario| {
-                matches!(
-                    scenario.expected_outcome,
-                    RepairConfidenceOutcome::MutatingRepairVerified
-                )
-            })
-            .expect("fixture includes mutating repair scenario");
+    fn mutating_repair_requires_verified_thresholds() -> Result<()> {
+        let mut spec = checked_in_spec()?;
+        let scenario =
+            scenario_with_outcome_mut(&mut spec, RepairConfidenceOutcome::MutatingRepairVerified)?;
         scenario.confidence_inputs.verification_passed = false;
         let report = report_for(spec);
         assert!(!report.valid);
@@ -1644,21 +1685,14 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("was not allowed by thresholds"))
         );
+        Ok(())
     }
 
     #[test]
-    fn dry_run_scenario_cannot_request_mutation() {
-        let mut spec = checked_in_spec();
-        let scenario = spec
-            .scenarios
-            .iter_mut()
-            .find(|scenario| {
-                matches!(
-                    scenario.expected_outcome,
-                    RepairConfidenceOutcome::DryRunSuccess
-                )
-            })
-            .expect("fixture includes dry-run scenario");
+    fn dry_run_scenario_cannot_request_mutation() -> Result<()> {
+        let mut spec = checked_in_spec()?;
+        let scenario =
+            scenario_with_outcome_mut(&mut spec, RepairConfidenceOutcome::DryRunSuccess)?;
         scenario.candidate_repair_plan.mutation_requested = true;
         let report = report_for(spec);
         assert!(!report.valid);
@@ -1668,12 +1702,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("must not mutate the image"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unknown_threshold_is_rejected() {
-        let mut spec = checked_in_spec();
-        spec.scenarios[0].threshold_id = "missing_threshold".to_owned();
+    fn unknown_threshold_is_rejected() -> Result<()> {
+        let mut spec = checked_in_spec()?;
+        first_scenario_mut(&mut spec)?.threshold_id = "missing_threshold".to_owned();
         let report = report_for(spec);
         assert!(!report.valid);
         assert!(
@@ -1682,13 +1717,15 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("references unknown threshold"))
         );
+        Ok(())
     }
 
     #[test]
-    fn experimental_threshold_requires_follow_up() {
-        let mut spec = checked_in_spec();
-        spec.thresholds[0].experimental = true;
-        spec.thresholds[0].follow_up_bead = None;
+    fn experimental_threshold_requires_follow_up() -> Result<()> {
+        let mut spec = checked_in_spec()?;
+        let threshold = first_threshold_mut(&mut spec)?;
+        threshold.experimental = true;
+        threshold.follow_up_bead = None;
         let report = report_for(spec);
         assert!(!report.valid);
         assert!(
@@ -1697,11 +1734,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("threshold.follow_up_bead"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_log_field_is_rejected() {
-        let mut spec = checked_in_spec();
+    fn missing_log_field_is_rejected() -> Result<()> {
+        let mut spec = checked_in_spec()?;
         spec.required_log_fields
             .retain(|field| field != "verification_verdict");
         let report = report_for(spec);
@@ -1711,12 +1749,15 @@ mod tests {
                 .missing_required_log_fields
                 .contains(&"verification_verdict".to_owned())
         );
+        Ok(())
     }
 
     #[test]
-    fn ledger_tamper_requires_refusal_outcome() {
-        let mut spec = checked_in_spec();
-        spec.scenarios[0].evidence_ledger.tamper_detected = true;
+    fn ledger_tamper_requires_refusal_outcome() -> Result<()> {
+        let mut spec = checked_in_spec()?;
+        first_scenario_mut(&mut spec)?
+            .evidence_ledger
+            .tamper_detected = true;
         let report = report_for(spec);
         assert!(!report.valid);
         assert!(
@@ -1725,5 +1766,6 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("ledger tamper requires unsafe/refused outcome"))
         );
+        Ok(())
     }
 }
