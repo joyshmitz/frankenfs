@@ -389,25 +389,24 @@ pub fn render_low_privilege_demo_sandbox_markdown(
     report: &LowPrivilegeDemoSandboxReport,
 ) -> String {
     let mut out = String::new();
-    writeln!(&mut out, "# Low-Privilege Demo Sandbox").expect("write to string");
-    writeln!(&mut out).expect("write to string");
-    writeln!(&mut out, "- manifest: `{}`", report.manifest_id).expect("write to string");
-    writeln!(&mut out, "- schema version: `{}`", report.schema_version).expect("write to string");
-    writeln!(&mut out, "- bead: `{}`", report.bead_id).expect("write to string");
-    writeln!(&mut out, "- valid: `{}`", report.valid).expect("write to string");
-    writeln!(&mut out, "- fixtures: `{}`", report.fixture_count).expect("write to string");
-    writeln!(&mut out, "- lanes: `{}`", report.lane_count).expect("write to string");
-    writeln!(
+    let _ = writeln!(&mut out, "# Low-Privilege Demo Sandbox");
+    let _ = writeln!(&mut out);
+    let _ = writeln!(&mut out, "- manifest: `{}`", report.manifest_id);
+    let _ = writeln!(&mut out, "- schema version: `{}`", report.schema_version);
+    let _ = writeln!(&mut out, "- bead: `{}`", report.bead_id);
+    let _ = writeln!(&mut out, "- valid: `{}`", report.valid);
+    let _ = writeln!(&mut out, "- fixtures: `{}`", report.fixture_count);
+    let _ = writeln!(&mut out, "- lanes: `{}`", report.lane_count);
+    let _ = writeln!(
         &mut out,
         "- host-skipped lanes: `{}`",
         report.host_skipped_lanes
-    )
-    .expect("write to string");
+    );
     if !report.errors.is_empty() {
-        writeln!(&mut out).expect("write to string");
-        writeln!(&mut out, "## Errors").expect("write to string");
+        let _ = writeln!(&mut out);
+        let _ = writeln!(&mut out, "## Errors");
         for error in &report.errors {
-            writeln!(&mut out, "- {error}").expect("write to string");
+            let _ = writeln!(&mut out, "- {error}");
         }
     }
     out
