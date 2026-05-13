@@ -831,16 +831,58 @@ fn validate_members(
 mod tests {
     use super::*;
 
-    fn fixture_corpus() -> WorkloadCorpus {
+    fn fixture_corpus() -> Result<WorkloadCorpus> {
         serde_json::from_str(include_str!(
             "../../../tests/workload-corpus/p1_workload_corpus.json"
         ))
-        .expect("checked-in corpus is valid JSON")
+        .context("checked-in corpus is valid JSON")
+    }
+
+    fn coverage_row<'a>(
+        report: &'a WorkloadCorpusValidationReport,
+        scenario_id: &str,
+    ) -> Result<&'a WorkloadCoverageMatrixRow> {
+        report
+            .coverage_matrix
+            .iter()
+            .find(|row| row.scenario_id == scenario_id)
+            .with_context(|| format!("coverage matrix includes row {scenario_id}"))
+    }
+
+    fn first_scenario_mut(corpus: &mut WorkloadCorpus) -> Result<&mut WorkloadScenario> {
+        corpus
+            .scenarios
+            .first_mut()
+            .context("fixture corpus includes at least one scenario")
+    }
+
+    fn first_two_scenarios_mut(
+        corpus: &mut WorkloadCorpus,
+    ) -> Result<(&mut WorkloadScenario, &mut WorkloadScenario)> {
+        let (first, rest) = corpus
+            .scenarios
+            .split_first_mut()
+            .context("fixture corpus includes at least one scenario")?;
+        let second = rest
+            .first_mut()
+            .context("fixture corpus includes at least two scenarios")?;
+        Ok((first, second))
+    }
+
+    fn scenario_with_status_mut(
+        corpus: &mut WorkloadCorpus,
+        status: WorkloadScenarioStatus,
+    ) -> Result<&mut WorkloadScenario> {
+        corpus
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.status == status)
+            .with_context(|| format!("fixture corpus includes {} scenario", status.label()))
     }
 
     #[test]
-    fn checked_in_corpus_validates_required_contract() {
-        let corpus = fixture_corpus();
+    fn checked_in_corpus_validates_required_contract() -> Result<()> {
+        let corpus = fixture_corpus()?;
         let report = validate_workload_corpus(&corpus);
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.bead_id, "bd-rchk0.5.7");
@@ -853,11 +895,12 @@ mod tests {
         assert!(report.proof_bundle_coverage.ready);
         assert_eq!(report.coverage_matrix.len(), report.scenario_count);
         assert!(report.missing_high_risk_user_risks.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn render_workload_corpus_markdown_checked_in_corpus() {
-        let corpus = fixture_corpus();
+    fn render_workload_corpus_markdown_checked_in_corpus() -> Result<()> {
+        let corpus = fixture_corpus()?;
         let report = validate_workload_corpus(&corpus);
         assert!(report.valid, "{:?}", report.errors);
         let markdown = render_workload_corpus_markdown(&report);
@@ -869,11 +912,12 @@ mod tests {
             "render_workload_corpus_markdown_checked_in_corpus",
             markdown
         );
+        Ok(())
     }
 
     #[test]
     fn workload_corpus_report_json_shape() -> Result<()> {
-        let corpus = fixture_corpus();
+        let corpus = fixture_corpus()?;
         let report = validate_workload_corpus(&corpus);
         assert!(report.valid, "{:?}", report.errors);
 
@@ -916,12 +960,11 @@ mod tests {
     }
 
     #[test]
-    fn validates_selected_reproduction_scenario() {
-        let corpus = fixture_corpus();
-        validate_selected_workload_scenario(&corpus, "workload_editor_save_atomic_ext4")
-            .expect("selected scenario exists");
+    fn validates_selected_reproduction_scenario() -> Result<()> {
+        let corpus = fixture_corpus()?;
+        validate_selected_workload_scenario(&corpus, "workload_editor_save_atomic_ext4")?;
         let scenario = find_workload_scenario(&corpus, "workload_editor_save_atomic_ext4")
-            .expect("selected scenario should be returned");
+            .context("selected scenario should be returned")?;
         assert_eq!(scenario.operation_class, "editor_save");
         assert!(
             scenario
@@ -929,28 +972,27 @@ mod tests {
                 .iter()
                 .any(|consumer| consumer == "crash_replay_lab")
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_unknown_selected_reproduction_scenario() {
-        let corpus = fixture_corpus();
-        let err =
-            validate_selected_workload_scenario(&corpus, "workload_missing_scenario").unwrap_err();
+    fn rejects_unknown_selected_reproduction_scenario() -> Result<()> {
+        let corpus = fixture_corpus()?;
+        let err = validate_selected_workload_scenario(&corpus, "workload_missing_scenario")
+            .err()
+            .context("missing selected workload scenario should be rejected")?;
         assert!(
             err.to_string()
                 .contains("workload corpus does not contain selected scenario")
         );
+        Ok(())
     }
 
     #[test]
-    fn coverage_matrix_contains_user_risk_and_consumer_axes() {
-        let corpus = fixture_corpus();
+    fn coverage_matrix_contains_user_risk_and_consumer_axes() -> Result<()> {
+        let corpus = fixture_corpus()?;
         let report = validate_workload_corpus(&corpus);
-        let row = report
-            .coverage_matrix
-            .iter()
-            .find(|row| row.scenario_id == "workload_editor_save_atomic_ext4")
-            .expect("matrix row exists");
+        let row = coverage_row(&report, "workload_editor_save_atomic_ext4")?;
         assert_eq!(row.claim_id, "claim_workload_editor_save_atomic_ext4");
         assert_eq!(row.risk_tier, "p1");
         assert_eq!(row.user_risk, "data_loss");
@@ -986,21 +1028,24 @@ mod tests {
                 .iter()
                 .any(|field| field == "required")
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_duplicate_scenario_ids() {
-        let mut corpus = fixture_corpus();
-        corpus.scenarios[1].scenario_id = corpus.scenarios[0].scenario_id.clone();
+    fn rejects_duplicate_scenario_ids() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let (first, second) = first_two_scenarios_mut(&mut corpus)?;
+        second.scenario_id = first.scenario_id.clone();
         let report = validate_workload_corpus(&corpus);
         assert!(!report.valid);
         assert_eq!(report.duplicate_scenario_ids.len(), 1);
+        Ok(())
     }
 
     #[test]
-    fn rejects_unknown_capability_tags() {
-        let mut corpus = fixture_corpus();
-        corpus.scenarios[0]
+    fn rejects_unknown_capability_tags() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_scenario_mut(&mut corpus)?
             .required_capabilities
             .push("unknown_capability".to_owned());
         let report = validate_workload_corpus(&corpus);
@@ -1011,22 +1056,24 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("unknown_capability"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_user_risk_field() {
-        let mut corpus = fixture_corpus();
-        corpus.scenarios[0].user_risk.clear();
+    fn rejects_missing_user_risk_field() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_scenario_mut(&mut corpus)?.user_risk.clear();
         let report = validate_workload_corpus(&corpus);
         assert!(!report.valid);
         assert!(report.errors.iter().any(|error| {
             error.contains("user_risk") && error.contains("references unknown value")
         }));
+        Ok(())
     }
 
     #[test]
-    fn rejects_orphaned_high_risk_categories() {
-        let mut corpus = fixture_corpus();
+    fn rejects_orphaned_high_risk_categories() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus
             .scenarios
             .retain(|scenario| scenario.user_risk != "repair_overclaim");
@@ -1039,24 +1086,26 @@ mod tests {
         assert!(report.errors.iter().any(|error| {
             error.contains("high-risk user risk repair_overclaim has no workload scenario")
         }));
+        Ok(())
     }
 
     #[test]
-    fn rejects_user_visible_rows_without_e2e_lane() {
-        let mut corpus = fixture_corpus();
-        corpus.scenarios[0].linked_e2e_suites.clear();
+    fn rejects_user_visible_rows_without_e2e_lane() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_scenario_mut(&mut corpus)?.linked_e2e_suites.clear();
         let report = validate_workload_corpus(&corpus);
         assert!(!report.valid);
         assert!(report.errors.iter().any(|error| {
             error.contains("workload_editor_save_atomic_ext4")
                 && error.contains("without an E2E or long-campaign proof lane")
         }));
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_required_artifact_declarations() {
-        let mut corpus = fixture_corpus();
-        corpus.scenarios[0].expected_artifacts.clear();
+    fn rejects_missing_required_artifact_declarations() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_scenario_mut(&mut corpus)?.expected_artifacts.clear();
         let report = validate_workload_corpus(&corpus);
         assert!(!report.valid);
         assert!(
@@ -1065,16 +1114,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("expected_artifacts"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_unsupported_without_classification() {
-        let mut corpus = fixture_corpus();
-        let scenario = corpus
-            .scenarios
-            .iter_mut()
-            .find(|scenario| scenario.status == WorkloadScenarioStatus::Unsupported)
-            .expect("fixture has unsupported scenario");
+    fn rejects_unsupported_without_classification() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let scenario = scenario_with_status_mut(&mut corpus, WorkloadScenarioStatus::Unsupported)?;
         scenario.unsupported_reason = None;
         scenario.follow_up_bead = None;
         scenario.non_goal_reason = None;
@@ -1086,21 +1132,19 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("unsupported_reason"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_host_skip_without_host_capability() {
-        let mut corpus = fixture_corpus();
-        let scenario = corpus
-            .scenarios
-            .iter_mut()
-            .find(|scenario| scenario.status == WorkloadScenarioStatus::HostSkip)
-            .expect("fixture has host skip scenario");
+    fn rejects_host_skip_without_host_capability() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let scenario = scenario_with_status_mut(&mut corpus, WorkloadScenarioStatus::HostSkip)?;
         scenario.required_capabilities = vec!["metadata_ops".to_owned()];
         let report = validate_workload_corpus(&corpus);
         assert!(!report.valid);
         assert!(report.errors.iter().any(|error| {
             error.contains("host-skip") && error.contains("host or FUSE capability")
         }));
+        Ok(())
     }
 }
