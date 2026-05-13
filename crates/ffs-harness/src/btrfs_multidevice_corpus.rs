@@ -496,16 +496,112 @@ fn is_valid_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{Context, bail};
 
-    fn fixture_corpus() -> BtrfsMultidevCorpus {
+    fn fixture_corpus() -> Result<BtrfsMultidevCorpus> {
         parse_btrfs_multidev_corpus(DEFAULT_BTRFS_MULTIDEV_CORPUS_JSON)
-            .expect("default btrfs multi-device corpus parses")
+            .context("default btrfs multi-device corpus parses")
+    }
+
+    fn first_scenario_mut(corpus: &mut BtrfsMultidevCorpus) -> Result<&mut BtrfsMultidevScenario> {
+        corpus
+            .scenarios
+            .first_mut()
+            .context("fixture corpus includes at least one scenario")
+    }
+
+    fn first_two_scenarios_mut(
+        corpus: &mut BtrfsMultidevCorpus,
+    ) -> Result<(&mut BtrfsMultidevScenario, &mut BtrfsMultidevScenario)> {
+        let (first, rest) = corpus
+            .scenarios
+            .split_first_mut()
+            .context("fixture corpus includes at least one scenario")?;
+        let second = rest
+            .first_mut()
+            .context("fixture corpus includes at least two scenarios")?;
+        Ok((first, second))
+    }
+
+    fn first_device_mut(corpus: &mut BtrfsMultidevCorpus) -> Result<&mut BtrfsDevice> {
+        first_scenario_mut(corpus)?
+            .devices
+            .first_mut()
+            .context("first fixture scenario includes at least one device")
+    }
+
+    fn first_two_devices_mut(
+        scenario: &mut BtrfsMultidevScenario,
+    ) -> Result<(&mut BtrfsDevice, &mut BtrfsDevice)> {
+        let (first, rest) = scenario
+            .devices
+            .split_first_mut()
+            .context("fixture scenario includes at least one device")?;
+        let second = rest
+            .first_mut()
+            .context("fixture scenario includes at least two devices")?;
+        Ok((first, second))
+    }
+
+    fn scenario_by_profile_mut<'a>(
+        corpus: &'a mut BtrfsMultidevCorpus,
+        profile: &str,
+    ) -> Result<&'a mut BtrfsMultidevScenario> {
+        corpus
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.profile == profile)
+            .with_context(|| format!("fixture corpus includes profile {profile}"))
+    }
+
+    fn scenario_by_kind_mut<'a>(
+        corpus: &'a mut BtrfsMultidevCorpus,
+        kind: &str,
+    ) -> Result<&'a mut BtrfsMultidevScenario> {
+        corpus
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.kind == kind)
+            .with_context(|| format!("fixture corpus includes kind {kind}"))
+    }
+
+    fn scenario_by_kind_with_min_devices_mut<'a>(
+        corpus: &'a mut BtrfsMultidevCorpus,
+        kind: &str,
+        min_devices: usize,
+    ) -> Result<&'a mut BtrfsMultidevScenario> {
+        corpus
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.kind == kind && scenario.devices.len() >= min_devices)
+            .with_context(|| {
+                format!("fixture corpus includes kind {kind} with at least {min_devices} devices")
+            })
+    }
+
+    fn scenario_by_refusal_outcome_mut(
+        corpus: &mut BtrfsMultidevCorpus,
+    ) -> Result<&mut BtrfsMultidevScenario> {
+        corpus
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.expected_outcome.starts_with("refused_"))
+            .context("fixture corpus includes a refusal outcome scenario")
+    }
+
+    fn unsupported_scrub_scenario_mut(
+        corpus: &mut BtrfsMultidevCorpus,
+    ) -> Result<&mut BtrfsMultidevScenario> {
+        corpus
+            .scenarios
+            .iter_mut()
+            .find(|scenario| !scenario.repair_scrub_boundary.scrub_supported)
+            .context("fixture corpus includes unsupported scrub scenario")
     }
 
     #[test]
-    fn default_corpus_validates_required_kinds() {
-        let report = validate_default_btrfs_multidev_corpus()
-            .expect("default btrfs multi-device corpus validates");
+    fn default_corpus_validates_required_kinds() -> Result<()> {
+        let report = validate_default_btrfs_multidev_corpus()?;
         assert_eq!(report.bead_id, "bd-ch373");
         assert_eq!(report.schema_version, BTRFS_MULTIDEV_CORPUS_SCHEMA_VERSION);
         for kind in REQUIRED_SCENARIO_KINDS {
@@ -514,12 +610,12 @@ mod tests {
                 "missing required kind {kind}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn render_markdown_summarizes_default_corpus() {
-        let report = validate_default_btrfs_multidev_corpus()
-            .expect("default btrfs multi-device corpus validates");
+    fn render_markdown_summarizes_default_corpus() -> Result<()> {
+        let report = validate_default_btrfs_multidev_corpus()?;
         let markdown = render_btrfs_multidev_corpus_markdown(&report);
         assert!(markdown.contains("# Btrfs Multi-Device Corpus"));
         assert!(markdown.contains("`healthy_assembly`"));
@@ -528,36 +624,38 @@ mod tests {
             "render_btrfs_multidev_corpus_markdown_default_corpus",
             markdown
         );
+        Ok(())
     }
 
     #[test]
-    fn btrfs_multidev_corpus_report_json_shape() {
-        let report = validate_default_btrfs_multidev_corpus()
-            .expect("default btrfs multi-device corpus validates");
-        let json =
-            serde_json::to_string_pretty(&report).expect("btrfs multi-device report serializes");
+    fn btrfs_multidev_corpus_report_json_shape() -> Result<()> {
+        let report = validate_default_btrfs_multidev_corpus()?;
+        let json = serde_json::to_string_pretty(&report)?;
         insta::assert_snapshot!("btrfs_multidev_corpus_report_json_shape", json);
-        let parsed: BtrfsMultidevCorpusReport =
-            serde_json::from_str(&json).expect("report deserializes");
+        let parsed: BtrfsMultidevCorpusReport = serde_json::from_str(&json)?;
         assert_eq!(parsed, report);
+        Ok(())
     }
 
     #[test]
-    fn fail_on_errors_rejects_invalid_report() {
-        let mut corpus = fixture_corpus();
+    fn fail_on_errors_rejects_invalid_report() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus.scenarios.clear();
         let report = validate_btrfs_multidev_corpus(&corpus);
-        let err =
-            fail_on_btrfs_multidev_corpus_errors(&report).expect_err("invalid report should fail");
+        let err = match fail_on_btrfs_multidev_corpus_errors(&report) {
+            Ok(()) => bail!("invalid report should fail"),
+            Err(err) => err,
+        };
         assert!(
             err.to_string()
                 .contains("btrfs multi-device corpus validation failed")
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_required_kind_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn missing_required_kind_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus
             .scenarios
             .retain(|scenario| scenario.kind != "missing_device");
@@ -568,11 +666,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required kind `missing_device`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_unsupported_profile_kind_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn missing_unsupported_profile_kind_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus
             .scenarios
             .retain(|scenario| scenario.kind != "unsupported_profile");
@@ -583,13 +682,14 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required kind `unsupported_profile`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_scenario_id_is_rejected() {
-        let mut corpus = fixture_corpus();
-        let dup = corpus.scenarios[0].scenario_id.clone();
-        corpus.scenarios[1].scenario_id = dup;
+    fn duplicate_scenario_id_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let (first, second) = first_two_scenarios_mut(&mut corpus)?;
+        second.scenario_id = first.scenario_id.clone();
         let report = validate_btrfs_multidev_corpus(&corpus);
         assert!(
             report
@@ -597,12 +697,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicate btrfs multi-device scenario_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn scenario_id_prefix_is_enforced() {
-        let mut corpus = fixture_corpus();
-        corpus.scenarios[0].scenario_id = "totally_unrelated_id".to_owned();
+    fn scenario_id_prefix_is_enforced() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_scenario_mut(&mut corpus)?.scenario_id = "totally_unrelated_id".to_owned();
         let report = validate_btrfs_multidev_corpus(&corpus);
         assert!(
             report
@@ -610,12 +711,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must start with btrfs_multidev_"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_profile_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.scenarios[0].profile = "raid42".to_owned();
+    fn unsupported_profile_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_scenario_mut(&mut corpus)?.profile = "raid42".to_owned();
         let report = validate_btrfs_multidev_corpus(&corpus);
         assert!(
             report
@@ -623,16 +725,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported profile"))
         );
+        Ok(())
     }
 
     #[test]
-    fn raid1_requires_two_devices() {
-        let mut corpus = fixture_corpus();
-        let scenario = corpus
-            .scenarios
-            .iter_mut()
-            .find(|s| s.profile == "raid1")
-            .expect("raid1 scenario exists");
+    fn raid1_requires_two_devices() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let scenario = scenario_by_profile_mut(&mut corpus, "raid1")?;
         scenario.device_count = 1;
         scenario.devices.truncate(1);
         scenario.chunk_layout.mirror_count = 1;
@@ -643,17 +742,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("raid1 requires at least two devices"))
         );
+        Ok(())
     }
 
     #[test]
-    fn raid10_requires_four_devices() {
-        let mut corpus = fixture_corpus();
-        let index = corpus
-            .scenarios
-            .iter()
-            .position(|s| s.profile == "raid10")
-            .unwrap_or(0);
-        let scenario = &mut corpus.scenarios[index];
+    fn raid10_requires_four_devices() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let scenario = scenario_by_kind_with_min_devices_mut(&mut corpus, "healthy_assembly", 2)?;
         scenario.profile = "raid10".to_owned();
         scenario.device_count = 2;
         scenario.devices.truncate(2);
@@ -664,12 +759,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("raid10 requires at least four devices"))
         );
+        Ok(())
     }
 
     #[test]
-    fn device_count_array_length_must_match() {
-        let mut corpus = fixture_corpus();
-        corpus.scenarios[0].device_count = 99;
+    fn device_count_array_length_must_match() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_scenario_mut(&mut corpus)?.device_count = 99;
         let report = validate_btrfs_multidev_corpus(&corpus);
         assert!(
             report
@@ -677,12 +773,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("mismatches devices array length"))
         );
+        Ok(())
     }
 
     #[test]
-    fn malformed_device_image_hash_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.scenarios[0].devices[0].image_hash = "md5:not-supported".to_owned();
+    fn malformed_device_image_hash_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_device_mut(&mut corpus)?.image_hash = "md5:not-supported".to_owned();
         let report = validate_btrfs_multidev_corpus(&corpus);
         assert!(
             report
@@ -690,17 +787,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("image_hash must be sha256"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_device_id_outside_classified_kind_is_rejected() {
-        let mut corpus = fixture_corpus();
-        let scenario = corpus
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "healthy_assembly" && s.devices.len() >= 2)
-            .expect("healthy assembly fixture exists");
-        scenario.devices[1].device_id = scenario.devices[0].device_id;
+    fn duplicate_device_id_outside_classified_kind_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let scenario = scenario_by_kind_with_min_devices_mut(&mut corpus, "healthy_assembly", 2)?;
+        let (first, second) = first_two_devices_mut(scenario)?;
+        second.device_id = first.device_id;
         let report = validate_btrfs_multidev_corpus(&corpus);
         assert!(
             report
@@ -708,12 +803,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicate device_id but is not classified"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_degraded_state_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.scenarios[0].degraded_state = "kinda_broken".to_owned();
+    fn unsupported_degraded_state_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_scenario_mut(&mut corpus)?.degraded_state = "kinda_broken".to_owned();
         let report = validate_btrfs_multidev_corpus(&corpus);
         assert!(
             report
@@ -721,16 +817,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported degraded_state"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_device_cannot_claim_assembly_success() {
-        let mut corpus = fixture_corpus();
-        let scenario = corpus
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "missing_device")
-            .expect("missing_device fixture exists");
+    fn missing_device_cannot_claim_assembly_success() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let scenario = scenario_by_kind_mut(&mut corpus, "missing_device")?;
         scenario.expected_outcome = "assembly_success".to_owned();
         scenario.expected_refusal_remediation = String::new();
         let report = validate_btrfs_multidev_corpus(&corpus);
@@ -740,16 +833,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing_device cannot expect assembly_success"))
         );
+        Ok(())
     }
 
     #[test]
-    fn refusal_outcome_requires_remediation_text() {
-        let mut corpus = fixture_corpus();
-        let scenario = corpus
-            .scenarios
-            .iter_mut()
-            .find(|s| s.expected_outcome.starts_with("refused_"))
-            .expect("refusal fixture exists");
+    fn refusal_outcome_requires_remediation_text() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let scenario = scenario_by_refusal_outcome_mut(&mut corpus)?;
         scenario.expected_refusal_remediation = String::new();
         let report = validate_btrfs_multidev_corpus(&corpus);
         assert!(
@@ -758,12 +848,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must declare expected_refusal_remediation"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_mount_mode_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.scenarios[0].mount_mode = "rwx_eyes_only".to_owned();
+    fn unsupported_mount_mode_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_scenario_mut(&mut corpus)?.mount_mode = "rwx_eyes_only".to_owned();
         let report = validate_btrfs_multidev_corpus(&corpus);
         assert!(
             report
@@ -771,13 +862,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported mount_mode"))
         );
+        Ok(())
     }
 
     #[test]
-    fn repair_supported_requires_scrub_supported() {
-        let mut corpus = fixture_corpus();
-        corpus.scenarios[0].repair_scrub_boundary.repair_supported = true;
-        corpus.scenarios[0].repair_scrub_boundary.scrub_supported = false;
+    fn repair_supported_requires_scrub_supported() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let boundary = &mut first_scenario_mut(&mut corpus)?.repair_scrub_boundary;
+        boundary.repair_supported = true;
+        boundary.scrub_supported = false;
         let report = validate_btrfs_multidev_corpus(&corpus);
         assert!(
             report
@@ -785,17 +878,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("repair_supported requires scrub_supported"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_scrub_must_link_follow_up_bead() {
-        let mut corpus = fixture_corpus();
-        let index = corpus
-            .scenarios
-            .iter()
-            .position(|s| !s.repair_scrub_boundary.scrub_supported)
-            .unwrap_or(0);
-        let scenario = &mut corpus.scenarios[index];
+    fn unsupported_scrub_must_link_follow_up_bead() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        let scenario = unsupported_scrub_scenario_mut(&mut corpus)?;
         scenario.repair_scrub_boundary.scrub_supported = false;
         scenario.repair_scrub_boundary.repair_supported = false;
         scenario.repair_scrub_boundary.follow_up_bead = String::new();
@@ -806,12 +895,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported scrub must point to a follow_up_bead"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_artifact_requirement_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.scenarios[0]
+    fn missing_artifact_requirement_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_scenario_mut(&mut corpus)?
             .artifact_requirements
             .retain(|requirement| requirement != "device_image_hashes");
         let report = validate_btrfs_multidev_corpus(&corpus);
@@ -821,12 +911,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("artifact_requirements missing `device_image_hashes`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_cleanup_policy_is_rejected() {
-        let mut corpus = fixture_corpus();
-        corpus.scenarios[0].cleanup_policy = "leave_disks_dirty".to_owned();
+    fn unsupported_cleanup_policy_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
+        first_scenario_mut(&mut corpus)?.cleanup_policy = "leave_disks_dirty".to_owned();
         let report = validate_btrfs_multidev_corpus(&corpus);
         assert!(
             report
@@ -834,11 +925,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported cleanup_policy"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_scenarios_list_is_rejected() {
-        let mut corpus = fixture_corpus();
+    fn empty_scenarios_list_is_rejected() -> Result<()> {
+        let mut corpus = fixture_corpus()?;
         corpus.scenarios.clear();
         let report = validate_btrfs_multidev_corpus(&corpus);
         assert!(
@@ -847,5 +939,6 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one scenario"))
         );
+        Ok(())
     }
 }
