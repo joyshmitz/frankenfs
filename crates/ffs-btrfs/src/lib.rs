@@ -12568,8 +12568,7 @@ mod tests {
             "BTRFS_SEND_STREAM_MAGIC must be 13 bytes (12 chars + null)"
         );
         assert_eq!(
-            BTRFS_SEND_STREAM_MAGIC,
-            b"btrfs-stream\0",
+            BTRFS_SEND_STREAM_MAGIC, b"btrfs-stream\0",
             "BTRFS_SEND_STREAM_MAGIC bytes must equal kernel magic 'btrfs-stream\\0'"
         );
         // Stream version v1 — has been v1 since send/receive was
@@ -12616,24 +12615,12 @@ mod tests {
             ("CHUNK_TREE", BTRFS_CHUNK_TREE_OBJECTID, 3),
             ("DEV_TREE", BTRFS_DEV_TREE_OBJECTID, 4),
             ("FS_TREE", BTRFS_FS_TREE_OBJECTID, 5),
-            (
-                "ROOT_TREE_DIR",
-                BTRFS_ROOT_TREE_DIR_OBJECTID,
-                6,
-            ),
+            ("ROOT_TREE_DIR", BTRFS_ROOT_TREE_DIR_OBJECTID, 6),
             ("CSUM_TREE", BTRFS_CSUM_TREE_OBJECTID, 7),
             ("QUOTA_TREE", BTRFS_QUOTA_TREE_OBJECTID, 8),
             ("UUID_TREE", BTRFS_UUID_TREE_OBJECTID, 9),
-            (
-                "FREE_SPACE_TREE",
-                BTRFS_FREE_SPACE_TREE_OBJECTID,
-                10,
-            ),
-            (
-                "BLOCK_GROUP_TREE",
-                BTRFS_BLOCK_GROUP_TREE_OBJECTID,
-                11,
-            ),
+            ("FREE_SPACE_TREE", BTRFS_FREE_SPACE_TREE_OBJECTID, 10),
+            ("BLOCK_GROUP_TREE", BTRFS_BLOCK_GROUP_TREE_OBJECTID, 11),
             ("FIRST_FREE", BTRFS_FIRST_FREE_OBJECTID, 256),
         ];
         for (name, actual, expected) in cases {
