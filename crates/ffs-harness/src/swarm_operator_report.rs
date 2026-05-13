@@ -411,9 +411,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_invariants_fail() {
+    fn missing_invariants_fail() -> Result<()> {
         let mut report = sample_report();
-        report.cards[0].invariants.clear();
+        first_card_mut(&mut report)?.invariants.clear();
 
         let validation = validate_swarm_operator_report(&report);
 
@@ -424,12 +424,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("card.invariants"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_fallback_fails() {
+    fn missing_fallback_fails() -> Result<()> {
         let mut report = sample_report();
-        report.cards[0].fallback.clear();
+        first_card_mut(&mut report)?.fallback.clear();
 
         let validation = validate_swarm_operator_report(&report);
 
@@ -440,12 +441,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("card.fallback"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_validation_command_fails() {
+    fn missing_validation_command_fails() -> Result<()> {
         let mut report = sample_report();
-        report.cards[0].validation_command.clear();
+        first_card_mut(&mut report)?.validation_command.clear();
 
         let validation = validate_swarm_operator_report(&report);
 
@@ -456,13 +458,15 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("card.validation_command"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_idea_ids_fail() {
+    fn duplicate_idea_ids_fail() -> Result<()> {
         let mut report = sample_report();
-        let duplicate_idea_id = report.cards[0].idea_id.clone();
-        report.cards[1].idea_id = duplicate_idea_id;
+        let (first_card, second_card) = first_two_cards_mut(&mut report)?;
+        let duplicate_idea_id = first_card.idea_id.clone();
+        second_card.idea_id = duplicate_idea_id;
 
         let validation = validate_swarm_operator_report(&report);
 
@@ -473,13 +477,15 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("duplicate idea_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn claim_upgrade_without_evidence_fails() {
+    fn claim_upgrade_without_evidence_fails() -> Result<()> {
         let mut report = sample_report();
-        report.cards[0].release_claim_state = SwarmOperatorReleaseClaimState::MeasuredAuthoritative;
-        report.cards[0].evidence[0].release_claim_state =
+        let first_card = first_card_mut(&mut report)?;
+        first_card.release_claim_state = SwarmOperatorReleaseClaimState::MeasuredAuthoritative;
+        first_evidence_mut(first_card)?.release_claim_state =
             SwarmOperatorReleaseClaimState::Experimental;
 
         let validation = validate_swarm_operator_report(&report);
@@ -491,6 +497,7 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("without matching measurement evidence"))
         );
+        Ok(())
     }
 
     #[test]
@@ -559,5 +566,22 @@ mod tests {
             release_claim_state: SwarmOperatorReleaseClaimState::Experimental,
             linked_bead_ids: vec![bead_id],
         }
+    }
+
+    fn first_card_mut(report: &mut SwarmOperatorReport) -> Result<&mut SwarmOperatorCard> {
+        report.cards.first_mut().context("sample report card")
+    }
+
+    fn first_two_cards_mut(
+        report: &mut SwarmOperatorReport,
+    ) -> Result<(&mut SwarmOperatorCard, &mut SwarmOperatorCard)> {
+        let [first_card, second_card, ..] = report.cards.as_mut_slice() else {
+            bail!("sample report includes two cards");
+        };
+        Ok((first_card, second_card))
+    }
+
+    fn first_evidence_mut(card: &mut SwarmOperatorCard) -> Result<&mut SwarmOperatorEvidence> {
+        card.evidence.first_mut().context("sample card evidence")
     }
 }
