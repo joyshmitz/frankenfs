@@ -3870,7 +3870,7 @@ mod tests {
     }
 
     #[test]
-    fn permissioned_campaign_reports_json_shape() -> Result<(), serde_json::Error> {
+    fn permissioned_campaign_reports_json_shape() -> Result<()> {
         let broker_report =
             validate_permissioned_campaign_broker_manifest(&valid_xfstests_manifest(), &config());
         let broker_json = serde_json::to_string_pretty(&broker_report)?;
@@ -3885,7 +3885,7 @@ mod tests {
                 PermissionedCampaignLedgerStepStatus::Interrupted,
                 PermissionedCampaignLedgerStepStatus::Resumed,
             ],
-        );
+        )?;
         let ledger_report =
             validate_permissioned_campaign_execution_ledger(&manifest, &ledger, &ledger_config());
         let ledger_json = serde_json::to_string_pretty(&ledger_report)?;
@@ -4494,7 +4494,11 @@ mod tests {
                 .claim_text
                 .contains("cannot upgrade swarm.responsiveness")
         );
-        assert!(packet.preflight_references[0].summary.contains("blocked"));
+        let first_preflight_reference = packet
+            .preflight_references
+            .first()
+            .context("swarm blocker packet preflight reference")?;
+        assert!(first_preflight_reference.summary.contains("blocked"));
         assert!(
             packet
                 .host_capability_facts
@@ -4530,16 +4534,19 @@ mod tests {
     }
 
     #[test]
-    fn swarm_adapter_rejects_small_host_smoke_as_authoritative() {
+    fn swarm_adapter_rejects_small_host_smoke_as_authoritative() -> Result<()> {
         let mut input = swarm_adapter_input();
         input.release_claim_classification =
             PermissionedSwarmReleaseClaimClassification::SmallHostSmoke;
-        let err = build_swarm_broker_manifest(&input).expect_err("small-host smoke rejected");
+        let err = build_swarm_broker_manifest(&input)
+            .err()
+            .context("small-host smoke accepted as authoritative")?;
         assert!(err.to_string().contains("small_host_smoke"));
         assert!(
             err.to_string()
                 .contains("authoritative swarm.responsiveness")
         );
+        Ok(())
     }
 
     #[test]
@@ -4729,7 +4736,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_ledger_accepts_supported_state_lifecycle_points() {
+    fn execution_ledger_accepts_supported_state_lifecycle_points() -> Result<()> {
         let cases = [
             vec![PermissionedCampaignLedgerStepStatus::NotAuthorized],
             vec![
@@ -4766,7 +4773,7 @@ mod tests {
 
         let manifest = valid_xfstests_manifest();
         for statuses in cases {
-            let ledger = valid_execution_ledger(&manifest, &statuses);
+            let ledger = valid_execution_ledger(&manifest, &statuses)?;
             let report = validate_permissioned_campaign_execution_ledger(
                 &manifest,
                 &ledger,
@@ -4778,10 +4785,11 @@ mod tests {
                 report.issues
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn execution_ledger_rejects_missing_ack_for_executed_run() {
+    fn execution_ledger_rejects_missing_ack_for_executed_run() -> Result<()> {
         let manifest = valid_xfstests_manifest();
         let mut ledger = valid_execution_ledger(
             &manifest,
@@ -4789,31 +4797,33 @@ mod tests {
                 PermissionedCampaignLedgerStepStatus::Running,
                 PermissionedCampaignLedgerStepStatus::Passed,
             ],
-        );
+        )?;
         ledger.required_ack.observed_value = None;
         ledger.required_ack.recorded_at = None;
         assert_ledger_issue(&manifest, &ledger, "missing_ack_text");
+        Ok(())
     }
 
     #[test]
-    fn execution_ledger_rejects_changed_command_plan() {
+    fn execution_ledger_rejects_changed_command_plan() -> Result<()> {
         let manifest = valid_xfstests_manifest();
         let mut ledger = valid_execution_ledger(
             &manifest,
             &[PermissionedCampaignLedgerStepStatus::NotAuthorized],
-        );
+        )?;
         ledger.command_plan_hash =
             "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned();
         assert_ledger_issue(&manifest, &ledger, "changed_command_plan");
+        Ok(())
     }
 
     #[test]
-    fn execution_ledger_rejects_stale_git_sha() {
+    fn execution_ledger_rejects_stale_git_sha() -> Result<()> {
         let manifest = valid_xfstests_manifest();
         let ledger = valid_execution_ledger(
             &manifest,
             &[PermissionedCampaignLedgerStepStatus::NotAuthorized],
-        );
+        )?;
         let report = validate_permissioned_campaign_execution_ledger(
             &manifest,
             &ledger,
@@ -4829,19 +4839,25 @@ mod tests {
             "{:?}",
             report.issues
         );
+        Ok(())
     }
 
     #[test]
-    fn execution_ledger_rejects_missing_raw_logs() {
+    fn execution_ledger_rejects_missing_raw_logs() -> Result<()> {
         let manifest = valid_xfstests_manifest();
         let mut ledger =
-            valid_execution_ledger(&manifest, &[PermissionedCampaignLedgerStepStatus::Running]);
-        ledger.steps[0].raw_log_paths.clear();
+            valid_execution_ledger(&manifest, &[PermissionedCampaignLedgerStepStatus::Running])?;
+        let first_step = ledger
+            .steps
+            .first_mut()
+            .context("execution ledger step for raw-log rejection")?;
+        first_step.raw_log_paths.clear();
         assert_ledger_issue(&manifest, &ledger, "missing_raw_log");
+        Ok(())
     }
 
     #[test]
-    fn execution_ledger_rejects_missing_cleanup_for_terminal_run() {
+    fn execution_ledger_rejects_missing_cleanup_for_terminal_run() -> Result<()> {
         let manifest = valid_xfstests_manifest();
         let mut ledger = valid_execution_ledger(
             &manifest,
@@ -4849,26 +4865,28 @@ mod tests {
                 PermissionedCampaignLedgerStepStatus::Running,
                 PermissionedCampaignLedgerStepStatus::Passed,
             ],
-        );
+        )?;
         ledger.cleanup.status = PermissionedCampaignLedgerCleanupStatus::NotStarted;
         ledger.cleanup.report_path = None;
         assert_ledger_issue(&manifest, &ledger, "missing_cleanup");
+        Ok(())
     }
 
     #[test]
-    fn execution_ledger_rejects_dry_run_packet_as_pass_evidence() {
+    fn execution_ledger_rejects_dry_run_packet_as_pass_evidence() -> Result<()> {
         let manifest = valid_xfstests_manifest();
         let mut ledger = valid_execution_ledger(
             &manifest,
             &[PermissionedCampaignLedgerStepStatus::NotAuthorized],
-        );
+        )?;
         ledger.product_evidence_claim =
             PermissionedCampaignProductEvidenceClaim::PacketCountsAsPassFail;
         assert_ledger_issue(&manifest, &ledger, "dry_run_packet_as_pass_evidence");
+        Ok(())
     }
 
     #[test]
-    fn execution_ledger_rejects_invalid_state_transition() {
+    fn execution_ledger_rejects_invalid_state_transition() -> Result<()> {
         let manifest = valid_xfstests_manifest();
         let ledger = valid_execution_ledger(
             &manifest,
@@ -4877,12 +4895,13 @@ mod tests {
                 PermissionedCampaignLedgerStepStatus::Passed,
                 PermissionedCampaignLedgerStepStatus::Resumed,
             ],
-        );
+        )?;
         assert_ledger_issue(&manifest, &ledger, "invalid_state_transition");
+        Ok(())
     }
 
     #[test]
-    fn execution_ledger_markdown_explains_resume_and_lane_candidates() {
+    fn execution_ledger_markdown_explains_resume_and_lane_candidates() -> Result<()> {
         let manifest = valid_xfstests_manifest();
         let ledger = valid_execution_ledger(
             &manifest,
@@ -4891,7 +4910,7 @@ mod tests {
                 PermissionedCampaignLedgerStepStatus::Interrupted,
                 PermissionedCampaignLedgerStepStatus::Resumed,
             ],
-        );
+        )?;
         let report =
             validate_permissioned_campaign_execution_ledger(&manifest, &ledger, &ledger_config());
         assert!(report.valid, "{:?}", report.issues);
@@ -4899,6 +4918,7 @@ mod tests {
         assert!(markdown.contains("Permissioned Campaign Execution Ledger"));
         assert!(markdown.contains("Proof Bundle Lane Candidates"));
         assert!(markdown.contains("resume_checkpoint"));
+        Ok(())
     }
 
     /// bd-rchk0.53.19 - exact-output snapshot for the permissioned execution
@@ -4909,7 +4929,7 @@ mod tests {
     /// candidate formatting, and the empty-issues section consumed by
     /// permissioned campaign handoffs.
     #[test]
-    fn render_permissioned_campaign_execution_ledger_markdown_resume_snapshot() {
+    fn render_permissioned_campaign_execution_ledger_markdown_resume_snapshot() -> Result<()> {
         let manifest = valid_xfstests_manifest();
         let ledger = valid_execution_ledger(
             &manifest,
@@ -4918,7 +4938,7 @@ mod tests {
                 PermissionedCampaignLedgerStepStatus::Interrupted,
                 PermissionedCampaignLedgerStepStatus::Resumed,
             ],
-        );
+        )?;
         let report =
             validate_permissioned_campaign_execution_ledger(&manifest, &ledger, &ledger_config());
         assert!(report.valid, "{:?}", report.issues);
@@ -4928,6 +4948,7 @@ mod tests {
             "render_permissioned_campaign_execution_ledger_markdown_resume",
             markdown
         );
+        Ok(())
     }
 
     fn assert_valid(manifest: &PermissionedCampaignBrokerManifest) {
@@ -4995,7 +5016,7 @@ mod tests {
     fn valid_execution_ledger(
         manifest: &PermissionedCampaignBrokerManifest,
         statuses: &[PermissionedCampaignLedgerStepStatus],
-    ) -> PermissionedCampaignExecutionLedger {
+    ) -> Result<PermissionedCampaignExecutionLedger> {
         let has_execution = statuses.iter().any(|status| status.requires_raw_logs());
         let final_status = statuses.last().copied();
         let terminal_cleanup = matches!(
@@ -5037,6 +5058,12 @@ mod tests {
             ));
         }
 
+        let first_command_id = manifest
+            .exact_commands
+            .first()
+            .context("execution ledger fixture command")?
+            .command_id
+            .clone();
         let steps = statuses
             .iter()
             .enumerate()
@@ -5061,7 +5088,7 @@ mod tests {
                         .exact_commands
                         .get(usize::from(index > 0))
                         .map_or_else(
-                            || manifest.exact_commands[0].command_id.clone(),
+                            || first_command_id.clone(),
                             |command| command.command_id.clone(),
                         ),
                     status: *status,
@@ -5074,7 +5101,7 @@ mod tests {
             })
             .collect();
 
-        PermissionedCampaignExecutionLedger {
+        Ok(PermissionedCampaignExecutionLedger {
             schema_version: PERMISSIONED_CAMPAIGN_EXECUTION_LEDGER_SCHEMA_VERSION,
             campaign_id: manifest.campaign_id.clone(),
             lane_kind: manifest.lane_kind,
@@ -5151,7 +5178,7 @@ mod tests {
             } else {
                 PermissionedCampaignProductEvidenceClaim::None
             },
-        }
+        })
     }
 
     fn ledger_artifact(
