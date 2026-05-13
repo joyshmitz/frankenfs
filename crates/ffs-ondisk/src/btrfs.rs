@@ -3578,6 +3578,30 @@ mod tests {
             }
         }
 
+        // bd-xbmxq — Determinism MR for BtrfsHeader::validate composition.
+        // validate is invoked after parse_from_block on every btrfs
+        // tree-block read to gate level/nritems/bytenr correctness.
+        // parse_from_block alone has its own determinism MR
+        // (btrfs_proptest_btrfs_header_parse_from_block_determinism); this
+        // pins the parse+validate composition. A regression that introduced
+        // non-deterministic state in validate (e.g., HashMap-keyed dispatch
+        // on block_size, allocator-address-keyed comparison) would silently
+        // corrupt the gating decision on tree-block reads.
+        #[test]
+        fn btrfs_proptest_header_parse_validate_determinism(
+            block in proptest::collection::vec(any::<u8>(), 0..=4096),
+            expected_bytenr in prop_oneof![Just(None::<u64>), any::<u64>().prop_map(Some)],
+        ) {
+            let parse_a = BtrfsHeader::parse_from_block(&block);
+            let parse_b = BtrfsHeader::parse_from_block(&block);
+            prop_assert_eq!(&parse_a, &parse_b);
+            if let Ok(header) = parse_a {
+                let validate_a = header.validate(block.len(), expected_bytenr);
+                let validate_b = header.validate(block.len(), expected_bytenr);
+                prop_assert_eq!(validate_a, validate_b);
+            }
+        }
+
         #[test]
         fn btrfs_proptest_structured_superblock_size_invariants(
             sector_shift in 12_u32..=18,
