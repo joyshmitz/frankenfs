@@ -1389,6 +1389,12 @@ mod tests {
         serde_json::to_string(value).map_err(|err| err.to_string())
     }
 
+    fn first_item<'a, T>(items: &'a [T], context: &str) -> Result<&'a T, String> {
+        items
+            .first()
+            .ok_or_else(|| format!("{context} must contain at least one row"))
+    }
+
     fn golden_field<'a>(golden: &'a Value, field: &str) -> Result<&'a Value, String> {
         golden
             .get(field)
@@ -1816,7 +1822,7 @@ mod tests {
         Ok(())
     }
 
-    fn assert_classification_report(report: &TrackerSourceHygieneReport) {
+    fn assert_classification_report(report: &TrackerSourceHygieneReport) -> Result<(), String> {
         assert_eq!(report.status, "pass");
         assert_eq!(report.local_open, 5);
         assert_eq!(report.foreign_open, 1);
@@ -1824,7 +1830,11 @@ mod tests {
         assert_eq!(report.excluded_foreign_in_progress_count, 1);
         assert_eq!(report.excluded_foreign_stale_in_progress_count, 1);
         assert_eq!(
-            report.foreign_stale_in_progress_samples[0].id,
+            first_item(
+                &report.foreign_stale_in_progress_samples,
+                "foreign stale in-progress samples",
+            )?
+            .id,
             "frankenscipy-foreign-stale"
         );
         assert_eq!(
@@ -1843,9 +1853,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["bd-blocked"]
         );
-        assert_eq!(report.permission_gated_rows[0].id, "bd-xfstests");
+        let permission_gated = first_item(&report.permission_gated_rows, "permission gated rows")?;
+        assert_eq!(permission_gated.id, "bd-xfstests");
         assert_eq!(
-            report.permission_gated_rows[0].permission_gate.gate_kind,
+            permission_gated.permission_gate.gate_kind,
             "xfstests_real_run"
         );
         assert_eq!(
@@ -1870,11 +1881,10 @@ mod tests {
             vec!["bd-epic", "bd-blocked", "bd-xfstests"]
         );
         assert_eq!(report.source_aware_queue_state.verdict, "ready");
-        assert_eq!(report.foreign_group_summaries[0].prefix, "br-r37");
-        assert_eq!(
-            report.foreign_group_summaries[0].owner_hints,
-            vec!["franken_networkx"]
-        );
+        let foreign_group = first_item(&report.foreign_group_summaries, "foreign group summaries")?;
+        assert_eq!(foreign_group.prefix, "br-r37");
+        assert_eq!(foreign_group.owner_hints, vec!["franken_networkx"]);
+        Ok(())
     }
 
     #[test]
@@ -1934,7 +1944,7 @@ mod tests {
         let report =
             analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
 
-        assert_classification_report(&report);
+        assert_classification_report(&report)?;
         Ok(())
     }
 
@@ -1964,12 +1974,10 @@ mod tests {
                 count: 2,
             }]
         );
-        assert_eq!(report.foreign_group_summaries[0].count, 2);
-        assert_eq!(report.foreign_group_summaries[0].prefix, "frankenscipy");
-        assert_eq!(
-            report.foreign_group_summaries[0].owner_hints,
-            vec!["frankenscipy"]
-        );
+        let foreign_group = first_item(&report.foreign_group_summaries, "foreign group summaries")?;
+        assert_eq!(foreign_group.count, 2);
+        assert_eq!(foreign_group.prefix, "frankenscipy");
+        assert_eq!(foreign_group.owner_hints, vec!["frankenscipy"]);
         Ok(())
     }
 
@@ -2164,7 +2172,9 @@ mod tests {
             report.source_aware_queue_state.stale_in_progress_ids,
             vec!["bd-active"]
         );
-        assert_eq!(report.local_in_progress_rows[0].age_seconds, Some(3_601));
+        let local_in_progress =
+            first_item(&report.local_in_progress_rows, "local in-progress rows")?;
+        assert_eq!(local_in_progress.age_seconds, Some(3_601));
         Ok(())
     }
 
@@ -2191,8 +2201,11 @@ mod tests {
             vec!["frankenscipy-stale"]
         );
         assert!(
-            report.source_aware_queue_state.next_safe_actions[0]
-                .contains("excluded_foreign_stale_in_progress_ids")
+            first_item(
+                &report.source_aware_queue_state.next_safe_actions,
+                "next safe actions",
+            )?
+            .contains("excluded_foreign_stale_in_progress_ids")
         );
         Ok(())
     }
@@ -2228,10 +2241,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_jsonl() {
-        let error = analyze_tracker_source_hygiene("{not-json}", &config())
-            .expect_err("invalid JSONL must fail");
+    fn rejects_invalid_jsonl() -> Result<(), String> {
+        let Err(error) = analyze_tracker_source_hygiene("{not-json}", &config()) else {
+            return Err("invalid JSONL unexpectedly parsed".to_owned());
+        };
         assert!(error.to_string().contains("line 1"));
+        Ok(())
     }
 
     #[test]
@@ -2249,7 +2264,9 @@ mod tests {
             analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
 
         assert_eq!(report.source_aware_queue_state.verdict, "blocked");
-        assert_eq!(report.blocked_local_rows[0].blocked_by[0].status, "missing");
+        let blocked_row = first_item(&report.blocked_local_rows, "blocked local rows")?;
+        let blocker = first_item(&blocked_row.blocked_by, "blocked dependency rows")?;
+        assert_eq!(blocker.status, "missing");
         Ok(())
     }
 
@@ -2276,7 +2293,10 @@ mod tests {
             analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
 
         assert_eq!(report.source_aware_queue_state.verdict, "ready");
-        assert_eq!(report.source_aware_ready_rows[0].id, "bd-work");
+        assert_eq!(
+            first_item(&report.source_aware_ready_rows, "source-aware ready rows")?.id,
+            "bd-work"
+        );
         Ok(())
     }
 
@@ -2293,7 +2313,13 @@ mod tests {
             analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
 
         assert_eq!(report.source_aware_queue_state.verdict, "epic_only");
-        assert!(report.source_aware_queue_state.next_safe_actions[0].contains("narrow child bead"));
+        assert!(
+            first_item(
+                &report.source_aware_queue_state.next_safe_actions,
+                "next safe actions",
+            )?
+            .contains("narrow child bead")
+        );
         Ok(())
     }
 }
