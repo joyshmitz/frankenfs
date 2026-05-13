@@ -12661,6 +12661,28 @@ mod tests {
             for _entry in iter_dir_block(&block, block_size) {}
         }
 
+        // bd-tj83g — Determinism MR for iter_dir_block. The iterator API
+        // is invoked on every readdir / lookup / rename / remove on
+        // ext4. parse_dir_block (the eager parser) has its own
+        // determinism MR via bd-qzwuq, but the iterator path runs
+        // independent state (offset cursor, done flag, checksum-tail
+        // detection) and is the actual hot path for ffs_core::OpenFs.
+        // A regression that introduced iteration-order dependence
+        // (HashMap-backed offset cache, allocator-address-based
+        // ordering) would silently corrupt readdir results. Compares
+        // two collected iteration passes element-by-element.
+        #[test]
+        fn ext4_proptest_iter_dir_block_determinism(
+            block in proptest::collection::vec(any::<u8>(), 0..=4096),
+            block_size in prop_oneof![Just(1024_u32), Just(2048_u32), Just(4096_u32)],
+        ) {
+            let a: Vec<Result<Ext4DirEntryRef<'_>, ParseError>> =
+                iter_dir_block(&block, block_size).collect();
+            let b: Vec<Result<Ext4DirEntryRef<'_>, ParseError>> =
+                iter_dir_block(&block, block_size).collect();
+            prop_assert_eq!(a, b);
+        }
+
         #[test]
         fn ext4_proptest_structured_block_size_supported(log_block_size in 0_u32..=2) {
             let incompat = Ext4IncompatFeatures::FILETYPE.0 | Ext4IncompatFeatures::EXTENTS.0;
