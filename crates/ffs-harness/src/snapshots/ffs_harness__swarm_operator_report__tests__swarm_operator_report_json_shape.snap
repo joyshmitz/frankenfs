@@ -1,0 +1,122 @@
+---
+source: crates/ffs-harness/src/swarm_operator_report.rs
+expression: serde_json::to_string_pretty(&shape)?
+---
+{
+  "schema_version": 1,
+  "report_id": "bd-p2j3e.7-swarm-operator-report-test",
+  "generated_at": "2026-05-04T00:00:00Z",
+  "required_card_ids": [
+    "tail_latency_decomposition",
+    "numa_shard_harness",
+    "rcu_qsbr_metadata",
+    "parallel_wal_group_commit",
+    "cache_budget_controller",
+    "scrub_repair_scheduler"
+  ],
+  "proof_bundle_consumers": [
+    "proof-bundle"
+  ],
+  "release_gate_consumers": [
+    "release-gate"
+  ],
+  "card_count": 6,
+  "cards": [
+    {
+      "idea_id": "tail_latency_decomposition",
+      "source_lane": "bd-p2j3e.1",
+      "selected_algorithmic_pattern": "tail_latency_decomposition_pattern",
+      "release_claim_state": "experimental",
+      "linked_bead_ids": [
+        "bd-p2j3e.1"
+      ],
+      "evidence_count": 1,
+      "first_evidence": {
+        "evidence_id": "tail_latency_decomposition_evidence",
+        "linked_bead_id": "bd-p2j3e.1",
+        "release_claim_state": "experimental",
+        "artifact_path_count": 1
+      }
+    },
+    {
+      "idea_id": "numa_shard_harness",
+      "source_lane": "bd-p2j3e.2",
+      "selected_algorithmic_pattern": "numa_shard_harness_pattern",
+      "release_claim_state": "experimental",
+      "linked_bead_ids": [
+        "bd-p2j3e.2"
+      ],
+      "evidence_count": 1,
+      "first_evidence": {
+        "evidence_id": "numa_shard_harness_evidence",
+        "linked_bead_id": "bd-p2j3e.2",
+        "release_claim_state": "experimental",
+        "artifact_path_count": 1
+      }
+    },
+    {
+      "idea_id": "rcu_qsbr_metadata",
+      "source_lane": "bd-p2j3e.3",
+      "selected_algorithmic_pattern": "rcu_qsbr_metadata_pattern",
+      "release_claim_state": "experimental",
+      "linked_bead_ids": [
+        "bd-p2j3e.3"
+      ],
+      "evidence_count": 1,
+      "first_evidence": {
+        "evidence_id": "rcu_qsbr_metadata_evidence",
+        "linked_bead_id": "bd-p2j3e.3",
+        "release_claim_state": "experimental",
+        "artifact_path_count": 1
+      }
+    },
+    {
+      "idea_id": "parallel_wal_group_commit",
+      "source_lane": "bd-p2j3e.4",
+      "selected_algorithmic_pattern": "parallel_wal_group_commit_pattern",
+      "release_claim_state": "experimental",
+      "linked_bead_ids": [
+        "bd-p2j3e.4"
+      ],
+      "evidence_count": 1,
+      "first_evidence": {
+        "evidence_id": "parallel_wal_group_commit_evidence",
+        "linked_bead_id": "bd-p2j3e.4",
+        "release_claim_state": "experimental",
+        "artifact_path_count": 1
+      }
+    },
+    {
+      "idea_id": "cache_budget_controller",
+      "source_lane": "bd-p2j3e.5",
+      "selected_algorithmic_pattern": "cache_budget_controller_pattern",
+      "release_claim_state": "experimental",
+      "linked_bead_ids": [
+        "bd-p2j3e.5"
+      ],
+      "evidence_count": 1,
+      "first_evidence": {
+        "evidence_id": "cache_budget_controller_evidence",
+        "linked_bead_id": "bd-p2j3e.5",
+        "release_claim_state": "experimental",
+        "artifact_path_count": 1
+      }
+    },
+    {
+      "idea_id": "scrub_repair_scheduler",
+      "source_lane": "bd-p2j3e.6",
+      "selected_algorithmic_pattern": "scrub_repair_scheduler_pattern",
+      "release_claim_state": "experimental",
+      "linked_bead_ids": [
+        "bd-p2j3e.6"
+      ],
+      "evidence_count": 1,
+      "first_evidence": {
+        "evidence_id": "scrub_repair_scheduler_evidence",
+        "linked_bead_id": "bd-p2j3e.6",
+        "release_claim_state": "experimental",
+        "artifact_path_count": 1
+      }
+    }
+  ]
+}

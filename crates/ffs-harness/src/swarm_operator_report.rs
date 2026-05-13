@@ -411,6 +411,63 @@ mod tests {
     }
 
     #[test]
+    fn swarm_operator_report_json_shape() -> Result<()> {
+        let report = sample_report();
+        let json = serde_json::to_string_pretty(&report)?;
+        let parsed: SwarmOperatorReport = serde_json::from_str(&json)?;
+
+        assert_eq!(parsed, report);
+        assert_eq!(
+            parsed.required_card_ids,
+            REQUIRED_CARD_IDS
+                .iter()
+                .map(|id| (*id).to_owned())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(parsed.cards.len(), REQUIRED_CARD_IDS.len());
+        assert_eq!(parsed.proof_bundle_consumers, ["proof-bundle"]);
+        assert_eq!(parsed.release_gate_consumers, ["release-gate"]);
+
+        let card_rows = parsed
+            .cards
+            .iter()
+            .map(|card| {
+                let evidence = card.evidence.first().context("sample card evidence")?;
+                Ok(serde_json::json!({
+                    "idea_id": card.idea_id,
+                    "source_lane": card.source_lane,
+                    "selected_algorithmic_pattern": card.selected_algorithmic_pattern,
+                    "release_claim_state": card.release_claim_state.label(),
+                    "linked_bead_ids": card.linked_bead_ids,
+                    "evidence_count": card.evidence.len(),
+                    "first_evidence": {
+                        "evidence_id": evidence.evidence_id,
+                        "linked_bead_id": evidence.linked_bead_id,
+                        "release_claim_state": evidence.release_claim_state.label(),
+                        "artifact_path_count": evidence.artifact_paths.len(),
+                    },
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let shape = serde_json::json!({
+            "schema_version": parsed.schema_version,
+            "report_id": parsed.report_id,
+            "generated_at": parsed.generated_at,
+            "required_card_ids": parsed.required_card_ids,
+            "proof_bundle_consumers": parsed.proof_bundle_consumers,
+            "release_gate_consumers": parsed.release_gate_consumers,
+            "card_count": parsed.cards.len(),
+            "cards": card_rows,
+        });
+
+        insta::assert_snapshot!(
+            "swarm_operator_report_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
+    }
+
+    #[test]
     fn missing_invariants_fail() -> Result<()> {
         let mut report = sample_report();
         first_card_mut(&mut report)?.invariants.clear();
