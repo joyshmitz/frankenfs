@@ -5653,6 +5653,44 @@ mod tests {
     }
 
     #[test]
+    fn readiness_lab_validation_report_json_shape() -> serde_json::Result<()> {
+        let report = validate(&sample_bundle());
+        assert!(report.valid);
+
+        let full_json = serde_json::to_string_pretty(&report)?;
+        let decoded: ReadinessLabValidationReport = serde_json::from_str(&full_json)?;
+
+        assert_eq!(decoded, report);
+        assert_eq!(decoded.artifact_count, 2);
+        assert_eq!(decoded.lane_count, 1);
+        assert_eq!(decoded.rch_assumption_count, 1);
+        assert_eq!(decoded.product_claim_violation_count, 0);
+
+        let shape = serde_json::json!({
+            "schema_version": report.schema_version,
+            "lab_id": report.lab_id,
+            "manifest_path": report.manifest_path,
+            "valid": report.valid,
+            "artifact_count": report.artifact_count,
+            "lane_count": report.lane_count,
+            "rch_assumption_count": report.rch_assumption_count,
+            "advisory_artifact_count": report.advisory_artifact_count,
+            "stale_artifact_count": report.stale_artifact_count,
+            "future_artifact_count": report.future_artifact_count,
+            "product_claim_violation_count": report.product_claim_violation_count,
+            "missing_required_field_count": report.missing_required_field_count,
+            "duplicate_id_count": report.duplicate_id_count,
+            "errors": report.errors,
+            "warnings": report.warnings,
+        });
+        insta::assert_snapshot!(
+            "readiness_lab_validation_report_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
+    }
+
+    #[test]
     fn serialization_roundtrip_preserves_bundle() -> serde_json::Result<()> {
         let bundle = sample_bundle();
         let encoded = serde_json::to_string_pretty(&bundle)?;
