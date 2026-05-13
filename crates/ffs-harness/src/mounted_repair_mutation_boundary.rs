@@ -183,21 +183,21 @@ pub fn render_mounted_repair_mutation_boundary_markdown(
 ) -> String {
     let mut out = String::new();
     out.push_str("# Mounted Repair Mutation Boundary\n\n");
-    writeln!(&mut out, "- matrix: `{}`", report.matrix_id).expect("write string");
-    writeln!(&mut out, "- schema version: `{}`", report.schema_version).expect("write string");
-    writeln!(&mut out, "- bead: `{}`", report.bead_id).expect("write string");
-    writeln!(&mut out, "- valid: `{}`", report.valid).expect("write string");
-    writeln!(&mut out, "- scenarios: `{}`", report.scenario_count).expect("write string");
+    let _ = writeln!(&mut out, "- matrix: `{}`", report.matrix_id);
+    let _ = writeln!(&mut out, "- schema version: `{}`", report.schema_version);
+    let _ = writeln!(&mut out, "- bead: `{}`", report.bead_id);
+    let _ = writeln!(&mut out, "- valid: `{}`", report.valid);
+    let _ = writeln!(&mut out, "- scenarios: `{}`", report.scenario_count);
     out.push('\n');
     out.push_str("## Scenario Kinds\n");
     for kind in &report.kinds_seen {
-        writeln!(&mut out, "- `{kind}`").expect("write string");
+        let _ = writeln!(&mut out, "- `{kind}`");
     }
     if !report.errors.is_empty() {
         out.push('\n');
         out.push_str("## Errors\n");
         for error in &report.errors {
-            writeln!(&mut out, "- {error}").expect("write string");
+            let _ = writeln!(&mut out, "- {error}");
         }
     }
     out
