@@ -657,11 +657,11 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
-    fn fixture_catalog() -> MetamorphicWorkloadSeedCatalog {
+    fn fixture_catalog() -> Result<MetamorphicWorkloadSeedCatalog> {
         serde_json::from_str(include_str!(
             "../../../tests/metamorphic-workload-seeds/metamorphic_workload_seed_catalog.json"
         ))
-        .expect("checked-in metamorphic seed catalog is valid JSON")
+        .context("checked-in metamorphic seed catalog is valid JSON")
     }
 
     fn validate_fixture(
@@ -670,9 +670,64 @@ mod tests {
         validate_metamorphic_workload_seed_catalog_with_repo_root(catalog, &repo_root())
     }
 
+    fn first_seed_mut(
+        catalog: &mut MetamorphicWorkloadSeedCatalog,
+    ) -> Result<&mut MetamorphicWorkloadSeed> {
+        catalog
+            .seeds
+            .first_mut()
+            .context("fixture catalog includes at least one seed")
+    }
+
+    fn first_two_seeds_mut(
+        catalog: &mut MetamorphicWorkloadSeedCatalog,
+    ) -> Result<(&mut MetamorphicWorkloadSeed, &mut MetamorphicWorkloadSeed)> {
+        let (first, rest) = catalog
+            .seeds
+            .split_first_mut()
+            .context("fixture catalog includes at least one seed")?;
+        let second = rest
+            .first_mut()
+            .context("fixture catalog includes at least two seeds")?;
+        Ok((first, second))
+    }
+
+    fn seed_by_id<'a>(
+        catalog: &'a MetamorphicWorkloadSeedCatalog,
+        seed_id: &str,
+    ) -> Result<&'a MetamorphicWorkloadSeed> {
+        catalog
+            .seeds
+            .iter()
+            .find(|seed| seed.seed_id == seed_id)
+            .with_context(|| format!("fixture has seed {seed_id}"))
+    }
+
+    fn seed_by_id_mut<'a>(
+        catalog: &'a mut MetamorphicWorkloadSeedCatalog,
+        seed_id: &str,
+    ) -> Result<&'a mut MetamorphicWorkloadSeed> {
+        catalog
+            .seeds
+            .iter_mut()
+            .find(|seed| seed.seed_id == seed_id)
+            .with_context(|| format!("fixture has seed {seed_id}"))
+    }
+
+    fn seed_by_execution_mode_mut<'a>(
+        catalog: &'a mut MetamorphicWorkloadSeedCatalog,
+        execution_mode: &str,
+    ) -> Result<&'a mut MetamorphicWorkloadSeed> {
+        catalog
+            .seeds
+            .iter_mut()
+            .find(|seed| seed.execution_mode == execution_mode)
+            .with_context(|| format!("fixture has {execution_mode} seed"))
+    }
+
     #[test]
-    fn checked_in_catalog_validates_required_contract() {
-        let catalog = fixture_catalog();
+    fn checked_in_catalog_validates_required_contract() -> Result<()> {
+        let catalog = fixture_catalog()?;
         let report = validate_fixture(&catalog);
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.bead_id, "bd-rchk0.79");
@@ -694,11 +749,13 @@ mod tests {
                 .by_proof_consumer
                 .contains_key("swarm_workload_harness")
         );
+        Ok(())
     }
 
     #[test]
-    fn render_metamorphic_workload_seed_catalog_markdown_checked_in_catalog_snapshot() {
-        let catalog = fixture_catalog();
+    fn render_metamorphic_workload_seed_catalog_markdown_checked_in_catalog_snapshot() -> Result<()>
+    {
+        let catalog = fixture_catalog()?;
         let report = validate_fixture(&catalog);
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.seed_count, 8);
@@ -713,11 +770,12 @@ mod tests {
             "render_metamorphic_workload_seed_catalog_markdown_checked_in_catalog",
             markdown
         );
+        Ok(())
     }
 
     #[test]
     fn metamorphic_workload_seed_catalog_report_json_shape() -> Result<()> {
-        let catalog = fixture_catalog();
+        let catalog = fixture_catalog()?;
         let report = validate_fixture(&catalog);
         assert!(report.valid, "{:?}", report.errors);
         let json = serde_json::to_string_pretty(&report)?;
@@ -729,9 +787,9 @@ mod tests {
     }
 
     #[test]
-    fn source_value_coverage_counts_valid_sources_independent_of_row_errors() {
-        let mut catalog = fixture_catalog();
-        catalog.seeds[0].invariant.clear();
+    fn source_value_coverage_counts_valid_sources_independent_of_row_errors() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        first_seed_mut(&mut catalog)?.invariant.clear();
 
         let report = validate_fixture(&catalog);
 
@@ -745,21 +803,24 @@ mod tests {
             "expected invariant validation error, got {:?}",
             report.errors
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_duplicate_seed_ids() {
-        let mut catalog = fixture_catalog();
-        catalog.seeds[1].seed_id = catalog.seeds[0].seed_id.clone();
+    fn rejects_duplicate_seed_ids() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let (first, second) = first_two_seeds_mut(&mut catalog)?;
+        second.seed_id = first.seed_id.clone();
         let report = validate_fixture(&catalog);
         assert!(!report.valid);
         assert_eq!(report.duplicate_seed_ids.len(), 1);
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_source_artifact() {
-        let mut catalog = fixture_catalog();
-        catalog.seeds[0].source_artifact =
+    fn rejects_missing_source_artifact() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        first_seed_mut(&mut catalog)?.source_artifact =
             "tests/metamorphic-workload-seeds/missing_source.json".to_owned();
         let report = validate_fixture(&catalog);
         assert!(!report.valid);
@@ -769,18 +830,19 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("source_artifact does not exist"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_existing_non_json_source_artifact() {
-        let temp = tempfile::tempdir().expect("tempdir can be created");
-        fs::write(temp.path().join("non_json_source.txt"), "seed: 64001\n")
-            .expect("non-JSON source artifact can be written");
+    fn rejects_existing_non_json_source_artifact() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        fs::write(temp.path().join("non_json_source.txt"), "seed: 64001\n")?;
 
-        let mut catalog = fixture_catalog();
+        let mut catalog = fixture_catalog()?;
         catalog.seeds.truncate(1);
-        catalog.seeds[0].source_artifact = "non_json_source.txt".to_owned();
-        catalog.seeds[0].source_value_pointer = "/seed".to_owned();
+        let seed = first_seed_mut(&mut catalog)?;
+        seed.source_artifact = "non_json_source.txt".to_owned();
+        seed.source_value_pointer = "/seed".to_owned();
 
         let report =
             validate_metamorphic_workload_seed_catalog_with_repo_root(&catalog, temp.path());
@@ -790,28 +852,27 @@ mod tests {
             error.contains("source_artifact is not valid JSON")
                 && error.contains("seed_workload_append_truncate_64001")
         }));
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_source_value_pointer_target() {
-        let mut catalog = fixture_catalog();
-        catalog.seeds[0].source_value_pointer = "/scenarios/3/missing_seed_field".to_owned();
+    fn rejects_missing_source_value_pointer_target() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        first_seed_mut(&mut catalog)?.source_value_pointer =
+            "/scenarios/3/missing_seed_field".to_owned();
         let report = validate_fixture(&catalog);
         assert!(!report.valid);
         assert!(report.errors.iter().any(|error| {
             error.contains("source_value_pointer does not exist")
                 && error.contains("seed_workload_append_truncate_64001")
         }));
+        Ok(())
     }
 
     #[test]
-    fn rejects_mismatched_numeric_source_value() {
-        let mut catalog = fixture_catalog();
-        let seed = catalog
-            .seeds
-            .iter_mut()
-            .find(|seed| seed.seed_id.eq("seed_soak_mount_ext4_1001"))
-            .expect("fixture has soak/canary seed");
+    fn rejects_mismatched_numeric_source_value() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let seed = seed_by_id_mut(&mut catalog, "seed_soak_mount_ext4_1001")?;
         seed.seed_value = SeedValue::Number(9_999_999);
         let report = validate_fixture(&catalog);
         assert!(!report.valid);
@@ -819,36 +880,33 @@ mod tests {
             error.contains("seed_value 9999999 was not found")
                 && error.contains("seed_soak_mount_ext4_1001")
         }));
+        Ok(())
     }
 
     #[test]
-    fn accepts_seed_contained_in_source_command_string() {
-        let catalog = fixture_catalog();
-        let seed = catalog
-            .seeds
-            .iter()
-            .find(|seed| seed.seed_id.eq("seed_workload_append_truncate_64001"))
-            .expect("fixture has command-contained seed");
-        let resolved = resolve_catalog_relative_path(&repo_root(), &seed.source_artifact)
-            .expect("fixture source artifact path resolves");
-        let source_json: Value = serde_json::from_str(
-            &fs::read_to_string(resolved).expect("fixture source artifact is readable"),
-        )
-        .expect("fixture source artifact is JSON");
+    fn accepts_seed_contained_in_source_command_string() -> Result<()> {
+        let catalog = fixture_catalog()?;
+        let seed = seed_by_id(&catalog, "seed_workload_append_truncate_64001")?;
+        let resolved = resolve_catalog_relative_path(&repo_root(), &seed.source_artifact)?;
+        let source_text = fs::read_to_string(&resolved).with_context(|| {
+            format!(
+                "fixture source artifact is readable: {}",
+                resolved.display()
+            )
+        })?;
+        let source_json: Value = serde_json::from_str(&source_text)
+            .with_context(|| format!("fixture source artifact is JSON: {}", resolved.display()))?;
         let source_value = source_json
             .pointer(&seed.source_value_pointer)
-            .expect("fixture source pointer exists");
+            .context("fixture source pointer exists")?;
         assert!(source_value_contains_seed(source_value, &seed.seed_value));
+        Ok(())
     }
 
     #[test]
-    fn rejects_permissioned_seed_without_ack_requirement() {
-        let mut catalog = fixture_catalog();
-        let seed = catalog
-            .seeds
-            .iter_mut()
-            .find(|seed| seed.execution_mode.eq("permissioned"))
-            .expect("fixture has permissioned seed");
+    fn rejects_permissioned_seed_without_ack_requirement() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let seed = seed_by_execution_mode_mut(&mut catalog, "permissioned")?;
         seed.ack_requirement = None;
         let report = validate_fixture(&catalog);
         assert!(!report.valid);
@@ -858,12 +916,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("must declare ack_requirement"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_unknown_relation_type() {
-        let mut catalog = fixture_catalog();
-        catalog.seeds[0].relation_type = "unknown_relation".to_owned();
+    fn rejects_unknown_relation_type() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        first_seed_mut(&mut catalog)?.relation_type = "unknown_relation".to_owned();
         let report = validate_fixture(&catalog);
         assert!(!report.valid);
         assert!(
@@ -872,12 +931,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("relation_type references unknown value"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_seed_without_invariant() {
-        let mut catalog = fixture_catalog();
-        catalog.seeds[0].invariant.clear();
+    fn rejects_seed_without_invariant() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        first_seed_mut(&mut catalog)?.invariant.clear();
         let report = validate_fixture(&catalog);
         assert!(!report.valid);
         assert!(
@@ -886,12 +946,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("invariant must not be empty"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_seed_without_existing_proof_consumer() {
-        let mut catalog = fixture_catalog();
-        catalog.seeds[0].proof_consumers = vec!["unknown_consumer".to_owned()];
+    fn rejects_seed_without_existing_proof_consumer() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        first_seed_mut(&mut catalog)?.proof_consumers = vec!["unknown_consumer".to_owned()];
         let report = validate_fixture(&catalog);
         assert!(!report.valid);
         assert!(
@@ -900,11 +961,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("proof_consumers references unknown value"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_catalog_with_too_few_source_kinds() {
-        let mut catalog = fixture_catalog();
+    fn rejects_catalog_with_too_few_source_kinds() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
         for seed in &mut catalog.seeds {
             seed.source_kind = "workload_corpus".to_owned();
         }
@@ -916,5 +978,6 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("at least 5 source kinds"))
         );
+        Ok(())
     }
 }
