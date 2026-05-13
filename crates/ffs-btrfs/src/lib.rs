@@ -7477,6 +7477,30 @@ mod tests {
                 .expect("compressed Inline extent must round-trip");
             proptest::prop_assert_eq!(parsed, original);
         }
+
+        // bd-whybk — MR-4 raw-bytes determinism for parse_extent_data.
+        // The existing MR-1/2/3 proptests above only exercise valid
+        // encode → parse round-trips. This proptest fuzzes ARBITRARY
+        // 0..=128 byte buffers (covering both Ok and Err paths) and
+        // asserts parse_extent_data(buf) == parse_extent_data(buf) on
+        // every call. parse_extent_data is invoked on every btrfs file
+        // read — the heaviest-trafficked btrfs leaf-item parser. A
+        // regression that introduced HashMap iteration, allocator-
+        // address dependency, or any non-deterministic per-call state
+        // on either the Ok or Err path would silently surface only
+        // under specific scheduling. Sister raw-bytes determinism MRs:
+        // parse_root_item (bd-fs41s), parse_xattr_items (bd-fhznm),
+        // parse_inode_refs (bd-9f8ef), parse_root_ref (bd-x2320),
+        // parse_dir_items (bd-7pr5k), parse_inode_item (in
+        // inode_item_proptest_determinism).
+        #[test]
+        fn proptest_parse_extent_data_raw_bytes_determinism(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=128),
+        ) {
+            let a = parse_extent_data(&bytes);
+            let b = parse_extent_data(&bytes);
+            proptest::prop_assert_eq!(a, b);
+        }
     }
 
     #[test]
