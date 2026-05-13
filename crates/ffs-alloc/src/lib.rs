@@ -4579,7 +4579,7 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
             idx_seed in any::<u32>(),
         ) {
             let before = bitmap_largest_free_run(&bm0, count);
-            let mut bm = bm0.clone();
+            let mut bm = bm0;
             let idx = idx_seed % count;
             bitmap_set(&mut bm, idx);
             let after = bitmap_largest_free_run(&bm, count);
