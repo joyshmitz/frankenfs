@@ -5033,6 +5033,84 @@ mod tests {
             let b = verify_tree_block_checksum(&block, csum_type);
             prop_assert_eq!(a, b);
         }
+
+        // bd-f1k5j — btrfs_key_cmp total-order laws.
+        // btrfs_key_cmp is the foundational lex ordering on
+        // (objectid, item_type, offset) used by validate_next_key to
+        // enforce strict-monotonic key ordering on every parsed btree
+        // leaf and internal node. Pin the total-order axioms:
+
+        // Reflexivity: cmp(a, a) == Equal.
+        #[test]
+        fn btrfs_proptest_key_cmp_reflexive(
+            oid in any::<u64>(), ty in any::<u8>(), off in any::<u64>(),
+        ) {
+            let a = super::BtrfsKey { objectid: oid, item_type: ty, offset: off };
+            prop_assert_eq!(super::btrfs_key_cmp(&a, &a), std::cmp::Ordering::Equal);
+        }
+
+        // Antisymmetry: cmp(a, b) == cmp(b, a).reverse() for any pair.
+        #[test]
+        fn btrfs_proptest_key_cmp_antisymmetric(
+            a_oid in any::<u64>(), a_ty in any::<u8>(), a_off in any::<u64>(),
+            b_oid in any::<u64>(), b_ty in any::<u8>(), b_off in any::<u64>(),
+        ) {
+            let a = super::BtrfsKey { objectid: a_oid, item_type: a_ty, offset: a_off };
+            let b = super::BtrfsKey { objectid: b_oid, item_type: b_ty, offset: b_off };
+            prop_assert_eq!(super::btrfs_key_cmp(&a, &b), super::btrfs_key_cmp(&b, &a).reverse());
+        }
+
+        // Transitivity: if a < b and b < c then a < c.
+        #[test]
+        fn btrfs_proptest_key_cmp_transitive(
+            a_oid in any::<u64>(), a_ty in any::<u8>(), a_off in any::<u64>(),
+            b_oid in any::<u64>(), b_ty in any::<u8>(), b_off in any::<u64>(),
+            c_oid in any::<u64>(), c_ty in any::<u8>(), c_off in any::<u64>(),
+        ) {
+            use std::cmp::Ordering::Less;
+            let a = super::BtrfsKey { objectid: a_oid, item_type: a_ty, offset: a_off };
+            let b = super::BtrfsKey { objectid: b_oid, item_type: b_ty, offset: b_off };
+            let c = super::BtrfsKey { objectid: c_oid, item_type: c_ty, offset: c_off };
+            if super::btrfs_key_cmp(&a, &b) == Less && super::btrfs_key_cmp(&b, &c) == Less {
+                prop_assert_eq!(super::btrfs_key_cmp(&a, &c), Less);
+            }
+        }
+
+        // Field-priority hierarchy: objectid dominates item_type, item_type
+        // dominates offset. Pins the lexicographic priority order.
+        #[test]
+        fn btrfs_proptest_key_cmp_objectid_dominates(
+            oid_lo in any::<u64>(),
+            oid_delta in 1_u64..,
+            ty_a in any::<u8>(),
+            ty_b in any::<u8>(),
+            off_a in any::<u64>(),
+            off_b in any::<u64>(),
+        ) {
+            let oid_hi = oid_lo.wrapping_add(oid_delta);
+            // Skip wrap; we need strictly oid_lo < oid_hi.
+            prop_assume!(oid_lo < oid_hi);
+            let a = super::BtrfsKey { objectid: oid_lo, item_type: ty_a, offset: off_a };
+            let b = super::BtrfsKey { objectid: oid_hi, item_type: ty_b, offset: off_b };
+            prop_assert_eq!(super::btrfs_key_cmp(&a, &b), std::cmp::Ordering::Less,
+                "lower objectid must always sort first regardless of item_type/offset");
+        }
+
+        #[test]
+        fn btrfs_proptest_key_cmp_item_type_dominates_offset(
+            oid in any::<u64>(),
+            ty_lo in any::<u8>(),
+            ty_delta in 1_u8..,
+            off_a in any::<u64>(),
+            off_b in any::<u64>(),
+        ) {
+            let ty_hi = ty_lo.wrapping_add(ty_delta);
+            prop_assume!(ty_lo < ty_hi);
+            let a = super::BtrfsKey { objectid: oid, item_type: ty_lo, offset: off_a };
+            let b = super::BtrfsKey { objectid: oid, item_type: ty_hi, offset: off_b };
+            prop_assert_eq!(super::btrfs_key_cmp(&a, &b), std::cmp::Ordering::Less,
+                "lower item_type must sort first when objectid is equal, regardless of offset");
+        }
     }
 
     // ── RAID profile identification ────────────────────────────────
