@@ -68,8 +68,12 @@ pub fn parse_capability_table(feature_parity_content: &str) -> Vec<CapabilityCon
             continue;
         }
 
-        let id_col = cols[1].trim();
-        let class_col = cols[3].trim();
+        let Some(id_col) = cols.get(1).map(|col| col.trim()) else {
+            continue;
+        };
+        let Some(class_col) = cols.get(3).map(|col| col.trim()) else {
+            continue;
+        };
 
         // Match `unit::name` or `e2e::name` (backtick-wrapped).
         let contract_id = id_col
@@ -141,7 +145,9 @@ impl<'a> RustCodeTokens<'a> {
 
     fn skip_trivia_and_literals(&mut self) {
         while self.pos < self.src.len() {
-            let rest = &self.src[self.pos..];
+            let Some(rest) = self.src.get(self.pos..) else {
+                break;
+            };
 
             if let Some(width) = rest.chars().next().filter(|ch| ch.is_whitespace()) {
                 self.pos += width.len_utf8();
@@ -149,8 +155,10 @@ impl<'a> RustCodeTokens<'a> {
             }
 
             if rest.starts_with("//") {
-                self.pos = self.src[self.pos..]
-                    .find('\n')
+                self.pos = self
+                    .src
+                    .get(self.pos..)
+                    .and_then(|tail| tail.find('\n'))
                     .map_or(self.src.len(), |offset| self.pos + offset + 1);
                 continue;
             }
@@ -194,7 +202,7 @@ impl<'a> Iterator for RustCodeTokens<'a> {
             {
                 self.pos += 1;
             }
-            return Some(CodeToken::Ident(&self.src[start..self.pos]));
+            return self.src.get(start..self.pos).map(CodeToken::Ident);
         }
 
         if is_ident_start(byte) {
@@ -205,7 +213,7 @@ impl<'a> Iterator for RustCodeTokens<'a> {
             {
                 self.pos += 1;
             }
-            return Some(CodeToken::Ident(&self.src[start..self.pos]));
+            return self.src.get(start..self.pos).map(CodeToken::Ident);
         }
 
         let ch = rest.chars().next()?;
@@ -227,13 +235,13 @@ fn skip_block_comment(src: &str, start: usize) -> usize {
     let mut pos = start + 2;
     let mut depth = 1usize;
 
-    while pos + 1 < bytes.len() {
-        match (bytes[pos], bytes[pos + 1]) {
-            (b'/', b'*') => {
+    while let Some(pair) = bytes.get(pos..pos + 2) {
+        match pair {
+            [b'/', b'*'] => {
                 depth += 1;
                 pos += 2;
             }
-            (b'*', b'/') => {
+            [b'*', b'/'] => {
                 depth -= 1;
                 pos += 2;
                 if depth == 0 {
@@ -270,10 +278,11 @@ fn raw_string_end(src: &str, start: usize) -> Option<usize> {
         return None;
     }
     pos += 1;
-    let hashes = &bytes[hashes_start..hashes_start + hash_count];
+    let hashes = bytes.get(hashes_start..hashes_start + hash_count)?;
 
     while pos < bytes.len() {
-        if bytes[pos] == b'"' && bytes.get(pos + 1..pos + 1 + hash_count) == Some(hashes) {
+        if bytes.get(pos) == Some(&b'"') && bytes.get(pos + 1..pos + 1 + hash_count) == Some(hashes)
+        {
             return Some(pos + 1 + hash_count);
         }
         pos += 1;
@@ -296,7 +305,7 @@ fn quoted_string_end(src: &str, start: usize) -> Option<usize> {
 
     pos += 1;
     while pos < bytes.len() {
-        match bytes[pos] {
+        match bytes.get(pos).copied()? {
             b'\\' => pos = pos.saturating_add(2),
             b'"' => return Some(pos + 1),
             _ => pos += 1,
@@ -337,16 +346,13 @@ pub fn check_e2e_contract(e2e_content: &str, bare_name: &str) -> bool {
     // 3. Crash-matrix: strip `crash_matrix_NN_` to get the label.
     if let Some(rest) = stripped.strip_prefix("crash_matrix_") {
         // Skip the two-digit point ID and underscore (e.g. "01_").
-        let bytes = rest.as_bytes();
-        if bytes.len() > 3
-            && bytes[0].is_ascii_digit()
-            && bytes[1].is_ascii_digit()
-            && bytes[2] == b'_'
+        if let [first, second, b'_', ..] = rest.as_bytes()
+            && first.is_ascii_digit()
+            && second.is_ascii_digit()
+            && let Some(label) = rest.get(3..)
+            && e2e_content.contains(label)
         {
-            let label = &rest[3..];
-            if e2e_content.contains(label) {
-                return true;
-            }
+            return true;
         }
     }
 
@@ -405,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_capability_table_extracts_rows() {
+    fn parse_capability_table_extracts_rows() -> Result<(), String> {
         let content = r"
 | Contract ID | Operation | Class | Expected |
 |---|---|---|---|
@@ -415,14 +421,21 @@ mod tests {
 ";
         let rows = parse_capability_table(content);
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].contract_id, "unit::btrfs_write_create_file");
-        assert_eq!(rows[0].kind, ContractKind::Unit);
-        assert_eq!(rows[0].bare_name, "btrfs_write_create_file");
-        assert_eq!(rows[1].kind, ContractKind::E2e);
+        let unit_row = rows
+            .first()
+            .ok_or_else(|| "missing unit contract row".to_owned())?;
+        let e2e_row = rows
+            .get(1)
+            .ok_or_else(|| "missing e2e contract row".to_owned())?;
+        assert_eq!(unit_row.contract_id, "unit::btrfs_write_create_file");
+        assert_eq!(unit_row.kind, ContractKind::Unit);
+        assert_eq!(unit_row.bare_name, "btrfs_write_create_file");
+        assert_eq!(e2e_row.kind, ContractKind::E2e);
         assert_eq!(
-            rows[1].bare_name,
+            e2e_row.bare_name,
             "btrfs_rw_crash_matrix_01_create_alpha_no_fsync"
         );
+        Ok(())
     }
 
     #[test]
@@ -613,7 +626,7 @@ crash_matrix_label_for_point() {
     }
 
     #[test]
-    fn parse_ignores_non_contract_rows() {
+    fn parse_ignores_non_contract_rows() -> Result<(), String> {
         let content = r"
 | Contract ID | Op | Class | Result |
 |---|---|---|---|
@@ -623,7 +636,11 @@ crash_matrix_label_for_point() {
         let rows = parse_capability_table(content);
         // Only the unit:: row should match
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].bare_name, "btrfs_write_mkdir");
+        let row = rows
+            .first()
+            .ok_or_else(|| "missing unit contract row".to_owned())?;
+        assert_eq!(row.bare_name, "btrfs_write_mkdir");
+        Ok(())
     }
 
     #[test]
