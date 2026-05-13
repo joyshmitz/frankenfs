@@ -1568,6 +1568,34 @@ mod tests {
     };
     use tempfile::TempDir;
 
+    fn stale_git_sha(report: &OperationalReadinessReport, index: usize) -> Result<&StaleGitSha> {
+        report
+            .stale_git_shas
+            .get(index)
+            .with_context(|| format!("expected stale git sha at index {index}"))
+    }
+
+    fn operational_scenario_mut<'a>(
+        manifest: &'a mut ArtifactManifest,
+        scenario_id: &str,
+    ) -> Result<&'a mut OperationalScenarioRecord> {
+        manifest
+            .operational_scenarios
+            .get_mut(scenario_id)
+            .with_context(|| format!("expected operational scenario `{scenario_id}`"))
+    }
+
+    fn readiness_event_mut<'a>(
+        manifest: &'a mut ArtifactManifest,
+        scenario_id: &str,
+    ) -> Result<&'a mut ReadinessEventEnvelope> {
+        manifest
+            .readiness_events
+            .iter_mut()
+            .find(|event| event.scenario_id.as_deref() == Some(scenario_id))
+            .with_context(|| format!("expected readiness event for `{scenario_id}`"))
+    }
+
     fn normalize_report_source_paths(report: &mut OperationalReadinessReport, fixture_root: &str) {
         report.report_id = report.report_id.replace(fixture_root, "$FIXTURE");
         report.source_root = "$FIXTURE".to_owned();
@@ -1583,12 +1611,12 @@ mod tests {
     }
 
     #[test]
-    fn aggregates_mixed_operational_manifest_outcomes() {
-        let fixture = ReadinessFixture::new();
+    fn aggregates_mixed_operational_manifest_outcomes() -> Result<()> {
+        let fixture = ReadinessFixture::new()?;
         let manifest = sample_operational_manifest("abc123");
-        fixture.write_manifest("operational.json", &manifest);
+        fixture.write_manifest("operational.json", &manifest)?;
 
-        let report = fixture.report(Some("abc123"));
+        let report = fixture.report(Some("abc123"))?;
 
         assert_eq!(report.source_manifest_count, 1);
         assert_eq!(report.scenario_count, 9);
@@ -1641,36 +1669,39 @@ mod tests {
                 && row.parent_correlation_ids == vec!["report_run-operational"]
                 && row.event_artifact_ids == vec!["mounted/ext4_rw.json"]
         }));
+        Ok(())
     }
 
     #[test]
-    fn detects_duplicate_scenario_ids_and_stale_git_shas() {
-        let fixture = ReadinessFixture::new();
+    fn detects_duplicate_scenario_ids_and_stale_git_shas() -> Result<()> {
+        let fixture = ReadinessFixture::new()?;
         let first = sample_legacy_summary("oldsha", "shared_scenario");
         let second = sample_legacy_summary("newsha", "shared_scenario");
-        fixture.write_legacy("first.json", &first);
-        fixture.write_legacy("second.json", &second);
+        fixture.write_legacy("first.json", &first)?;
+        fixture.write_legacy("second.json", &second)?;
 
-        let report = fixture.report(Some("newsha"));
+        let report = fixture.report(Some("newsha"))?;
 
         assert_eq!(report.source_legacy_summary_count, 2);
         assert_eq!(report.duplicate_scenario_ids, vec!["shared_scenario"]);
         assert_eq!(report.stale_git_shas.len(), 1);
-        assert_eq!(report.stale_git_shas[0].observed, "oldsha");
+        assert_eq!(stale_git_sha(&report, 0)?.observed, "oldsha");
+        Ok(())
     }
 
     #[test]
-    fn max_age_flags_manifest_and_legacy_summary_staleness() {
-        let fixture = ReadinessFixture::new();
+    fn max_age_flags_manifest_and_legacy_summary_staleness() -> Result<()> {
+        let fixture = ReadinessFixture::new()?;
         let mut manifest = sample_operational_manifest("abc123");
         manifest.created_at = "2026-05-01T00:00:00Z".to_owned();
         let mut legacy = sample_legacy_summary("abc123", "legacy_fuse_capability");
         legacy.created_at = Some("2026-05-01T12:00:00Z".to_owned());
-        fixture.write_manifest("manifest.json", &manifest);
-        fixture.write_legacy("legacy_result.json", &legacy);
-        fs::write(fixture.dir.path().join("run.log"), "legacy log").expect("write log");
+        fixture.write_manifest("manifest.json", &manifest)?;
+        fixture.write_legacy("legacy_result.json", &legacy)?;
+        fs::write(fixture.dir.path().join("run.log"), "legacy log")
+            .context("write legacy run log")?;
 
-        let mut report = fixture.report_with_recency(Some("abc123"), 3, "2026-05-06T00:00:00Z");
+        let mut report = fixture.report_with_recency(Some("abc123"), 3, "2026-05-06T00:00:00Z")?;
 
         assert!(report.contract_failed);
         assert_eq!(report.stale_artifacts.len(), 2);
@@ -1704,20 +1735,22 @@ mod tests {
             "render_operational_readiness_markdown_stale_recency",
             markdown
         );
+        Ok(())
     }
 
     #[test]
-    fn max_age_requires_parseable_timestamps() {
-        let fixture = ReadinessFixture::new();
+    fn max_age_requires_parseable_timestamps() -> Result<()> {
+        let fixture = ReadinessFixture::new()?;
         let mut manifest = sample_operational_manifest("abc123");
         manifest.created_at = "not-a-timestamp".to_owned();
         let mut legacy = sample_legacy_summary("abc123", "legacy_missing_timestamp");
         legacy.created_at = None;
-        fixture.write_manifest("manifest.json", &manifest);
-        fixture.write_legacy("legacy_result.json", &legacy);
-        fs::write(fixture.dir.path().join("run.log"), "legacy log").expect("write log");
+        fixture.write_manifest("manifest.json", &manifest)?;
+        fixture.write_legacy("legacy_result.json", &legacy)?;
+        fs::write(fixture.dir.path().join("run.log"), "legacy log")
+            .context("write legacy run log")?;
 
-        let report = fixture.report_with_recency(Some("abc123"), 3, "2026-05-06T00:00:00Z");
+        let report = fixture.report_with_recency(Some("abc123"), 3, "2026-05-06T00:00:00Z")?;
 
         assert!(report.contract_failed);
         assert!(report.stale_artifacts.is_empty());
@@ -1733,20 +1766,22 @@ mod tests {
             violation.remediation_id == "bd-7pw36:artifact-recency-timestamp"
                 && violation.violation.contains("created_at")
         }));
+        Ok(())
     }
 
     #[test]
-    fn max_age_rejects_future_dated_artifacts() {
-        let fixture = ReadinessFixture::new();
+    fn max_age_rejects_future_dated_artifacts() -> Result<()> {
+        let fixture = ReadinessFixture::new()?;
         let mut manifest = sample_operational_manifest("abc123");
         manifest.created_at = "2026-05-08T00:00:00Z".to_owned();
         let mut legacy = sample_legacy_summary("abc123", "legacy_future_timestamp");
         legacy.created_at = Some("2026-05-09T00:00:00Z".to_owned());
-        fixture.write_manifest("manifest.json", &manifest);
-        fixture.write_legacy("legacy_result.json", &legacy);
-        fs::write(fixture.dir.path().join("run.log"), "legacy log").expect("write log");
+        fixture.write_manifest("manifest.json", &manifest)?;
+        fixture.write_legacy("legacy_result.json", &legacy)?;
+        fs::write(fixture.dir.path().join("run.log"), "legacy log")
+            .context("write legacy run log")?;
 
-        let mut report = fixture.report_with_recency(Some("abc123"), 3, "2026-05-06T00:00:00Z");
+        let mut report = fixture.report_with_recency(Some("abc123"), 3, "2026-05-06T00:00:00Z")?;
 
         assert!(report.contract_failed);
         assert!(report.stale_artifacts.is_empty());
@@ -1784,20 +1819,18 @@ mod tests {
             "render_operational_readiness_markdown_future_timestamp_refusal",
             markdown
         );
+        Ok(())
     }
 
     #[test]
-    fn reports_missing_log_paths_without_failing_aggregation() {
-        let fixture = ReadinessFixture::new();
+    fn reports_missing_log_paths_without_failing_aggregation() -> Result<()> {
+        let fixture = ReadinessFixture::new()?;
         let mut manifest = sample_operational_manifest("abc123");
-        manifest
-            .operational_scenarios
-            .get_mut("mounted_ext4_rw")
-            .expect("scenario exists")
-            .stdout_path = "missing/stdout.log".to_owned();
-        fixture.write_manifest("manifest.json", &manifest);
+        operational_scenario_mut(&mut manifest, "mounted_ext4_rw")?.stdout_path =
+            "missing/stdout.log".to_owned();
+        fixture.write_manifest("manifest.json", &manifest)?;
 
-        let report = fixture.report(Some("abc123"));
+        let report = fixture.report(Some("abc123"))?;
 
         assert!(report.missing_log_paths.iter().any(|missing| {
             missing.scenario_id.as_deref() == Some("mounted_ext4_rw")
@@ -1808,15 +1841,16 @@ mod tests {
             violation.scenario_id.as_deref() == Some("mounted_ext4_rw")
                 && violation.violation.contains("missing required log path")
         }));
+        Ok(())
     }
 
     #[test]
-    fn markdown_preserves_links_and_counts() {
-        let fixture = ReadinessFixture::new();
+    fn markdown_preserves_links_and_counts() -> Result<()> {
+        let fixture = ReadinessFixture::new()?;
         let manifest = sample_operational_manifest("abc123");
-        fixture.write_manifest("operational.json", &manifest);
+        fixture.write_manifest("operational.json", &manifest)?;
 
-        let report = fixture.report(Some("abc123"));
+        let report = fixture.report(Some("abc123"))?;
         let markdown = render_operational_readiness_markdown(&report);
 
         assert!(markdown.contains("Totals: pass=2 fail=3 skip=2 error=2"));
@@ -1827,15 +1861,16 @@ mod tests {
         assert!(markdown.contains("Correlation graph: event_nodes=9 parent_edges=9"));
         assert!(markdown.contains("event `event_mounted_ext4_rw`"));
         assert!(markdown.contains("Contract: failed=false missing_workstreams=0 violations=0"));
+        Ok(())
     }
 
     #[test]
-    fn render_operational_readiness_markdown_mixed_manifest_snapshot() {
-        let fixture = ReadinessFixture::new();
+    fn render_operational_readiness_markdown_mixed_manifest_snapshot() -> Result<()> {
+        let fixture = ReadinessFixture::new()?;
         let manifest = sample_operational_manifest("abc123");
-        fixture.write_manifest("operational.json", &manifest);
+        fixture.write_manifest("operational.json", &manifest)?;
 
-        let mut report = fixture.report(Some("abc123"));
+        let mut report = fixture.report(Some("abc123"))?;
         let fixture_root = fixture.dir.path().display().to_string();
         normalize_report_source_paths(&mut report, &fixture_root);
         let markdown = render_operational_readiness_markdown(&report);
@@ -1847,15 +1882,16 @@ mod tests {
             "render_operational_readiness_markdown_mixed_manifest",
             markdown
         );
+        Ok(())
     }
 
     #[test]
     fn operational_readiness_report_json_shape() -> Result<()> {
-        let fixture = ReadinessFixture::new();
+        let fixture = ReadinessFixture::new()?;
         let manifest = sample_operational_manifest("abc123");
-        fixture.write_manifest("operational.json", &manifest);
+        fixture.write_manifest("operational.json", &manifest)?;
 
-        let mut report = fixture.report(Some("abc123"));
+        let mut report = fixture.report(Some("abc123"))?;
         let fixture_root = fixture.dir.path().display().to_string();
         normalize_report_source_paths(&mut report, &fixture_root);
 
@@ -1912,37 +1948,34 @@ mod tests {
     }
 
     #[test]
-    fn missing_readiness_event_fails_report_contract() {
-        let fixture = ReadinessFixture::new();
+    fn missing_readiness_event_fails_report_contract() -> Result<()> {
+        let fixture = ReadinessFixture::new()?;
         let mut manifest = sample_operational_manifest("abc123");
         manifest
             .readiness_events
             .retain(|event| event.scenario_id.as_deref() != Some("mounted_ext4_rw"));
-        fixture.write_manifest("operational.json", &manifest);
+        fixture.write_manifest("operational.json", &manifest)?;
 
-        let report = fixture.report(Some("abc123"));
+        let report = fixture.report(Some("abc123"))?;
 
         assert!(report.contract_failed);
         assert!(report.contract_violations.iter().any(|violation| {
             violation.scenario_id.as_deref() == Some("mounted_ext4_rw")
                 && violation.remediation_id == "bd-slp26:missing-readiness-event"
         }));
+        Ok(())
     }
 
     #[test]
-    fn invalid_readiness_event_fails_report_contract() {
-        let fixture = ReadinessFixture::new();
+    fn invalid_readiness_event_fails_report_contract() -> Result<()> {
+        let fixture = ReadinessFixture::new()?;
         let mut manifest = sample_operational_manifest("abc123");
-        let event = manifest
-            .readiness_events
-            .iter_mut()
-            .find(|event| event.scenario_id.as_deref() == Some("mounted_ext4_rw"))
-            .expect("event exists");
+        let event = readiness_event_mut(&mut manifest, "mounted_ext4_rw")?;
         event.raw_log_refs.clear();
         event.parent_correlation_id = Some("missing-parent-event".to_owned());
-        fixture.write_manifest("operational.json", &manifest);
+        fixture.write_manifest("operational.json", &manifest)?;
 
-        let report = fixture.report(Some("abc123"));
+        let report = fixture.report(Some("abc123"))?;
 
         assert!(report.contract_failed);
         assert_eq!(report.correlation_graph_summary.orphan_parent_edges, 1);
@@ -1954,6 +1987,7 @@ mod tests {
             violation.remediation_id == "bd-slp26:manifest-validation"
                 && violation.violation.contains("parent_correlation_id")
         }));
+        Ok(())
     }
 
     #[test]
@@ -2133,20 +2167,20 @@ mod tests {
     }
 
     impl ReadinessFixture {
-        fn new() -> Self {
-            Self {
-                dir: TempDir::new().expect("tempdir"),
-            }
+        fn new() -> Result<Self> {
+            Ok(Self {
+                dir: TempDir::new().context("create readiness tempdir")?,
+            })
         }
 
-        fn report(&self, current_git_sha: Option<&str>) -> OperationalReadinessReport {
+        fn report(&self, current_git_sha: Option<&str>) -> Result<OperationalReadinessReport> {
             let config = OperationalReadinessReportConfig {
                 artifacts_dir: self.dir.path().to_path_buf(),
                 current_git_sha: current_git_sha.map(str::to_owned),
                 max_artifact_age_days: None,
                 recency_reference_epoch_days: None,
             };
-            build_operational_readiness_report(&config).expect("report builds")
+            build_operational_readiness_report(&config)
         }
 
         fn report_with_recency(
@@ -2154,35 +2188,33 @@ mod tests {
             current_git_sha: Option<&str>,
             max_artifact_age_days: u32,
             reference_timestamp: &str,
-        ) -> OperationalReadinessReport {
+        ) -> Result<OperationalReadinessReport> {
             let config = OperationalReadinessReportConfig {
                 artifacts_dir: self.dir.path().to_path_buf(),
                 current_git_sha: current_git_sha.map(str::to_owned),
                 max_artifact_age_days: Some(max_artifact_age_days),
                 recency_reference_epoch_days: Some(
-                    parse_manifest_timestamp_epoch_days(reference_timestamp)
-                        .expect("reference timestamp parses"),
+                    parse_manifest_timestamp_epoch_days(reference_timestamp).with_context(
+                        || format!("parse reference timestamp `{reference_timestamp}`"),
+                    )?,
                 ),
             };
-            build_operational_readiness_report(&config).expect("report builds")
+            build_operational_readiness_report(&config)
         }
 
-        fn write_manifest(&self, name: &str, manifest: &ArtifactManifest) {
+        fn write_manifest(&self, name: &str, manifest: &ArtifactManifest) -> Result<()> {
             let path = self.dir.path().join(name);
-            fs::write(
-                path,
-                serde_json::to_string_pretty(manifest).expect("manifest serializes"),
-            )
-            .expect("write manifest");
+            let json = serde_json::to_string_pretty(manifest)
+                .with_context(|| format!("serialize manifest `{name}`"))?;
+            fs::write(&path, json).with_context(|| format!("write manifest {}", path.display()))
         }
 
-        fn write_legacy(&self, name: &str, summary: &LegacyE2eSummary) {
+        fn write_legacy(&self, name: &str, summary: &LegacyE2eSummary) -> Result<()> {
             let path = self.dir.path().join(name);
-            fs::write(
-                path,
-                serde_json::to_string_pretty(summary).expect("summary serializes"),
-            )
-            .expect("write summary");
+            let json = serde_json::to_string_pretty(summary)
+                .with_context(|| format!("serialize legacy summary `{name}`"))?;
+            fs::write(&path, json)
+                .with_context(|| format!("write legacy summary {}", path.display()))
         }
     }
 
