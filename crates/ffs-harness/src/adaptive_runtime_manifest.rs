@@ -1470,11 +1470,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checked_in_adaptive_runtime_manifest_validates() {
+    fn checked_in_adaptive_runtime_manifest_validates() -> Result<()> {
         let manifest = load_adaptive_runtime_evidence_manifest(Path::new(&workspace_path(
             DEFAULT_ADAPTIVE_RUNTIME_EVIDENCE_MANIFEST,
-        )))
-        .expect("load checked-in adaptive runtime manifest");
+        )))?;
         let report = validate_adaptive_runtime_evidence_manifest(&manifest);
 
         assert!(report.valid, "{:?}", report.errors);
@@ -1483,6 +1482,7 @@ mod tests {
         assert_eq!(report.runtime_mode, "per_core");
         assert_eq!(report.artifact_count, 3);
         assert_eq!(report.raw_log_count, 2);
+        Ok(())
     }
 
     #[test]
