@@ -503,22 +503,26 @@ mod tests {
     }
 
     #[test]
-    fn e2e_marker_parse_valid() {
+    fn e2e_marker_parse_valid() -> Result<(), &'static str> {
         let line = "SCENARIO_RESULT|scenario_id=taxonomy_builds_clean|outcome=PASS";
-        let (id, outcome_val, detail) = e2e_marker::parse_marker(line).expect("parse");
+        let (id, outcome_val, detail) =
+            e2e_marker::parse_marker(line).ok_or("expected valid e2e marker")?;
         assert_eq!(id, "taxonomy_builds_clean");
         assert_eq!(outcome_val, "PASS");
         assert!(detail.is_none());
+        Ok(())
     }
 
     #[test]
-    fn e2e_marker_parse_with_detail() {
+    fn e2e_marker_parse_with_detail() -> Result<(), &'static str> {
         let line =
             "SCENARIO_RESULT|scenario_id=thresholds_toml_valid|outcome=FAIL|detail=missing_key_x";
-        let (id, outcome_val, detail) = e2e_marker::parse_marker(line).expect("parse");
+        let (id, outcome_val, detail) =
+            e2e_marker::parse_marker(line).ok_or("expected detailed e2e marker")?;
         assert_eq!(id, "thresholds_toml_valid");
         assert_eq!(outcome_val, "FAIL");
         assert_eq!(detail, Some("missing_key_x"));
+        Ok(())
     }
 
     #[test]
