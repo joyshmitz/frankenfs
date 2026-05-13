@@ -1838,6 +1838,45 @@ mod tests {
             prop_assert!(index < ipg);
         }
 
+        // bd-vbrhh — BlockSize byte_to_block / block_to_byte roundtrip MR.
+        // BlockSize unit converters are used throughout ffs_core / ffs_ondisk
+        // for every read seek and write seek. The contract:
+        //   byte_to_block(block_to_byte(block)) == block (when not overflowing)
+        // A regression that swapped shift direction or used the wrong block-size
+        // field would silently corrupt every byte↔block translation.
+        #[test]
+        fn proptest_block_size_block_byte_roundtrip(
+            bs_log in 10_u32..=16,  // 1024..=65536 — valid BlockSize values
+            block in 0_u64..=(u32::MAX as u64),
+        ) {
+            let bs = BlockSize::new(1_u32 << bs_log).expect("valid block size");
+            if let Some(byte_offset) = bs.block_to_byte(BlockNumber(block)) {
+                let recovered = bs.byte_to_block(byte_offset);
+                prop_assert_eq!(recovered, BlockNumber(block),
+                    "block→byte→block roundtrip must recover original block");
+            }
+        }
+
+        // bd-vbrhh — Truncation MR: for any byte offset, byte_to_block
+        // truncates toward zero such that
+        //   block_to_byte(byte_to_block(b)) <= b < block_to_byte(byte_to_block(b) + 1)
+        // (when both sides don't overflow). Pins the truncation semantics
+        // documented on byte_to_block.
+        #[test]
+        fn proptest_block_size_byte_to_block_truncation(
+            bs_log in 10_u32..=16,
+            byte_offset in 0_u64..=(1_u64 << 48),  // bounded so block_to_byte doesn't overflow
+        ) {
+            let bs = BlockSize::new(1_u32 << bs_log).expect("valid block size");
+            let block = bs.byte_to_block(byte_offset);
+            let block_byte_start = bs.block_to_byte(block).expect("no overflow under bound");
+            prop_assert!(block_byte_start <= byte_offset);
+            let next_byte_start = bs.block_to_byte(BlockNumber(block.0 + 1));
+            if let Some(next) = next_byte_start {
+                prop_assert!(byte_offset < next, "byte_offset must be strictly less than next block start");
+            }
+        }
+
         #[test]
         fn proptest_crc32c_seed_zero_equiv(data in prop::collection::vec(any::<u8>(), 0..256)) {
             let unseeded = crc32c(&data);
