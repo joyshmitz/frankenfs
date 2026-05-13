@@ -7285,7 +7285,8 @@ mod tests {
         //  - HI follows LO+ 2 bytes of padding (i_pad1 at 0x7E).
         //  - Both are 16-bit fields, so each occupies 2 bytes.
         assert_eq!(
-            INODE_CHECKSUM_HI_OFFSET - INODE_CHECKSUM_LO_OFFSET, 6,
+            INODE_CHECKSUM_HI_OFFSET - INODE_CHECKSUM_LO_OFFSET,
+            6,
             "INODE_CHECKSUM_HI - INODE_CHECKSUM_LO == 6 \
              (lo:u16 @0x7C, i_pad1:u16 @0x7E, i_isize_high:u16 @0x80, hi:u16 @0x82)"
         );
@@ -7293,16 +7294,19 @@ mod tests {
         // bg_checksum fits within the 32-byte group descriptor:
         // GD_CHECKSUM_OFFSET (0x1E) + 2 == 0x20.
         assert_eq!(
-            GD_CHECKSUM_OFFSET + 2, 0x20,
+            GD_CHECKSUM_OFFSET + 2,
+            0x20,
             "bg_checksum is u16 at the end of the 32-byte group descriptor"
         );
 
         // i_checksum_lo + 2 leaves the next field (0x7E) starting at i_pad1.
         // i_checksum_hi + 2 == 0x84 — within the 256-byte ext4_inode region.
-        assert!(
-            INODE_CHECKSUM_HI_OFFSET + 2 <= 256,
-            "i_checksum_hi must fit within the maximum ext4 inode size"
-        );
+        const {
+            assert!(
+                INODE_CHECKSUM_HI_OFFSET + 2 <= 256,
+                "i_checksum_hi must fit within the maximum ext4 inode size"
+            );
+        }
     }
 
     #[test]

@@ -12669,13 +12669,19 @@ mod tests {
         assert_eq!(*sorted.last().unwrap(), 22);
         assert_eq!(sorted.len(), 23);
         for (i, &v) in sorted.iter().enumerate() {
-            assert_eq!(v, u16::try_from(i).unwrap(),
-                "SendCommand discriminants must be contiguous 0..=22 (gap detected)");
+            assert_eq!(
+                v,
+                u16::try_from(i).unwrap(),
+                "SendCommand discriminants must be contiguous 0..=22 (gap detected)"
+            );
         }
 
         // from_u16 must reject 23 (one past the largest valid value).
-        assert_eq!(SendCommand::from_u16(23), None,
-            "SendCommand::from_u16(23) must reject out-of-range values");
+        assert_eq!(
+            SendCommand::from_u16(23),
+            None,
+            "SendCommand::from_u16(23) must reject out-of-range values"
+        );
     }
 
     /// bd-q5dpf — Kernel-conformance pin for the 11 BTRFS_*_TREE_OBJECTID
