@@ -24,9 +24,39 @@ REPO_ROOT="$(pwd)"
 IMAGES_DIR="tests/fixtures/images"
 GOLDEN_DIR="tests/fixtures/golden"
 LOG_FILE="${GOLDEN_DIR}/generation.log"
+FFS_USE_RCH="${FFS_USE_RCH:-1}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:-CARGO_TARGET_DIR}"
+RCH_AGENT_TARGET_SUFFIX="${AGENT_NAME:-${USER:-agent}}"
+RCH_CARGO_TARGET_DIR="${RCH_CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_frankenfs_ext4_fixtures_$RCH_AGENT_TARGET_SUFFIX}"
 
 # Ensure directories exist
 mkdir -p "$IMAGES_DIR" "$GOLDEN_DIR"
+
+rch_allow_env() {
+    local name="$1"
+    if [[ ",$RCH_ENV_ALLOWLIST," != *",$name,"* ]]; then
+        RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST},$name"
+    fi
+}
+
+rch_allow_env CARGO_TARGET_DIR
+
+run_cargo() {
+    if [[ "$FFS_USE_RCH" == "1" ]]; then
+        if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+            echo "ERROR: FFS_USE_RCH=1 requires $RCH_BIN; set FFS_USE_RCH=0 for an explicit local cargo run" >&2
+            exit 127
+        fi
+        CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" \
+            RCH_ENV_ALLOWLIST="$RCH_ENV_ALLOWLIST" \
+            RCH_VISIBILITY="$RCH_VISIBILITY" \
+            "$RCH_BIN" exec -- cargo "$@"
+    else
+        cargo "$@"
+    fi
+}
 
 write_golden_checksums() {
     (
@@ -155,7 +185,7 @@ create_image "ext4_large" 128 "extent,filetype,dir_index,sparse_super"
 
 echo "=== Phase 2: Building FrankenFS CLI ==="
 echo ""
-cargo build -p ffs-cli --release 2>&1
+run_cargo build -p ffs-cli --release 2>&1
 
 echo ""
 echo "=== Phase 3: Generating Golden Outputs ==="
@@ -167,7 +197,7 @@ for img in "$IMAGES_DIR"/ext4_*.img; do
 
     echo "Generating: $golden"
     # Redirect stderr to hide cargo build output, capture only JSON
-    cargo run -p ffs-cli --release -- inspect "$img" --json 2>/dev/null > "$golden"
+    run_cargo run -p ffs-cli --release -- inspect "$img" --json 2>/dev/null > "$golden"
 
     # Show summary
     echo "  Size: $(wc -c < "$golden") bytes"
