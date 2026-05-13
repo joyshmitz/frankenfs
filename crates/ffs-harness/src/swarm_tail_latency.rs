@@ -1043,9 +1043,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_component_is_rejected() {
+    fn missing_component_is_rejected() -> Result<()> {
         let mut ledger = fixture_ledger();
-        ledger.rows[0]
+        first_row_mut(&mut ledger)?
             .latency
             .components
             .retain(|component| component.component != TailLatencyComponent::WalFsync);
@@ -1056,24 +1056,26 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("missing required component wal_fsync"))
         );
+        Ok(())
     }
 
     #[test]
-    fn invalid_component_total_is_rejected() {
+    fn invalid_component_total_is_rejected() -> Result<()> {
         let mut ledger = fixture_ledger();
-        ledger.rows[0].latency.components[0].p99_us = 50_000.0;
+        first_component_mut(first_row_mut(&mut ledger)?)?.p99_us = 50_000.0;
         let report = validate_swarm_tail_latency_ledger(&ledger);
         assert!(
             report.errors.iter().any(|error| {
                 error.contains("component p99 sum") && error.contains("tolerance")
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_workload_seed_is_rejected() {
+    fn missing_workload_seed_is_rejected() -> Result<()> {
         let mut ledger = fixture_ledger();
-        ledger.rows[0].workload_seed = 0;
+        first_row_mut(&mut ledger)?.workload_seed = 0;
         let report = validate_swarm_tail_latency_ledger(&ledger);
         assert!(
             report
@@ -1081,12 +1083,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("workload_seed must be non-zero"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_raw_logs_are_rejected() {
+    fn missing_raw_logs_are_rejected() -> Result<()> {
         let mut ledger = fixture_ledger();
-        ledger.rows[0].raw_logs.clear();
+        first_row_mut(&mut ledger)?.raw_logs.clear();
         let report = validate_swarm_tail_latency_ledger(&ledger);
         assert!(
             report
@@ -1094,23 +1097,26 @@ mod tests {
                 .iter()
                 .any(|error| { error.contains("raw_logs must not be empty") })
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_reference_state_is_rejected() {
+    fn missing_reference_state_is_rejected() -> Result<()> {
         let mut ledger = fixture_ledger();
-        ledger.rows[0].reference_state.baseline_id = None;
-        ledger.rows[0].reference_state.baseline_artifact = None;
+        let row = first_row_mut(&mut ledger)?;
+        row.reference_state.baseline_id = None;
+        row.reference_state.baseline_artifact = None;
         let report = validate_swarm_tail_latency_ledger(&ledger);
         assert!(report.errors.iter().any(|error| {
             error.contains("comparable reference requires baseline_id and baseline_artifact")
         }));
+        Ok(())
     }
 
     #[test]
-    fn missing_reproduction_command_is_rejected() {
+    fn missing_reproduction_command_is_rejected() -> Result<()> {
         let mut ledger = fixture_ledger();
-        ledger.rows[0].reproduction_command.clear();
+        first_row_mut(&mut ledger)?.reproduction_command.clear();
         let report = validate_swarm_tail_latency_ledger(&ledger);
         assert!(
             report
@@ -1118,37 +1124,42 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("reproduction_command must not be empty"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_release_claim_upgrade_is_rejected() {
+    fn unsupported_release_claim_upgrade_is_rejected() -> Result<()> {
         let mut ledger = fixture_ledger();
-        ledger.rows[0].host.lane = TailHostLane::DeveloperSmoke;
-        ledger.rows[0].release_claim_state = TailReleaseClaimState::MeasuredAuthoritative;
+        let row = first_row_mut(&mut ledger)?;
+        row.host.lane = TailHostLane::DeveloperSmoke;
+        row.release_claim_state = TailReleaseClaimState::MeasuredAuthoritative;
         let report = validate_swarm_tail_latency_ledger(&ledger);
         assert!(report.errors.iter().any(|error| {
             error.contains("authoritative claim must run in permissioned_large_host lane")
         }));
+        Ok(())
     }
 
     #[test]
-    fn missing_reference_cannot_make_measured_claim() {
+    fn missing_reference_cannot_make_measured_claim() -> Result<()> {
         let mut ledger = fixture_ledger();
-        ledger.rows[0].reference_state.state = TailReferenceKind::Missing;
-        ledger.rows[0].reference_state.baseline_id = None;
-        ledger.rows[0].reference_state.baseline_artifact = None;
-        ledger.rows[0].classification = TailLatencyClassification::MissingReference;
-        ledger.rows[0].release_claim_state = TailReleaseClaimState::MeasuredAuthoritative;
+        let row = first_row_mut(&mut ledger)?;
+        row.reference_state.state = TailReferenceKind::Missing;
+        row.reference_state.baseline_id = None;
+        row.reference_state.baseline_artifact = None;
+        row.classification = TailLatencyClassification::MissingReference;
+        row.release_claim_state = TailReleaseClaimState::MeasuredAuthoritative;
         let report = validate_swarm_tail_latency_ledger(&ledger);
         assert!(report.errors.iter().any(|error| {
             error.contains("public performance wording must remain experimental")
         }));
+        Ok(())
     }
 
     #[test]
-    fn missing_host_fingerprint_is_rejected() {
+    fn missing_host_fingerprint_is_rejected() -> Result<()> {
         let mut ledger = fixture_ledger();
-        ledger.rows[0].host.host_fingerprint.clear();
+        first_row_mut(&mut ledger)?.host.host_fingerprint.clear();
         let report = validate_swarm_tail_latency_ledger(&ledger);
         assert!(
             report
@@ -1156,12 +1167,14 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("host.host_fingerprint"))
         );
+        Ok(())
     }
 
     #[test]
-    fn nonmonotonic_latency_buckets_are_rejected() {
+    fn nonmonotonic_latency_buckets_are_rejected() -> Result<()> {
         let mut ledger = fixture_ledger();
-        ledger.rows[0].latency.p95_latency_us = ledger.rows[0].latency.p50_latency_us - 1.0;
+        let row = first_row_mut(&mut ledger)?;
+        row.latency.p95_latency_us = row.latency.p50_latency_us - 1.0;
         let report = validate_swarm_tail_latency_ledger(&ledger);
         assert!(
             report
@@ -1169,6 +1182,7 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("p50 <= p95 <= p99"))
         );
+        Ok(())
     }
 
     #[test]
@@ -1186,6 +1200,19 @@ mod tests {
                 .contains(&"repair_backlog".to_owned())
         );
         Ok(())
+    }
+
+    fn first_row_mut(ledger: &mut SwarmTailLatencyLedger) -> Result<&mut SwarmTailLatencyRow> {
+        ledger.rows.first_mut().context("fixture ledger row")
+    }
+
+    fn first_component_mut(
+        row: &mut SwarmTailLatencyRow,
+    ) -> Result<&mut TailLatencyComponentBucket> {
+        row.latency
+            .components
+            .first_mut()
+            .context("fixture latency component")
     }
 
     fn fixture_ledger() -> SwarmTailLatencyLedger {
