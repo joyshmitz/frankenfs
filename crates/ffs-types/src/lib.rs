@@ -1845,6 +1845,46 @@ mod tests {
             prop_assert_eq!(unseeded, seeded);
         }
 
+        // bd-oviw2 — crc32c_append associativity proptest MR.
+        // crc32c_append is the btrfs-side foundational CRC32C primitive
+        // used by btrfs superblock checksum, tree block checksums, send
+        // stream commands. Multi-region checksumming requires:
+        //     crc32c_append(seed, a||b) == crc32c_append(crc32c_append(seed, a), b)
+        // Sister ext4_chksum has bd-8pbjm pinning this property. A
+        // regression that swapped crc32c_append for a non-associative
+        // fold would silently corrupt every multi-region btrfs checksum.
+        #[test]
+        fn proptest_crc32c_append_associative_across_appends(
+            seed in any::<u32>(),
+            a in prop::collection::vec(any::<u8>(), 0..=256),
+            b in prop::collection::vec(any::<u8>(), 0..=256),
+        ) {
+            let mut concat = Vec::with_capacity(a.len() + b.len());
+            concat.extend_from_slice(&a);
+            concat.extend_from_slice(&b);
+            let direct = crc32c_append(seed, &concat);
+            let two_hop = crc32c_append(crc32c_append(seed, &a), &b);
+            prop_assert_eq!(direct, two_hop);
+        }
+
+        /// bd-oviw2 — Three-way associativity: catches regressions
+        /// that subtly break chaining beyond the first hop.
+        #[test]
+        fn proptest_crc32c_append_associative_three_way(
+            seed in any::<u32>(),
+            a in prop::collection::vec(any::<u8>(), 0..=64),
+            b in prop::collection::vec(any::<u8>(), 0..=64),
+            c in prop::collection::vec(any::<u8>(), 0..=64),
+        ) {
+            let mut concat = Vec::with_capacity(a.len() + b.len() + c.len());
+            concat.extend_from_slice(&a);
+            concat.extend_from_slice(&b);
+            concat.extend_from_slice(&c);
+            let direct = crc32c_append(seed, &concat);
+            let three_hop = crc32c_append(crc32c_append(crc32c_append(seed, &a), &b), &c);
+            prop_assert_eq!(direct, three_hop);
+        }
+
         #[test]
         fn proptest_device_id_uuid_roundtrip(raw in any::<[u8; 16]>()) {
             let id = DeviceId::from_uuid_bytes_be(raw);
