@@ -13673,6 +13673,42 @@ mod tests {
             let _ = lookup_in_dir_block(&block, block_size, &target);
         }
 
+        // bd-z9ltd — Determinism MR for lookup_in_dir_block. lookup_in_dir_block
+        // is invoked on every ext4 path lookup that hits a non-htree directory
+        // (or htree leaf). It composes parse_dir_block + Vec::into_iter().find()
+        // — a regression that introduced HashMap-based dispatch or any non-
+        // deterministic comparison state would silently corrupt lookups. Sister
+        // parse_dir_block (bd-qzwuq) and iter_dir_block (bd-tj83g) have their
+        // own determinism MRs covering the underlying parser; this pins the
+        // lookup wrapper.
+        #[test]
+        fn ext4_proptest_lookup_in_dir_block_determinism(
+            block in proptest::collection::vec(any::<u8>(), 0..=4096),
+            block_size in prop_oneof![Just(1024_u32), Just(2048_u32), Just(4096_u32)],
+            target in proptest::collection::vec(any::<u8>(), 0..=255),
+        ) {
+            let a = lookup_in_dir_block(&block, block_size, &target);
+            let b = lookup_in_dir_block(&block, block_size, &target);
+            prop_assert_eq!(a, b);
+        }
+
+        // bd-z9ltd — Companion determinism MR for the casefold variant.
+        // lookup_in_dir_block_casefold runs an additional UTF-8 casefold
+        // step on each entry (ext4_casefold_key) before comparing, so it
+        // has independent surface area for non-determinism beyond
+        // lookup_in_dir_block. Invoked on every path lookup against a
+        // case-insensitive (CASEFOLD) directory.
+        #[test]
+        fn ext4_proptest_lookup_in_dir_block_casefold_determinism(
+            block in proptest::collection::vec(any::<u8>(), 0..=4096),
+            block_size in prop_oneof![Just(1024_u32), Just(2048_u32), Just(4096_u32)],
+            target in proptest::collection::vec(any::<u8>(), 0..=255),
+        ) {
+            let a = lookup_in_dir_block_casefold(&block, block_size, &target);
+            let b = lookup_in_dir_block_casefold(&block, block_size, &target);
+            prop_assert_eq!(a, b);
+        }
+
         // ── parse_ibody_xattrs properties ──────────────────────────────
 
         /// parse_ibody_xattrs never panics on an inode with arbitrary xattr_ibody.
