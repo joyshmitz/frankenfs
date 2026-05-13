@@ -25,7 +25,9 @@
 //! ops.increment(1);
 //!
 //! let snapshot = registry.snapshot();
-//! let json = serde_json::to_string_pretty(&snapshot).unwrap();
+//! let json = serde_json::to_string_pretty(&snapshot)?;
+//! # let _ = json;
+//! # Ok::<(), serde_json::Error>(())
 //! ```
 
 use parking_lot::RwLock;
@@ -482,6 +484,16 @@ pub fn noop_handle(name: &str, kind: MetricKind) -> MetricHandle {
 mod tests {
     use super::*;
 
+    fn histogram_snapshot<'a>(
+        snap: &'a MetricsSnapshot,
+        name: &str,
+    ) -> Result<&'a HistogramSnapshot, String> {
+        snap.metrics
+            .get(name)
+            .and_then(|metric| metric.histogram.as_ref())
+            .ok_or_else(|| format!("missing histogram metric {name}"))
+    }
+
     #[test]
     fn counter_increment() {
         let registry = MetricsRegistry::new();
@@ -553,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn histogram_observe() {
+    fn histogram_observe() -> Result<(), String> {
         let registry = MetricsRegistry::new();
         registry.enable();
         let hist = registry.register("latency.us", MetricKind::Histogram);
@@ -566,7 +578,7 @@ mod tests {
         hist.observe(5_000_000); // +Inf bucket
 
         let snap = registry.snapshot();
-        let h = snap.metrics["latency.us"].histogram.as_ref().unwrap();
+        let h = histogram_snapshot(&snap, "latency.us")?;
         assert_eq!(h.count, 5);
         assert_eq!(h.sum, 3 + 50 + 500 + 999_999 + 5_000_000);
 
@@ -582,10 +594,11 @@ mod tests {
         assert_eq!(h.buckets[5].count, 1); // le=500
         assert_eq!(h.buckets[11].count, 1); // le=1_000_000
         assert_eq!(h.inf_count, 1);
+        Ok(())
     }
 
     #[test]
-    fn histogram_custom_bounds() {
+    fn histogram_custom_bounds() -> Result<(), String> {
         let registry = MetricsRegistry::new();
         registry.enable();
         let hist = registry.register_histogram("custom.hist", &[10, 100, 1000]);
@@ -596,17 +609,18 @@ mod tests {
         hist.observe(5000); // inf
 
         let snap = registry.snapshot();
-        let h = snap.metrics["custom.hist"].histogram.as_ref().unwrap();
+        let h = histogram_snapshot(&snap, "custom.hist")?;
         assert_eq!(h.count, 4);
         assert_eq!(h.buckets.len(), 3);
         assert_eq!(h.buckets[0].count, 1);
         assert_eq!(h.buckets[1].count, 1);
         assert_eq!(h.buckets[2].count, 1);
         assert_eq!(h.inf_count, 1);
+        Ok(())
     }
 
     #[test]
-    fn histogram_custom_bounds_are_sorted_and_deduplicated() {
+    fn histogram_custom_bounds_are_sorted_and_deduplicated() -> Result<(), String> {
         let registry = MetricsRegistry::new();
         registry.enable();
         let hist = registry.register_histogram("custom.hist", &[100, 10, 100, 1000]);
@@ -617,17 +631,18 @@ mod tests {
         hist.observe(5000);
 
         let snap = registry.snapshot();
-        let h = snap.metrics["custom.hist"].histogram.as_ref().unwrap();
+        let h = histogram_snapshot(&snap, "custom.hist")?;
         let bounds = h.buckets.iter().map(|bucket| bucket.le).collect::<Vec<_>>();
         assert_eq!(bounds, vec![10, 100, 1000]);
         assert_eq!(h.buckets[0].count, 1);
         assert_eq!(h.buckets[1].count, 1);
         assert_eq!(h.buckets[2].count, 1);
         assert_eq!(h.inf_count, 1);
+        Ok(())
     }
 
     #[test]
-    fn histogram_totals_saturate_on_overflow() {
+    fn histogram_totals_saturate_on_overflow() -> Result<(), String> {
         let registry = MetricsRegistry::new();
         registry.enable();
         let hist = registry.register_histogram("custom.hist", &[10]);
@@ -644,10 +659,11 @@ mod tests {
         hist.observe(5);
 
         let snap = registry.snapshot();
-        let h = snap.metrics["custom.hist"].histogram.as_ref().unwrap();
+        let h = histogram_snapshot(&snap, "custom.hist")?;
         assert_eq!(h.sum, u64::MAX);
         assert_eq!(h.count, u64::MAX);
         assert_eq!(h.buckets[0].count, u64::MAX);
+        Ok(())
     }
 
     #[test]
@@ -740,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_counter_updates() {
+    fn concurrent_counter_updates() -> Result<(), String> {
         let registry = Arc::new(MetricsRegistry::new());
         registry.enable();
         let counter = registry.register("concurrent.ops", MetricKind::Counter);
@@ -757,15 +773,16 @@ mod tests {
             .collect();
 
         for h in handles {
-            h.join().expect("thread join");
+            h.join().map_err(|_| "concurrent counter worker panicked")?;
         }
 
         let snap = registry.snapshot();
         assert_eq!(snap.metrics["concurrent.ops"].value, Some(8000));
+        Ok(())
     }
 
     #[test]
-    fn concurrent_histogram_observations() {
+    fn concurrent_histogram_observations() -> Result<(), String> {
         let registry = Arc::new(MetricsRegistry::new());
         registry.enable();
         let hist = registry.register("concurrent.latency", MetricKind::Histogram);
@@ -782,15 +799,14 @@ mod tests {
             .collect();
 
         for h in handles {
-            h.join().expect("thread join");
+            h.join()
+                .map_err(|_| "concurrent histogram worker panicked")?;
         }
 
         let snap = registry.snapshot();
-        let hs = snap.metrics["concurrent.latency"]
-            .histogram
-            .as_ref()
-            .unwrap();
+        let hs = histogram_snapshot(&snap, "concurrent.latency")?;
         assert_eq!(hs.count, 400); // 4 threads * 100 observations
+        Ok(())
     }
 
     #[test]
