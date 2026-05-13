@@ -3723,7 +3723,7 @@ fn ledger_proof_bundle_candidate_summary(
 
 fn ledger_hash_part(hasher: &mut Sha256, value: &str) {
     hasher.update(value.as_bytes());
-    hasher.update([0]);
+    hasher.update(b"\0");
 }
 
 fn ledger_has_permissioned_execution(ledger: &PermissionedCampaignExecutionLedger) -> bool {
