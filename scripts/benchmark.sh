@@ -60,8 +60,9 @@ cargo_exec() {
         if command -v rch >/dev/null 2>&1; then
             rch exec -- cargo "$@"
         else
-            echo "warning: rch not found; falling back to local cargo" >&2
-            cargo "$@"
+            echo "error: rch not found; default benchmark mode must not fall back to local cargo" >&2
+            echo "hint: install rch or pass --local for an explicit local-only benchmark run" >&2
+            exit 127
         fi
     else
         cargo "$@"
@@ -102,7 +103,7 @@ fi
 CLI_BIN="${TARGET_DIR}/release/ffs-cli"
 HARNESS_BIN="${TARGET_DIR}/release/ffs-harness"
 if [ ! -x "$CLI_BIN" ] || [ ! -x "$HARNESS_BIN" ]; then
-    if [ -x "target/release/ffs-cli" ] && [ -x "target/release/ffs-harness" ]; then
+    if [ "$USE_RCH" -eq 0 ] && [ -x "target/release/ffs-cli" ] && [ -x "target/release/ffs-harness" ]; then
         TARGET_DIR="target"
         CLI_BIN="target/release/ffs-cli"
         HARNESS_BIN="target/release/ffs-harness"
