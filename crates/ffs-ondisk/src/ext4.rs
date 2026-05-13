@@ -14447,6 +14447,125 @@ mod tests {
             prop_assert!(verify_block_bitmap_free_count(&bm, total_bits, free).is_ok());
         }
 
+        // bd-e5vp5 — stamp/verify proptest MRs for the two BITMAP
+        // checksums. Sister stamp/verify proptests exist for
+        // group_desc (ext4_proptest_gd_checksum_stamp_verify_roundtrip),
+        // dir_block (ext4_proptest_dir_block_checksum_stamp_verify),
+        // and extent_block (ext4_proptest_extent_block_checksum_stamp_verify);
+        // the two bitmap checksums had only a fixed-input smoke test.
+        // bitmap_csum protects per-group allocation state — a regression
+        // that masks for one bitmap content+seed but fails for arbitrary
+        // inputs (endian swap, wrong slice length, lo/hi swap) would
+        // silently corrupt every block-group allocation.
+
+        /// MR-1 block_bitmap stamp(bm, seed) → verify must succeed for any
+        /// bitmap content + seed across both 32+64-byte descriptor sizes.
+        #[test]
+        fn ext4_proptest_block_bitmap_checksum_stamp_verify(
+            csum_seed in any::<u32>(),
+            byte_len in prop_oneof![Just(8_usize), Just(32_usize), Just(128_usize), Just(512_usize)],
+            fill_seed in any::<u64>(),
+            desc_size in prop_oneof![Just(32_u16), Just(64_u16)],
+        ) {
+            let clusters_per_group = u32::try_from(byte_len * 8).unwrap();
+            let mut bm = vec![0u8; byte_len];
+            let mut rng = fill_seed;
+            for b in &mut bm {
+                rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                *b = rng.to_le_bytes()[7];
+            }
+            let mut gd = Ext4GroupDesc {
+                block_bitmap: 0, inode_bitmap: 0, inode_table: 0,
+                free_blocks_count: 0, free_inodes_count: 0, used_dirs_count: 0,
+                itable_unused: 0, flags: 0, checksum: 0,
+                block_bitmap_csum: 0xDEAD_BEEF, // pre-filled garbage to ensure stamp overwrites
+                inode_bitmap_csum: 0,
+            };
+            stamp_block_bitmap_checksum(&bm, csum_seed, clusters_per_group, &mut gd, desc_size);
+            // For 32-byte descriptor, only the low 16 bits of bitmap_csum are stored.
+            if desc_size < 64 {
+                prop_assert_eq!(gd.block_bitmap_csum >> 16, 0,
+                    "32-byte descriptor must clear high half of block_bitmap_csum");
+            }
+            prop_assert!(
+                verify_block_bitmap_checksum(&bm, csum_seed, clusters_per_group, &gd, desc_size).is_ok(),
+                "stamp then verify must succeed for byte_len={byte_len}, desc_size={desc_size}"
+            );
+        }
+
+        /// MR-2 inode_bitmap stamp(bm, seed) → verify must succeed.
+        #[test]
+        fn ext4_proptest_inode_bitmap_checksum_stamp_verify(
+            csum_seed in any::<u32>(),
+            byte_len in prop_oneof![Just(8_usize), Just(32_usize), Just(128_usize), Just(256_usize)],
+            fill_seed in any::<u64>(),
+            desc_size in prop_oneof![Just(32_u16), Just(64_u16)],
+        ) {
+            let inodes_per_group = u32::try_from(byte_len * 8).unwrap();
+            let mut bm = vec![0u8; byte_len];
+            let mut rng = fill_seed;
+            for b in &mut bm {
+                rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                *b = rng.to_le_bytes()[7];
+            }
+            let mut gd = Ext4GroupDesc {
+                block_bitmap: 0, inode_bitmap: 0, inode_table: 0,
+                free_blocks_count: 0, free_inodes_count: 0, used_dirs_count: 0,
+                itable_unused: 0, flags: 0, checksum: 0,
+                block_bitmap_csum: 0,
+                inode_bitmap_csum: 0xCAFE_BABE, // pre-filled garbage to ensure stamp overwrites
+            };
+            stamp_inode_bitmap_checksum(&bm, csum_seed, inodes_per_group, &mut gd, desc_size);
+            if desc_size < 64 {
+                prop_assert_eq!(gd.inode_bitmap_csum >> 16, 0,
+                    "32-byte descriptor must clear high half of inode_bitmap_csum");
+            }
+            prop_assert!(
+                verify_inode_bitmap_checksum(&bm, csum_seed, inodes_per_group, &gd, desc_size).is_ok(),
+                "stamp then verify must succeed for byte_len={byte_len}, desc_size={desc_size}"
+            );
+        }
+
+        /// MR-3 cross-seed non-replay for block_bitmap: a stamp under
+        /// seed_a must NOT verify under seed_b for any distinct seeds.
+        /// Defends against cross-filesystem replay of a valid bitmap-csum.
+        #[test]
+        fn ext4_proptest_block_bitmap_checksum_cross_seed_non_replay(
+            seed_a in any::<u32>(),
+            seed_delta in 1_u32..,
+            byte_len in prop_oneof![Just(8_usize), Just(32_usize), Just(128_usize)],
+            fill_seed in any::<u64>(),
+        ) {
+            let seed_b = seed_a.wrapping_add(seed_delta);
+            let clusters_per_group = u32::try_from(byte_len * 8).unwrap();
+            let mut bm = vec![0u8; byte_len];
+            let mut rng = fill_seed;
+            for b in &mut bm {
+                rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                *b = rng.to_le_bytes()[7];
+            }
+            let mut gd = Ext4GroupDesc {
+                block_bitmap: 0, inode_bitmap: 0, inode_table: 0,
+                free_blocks_count: 0, free_inodes_count: 0, used_dirs_count: 0,
+                itable_unused: 0, flags: 0, checksum: 0,
+                block_bitmap_csum: 0, inode_bitmap_csum: 0,
+            };
+            stamp_block_bitmap_checksum(&bm, seed_a, clusters_per_group, &mut gd, 64);
+            // Sanity: same-seed verifies.
+            prop_assert!(
+                verify_block_bitmap_checksum(&bm, seed_a, clusters_per_group, &gd, 64).is_ok()
+            );
+            // Cross-seed must fail unless CRC32C of (seed_a, bm) == CRC32C of (seed_b, bm),
+            // which is astronomically unlikely for 32-bit seeds with arbitrary delta.
+            // Filter the rare case to keep the proptest stable across all 32-bit deltas.
+            let csum_b = block_bitmap_checksum_value(&bm, seed_b, clusters_per_group, 64);
+            prop_assume!(csum_b != gd.block_bitmap_csum);
+            prop_assert!(
+                verify_block_bitmap_checksum(&bm, seed_b, clusters_per_group, &gd, 64).is_err(),
+                "stamp under seed {seed_a:#x} must NOT verify under seed {seed_b:#x}"
+            );
+        }
+
         // ── Superblock geometry and validation ───────────────────────
 
         /// Well-formed superblock always passes validate_geometry().
