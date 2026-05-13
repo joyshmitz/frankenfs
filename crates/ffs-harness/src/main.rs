@@ -9639,8 +9639,8 @@ mod readiness_action_cli_tests {
     use super::*;
 
     #[test]
-    fn recommend_readiness_actions_cmd_writes_dry_run_report_pack() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn recommend_readiness_actions_cmd_writes_dry_run_report_pack() -> Result<()> {
+        let dir = tempfile::tempdir()?;
         let json_path = dir.path().join("readiness-actions.json");
         let markdown_path = dir.path().join("readiness-actions.md");
         let stdout_log_path = dir.path().join("stdout.log");
@@ -9663,11 +9663,10 @@ mod readiness_action_cli_tests {
             "ffs-harness recommend-readiness-actions --dry-run-test".to_owned(),
         ];
 
-        recommend_readiness_actions_cmd(&args).expect("dry-run command succeeds");
+        recommend_readiness_actions_cmd(&args)?;
 
-        let json = std::fs::read_to_string(&json_path).expect("json report");
-        let report: ReadinessActionDryRunReport =
-            serde_json::from_str(&json).expect("parse json report");
+        let json = std::fs::read_to_string(&json_path)?;
+        let report: ReadinessActionDryRunReport = serde_json::from_str(&json)?;
         assert!(report.dry_run);
         assert_eq!(report.report_id, "cli_dry_run_test");
         assert_eq!(report.generated_at, "2026-05-07T00:00:00Z");
@@ -9685,20 +9684,21 @@ mod readiness_action_cli_tests {
         assert!(action_ids.contains(&"run-permissioned-xfstests-baseline"));
         assert!(action_ids.contains(&"refresh-large-host-swarm-campaign"));
 
-        let markdown = std::fs::read_to_string(&markdown_path).expect("markdown report");
+        let markdown = std::fs::read_to_string(&markdown_path)?;
         assert!(markdown.contains("# Readiness Action Dry-Run Report"));
         assert!(markdown.contains("LocalSafe"));
         assert!(markdown.contains("Permissioned"));
         assert!(markdown.contains("DowngradeRequired"));
 
-        let stdout_log = std::fs::read_to_string(&stdout_log_path).expect("stdout log");
+        let stdout_log = std::fs::read_to_string(&stdout_log_path)?;
         assert!(stdout_log.contains("readiness-action-dry-run"));
         assert!(stdout_log.contains("recommendations=4"));
         assert!(stdout_log.contains("scenarios=4"));
         assert!(stdout_log.contains("cleanup_status=not_required_dry_run"));
 
-        let stderr_log = std::fs::read_to_string(&stderr_log_path).expect("stderr log");
+        let stderr_log = std::fs::read_to_string(&stderr_log_path)?;
         assert!(stderr_log.contains("no reproduction commands executed"));
         assert!(stderr_log.contains("stale-evidence commands stayed dry-run only"));
+        Ok(())
     }
 }
