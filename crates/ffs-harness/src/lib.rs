@@ -160,11 +160,11 @@ fn strip_markdown_emphasis(value: &str) -> &str {
 
 fn parse_coverage_domain_row(line: &str) -> Option<CoverageDomain> {
     let cols: Vec<&str> = line.split('|').map(str::trim).collect();
-    if cols.len() < 5 {
+    let [_, domain_cell, implemented_cell, total_cell, ..] = cols.as_slice() else {
         return None;
-    }
+    };
 
-    let domain = strip_markdown_emphasis(cols[1]);
+    let domain = strip_markdown_emphasis(domain_cell);
     if domain.is_empty()
         || domain.eq_ignore_ascii_case("domain")
         || domain.eq_ignore_ascii_case("overall")
@@ -172,8 +172,8 @@ fn parse_coverage_domain_row(line: &str) -> Option<CoverageDomain> {
         return None;
     }
 
-    let implemented: u32 = strip_markdown_emphasis(cols[2]).parse().ok()?;
-    let total: u32 = strip_markdown_emphasis(cols[3]).parse().ok()?;
+    let implemented: u32 = strip_markdown_emphasis(implemented_cell).parse().ok()?;
+    let total: u32 = strip_markdown_emphasis(total_cell).parse().ok()?;
     Some(CoverageDomain::new(domain, implemented, total))
 }
 
@@ -853,13 +853,14 @@ mod tests {
     }
 
     #[test]
-    fn parity_report_matches_feature_parity_md() {
+    fn parity_report_matches_feature_parity_md() -> Result<()> {
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
-            .expect("workspace root");
+            .context("workspace root")?;
         let md_path = workspace_root.join("FEATURE_PARITY.md");
-        let md_text = fs::read_to_string(&md_path).expect("read FEATURE_PARITY.md");
+        let md_text =
+            fs::read_to_string(&md_path).with_context(|| format!("read {}", md_path.display()))?;
 
         // Parse all data rows from the Coverage Summary table using the
         // same parser as ParityReport::current().
@@ -882,13 +883,12 @@ mod tests {
         let report = ParityReport::current();
         for domain in &report.domains {
             let key = domain.domain.to_lowercase();
-            let md_match = md_domains.iter().find(|(d, _, _)| *d == key);
-            assert!(
-                md_match.is_some(),
-                "FEATURE_PARITY.md missing domain: {}",
-                domain.domain,
-            );
-            let (_, md_impl, md_total) = md_match.unwrap();
+            let Some((_, md_impl, md_total)) = md_domains.iter().find(|(d, _, _)| *d == key) else {
+                return Err(anyhow::anyhow!(
+                    "FEATURE_PARITY.md missing domain: {}",
+                    domain.domain
+                ));
+            };
             assert_eq!(
                 *md_impl, domain.implemented,
                 "FEATURE_PARITY.md has implemented={md_impl} but ParityReport has {} for '{}'",
@@ -900,6 +900,7 @@ mod tests {
                 domain.total, domain.domain,
             );
         }
+        Ok(())
     }
 
     #[test]
