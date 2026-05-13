@@ -392,11 +392,16 @@ pub fn check_btrfs_drift(
 mod tests {
     use super::*;
 
-    fn repo_root() -> String {
+    fn repo_root() -> std::io::Result<String> {
         env!("CARGO_MANIFEST_DIR")
             .strip_suffix("/crates/ffs-harness")
-            .expect("harness must be in crates/ffs-harness")
-            .to_owned()
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "harness must be in crates/ffs-harness",
+                )
+            })
     }
 
     #[test]
@@ -514,12 +519,10 @@ crash_matrix_label_for_point() {
     }
 
     #[test]
-    fn all_documented_unit_contracts_have_test_functions() {
-        let root = repo_root();
-        let parity =
-            std::fs::read_to_string(format!("{root}/FEATURE_PARITY.md")).expect("read parity");
-        let core_src = std::fs::read_to_string(format!("{root}/crates/ffs-core/src/lib.rs"))
-            .expect("read core");
+    fn all_documented_unit_contracts_have_test_functions() -> std::io::Result<()> {
+        let root = repo_root()?;
+        let parity = std::fs::read_to_string(format!("{root}/FEATURE_PARITY.md"))?;
+        let core_src = std::fs::read_to_string(format!("{root}/crates/ffs-core/src/lib.rs"))?;
 
         let rows = parse_capability_table(&parity);
         let unit_rows: Vec<_> = rows
@@ -541,21 +544,18 @@ crash_matrix_label_for_point() {
                 row.bare_name
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn all_documented_e2e_contracts_have_scenario_references() {
-        let root = repo_root();
-        let parity =
-            std::fs::read_to_string(format!("{root}/FEATURE_PARITY.md")).expect("read parity");
-        let core_src = std::fs::read_to_string(format!("{root}/crates/ffs-core/src/lib.rs"))
-            .expect("read core");
+    fn all_documented_e2e_contracts_have_scenario_references() -> std::io::Result<()> {
+        let root = repo_root()?;
+        let parity = std::fs::read_to_string(format!("{root}/FEATURE_PARITY.md"))?;
+        let core_src = std::fs::read_to_string(format!("{root}/crates/ffs-core/src/lib.rs"))?;
         let e2e_script =
-            std::fs::read_to_string(format!("{root}/scripts/e2e/ffs_btrfs_rw_smoke.sh"))
-                .expect("read e2e script");
+            std::fs::read_to_string(format!("{root}/scripts/e2e/ffs_btrfs_rw_smoke.sh"))?;
         let fuse_e2e =
-            std::fs::read_to_string(format!("{root}/crates/ffs-harness/tests/fuse_e2e.rs"))
-                .expect("read FUSE e2e tests");
+            std::fs::read_to_string(format!("{root}/crates/ffs-harness/tests/fuse_e2e.rs"))?;
         let e2e_backing = format!("{e2e_script}\n{fuse_e2e}");
 
         let rows = parse_capability_table(&parity);
@@ -579,21 +579,18 @@ crash_matrix_label_for_point() {
                 row.bare_name
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn full_drift_check_passes_for_repo() {
-        let root = repo_root();
-        let parity =
-            std::fs::read_to_string(format!("{root}/FEATURE_PARITY.md")).expect("read parity");
-        let core_src = std::fs::read_to_string(format!("{root}/crates/ffs-core/src/lib.rs"))
-            .expect("read core");
+    fn full_drift_check_passes_for_repo() -> std::io::Result<()> {
+        let root = repo_root()?;
+        let parity = std::fs::read_to_string(format!("{root}/FEATURE_PARITY.md"))?;
+        let core_src = std::fs::read_to_string(format!("{root}/crates/ffs-core/src/lib.rs"))?;
         let e2e_script =
-            std::fs::read_to_string(format!("{root}/scripts/e2e/ffs_btrfs_rw_smoke.sh"))
-                .expect("read e2e script");
+            std::fs::read_to_string(format!("{root}/scripts/e2e/ffs_btrfs_rw_smoke.sh"))?;
         let fuse_e2e =
-            std::fs::read_to_string(format!("{root}/crates/ffs-harness/tests/fuse_e2e.rs"))
-                .expect("read FUSE e2e tests");
+            std::fs::read_to_string(format!("{root}/crates/ffs-harness/tests/fuse_e2e.rs"))?;
         let e2e_backing = format!("{e2e_script}\n{fuse_e2e}");
 
         let results = check_btrfs_drift(&parity, &core_src, &e2e_backing);
@@ -612,6 +609,7 @@ crash_matrix_label_for_point() {
                 .map(|r| r.contract_id.as_str())
                 .collect::<Vec<_>>()
         );
+        Ok(())
     }
 
     #[test]
@@ -672,10 +670,9 @@ const RAW_BYTES: &[u8] = br#"fn btrfs_write_mkdir() {}"#;
     }
 
     #[test]
-    fn contract_row_count_matches_expected() {
-        let root = repo_root();
-        let parity =
-            std::fs::read_to_string(format!("{root}/FEATURE_PARITY.md")).expect("read parity");
+    fn contract_row_count_matches_expected() -> std::io::Result<()> {
+        let root = repo_root()?;
+        let parity = std::fs::read_to_string(format!("{root}/FEATURE_PARITY.md"))?;
         let rows = parse_capability_table(&parity);
 
         let unit_count = rows.iter().filter(|r| r.kind == ContractKind::Unit).count();
@@ -690,5 +687,6 @@ const RAW_BYTES: &[u8] = br#"fn btrfs_write_mkdir() {}"#;
             e2e_count >= 10,
             "expected >= 10 e2e contracts, got {e2e_count}"
         );
+        Ok(())
     }
 }
