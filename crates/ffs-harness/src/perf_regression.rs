@@ -180,7 +180,7 @@ mod tests {
     // ── bd-3ib.3: Performance baseline and regression detection tests ──
 
     #[test]
-    fn perf_baseline_json_round_trip() -> Result<(), serde_json::Error> {
+    fn perf_baseline_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         // Verify the PerfBaseline struct serializes and deserializes correctly.
         let baseline = PerfBaseline {
             generated_at: "2026-02-17T00:00:00Z".to_owned(),
@@ -217,9 +217,28 @@ mod tests {
         assert_eq!(parsed.generated_at, "2026-02-17T00:00:00Z");
         assert_eq!(parsed.commit, "abc123");
         assert_eq!(parsed.measurements.len(), 2);
-        assert_eq!(parsed.measurements[0].operation, "metadata_parity_cli");
-        assert!((parsed.measurements[0].p99_us - 1450.0).abs() < f64::EPSILON);
-        assert_eq!(parsed.measurements[1].status, "pending");
+        let metadata = parsed
+            .measurements
+            .iter()
+            .find(|measurement| measurement.operation == "metadata_parity_cli")
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "metadata_parity_cli measurement present",
+                )
+            })?;
+        assert!((metadata.p99_us - 1450.0).abs() < f64::EPSILON);
+        let pending = parsed
+            .measurements
+            .iter()
+            .find(|measurement| measurement.status == "pending")
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "pending measurement present",
+                )
+            })?;
+        assert_eq!(pending.operation, "write_seq_4k");
         Ok(())
     }
 
