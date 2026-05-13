@@ -2010,13 +2010,47 @@ mod tests {
         include_str!("../../../docs/repair-writeback-serialization-contract.json");
     const ARTIFACT_ROOT: &str = "artifacts/repair-writeback/dry-run";
 
-    fn sample_contract() -> RepairWritebackSerializationContract {
-        serde_json::from_str(CHECKED_IN_CONTRACT).expect("checked-in contract parses")
+    fn sample_contract() -> Result<RepairWritebackSerializationContract> {
+        serde_json::from_str(CHECKED_IN_CONTRACT).context("checked-in contract parses")
+    }
+
+    fn schedule_mut<'a>(
+        contract: &'a mut RepairWritebackSerializationContract,
+        schedule_id: &str,
+    ) -> Result<&'a mut RepairRaceSchedule> {
+        contract
+            .race_schedule_manifest
+            .schedules
+            .iter_mut()
+            .find(|schedule| schedule.schedule_id == schedule_id)
+            .with_context(|| format!("checked-in contract includes schedule {schedule_id}"))
+    }
+
+    fn identity_guard_mut<'a>(
+        contract: &'a mut RepairWritebackSerializationContract,
+        guard_id: &str,
+    ) -> Result<&'a mut SerializationIdentityGuard> {
+        contract
+            .identity_guards
+            .iter_mut()
+            .find(|guard| guard.guard_id == guard_id)
+            .with_context(|| format!("checked-in contract includes identity guard {guard_id}"))
+    }
+
+    fn state<'a>(
+        contract: &'a RepairWritebackSerializationContract,
+        state_id: &str,
+    ) -> Result<&'a SerializationState> {
+        contract
+            .states
+            .iter()
+            .find(|state| state.state_id == state_id)
+            .with_context(|| format!("checked-in contract includes state {state_id}"))
     }
 
     #[test]
-    fn checked_in_contract_validates() {
-        let contract = sample_contract();
+    fn checked_in_contract_validates() -> Result<()> {
+        let contract = sample_contract()?;
         let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.missing_required_states, Vec::<String>::new());
@@ -2032,11 +2066,12 @@ mod tests {
         );
         assert_eq!(report.identity_guard_count, REQUIRED_IDENTITY_GUARDS.len());
         assert!(report.risk_report.fail_closed_is_lower_loss);
+        Ok(())
     }
 
     #[test]
-    fn render_repair_writeback_serialization_markdown_checked_in_contract_snapshot() {
-        let contract = sample_contract();
+    fn render_repair_writeback_serialization_markdown_checked_in_contract_snapshot() -> Result<()> {
+        let contract = sample_contract()?;
         let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(
@@ -2052,11 +2087,12 @@ mod tests {
             "render_repair_writeback_serialization_markdown_checked_in_contract",
             markdown
         );
+        Ok(())
     }
 
     #[test]
     fn repair_writeback_serialization_report_json_shape() -> Result<()> {
-        let contract = sample_contract();
+        let contract = sample_contract()?;
         let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(
@@ -2074,8 +2110,8 @@ mod tests {
     }
 
     #[test]
-    fn model_rejects_repair_writeback_during_client_write() {
-        let contract = sample_contract();
+    fn model_rejects_repair_writeback_during_client_write() -> Result<()> {
+        let contract = sample_contract()?;
         let transition = evaluate_transition(
             &contract,
             "client_write_in_flight",
@@ -2086,60 +2122,66 @@ mod tests {
         assert_eq!(transition.to_state, "repair_writeback_blocked_rw");
         assert_eq!(transition.error_class, "rw_repair_serialization_missing");
         assert!(transition.follow_up_bead.is_some());
+        Ok(())
     }
 
     #[test]
-    fn flush_does_not_create_a_durability_or_repair_boundary() {
-        let contract = sample_contract();
+    fn flush_does_not_create_a_durability_or_repair_boundary() -> Result<()> {
+        let contract = sample_contract()?;
         let transition = evaluate_transition(&contract, "client_write_in_flight", "flush_observed");
         assert!(!transition.allowed);
         assert!(!transition.mutation_allowed);
         assert_eq!(transition.error_class, "flush_non_durable");
+        Ok(())
     }
 
     #[test]
-    fn stale_symbol_is_rejected_before_writeback() {
-        let contract = sample_contract();
+    fn stale_symbol_is_rejected_before_writeback() -> Result<()> {
+        let contract = sample_contract()?;
         let transition = evaluate_transition(&contract, "repair_lease_held", "repair_symbol_stale");
         assert!(!transition.allowed);
         assert!(!transition.mutation_allowed);
         assert_eq!(transition.error_class, "stale_repair_symbol");
+        Ok(())
     }
 
     #[test]
-    fn fsync_boundary_missing_rejects_repair_mutation() {
-        let contract = sample_contract();
+    fn fsync_boundary_missing_rejects_repair_mutation() -> Result<()> {
+        let contract = sample_contract()?;
         let transition =
             evaluate_transition(&contract, "repair_lease_held", "fsync_boundary_missing");
         assert!(!transition.allowed);
         assert!(!transition.mutation_allowed);
         assert_eq!(transition.error_class, "dirty_cache_not_fsynced");
+        Ok(())
     }
 
     #[test]
-    fn cancellation_goes_to_cleanup_without_mutation() {
-        let contract = sample_contract();
+    fn cancellation_goes_to_cleanup_without_mutation() -> Result<()> {
+        let contract = sample_contract()?;
         let transition =
             evaluate_transition(&contract, "repair_writeback_staged", "repair_cancelled");
         assert!(transition.allowed);
         assert!(!transition.mutation_allowed);
         assert_eq!(transition.to_state, "cleanup_complete");
+        Ok(())
     }
 
     #[test]
-    fn halfway_writeback_failure_blocks_symbol_refresh() {
-        let contract = sample_contract();
+    fn halfway_writeback_failure_blocks_symbol_refresh() -> Result<()> {
+        let contract = sample_contract()?;
         let transition =
             evaluate_transition(&contract, "repair_writeback_staged", "writeback_failed");
         assert!(transition.allowed);
         assert!(!transition.mutation_allowed);
         assert_eq!(transition.to_state, "writeback_failure");
         assert_eq!(transition.error_class, "writeback_failure_no_refresh");
+        Ok(())
     }
 
     #[test]
-    fn race_schedule_manifest_covers_required_interleavings() {
-        let contract = sample_contract();
+    fn race_schedule_manifest_covers_required_interleavings() -> Result<()> {
+        let contract = sample_contract()?;
         let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
         assert!(report.valid, "{:?}", report.errors);
         assert!(report.schedule_count >= REQUIRED_RACE_COVERAGE_CASES.len());
@@ -2162,11 +2204,12 @@ mod tests {
                 .iter()
                 .any(|schedule| schedule.coverage_case == "cancellation_during_writeback")
         );
+        Ok(())
     }
 
     #[test]
-    fn dependency_cycle_in_race_manifest_fails() {
-        let mut contract = sample_contract();
+    fn dependency_cycle_in_race_manifest_fails() -> Result<()> {
+        let mut contract = sample_contract()?;
         contract
             .race_schedule_manifest
             .operation_dependencies
@@ -2183,17 +2226,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("dependency graph must be acyclic"))
         );
+        Ok(())
     }
 
     #[test]
-    fn cancellation_schedule_requires_injection_metadata() {
-        let mut contract = sample_contract();
-        let schedule = contract
-            .race_schedule_manifest
-            .schedules
-            .iter_mut()
-            .find(|schedule| schedule.coverage_case == "cancellation_during_decode")
-            .expect("cancellation decode schedule exists");
+    fn cancellation_schedule_requires_injection_metadata() -> Result<()> {
+        let mut contract = sample_contract()?;
+        let schedule = schedule_mut(&mut contract, "rw-repair-race-cancel-decode")?;
         schedule.cancellation_injection = None;
         let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
         assert!(!report.valid);
@@ -2203,17 +2242,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("requires cancellation_injection"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_interleaving_requires_follow_up() {
-        let mut contract = sample_contract();
-        let schedule = contract
-            .race_schedule_manifest
-            .schedules
-            .iter_mut()
-            .find(|schedule| schedule.classification == "unsupported_interleaving")
-            .expect("unsupported schedule exists");
+    fn unsupported_interleaving_requires_follow_up() -> Result<()> {
+        let mut contract = sample_contract()?;
+        let schedule = schedule_mut(&mut contract, "rw-repair-race-unsupported-epoch-rewind")?;
         schedule.follow_up_bead = None;
         let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
         assert!(!report.valid);
@@ -2223,17 +2258,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("require follow_up_bead"))
         );
+        Ok(())
     }
 
     #[test]
-    fn survivor_set_mismatch_fails_for_deterministic_schedule() {
-        let mut contract = sample_contract();
-        let schedule = contract
-            .race_schedule_manifest
-            .schedules
-            .iter_mut()
-            .find(|schedule| schedule.classification == "accepted")
-            .expect("accepted schedule exists");
+    fn survivor_set_mismatch_fails_for_deterministic_schedule() -> Result<()> {
+        let mut contract = sample_contract()?;
+        let schedule = schedule_mut(&mut contract, "rw-repair-race-repair-before-write")?;
         schedule
             .observed_survivor_set
             .push("unexpected_block".to_owned());
@@ -2245,11 +2276,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("survivor sets must match"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_identity_guard_is_rejected() {
-        let mut contract = sample_contract();
+    fn missing_identity_guard_is_rejected() -> Result<()> {
+        let mut contract = sample_contract()?;
         contract
             .identity_guards
             .retain(|guard| guard.guard_id != "lease_generation_monotonic");
@@ -2260,16 +2292,13 @@ mod tests {
                 .missing_required_identity_guards
                 .contains(&"lease_generation_monotonic".to_owned())
         );
+        Ok(())
     }
 
     #[test]
-    fn identity_guard_must_reject_structural_aba() {
-        let mut contract = sample_contract();
-        let guard = contract
-            .identity_guards
-            .iter_mut()
-            .find(|guard| guard.guard_id == "epoch_generation_monotonic")
-            .expect("epoch guard exists");
+    fn identity_guard_must_reject_structural_aba() -> Result<()> {
+        let mut contract = sample_contract()?;
+        let guard = identity_guard_mut(&mut contract, "epoch_generation_monotonic")?;
         guard.rejects_structural_aba = false;
         let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
         assert!(!report.valid);
@@ -2279,16 +2308,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("must reject structural ABA reuse"))
         );
+        Ok(())
     }
 
     #[test]
-    fn identity_guard_log_fields_must_be_declared() {
-        let mut contract = sample_contract();
-        let guard = contract
-            .identity_guards
-            .iter_mut()
-            .find(|guard| guard.guard_id == "snapshot_id_mismatch_rejected")
-            .expect("snapshot guard exists");
+    fn identity_guard_log_fields_must_be_declared() -> Result<()> {
+        let mut contract = sample_contract()?;
+        let guard = identity_guard_mut(&mut contract, "snapshot_id_mismatch_rejected")?;
         guard
             .required_log_fields
             .push("undeclared_identity".to_owned());
@@ -2300,11 +2326,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("undeclared evidence field"))
         );
+        Ok(())
     }
 
     #[test]
-    fn invalid_contract_missing_evidence_field_fails() {
-        let mut contract = sample_contract();
+    fn invalid_contract_missing_evidence_field_fails() -> Result<()> {
+        let mut contract = sample_contract()?;
         contract
             .required_evidence_fields
             .retain(|field| field != "reproduction_command");
@@ -2315,30 +2342,39 @@ mod tests {
                 .missing_required_evidence_fields
                 .contains(&"reproduction_command".to_owned())
         );
+        Ok(())
     }
 
     #[test]
-    fn invalid_unsafe_risk_choice_fails() {
-        let mut contract = sample_contract();
+    fn invalid_unsafe_risk_choice_fails() -> Result<()> {
+        let mut contract = sample_contract()?;
         contract.risk_decision.chosen_option = "enable_rw_repair_without_serializer".to_owned();
         contract.risk_decision.rejected_option = "fail_closed_until_unified_serializer".to_owned();
         let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
         assert!(!report.valid);
         assert!(!report.risk_report.fail_closed_is_lower_loss);
+        Ok(())
     }
 
     #[test]
-    fn duplicate_state_ids_fail() {
-        let mut contract = sample_contract();
-        contract.states.push(contract.states[0].clone());
+    fn duplicate_state_ids_fail() -> Result<()> {
+        let mut contract = sample_contract()?;
+        let duplicate_state_id = "detection_only_scrub";
+        let duplicate_state = state(&contract, duplicate_state_id)?.clone();
+        contract.states.push(duplicate_state);
         let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
         assert!(!report.valid);
-        assert!(report.duplicate_ids.contains(&contract.states[0].state_id));
+        assert!(
+            report
+                .duplicate_ids
+                .contains(&duplicate_state_id.to_owned())
+        );
+        Ok(())
     }
 
     #[test]
-    fn sample_artifact_manifest_is_valid() {
-        let contract = sample_contract();
+    fn sample_artifact_manifest_is_valid() -> Result<()> {
+        let contract = sample_contract()?;
         let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
         let manifest = build_repair_writeback_serialization_sample_artifact_manifest(
             &contract,
@@ -2349,11 +2385,12 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(manifest.gate_id, "repair_writeback_serialization");
         assert_eq!(manifest.bead_id.as_deref(), Some("bd-rchk0.1.1"));
+        Ok(())
     }
 
     #[test]
-    fn proof_summary_is_downstream_consumable() {
-        let contract = sample_contract();
+    fn proof_summary_is_downstream_consumable() -> Result<()> {
+        let contract = sample_contract()?;
         let report = validate_repair_writeback_serialization_contract(&contract, ARTIFACT_ROOT);
         let summary = build_repair_writeback_proof_summary(&contract, &report);
         assert_eq!(
@@ -2410,5 +2447,6 @@ mod tests {
             }),
             "summary must expose all required identity guards"
         );
+        Ok(())
     }
 }
