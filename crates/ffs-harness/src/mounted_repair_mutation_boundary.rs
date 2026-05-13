@@ -544,16 +544,60 @@ fn e2e_script_paths(command: &str) -> impl Iterator<Item = &str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
 
-    fn fixture_matrix() -> MountedRepairMutationBoundary {
+    fn fixture_matrix() -> Result<MountedRepairMutationBoundary> {
         parse_mounted_repair_mutation_boundary(DEFAULT_MOUNTED_REPAIR_MUTATION_BOUNDARY_JSON)
-            .expect("default mounted repair mutation boundary parses")
+            .context("default mounted repair mutation boundary parses")
+    }
+
+    fn first_scenario_mut(
+        matrix: &mut MountedRepairMutationBoundary,
+    ) -> Result<&mut MutationBoundaryScenario> {
+        matrix
+            .scenarios
+            .first_mut()
+            .context("fixture matrix includes at least one scenario")
+    }
+
+    fn first_two_scenarios_mut(
+        matrix: &mut MountedRepairMutationBoundary,
+    ) -> Result<(&mut MutationBoundaryScenario, &mut MutationBoundaryScenario)> {
+        let (first, rest) = matrix
+            .scenarios
+            .split_first_mut()
+            .context("fixture matrix includes at least one scenario")?;
+        let second = rest
+            .first_mut()
+            .context("fixture matrix includes at least two scenarios")?;
+        Ok((first, second))
+    }
+
+    fn scenario_by_kind_mut<'a>(
+        matrix: &'a mut MountedRepairMutationBoundary,
+        kind: &str,
+    ) -> Result<&'a mut MutationBoundaryScenario> {
+        matrix
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.kind == kind)
+            .with_context(|| format!("fixture matrix includes kind {kind}"))
+    }
+
+    fn scenario_by_outcome_mut<'a>(
+        matrix: &'a mut MountedRepairMutationBoundary,
+        expected_outcome: &str,
+    ) -> Result<&'a mut MutationBoundaryScenario> {
+        matrix
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.expected_outcome == expected_outcome)
+            .with_context(|| format!("fixture matrix includes expected_outcome {expected_outcome}"))
     }
 
     #[test]
-    fn default_matrix_validates_required_kinds() {
-        let report = validate_default_mounted_repair_mutation_boundary()
-            .expect("default mounted repair mutation boundary validates");
+    fn default_matrix_validates_required_kinds() -> Result<()> {
+        let report = validate_default_mounted_repair_mutation_boundary()?;
         assert_eq!(report.bead_id, "bd-wjsuj");
         for kind in REQUIRED_KINDS {
             assert!(
@@ -561,11 +605,12 @@ mod tests {
                 "missing kind {kind}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn missing_rw_refusal_kind_is_rejected() {
-        let mut matrix = fixture_matrix();
+    fn missing_rw_refusal_kind_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
         matrix.scenarios.retain(|s| s.kind != "rw_repair_refused");
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(
@@ -574,11 +619,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required kind `rw_repair_refused`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_stale_ledger_kind_is_rejected() {
-        let mut matrix = fixture_matrix();
+    fn missing_stale_ledger_kind_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
         matrix
             .scenarios
             .retain(|s| s.kind != "stale_ledger_refused");
@@ -589,13 +635,14 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing required kind `stale_ledger_refused`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_scenario_id_is_rejected() {
-        let mut matrix = fixture_matrix();
-        let dup = matrix.scenarios[0].scenario_id.clone();
-        matrix.scenarios[1].scenario_id = dup;
+    fn duplicate_scenario_id_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let (first, second) = first_two_scenarios_mut(&mut matrix)?;
+        second.scenario_id = first.scenario_id.clone();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(
             report
@@ -603,12 +650,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicate mutation boundary scenario_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn scenario_id_prefix_is_enforced() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].scenario_id = "repair_001".to_owned();
+    fn scenario_id_prefix_is_enforced() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.scenario_id = "repair_001".to_owned();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(
             report
@@ -616,16 +664,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must start with repair_boundary_"))
         );
+        Ok(())
     }
 
     #[test]
-    fn default_ro_detection_must_report_no_mutation() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "default_ro_detection_only")
-            .expect("default_ro_detection_only fixture exists");
+    fn default_ro_detection_must_report_no_mutation() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_kind_mut(&mut matrix, "default_ro_detection_only")?;
         scenario.expected_mutation_scope = "ledger_only".to_owned();
         scenario.expected_post_ledger_row_count = scenario.pre_ledger_row_count + 1;
         let report = validate_mounted_repair_mutation_boundary(&matrix);
@@ -635,31 +680,25 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("default_ro_detection_only must report no_mutation"))
         );
+        Ok(())
     }
 
     #[test]
-    fn default_ro_detection_cannot_pass_background_repair() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "default_ro_detection_only")
-            .expect("default detection fixture exists");
+    fn default_ro_detection_cannot_pass_background_repair() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_kind_mut(&mut matrix, "default_ro_detection_only")?;
         scenario.background_repair = true;
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(report.errors.iter().any(|err| {
             err.contains("default_ro_detection_only requires read_only + background_scrub_ledger")
         }));
+        Ok(())
     }
 
     #[test]
-    fn ro_repair_with_ledger_must_change_image_hash() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "ro_repair_with_ledger_allowed")
-            .expect("ro repair fixture exists");
+    fn ro_repair_with_ledger_must_change_image_hash() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_kind_mut(&mut matrix, "ro_repair_with_ledger_allowed")?;
         scenario.expected_post_image_hash = scenario.pre_image_hash.clone();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(
@@ -668,16 +707,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("image-mutating outcome must change the image hash"))
         );
+        Ok(())
     }
 
     #[test]
-    fn ro_repair_with_ledger_must_grow_ledger() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "ro_repair_with_ledger_allowed")
-            .expect("ro repair fixture exists");
+    fn ro_repair_with_ledger_must_grow_ledger() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_kind_mut(&mut matrix, "ro_repair_with_ledger_allowed")?;
         scenario.expected_post_ledger_row_count = scenario.pre_ledger_row_count;
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(
@@ -686,46 +722,37 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("mutating scope must grow the ledger row count"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rw_refusal_must_keep_image_hash_stable() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "rw_repair_refused")
-            .expect("rw refusal fixture exists");
+    fn rw_refusal_must_keep_image_hash_stable() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_kind_mut(&mut matrix, "rw_repair_refused")?;
         scenario.expected_post_image_hash =
             "sha256:00000000000000000000000000000000000000000000000000000000000000ff".to_owned();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(report.errors.iter().any(|err| err.contains(
             "non-image-mutating outcome must keep expected_post_image_hash equal to pre_image_hash"
         )));
+        Ok(())
     }
 
     #[test]
-    fn rw_refusal_must_keep_ledger_row_count_unchanged() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "rw_repair_refused")
-            .expect("rw refusal fixture exists");
+    fn rw_refusal_must_keep_ledger_row_count_unchanged() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_kind_mut(&mut matrix, "rw_repair_refused")?;
         scenario.expected_post_ledger_row_count = scenario.pre_ledger_row_count + 5;
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(report.errors.iter().any(|err| err
             .contains("non-mutating scope must leave ledger row count unchanged")));
+        Ok(())
     }
 
     #[test]
-    fn rw_refusal_must_link_follow_up_bead() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "rw_repair_refused")
-            .expect("rw refusal fixture exists");
+    fn rw_refusal_must_link_follow_up_bead() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_kind_mut(&mut matrix, "rw_repair_refused")?;
         scenario.follow_up_bead = String::new();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(
@@ -734,16 +761,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("refusal outcome must link a follow_up_bead"))
         );
+        Ok(())
     }
 
     #[test]
-    fn ledger_refusal_must_classify_correctly() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.kind == "stale_ledger_refused")
-            .expect("stale ledger fixture exists");
+    fn ledger_refusal_must_classify_correctly() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_kind_mut(&mut matrix, "stale_ledger_refused")?;
         scenario.expected_outcome = "rw_refused".to_owned();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(
@@ -752,16 +776,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("ledger refusal must classify as ledger_refused"))
         );
+        Ok(())
     }
 
     #[test]
-    fn host_skip_outcome_requires_skip_reason() {
-        let mut matrix = fixture_matrix();
-        let scenario = matrix
-            .scenarios
-            .iter_mut()
-            .find(|s| s.expected_outcome == "host_skipped")
-            .expect("host skip fixture exists");
+    fn host_skip_outcome_requires_skip_reason() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        let scenario = scenario_by_outcome_mut(&mut matrix, "host_skipped")?;
         scenario.host_skip_reason = String::new();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(
@@ -770,12 +791,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("host_skipped outcome must declare host_skip_reason"))
         );
+        Ok(())
     }
 
     #[test]
-    fn host_paths_touched_must_be_sandboxed() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0]
+    fn host_paths_touched_must_be_sandboxed() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?
             .host_paths_touched
             .push("/etc/passwd".to_owned());
         let report = validate_mounted_repair_mutation_boundary(&matrix);
@@ -785,12 +807,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("host_paths_touched") && err.contains("artifacts/"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_mount_mode_is_rejected() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].mount_mode = "rwx".to_owned();
+    fn unsupported_mount_mode_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.mount_mode = "rwx".to_owned();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(
             report
@@ -798,12 +821,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported mount_mode"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_mutation_scope_is_rejected() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].expected_mutation_scope = "anything_goes".to_owned();
+    fn unsupported_mutation_scope_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.expected_mutation_scope = "anything_goes".to_owned();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(
             report
@@ -811,12 +835,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported expected_mutation_scope"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_ledger_state_is_rejected() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].ledger_state = "schroedinger".to_owned();
+    fn unsupported_ledger_state_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.ledger_state = "schroedinger".to_owned();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(
             report
@@ -824,12 +849,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported ledger_state"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_artifact_paths_is_rejected() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].artifact_paths.clear();
+    fn missing_artifact_paths_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.artifact_paths.clear();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(
             report
@@ -837,12 +863,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must declare at least one artifact_path"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_reproduction_command_is_rejected() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].reproduction_command = String::new();
+    fn missing_reproduction_command_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.reproduction_command = String::new();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(
             report
@@ -850,29 +877,31 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing reproduction_command"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_reproduction_script_is_rejected() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].reproduction_command =
+    fn missing_reproduction_script_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.reproduction_command =
             "scripts/e2e/ffs_missing_mounted_repair_boundary_runner.sh".to_owned();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(report.errors.iter().any(|err| {
             err.contains("references missing script")
                 && err.contains("ffs_missing_mounted_repair_boundary_runner.sh")
         }));
+        Ok(())
     }
 
     #[test]
-    fn render_mounted_repair_mutation_boundary_markdown_default_matrix() {
-        let report = validate_default_mounted_repair_mutation_boundary()
-            .expect("default mounted repair mutation boundary validates");
+    fn render_mounted_repair_mutation_boundary_markdown_default_matrix() -> Result<()> {
+        let report = validate_default_mounted_repair_mutation_boundary()?;
         let markdown = render_mounted_repair_mutation_boundary_markdown(&report);
         insta::assert_snapshot!(
             "render_mounted_repair_mutation_boundary_markdown_default_matrix",
             markdown
         );
+        Ok(())
     }
 
     #[test]
@@ -887,21 +916,23 @@ mod tests {
     }
 
     #[test]
-    fn fail_on_errors_rejects_invalid_report() {
-        let mut matrix = fixture_matrix();
-        matrix.scenarios[0].expected_mutation_scope = "wild_write".to_owned();
+    fn fail_on_errors_rejects_invalid_report() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
+        first_scenario_mut(&mut matrix)?.expected_mutation_scope = "wild_write".to_owned();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
-        let err = fail_on_mounted_repair_mutation_boundary_errors(&report)
-            .expect_err("invalid report is rejected");
+        let Err(err) = fail_on_mounted_repair_mutation_boundary_errors(&report) else {
+            anyhow::bail!("invalid report is rejected");
+        };
         assert!(
             err.to_string()
                 .contains("mounted repair mutation boundary failed")
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_scenarios_list_is_rejected() {
-        let mut matrix = fixture_matrix();
+    fn empty_scenarios_list_is_rejected() -> Result<()> {
+        let mut matrix = fixture_matrix()?;
         matrix.scenarios.clear();
         let report = validate_mounted_repair_mutation_boundary(&matrix);
         assert!(
@@ -910,5 +941,6 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one scenario"))
         );
+        Ok(())
     }
 }
