@@ -12613,6 +12613,23 @@ mod tests {
             prop_assert_eq!(a, b);
         }
 
+        // bd-bopdb — Determinism MR for parse_dx_root_with_large_dir.
+        // parse_dx_root() is a thin wrapper that calls this with
+        // large_dir=false, covered by bd-afwgs. The large_dir=true
+        // branch validates a different max_indirect_levels bound
+        // (3 vs 2) and is the entry point for INCOMPAT_LARGEDIR
+        // htree directories. This proptest cycles the bool to fuzz
+        // both branches.
+        #[test]
+        fn ext4_proptest_parse_dx_root_with_large_dir_determinism(
+            block in proptest::collection::vec(any::<u8>(), 0..=4096),
+            large_dir in proptest::prelude::any::<bool>(),
+        ) {
+            let a = parse_dx_root_with_large_dir(&block, large_dir);
+            let b = parse_dx_root_with_large_dir(&block, large_dir);
+            prop_assert_eq!(a, b);
+        }
+
         // bd-z8ko5 — Determinism MR for parse_inode_extent_tree. Runs
         // on every ext4 file open / read / write to compute the extent
         // tree from an Ext4Inode. Companion to bd-qzwuq's
