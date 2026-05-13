@@ -201,9 +201,15 @@ if jq -s \
     def swarm_ack_present:
         ($swarm_enable == "1")
         and ($swarm_ack == "swarm-workload-may-use-permissioned-large-host");
+    def explicit_non_permissioned_guard:
+        issue_text as $text
+        | (($text | test("non-permissioned|read-only"; "i"))
+            and ($text | test("must not (run|execute)|does not (run|execute)|without running|no xfstests|no large-host|no large host|no permissioned|not run[^.]*xfstests|not run[^.]*large-host|not run[^.]*large host|not run[^.]*swarm"; "i")));
     def permission_gate:
         issue_text as $text
-        | if (($text | test("XFSTESTS_REAL_RUN_ACK|xfstests-may-mutate-test-and-scratch-devices|real xfstests run|execute[^.]*xfstests baseline|run[^.]*xfstests baseline"; "i")) and (xfstests_ack_present | not)) then
+        | if explicit_non_permissioned_guard then
+            null
+        elif (($text | test("XFSTESTS_REAL_RUN_ACK|xfstests-may-mutate-test-and-scratch-devices|real xfstests run|execute[^.]*xfstests baseline|run[^.]*xfstests baseline"; "i")) and (xfstests_ack_present | not)) then
             {
                 gate_kind: "xfstests_real_run",
                 required_env: "XFSTESTS_REAL_RUN_ACK",

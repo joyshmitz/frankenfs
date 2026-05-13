@@ -1007,6 +1007,10 @@ fn permission_gate(
     config: &TrackerSourceHygieneAnalysisConfig,
 ) -> Option<TrackerPermissionGate> {
     let text = issue.text_for_classification().to_ascii_lowercase();
+    if explicit_non_permissioned_guard_matches(&text) {
+        return None;
+    }
+
     let xfstests_ack_present = config
         .xfstests_real_run_ack
         .as_deref()
@@ -1051,6 +1055,24 @@ fn swarm_text_matches(text: &str) -> bool {
         || text.contains("large-host")
         || text.contains("large host")
         || (text.contains("permissioned") && text.contains("swarm"))
+}
+
+fn explicit_non_permissioned_guard_matches(text: &str) -> bool {
+    (text.contains("non-permissioned") || text.contains("read-only"))
+        && (text.contains("must not run")
+            || text.contains("must not execute")
+            || text.contains("does not run")
+            || text.contains("does not execute")
+            || text.contains("without running")
+            || text.contains("no xfstests")
+            || text.contains("no large-host")
+            || text.contains("no large host")
+            || text.contains("no permissioned")
+            || (text.contains("not run")
+                && (text.contains("xfstests")
+                    || text.contains("large-host")
+                    || text.contains("large host")
+                    || text.contains("swarm"))))
 }
 
 fn excluded_foreign_by_prefix(issues: &[TrackerIssue<'_>]) -> Vec<TrackerPrefixCount> {
@@ -2152,6 +2174,63 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_non_permissioned_guard_mentions_do_not_gate_work() -> Result<(), String> {
+        let issues = [
+            line(&serde_json::json!({
+                "id": "bd-validator",
+                "title": "Add a validator for required serialized report coverage rows",
+                "description": "The validator is read-only and non-permissioned: no xfstests, mounted mutation, large-host campaign, or proof-bundle pass claim may run here.",
+                "status": "open",
+                "priority": 2
+            }))?,
+            line(&serde_json::json!({
+                "id": "bd-real-xfstests",
+                "title": "execute xfstests baseline",
+                "description": "requires real xfstests run before publishing pass/fail artifacts",
+                "status": "open",
+                "priority": 1
+            }))?,
+            line(&serde_json::json!({
+                "id": "bd-real-swarm",
+                "title": "permissioned large-host swarm campaign",
+                "description": "requires FFS_SWARM_WORKLOAD_REAL_RUN_ACK before using a large host",
+                "status": "open",
+                "priority": 1
+            }))?,
+        ]
+        .join("\n");
+
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
+
+        assert_eq!(
+            report
+                .source_aware_ready_rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bd-validator"]
+        );
+        let gated: BTreeMap<&str, &str> = report
+            .permission_gated_rows
+            .iter()
+            .map(|row| (row.id.as_str(), row.permission_gate.gate_kind.as_str()))
+            .collect();
+        assert_eq!(gated.get("bd-real-xfstests"), Some(&"xfstests_real_run"));
+        assert_eq!(
+            gated.get("bd-real-swarm"),
+            Some(&"large_host_swarm_real_run")
+        );
+        assert!(!gated.contains_key("bd-validator"));
+        assert_eq!(report.source_aware_queue_state.verdict, "ready");
+        assert_eq!(
+            report.source_aware_queue_state.claimable_ids,
+            vec!["bd-validator"]
+        );
         Ok(())
     }
 
