@@ -1725,6 +1725,26 @@ mod tests {
         }
     }
 
+    fn allowlist_mut(
+        report: &mut MountedDifferentialOracleReport,
+        index: usize,
+    ) -> Result<&mut MountedDifferentialAllowlistRecord> {
+        report
+            .allowlist
+            .get_mut(index)
+            .with_context(|| format!("fixture must include allowlist record at index {index}"))
+    }
+
+    fn scenario_mut(
+        report: &mut MountedDifferentialOracleReport,
+        index: usize,
+    ) -> Result<&mut MountedDifferentialScenario> {
+        report
+            .scenarios
+            .get_mut(index)
+            .with_context(|| format!("fixture must include scenario at index {index}"))
+    }
+
     #[test]
     fn valid_report_covers_strict_allowlist_and_host_skip_contract() {
         let validation = validate_mounted_differential_oracle_report(&valid_report());
@@ -1748,10 +1768,11 @@ mod tests {
     }
 
     #[test]
-    fn broad_and_expired_allowlists_are_rejected() {
+    fn broad_and_expired_allowlists_are_rejected() -> Result<()> {
         let mut report = valid_report();
-        report.allowlist[0].scenario_id = "*".to_owned();
-        report.allowlist[0].expires_on = "2026-01-01".to_owned();
+        let allowlist = allowlist_mut(&mut report, 0)?;
+        allowlist.scenario_id = "*".to_owned();
+        allowlist.expires_on = "2026-01-01".to_owned();
         let validation = validate_mounted_differential_oracle_report(&report);
         assert!(!validation.valid);
         assert!(
@@ -1766,13 +1787,15 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("expires_on"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unresolved_diffs_fail_closed_for_public_claims() {
+    fn unresolved_diffs_fail_closed_for_public_claims() -> Result<()> {
         let mut report = valid_report();
-        report.scenarios[1].classification = MountedDifferentialClassification::Diff;
-        report.scenarios[1].allowlist_id = None;
+        let scenario = scenario_mut(&mut report, 1)?;
+        scenario.classification = MountedDifferentialClassification::Diff;
+        scenario.allowlist_id = None;
         let validation = validate_mounted_differential_oracle_report(&report);
         assert!(!validation.valid);
         assert!(
@@ -1781,12 +1804,13 @@ mod tests {
                 .iter()
                 .any(|claim| claim.contains("unresolved kernel/FrankenFS disagreement"))
         );
+        Ok(())
     }
 
     #[test]
-    fn btrfs_default_permissions_skip_cannot_mask_product_failure() {
+    fn btrfs_default_permissions_skip_cannot_mask_product_failure() -> Result<()> {
         let mut report = valid_report();
-        report.scenarios[7].filesystem = MountedDifferentialFilesystem::Ext4;
+        scenario_mut(&mut report, 7)?.filesystem = MountedDifferentialFilesystem::Ext4;
         let validation = validate_mounted_differential_oracle_report(&report);
         assert!(!validation.valid);
         assert!(
@@ -1795,20 +1819,20 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("DefaultPermissions diagnosis used on non-btrfs"))
         );
+        Ok(())
     }
 
     #[test]
-    fn baseline_manifest_and_lane_isolation_fail_closed() {
+    fn baseline_manifest_and_lane_isolation_fail_closed() -> Result<()> {
         let mut report = valid_report();
-        report.scenarios[0].baseline_manifest.mkfs_command = "mkfs.btrfs -f wrong.img".to_owned();
-        report.scenarios[0]
-            .baseline_manifest
-            .cleanup_requirements
-            .raw_logs = MountedDifferentialRawLogPolicy::Discard;
-        report.scenarios[0].lane_isolation.frankenfs_mountpoint =
-            report.scenarios[0].lane_isolation.kernel_mountpoint.clone();
-        report.scenarios[0].frankenfs_observation.stdout_path =
-            report.scenarios[0].kernel_observation.stdout_path.clone();
+        let scenario = scenario_mut(&mut report, 0)?;
+        scenario.baseline_manifest.mkfs_command = "mkfs.btrfs -f wrong.img".to_owned();
+        scenario.baseline_manifest.cleanup_requirements.raw_logs =
+            MountedDifferentialRawLogPolicy::Discard;
+        scenario.lane_isolation.frankenfs_mountpoint =
+            scenario.lane_isolation.kernel_mountpoint.clone();
+        scenario.frankenfs_observation.stdout_path =
+            scenario.kernel_observation.stdout_path.clone();
         let validation = validate_mounted_differential_oracle_report(&report);
         assert!(!validation.valid);
         assert!(
@@ -1835,13 +1859,15 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("stdout_path crosses lane root"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_scope_requires_owner_or_non_goal() {
+    fn unsupported_scope_requires_owner_or_non_goal() -> Result<()> {
         let mut report = valid_report();
-        report.scenarios[9].owner_bead = None;
-        report.scenarios[9].non_goal_reason = None;
+        let scenario = scenario_mut(&mut report, 9)?;
+        scenario.owner_bead = None;
+        scenario.non_goal_reason = None;
         let validation = validate_mounted_differential_oracle_report(&report);
         assert!(!validation.valid);
         assert!(
@@ -1850,6 +1876,7 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("needs owner_bead or non_goal_reason"))
         );
+        Ok(())
     }
 
     #[test]
@@ -1866,10 +1893,11 @@ mod tests {
     }
 
     #[test]
-    fn render_mounted_differential_oracle_markdown_diff_gate_blocks_snapshot() {
+    fn render_mounted_differential_oracle_markdown_diff_gate_blocks_snapshot() -> Result<()> {
         let mut report = valid_report();
-        report.scenarios[1].classification = MountedDifferentialClassification::Diff;
-        report.scenarios[1].allowlist_id = None;
+        let scenario = scenario_mut(&mut report, 1)?;
+        scenario.classification = MountedDifferentialClassification::Diff;
+        scenario.allowlist_id = None;
         let validation = validate_mounted_differential_oracle_report(&report);
         let markdown = render_mounted_differential_oracle_markdown(&validation);
         assert!(markdown.contains("Mounted Differential Oracle Report"));
@@ -1881,5 +1909,6 @@ mod tests {
             "render_mounted_differential_oracle_markdown_diff_gate_blocks_snapshot",
             markdown
         );
+        Ok(())
     }
 }
