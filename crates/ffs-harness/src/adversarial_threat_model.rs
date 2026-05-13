@@ -1320,16 +1320,23 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn sample_model() -> AdversarialThreatModel {
+    fn sample_model() -> Result<AdversarialThreatModel> {
         serde_json::from_str(include_str!(
             "../../../security/adversarial_image_threat_model.json"
         ))
-        .expect("checked-in adversarial threat model parses")
+        .context("checked-in adversarial threat model parses")
+    }
+
+    fn first_scenario_mut(model: &mut AdversarialThreatModel) -> Result<&mut ThreatScenario> {
+        model
+            .scenarios
+            .first_mut()
+            .context("checked-in adversarial threat model has at least one scenario")
     }
 
     #[test]
-    fn checked_in_model_validates_and_generates_wording() {
-        let model = sample_model();
+    fn checked_in_model_validates_and_generates_wording() -> Result<()> {
+        let model = sample_model()?;
         let report = validate_adversarial_threat_model(&model, "artifacts/security/dry-run");
         assert!(report.valid, "{:?}", report.errors);
         assert_eq!(report.scenario_count, 17);
@@ -1340,16 +1347,17 @@ mod tests {
                 .iter()
                 .any(|scenario| scenario.path_decision == "refuse_traversal")
         );
-        assert!(
-            report.generated_security_wording[0]
-                .wording
-                .contains("docs alone cannot promote")
-        );
+        let wording = report
+            .generated_security_wording
+            .first()
+            .context("security wording generated for checked-in model")?;
+        assert!(wording.wording.contains("docs alone cannot promote"));
+        Ok(())
     }
 
     #[test]
     fn adversarial_threat_model_report_json_shape() -> Result<()> {
-        let model = sample_model();
+        let model = sample_model()?;
         let report = validate_adversarial_threat_model(&model, "artifacts/security/dry-run");
         let json = serde_json::to_string_pretty(&report)?;
         insta::assert_snapshot!("adversarial_threat_model_report_json_shape", json);
@@ -1386,8 +1394,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_required_threat_class() {
-        let mut model = sample_model();
+    fn rejects_missing_required_threat_class() -> Result<()> {
+        let mut model = sample_model()?;
         model
             .required_threat_classes
             .retain(|class| *class != ThreatClass::ResourceExhaustion);
@@ -1399,13 +1407,15 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("required_threat_classes missing resource_exhaustion"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_path_traversal_mismatch() {
-        let mut model = sample_model();
-        model.scenarios[0].hostile_path = "proof/../../etc/passwd".to_owned();
-        model.scenarios[0].expected_path_decision = ArtifactPathDecision::AcceptConfined;
+    fn rejects_path_traversal_mismatch() -> Result<()> {
+        let mut model = sample_model()?;
+        let scenario = first_scenario_mut(&mut model)?;
+        scenario.hostile_path = "proof/../../etc/passwd".to_owned();
+        scenario.expected_path_decision = ArtifactPathDecision::AcceptConfined;
         let report = validate_adversarial_threat_model(&model, "artifacts/security");
         assert!(!report.valid);
         assert!(
@@ -1414,16 +1424,17 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("classifier returned refuse_traversal"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_symlink_path_when_expected_as_confined() {
-        let mut model = sample_model();
+    fn rejects_symlink_path_when_expected_as_confined() -> Result<()> {
+        let mut model = sample_model()?;
         let scenario = model
             .scenarios
             .iter_mut()
             .find(|scenario| scenario.scenario_id == "hostile_proof_bundle_symlink_refused")
-            .expect("symlink scenario exists");
+            .context("symlink scenario exists")?;
         scenario.expected_path_decision = ArtifactPathDecision::AcceptConfined;
         let report = validate_adversarial_threat_model(&model, "artifacts/security");
         assert!(!report.valid);
@@ -1433,23 +1444,25 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("classifier returned refuse_symlink"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_unreviewed_critical_threats() {
-        let mut model = sample_model();
-        model.scenarios[0].review_status = ThreatReviewStatus::Unreviewed;
+    fn rejects_unreviewed_critical_threats() -> Result<()> {
+        let mut model = sample_model()?;
+        first_scenario_mut(&mut model)?.review_status = ThreatReviewStatus::Unreviewed;
         let report = validate_adversarial_threat_model(&model, "artifacts/security");
         assert!(!report.valid);
         assert!(report.errors.iter().any(|error| {
             error.contains("critical threat scenario malformed_ext4_superblock_reject_before_mount")
         }));
+        Ok(())
     }
 
     #[test]
-    fn rejects_zero_resource_caps() {
-        let mut model = sample_model();
-        model.scenarios[0].resource_limits.max_wall_ms = 0;
+    fn rejects_zero_resource_caps() -> Result<()> {
+        let mut model = sample_model()?;
+        first_scenario_mut(&mut model)?.resource_limits.max_wall_ms = 0;
         let report = validate_adversarial_threat_model(&model, "artifacts/security");
         assert!(!report.valid);
         assert!(
@@ -1458,16 +1471,17 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("resource limits must be positive"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_unsafe_operator_command_promotion() {
-        let mut model = sample_model();
+    fn rejects_unsafe_operator_command_promotion() -> Result<()> {
+        let mut model = sample_model()?;
         let scenario = model
             .scenarios
             .iter_mut()
             .find(|scenario| scenario.scenario_id == "unsafe_repair_operator_command_refused")
-            .expect("operator scenario exists");
+            .context("operator scenario exists")?;
         scenario.release_gate_effect = ReleaseGateEffect::FollowUpOnly;
         let report = validate_adversarial_threat_model(&model, "artifacts/security");
         assert!(!report.valid);
@@ -1477,14 +1491,22 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("must use fail_closed release gate effect"))
         );
+        Ok(())
     }
 
     #[test]
-    fn invalid_units_and_enums_fail_during_parse() {
-        let mut value = json!(sample_model());
-        value["scenarios"][0]["expected_safe_behavior"] = json!("run_anyway");
+    fn invalid_units_and_enums_fail_during_parse() -> Result<()> {
+        let mut value = json!(sample_model()?);
+        let scenario = value
+            .get_mut("scenarios")
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|scenarios| scenarios.first_mut())
+            .and_then(serde_json::Value::as_object_mut)
+            .context("checked-in adversarial threat model has an object scenario")?;
+        scenario.insert("expected_safe_behavior".to_owned(), json!("run_anyway"));
         let parsed = serde_json::from_value::<AdversarialThreatModel>(value);
         assert!(parsed.is_err());
+        Ok(())
     }
 
     #[test]
@@ -1497,8 +1519,8 @@ mod tests {
     }
 
     #[test]
-    fn sample_artifact_manifest_maps_to_shared_qa_schema() {
-        let model = sample_model();
+    fn sample_artifact_manifest_maps_to_shared_qa_schema() -> Result<()> {
+        let model = sample_model()?;
         let report = validate_adversarial_threat_model(&model, "artifacts/security/dry-run");
         let artifact_manifest = build_adversarial_threat_model_sample_artifact_manifest(
             &model,
@@ -1515,11 +1537,12 @@ mod tests {
                 .iter()
                 .any(|artifact| artifact.category == ArtifactCategory::ReproPack)
         );
+        Ok(())
     }
 
     #[test]
-    fn checked_in_model_covers_bounded_hostile_fixture_matrix() {
-        let model = sample_model();
+    fn checked_in_model_covers_bounded_hostile_fixture_matrix() -> Result<()> {
+        let model = sample_model()?;
         let report = validate_adversarial_threat_model(&model, "artifacts/security/dry-run");
         assert!(report.valid, "{:?}", report.errors);
         let scenario_ids = report
@@ -1543,12 +1566,13 @@ mod tests {
         ] {
             assert!(scenario_ids.contains(required), "missing {required}");
         }
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_resource_controls() {
-        let mut model = sample_model();
-        model.scenarios[0].resource_controls.clear();
+    fn rejects_missing_resource_controls() -> Result<()> {
+        let mut model = sample_model()?;
+        first_scenario_mut(&mut model)?.resource_controls.clear();
         let report = validate_adversarial_threat_model(&model, "artifacts/security");
         assert!(!report.valid);
         assert!(
@@ -1557,12 +1581,18 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("resource_controls must not be empty"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_resource_control_unit_mismatch() {
-        let mut model = sample_model();
-        model.scenarios[0].resource_controls[0].limit_unit = ThreatResourceLimitUnit::Count;
+    fn rejects_resource_control_unit_mismatch() -> Result<()> {
+        let mut model = sample_model()?;
+        let scenario = first_scenario_mut(&mut model)?;
+        scenario
+            .resource_controls
+            .first_mut()
+            .context("checked-in scenario has at least one resource control")?
+            .limit_unit = ThreatResourceLimitUnit::Count;
         let report = validate_adversarial_threat_model(&model, "artifacts/security");
         assert!(!report.valid);
         assert!(
@@ -1571,12 +1601,14 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("uses incompatible unit"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_expected_classification_mismatch() {
-        let mut model = sample_model();
-        model.scenarios[0].expected_classification = ObservedThreatClassification::Capped;
+    fn rejects_expected_classification_mismatch() -> Result<()> {
+        let mut model = sample_model()?;
+        first_scenario_mut(&mut model)?.expected_classification =
+            ObservedThreatClassification::Capped;
         let report = validate_adversarial_threat_model(&model, "artifacts/security");
         assert!(!report.valid);
         assert!(
@@ -1585,13 +1617,14 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("expected classification capped but observed rejected"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_observed_counter_over_limit() {
-        let mut model = sample_model();
-        model.scenarios[0].observed_resource_counters.wall_ms =
-            model.scenarios[0].resource_limits.max_wall_ms + 1;
+    fn rejects_observed_counter_over_limit() -> Result<()> {
+        let mut model = sample_model()?;
+        let scenario = first_scenario_mut(&mut model)?;
+        scenario.observed_resource_counters.wall_ms = scenario.resource_limits.max_wall_ms + 1;
         let report = validate_adversarial_threat_model(&model, "artifacts/security");
         assert!(!report.valid);
         assert!(
@@ -1600,12 +1633,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("observed wall_ms"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_artifact_path_traversal() {
-        let mut model = sample_model();
-        model.scenarios[0]
+    fn rejects_artifact_path_traversal() -> Result<()> {
+        let mut model = sample_model()?;
+        first_scenario_mut(&mut model)?
             .artifact_paths
             .push("artifacts/security/../../host_escape.json".to_owned());
         let report = validate_adversarial_threat_model(&model, "artifacts/security");
@@ -1616,12 +1650,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("is not confined"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_cleanup_failure() {
-        let mut model = sample_model();
-        model.scenarios[0].cleanup_status = ThreatCleanupStatus::Failed;
+    fn rejects_cleanup_failure() -> Result<()> {
+        let mut model = sample_model()?;
+        first_scenario_mut(&mut model)?.cleanup_status = ThreatCleanupStatus::Failed;
         let report = validate_adversarial_threat_model(&model, "artifacts/security");
         assert!(!report.valid);
         assert!(
@@ -1630,5 +1665,6 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("cleanup_status must be clean"))
         );
+        Ok(())
     }
 }
