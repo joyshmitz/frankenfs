@@ -1459,16 +1459,79 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn sample_manifest() -> PerformanceBaselineManifest {
+    fn sample_manifest() -> Result<PerformanceBaselineManifest> {
         serde_json::from_str(include_str!(
             "../../../benchmarks/performance_baseline_manifest.json"
         ))
-        .expect("checked-in performance manifest parses")
+        .context("checked-in performance manifest parses")
+    }
+
+    fn first_workload_mut(
+        manifest: &mut PerformanceBaselineManifest,
+    ) -> Result<&mut PerformanceWorkload> {
+        manifest
+            .workloads
+            .first_mut()
+            .context("fixture manifest includes at least one workload")
+    }
+
+    fn workload_by_id_mut<'a>(
+        manifest: &'a mut PerformanceBaselineManifest,
+        workload_id: &str,
+    ) -> Result<&'a mut PerformanceWorkload> {
+        manifest
+            .workloads
+            .iter_mut()
+            .find(|workload| workload.workload_id == workload_id)
+            .with_context(|| format!("fixture manifest includes workload {workload_id}"))
+    }
+
+    fn first_fixture_evidence_mut(
+        manifest: &mut PerformanceBaselineManifest,
+    ) -> Result<&mut PerformanceFixtureEvidence> {
+        manifest
+            .fixture_evidence
+            .first_mut()
+            .context("fixture manifest includes at least one fixture evidence row")
+    }
+
+    fn first_workload_json_object_mut(
+        value: &mut serde_json::Value,
+    ) -> Result<&mut serde_json::Map<String, serde_json::Value>> {
+        value
+            .get_mut("workloads")
+            .and_then(serde_json::Value::as_array_mut)
+            .context("manifest JSON includes workloads array")?
+            .first_mut()
+            .and_then(serde_json::Value::as_object_mut)
+            .context("manifest JSON includes first workload object")
+    }
+
+    fn first_fixture_json_object_mut(
+        value: &mut serde_json::Value,
+    ) -> Result<&mut serde_json::Map<String, serde_json::Value>> {
+        value
+            .get_mut("fixture_evidence")
+            .and_then(serde_json::Value::as_array_mut)
+            .context("manifest JSON includes fixture_evidence array")?
+            .first_mut()
+            .and_then(serde_json::Value::as_object_mut)
+            .context("manifest JSON includes first fixture evidence object")
+    }
+
+    fn fixture_report<'a>(
+        by_fixture: &'a BTreeMap<&str, &PerformanceEvidenceReport>,
+        fixture_id: &str,
+    ) -> Result<&'a PerformanceEvidenceReport> {
+        by_fixture
+            .get(fixture_id)
+            .copied()
+            .with_context(|| format!("fixture report exists for {fixture_id}"))
     }
 
     #[test]
-    fn checked_in_manifest_validates_and_expands_commands() {
-        let manifest = sample_manifest();
+    fn checked_in_manifest_validates_and_expands_commands() -> Result<()> {
+        let manifest = sample_manifest()?;
         let report =
             validate_performance_baseline_manifest(&manifest, "artifacts/performance/dry-run");
         assert!(report.valid, "{:?}", report.errors);
@@ -1526,11 +1589,12 @@ mod tests {
                 && row.command.contains("--features s3fifo")
                 && row.kernel_fuse_mode == PerformanceKernelFuseMode::NotRequired
         }));
+        Ok(())
     }
 
     #[test]
     fn performance_baseline_manifest_report_json_shape() -> Result<()> {
-        let manifest = sample_manifest();
+        let manifest = sample_manifest()?;
         let report =
             validate_performance_baseline_manifest(&manifest, "artifacts/performance/dry-run");
         assert!(report.valid, "{:?}", report.errors);
@@ -1543,9 +1607,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_workload_id() {
-        let mut manifest = sample_manifest();
-        manifest.workloads[0].workload_id.clear();
+    fn rejects_missing_workload_id() -> Result<()> {
+        let mut manifest = sample_manifest()?;
+        first_workload_mut(&mut manifest)?.workload_id.clear();
         let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
         assert!(!report.valid);
         assert!(
@@ -1554,12 +1618,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("workload_id must not be empty"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_unknown_capability_names() {
-        let mut manifest = sample_manifest();
-        manifest.workloads[0]
+    fn rejects_unknown_capability_names() -> Result<()> {
+        let mut manifest = sample_manifest()?;
+        first_workload_mut(&mut manifest)?
             .required_capabilities
             .push("warp_drive".to_owned());
         let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
@@ -1570,30 +1635,31 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("unknown capability warp_drive"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_invalid_units_during_parse() {
-        let mut value = json!(sample_manifest());
-        value["workloads"][0]["metric_unit"] = json!("furlongs_per_fortnight");
+    fn rejects_invalid_units_during_parse() -> Result<()> {
+        let mut value = json!(sample_manifest()?);
+        first_workload_json_object_mut(&mut value)?
+            .insert("metric_unit".to_owned(), json!("furlongs_per_fortnight"));
         let parsed = serde_json::from_value::<PerformanceBaselineManifest>(value);
         assert!(parsed.is_err());
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_thresholds_during_parse() {
-        let mut value = json!(sample_manifest());
-        value["workloads"][0]
-            .as_object_mut()
-            .expect("workload object")
-            .remove("threshold");
+    fn rejects_missing_thresholds_during_parse() -> Result<()> {
+        let mut value = json!(sample_manifest()?);
+        first_workload_json_object_mut(&mut value)?.remove("threshold");
         let parsed = serde_json::from_value::<PerformanceBaselineManifest>(value);
         assert!(parsed.is_err());
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_environment_fields() {
-        let mut manifest = sample_manifest();
+    fn rejects_missing_environment_fields() -> Result<()> {
+        let mut manifest = sample_manifest()?;
         manifest
             .required_environment_fields
             .retain(|field| field != "git_sha");
@@ -1605,11 +1671,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("required_environment_fields missing git_sha"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_worker_metadata_field() {
-        let mut manifest = sample_manifest();
+    fn rejects_missing_worker_metadata_field() -> Result<()> {
+        let mut manifest = sample_manifest()?;
         manifest
             .required_environment_fields
             .retain(|field| field != "worker_id");
@@ -1621,12 +1688,15 @@ mod tests {
                 .iter()
                 .any(|error| { error.contains("required_environment_fields missing worker_id") })
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_workload_missing_target_dir_template() {
-        let mut manifest = sample_manifest();
-        manifest.workloads[0].target_dir_template.clear();
+    fn rejects_workload_missing_target_dir_template() -> Result<()> {
+        let mut manifest = sample_manifest()?;
+        first_workload_mut(&mut manifest)?
+            .target_dir_template
+            .clear();
         let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
         assert!(!report.valid);
         assert!(
@@ -1635,12 +1705,13 @@ mod tests {
                 .iter()
                 .any(|error| { error.contains("target_dir_template must not be empty") })
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_invalid_input_fixture_hash() {
-        let mut manifest = sample_manifest();
-        manifest.workloads[0].input_fixture_hash = "abc123".to_owned();
+    fn rejects_invalid_input_fixture_hash() -> Result<()> {
+        let mut manifest = sample_manifest()?;
+        first_workload_mut(&mut manifest)?.input_fixture_hash = "abc123".to_owned();
         let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
         assert!(!report.valid);
         assert!(
@@ -1648,12 +1719,13 @@ mod tests {
                 error.contains("input_fixture_hash must be sha256:<64 hex chars>")
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_raw_log_contract() {
-        let mut manifest = sample_manifest();
-        manifest.workloads[0]
+    fn rejects_missing_raw_log_contract() -> Result<()> {
+        let mut manifest = sample_manifest()?;
+        first_workload_mut(&mut manifest)?
             .required_raw_logs
             .retain(|field| field != "stderr");
         let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
@@ -1664,11 +1736,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("required_raw_logs missing stderr"))
         );
+        Ok(())
     }
 
     #[test]
-    fn fixture_rows_cover_quarantine_states() {
-        let manifest = sample_manifest();
+    fn fixture_rows_cover_quarantine_states() -> Result<()> {
+        let manifest = sample_manifest()?;
         let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
         let by_fixture = report
             .fixture_evidence_reports
@@ -1676,58 +1749,61 @@ mod tests {
             .map(|row| (row.fixture_id.as_str(), row))
             .collect::<BTreeMap<_, _>>();
         assert_eq!(
-            by_fixture["fixture_pass_core"].comparison_verdict,
+            fixture_report(&by_fixture, "fixture_pass_core")?.comparison_verdict,
             PerformanceEvidenceClassification::Pass
         );
         assert_eq!(
-            by_fixture["fixture_warn_cli"].comparison_verdict,
+            fixture_report(&by_fixture, "fixture_warn_cli")?.comparison_verdict,
             PerformanceEvidenceClassification::Warn
         );
         assert_eq!(
-            by_fixture["fixture_fail_mvcc"].comparison_verdict,
+            fixture_report(&by_fixture, "fixture_fail_mvcc")?.comparison_verdict,
             PerformanceEvidenceClassification::Fail
         );
         assert_eq!(
-            by_fixture["fixture_noisy_repair"].comparison_verdict,
+            fixture_report(&by_fixture, "fixture_noisy_repair")?.comparison_verdict,
             PerformanceEvidenceClassification::Noisy
         );
         assert_eq!(
-            by_fixture["fixture_stale_fuse"].comparison_verdict,
+            fixture_report(&by_fixture, "fixture_stale_fuse")?.comparison_verdict,
             PerformanceEvidenceClassification::Stale
         );
         assert_eq!(
-            by_fixture["fixture_missing_long_campaign"].comparison_verdict,
+            fixture_report(&by_fixture, "fixture_missing_long_campaign")?.comparison_verdict,
             PerformanceEvidenceClassification::Missing
         );
         assert_eq!(
-            by_fixture["fixture_missing_baseline_arc"].comparison_verdict,
+            fixture_report(&by_fixture, "fixture_missing_baseline_arc")?.comparison_verdict,
             PerformanceEvidenceClassification::MissingBaseline
         );
         assert_eq!(
-            by_fixture["fixture_environment_mismatch_fuse_read"].comparison_verdict,
+            fixture_report(&by_fixture, "fixture_environment_mismatch_fuse_read")?
+                .comparison_verdict,
             PerformanceEvidenceClassification::EnvironmentMismatch
         );
         assert_eq!(
-            by_fixture["fixture_budget_exceeded_mvcc"].comparison_verdict,
+            fixture_report(&by_fixture, "fixture_budget_exceeded_mvcc")?.comparison_verdict,
             PerformanceEvidenceClassification::BudgetExceeded
         );
         assert_eq!(
-            by_fixture["fixture_overhead_exceeded_repair_refresh"].comparison_verdict,
+            fixture_report(&by_fixture, "fixture_overhead_exceeded_repair_refresh")?
+                .comparison_verdict,
             PerformanceEvidenceClassification::InstrumentationOverheadExceeded
         );
         assert_eq!(
-            by_fixture["fixture_degraded_accepted_fuse"].comparison_verdict,
+            fixture_report(&by_fixture, "fixture_degraded_accepted_fuse")?.comparison_verdict,
             PerformanceEvidenceClassification::DegradedAccepted
         );
         assert_eq!(
-            by_fixture["fixture_blocked_core"].comparison_verdict,
+            fixture_report(&by_fixture, "fixture_blocked_core")?.comparison_verdict,
             PerformanceEvidenceClassification::Blocked
         );
+        Ok(())
     }
 
     #[test]
-    fn quarantined_rows_downgrade_public_claims() {
-        let manifest = sample_manifest();
+    fn quarantined_rows_downgrade_public_claims() -> Result<()> {
+        let manifest = sample_manifest()?;
         let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
         for row in &report.fixture_evidence_reports {
             if row.comparison_verdict.needs_quarantine() {
@@ -1739,16 +1815,13 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn important_quarantine_requires_follow_up_bead() {
-        let mut manifest = sample_manifest();
-        let workload = manifest
-            .workloads
-            .iter_mut()
-            .find(|workload| workload.workload_id == "mvcc_conflict_detection_rate")
-            .expect("fixture workload exists");
+    fn important_quarantine_requires_follow_up_bead() -> Result<()> {
+        let mut manifest = sample_manifest()?;
+        let workload = workload_by_id_mut(&mut manifest, "mvcc_conflict_detection_rate")?;
         workload.quarantine_policy.follow_up_bead.clear();
         let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
         assert!(!report.valid);
@@ -1758,16 +1831,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("quarantine policy must link follow_up_bead"))
         );
+        Ok(())
     }
 
     #[test]
-    fn quarantined_workload_cannot_overclaim_public_state() {
-        let mut manifest = sample_manifest();
-        let workload = manifest
-            .workloads
-            .iter_mut()
-            .find(|workload| workload.workload_id == "repair_lrc_encode_throughput")
-            .expect("fixture workload exists");
+    fn quarantined_workload_cannot_overclaim_public_state() -> Result<()> {
+        let mut manifest = sample_manifest()?;
+        let workload = workload_by_id_mut(&mut manifest, "repair_lrc_encode_throughput")?;
         workload.quarantine_policy.claim_when_quarantined =
             PerformancePublicClaimState::MeasuredAuthoritative;
         let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
@@ -1776,11 +1846,12 @@ mod tests {
             error
                 .contains("quarantined performance evidence may only claim unknown or experimental")
         }));
+        Ok(())
     }
 
     #[test]
-    fn claim_tiers_and_budget_decisions_are_reported() {
-        let manifest = sample_manifest();
+    fn claim_tiers_and_budget_decisions_are_reported() -> Result<()> {
+        let manifest = sample_manifest()?;
         let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
         let by_fixture = report
             .fixture_evidence_reports
@@ -1788,46 +1859,46 @@ mod tests {
             .map(|row| (row.fixture_id.as_str(), row))
             .collect::<BTreeMap<_, _>>();
         assert_eq!(
-            by_fixture["fixture_pass_core"].claim_tier_after,
+            fixture_report(&by_fixture, "fixture_pass_core")?.claim_tier_after,
             PerformancePublicClaimState::RegressionFree
         );
         assert_eq!(
-            by_fixture["fixture_warn_cli"].claim_tier_after,
+            fixture_report(&by_fixture, "fixture_warn_cli")?.claim_tier_after,
             PerformancePublicClaimState::MeasuredLocal
         );
         assert_eq!(
-            by_fixture["fixture_degraded_accepted_fuse"].claim_tier_after,
+            fixture_report(&by_fixture, "fixture_degraded_accepted_fuse")?.claim_tier_after,
             PerformancePublicClaimState::DegradedButAccepted
         );
         assert_eq!(
-            by_fixture["fixture_blocked_core"].claim_tier_after,
+            fixture_report(&by_fixture, "fixture_blocked_core")?.claim_tier_after,
             PerformancePublicClaimState::Blocked
         );
         assert_eq!(
-            by_fixture["fixture_budget_exceeded_mvcc"].budget_decision,
+            fixture_report(&by_fixture, "fixture_budget_exceeded_mvcc")?.budget_decision,
             "budget_exceeded"
         );
         assert_eq!(
-            by_fixture["fixture_overhead_exceeded_repair_refresh"].overhead_decision,
+            fixture_report(&by_fixture, "fixture_overhead_exceeded_repair_refresh")?
+                .overhead_decision,
             "instrumentation_overhead_exceeded"
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_claim_policy_during_parse() {
-        let mut value = json!(sample_manifest());
-        value["workloads"][0]
-            .as_object_mut()
-            .expect("workload object")
-            .remove("claim_policy");
+    fn rejects_missing_claim_policy_during_parse() -> Result<()> {
+        let mut value = json!(sample_manifest()?);
+        first_workload_json_object_mut(&mut value)?.remove("claim_policy");
         let parsed = serde_json::from_value::<PerformanceBaselineManifest>(value);
         assert!(parsed.is_err());
+        Ok(())
     }
 
     #[test]
-    fn rejects_invalid_claim_budget() {
-        let mut manifest = sample_manifest();
-        manifest.workloads[0]
+    fn rejects_invalid_claim_budget() -> Result<()> {
+        let mut manifest = sample_manifest()?;
+        first_workload_mut(&mut manifest)?
             .claim_policy
             .overhead_budget
             .max_runtime_seconds = 0.0;
@@ -1839,23 +1910,23 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("claim overhead_budget values must be positive"))
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_statistical_summary_during_parse() {
-        let mut value = json!(sample_manifest());
-        value["fixture_evidence"][0]
-            .as_object_mut()
-            .expect("fixture object")
-            .remove("statistical_summary");
+    fn rejects_missing_statistical_summary_during_parse() -> Result<()> {
+        let mut value = json!(sample_manifest()?);
+        first_fixture_json_object_mut(&mut value)?.remove("statistical_summary");
         let parsed = serde_json::from_value::<PerformanceBaselineManifest>(value);
         assert!(parsed.is_err());
+        Ok(())
     }
 
     #[test]
-    fn rejects_authoritative_claim_without_authoritative_evidence() {
-        let mut manifest = sample_manifest();
-        manifest.fixture_evidence[0].evidence_authority = PerformanceEvidenceAuthority::Local;
+    fn rejects_authoritative_claim_without_authoritative_evidence() -> Result<()> {
+        let mut manifest = sample_manifest()?;
+        first_fixture_evidence_mut(&mut manifest)?.evidence_authority =
+            PerformanceEvidenceAuthority::Local;
         let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
         assert!(!report.valid);
         assert!(
@@ -1864,13 +1935,15 @@ mod tests {
                 .iter()
                 .any(|error| { error.contains("must cite fresh authoritative evidence") })
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_non_aggregatable_artifact_fields() {
-        let mut manifest = sample_manifest();
-        manifest.workloads[0].output_artifact.aggregate_key = "median_ns".to_owned();
-        manifest.workloads[0].output_artifact.path_template = "results/static.json".to_owned();
+    fn rejects_non_aggregatable_artifact_fields() -> Result<()> {
+        let mut manifest = sample_manifest()?;
+        let workload = first_workload_mut(&mut manifest)?;
+        workload.output_artifact.aggregate_key = "median_ns".to_owned();
+        workload.output_artifact.path_template = "results/static.json".to_owned();
         let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
         assert!(!report.valid);
         assert!(report.errors.iter().any(|error| {
@@ -1881,11 +1954,12 @@ mod tests {
                 error.contains("artifact path_template must include {workload_id}")
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn sample_artifact_manifest_maps_to_shared_qa_schema() {
-        let manifest = sample_manifest();
+    fn sample_artifact_manifest_maps_to_shared_qa_schema() -> Result<()> {
+        let manifest = sample_manifest()?;
         let artifact_manifest =
             build_performance_sample_artifact_manifest(&manifest, "artifacts/performance/dry-run");
         let errors = validate_manifest(&artifact_manifest);
@@ -1898,5 +1972,6 @@ mod tests {
                 .iter()
                 .any(|artifact| artifact.category == ArtifactCategory::BenchmarkBaseline)
         );
+        Ok(())
     }
 }
