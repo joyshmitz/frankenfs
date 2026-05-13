@@ -1560,6 +1560,39 @@ mod tests {
         Ok(())
     }
 
+    fn scenario_mut<'a>(
+        manifest: &'a mut WalGroupCommitGateManifest,
+        scenario_id: &str,
+    ) -> Result<&'a mut WalMeasurementScenario> {
+        manifest
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.scenario_id == scenario_id)
+            .with_context(|| format!("sample manifest includes scenario {scenario_id}"))
+    }
+
+    fn replay_proof_mut<'a>(
+        manifest: &'a mut WalGroupCommitGateManifest,
+        proof_id: &str,
+    ) -> Result<&'a mut WalReplayProofRow> {
+        manifest
+            .replay_proofs
+            .iter_mut()
+            .find(|proof| proof.proof_id == proof_id)
+            .with_context(|| format!("sample manifest includes replay proof {proof_id}"))
+    }
+
+    fn public_claim_mut<'a>(
+        manifest: &'a mut WalGroupCommitGateManifest,
+        claim_id: &str,
+    ) -> Result<&'a mut WalPublicClaim> {
+        manifest
+            .public_claims
+            .iter_mut()
+            .find(|claim| claim.claim_id == claim_id)
+            .with_context(|| format!("sample manifest includes public claim {claim_id}"))
+    }
+
     #[test]
     fn missing_required_invariant_is_rejected() {
         let mut manifest = sample_manifest();
@@ -1579,10 +1612,14 @@ mod tests {
     }
 
     #[test]
-    fn missing_raw_logs_are_rejected() {
+    fn missing_raw_logs_are_rejected() -> Result<()> {
         let mut manifest = sample_manifest();
-        manifest.scenarios[0].raw_logs.clear();
-        manifest.replay_proofs[0].raw_log_path.clear();
+        scenario_mut(&mut manifest, "wal_append_256gb_authoritative")?
+            .raw_logs
+            .clear();
+        replay_proof_mut(&mut manifest, "proof_large_pass")?
+            .raw_log_path
+            .clear();
 
         let report = validate_wal_group_commit_gate_manifest(&manifest);
 
@@ -1599,29 +1636,36 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("raw_log_path must not be empty"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_reference_lane_classifies_conservatively() {
+    fn missing_reference_lane_classifies_conservatively() -> Result<()> {
         let mut manifest = sample_manifest();
-        manifest.scenarios[0].reference = None;
-        manifest.scenarios[0].claim_state = WalClaimState::MissingReference;
-        for measurement in &mut manifest.scenarios[0].measurements {
-            measurement.claim_state = WalClaimState::MissingReference;
-            measurement.expected_classification = WalMeasurementClassification::MissingReference;
+        {
+            let scenario = scenario_mut(&mut manifest, "wal_append_256gb_authoritative")?;
+            scenario.reference = None;
+            scenario.claim_state = WalClaimState::MissingReference;
+            for measurement in &mut scenario.measurements {
+                measurement.claim_state = WalClaimState::MissingReference;
+                measurement.expected_classification =
+                    WalMeasurementClassification::MissingReference;
+            }
         }
-        manifest.public_claims[0].claim_state = WalClaimState::MissingReference;
+        public_claim_mut(&mut manifest, "parallel_wal_authoritative_claim")?.claim_state =
+            WalClaimState::MissingReference;
 
         let report = validate_wal_group_commit_gate_manifest(&manifest);
 
         assert!(report.valid, "{:?}", report.errors);
         assert!(report.missing_reference_count >= 4);
+        Ok(())
     }
 
     #[test]
-    fn authoritative_missing_reference_is_rejected() {
+    fn authoritative_missing_reference_is_rejected() -> Result<()> {
         let mut manifest = sample_manifest();
-        manifest.scenarios[0].reference = None;
+        scenario_mut(&mut manifest, "wal_append_256gb_authoritative")?.reference = None;
 
         let report = validate_wal_group_commit_gate_manifest(&manifest);
 
@@ -1632,6 +1676,7 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("missing comparable reference"))
         );
+        Ok(())
     }
 
     #[test]
@@ -1651,9 +1696,9 @@ mod tests {
     }
 
     #[test]
-    fn public_claim_cannot_improve_without_replay_proof() {
+    fn public_claim_cannot_improve_without_replay_proof() -> Result<()> {
         let mut manifest = sample_manifest();
-        manifest.replay_proofs[0].durable_publish_order_verified = false;
+        replay_proof_mut(&mut manifest, "proof_large_pass")?.durable_publish_order_verified = false;
 
         let report = validate_wal_group_commit_gate_manifest(&manifest);
 
@@ -1664,6 +1709,7 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("cannot improve until replay proof"))
         );
+        Ok(())
     }
 
     fn sample_manifest() -> WalGroupCommitGateManifest {
