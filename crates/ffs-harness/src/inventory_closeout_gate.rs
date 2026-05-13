@@ -440,16 +440,45 @@ pub fn render_inventory_closeout_gate_markdown(report: &InventoryCloseoutReport)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{Context, bail};
 
-    fn fixture_gate() -> InventoryCloseoutGate {
+    fn fixture_gate() -> Result<InventoryCloseoutGate> {
         parse_inventory_closeout_gate(DEFAULT_INVENTORY_CLOSEOUT_GATE_JSON)
-            .expect("default inventory closeout gate parses")
+            .context("default inventory closeout gate parses")
+    }
+
+    fn first_row_mut(gate: &mut InventoryCloseoutGate) -> Result<&mut InventoryCloseoutRow> {
+        gate.rows
+            .first_mut()
+            .context("fixture gate includes at least one row")
+    }
+
+    fn first_two_rows_mut(
+        gate: &mut InventoryCloseoutGate,
+    ) -> Result<(&mut InventoryCloseoutRow, &mut InventoryCloseoutRow)> {
+        let (first, rest) = gate
+            .rows
+            .split_first_mut()
+            .context("fixture gate includes at least one row")?;
+        let second = rest
+            .first_mut()
+            .context("fixture gate includes at least two rows")?;
+        Ok((first, second))
+    }
+
+    fn row_by_state_mut<'a>(
+        gate: &'a mut InventoryCloseoutGate,
+        state: &str,
+    ) -> Result<&'a mut InventoryCloseoutRow> {
+        gate.rows
+            .iter_mut()
+            .find(|row| row.state == state)
+            .with_context(|| format!("fixture gate includes state {state}"))
     }
 
     #[test]
-    fn default_gate_validates_high_risk_coverage() {
-        let report = validate_default_inventory_closeout_gate()
-            .expect("default inventory closeout gate validates");
+    fn default_gate_validates_high_risk_coverage() -> Result<()> {
+        let report = validate_default_inventory_closeout_gate()?;
         assert_eq!(report.bead_id, "bd-rpjp9");
         for surface in HIGH_RISK_SURFACES {
             assert!(
@@ -457,11 +486,12 @@ mod tests {
                 "missing surface {surface}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn missing_high_risk_surface_is_rejected() {
-        let mut gate = fixture_gate();
+    fn missing_high_risk_surface_is_rejected() -> Result<()> {
+        let mut gate = fixture_gate()?;
         gate.rows.retain(|r| r.risk_surface != "fuzz");
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
@@ -470,21 +500,23 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must classify at least one row from risk_surface `fuzz`"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_xfstests_surface_is_rejected() {
-        let mut gate = fixture_gate();
+    fn missing_xfstests_surface_is_rejected() -> Result<()> {
+        let mut gate = fixture_gate()?;
         gate.rows.retain(|r| r.risk_surface != "xfstests");
         let report = validate_inventory_closeout_gate(&gate);
         assert!(report.errors.iter().any(|err| err.contains("`xfstests`")));
+        Ok(())
     }
 
     #[test]
-    fn duplicate_row_id_is_rejected() {
-        let mut gate = fixture_gate();
-        let dup = gate.rows[0].row_id.clone();
-        gate.rows[1].row_id = dup;
+    fn duplicate_row_id_is_rejected() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        let (first, second) = first_two_rows_mut(&mut gate)?;
+        second.row_id = first.row_id.clone();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
             report
@@ -492,12 +524,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicate inventory closeout row_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn row_id_prefix_is_enforced() {
-        let mut gate = fixture_gate();
-        gate.rows[0].row_id = "x_001".to_owned();
+    fn row_id_prefix_is_enforced() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        first_row_mut(&mut gate)?.row_id = "x_001".to_owned();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
             report
@@ -505,31 +538,25 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("must start with inv_"))
         );
+        Ok(())
     }
 
     #[test]
-    fn linked_bead_state_requires_bd_prefix() {
-        let mut gate = fixture_gate();
-        let row = gate
-            .rows
-            .iter_mut()
-            .find(|r| r.state == "linked_bead")
-            .expect("linked_bead row exists");
+    fn linked_bead_state_requires_bd_prefix() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        let row = row_by_state_mut(&mut gate, "linked_bead")?;
         row.linked_bead_or_artifact = "PROJ-1".to_owned();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(report.errors.iter().any(|err| {
             err.contains("linked_bead state requires linked_bead_or_artifact starting with bd-")
         }));
+        Ok(())
     }
 
     #[test]
-    fn completed_artifact_state_requires_artifact_path() {
-        let mut gate = fixture_gate();
-        let row = gate
-            .rows
-            .iter_mut()
-            .find(|r| r.state == "completed_artifact")
-            .expect("completed artifact row exists");
+    fn completed_artifact_state_requires_artifact_path() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        let row = row_by_state_mut(&mut gate, "completed_artifact")?;
         row.linked_bead_or_artifact = "no-slash-no-path".to_owned();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
@@ -538,17 +565,15 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("completed_artifact state requires an artifact path"))
         );
+        Ok(())
     }
 
     #[test]
-    fn stale_allowed_requires_future_expiry() {
-        let mut gate = fixture_gate();
-        let row = gate
-            .rows
-            .iter_mut()
-            .find(|r| r.state == "stale_allowed_until")
-            .expect("stale_allowed row exists");
-        row.stale_expiry_unix = gate.now_unix.saturating_sub(1);
+    fn stale_allowed_requires_future_expiry() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        let stale_expiry_unix = gate.now_unix.saturating_sub(1);
+        let row = row_by_state_mut(&mut gate, "stale_allowed_until")?;
+        row.stale_expiry_unix = stale_expiry_unix;
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
             report
@@ -556,16 +581,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("stale_expiry_unix must be in the future"))
         );
+        Ok(())
     }
 
     #[test]
-    fn stale_allowed_requires_owner() {
-        let mut gate = fixture_gate();
-        let row = gate
-            .rows
-            .iter_mut()
-            .find(|r| r.state == "stale_allowed_until")
-            .expect("stale_allowed row exists");
+    fn stale_allowed_requires_owner() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        let row = row_by_state_mut(&mut gate, "stale_allowed_until")?;
         row.owner = String::new();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
@@ -574,16 +596,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("stale_allowed_until requires owner"))
         );
+        Ok(())
     }
 
     #[test]
-    fn stale_allowed_requires_user_risk_rationale() {
-        let mut gate = fixture_gate();
-        let row = gate
-            .rows
-            .iter_mut()
-            .find(|r| r.state == "stale_allowed_until")
-            .expect("stale_allowed row exists");
+    fn stale_allowed_requires_user_risk_rationale() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        let row = row_by_state_mut(&mut gate, "stale_allowed_until")?;
         row.user_risk_rationale = String::new();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
@@ -592,31 +611,25 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("stale_allowed_until requires user_risk_rationale"))
         );
+        Ok(())
     }
 
     #[test]
-    fn stale_allowed_requires_linked_bead_or_artifact() {
-        let mut gate = fixture_gate();
-        let row = gate
-            .rows
-            .iter_mut()
-            .find(|r| r.state == "stale_allowed_until")
-            .expect("stale_allowed row exists");
+    fn stale_allowed_requires_linked_bead_or_artifact() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        let row = row_by_state_mut(&mut gate, "stale_allowed_until")?;
         row.linked_bead_or_artifact = String::new();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(report.errors.iter().any(|err| {
             err.contains("stale_allowed_until requires linked bead or non-goal artifact")
         }));
+        Ok(())
     }
 
     #[test]
-    fn duplicate_of_must_match_existing_row() {
-        let mut gate = fixture_gate();
-        let row = gate
-            .rows
-            .iter_mut()
-            .find(|r| r.state == "duplicate_of")
-            .expect("duplicate_of row exists");
+    fn duplicate_of_must_match_existing_row() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        let row = row_by_state_mut(&mut gate, "duplicate_of")?;
         row.duplicate_of = "inv_does_not_exist".to_owned();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
@@ -625,16 +638,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("does not match any other row_id"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_of_cannot_point_to_self() {
-        let mut gate = fixture_gate();
-        let row = gate
-            .rows
-            .iter_mut()
-            .find(|r| r.state == "duplicate_of")
-            .expect("duplicate_of row exists");
+    fn duplicate_of_cannot_point_to_self() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        let row = row_by_state_mut(&mut gate, "duplicate_of")?;
         row.duplicate_of = row.row_id.clone();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
@@ -643,16 +653,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("duplicate_of cannot point to itself"))
         );
+        Ok(())
     }
 
     #[test]
-    fn explicit_non_goal_requires_rationale_and_owner() {
-        let mut gate = fixture_gate();
-        let row = gate
-            .rows
-            .iter_mut()
-            .find(|r| r.state == "explicit_non_goal")
-            .expect("non-goal row exists");
+    fn explicit_non_goal_requires_rationale_and_owner() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        let row = row_by_state_mut(&mut gate, "explicit_non_goal")?;
         row.user_risk_rationale = String::new();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
@@ -661,30 +668,24 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("requires user_risk_rationale"))
         );
+        Ok(())
     }
 
     #[test]
-    fn host_blocked_requires_linked_bead_or_artifact() {
-        let mut gate = fixture_gate();
-        let row = gate
-            .rows
-            .iter_mut()
-            .find(|r| r.state == "host_blocked")
-            .expect("host_blocked row exists");
+    fn host_blocked_requires_linked_bead_or_artifact() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        let row = row_by_state_mut(&mut gate, "host_blocked")?;
         row.linked_bead_or_artifact = "no-prefix-no-slash".to_owned();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(report.errors.iter().any(|err| err
             .contains("host_blocked state requires linked bead or artifact path")));
+        Ok(())
     }
 
     #[test]
-    fn false_positive_requires_owner_and_rationale() {
-        let mut gate = fixture_gate();
-        let row = gate
-            .rows
-            .iter_mut()
-            .find(|r| r.state == "false_positive")
-            .expect("false_positive row exists");
+    fn false_positive_requires_owner_and_rationale() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        let row = row_by_state_mut(&mut gate, "false_positive")?;
         row.owner = String::new();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
@@ -693,12 +694,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("false_positive state requires owner"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_state_is_rejected() {
-        let mut gate = fixture_gate();
-        gate.rows[0].state = "completely_made_up".to_owned();
+    fn unsupported_state_is_rejected() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        first_row_mut(&mut gate)?.state = "completely_made_up".to_owned();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
             report
@@ -706,12 +708,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported state"))
         );
+        Ok(())
     }
 
     #[test]
-    fn unsupported_risk_surface_is_rejected() {
-        let mut gate = fixture_gate();
-        gate.rows[0].risk_surface = "telepathy".to_owned();
+    fn unsupported_risk_surface_is_rejected() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        first_row_mut(&mut gate)?.risk_surface = "telepathy".to_owned();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
             report
@@ -719,12 +722,13 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("unsupported risk_surface"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_matched_snippet_hash_is_rejected() {
-        let mut gate = fixture_gate();
-        gate.rows[0].matched_snippet_hash = String::new();
+    fn missing_matched_snippet_hash_is_rejected() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        first_row_mut(&mut gate)?.matched_snippet_hash = String::new();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
             report
@@ -732,11 +736,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing matched_snippet_hash"))
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_rows_list_is_rejected() {
-        let mut gate = fixture_gate();
+    fn empty_rows_list_is_rejected() -> Result<()> {
+        let mut gate = fixture_gate()?;
         gate.rows.clear();
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
@@ -745,11 +750,12 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("at least one row"))
         );
+        Ok(())
     }
 
     #[test]
-    fn now_unix_must_be_positive() {
-        let mut gate = fixture_gate();
+    fn now_unix_must_be_positive() -> Result<()> {
+        let mut gate = fixture_gate()?;
         gate.now_unix = 0;
         let report = validate_inventory_closeout_gate(&gate);
         assert!(
@@ -758,17 +764,18 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("now_unix must be positive"))
         );
+        Ok(())
     }
 
     #[test]
-    fn render_inventory_closeout_gate_markdown_default_gate() {
-        let report = validate_default_inventory_closeout_gate()
-            .expect("default inventory closeout gate validates");
+    fn render_inventory_closeout_gate_markdown_default_gate() -> Result<()> {
+        let report = validate_default_inventory_closeout_gate()?;
         let markdown = render_inventory_closeout_gate_markdown(&report);
         insta::assert_snapshot!(
             "render_inventory_closeout_gate_markdown_default_gate",
             markdown
         );
+        Ok(())
     }
 
     #[test]
@@ -782,13 +789,16 @@ mod tests {
     }
 
     #[test]
-    fn fail_on_errors_rejects_invalid_report() {
-        let mut gate = fixture_gate();
-        gate.rows[0].risk_surface = "telepathy".to_owned();
+    fn fail_on_errors_rejects_invalid_report() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        first_row_mut(&mut gate)?.risk_surface = "telepathy".to_owned();
         let report = validate_inventory_closeout_gate(&gate);
-        let err = fail_on_inventory_closeout_gate_errors(&report)
-            .expect_err("invalid report fails closed");
+        let err = match fail_on_inventory_closeout_gate_errors(&report) {
+            Ok(()) => bail!("invalid report fails closed"),
+            Err(err) => err,
+        };
         assert!(err.to_string().contains("inventory closeout gate failed"));
         assert!(err.to_string().contains("unsupported risk_surface"));
+        Ok(())
     }
 }
