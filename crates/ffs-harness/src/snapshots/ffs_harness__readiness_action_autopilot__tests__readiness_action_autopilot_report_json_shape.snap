@@ -1,0 +1,184 @@
+---
+source: crates/ffs-harness/src/readiness_action_autopilot.rs
+expression: serde_json::to_string_pretty(&shape)?
+---
+{
+  "schema_version": 1,
+  "report_count": 4,
+  "report_ids": [
+    "readiness_action_local_safe_schema_slice",
+    "readiness_action_permissioned_xfstests_blocked",
+    "readiness_action_stale_large_host_swarm_evidence",
+    "readiness_action_contradictory_release_gate_claim"
+  ],
+  "reports": [
+    {
+      "report_id": "readiness_action_local_safe_schema_slice",
+      "generated_at": "2026-05-07T00:00:00Z",
+      "source_input_count": 2,
+      "recommendation_count": 1,
+      "source_inputs": [
+        {
+          "input_id": "beads-open-queue",
+          "kind": "beads_jsonl",
+          "state": "present",
+          "required": true,
+          "has_schema_version": true,
+          "has_digest": false
+        },
+        {
+          "input_id": "release-gate-policy",
+          "kind": "release_gate_policy",
+          "state": "present",
+          "required": true,
+          "has_schema_version": true,
+          "has_digest": false
+        }
+      ],
+      "recommendations": [
+        {
+          "action_id": "define-readiness-action-schema",
+          "safety_class": "local_safe",
+          "controlling_bead": "bd-rchk0.98.1",
+          "evidence_tier": "tracker_only",
+          "ack_required": false,
+          "public_claim_effect": "no_change",
+          "diagnostic_count": 0,
+          "diagnostics": []
+        }
+      ]
+    },
+    {
+      "report_id": "readiness_action_permissioned_xfstests_blocked",
+      "generated_at": "2026-05-07T00:00:00Z",
+      "source_input_count": 2,
+      "recommendation_count": 1,
+      "source_inputs": [
+        {
+          "input_id": "beads-open-queue",
+          "kind": "beads_jsonl",
+          "state": "present",
+          "required": true,
+          "has_schema_version": true,
+          "has_digest": false
+        },
+        {
+          "input_id": "operational-readiness-report",
+          "kind": "operational_readiness_report",
+          "state": "missing",
+          "required": true,
+          "has_schema_version": true,
+          "has_digest": false
+        }
+      ],
+      "recommendations": [
+        {
+          "action_id": "run-permissioned-xfstests-baseline",
+          "safety_class": "permissioned",
+          "controlling_bead": "bd-rchk3.3",
+          "evidence_tier": "operational_readiness",
+          "ack_required": true,
+          "public_claim_effect": "block_upgrade",
+          "diagnostic_count": 1,
+          "diagnostics": [
+            {
+              "diagnostic_id": "xfstests-real-run-ack-missing",
+              "severity": "error",
+              "source_kind": "operational_readiness_report",
+              "has_source_path": true,
+              "has_stale_window": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "report_id": "readiness_action_stale_large_host_swarm_evidence",
+      "generated_at": "2026-05-07T00:00:00Z",
+      "source_input_count": 2,
+      "recommendation_count": 1,
+      "source_inputs": [
+        {
+          "input_id": "proof-bundle-report",
+          "kind": "proof_bundle_report",
+          "state": "stale",
+          "required": true,
+          "has_schema_version": true,
+          "has_digest": false
+        },
+        {
+          "input_id": "host-capability-manifest",
+          "kind": "host_capability_artifact",
+          "state": "permission_required",
+          "required": true,
+          "has_schema_version": true,
+          "has_digest": false
+        }
+      ],
+      "recommendations": [
+        {
+          "action_id": "refresh-large-host-swarm-campaign",
+          "safety_class": "permissioned",
+          "controlling_bead": "bd-rchk0.53.8",
+          "evidence_tier": "authoritative",
+          "ack_required": true,
+          "public_claim_effect": "downgrade_required",
+          "diagnostic_count": 1,
+          "diagnostics": [
+            {
+              "diagnostic_id": "swarm-evidence-stale",
+              "severity": "warning",
+              "source_kind": "proof_bundle_report",
+              "has_source_path": true,
+              "has_stale_window": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "report_id": "readiness_action_contradictory_release_gate_claim",
+      "generated_at": "2026-05-07T00:00:00Z",
+      "source_input_count": 2,
+      "recommendation_count": 1,
+      "source_inputs": [
+        {
+          "input_id": "release-gate-policy",
+          "kind": "release_gate_policy",
+          "state": "present",
+          "required": true,
+          "has_schema_version": true,
+          "has_digest": false
+        },
+        {
+          "input_id": "proof-bundle-report",
+          "kind": "proof_bundle_report",
+          "state": "contradictory",
+          "required": true,
+          "has_schema_version": true,
+          "has_digest": false
+        }
+      ],
+      "recommendations": [
+        {
+          "action_id": "refuse-contradictory-readiness-upgrade",
+          "safety_class": "impossible",
+          "controlling_bead": "bd-rchk0",
+          "evidence_tier": "proof_bundle",
+          "ack_required": false,
+          "public_claim_effect": "block_upgrade",
+          "diagnostic_count": 1,
+          "diagnostics": [
+            {
+              "diagnostic_id": "release-gate-proof-contradiction",
+              "severity": "error",
+              "source_kind": "proof_bundle_report",
+              "has_source_path": true,
+              "has_stale_window": false
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

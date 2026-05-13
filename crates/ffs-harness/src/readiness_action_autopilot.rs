@@ -1689,6 +1689,95 @@ mod tests {
     }
 
     #[test]
+    fn readiness_action_autopilot_report_json_shape() -> serde_json::Result<()> {
+        let reports = default_source_reports();
+        let json = serde_json::to_string_pretty(&reports)?;
+        let decoded: Vec<ReadinessActionAutopilotReport> = serde_json::from_str(&json)?;
+
+        assert_eq!(decoded, reports);
+        assert_eq!(decoded.len(), REQUIRED_FIXTURE_CLASSIFICATIONS.len());
+        assert!(
+            decoded
+                .iter()
+                .all(|report| report.schema_version == READINESS_ACTION_AUTOPILOT_SCHEMA_VERSION)
+        );
+
+        let report_rows = decoded
+            .iter()
+            .map(|report| {
+                let input_rows = report
+                    .source_inputs
+                    .iter()
+                    .map(|input| {
+                        serde_json::json!({
+                            "input_id": &input.input_id,
+                            "kind": input.kind,
+                            "state": input.state,
+                            "required": input.required,
+                            "has_schema_version": input.schema_version.is_some(),
+                            "has_digest": input.digest.is_some(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let recommendation_rows = report
+                    .recommendations
+                    .iter()
+                    .map(|recommendation| {
+                        let diagnostic_rows = recommendation
+                            .diagnostics
+                            .iter()
+                            .map(|diagnostic| {
+                                serde_json::json!({
+                                    "diagnostic_id": &diagnostic.diagnostic_id,
+                                    "severity": diagnostic.severity,
+                                    "source_kind": diagnostic.source_kind,
+                                    "has_source_path": diagnostic.source_path.is_some(),
+                                    "has_stale_window": diagnostic.stale_age_days.is_some()
+                                        && diagnostic.freshness_ttl_days.is_some(),
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        serde_json::json!({
+                            "action_id": &recommendation.action_id,
+                            "safety_class": recommendation.safety_class,
+                            "controlling_bead": &recommendation.controlling_bead,
+                            "evidence_tier": recommendation.evidence_tier,
+                            "ack_required": recommendation.ack_required,
+                            "public_claim_effect": recommendation.public_claim_effect,
+                            "diagnostic_count": recommendation.diagnostics.len(),
+                            "diagnostics": diagnostic_rows,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+                serde_json::json!({
+                    "report_id": &report.report_id,
+                    "generated_at": &report.generated_at,
+                    "source_input_count": report.source_inputs.len(),
+                    "recommendation_count": report.recommendations.len(),
+                    "source_inputs": input_rows,
+                    "recommendations": recommendation_rows,
+                })
+            })
+            .collect::<Vec<_>>();
+        let shape = serde_json::json!({
+            "schema_version": READINESS_ACTION_AUTOPILOT_SCHEMA_VERSION,
+            "report_count": decoded.len(),
+            "report_ids": decoded
+                .iter()
+                .map(|report| report.report_id.as_str())
+                .collect::<Vec<_>>(),
+            "reports": report_rows,
+        });
+
+        insta::assert_snapshot!(
+            "readiness_action_autopilot_report_json_shape",
+            serde_json::to_string_pretty(&shape)?
+        );
+        Ok(())
+    }
+
+    #[test]
     fn fixtures_round_trip_with_stable_json() -> serde_json::Result<()> {
         let fixture_set = default_readiness_action_autopilot_fixture_set();
         let first = serde_json::to_string_pretty(&fixture_set)?;
