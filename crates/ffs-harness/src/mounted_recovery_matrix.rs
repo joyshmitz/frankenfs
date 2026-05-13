@@ -666,9 +666,17 @@ pub fn fail_on_mounted_recovery_matrix_errors(report: &MountedRecoveryMatrixRepo
 mod tests {
     use super::*;
 
-    fn valid_matrix() -> MountedRecoveryMatrix {
+    fn valid_matrix() -> Result<MountedRecoveryMatrix> {
         parse_mounted_recovery_matrix(DEFAULT_RECOVERY_MATRIX_JSON)
-            .expect("default recovery matrix parses")
+    }
+
+    fn first_scenario_mut(
+        matrix: &mut MountedRecoveryMatrix,
+    ) -> Result<&mut MountedRecoveryScenario> {
+        matrix
+            .scenarios
+            .first_mut()
+            .context("matrix includes first scenario")
     }
 
     #[test]
@@ -696,9 +704,9 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_recovery_command_is_rejected() {
-        let mut matrix = valid_matrix();
-        matrix.scenarios[0].recovery_command = "rm -rf /tmp/frankenfs".to_owned();
+    fn unsafe_recovery_command_is_rejected() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        first_scenario_mut(&mut matrix)?.recovery_command = "rm -rf /tmp/frankenfs".to_owned();
         let report = validate_mounted_recovery_matrix(&matrix);
         assert!(
             report
@@ -706,16 +714,17 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("unsafe host command"))
         );
+        Ok(())
     }
 
     #[test]
-    fn process_termination_must_preserve_partial_artifacts() {
-        let mut matrix = valid_matrix();
+    fn process_termination_must_preserve_partial_artifacts() -> Result<()> {
+        let mut matrix = valid_matrix()?;
         let scenario = matrix
             .scenarios
             .iter_mut()
             .find(|scenario| scenario.lifecycle_event.as_str().eq("process_termination"))
-            .expect("process termination scenario exists");
+            .context("process termination scenario exists")?;
         scenario.process_control.preserve_partial_artifacts = false;
         let report = validate_mounted_recovery_matrix(&matrix);
         assert!(
@@ -724,12 +733,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("process_termination must preserve"))
         );
+        Ok(())
     }
 
     #[test]
-    fn absolute_artifact_paths_are_rejected() {
-        let mut matrix = valid_matrix();
-        matrix.scenarios[0].actual_state_artifact = "/tmp/actual.json".to_owned();
+    fn absolute_artifact_paths_are_rejected() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        first_scenario_mut(&mut matrix)?.actual_state_artifact = "/tmp/actual.json".to_owned();
         let report = validate_mounted_recovery_matrix(&matrix);
         assert!(
             report
@@ -737,12 +747,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("path must be relative"))
         );
+        Ok(())
     }
 
     #[test]
-    fn pass_classification_must_use_none_error_class() {
-        let mut matrix = valid_matrix();
-        matrix.scenarios[0].error_class = "product_failure".to_owned();
+    fn pass_classification_must_use_none_error_class() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        first_scenario_mut(&mut matrix)?.error_class = "product_failure".to_owned();
         let report = validate_mounted_recovery_matrix(&matrix);
         assert!(
             report
@@ -750,13 +761,23 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("pass classification"))
         );
+        Ok(())
     }
 
     #[test]
-    fn duplicate_scenario_ids_are_rejected() {
-        let mut matrix = valid_matrix();
-        let duplicate = matrix.scenarios[0].scenario_id.clone();
-        matrix.scenarios[1].scenario_id = duplicate;
+    fn duplicate_scenario_ids_are_rejected() -> Result<()> {
+        let mut matrix = valid_matrix()?;
+        let duplicate = matrix
+            .scenarios
+            .first()
+            .context("matrix includes first scenario")?
+            .scenario_id
+            .clone();
+        matrix
+            .scenarios
+            .get_mut(1)
+            .context("matrix includes second scenario")?
+            .scenario_id = duplicate;
         let report = validate_mounted_recovery_matrix(&matrix);
         assert!(
             report
@@ -764,5 +785,6 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("duplicate scenario_id"))
         );
+        Ok(())
     }
 }
