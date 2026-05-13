@@ -1145,9 +1145,9 @@ mod tests {
 
     const CHECKED_IN_SPEC_JSON: &str = include_str!("../../../docs/operator-recovery-drill.json");
 
-    fn checked_in_spec() -> OperatorRecoveryDrillSpec {
+    fn checked_in_spec() -> Result<OperatorRecoveryDrillSpec> {
         serde_json::from_str(CHECKED_IN_SPEC_JSON)
-            .expect("checked-in operator recovery drill is valid JSON")
+            .context("checked-in operator recovery drill is valid JSON")
     }
 
     fn report_for(mut spec: OperatorRecoveryDrillSpec) -> OperatorRecoveryDrillReport {
@@ -1155,9 +1155,35 @@ mod tests {
         validate_operator_recovery_drill(&spec)
     }
 
+    fn mutating_scenario_mut(
+        spec: &mut OperatorRecoveryDrillSpec,
+    ) -> Result<&mut OperatorRecoveryScenario> {
+        spec.scenarios
+            .iter_mut()
+            .find(|scenario| {
+                scenario
+                    .expected_outcome
+                    .eq(&OperatorRecoveryOutcome::MutatingRepairVerified)
+            })
+            .context("fixture includes mutating scenario")
+    }
+
+    fn dry_run_scenario_mut(
+        spec: &mut OperatorRecoveryDrillSpec,
+    ) -> Result<&mut OperatorRecoveryScenario> {
+        spec.scenarios
+            .iter_mut()
+            .find(|scenario| {
+                scenario
+                    .expected_outcome
+                    .eq(&OperatorRecoveryOutcome::DryRunSuccess)
+            })
+            .context("fixture includes dry-run scenario")
+    }
+
     #[test]
-    fn checked_in_drill_validates_required_contract() {
-        let spec = checked_in_spec();
+    fn checked_in_drill_validates_required_contract() -> Result<()> {
+        let spec = checked_in_spec()?;
         let report = validate_operator_recovery_drill(&spec);
         assert!(report.valid, "{:#?}", report.errors);
         assert_eq!(report.scenario_count, 4);
@@ -1167,20 +1193,13 @@ mod tests {
         assert!(report.missing_required_outcomes.is_empty());
         assert!(report.missing_required_log_fields.is_empty());
         assert!(report.missing_required_consumers.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn malformed_image_hash_payloads_are_rejected() {
-        let mut spec = checked_in_spec();
-        let scenario = spec
-            .scenarios
-            .iter_mut()
-            .find(|scenario| {
-                scenario
-                    .expected_outcome
-                    .eq(&OperatorRecoveryOutcome::MutatingRepairVerified)
-            })
-            .expect("fixture includes mutating scenario");
+    fn malformed_image_hash_payloads_are_rejected() -> Result<()> {
+        let mut spec = checked_in_spec()?;
+        let scenario = mutating_scenario_mut(&mut spec)?;
         scenario.image_hashes.original_image_hash = "sha256:not-a-real-digest".to_owned();
         scenario.image_hashes.pre_repair_hash =
             "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz".to_owned();
@@ -1202,20 +1221,13 @@ mod tests {
                 report.errors
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn mutating_repair_requires_rollback_and_verification() {
-        let mut spec = checked_in_spec();
-        let scenario = spec
-            .scenarios
-            .iter_mut()
-            .find(|scenario| {
-                scenario
-                    .expected_outcome
-                    .eq(&OperatorRecoveryOutcome::MutatingRepairVerified)
-            })
-            .expect("fixture includes mutating scenario");
+    fn mutating_repair_requires_rollback_and_verification() -> Result<()> {
+        let mut spec = checked_in_spec()?;
+        let scenario = mutating_scenario_mut(&mut spec)?;
         scenario.repair_plan.rollback_available = false;
         scenario.verification.post_repair_scrub_clean = false;
         let report = report_for(spec);
@@ -1232,21 +1244,18 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("post-repair verification"))
         );
+        Ok(())
     }
 
     #[test]
-    fn blocking_preflight_failure_cannot_mutate() {
-        let mut spec = checked_in_spec();
-        let scenario = spec
-            .scenarios
-            .iter_mut()
-            .find(|scenario| {
-                scenario
-                    .expected_outcome
-                    .eq(&OperatorRecoveryOutcome::MutatingRepairVerified)
-            })
-            .expect("fixture includes mutating scenario");
-        scenario.preflight_checks[0].passed = false;
+    fn blocking_preflight_failure_cannot_mutate() -> Result<()> {
+        let mut spec = checked_in_spec()?;
+        let scenario = mutating_scenario_mut(&mut spec)?;
+        let preflight = scenario
+            .preflight_checks
+            .first_mut()
+            .context("mutating scenario includes preflight check")?;
+        preflight.passed = false;
         let report = report_for(spec);
         assert!(!report.valid);
         assert!(
@@ -1255,20 +1264,13 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("blocking preflight failure"))
         );
+        Ok(())
     }
 
     #[test]
-    fn dry_run_scenario_cannot_request_mutation() {
-        let mut spec = checked_in_spec();
-        let scenario = spec
-            .scenarios
-            .iter_mut()
-            .find(|scenario| {
-                scenario
-                    .expected_outcome
-                    .eq(&OperatorRecoveryOutcome::DryRunSuccess)
-            })
-            .expect("fixture includes dry-run scenario");
+    fn dry_run_scenario_cannot_request_mutation() -> Result<()> {
+        let mut spec = checked_in_spec()?;
+        let scenario = dry_run_scenario_mut(&mut spec)?;
         scenario.repair_plan.mutation_requested = true;
         let report = report_for(spec);
         assert!(!report.valid);
@@ -1278,11 +1280,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("must not mutate the image"))
         );
+        Ok(())
     }
 
     #[test]
-    fn missing_log_field_is_rejected() {
-        let mut spec = checked_in_spec();
+    fn missing_log_field_is_rejected() -> Result<()> {
+        let mut spec = checked_in_spec()?;
         spec.required_log_fields
             .retain(|field| field.as_str().ne("rollback_or_refusal_outcome"));
         let report = report_for(spec);
@@ -1292,12 +1295,17 @@ mod tests {
                 .missing_required_log_fields
                 .contains(&"rollback_or_refusal_outcome".to_owned())
         );
+        Ok(())
     }
 
     #[test]
-    fn proof_bundle_consumer_is_required() {
-        let mut spec = checked_in_spec();
-        for artifact in &mut spec.scenarios[0].expected_artifacts {
+    fn proof_bundle_consumer_is_required() -> Result<()> {
+        let mut spec = checked_in_spec()?;
+        let scenario = spec
+            .scenarios
+            .first_mut()
+            .context("fixture includes first scenario")?;
+        for artifact in &mut scenario.expected_artifacts {
             artifact
                 .consumers
                 .retain(|consumer| consumer.as_str().ne("proof_bundle"));
@@ -1310,6 +1318,7 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("proof_bundle artifact consumer"))
         );
+        Ok(())
     }
 
     fn happy_gate() -> MutationPreconditionGate {
@@ -1500,15 +1509,17 @@ mod tests {
     /// silently breaks downstream proof-bundle / release-gate
     /// dashboard parsers.
     #[test]
-    fn render_operator_recovery_drill_markdown_default_sample() {
-        let report = report_for(checked_in_spec());
+    fn render_operator_recovery_drill_markdown_default_sample() -> Result<()> {
+        let report = report_for(checked_in_spec()?);
         let markdown = render_operator_recovery_drill_markdown(&report);
         insta::assert_snapshot!(markdown);
+        Ok(())
     }
 
     #[test]
     fn operator_recovery_drill_report_json_shape() -> Result<()> {
-        let report = validate_operator_recovery_drill(&checked_in_spec());
+        let spec = checked_in_spec()?;
+        let report = validate_operator_recovery_drill(&spec);
         let json = serde_json::to_string_pretty(&report)?;
         let parsed: OperatorRecoveryDrillReport = serde_json::from_str(&json)?;
         assert_eq!(parsed, report);
