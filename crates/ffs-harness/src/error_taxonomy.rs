@@ -438,11 +438,16 @@ pub struct PresetAlignmentResult {
 mod tests {
     use super::*;
 
-    fn repo_root() -> String {
+    fn repo_root() -> std::io::Result<String> {
         env!("CARGO_MANIFEST_DIR")
             .strip_suffix("/crates/ffs-harness")
-            .expect("harness must be in crates/ffs-harness")
-            .to_owned()
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "harness must be in crates/ffs-harness",
+                )
+            })
     }
 
     #[test]
@@ -498,8 +503,8 @@ mod tests {
     }
 
     #[test]
-    fn runbook_links_exist_on_disk() {
-        let root = repo_root();
+    fn runbook_links_exist_on_disk() -> std::io::Result<()> {
+        let root = repo_root()?;
         let results = check_runbook_links(&root);
         for r in &results {
             assert!(
@@ -508,13 +513,13 @@ mod tests {
                 r.code, r.runbook_path
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn variant_references_exist_in_ffs_error() {
-        let root = repo_root();
-        let src = std::fs::read_to_string(format!("{root}/crates/ffs-error/src/lib.rs"))
-            .expect("read ffs-error/src/lib.rs");
+    fn variant_references_exist_in_ffs_error() -> std::io::Result<()> {
+        let root = repo_root()?;
+        let src = std::fs::read_to_string(format!("{root}/crates/ffs-error/src/lib.rs"))?;
         let results = check_variant_references(&src);
         for r in &results {
             assert!(
@@ -523,6 +528,7 @@ mod tests {
                 r.variant, r.code
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -601,8 +607,8 @@ mod tests {
     }
 
     #[test]
-    fn class_runbook_paths_exist_on_disk() {
-        let root = repo_root();
+    fn class_runbook_paths_exist_on_disk() -> std::io::Result<()> {
+        let root = repo_root()?;
         for class in ErrorClass::all() {
             if let Some(path) = class.runbook_path() {
                 let full = format!("{root}/{path}");
@@ -612,5 +618,6 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 }
