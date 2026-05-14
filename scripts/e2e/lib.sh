@@ -789,7 +789,7 @@ e2e_rch_capture() {
         status="$wait_status"
     fi
 
-    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+    if grep -Fq "[RCH] local (" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
         e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}|command=$*"
         printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
         return 99

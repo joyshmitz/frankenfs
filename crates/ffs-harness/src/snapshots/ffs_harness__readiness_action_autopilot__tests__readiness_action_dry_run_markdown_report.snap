@@ -7,7 +7,7 @@ expression: markdown
 - Report: `readiness_action_planner_test_report`
 - Generated at: `2026-05-07T00:00:00Z`
 - Dry run: `true`
-- Recommendations: `4`
+- Recommendations: `8`
 - Suppressed duplicates: `0`
 - Cleanup status: `not_required`
 
@@ -30,7 +30,20 @@ expression: markdown
 
 | Action | Safety | Ack | Claim | Evidence | Diagnostics | Reproduction Command |
 |---|---:|---:|---|---|---:|---|
+| preserve-degraded-rch-proof-ledger | LocalSafe | false | NoChange | ProofBundle | 1 | `ffs-harness rch-proof-ledger --transcript artifacts/rch/transcripts/cargo_check.raw` |
+| preserve-foreign-owner-handoff | LocalSafe | false | NoChange | TrackerOnly | 0 | `ffs-harness claimability-plan --tracker-report polluted_tracker_source_hygiene_report.json` |
+| claim-source-aware-task | LocalSafe | false | NoChange | TrackerOnly | 0 | `ffs-harness claimability-plan --tracker-report tracker_source_hygiene_report.json` |
 | define-readiness-action-schema | LocalSafe | false | NoChange | TrackerOnly | 0 | `cargo test -p ffs-harness readiness_action_autopilot` |
+| block-permission-gated-claimability-row | Permissioned | true | BlockUpgrade | TrackerOnly | 2 | `XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/ffs_xfstests_e2e.sh` |
 | run-permissioned-xfstests-baseline | Permissioned | true | BlockUpgrade | OperationalReadiness | 3 | `XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/ffs_xfstests_e2e.sh` |
 | refresh-large-host-swarm-campaign | Permissioned | true | DowngradeRequired | Authoritative | 4 | `FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host scripts/e2e/ffs_swarm_workload_harness_e2e.sh` |
 | refuse-contradictory-readiness-upgrade | Impossible | false | BlockUpgrade | ProofBundle | 2 | `cargo test -p ffs-harness release_gate -- --nocapture` |
+
+## Operator Evidence
+
+| Action | Mail Thread | Reservation Artifact | Proof Artifact | Safe Next Commands |
+|---|---|---|---|---|
+| preserve-degraded-rch-proof-ledger | bd-0chpv.4 | none | artifacts/rch/proof_ledgers/remote_success_artifact_warning.json | preserve worker exit=0 transcript and artifact warning before deciding whether to rerun<br>reject [RCH] local fallback as proof |
+| preserve-foreign-owner-handoff | tracker-hygiene | none | none | message owner project before moving, closing, rewriting, or claiming foreign rows |
+| claim-source-aware-task | bd-0chpv.5 | artifacts/agent_mail/reservations/bd-0chpv.5.json | none | br update --no-db --json --actor <agent> --claim bd-0chpv.5<br>file_reservation_paths(project_key, agent_name, exact_paths, reason="bd-0chpv.5") |
+| block-permission-gated-claimability-row | bd-rchk3.3 | none | none | do not run without XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices |

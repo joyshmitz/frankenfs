@@ -1,15 +1,16 @@
 ---
 source: crates/ffs-harness/src/readiness_action_autopilot.rs
-expression: serde_json::to_string_pretty(&shape)?
+expression: "serde_json::to_string_pretty(&shape)?"
 ---
 {
   "schema_version": 1,
-  "report_count": 4,
+  "report_count": 5,
   "report_ids": [
     "readiness_action_local_safe_schema_slice",
     "readiness_action_permissioned_xfstests_blocked",
     "readiness_action_stale_large_host_swarm_evidence",
-    "readiness_action_contradictory_release_gate_claim"
+    "readiness_action_contradictory_release_gate_claim",
+    "readiness_action_claimability_rch_operator_evidence"
   ],
   "reports": [
     {
@@ -173,6 +174,96 @@ expression: serde_json::to_string_pretty(&shape)?
               "diagnostic_id": "release-gate-proof-contradiction",
               "severity": "error",
               "source_kind": "proof_bundle_report",
+              "has_source_path": true,
+              "has_stale_window": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "report_id": "readiness_action_claimability_rch_operator_evidence",
+      "generated_at": "2026-05-14T00:00:00Z",
+      "source_input_count": 3,
+      "recommendation_count": 4,
+      "source_inputs": [
+        {
+          "input_id": "claimability-plan-polluted",
+          "kind": "claimability_plan_report",
+          "state": "present",
+          "required": true,
+          "has_schema_version": true,
+          "has_digest": false
+        },
+        {
+          "input_id": "claimability-plan-permission-gated",
+          "kind": "claimability_plan_report",
+          "state": "present",
+          "required": true,
+          "has_schema_version": true,
+          "has_digest": false
+        },
+        {
+          "input_id": "rch-proof-ledger-degraded",
+          "kind": "rch_proof_ledger",
+          "state": "present",
+          "required": true,
+          "has_schema_version": true,
+          "has_digest": false
+        }
+      ],
+      "recommendations": [
+        {
+          "action_id": "claim-source-aware-task",
+          "safety_class": "local_safe",
+          "controlling_bead": "bd-0chpv.5",
+          "evidence_tier": "tracker_only",
+          "ack_required": false,
+          "public_claim_effect": "no_change",
+          "diagnostic_count": 0,
+          "diagnostics": []
+        },
+        {
+          "action_id": "block-permission-gated-claimability-row",
+          "safety_class": "permissioned",
+          "controlling_bead": "bd-rchk3.3",
+          "evidence_tier": "tracker_only",
+          "ack_required": true,
+          "public_claim_effect": "block_upgrade",
+          "diagnostic_count": 1,
+          "diagnostics": [
+            {
+              "diagnostic_id": "claimability-permission-gate-present",
+              "severity": "warning",
+              "source_kind": "claimability_plan_report",
+              "has_source_path": true,
+              "has_stale_window": false
+            }
+          ]
+        },
+        {
+          "action_id": "preserve-foreign-owner-handoff",
+          "safety_class": "local_safe",
+          "controlling_bead": "bd-0chpv.2",
+          "evidence_tier": "tracker_only",
+          "ack_required": false,
+          "public_claim_effect": "no_change",
+          "diagnostic_count": 0,
+          "diagnostics": []
+        },
+        {
+          "action_id": "preserve-degraded-rch-proof-ledger",
+          "safety_class": "local_safe",
+          "controlling_bead": "bd-0chpv.4",
+          "evidence_tier": "proof_bundle",
+          "ack_required": false,
+          "public_claim_effect": "no_change",
+          "diagnostic_count": 1,
+          "diagnostics": [
+            {
+              "diagnostic_id": "rch-proof-ledger-artifact-warning",
+              "severity": "warning",
+              "source_kind": "rch_proof_ledger",
               "has_source_path": true,
               "has_stale_window": false
             }

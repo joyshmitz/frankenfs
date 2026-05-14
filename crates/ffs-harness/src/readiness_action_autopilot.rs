@@ -21,12 +21,14 @@ const REQUIRED_FIXTURE_CLASSIFICATIONS: [ReadinessFixtureClassification; 4] = [
     ReadinessFixtureClassification::ContradictoryEvidence,
 ];
 
-const REQUIRED_INPUT_KINDS: [ReadinessActionInputKind; 5] = [
+const REQUIRED_INPUT_KINDS: [ReadinessActionInputKind; 7] = [
     ReadinessActionInputKind::BeadsJsonl,
     ReadinessActionInputKind::ReleaseGatePolicy,
     ReadinessActionInputKind::ProofBundleReport,
     ReadinessActionInputKind::OperationalReadinessReport,
     ReadinessActionInputKind::HostCapabilityArtifact,
+    ReadinessActionInputKind::ClaimabilityPlanReport,
+    ReadinessActionInputKind::RchProofLedger,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +84,8 @@ pub enum ReadinessActionInputKind {
     ProofBundleReport,
     OperationalReadinessReport,
     HostCapabilityArtifact,
+    ClaimabilityPlanReport,
+    RchProofLedger,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -101,8 +105,16 @@ pub struct ReadinessActionRecommendation {
     pub title: String,
     pub safety_class: ReadinessActionSafetyClass,
     pub controlling_bead: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_thread_id: Option<String>,
     pub evidence_tier: ReadinessEvidenceTier,
     pub ack_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation_artifact_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof_artifact_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safe_next_commands: Vec<String>,
     pub reproduction_command: String,
     pub rationale: String,
     pub public_claim_effect: PublicClaimEffect,
@@ -280,8 +292,12 @@ pub fn default_readiness_action_autopilot_fixture_set() -> ReadinessActionAutopi
                         title: "Define readiness action autopilot schema and fixtures".to_owned(),
                         safety_class: ReadinessActionSafetyClass::LocalSafe,
                         controlling_bead: "bd-rchk0.98.1".to_owned(),
+                        mail_thread_id: None,
                         evidence_tier: ReadinessEvidenceTier::TrackerOnly,
                         ack_required: false,
+                        reservation_artifact_path: None,
+                        proof_artifact_path: None,
+                        safe_next_commands: Vec::new(),
                         reproduction_command:
                             "cargo test -p ffs-harness readiness_action_autopilot"
                                 .to_owned(),
@@ -318,8 +334,12 @@ pub fn default_readiness_action_autopilot_fixture_set() -> ReadinessActionAutopi
                         title: "Run permissioned xfstests baseline".to_owned(),
                         safety_class: ReadinessActionSafetyClass::Permissioned,
                         controlling_bead: "bd-rchk3.3".to_owned(),
+                        mail_thread_id: None,
                         evidence_tier: ReadinessEvidenceTier::OperationalReadiness,
                         ack_required: true,
+                        reservation_artifact_path: None,
+                        proof_artifact_path: None,
+                        safe_next_commands: Vec::new(),
                         reproduction_command: "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/ffs_xfstests_e2e.sh".to_owned(),
                         rationale: "The current queue contains xfstests work that cannot run without explicit mutation authorization.".to_owned(),
                         public_claim_effect: PublicClaimEffect::BlockUpgrade,
@@ -360,8 +380,12 @@ pub fn default_readiness_action_autopilot_fixture_set() -> ReadinessActionAutopi
                         title: "Refresh large-host swarm responsiveness evidence".to_owned(),
                         safety_class: ReadinessActionSafetyClass::Permissioned,
                         controlling_bead: "bd-rchk0.53.8".to_owned(),
+                        mail_thread_id: None,
                         evidence_tier: ReadinessEvidenceTier::Authoritative,
                         ack_required: true,
+                        reservation_artifact_path: None,
+                        proof_artifact_path: None,
+                        safe_next_commands: Vec::new(),
                         reproduction_command: "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host scripts/e2e/ffs_swarm_workload_harness_e2e.sh".to_owned(),
                         rationale: "Large-host responsiveness claims require fresh authoritative host evidence.".to_owned(),
                         public_claim_effect: PublicClaimEffect::DowngradeRequired,
@@ -406,8 +430,12 @@ pub fn default_readiness_action_autopilot_fixture_set() -> ReadinessActionAutopi
                         title: "Refuse contradictory readiness upgrade".to_owned(),
                         safety_class: ReadinessActionSafetyClass::Impossible,
                         controlling_bead: "bd-rchk0".to_owned(),
+                        mail_thread_id: None,
                         evidence_tier: ReadinessEvidenceTier::ProofBundle,
                         ack_required: false,
+                        reservation_artifact_path: None,
+                        proof_artifact_path: None,
+                        safe_next_commands: Vec::new(),
                         reproduction_command: "cargo test -p ffs-harness release_gate -- --nocapture".to_owned(),
                         rationale: "A public readiness upgrade is impossible while proof-bundle and release-gate evidence disagree.".to_owned(),
                         public_claim_effect: PublicClaimEffect::BlockUpgrade,
@@ -420,6 +448,144 @@ pub fn default_readiness_action_autopilot_fixture_set() -> ReadinessActionAutopi
                             "Resolve the artifact conflict before changing README or FEATURE_PARITY readiness claims.",
                         )],
                     }],
+                },
+            },
+            ReadinessActionAutopilotFixture {
+                fixture_id: "claimability_and_rch_operator_evidence".to_owned(),
+                expected_classification: ReadinessFixtureClassification::LocalSafe,
+                report: ReadinessActionAutopilotReport {
+                    schema_version: READINESS_ACTION_AUTOPILOT_SCHEMA_VERSION,
+                    report_id: "readiness_action_claimability_rch_operator_evidence".to_owned(),
+                    generated_at: "2026-05-14T00:00:00Z".to_owned(),
+                    source_inputs: vec![
+                        input(
+                            "claimability-plan-polluted",
+                            ReadinessActionInputKind::ClaimabilityPlanReport,
+                            "artifacts/claimability_autopilot/polluted_one_claimable/claimability_plan.json",
+                            ReadinessActionInputState::Present,
+                        ),
+                        input(
+                            "claimability-plan-permission-gated",
+                            ReadinessActionInputKind::ClaimabilityPlanReport,
+                            "artifacts/claimability_autopilot/permission_gated_zero_claimable/claimability_plan.json",
+                            ReadinessActionInputState::Present,
+                        ),
+                        input(
+                            "rch-proof-ledger-degraded",
+                            ReadinessActionInputKind::RchProofLedger,
+                            "artifacts/rch/proof_ledgers/remote_success_artifact_warning.json",
+                            ReadinessActionInputState::Present,
+                        ),
+                    ],
+                    recommendations: vec![
+                        ReadinessActionRecommendation {
+                            action_id: "claim-source-aware-task".to_owned(),
+                            title: "Claim source-aware task from claimability plan".to_owned(),
+                            safety_class: ReadinessActionSafetyClass::LocalSafe,
+                            controlling_bead: "bd-0chpv.5".to_owned(),
+                            mail_thread_id: Some("bd-0chpv.5".to_owned()),
+                            evidence_tier: ReadinessEvidenceTier::TrackerOnly,
+                            ack_required: false,
+                            reservation_artifact_path: Some(
+                                "artifacts/agent_mail/reservations/bd-0chpv.5.json".to_owned(),
+                            ),
+                            proof_artifact_path: None,
+                            safe_next_commands: vec![
+                                "br update --no-db --json --actor <agent> --claim bd-0chpv.5"
+                                    .to_owned(),
+                                "file_reservation_paths(project_key, agent_name, exact_paths, reason=\"bd-0chpv.5\")"
+                                    .to_owned(),
+                            ],
+                            reproduction_command:
+                                "ffs-harness claimability-plan --tracker-report tracker_source_hygiene_report.json"
+                                    .to_owned(),
+                            rationale: "Claimability planner output can identify one safe local task, but it is operator evidence only and does not change readiness claims."
+                                .to_owned(),
+                            public_claim_effect: PublicClaimEffect::NoChange,
+                            diagnostics: Vec::new(),
+                        },
+                        ReadinessActionRecommendation {
+                            action_id: "block-permission-gated-claimability-row".to_owned(),
+                            title: "Block permission-gated claimability row".to_owned(),
+                            safety_class: ReadinessActionSafetyClass::Permissioned,
+                            controlling_bead: "bd-rchk3.3".to_owned(),
+                            mail_thread_id: Some("bd-rchk3.3".to_owned()),
+                            evidence_tier: ReadinessEvidenceTier::TrackerOnly,
+                            ack_required: true,
+                            reservation_artifact_path: None,
+                            proof_artifact_path: None,
+                            safe_next_commands: vec![
+                                "do not run without XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices"
+                                    .to_owned(),
+                            ],
+                            reproduction_command: "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices scripts/e2e/ffs_xfstests_e2e.sh".to_owned(),
+                            rationale: "The claimability plan preserves permission-gated rows as blocked work until the exact operator ACK is present.".to_owned(),
+                            public_claim_effect: PublicClaimEffect::BlockUpgrade,
+                            diagnostics: vec![diagnostic(
+                                "claimability-permission-gate-present",
+                                ReadinessActionDiagnosticSeverity::Warning,
+                                ReadinessActionInputKind::ClaimabilityPlanReport,
+                                Some("artifacts/claimability_autopilot/permission_gated_zero_claimable/claimability_plan.json"),
+                                "Claimability planner reported a permission-gated queue row.",
+                                "keep the action dry-run-only until the operator supplies the exact ACK",
+                            )],
+                        },
+                        ReadinessActionRecommendation {
+                            action_id: "preserve-foreign-owner-handoff".to_owned(),
+                            title: "Preserve foreign tracker rows for owner handoff".to_owned(),
+                            safety_class: ReadinessActionSafetyClass::LocalSafe,
+                            controlling_bead: "bd-0chpv.2".to_owned(),
+                            mail_thread_id: Some("tracker-hygiene".to_owned()),
+                            evidence_tier: ReadinessEvidenceTier::TrackerOnly,
+                            ack_required: false,
+                            reservation_artifact_path: None,
+                            proof_artifact_path: None,
+                            safe_next_commands: vec![
+                                "message owner project before moving, closing, rewriting, or claiming foreign rows"
+                                    .to_owned(),
+                            ],
+                            reproduction_command:
+                                "ffs-harness claimability-plan --tracker-report polluted_tracker_source_hygiene_report.json"
+                                    .to_owned(),
+                            rationale: "Polluted tracker rows are advisory owner-handoff evidence, not local readiness work."
+                                .to_owned(),
+                            public_claim_effect: PublicClaimEffect::NoChange,
+                            diagnostics: Vec::new(),
+                        },
+                        ReadinessActionRecommendation {
+                            action_id: "preserve-degraded-rch-proof-ledger".to_owned(),
+                            title: "Preserve degraded RCH proof ledger".to_owned(),
+                            safety_class: ReadinessActionSafetyClass::LocalSafe,
+                            controlling_bead: "bd-0chpv.4".to_owned(),
+                            mail_thread_id: Some("bd-0chpv.4".to_owned()),
+                            evidence_tier: ReadinessEvidenceTier::ProofBundle,
+                            ack_required: false,
+                            reservation_artifact_path: None,
+                            proof_artifact_path: Some(
+                                "artifacts/rch/proof_ledgers/remote_success_artifact_warning.json"
+                                    .to_owned(),
+                            ),
+                            safe_next_commands: vec![
+                                "preserve worker exit=0 transcript and artifact warning before deciding whether to rerun"
+                                    .to_owned(),
+                                "reject [RCH] local fallback as proof".to_owned(),
+                            ],
+                            reproduction_command:
+                                "ffs-harness rch-proof-ledger --transcript artifacts/rch/transcripts/cargo_check.raw"
+                                    .to_owned(),
+                            rationale: "A degraded RCH proof ledger is useful operator evidence, but it must not upgrade readiness by itself."
+                                .to_owned(),
+                            public_claim_effect: PublicClaimEffect::NoChange,
+                            diagnostics: vec![diagnostic(
+                                "rch-proof-ledger-artifact-warning",
+                                ReadinessActionDiagnosticSeverity::Warning,
+                                ReadinessActionInputKind::RchProofLedger,
+                                Some("artifacts/rch/proof_ledgers/remote_success_artifact_warning.json"),
+                                "Remote worker success has an artifact retrieval warning.",
+                                "preserve the transcript and use degraded-proof wording instead of upgrading readiness",
+                            )],
+                        },
+                    ],
                 },
             },
         ],
@@ -518,6 +684,49 @@ pub fn render_readiness_action_dry_run_markdown(report: &ReadinessActionDryRunRe
             scenario.diagnostic_count,
             markdown_table_cell(&scenario.reproduction_command)
         );
+    }
+
+    let operator_evidence_rows = report
+        .planner_result
+        .report
+        .recommendations
+        .iter()
+        .filter(|recommendation| {
+            recommendation.mail_thread_id.is_some()
+                || recommendation.reservation_artifact_path.is_some()
+                || recommendation.proof_artifact_path.is_some()
+                || !recommendation.safe_next_commands.is_empty()
+        })
+        .collect::<Vec<_>>();
+    if !operator_evidence_rows.is_empty() {
+        markdown.push_str("\n## Operator Evidence\n\n");
+        markdown.push_str("| Action | Mail Thread | Reservation Artifact | Proof Artifact | Safe Next Commands |\n|---|---|---|---|---|\n");
+        for recommendation in operator_evidence_rows {
+            let safe_next_commands = if recommendation.safe_next_commands.is_empty() {
+                "none".to_owned()
+            } else {
+                recommendation.safe_next_commands.join("<br>")
+            };
+            let _ = writeln!(
+                markdown,
+                "| {} | {} | {} | {} | {} |",
+                markdown_table_cell(&recommendation.action_id),
+                markdown_table_cell(recommendation.mail_thread_id.as_deref().unwrap_or("none")),
+                markdown_table_cell(
+                    recommendation
+                        .reservation_artifact_path
+                        .as_deref()
+                        .unwrap_or("none")
+                ),
+                markdown_table_cell(
+                    recommendation
+                        .proof_artifact_path
+                        .as_deref()
+                        .unwrap_or("none")
+                ),
+                markdown_table_cell(&safe_next_commands)
+            );
+        }
     }
 
     if !report.planner_result.suppressed_duplicates.is_empty() {
@@ -1314,6 +1523,8 @@ const fn input_kind_label(kind: ReadinessActionInputKind) -> &'static str {
         ReadinessActionInputKind::ProofBundleReport => "proof_bundle_report",
         ReadinessActionInputKind::OperationalReadinessReport => "operational_readiness_report",
         ReadinessActionInputKind::HostCapabilityArtifact => "host_capability_artifact",
+        ReadinessActionInputKind::ClaimabilityPlanReport => "claimability_plan_report",
+        ReadinessActionInputKind::RchProofLedger => "rch_proof_ledger",
     }
 }
 
@@ -1503,6 +1714,46 @@ fn validate_recommendation(
             recommendation.action_id
         ));
     }
+    if recommendation
+        .mail_thread_id
+        .as_ref()
+        .is_some_and(|thread| thread.trim().is_empty())
+    {
+        errors.push(format!(
+            "{fixture_label}: action {} mail_thread_id must be non-empty when supplied",
+            recommendation.action_id
+        ));
+    }
+    if recommendation
+        .reservation_artifact_path
+        .as_ref()
+        .is_some_and(|path| path.trim().is_empty())
+    {
+        errors.push(format!(
+            "{fixture_label}: action {} reservation_artifact_path must be non-empty when supplied",
+            recommendation.action_id
+        ));
+    }
+    if recommendation
+        .proof_artifact_path
+        .as_ref()
+        .is_some_and(|path| path.trim().is_empty())
+    {
+        errors.push(format!(
+            "{fixture_label}: action {} proof_artifact_path must be non-empty when supplied",
+            recommendation.action_id
+        ));
+    }
+    if recommendation
+        .safe_next_commands
+        .iter()
+        .any(|command| command.trim().is_empty())
+    {
+        errors.push(format!(
+            "{fixture_label}: action {} safe_next_commands must not contain empty commands",
+            recommendation.action_id
+        ));
+    }
     if recommendation.reproduction_command.trim().is_empty() {
         errors.push(format!(
             "{fixture_label}: action {} missing reproduction_command",
@@ -1643,7 +1894,7 @@ mod tests {
         let report = validate_readiness_action_fixture_set(&fixture_set);
 
         assert!(report.valid, "{:?}", report.errors);
-        assert_eq!(report.fixture_count, 4);
+        assert_eq!(report.fixture_count, 5);
         assert_eq!(
             report.classifications_seen,
             REQUIRED_FIXTURE_CLASSIFICATIONS
@@ -1695,7 +1946,12 @@ mod tests {
         let decoded: Vec<ReadinessActionAutopilotReport> = serde_json::from_str(&json)?;
 
         assert_eq!(decoded, reports);
-        assert_eq!(decoded.len(), REQUIRED_FIXTURE_CLASSIFICATIONS.len());
+        assert_eq!(
+            decoded.len(),
+            default_readiness_action_autopilot_fixture_set()
+                .fixtures
+                .len()
+        );
         assert!(
             decoded
                 .iter()
@@ -1841,7 +2097,11 @@ mod tests {
         assert_eq!(
             action_ids,
             vec![
+                "preserve-degraded-rch-proof-ledger",
+                "preserve-foreign-owner-handoff",
+                "claim-source-aware-task",
                 "define-readiness-action-schema",
+                "block-permission-gated-claimability-row",
                 "run-permissioned-xfstests-baseline",
                 "refresh-large-host-swarm-campaign",
                 "refuse-contradictory-readiness-upgrade",
@@ -1871,20 +2131,35 @@ mod tests {
             .iter()
             .map(|recommendation| recommendation.action_id.as_str())
             .collect();
-        let suppressed: Vec<&str> = result
+        let suppressed: Vec<(&str, &str)> = result
             .suppressed_duplicates
             .iter()
-            .map(|duplicate| duplicate.controlling_bead.as_str())
+            .map(|duplicate| {
+                (
+                    duplicate.controlling_bead.as_str(),
+                    duplicate.action_id.as_str(),
+                )
+            })
             .collect();
 
         assert_eq!(
             action_ids,
             vec![
+                "preserve-degraded-rch-proof-ledger",
+                "preserve-foreign-owner-handoff",
+                "claim-source-aware-task",
                 "define-readiness-action-schema",
                 "refuse-contradictory-readiness-upgrade",
             ]
         );
-        assert_eq!(suppressed, vec!["bd-rchk0.53.8", "bd-rchk3.3"]);
+        assert_eq!(
+            suppressed,
+            vec![
+                ("bd-rchk0.53.8", "refresh-large-host-swarm-campaign"),
+                ("bd-rchk3.3", "block-permission-gated-claimability-row"),
+                ("bd-rchk3.3", "run-permissioned-xfstests-baseline"),
+            ]
+        );
     }
 
     #[test]
@@ -1959,6 +2234,70 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn planner_preserves_claimability_and_rch_operator_evidence() -> Result<()> {
+        let result = plan_readiness_actions(&planning_input(default_source_reports(), Vec::new()));
+        let claim = planned_action(&result, "claim-source-aware-task")?;
+        assert_eq!(claim.mail_thread_id.as_deref(), Some("bd-0chpv.5"));
+        assert_eq!(
+            claim.reservation_artifact_path.as_deref(),
+            Some("artifacts/agent_mail/reservations/bd-0chpv.5.json")
+        );
+        assert!(
+            claim
+                .safe_next_commands
+                .iter()
+                .any(|command| command.contains("file_reservation_paths"))
+        );
+
+        let proof = planned_action(&result, "preserve-degraded-rch-proof-ledger")?;
+        assert_eq!(proof.mail_thread_id.as_deref(), Some("bd-0chpv.4"));
+        assert_eq!(
+            proof.proof_artifact_path.as_deref(),
+            Some("artifacts/rch/proof_ledgers/remote_success_artifact_warning.json")
+        );
+        assert_eq!(proof.public_claim_effect, PublicClaimEffect::NoChange);
+        assert!(
+            proof
+                .safe_next_commands
+                .iter()
+                .any(|command| command.contains("[RCH] local fallback"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn advisory_planning_inputs_cannot_upgrade_public_claims() {
+        let result = plan_readiness_actions(&planning_input(default_source_reports(), Vec::new()));
+        let advisory_actions = [
+            "claim-source-aware-task",
+            "block-permission-gated-claimability-row",
+            "preserve-foreign-owner-handoff",
+            "preserve-degraded-rch-proof-ledger",
+        ];
+
+        for action_id in advisory_actions {
+            let recommendation = result
+                .report
+                .recommendations
+                .iter()
+                .find(|recommendation| recommendation.action_id == action_id)
+                .expect("advisory action exists");
+            assert_ne!(
+                recommendation.public_claim_effect,
+                PublicClaimEffect::UpgradeEligible,
+                "{action_id} must not upgrade public readiness"
+            );
+        }
+        assert!(
+            result
+                .report
+                .recommendations
+                .iter()
+                .all(|recommendation| recommendation.action_id != "claim-raw-bv-parent-epic")
+        );
     }
 
     #[test]
@@ -2170,6 +2509,7 @@ mod tests {
             .iter()
             .map(|scenario| scenario.action_id.as_str())
             .collect();
+        assert!(action_ids.contains(&"claim-source-aware-task"));
         assert!(action_ids.contains(&"define-readiness-action-schema"));
         assert!(action_ids.contains(&"run-permissioned-xfstests-baseline"));
         assert!(action_ids.contains(&"refresh-large-host-swarm-campaign"));
@@ -2190,6 +2530,11 @@ mod tests {
         let markdown = render_readiness_action_dry_run_markdown(&report);
 
         assert!(markdown.contains("# Readiness Action Dry-Run Report"));
+        assert!(markdown.contains("## Operator Evidence"));
+        assert!(markdown.contains("claim-source-aware-task"));
+        assert!(
+            markdown.contains("artifacts/rch/proof_ledgers/remote_success_artifact_warning.json")
+        );
         assert!(markdown.contains("define-readiness-action-schema"));
         assert!(markdown.contains("run-permissioned-xfstests-baseline"));
         assert!(markdown.contains("refresh-large-host-swarm-campaign"));
@@ -2308,8 +2653,12 @@ mod tests {
             title: action_id.replace('-', " "),
             safety_class: ReadinessActionSafetyClass::LocalSafe,
             controlling_bead: "bd-rchk0.98.3".to_owned(),
+            mail_thread_id: None,
             evidence_tier: ReadinessEvidenceTier::TrackerOnly,
             ack_required: false,
+            reservation_artifact_path: None,
+            proof_artifact_path: None,
+            safe_next_commands: Vec::new(),
             reproduction_command: "cargo test -p ffs-harness readiness_action_autopilot".to_owned(),
             rationale: "Synthetic planner guard test action.".to_owned(),
             public_claim_effect: PublicClaimEffect::NoChange,

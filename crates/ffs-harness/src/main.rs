@@ -10824,19 +10824,22 @@ mod readiness_action_cli_tests {
             .map(|scenario| scenario.action_id.as_str())
             .collect();
         assert!(action_ids.contains(&"define-readiness-action-schema"));
+        assert!(action_ids.contains(&"claim-source-aware-task"));
+        assert!(action_ids.contains(&"preserve-degraded-rch-proof-ledger"));
         assert!(action_ids.contains(&"run-permissioned-xfstests-baseline"));
         assert!(action_ids.contains(&"refresh-large-host-swarm-campaign"));
 
         let markdown = std::fs::read_to_string(&markdown_path)?;
         assert!(markdown.contains("# Readiness Action Dry-Run Report"));
+        assert!(markdown.contains("## Operator Evidence"));
         assert!(markdown.contains("LocalSafe"));
         assert!(markdown.contains("Permissioned"));
         assert!(markdown.contains("DowngradeRequired"));
 
         let stdout_log = std::fs::read_to_string(&stdout_log_path)?;
         assert!(stdout_log.contains("readiness-action-dry-run"));
-        assert!(stdout_log.contains("recommendations=4"));
-        assert!(stdout_log.contains("scenarios=4"));
+        assert!(stdout_log.contains("recommendations=8"));
+        assert!(stdout_log.contains("scenarios=8"));
         assert!(stdout_log.contains("cleanup_status=not_required_dry_run"));
 
         let stderr_log = std::fs::read_to_string(&stderr_log_path)?;

@@ -1771,6 +1771,14 @@ stdout log, and deterministic stderr log, then checks that local-safe,
 permissioned, stale-evidence, and impossible recommendations stay classified as
 planner output rather than executed work.
 
+The dry-run report also accepts advisory claimability-plan and RCH proof-ledger
+inputs. These recommendations carry exact bead IDs, Agent Mail thread IDs when
+known, reservation/proof artifact paths, and safe next commands, but they remain
+operator evidence only: polluted tracker rows stay owner-handoff, permission
+gates stay blocked until the exact ACK, raw bv parent-epic suggestions stay
+suppressed when claimability has zero safe claims, and proof-capture artifacts
+must not improve public readiness scores or parity percentages.
+
 The suite treats malformed planning input as a fail-closed error and verifies
 that the deterministic stderr log says permissioned, destructive, and
 stale-evidence commands stayed dry-run only. It complements

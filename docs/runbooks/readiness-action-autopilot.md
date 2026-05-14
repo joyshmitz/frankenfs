@@ -27,8 +27,10 @@ E2E artifact bundles.
 ## Agent Handoff
 
 Each recommendation carries a controlling bead, exact reproduction command,
-safety class, evidence tier, diagnostics, and public-claim effect. Use the
-controlling bead as the Agent Mail thread id and Beads traceability anchor.
+safety class, evidence tier, diagnostics, public-claim effect, and, when known,
+Agent Mail thread ids plus reservation/proof artifact paths. Use the controlling
+bead as the Beads traceability anchor and the supplied mail thread as the
+coordination thread.
 
 Local-safe actions may be claimed and executed by an agent after normal file
 reservation checks. Permissioned, destructive, or stale-evidence actions require
@@ -38,6 +40,25 @@ Do not treat a dry-run recommendation as product evidence. A dry-run report can
 justify opening or prioritizing work, but public readiness claims must remain
 tied to real proof bundles, operational readiness reports, host capability
 artifacts, or xfstests result artifacts.
+
+## Claimability And RCH Advisory Inputs
+
+The dry-run planner may consume claimability-plan reports and RCH proof ledgers
+as advisory operator evidence. These inputs are intentionally weaker than
+product proof:
+
+| Advisory input | Allowed use | Forbidden claim effect |
+|---|---|---|
+| claimability plan | choose the next safe bead, carry the Agent Mail thread id, preserve reservation artifact paths, and copy exact safe-next commands | claim a raw bv parent epic, mutate foreign tracker rows, or improve a readiness percentage |
+| permission-gated claimability row | block the action until the exact ACK is present | satisfy xfstests, mount, or large-host evidence requirements |
+| degraded RCH proof ledger | preserve worker id, remote exit status, transcript path, and artifact retrieval warning for operator review | treat `[RCH] local` fallback as proof or upgrade public readiness from proof capture alone |
+
+When a claimability plan reports zero safe claims and raw bv recommends a parent
+epic, the readiness action output must stay handoff-only: it may explain that
+the parent-epic suggestion was suppressed, but it must not recommend claiming
+the parent epic. Every claimability/RCH recommendation must keep
+`public_claim_effect` at `no_change`, `block_upgrade`, or `downgrade_required`;
+`upgrade_eligible` is reserved for authoritative product evidence.
 
 ## Advisory Readiness Lab Handoff
 

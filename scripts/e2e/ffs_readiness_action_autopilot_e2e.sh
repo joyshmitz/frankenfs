@@ -124,10 +124,14 @@ output_kinds = {row["kind"] for row in metadata["output_paths"]}
 if output_kinds != {"json_report", "markdown_report", "stdout_log", "stderr_log"}:
     raise SystemExit(f"unexpected output paths: {output_kinds}")
 scenarios = report["scenarios"]
-if len(scenarios) != 4:
-    raise SystemExit(f"expected 4 dry-run scenarios, got {len(scenarios)}")
+if len(scenarios) != 8:
+    raise SystemExit(f"expected 8 dry-run scenarios, got {len(scenarios)}")
 action_ids = {row["action_id"] for row in scenarios}
 required_actions = {
+    "claim-source-aware-task",
+    "preserve-degraded-rch-proof-ledger",
+    "block-permission-gated-claimability-row",
+    "preserve-foreign-owner-handoff",
     "define-readiness-action-schema",
     "run-permissioned-xfstests-baseline",
     "refresh-large-host-swarm-campaign",
@@ -142,11 +146,32 @@ if "downgrade_required" not in claim_effects and "block_upgrade" not in claim_ef
     raise SystemExit(f"missing conservative claim effects: {claim_effects}")
 if any("no reproduction command was executed" not in row["dry_run_note"] for row in scenarios):
     raise SystemExit("every scenario must carry a dry-run note")
-if report["planner_result"]["report"]["recommendations"][0]["safety_class"] != "local_safe":
-    raise SystemExit("local-safe recommendation should rank first")
+if report["planner_result"]["report"]["recommendations"][0]["public_claim_effect"] == "upgrade_eligible":
+    raise SystemExit("advisory planning evidence must not rank as a public upgrade")
+advisory = [
+    row for row in report["planner_result"]["report"]["recommendations"]
+    if row["action_id"] in {
+        "claim-source-aware-task",
+        "preserve-degraded-rch-proof-ledger",
+        "block-permission-gated-claimability-row",
+        "preserve-foreign-owner-handoff",
+    }
+]
+if len(advisory) != 4:
+    raise SystemExit("missing advisory claimability/rch recommendations")
+if any(row["public_claim_effect"] == "upgrade_eligible" for row in advisory):
+    raise SystemExit("advisory claimability/rch recommendations must not upgrade public claims")
+if not any(row.get("mail_thread_id") == "bd-0chpv.5" for row in advisory):
+    raise SystemExit("claimability recommendation missing mail thread id")
+if not any(row.get("proof_artifact_path") for row in advisory):
+    raise SystemExit("rch proof recommendation missing proof artifact path")
+if not any(row.get("reservation_artifact_path") for row in advisory):
+    raise SystemExit("claimability recommendation missing reservation artifact path")
+if any(row["action_id"] == "claim-raw-bv-parent-epic" for row in report["planner_result"]["report"]["recommendations"]):
+    raise SystemExit("raw bv parent epic claim leaked into recommendations")
 if "# Readiness Action Dry-Run Report" not in raw_output:
     raise SystemExit("markdown heading missing")
-for marker in ("LocalSafe", "Permissioned", "DowngradeRequired"):
+for marker in ("LocalSafe", "Permissioned", "DowngradeRequired", "Operator Evidence"):
     if marker not in raw_output:
         raise SystemExit(f"markdown missing {marker}")
 PY
@@ -158,8 +183,8 @@ fi
 
 e2e_step "Scenario 4: deterministic logs prove no commands executed"
 if grep -q "readiness-action-dry-run" "$DRY_RUN_RAW" \
-    && grep -q "recommendations=4" "$DRY_RUN_RAW" \
-    && grep -q "scenarios=4" "$DRY_RUN_RAW" \
+    && grep -q "recommendations=8" "$DRY_RUN_RAW" \
+    && grep -q "scenarios=8" "$DRY_RUN_RAW" \
     && grep -q "cleanup_status=not_required_dry_run" "$DRY_RUN_RAW" \
     && grep -q "no reproduction commands executed" "$DRY_RUN_RAW" \
     && grep -q "permissioned, destructive, and stale-evidence commands stayed dry-run only" "$DRY_RUN_RAW"; then
