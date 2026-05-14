@@ -568,15 +568,60 @@ pub fn classify_hostile_artifact_path(
 #[must_use]
 pub fn redact_host_path(text: &str) -> String {
     text.split_whitespace()
-        .map(|token| {
-            if token.starts_with('/') {
-                "<redacted-host-path>"
-            } else {
-                token
-            }
-        })
+        .map(redact_host_path_token)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn redact_host_path_token(token: &str) -> String {
+    if let Some(redacted) = redact_absolute_path_from(token, 0) {
+        return redacted;
+    }
+    token
+        .find('=')
+        .and_then(|index| redact_absolute_path_from(token, index + '='.len_utf8()))
+        .unwrap_or_else(|| token.to_owned())
+}
+
+fn redact_absolute_path_from(token: &str, probe_start: usize) -> Option<String> {
+    let path_start = skip_leading_path_wrappers(token, probe_start);
+    if !token.get(path_start..)?.starts_with('/') {
+        return None;
+    }
+    let path_end = trim_trailing_path_wrappers(token, path_start);
+    let prefix = token.get(..path_start)?;
+    let suffix = token.get(path_end..)?;
+    Some(format!("{}<redacted-host-path>{}", prefix, suffix))
+}
+
+fn skip_leading_path_wrappers(token: &str, start: usize) -> usize {
+    token
+        .get(start..)
+        .and_then(|suffix| {
+            suffix
+                .char_indices()
+                .find(|(_, ch)| !matches!(ch, '`' | '"' | '\'' | '(' | '[' | '{'))
+                .map(|(index, _)| start + index)
+        })
+        .unwrap_or(token.len())
+}
+
+fn trim_trailing_path_wrappers(token: &str, path_start: usize) -> usize {
+    let mut end = token.len();
+    while end > path_start {
+        let Some(prefix) = token.get(..end) else {
+            break;
+        };
+        let Some((index, ch)) = prefix.char_indices().next_back() else {
+            break;
+        };
+        if matches!(ch, '`' | '"' | '\'' | ')' | ']' | '}' | ',' | ';') {
+            end = index;
+        } else {
+            break;
+        }
+    }
+    end
 }
 
 #[must_use]
@@ -1516,6 +1561,23 @@ mod tests {
             redacted,
             "open <redacted-host-path> with <redacted-host-path>"
         );
+    }
+
+    #[test]
+    fn redacts_wrapped_and_option_value_host_paths() {
+        let redacted = redact_host_path(
+            "inspect `/home/user/private.img`, --ledger=/tmp/ledger.jsonl ('--scratch=/var/tmp/work.img')",
+        );
+        assert_eq!(
+            redacted,
+            "inspect `<redacted-host-path>`, --ledger=<redacted-host-path> ('--scratch=<redacted-host-path>')"
+        );
+    }
+
+    #[test]
+    fn redaction_preserves_relative_paths_placeholders_and_urls() {
+        let command = "ffs --model security/adversarial_image_threat_model.json --image <image> --url https://example.test/path";
+        assert_eq!(redact_host_path(command), command);
     }
 
     #[test]
