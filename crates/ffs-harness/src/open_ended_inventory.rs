@@ -1182,8 +1182,34 @@ fn directory_hash(paths: &[&SourceScopePathDecision]) -> String {
 fn count_note_matches(text: &str) -> usize {
     NOTE_MATCH_TOKENS
         .iter()
-        .map(|token| text.matches(token).count())
+        .map(|token| count_note_token_matches(text, token))
         .sum()
+}
+
+fn count_note_token_matches(text: &str, token: &str) -> usize {
+    match token {
+        "bd-" | "thread::sleep" => text.matches(token).count(),
+        _ => count_ascii_bounded_matches(text, token),
+    }
+}
+
+fn count_ascii_bounded_matches(text: &str, token: &str) -> usize {
+    text.match_indices(token)
+        .filter(|(start, _)| {
+            let end = start.saturating_add(token.len());
+            has_ascii_note_boundary(text, *start, end)
+        })
+        .count()
+}
+
+fn has_ascii_note_boundary(text: &str, start: usize, end: usize) -> bool {
+    let before = text[..start].chars().next_back();
+    let after = text[end..].chars().next();
+    !before.is_some_and(is_ascii_note_token_char) && !after.is_some_and(is_ascii_note_token_char)
+}
+
+fn is_ascii_note_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn count_linked_beads_or_artifacts(text: &str) -> usize {
@@ -2006,7 +2032,7 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
     use super::{
         DEFAULT_SOURCE_SCOPE_MANIFEST_JSON, REQUIRED_SOURCE_FAMILIES,
         SOURCE_SCOPE_MANIFEST_SCHEMA_VERSION, SourceScopeManifest, SourceScopeManifestReport,
-        parse_source_scope_manifest, scan_source_scope_manifest,
+        count_note_matches, parse_source_scope_manifest, scan_source_scope_manifest,
         validate_default_source_scope_manifest, validate_source_scope_manifest,
     };
 
@@ -2425,6 +2451,59 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                     .contains("validate-source-scope")
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn source_scope_note_counter_requires_token_boundaries() {
+        assert_eq!(
+            count_note_matches("FfsError::NotEmpty maps to ENOTEMPTY"),
+            0,
+            "errno constants and Rust identifiers must not count as NOTE markers"
+        );
+        assert_eq!(
+            count_note_matches("fake_source mock_impl dummyValue placeholderName stubbed"),
+            0,
+            "implementation-placeholder words inside identifiers are scanner noise"
+        );
+        assert_eq!(
+            count_note_matches(
+                "// NOTE: TODO fuzz FIXME bd-rchk7.1 non-goal not yet implemented thread::sleep fake mock dummy placeholder stub"
+            ),
+            12,
+            "standalone markers, tracked beads, explicit phrases, and sleep markers still count"
+        );
+    }
+
+    #[test]
+    fn source_scope_scan_ignores_note_inside_errno_identifier() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        populate_source_scope_workspace(temp.path())?;
+        write_sample_file(
+            temp.path(),
+            "crates/ffs-error/src/lib.rs",
+            "pub enum FfsError { NotEmpty }\nconst ERRNO: &str = \"ENOTEMPTY\";\n",
+        )?;
+
+        let report = scan_source_scope_manifest(
+            &fixture_manifest(),
+            temp.path(),
+            None,
+            "cargo run -p ffs-harness -- validate-source-scope-manifest",
+        );
+        assert!(report.valid, "scan should validate: {:?}", report.errors);
+        let tests = report
+            .scanned_sources
+            .iter()
+            .find(|source| source.source_family == "tests")
+            .expect("tests source scanned");
+        let errno_path = tests
+            .matched_paths
+            .iter()
+            .find(|path| path.source_path == "crates/ffs-error/src/lib.rs")
+            .expect("errno fixture path logged");
+        assert_eq!(errno_path.matched_note_count, 0);
+        assert_eq!(errno_path.linked_bead_or_artifact_count, 0);
         Ok(())
     }
 
