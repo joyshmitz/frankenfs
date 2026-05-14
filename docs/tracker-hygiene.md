@@ -285,6 +285,35 @@ Minimal report-shaped fixture:
 The mixed current-agent plus peer fixture used by the planner tests is
 `tests/fixtures/claimability_autopilot_live_reservation_snapshot.json`.
 
+### Post-Close Reservation Reconciliation
+
+At bead closeout, release the current agent's reservations and record the
+result in the Agent Mail thread. If `release_file_reservations` reports
+`released=0` but a later claim or snapshot still shows active leases held by
+the same agent, do not treat that as a peer blocker and do not force-release
+another agent's lease.
+
+Use this deterministic check:
+
+1. Call `release_file_reservations(project_key, agent_name)` or the exact
+   scoped release for the files owned by the bead.
+2. Capture a fresh, non-mutating reservation snapshot when available. If no
+   non-mutating source is available, record the state as unknown instead of
+   creating a probe lease.
+3. Classify remaining overlaps:
+   - `active_peer_conflict`: stop or request explicit handoff from the holder.
+   - `self_held`: reuse or renew only when the same agent is immediately
+     continuing related work; otherwise report the leftover lease in Agent
+     Mail and attempt another normal release.
+   - `shared_observation`, `expired`, or `no_active_conflict`: not blockers,
+     but still include the snapshot path or summary in closeout evidence.
+4. Send a final Agent Mail note with the release result, any fresh snapshot
+   path, and whether self-held leftovers remain.
+
+This check is advisory and fail-safe. It does not authorize deleting reservation
+artifacts, bypassing `file_reservation_paths`, force-releasing peer leases, or
+mutating `.beads/issues.jsonl` through a reservation conflict.
+
 ## Strict Mode
 
 `TRACKER_SOURCE_HYGIENE_STRICT=1` fails when foreign-looking open rows exist.

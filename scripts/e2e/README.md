@@ -1391,6 +1391,15 @@ cleanup is disabled by default for this suite so no files are deleted by agent
 runs; set `FFS_E2E_DISABLE_TEMP_CLEANUP=0` only when a human explicitly wants
 standard temp cleanup.
 
+For post-close reservation reconciliation, release the current agent's leases
+first, then capture a fresh non-mutating reservation snapshot when one is
+available. Treat active peer conflicts as handoff blockers, but classify
+current-agent leftovers as `self_held` so the next agent can decide whether the
+same lease is intentionally being reused or should be reported and released
+again. Record the release result and any snapshot path in the Agent Mail thread;
+do not force-release peer leases, delete reservation artifacts, or bypass live
+`file_reservation_paths` conflicts.
+
 ## Release Gate Evaluation
 
 Release gates are executable policy files that consume a validated proof bundle
