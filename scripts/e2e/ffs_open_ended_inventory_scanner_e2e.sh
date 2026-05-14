@@ -293,6 +293,7 @@ required_families = {
     "readme_status_docs",
     "feature_parity_doc",
     "canonical_spec_docs",
+    "architecture_design_docs",
     "conformance_docs",
     "conformance_fixture_artifacts",
     "fixture_manifests",

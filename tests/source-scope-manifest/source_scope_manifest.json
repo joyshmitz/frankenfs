@@ -56,6 +56,29 @@
       "non_applicability_rationale": ""
     },
     {
+      "id": "architecture_design_docs",
+      "source_family": "architecture_design_docs",
+      "included_globs": [
+        "docs/design-*.md",
+        "docs/oq*.md",
+        "docs/perf/README.md"
+      ],
+      "excluded_globs": [
+        "target/**",
+        "**/.rch-target/**",
+        "docs/**/_generated/**",
+        "docs/**/_artifacts/**"
+      ],
+      "risk_category": "docs_only",
+      "owner": "architecture",
+      "status": "active",
+      "expected_proof_types": ["docs-non-goal", "parser-unit"],
+      "freshness_ttl_days": 30,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
       "id": "conformance_docs",
       "source_family": "conformance_docs",
       "included_globs": [

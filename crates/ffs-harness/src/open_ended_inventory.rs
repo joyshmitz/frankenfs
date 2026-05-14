@@ -363,10 +363,11 @@ pub const DEFAULT_SOURCE_SCOPE_MANIFEST_PATH: &str =
 const DEFAULT_SOURCE_SCOPE_MANIFEST_JSON: &str =
     include_str!("../../../tests/source-scope-manifest/source_scope_manifest.json");
 
-const REQUIRED_SOURCE_FAMILIES: [&str; 19] = [
+const REQUIRED_SOURCE_FAMILIES: [&str; 20] = [
     "readme_status_docs",
     "feature_parity_doc",
     "canonical_spec_docs",
+    "architecture_design_docs",
     "conformance_docs",
     "conformance_fixture_artifacts",
     "fixture_manifests",
@@ -392,6 +393,9 @@ const CANONICAL_SPEC_DOCS: [&str; 5] = [
     "PROPOSED_ARCHITECTURE.md",
     "FEATURE_PARITY.md",
 ];
+
+const ARCHITECTURE_DESIGN_DOC_GLOBS: [&str; 3] =
+    ["docs/design-*.md", "docs/oq*.md", "docs/perf/README.md"];
 
 const CONFORMANCE_FIXTURE_ARTIFACT_GLOBS: [&str; 9] = [
     "conformance/COVERAGE.md",
@@ -932,6 +936,7 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             ));
         }
         "canonical_spec_docs" => validate_canonical_spec_docs_coverage(entry, errors),
+        "architecture_design_docs" => validate_architecture_design_docs(entry, &excluded, errors),
         "tests" => validate_tests_exclusions(entry, &excluded, missing_target_paths, errors),
         "conformance_docs" if missing_target_paths => {
             errors.push(format!(
@@ -960,6 +965,37 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             validate_performance_control_artifacts(entry, &excluded, errors);
         }
         _ => {}
+    }
+}
+
+fn validate_architecture_design_docs(
+    entry: &SourceScopeEntry,
+    excluded: &str,
+    errors: &mut Vec<String>,
+) {
+    for required_glob in ARCHITECTURE_DESIGN_DOC_GLOBS {
+        if !entry
+            .included_globs
+            .iter()
+            .any(|glob| glob == required_glob)
+        {
+            errors.push(format!(
+                "source `{}` must include architecture design doc glob `{required_glob}`",
+                entry.id
+            ));
+        }
+    }
+    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+        errors.push(format!(
+            "source `{}` must exclude build target paths from architecture design docs",
+            entry.id
+        ));
+    }
+    if !excluded.contains("_generated") || !excluded.contains("_artifacts") {
+        errors.push(format!(
+            "source `{}` must exclude generated architecture design doc directories",
+            entry.id
+        ));
     }
 }
 
@@ -2375,6 +2411,7 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         populate_test_control_artifact_source_scope_workspace(root)?;
         populate_operator_runbook_source_scope_workspace(root)?;
         populate_operational_evidence_artifact_source_scope_workspace(root)?;
+        populate_architecture_design_doc_source_scope_workspace(root)?;
         populate_performance_source_scope_workspace(root)
     }
 
@@ -2643,6 +2680,26 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         )
     }
 
+    fn populate_architecture_design_doc_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
+        write_sample_files(
+            root,
+            &[
+                (
+                    "docs/design-adaptive-refresh.md",
+                    "NOTE adaptive refresh design bd-m5wf.4.1 artifact\n",
+                ),
+                (
+                    "docs/oq1-native-mode-boundary.md",
+                    "NOTE native mode boundary bd-h6nz.6.1 artifact\n",
+                ),
+                (
+                    "docs/perf/README.md",
+                    "NOTE perf runbook bd-rchk5 artifact\n",
+                ),
+            ],
+        )
+    }
+
     fn populate_performance_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
         write_sample_files(
             root,
@@ -2857,6 +2914,21 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         assert!(report.errors.iter().any(|err| {
             err.contains("missing required family `operational_evidence_artifacts`")
         }));
+    }
+
+    #[test]
+    fn missing_architecture_design_docs_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "architecture_design_docs");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required family `architecture_design_docs`"))
+        );
     }
 
     #[test]
@@ -3295,6 +3367,27 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         assert!(report.errors.iter().any(|err| {
             err.contains("security/*.json")
                 || err.contains("generated operational evidence artifact directories")
+        }));
+    }
+
+    #[test]
+    fn architecture_design_docs_coverage_is_validated() {
+        let mut manifest = fixture_manifest();
+        let architecture_docs = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "architecture_design_docs")
+            .expect("architecture design docs source exists");
+        architecture_docs
+            .included_globs
+            .retain(|glob| glob != "docs/oq*.md");
+        architecture_docs
+            .excluded_globs
+            .retain(|glob| !glob.contains("_generated"));
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("docs/oq*.md")
+                || err.contains("generated architecture design doc directories")
         }));
     }
 
