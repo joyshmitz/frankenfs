@@ -84,7 +84,7 @@ expression: markdown
 
 | Command | Role | Exact command |
 |---|---|---|
-| `xfstests_preflight` | `preflight` | `cargo run -p ffs-harness -- xfstests-preflight --xfstests-dir third_party/xfstests-dev` |
+| `xfstests_preflight` | `preflight` | `XFSTESTS_DIR=third_party/xfstests-dev TEST_DIR=artifacts/xfstests/test-dir SCRATCH_MNT=artifacts/xfstests/scratch scripts/e2e/ffs_xfstests_preflight_e2e.sh --out artifacts/xfstests/preflight/report.json` |
 | `xfstests_permissioned_run` | `permissioned_run` | `XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices XFSTESTS_DIR=third_party/xfstests-dev TEST_DIR=artifacts/xfstests/test-dir SCRATCH_MNT=artifacts/xfstests/scratch RESULT_BASE=artifacts/xfstests/real-run scripts/e2e/ffs_xfstests_e2e.sh` |
 | `xfstests_preserve_artifacts` | `cleanup` | `RESULT_BASE=artifacts/xfstests/real-run find artifacts/xfstests/real-run -maxdepth 3 -type f -print | sort > artifacts/xfstests/real-run/artifact_manifest.txt` |
 

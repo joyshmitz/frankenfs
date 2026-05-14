@@ -1413,11 +1413,11 @@ pub fn build_xfstests_broker_manifest(
             PermissionedCampaignCommand {
                 command_id: "xfstests_preflight".to_owned(),
                 exact_command: format!(
-                    "XFSTESTS_DIR={} TEST_DIR={} SCRATCH_MNT={} RESULT_BASE={} scripts/e2e/ffs_xfstests_e2e.sh --dry-run",
+                    "XFSTESTS_DIR={} TEST_DIR={} SCRATCH_MNT={} scripts/e2e/ffs_xfstests_preflight_e2e.sh --out {}",
                     shell_single_quote(&input.xfstests_dir),
                     shell_single_quote(&input.test_dir),
                     shell_single_quote(&input.scratch_mnt),
-                    shell_single_quote(&input.result_base)
+                    shell_single_quote(&input.preflight_artifact_path)
                 ),
                 command_role: PermissionedCampaignCommandRole::Preflight,
             },
@@ -2982,7 +2982,20 @@ fn validate_xfstests_rehearsal_contract(
                 "xfstests rehearsal packets must not install packages or mutate the host setup automatically",
             );
         }
+        if command_invokes_removed_xfstests_preflight(&command.exact_command) {
+            push_issue(
+                issues,
+                &format!("exact_commands[{index}].exact_command"),
+                "removed_xfstests_preflight_command",
+                "xfstests preflight must use scripts/e2e/ffs_xfstests_preflight_e2e.sh, not a removed ffs-harness subcommand",
+            );
+        }
     }
+}
+
+fn command_invokes_removed_xfstests_preflight(command: &str) -> bool {
+    command.contains("ffs-harness -- xfstests-preflight")
+        || command.contains("ffs-harness xfstests-preflight")
 }
 
 fn command_invokes_auto_install(command: &str) -> bool {
@@ -4402,6 +4415,46 @@ mod tests {
     }
 
     #[test]
+    fn xfstests_rehearsal_refuses_removed_harness_preflight_command() {
+        let mut manifest = valid_xfstests_manifest();
+        let preflight = manifest
+            .exact_commands
+            .iter_mut()
+            .find(|command| command.command_id == "xfstests_preflight")
+            .expect("valid fixture has xfstests preflight command");
+        preflight.exact_command =
+            "cargo run -p ffs-harness -- xfstests-preflight --xfstests-dir third_party/xfstests-dev"
+                .to_owned();
+        assert_issue(&manifest, "removed_xfstests_preflight_command");
+    }
+
+    #[test]
+    fn xfstests_adapter_uses_hermetic_preflight_script() -> Result<()> {
+        let manifest = build_xfstests_broker_manifest(&xfstests_adapter_input())?;
+        let preflight = manifest
+            .exact_commands
+            .iter()
+            .find(|command| command.command_id == "xfstests_preflight")
+            .context("xfstests preflight command")?;
+        assert!(
+            preflight
+                .exact_command
+                .contains("scripts/e2e/ffs_xfstests_preflight_e2e.sh --out")
+        );
+        assert!(
+            preflight
+                .exact_command
+                .contains("artifacts/xfstests/preflight/report.json")
+        );
+        assert!(
+            !preflight
+                .exact_command
+                .contains("ffs-harness -- xfstests-preflight")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn xfstests_rehearsal_permissioned_run_must_name_scoped_env() -> Result<(), &'static str> {
         let mut manifest = valid_xfstests_manifest();
         let permissioned_run = manifest
@@ -5397,7 +5450,7 @@ mod tests {
             exact_commands: vec![
                 command(
                     "xfstests_preflight",
-                    "cargo run -p ffs-harness -- xfstests-preflight --xfstests-dir third_party/xfstests-dev",
+                    "XFSTESTS_DIR=third_party/xfstests-dev TEST_DIR=artifacts/xfstests/test-dir SCRATCH_MNT=artifacts/xfstests/scratch scripts/e2e/ffs_xfstests_preflight_e2e.sh --out artifacts/xfstests/preflight/report.json",
                     PermissionedCampaignCommandRole::Preflight,
                 ),
                 command(
