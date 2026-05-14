@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "issues_path": "tests/fixtures/claimability_autopilot_permission_gated.jsonl",
+  "strict": false,
+  "report_now_epoch": 2000000000,
+  "status": "pass",
+  "mutation_policy": "report-only; no tracker rows are modified",
+  "classifier": {
+    "local_id_regex": "^(bd|frankenfs)-",
+    "local_rule": "local IDs start with bd- or frankenfs-",
+    "foreign_rule": "all other IDs are owner-handoff only"
+  },
+  "total_rows": 2,
+  "local_total": 2,
+  "foreign_total": 0,
+  "open_total": 2,
+  "local_open": 2,
+  "foreign_open": 0,
+  "foreign_in_progress": 0,
+  "excluded_foreign_open_count": 0,
+  "excluded_foreign_in_progress_count": 0,
+  "excluded_foreign_stale_in_progress_count": 0,
+  "excluded_foreign_by_prefix": [],
+  "foreign_group_summaries": [],
+  "foreign_reconciliation_plan": {
+    "schema_version": 1,
+    "mutation_policy": "report-only; foreign rows require owner handoff",
+    "authorization_required": false,
+    "conservation_check_required": false,
+    "groups": [],
+    "next_steps": []
+  },
+  "local_open_ids": [
+    "bd-autopilot-epic",
+    "bd-autopilot-permissioned"
+  ],
+  "local_open_rows": [
+    {
+      "id": "bd-autopilot-epic",
+      "title": "Claimability autopilot fixture epic",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "epic",
+      "source_repo": ".",
+      "assignee": null,
+      "blocked_by": []
+    },
+    {
+      "id": "bd-autopilot-permissioned",
+      "title": "Permission-gated xfstests fixture row",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "task",
+      "source_repo": ".",
+      "assignee": null,
+      "blocked_by": []
+    }
+  ],
+  "source_aware_ready_rows": [],
+  "source_aware_queue_state": {
+    "schema_version": 1,
+    "verdict": "permission_gated",
+    "claimable_count": 0,
+    "local_open_count": 2,
+    "local_epic_count": 1,
+    "blocked_local_count": 0,
+    "permission_gated_count": 1,
+    "local_nonclaimable_count": 2,
+    "local_in_progress_count": 0,
+    "stale_in_progress_count": 0,
+    "excluded_foreign_open_count": 0,
+    "excluded_foreign_in_progress_count": 0,
+    "excluded_foreign_stale_in_progress_count": 0,
+    "excluded_foreign_stale_in_progress_ids": [],
+    "claimable_ids": [],
+    "local_epic_ids": [
+      "bd-autopilot-epic"
+    ],
+    "blocked_local_ids": [],
+    "permission_gated_ids": [
+      "bd-autopilot-permissioned"
+    ],
+    "local_nonclaimable_ids": [
+      "bd-autopilot-epic",
+      "bd-autopilot-permissioned"
+    ],
+    "local_in_progress_ids": [],
+    "stale_in_progress_ids": [],
+    "next_safe_actions": [
+      "do not run permission-gated rows without the exact required ACK"
+    ]
+  },
+  "permission_gated_rows": [
+    {
+      "id": "bd-autopilot-permissioned",
+      "title": "Permission-gated xfstests fixture row",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "task",
+      "source_repo": ".",
+      "assignee": null,
+      "blocked_by": [],
+      "permission_gate": {
+        "gate_kind": "xfstests_real_run",
+        "required_env": "XFSTESTS_REAL_RUN_ACK",
+        "required_value": "xfstests-may-mutate-test-and-scratch-devices",
+        "present": false
+      }
+    }
+  ],
+  "blocked_local_rows": [],
+  "local_nonclaimable_rows": [
+    {
+      "id": "bd-autopilot-epic",
+      "title": "Claimability autopilot fixture epic",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "epic",
+      "source_repo": ".",
+      "assignee": null,
+      "reason": "epic",
+      "blocked_by": [],
+      "permission_gate": null
+    },
+    {
+      "id": "bd-autopilot-permissioned",
+      "title": "Permission-gated xfstests fixture row",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "task",
+      "source_repo": ".",
+      "assignee": null,
+      "reason": "permission_gated",
+      "blocked_by": [],
+      "permission_gate": {
+        "gate_kind": "xfstests_real_run",
+        "required_env": "XFSTESTS_REAL_RUN_ACK",
+        "required_value": "xfstests-may-mutate-test-and-scratch-devices",
+        "present": false
+      }
+    }
+  ],
+  "local_in_progress_rows": [],
+  "stale_in_progress_rows": [],
+  "foreign_open_samples": [],
+  "foreign_in_progress_samples": [],
+  "foreign_stale_in_progress_samples": [],
+  "reproduction_commands": [
+    "ffs-harness validate-tracker-source-hygiene --issues tests/fixtures/claimability_autopilot_permission_gated.jsonl"
+  ],
+  "errors": []
+}

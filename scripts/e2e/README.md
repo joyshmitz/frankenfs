@@ -1360,6 +1360,37 @@ This writes `tracker_source_hygiene_local_open.jsonl`,
 files under the export directory while keeping the tracker mutation policy
 report-only.
 
+## Claimability Autopilot
+
+The claimability autopilot E2E is a fixture-only gate for agent queue guidance.
+It runs `validate-tracker-source-hygiene` and `claimability-plan` through
+`rch exec -- cargo run` and rejects transcripts that use local fallback. The
+suite writes JSON and Markdown claimability plans under
+`artifacts/claimability_autopilot/<run-id>/`, records the tracker report,
+reservation snapshot, bv fixture, command transcripts, cleanup policy, and exact
+next command hints in `result.json`, and checks that fixture tracker rows were
+not mutated.
+
+Run it with:
+
+```bash
+./scripts/e2e/ffs_claimability_autopilot_e2e.sh
+```
+
+The committed fixtures cover:
+
+- zero-claimable permission-gated queues with parent-epic bv suppression
+- one source-aware claimable task
+- active peer reservation over the target file surface
+- stale in-progress reclaim candidates that still require Agent Mail review
+- foreign polluted rows preserved as owner handoff only
+
+The script does not call bare `bv`, does not run local cargo validation, and
+does not claim, close, rewrite, or edit tracker rows in fixture mode. Temporary
+cleanup is disabled by default for this suite so no files are deleted by agent
+runs; set `FFS_E2E_DISABLE_TEMP_CLEANUP=0` only when a human explicitly wants
+standard temp cleanup.
+
 ## Release Gate Evaluation
 
 Release gates are executable policy files that consume a validated proof bundle

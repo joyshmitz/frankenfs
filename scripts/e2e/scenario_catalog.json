@@ -5208,6 +5208,70 @@
       ]
     },
     {
+      "suite_id": "ffs_claimability_autopilot",
+      "script": "scripts/e2e/ffs_claimability_autopilot_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "claimability_autopilot_transcripts_remote_only",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=claimability_autopilot_transcripts_remote_only|outcome=PASS"
+        },
+        {
+          "id": "claimability_autopilot_artifacts_written",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=claimability_autopilot_artifacts_written|outcome=PASS"
+        },
+        {
+          "id": "claimability_autopilot_zero_claimable_permission_gated",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=claimability_autopilot_zero_claimable_permission_gated|outcome=PASS"
+        },
+        {
+          "id": "claimability_autopilot_one_claimable_task",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=claimability_autopilot_one_claimable_task|outcome=PASS"
+        },
+        {
+          "id": "claimability_autopilot_peer_reserved_surface",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=claimability_autopilot_peer_reserved_surface|outcome=PASS"
+        },
+        {
+          "id": "claimability_autopilot_stale_reclaim_candidate",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=claimability_autopilot_stale_reclaim_candidate|outcome=PASS"
+        },
+        {
+          "id": "claimability_autopilot_foreign_owner_handoff",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=claimability_autopilot_foreign_owner_handoff|outcome=PASS"
+        },
+        {
+          "id": "claimability_autopilot_result_summary",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=claimability_autopilot_result_summary|outcome=PASS"
+        },
+        {
+          "id": "claimability_autopilot_fixture_non_mutation",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=claimability_autopilot_fixture_non_mutation|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_tracker_source_hygiene",
       "script": "scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
       "required_categories": [

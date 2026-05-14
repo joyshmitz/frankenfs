@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "issues_path": "tests/fixtures/claimability_autopilot_polluted.jsonl",
+  "strict": false,
+  "report_now_epoch": 2000000000,
+  "status": "pass",
+  "mutation_policy": "report-only; no tracker rows are modified",
+  "classifier": {
+    "local_id_regex": "^(bd|frankenfs)-",
+    "local_rule": "local IDs start with bd- or frankenfs-",
+    "foreign_rule": "all other IDs are owner-handoff only"
+  },
+  "total_rows": 3,
+  "local_total": 2,
+  "foreign_total": 1,
+  "open_total": 2,
+  "local_open": 1,
+  "foreign_open": 1,
+  "foreign_in_progress": 0,
+  "excluded_foreign_open_count": 1,
+  "excluded_foreign_in_progress_count": 0,
+  "excluded_foreign_stale_in_progress_count": 0,
+  "excluded_foreign_by_prefix": [
+    {
+      "prefix": "br-r37",
+      "count": 1
+    }
+  ],
+  "foreign_group_summaries": [
+    {
+      "prefix": "br-r37",
+      "count": 1,
+      "owner_hints": [
+        "unknown"
+      ],
+      "sample_ids": [
+        "br-r37-autopilot-foreign"
+      ],
+      "sample_titles": [
+        "Foreign polluted tracker fixture row"
+      ]
+    }
+  ],
+  "foreign_reconciliation_plan": {
+    "schema_version": 1,
+    "mutation_policy": "report-only; foreign rows require owner handoff",
+    "authorization_required": true,
+    "conservation_check_required": true,
+    "groups": [
+      {
+        "prefix": "br-r37",
+        "count": 1,
+        "owner_hints": [
+          "unknown"
+        ],
+        "sample_ids": [
+          "br-r37-autopilot-foreign"
+        ],
+        "recommended_thread_id": "tracker-hygiene",
+        "recommended_subject": "[tracker-hygiene] Owner handoff for br-r37",
+        "proposed_action": "message likely owner before moving, closing, rewriting, or deleting rows",
+        "authorization_required": true,
+        "conservation_rule": "foreign rows must remain count-preserved until owner ACK"
+      }
+    ],
+    "next_steps": [
+      "message likely owner before moving, closing, rewriting, or deleting foreign rows"
+    ]
+  },
+  "local_open_ids": [
+    "bd-autopilot-ready"
+  ],
+  "local_open_rows": [
+    {
+      "id": "bd-autopilot-ready",
+      "title": "Claimability autopilot ready fixture row",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "task",
+      "source_repo": ".",
+      "assignee": null,
+      "blocked_by": []
+    }
+  ],
+  "source_aware_ready_rows": [
+    {
+      "id": "bd-autopilot-ready",
+      "title": "Claimability autopilot ready fixture row",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "task",
+      "source_repo": ".",
+      "assignee": null,
+      "blocked_by": []
+    }
+  ],
+  "source_aware_queue_state": {
+    "schema_version": 1,
+    "verdict": "ready",
+    "claimable_count": 1,
+    "local_open_count": 1,
+    "local_epic_count": 0,
+    "blocked_local_count": 0,
+    "permission_gated_count": 0,
+    "local_nonclaimable_count": 0,
+    "local_in_progress_count": 1,
+    "stale_in_progress_count": 1,
+    "excluded_foreign_open_count": 1,
+    "excluded_foreign_in_progress_count": 0,
+    "excluded_foreign_stale_in_progress_count": 0,
+    "excluded_foreign_stale_in_progress_ids": [],
+    "claimable_ids": [
+      "bd-autopilot-ready"
+    ],
+    "local_epic_ids": [],
+    "blocked_local_ids": [],
+    "permission_gated_ids": [],
+    "local_nonclaimable_ids": [],
+    "local_in_progress_ids": [
+      "bd-autopilot-stale"
+    ],
+    "stale_in_progress_ids": [
+      "bd-autopilot-stale"
+    ],
+    "next_safe_actions": [
+      "claim one source_aware_ready row before creating fallback work"
+    ]
+  },
+  "permission_gated_rows": [],
+  "blocked_local_rows": [],
+  "local_nonclaimable_rows": [],
+  "local_in_progress_rows": [
+    {
+      "id": "bd-autopilot-stale",
+      "title": "Claimability autopilot stale in-progress row",
+      "status": "in_progress",
+      "priority": 2,
+      "issue_type": "task",
+      "source_repo": ".",
+      "assignee": "stale-fixture-agent",
+      "blocked_by": [],
+      "created_at": "2033-05-18T00:00:00Z",
+      "updated_at": "2033-05-18T01:00:00Z",
+      "last_activity_epoch": 1999990800,
+      "age_seconds": 9200,
+      "stale_after_seconds": 3600,
+      "stale": true
+    }
+  ],
+  "stale_in_progress_rows": [
+    {
+      "id": "bd-autopilot-stale",
+      "title": "Claimability autopilot stale in-progress row",
+      "status": "in_progress",
+      "priority": 2,
+      "issue_type": "task",
+      "source_repo": ".",
+      "assignee": "stale-fixture-agent",
+      "blocked_by": [],
+      "created_at": "2033-05-18T00:00:00Z",
+      "updated_at": "2033-05-18T01:00:00Z",
+      "last_activity_epoch": 1999990800,
+      "age_seconds": 9200,
+      "stale_after_seconds": 3600,
+      "stale": true
+    }
+  ],
+  "foreign_open_samples": [
+    {
+      "id": "br-r37-autopilot-foreign",
+      "title": "Foreign polluted tracker fixture row",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "bug",
+      "source_repo": "."
+    }
+  ],
+  "foreign_in_progress_samples": [],
+  "foreign_stale_in_progress_samples": [],
+  "reproduction_commands": [
+    "ffs-harness validate-tracker-source-hygiene --issues tests/fixtures/claimability_autopilot_polluted.jsonl"
+  ],
+  "errors": []
+}

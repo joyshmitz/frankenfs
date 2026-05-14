@@ -1,0 +1,24 @@
+{
+  "quick_ref": {
+    "top_picks": [
+      {
+        "id": "bd-autopilot-epic",
+        "title": "Claimability autopilot fixture epic"
+      },
+      {
+        "id": "bd-autopilot-ready",
+        "title": "Claimability autopilot ready fixture row"
+      }
+    ]
+  },
+  "recommendations": [
+    {
+      "issue_id": "bd-autopilot-epic",
+      "reason": "Raw graph rank recommends the parent epic."
+    },
+    {
+      "bead_id": "bd-autopilot-ready",
+      "reason": "A local task is claimable when source-aware hygiene says so."
+    }
+  ]
+}

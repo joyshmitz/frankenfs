@@ -1,0 +1,2 @@
+{"id":"bd-autopilot-epic","title":"Claimability autopilot fixture epic","status":"open","priority":1,"issue_type":"epic","source_repo":"."}
+{"id":"bd-autopilot-permissioned","title":"Permission-gated xfstests fixture row","notes":"Requires XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices before a real xfstests run can execute.","status":"open","priority":1,"issue_type":"task","source_repo":"."}
