@@ -73,6 +73,14 @@ const REQUIRED_OUTCOME_COVERAGE: [&str; 7] = [
     "passing_with_caveat",
 ];
 
+const ALLOWED_HARNESS_REPRODUCTION_COMMANDS: [&str; 5] = [
+    "fuse-capability-probe",
+    "build-operator-proof-bundle",
+    "validate-adversarial-threat-model",
+    "validate-repair-confidence-lab",
+    "validate-remediation-catalog",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemediationCatalog {
     pub schema_version: u32,
@@ -200,6 +208,11 @@ fn validate_remediation_entry(
     validate_remediation_vocabulary(entry, outcome_classes, feature_states, errors);
     validate_remediation_required_text(entry, errors);
     validate_reproduction_script_paths(
+        &format!("remediation `{}`", entry.id),
+        &entry.reproduction_command,
+        errors,
+    );
+    validate_harness_reproduction_command(
         &format!("remediation `{}`", entry.id),
         &entry.reproduction_command,
         errors,
@@ -359,6 +372,30 @@ fn e2e_script_paths(command: &str) -> impl Iterator<Item = &str> {
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("sh")))
         .then_some(token)
+    })
+}
+
+fn validate_harness_reproduction_command(context: &str, command: &str, errors: &mut Vec<String>) {
+    let Some(command_name) = harness_command_name(command) else {
+        return;
+    };
+    if !ALLOWED_HARNESS_REPRODUCTION_COMMANDS.contains(&command_name) {
+        errors.push(format!(
+            "{context} reproduction_command references unsupported ffs-harness command `{command_name}`; expected one of {}",
+            ALLOWED_HARNESS_REPRODUCTION_COMMANDS.join(", ")
+        ));
+    }
+}
+
+fn harness_command_name(command: &str) -> Option<&str> {
+    const MARKERS: [&str; 2] = [
+        "cargo run -p ffs-harness -- ",
+        "cargo run --quiet -p ffs-harness -- ",
+    ];
+    MARKERS.iter().find_map(|marker| {
+        command
+            .split_once(marker)
+            .and_then(|(_, rest)| rest.split_whitespace().next())
     })
 }
 
@@ -668,6 +705,41 @@ mod tests {
             err.contains("references missing script")
                 && err.contains("ffs_missing_remediation_runner.sh")
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_harness_reproduction_command_is_rejected() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        first_entry_mut(&mut catalog)?.reproduction_command =
+            "rch exec -- cargo run -p ffs-harness -- run-repair-confidence-lab --image sample.img"
+                .to_owned();
+        let report = validate_remediation_catalog(&catalog);
+
+        assert!(report.errors.iter().any(|err| {
+            err.contains("reproduction_command references unsupported ffs-harness command")
+                && err.contains("run-repair-confidence-lab")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn unsafe_repair_refusal_uses_current_repair_confidence_validator() -> Result<()> {
+        let catalog = fixture_catalog()?;
+        let entry = entry_by_id(&catalog, "rem_unsafe_repair_refused")?;
+
+        assert!(
+            entry
+                .reproduction_command
+                .contains("validate-repair-confidence-lab"),
+            "unsafe repair remediation must point at the current repair-confidence validator"
+        );
+        assert!(
+            !entry
+                .reproduction_command
+                .contains("run-repair-confidence-lab"),
+            "unsafe repair remediation must not advertise the removed runner command"
+        );
         Ok(())
     }
 

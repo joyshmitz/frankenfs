@@ -133,7 +133,7 @@
       "technical_cause": "Repair confidence lab thresholds (symbol coverage, ledger integrity, residual risk) did not meet the mutation_safety_gate, so the repair plan stopped at detection-only.",
       "immediate_action": "Capture the detection report, take a manual backup before any further attempts, and route the image to the repair-confidence calibration corpus.",
       "safe_retry_policy": "manual_dry_run_then_review",
-      "reproduction_command": "rch exec -- cargo run -p ffs-harness -- run-repair-confidence-lab --image <path> --dry-run",
+      "reproduction_command": "rch exec -- cargo run -p ffs-harness -- validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json --select repair_dry_run_single_block_recoverable",
       "artifact_links": [
         "artifacts/repair/<image_hash>/detection.json",
         "artifacts/repair/<image_hash>/dry_run.json"

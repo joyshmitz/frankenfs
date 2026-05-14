@@ -112,6 +112,13 @@ required_outcomes = {
     "unsafe_repair_refusal",
     "passing_with_caveat",
 }
+allowed_harness_commands = {
+    "fuse-capability-probe",
+    "build-operator-proof-bundle",
+    "validate-adversarial-threat-model",
+    "validate-repair-confidence-lab",
+    "validate-remediation-catalog",
+}
 if not report["valid"]:
     raise SystemExit(report["errors"])
 if report["entry_count"] < len(required_outcomes):
@@ -135,6 +142,20 @@ for entry in catalog["entries"]:
         raise SystemExit(f"missing artifact links: {entry['id']}")
     if not entry["owning_bead"].startswith("bd-"):
         raise SystemExit(f"owning bead must be a bd id: {entry['id']}")
+    command = entry["reproduction_command"]
+    if "run-repair-confidence-lab" in command:
+        raise SystemExit(f"stale repair-confidence runner command: {entry['id']}")
+    for marker in (
+        "cargo run -p ffs-harness -- ",
+        "cargo run --quiet -p ffs-harness -- ",
+    ):
+        if marker not in command:
+            continue
+        command_name = command.split(marker, 1)[1].split()[0]
+        if command_name not in allowed_harness_commands:
+            raise SystemExit(
+                f"unsupported ffs-harness command in {entry['id']}: {command_name}"
+            )
 PY
 then
     scenario_result "remediation_catalog_coverage" "PASS" "outcome coverage, actions, artifacts, and ownership verified"
