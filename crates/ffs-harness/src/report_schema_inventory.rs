@@ -155,6 +155,15 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__fault_injection_corpus__tests__fault_injection_corpus_report_json_shape.snap",
         ),
         covered_advisory_row(
+            "repair_corpus_report",
+            "crates/ffs-harness/src/repair_corpus.rs",
+            "RepairCorpusReport",
+            "validate-repair-corpus",
+            "self-healing repair corpus validation gates",
+            "repair_corpus_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__repair_corpus__tests__repair_corpus_report_json_shape.snap",
+        ),
+        covered_advisory_row(
             "readiness_lab_numa_p99_replay_report",
             "crates/ffs-harness/src/readiness_lab.rs",
             "ReadinessLabNumaP99ReplayReport",
@@ -803,12 +812,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 14);
+        assert_eq!(report.total_rows, 15);
         assert_eq!(report.required_rows, 6);
-        assert_eq!(report.advisory_only_rows, 6);
+        assert_eq!(report.advisory_only_rows, 7);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 13);
+        assert_eq!(report.covered_rows, 14);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
