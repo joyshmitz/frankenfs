@@ -1,0 +1,53 @@
+---
+source: crates/ffs-harness/src/report_schema_inventory.rs
+expression: markdown
+---
+# Report Schema Inventory
+
+- Inventory ID: `ffs_harness_serialized_report_schema_inventory_v1`
+- Valid: `true`
+- Product evidence claim: `none`
+- Reproduction command: `ffs-harness validate-report-schema-inventory --out artifacts/report-schema-inventory/report.json --summary-out artifacts/report-schema-inventory/report.md`
+
+## Counts
+
+| Metric | Count |
+|---|---:|
+| Total rows | 22 |
+| Required rows | 6 |
+| Advisory-only rows | 14 |
+| Permissioned-only rows | 1 |
+| Covered rows | 21 |
+| Missing rows | 0 |
+| Excluded rows | 1 |
+
+## Uncovered Required Reports
+
+None.
+
+## Row Results
+
+| Report ID | Requirement | Status | Missing Evidence | Errors |
+|---|---|---|---|---|
+| `authoritative_lane_decision` | `Required` | `Covered` | none | none |
+| `btrfs_multidev_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `btrfs_send_receive_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `casefold_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `fault_injection_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `low_privilege_demo_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `metamorphic_workload_seed_catalog_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `operational_readiness_report` | `Required` | `Covered` | none | none |
+| `permissioned_campaign_reports` | `PermissionedOnly` | `Covered` | none | none |
+| `proof_bundle_validation_report` | `Required` | `Covered` | none | none |
+| `readiness_action_autopilot_source_reports` | `AdvisoryOnly` | `Covered` | none | none |
+| `readiness_action_dry_run_metadata` | `Excluded` | `Excluded` | none | none |
+| `readiness_dashboard_report` | `Required` | `Covered` | none | none |
+| `readiness_lab_numa_p99_replay_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `readiness_lab_rch_lane_schedule_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `readiness_lab_validation_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `release_gate_evaluation_report` | `Required` | `Covered` | none | none |
+| `repair_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `swarm_operator_report` | `Required` | `Covered` | none | none |
+| `swarm_workload_harness_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `tracker_source_hygiene_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `workload_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |

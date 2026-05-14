@@ -1104,6 +1104,22 @@ mod tests {
     }
 
     #[test]
+    fn render_report_schema_inventory_markdown_default_report() -> Result<()> {
+        let inventory = current_report_schema_inventory();
+        let report = validate_report_schema_inventory(&inventory);
+        if !report.errors.is_empty() {
+            bail!("default inventory has errors: {:?}", report.errors);
+        }
+
+        let markdown = render_report_schema_inventory_markdown(&report);
+        insta::assert_snapshot!(
+            "render_report_schema_inventory_markdown_default_report",
+            markdown
+        );
+        Ok(())
+    }
+
+    #[test]
     fn report_schema_inventory_shape() -> Result<()> {
         let inventory = current_report_schema_inventory();
         let report = validate_report_schema_inventory(&inventory);
