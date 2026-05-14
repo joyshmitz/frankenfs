@@ -11,8 +11,8 @@ expression: markdown
 - Cleanup status: `not_started`
 - Product evidence claim: `none`
 - Git SHA: `abcdef123456`
-- Command plan hash: `sha256:edb5b4f61cd459eea32b5d2e52a2b28e47c9f260d8f4325ee8c441d3b274991b`
-- Expected command plan hash: `sha256:edb5b4f61cd459eea32b5d2e52a2b28e47c9f260d8f4325ee8c441d3b274991b`
+- Command plan hash: `sha256:a6f1f422a5a9a1adb0fc79550ae8aebca33e4614fff2029bded48014ea6016f9`
+- Expected command plan hash: `sha256:a6f1f422a5a9a1adb0fc79550ae8aebca33e4614fff2029bded48014ea6016f9`
 - Artifact count: `3`
 
 ## Target Beads
