@@ -591,7 +591,7 @@ fn redact_absolute_path_from(token: &str, probe_start: usize) -> Option<String> 
     let path_end = trim_trailing_path_wrappers(token, path_start);
     let prefix = token.get(..path_start)?;
     let suffix = token.get(path_end..)?;
-    Some(format!("{}<redacted-host-path>{}", prefix, suffix))
+    Some(format!("{prefix}<redacted-host-path>{suffix}"))
 }
 
 fn skip_leading_path_wrappers(token: &str, start: usize) -> usize {

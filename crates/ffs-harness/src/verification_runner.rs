@@ -1281,13 +1281,14 @@ fn log_artifact_entry_with_sha(
 
 fn is_sensitive_arg_name(arg: &str) -> bool {
     let lower = arg.trim_start_matches('-').to_ascii_lowercase();
+    let normalized: String = lower.chars().filter(char::is_ascii_alphanumeric).collect();
     lower.contains("token")
         || lower.contains("password")
         || lower.contains("secret")
-        || lower.contains("api-key")
-        || lower.contains("access-key")
-        || lower.contains("private-key")
-        || lower == "auth"
+        || normalized.contains("apikey")
+        || normalized.contains("accesskey")
+        || normalized.contains("privatekey")
+        || normalized == "auth"
 }
 
 fn sanitize_artifact_segment(raw: &str) -> String {
@@ -2118,6 +2119,46 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
                 expected_inline_sensitive_arg,
                 "--background-scrub-ledger".to_owned(),
                 "artifacts/e2e/run/ledger.jsonl".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn command_line_redaction_normalizes_sensitive_arg_spellings() {
+        let underscore_key_arg = format!("--{}{}=sample-credential", "api", "_key");
+        let expected_underscore_key_arg = format!("--{}{}=[REDACTED]", "api", "_key");
+        let compact_key_arg = format!("--{}{}=sample-credential", "api", "key");
+        let expected_compact_key_arg = format!("--{}{}=[REDACTED]", "api", "key");
+        let split_access_key = format!("--{}{}", "access", "_key");
+        let inline_aws_access_key = format!("AWS_{}{}_ID=sample-credential", "ACCESS", "_KEY");
+        let expected_inline_aws_access_key = format!("AWS_{}{}_ID=[REDACTED]", "ACCESS", "_KEY");
+        let split_private_key = format!("--{}{}", "private", "key");
+        let raw = vec![
+            "ffs-harness".to_owned(),
+            underscore_key_arg,
+            compact_key_arg,
+            split_access_key.clone(),
+            "sample-credential".to_owned(),
+            inline_aws_access_key,
+            split_private_key.clone(),
+            "sample-credential".to_owned(),
+            "--artifact-root".to_owned(),
+            "artifacts/e2e/run".to_owned(),
+        ];
+        let redacted = redact_command_line(&raw);
+        assert_eq!(
+            redacted,
+            vec![
+                "ffs-harness".to_owned(),
+                expected_underscore_key_arg,
+                expected_compact_key_arg,
+                split_access_key,
+                "[REDACTED]".to_owned(),
+                expected_inline_aws_access_key,
+                split_private_key,
+                "[REDACTED]".to_owned(),
+                "--artifact-root".to_owned(),
+                "artifacts/e2e/run".to_owned(),
             ]
         );
     }
