@@ -12,6 +12,7 @@ pub mod btrfs_multidevice_corpus;
 pub mod btrfs_send_receive_corpus;
 pub mod casefold_corpus;
 pub mod chaos_replay_lab;
+pub mod claimability_plan;
 pub mod crash_promotion;
 pub mod crash_replay_artifact;
 pub mod cross_oracle_arbitration;

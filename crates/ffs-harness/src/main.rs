@@ -54,6 +54,10 @@ use ffs_harness::{
         DEFAULT_CHAOS_REPLAY_LAB_PATH, fail_on_chaos_replay_lab_errors, load_chaos_replay_lab,
         render_chaos_replay_lab_markdown, validate_chaos_replay_lab,
     },
+    claimability_plan::{
+        ClaimabilityPlanConfig, build_claimability_plan_report, fail_on_claimability_plan_errors,
+        render_claimability_plan_markdown,
+    },
     cross_oracle_arbitration::{
         DEFAULT_CROSS_ORACLE_ARBITRATION_REPORT, fail_on_cross_oracle_arbitration_errors,
         load_cross_oracle_arbitration_report, render_cross_oracle_arbitration_markdown,
@@ -285,7 +289,8 @@ use ffs_harness::{
         validate_topology_runtime_advisor_manifest_with_config,
     },
     tracker_source_hygiene::{
-        TrackerLocalGraphExportPaths, TrackerSourceHygieneConfig,
+        AgentMailReservationSnapshotReport, TrackerLocalGraphExportPaths,
+        TrackerSourceHygieneConfig, TrackerSourceHygieneReport,
         fail_on_tracker_source_hygiene_errors, run_tracker_source_hygiene,
         write_tracker_source_hygiene_local_graph_exports,
     },
@@ -586,6 +591,7 @@ fn run() -> Result<()> {
         }
         Some("validate-docs-status-drift") => validate_docs_status_drift_cmd(&args[1..]),
         Some("validate-tracker-source-hygiene") => validate_tracker_source_hygiene_cmd(&args[1..]),
+        Some("claimability-plan") => claimability_plan_cmd(&args[1..]),
         Some("rch-proof-ledger") => rch_proof_ledger_cmd(&args[1..]),
         Some("validate-fuzz-smoke") => validate_fuzz_smoke_cmd(&args[1..]),
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
@@ -8032,6 +8038,117 @@ fn validate_docs_status_drift_cmd(args: &[String]) -> Result<()> {
     fail_on_docs_status_drift_errors(&report)
 }
 
+#[allow(clippy::too_many_lines)]
+fn claimability_plan_cmd(args: &[String]) -> Result<()> {
+    let mut tracker_report_path: Option<String> = None;
+    let mut reservation_report_path: Option<String> = None;
+    let mut bv_report_path: Option<String> = None;
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut generated_at = current_unix_timestamp_label();
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--tracker-report" => {
+                tracker_report_path = Some(require_value(args, i, "--tracker-report")?.to_owned());
+                i += 2;
+            }
+            "--reservation-report" => {
+                reservation_report_path =
+                    Some(require_value(args, i, "--reservation-report")?.to_owned());
+                i += 2;
+            }
+            "--bv-report" => {
+                bv_report_path = Some(require_value(args, i, "--bv-report")?.to_owned());
+                i += 2;
+            }
+            "--generated-at" => {
+                require_value(args, i, "--generated-at")?.clone_into(&mut generated_at);
+                i += 2;
+            }
+            "--format" => {
+                format = parse_proof_bundle_format(require_value(args, i, "--format")?)?;
+                i += 2;
+            }
+            "--out" => {
+                out_path = Some(require_value(args, i, "--out")?.to_owned());
+                i += 2;
+            }
+            "--summary-out" => {
+                summary_out_path = Some(require_value(args, i, "--summary-out")?.to_owned());
+                i += 2;
+            }
+            "--help" | "-h" => {
+                print_claimability_plan_usage();
+                return Ok(());
+            }
+            other => bail!("unknown claimability-plan argument: {other}"),
+        }
+    }
+
+    let tracker_report_path = tracker_report_path.context("--tracker-report is required")?;
+    let tracker_json = fs::read_to_string(&tracker_report_path)
+        .with_context(|| format!("failed to read {tracker_report_path}"))?;
+    let tracker_report: TrackerSourceHygieneReport = serde_json::from_str(&tracker_json)
+        .with_context(|| format!("failed to parse tracker report {tracker_report_path}"))?;
+
+    let reservation_report = if let Some(path) = &reservation_report_path {
+        let json = fs::read_to_string(path).with_context(|| format!("failed to read {path}"))?;
+        Some(
+            serde_json::from_str::<AgentMailReservationSnapshotReport>(&json)
+                .with_context(|| format!("failed to parse reservation report {path}"))?,
+        )
+    } else {
+        None
+    };
+    let bv_snapshot = if let Some(path) = &bv_report_path {
+        let json = fs::read_to_string(path).with_context(|| format!("failed to read {path}"))?;
+        Some(
+            serde_json::from_str::<serde_json::Value>(&json)
+                .with_context(|| format!("failed to parse bv report {path}"))?,
+        )
+    } else {
+        None
+    };
+    let config = ClaimabilityPlanConfig {
+        generated_at,
+        tracker_report_path,
+        reservation_report_path,
+        bv_report_path,
+    };
+    let report = build_claimability_plan_report(
+        &config,
+        &tracker_report,
+        reservation_report.as_ref(),
+        bv_snapshot.as_ref(),
+    );
+    let json = serde_json::to_string_pretty(&report)?;
+    let markdown = render_claimability_plan_markdown(&report);
+    let output = match format {
+        ProofBundleFormat::Json => format!("{json}\n"),
+        ProofBundleFormat::Markdown => markdown.clone(),
+    };
+
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &output)?;
+        println!(
+            "claimability plan written: {} rows={} status={}",
+            path,
+            report.rows.len(),
+            report.status
+        );
+    } else {
+        print!("{output}");
+    }
+    if let Some(path) = summary_out_path {
+        write_text_file(Path::new(&path), &markdown)?;
+        println!("claimability plan markdown written: {path}");
+    }
+    fail_on_claimability_plan_errors(&report)
+}
+
 fn validate_tracker_source_hygiene_cmd(args: &[String]) -> Result<()> {
     let mut config = tracker_source_hygiene_config_from_env()?;
     let mut out_path: Option<String> = None;
@@ -9154,6 +9271,9 @@ fn print_usage_core_commands() {
         "  ffs-harness validate-tracker-source-hygiene [--issues FILE] [--strict] [--out FILE]"
     );
     println!(
+        "  ffs-harness claimability-plan --tracker-report FILE [--reservation-report FILE] [--bv-report FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+    println!(
         "  ffs-harness validate-report-schema-inventory [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
@@ -9911,6 +10031,21 @@ fn print_tracker_source_hygiene_usage() {
         "  --export-dir DIR                   Write local graph JSONL exports and .sha256 files"
     );
     println!("  --out FILE                         Write JSON report to FILE");
+}
+
+fn print_claimability_plan_usage() {
+    println!("Usage: ffs-harness claimability-plan [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --tracker-report FILE              Read tracker source hygiene report JSON");
+    println!(
+        "  --reservation-report FILE          Read optional Agent Mail reservation report JSON"
+    );
+    println!("  --bv-report FILE                   Read optional bv robot JSON snapshot");
+    println!("  --generated-at VALUE               Override generated_at label");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write selected-format report to FILE");
+    println!("  --summary-out FILE                 Write Markdown summary to FILE");
 }
 
 fn print_proof_overhead_budget_usage() {
