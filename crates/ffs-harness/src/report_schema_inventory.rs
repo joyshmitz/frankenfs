@@ -226,6 +226,15 @@ fn corpus_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "workload_corpus_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__workload_corpus__tests__workload_corpus_report_json_shape.snap",
         ),
+        covered_advisory_row(
+            "metamorphic_workload_seed_catalog_report",
+            "crates/ffs-harness/src/metamorphic_workload_seed_catalog.rs",
+            "MetamorphicWorkloadSeedCatalogReport",
+            "validate-metamorphic-workload-seeds",
+            "metamorphic workload seed coverage catalog gates",
+            "metamorphic_workload_seed_catalog_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__metamorphic_workload_seed_catalog__tests__metamorphic_workload_seed_catalog_report_json_shape.snap",
+        ),
     ]
 }
 
@@ -857,12 +866,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 19);
+        assert_eq!(report.total_rows, 20);
         assert_eq!(report.required_rows, 6);
-        assert_eq!(report.advisory_only_rows, 11);
+        assert_eq!(report.advisory_only_rows, 12);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 18);
+        assert_eq!(report.covered_rows, 19);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
