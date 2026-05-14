@@ -146,7 +146,7 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__tracker_source_hygiene__tests__tracker_source_hygiene_report_json_shape.snap",
         ),
     ];
-    rows.extend(corpus_advisory_report_rows());
+    rows.extend(corpus_and_workload_advisory_report_rows());
     rows.extend([
         covered_advisory_row(
             "readiness_lab_numa_p99_replay_report",
@@ -170,7 +170,7 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
     rows
 }
 
-fn corpus_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
+fn corpus_and_workload_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
     vec![
         covered_advisory_row(
             "fault_injection_corpus_report",
@@ -234,6 +234,15 @@ fn corpus_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "metamorphic workload seed coverage catalog gates",
             "metamorphic_workload_seed_catalog_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__metamorphic_workload_seed_catalog__tests__metamorphic_workload_seed_catalog_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "swarm_workload_harness_report",
+            "crates/ffs-harness/src/swarm_workload_harness.rs",
+            "SwarmWorkloadHarnessReport",
+            "validate-swarm-workload-harness",
+            "large-host swarm workload manifest validation gates",
+            "swarm_workload_harness_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__swarm_workload_harness__tests__swarm_workload_harness_report_json_shape.snap",
         ),
     ]
 }
@@ -866,12 +875,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 20);
+        assert_eq!(report.total_rows, 21);
         assert_eq!(report.required_rows, 6);
-        assert_eq!(report.advisory_only_rows, 12);
+        assert_eq!(report.advisory_only_rows, 13);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 19);
+        assert_eq!(report.covered_rows, 20);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
