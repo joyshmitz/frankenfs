@@ -363,8 +363,9 @@ pub const DEFAULT_SOURCE_SCOPE_MANIFEST_PATH: &str =
 const DEFAULT_SOURCE_SCOPE_MANIFEST_JSON: &str =
     include_str!("../../../tests/source-scope-manifest/source_scope_manifest.json");
 
-const REQUIRED_SOURCE_FAMILIES: [&str; 20] = [
+const REQUIRED_SOURCE_FAMILIES: [&str; 21] = [
     "readme_status_docs",
+    "agent_workflow_docs",
     "feature_parity_doc",
     "canonical_spec_docs",
     "architecture_design_docs",
@@ -393,6 +394,8 @@ const CANONICAL_SPEC_DOCS: [&str; 5] = [
     "PROPOSED_ARCHITECTURE.md",
     "FEATURE_PARITY.md",
 ];
+
+const AGENT_WORKFLOW_DOCS: [&str; 1] = ["AGENTS.md"];
 
 const ARCHITECTURE_DESIGN_DOC_GLOBS: [&str; 3] =
     ["docs/design-*.md", "docs/oq*.md", "docs/perf/README.md"];
@@ -935,6 +938,7 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
                 entry.id
             ));
         }
+        "agent_workflow_docs" => validate_agent_workflow_docs(entry, &excluded, errors),
         "canonical_spec_docs" => validate_canonical_spec_docs_coverage(entry, errors),
         "architecture_design_docs" => validate_architecture_design_docs(entry, &excluded, errors),
         "tests" => validate_tests_exclusions(entry, &excluded, missing_target_paths, errors),
@@ -965,6 +969,27 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             validate_performance_control_artifacts(entry, &excluded, errors);
         }
         _ => {}
+    }
+}
+
+fn validate_agent_workflow_docs(
+    entry: &SourceScopeEntry,
+    excluded: &str,
+    errors: &mut Vec<String>,
+) {
+    for required_doc in AGENT_WORKFLOW_DOCS {
+        if !entry.included_globs.iter().any(|glob| glob == required_doc) {
+            errors.push(format!(
+                "source `{}` must include agent workflow doc `{required_doc}`",
+                entry.id
+            ));
+        }
+    }
+    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+        errors.push(format!(
+            "source `{}` must exclude build target paths from agent workflow docs",
+            entry.id
+        ));
     }
 }
 
@@ -2420,6 +2445,7 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
             root,
             &[
                 ("README.md", "NOTE bd-rchk7.1 artifact coverage\n"),
+                ("AGENTS.md", "NOTE agent workflow bd-rchk0.284 artifact\n"),
                 ("FEATURE_PARITY.md", "bd-rchk7.1 artifact coverage\n"),
                 (
                     "COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md",
@@ -2784,6 +2810,21 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .errors
                 .iter()
                 .any(|err| err.contains("missing required family `canonical_spec_docs`"))
+        );
+    }
+
+    #[test]
+    fn missing_agent_workflow_docs_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "agent_workflow_docs");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required family `agent_workflow_docs`"))
         );
     }
 
@@ -3388,6 +3429,24 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         assert!(report.errors.iter().any(|err| {
             err.contains("docs/oq*.md")
                 || err.contains("generated architecture design doc directories")
+        }));
+    }
+
+    #[test]
+    fn agent_workflow_docs_coverage_is_validated() {
+        let mut manifest = fixture_manifest();
+        let agent_docs = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "agent_workflow_docs")
+            .expect("agent workflow docs source exists");
+        agent_docs.included_globs.retain(|glob| glob != "AGENTS.md");
+        agent_docs
+            .excluded_globs
+            .retain(|glob| !glob.contains(".rch-target"));
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("AGENTS.md") || err.contains("build target paths from agent workflow docs")
         }));
     }
 

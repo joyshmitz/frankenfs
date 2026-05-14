@@ -18,6 +18,20 @@
       "non_applicability_rationale": ""
     },
     {
+      "id": "agent_workflow_docs",
+      "source_family": "agent_workflow_docs",
+      "included_globs": ["AGENTS.md"],
+      "excluded_globs": ["target/**", "**/.rch-target/**"],
+      "risk_category": "docs_only",
+      "owner": "release",
+      "status": "active",
+      "expected_proof_types": ["docs-non-goal"],
+      "freshness_ttl_days": 14,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
       "id": "feature_parity_doc",
       "source_family": "feature_parity_doc",
       "included_globs": ["FEATURE_PARITY.md"],
