@@ -7,12 +7,16 @@
 //! snapshots, without running permissioned xfstests, mounted mutation, or
 //! large-host campaigns.
 
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::path::{Component, Path};
 
 pub const REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION: u32 = 1;
 pub const REPORT_SCHEMA_INVENTORY_ID: &str = "ffs_harness_serialized_report_schema_inventory_v1";
+pub const REPORT_SCHEMA_INVENTORY_PRODUCT_EVIDENCE_CLAIM: &str = "none";
+pub const REPORT_SCHEMA_INVENTORY_REPRODUCTION_COMMAND: &str = "ffs-harness validate-report-schema-inventory --out artifacts/report-schema-inventory/report.json --summary-out artifacts/report-schema-inventory/report.md";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportSchemaInventory {
@@ -66,6 +70,8 @@ pub enum ReportSchemaClaimEffect {
 pub struct ReportSchemaInventoryReport {
     pub schema_version: u32,
     pub inventory_id: String,
+    pub product_evidence_claim: String,
+    pub reproduction_command: String,
     pub valid: bool,
     pub total_rows: usize,
     pub required_rows: usize,
@@ -75,6 +81,7 @@ pub struct ReportSchemaInventoryReport {
     pub missing_rows: usize,
     pub excluded_rows: usize,
     pub report_ids: Vec<String>,
+    pub uncovered_required_report_ids: Vec<String>,
     pub row_results: Vec<ReportSchemaInventoryRowResult>,
     pub errors: Vec<String>,
 }
@@ -293,10 +300,20 @@ pub fn validate_report_schema_inventory(
     }
     row_results.sort_by(|left, right| left.report_id.cmp(&right.report_id));
     errors.sort();
+    let uncovered_required_report_ids = row_results
+        .iter()
+        .filter(|row| {
+            row.coverage_requirement == ReportSchemaCoverageRequirement::Required
+                && !row.missing_evidence.is_empty()
+        })
+        .map(|row| row.report_id.clone())
+        .collect();
 
     ReportSchemaInventoryReport {
         schema_version: inventory.schema_version,
         inventory_id: inventory.inventory_id.clone(),
+        product_evidence_claim: REPORT_SCHEMA_INVENTORY_PRODUCT_EVIDENCE_CLAIM.to_owned(),
+        reproduction_command: REPORT_SCHEMA_INVENTORY_REPRODUCTION_COMMAND.to_owned(),
         valid: errors.is_empty(),
         total_rows: inventory.rows.len(),
         required_rows,
@@ -306,9 +323,99 @@ pub fn validate_report_schema_inventory(
         missing_rows,
         excluded_rows,
         report_ids: report_ids.into_iter().collect(),
+        uncovered_required_report_ids,
         row_results,
         errors,
     }
+}
+
+pub fn fail_on_report_schema_inventory_errors(report: &ReportSchemaInventoryReport) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    bail!(
+        "report schema inventory failed with {} error(s): {}",
+        report.errors.len(),
+        report.errors.join("; ")
+    );
+}
+
+#[must_use]
+pub fn render_report_schema_inventory_markdown(report: &ReportSchemaInventoryReport) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "# Report Schema Inventory");
+    let _ = writeln!(output);
+    let _ = writeln!(output, "- Inventory ID: `{}`", report.inventory_id);
+    let _ = writeln!(output, "- Valid: `{}`", report.valid);
+    let _ = writeln!(
+        output,
+        "- Product evidence claim: `{}`",
+        report.product_evidence_claim
+    );
+    let _ = writeln!(
+        output,
+        "- Reproduction command: `{}`",
+        report.reproduction_command
+    );
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Counts");
+    let _ = writeln!(output);
+    let _ = writeln!(output, "| Metric | Count |");
+    let _ = writeln!(output, "|---|---:|");
+    let _ = writeln!(output, "| Total rows | {} |", report.total_rows);
+    let _ = writeln!(output, "| Required rows | {} |", report.required_rows);
+    let _ = writeln!(
+        output,
+        "| Advisory-only rows | {} |",
+        report.advisory_only_rows
+    );
+    let _ = writeln!(
+        output,
+        "| Permissioned-only rows | {} |",
+        report.permissioned_only_rows
+    );
+    let _ = writeln!(output, "| Covered rows | {} |", report.covered_rows);
+    let _ = writeln!(output, "| Missing rows | {} |", report.missing_rows);
+    let _ = writeln!(output, "| Excluded rows | {} |", report.excluded_rows);
+    let _ = writeln!(output);
+
+    let _ = writeln!(output, "## Uncovered Required Reports");
+    let _ = writeln!(output);
+    if report.uncovered_required_report_ids.is_empty() {
+        let _ = writeln!(output, "None.");
+    } else {
+        for report_id in &report.uncovered_required_report_ids {
+            let _ = writeln!(output, "- `{report_id}`");
+        }
+    }
+
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Row Results");
+    let _ = writeln!(output);
+    let _ = writeln!(
+        output,
+        "| Report ID | Requirement | Status | Missing Evidence | Errors |"
+    );
+    let _ = writeln!(output, "|---|---|---|---|---|");
+    for row in &report.row_results {
+        let missing = if row.missing_evidence.is_empty() {
+            "none".to_owned()
+        } else {
+            row.missing_evidence.join(", ")
+        };
+        let errors = if row.errors.is_empty() {
+            "none".to_owned()
+        } else {
+            row.errors.join("; ")
+        };
+        let _ = writeln!(
+            output,
+            "| `{}` | `{:?}` | `{:?}` | {} | {} |",
+            row.report_id, row.coverage_requirement, row.coverage_status, missing, errors
+        );
+    }
+
+    output
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -670,6 +777,14 @@ mod tests {
         let report = validate_report_schema_inventory(&inventory);
 
         assert!(report.valid);
+        assert_eq!(
+            report.product_evidence_claim,
+            REPORT_SCHEMA_INVENTORY_PRODUCT_EVIDENCE_CLAIM
+        );
+        assert_eq!(
+            report.reproduction_command,
+            REPORT_SCHEMA_INVENTORY_REPRODUCTION_COMMAND
+        );
         assert!(
             report.errors.is_empty(),
             "default inventory should be valid: {:?}",
@@ -696,6 +811,7 @@ mod tests {
             report.row_results[0].report_id,
             "authoritative_lane_decision"
         );
+        assert!(report.uncovered_required_report_ids.is_empty());
         assert!(report.row_results.iter().all(|row| row.errors.is_empty()));
     }
 
@@ -852,6 +968,10 @@ mod tests {
                 .any(|error| error.contains("required public report")),
             "{result:?}"
         );
+        assert_eq!(
+            report.uncovered_required_report_ids,
+            vec!["swarm_operator_report"]
+        );
     }
 
     #[test]
@@ -873,6 +993,27 @@ mod tests {
     }
 
     #[test]
+    fn report_markdown_summary_names_claim_and_uncovered_rows() {
+        let mut inventory = current_report_schema_inventory();
+        let row = inventory
+            .rows
+            .iter_mut()
+            .find(|row| row.report_id == "swarm_operator_report")
+            .expect("fixture includes swarm operator report row");
+        row.coverage_status = ReportSchemaCoverageStatus::Missing;
+        row.evidence_test.clear();
+        row.snapshot_path.clear();
+
+        let report = validate_report_schema_inventory(&inventory);
+        let markdown = render_report_schema_inventory_markdown(&report);
+
+        assert!(markdown.contains("# Report Schema Inventory"));
+        assert!(markdown.contains("Product evidence claim: `none`"));
+        assert!(markdown.contains("`swarm_operator_report`"));
+        assert!(fail_on_report_schema_inventory_errors(&report).is_err());
+    }
+
+    #[test]
     fn report_schema_inventory_shape() -> Result<()> {
         let inventory = current_report_schema_inventory();
         let report = validate_report_schema_inventory(&inventory);
@@ -887,6 +1028,8 @@ mod tests {
         let shape = json!({
             "schema_version": inventory.schema_version,
             "inventory_id": inventory.inventory_id,
+            "product_evidence_claim": report.product_evidence_claim,
+            "reproduction_command": report.reproduction_command,
             "report_valid": report.valid,
             "counts": {
                 "total_rows": report.total_rows,
@@ -897,6 +1040,7 @@ mod tests {
                 "missing_rows": report.missing_rows,
                 "excluded_rows": report.excluded_rows,
             },
+            "uncovered_required_report_ids": report.uncovered_required_report_ids,
             "first_row": {
                 "report_id": inventory.rows[0].report_id,
                 "module_path": inventory.rows[0].module_path,

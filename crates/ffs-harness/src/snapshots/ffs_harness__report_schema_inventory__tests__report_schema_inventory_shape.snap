@@ -5,6 +5,8 @@ expression: json
 {
   "schema_version": 1,
   "inventory_id": "ffs_harness_serialized_report_schema_inventory_v1",
+  "product_evidence_claim": "none",
+  "reproduction_command": "ffs-harness validate-report-schema-inventory --out artifacts/report-schema-inventory/report.json --summary-out artifacts/report-schema-inventory/report.md",
   "report_valid": true,
   "counts": {
     "total_rows": 13,
@@ -15,6 +17,7 @@ expression: json
     "missing_rows": 0,
     "excluded_rows": 1
   },
+  "uncovered_required_report_ids": [],
   "first_row": {
     "report_id": "readiness_lab_validation_report",
     "module_path": "crates/ffs-harness/src/readiness_lab.rs",

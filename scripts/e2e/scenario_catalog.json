@@ -806,6 +806,52 @@
       ]
     },
     {
+      "suite_id": "ffs_report_schema_inventory",
+      "script": "scripts/e2e/ffs_report_schema_inventory_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "report_schema_inventory_cli_docs_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=report_schema_inventory_cli_docs_wired|outcome=PASS"
+        },
+        {
+          "id": "report_schema_inventory_artifacts_written",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=report_schema_inventory_artifacts_written|outcome=PASS"
+        },
+        {
+          "id": "report_schema_inventory_json_contract",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=report_schema_inventory_json_contract|outcome=PASS"
+        },
+        {
+          "id": "report_schema_inventory_markdown_summary",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=report_schema_inventory_markdown_summary|outcome=PASS"
+        },
+        {
+          "id": "report_schema_inventory_catalog_valid",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=report_schema_inventory_catalog_valid|outcome=PASS"
+        },
+        {
+          "id": "report_schema_inventory_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=report_schema_inventory_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_chaos_replay_lab",
       "script": "scripts/e2e/ffs_chaos_replay_lab_e2e.sh",
       "required_categories": [

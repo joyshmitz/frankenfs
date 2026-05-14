@@ -120,6 +120,30 @@ it excludes epics, blocked rows, foreign-looking rows, and permission-gated
 rows until the required ACK is present. These artifacts are copies; generating
 them does not close, rewrite, delete, or rename any tracker row.
 
+## Serialized Report Coverage Gate
+
+When source-aware triage produces another missing JSON/report-shape bead, run
+the report schema inventory gate before filing an ad hoc follow-up:
+
+```bash
+ffs-harness validate-report-schema-inventory \
+  --out artifacts/report-schema-inventory/report.json \
+  --summary-out artifacts/report-schema-inventory/report.md
+```
+
+The E2E wrapper is:
+
+```bash
+./scripts/e2e/ffs_report_schema_inventory_e2e.sh
+```
+
+This gate is non-permissioned and read-only. It emits
+`product_evidence_claim=none`, `uncovered_required_report_ids`, deterministic
+row results, row-scoped missing-evidence tokens, and a reproduction command.
+Use uncovered required rows as the source for narrow report-coverage beads; do
+not treat the report as a proof-bundle pass, xfstests result, mounted mutation
+result, or large-host swarm campaign result.
+
 ## Reconciliation Rules
 
 Do not delete, rewrite, close, or rename foreign-looking rows merely because

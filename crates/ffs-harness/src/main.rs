@@ -226,6 +226,10 @@ use ffs_harness::{
         render_repair_writeback_serialization_markdown,
         validate_repair_writeback_serialization_contract,
     },
+    report_schema_inventory::{
+        current_report_schema_inventory, fail_on_report_schema_inventory_errors,
+        render_report_schema_inventory_markdown, validate_report_schema_inventory,
+    },
     scrub_repair_scheduler::{
         DEFAULT_SCRUB_REPAIR_SCHEDULER_MANIFEST, fail_on_scrub_repair_scheduler_errors,
         load_scrub_repair_scheduler_manifest, render_scrub_repair_scheduler_markdown,
@@ -559,6 +563,9 @@ fn run() -> Result<()> {
         Some("validate-chaos-replay-lab") => validate_chaos_replay_lab_cmd(&args[1..]),
         Some("validate-inventory-closeout-gate") => {
             validate_inventory_closeout_gate_cmd(&args[1..])
+        }
+        Some("validate-report-schema-inventory") => {
+            validate_report_schema_inventory_cmd(&args[1..])
         }
         Some("validate-remediation-catalog") => validate_remediation_catalog_cmd(&args[1..]),
         Some("validate-remediation-severity-gate") => {
@@ -1022,6 +1029,13 @@ struct ChaosReplayLabCmdArgs {
 #[derive(Debug)]
 struct InventoryCloseoutGateCmdArgs {
     gate_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
+struct ReportSchemaInventoryCmdArgs {
     out_path: Option<String>,
     summary_out_path: Option<String>,
     format: ProofBundleFormat,
@@ -7747,6 +7761,81 @@ fn validate_inventory_closeout_gate_cmd(args: &[String]) -> Result<()> {
     fail_on_inventory_closeout_gate_errors(&report)
 }
 
+fn validate_report_schema_inventory_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_report_schema_inventory_cmd_args(args)? else {
+        return Ok(());
+    };
+    let inventory = current_report_schema_inventory();
+    let report = validate_report_schema_inventory(&inventory);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_report_schema_inventory_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "report schema inventory written: {} valid={} rows={} product_evidence_claim={}",
+            path, report.valid, report.total_rows, report.product_evidence_claim
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_report_schema_inventory_markdown(&report)),
+        )?;
+        println!("report schema inventory summary written: {path}");
+    }
+
+    fail_on_report_schema_inventory_errors(&report)
+}
+
+fn parse_report_schema_inventory_cmd_args(
+    args: &[String],
+) -> Result<Option<ReportSchemaInventoryCmdArgs>> {
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_report_schema_inventory_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-report-schema-inventory argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(ReportSchemaInventoryCmdArgs {
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
 fn parse_inventory_closeout_gate_cmd_args(
     args: &[String],
 ) -> Result<Option<InventoryCloseoutGateCmdArgs>> {
@@ -8330,6 +8419,9 @@ fn print_usage_core_commands() {
         "  ffs-harness validate-tracker-source-hygiene [--issues FILE] [--strict] [--out FILE]"
     );
     println!(
+        "  ffs-harness validate-report-schema-inventory [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+    println!(
         "  ffs-harness validate-fuzz-smoke [--manifest FILE] [--workspace-root DIR] [--out FILE]"
     );
     println!(
@@ -8396,6 +8488,7 @@ fn print_usage_commands() {
     print_repair_writeback_serialization_usage_summary();
     print_chaos_replay_lab_usage_summary();
     print_inventory_closeout_gate_usage_summary();
+    print_report_schema_inventory_usage_summary();
     println!(
         "  ffs-harness validate-remediation-catalog [--catalog FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
@@ -8484,6 +8577,9 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl --out artifacts/tracker/source_hygiene.json"
+    );
+    println!(
+        "  ffs-harness validate-report-schema-inventory --out artifacts/report-schema-inventory/report.json --summary-out artifacts/report-schema-inventory/report.md"
     );
     println!("  ffs-harness validate-fuzz-smoke --out artifacts/fuzz-smoke/fuzz_smoke_report.json");
     println!(
@@ -9590,6 +9686,21 @@ fn print_inventory_closeout_gate_usage() {
     println!();
     println!("Options:");
     println!("  --gate FILE                        Read inventory closeout gate JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report");
+    println!("  --summary-out FILE                 Write Markdown inventory summary");
+}
+
+fn print_report_schema_inventory_usage_summary() {
+    println!(
+        "  ffs-harness validate-report-schema-inventory [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_report_schema_inventory_usage() {
+    println!("Usage: ffs-harness validate-report-schema-inventory [OPTIONS]");
+    println!();
+    println!("Options:");
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write validation report");
     println!("  --summary-out FILE                 Write Markdown inventory summary");

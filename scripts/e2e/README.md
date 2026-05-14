@@ -493,6 +493,33 @@ evidence needed to prevent vague high-risk notes from being silently treated as
 done. Stale-allowed rows require a future expiry, owner, user-risk rationale,
 and linked bead or non-goal artifact; duplicates must point at another row.
 
+## Report Schema Inventory Gate
+
+The report schema inventory gate is built from the in-code
+`ffs_harness::report_schema_inventory` table.
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-report-schema-inventory \
+  --out artifacts/report-schema-inventory/report.json \
+  --summary-out artifacts/report-schema-inventory/report.md
+```
+
+The E2E wrapper is:
+
+```bash
+./scripts/e2e/ffs_report_schema_inventory_e2e.sh
+```
+
+This gate is a read-only coverage inventory for durable `ffs-harness` JSON
+report contracts, not proof that any mounted mutation, xfstests, large-host
+swarm campaign, or proof-bundle pass has executed. The JSON report and Markdown
+summary must keep `product_evidence_claim=none`, list any uncovered required
+report IDs, preserve row-level missing-evidence diagnostics, and include a
+reproduction command so future agents can turn missing required rows into
+narrow beads instead of another ad hoc JSON-shape scan.
+
 ## Chaos Replay Lab Contract
 
 The chaos replay lab lives in:
