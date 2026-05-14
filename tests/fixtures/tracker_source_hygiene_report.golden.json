@@ -310,6 +310,92 @@
       "title": "Fixture foreign open row 20"
     }
   ],
+  "foreign_reconciliation_plan": {
+    "authorization_required": true,
+    "conservation_check_required": true,
+    "groups": [
+      {
+        "authorization_required": true,
+        "conservation_rule": "before authorized mutation, preserve pre/post snapshots and prove total row conservation across affected stores",
+        "count": 22,
+        "owner_hints": [
+          "franken_networkx"
+        ],
+        "prefix": "br-r37",
+        "proposed_action": "ask hinted owner project to confirm authority before any move, removal, rewrite, or project-field backfill",
+        "recommended_subject": "[tracker-hygiene] Foreign row ownership check: br-r37",
+        "recommended_thread_id": "tracker-hygiene",
+        "sample_ids": [
+          "br-r37-c1-foreign01",
+          "br-r37-c1-foreign02",
+          "br-r37-c1-foreign03",
+          "br-r37-c1-foreign04",
+          "br-r37-c1-foreign05",
+          "br-r37-c1-foreign06",
+          "br-r37-c1-foreign07",
+          "br-r37-c1-foreign08",
+          "br-r37-c1-foreign09",
+          "br-r37-c1-foreign10"
+        ]
+      },
+      {
+        "authorization_required": true,
+        "conservation_rule": "before authorized mutation, preserve pre/post snapshots and prove total row conservation across affected stores",
+        "count": 2,
+        "owner_hints": [
+          "franken_numpy"
+        ],
+        "prefix": "franken_numpy",
+        "proposed_action": "ask hinted owner project to confirm authority before any move, removal, rewrite, or project-field backfill",
+        "recommended_subject": "[tracker-hygiene] Foreign row ownership check: franken_numpy",
+        "recommended_thread_id": "tracker-hygiene",
+        "sample_ids": [
+          "franken_numpy-fixture01",
+          "franken_numpy-fixture02"
+        ]
+      },
+      {
+        "authorization_required": true,
+        "conservation_rule": "before authorized mutation, preserve pre/post snapshots and prove total row conservation across affected stores",
+        "count": 1,
+        "owner_hints": [
+          "frankenredis"
+        ],
+        "prefix": "frankenredis",
+        "proposed_action": "ask hinted owner project to confirm authority before any move, removal, rewrite, or project-field backfill",
+        "recommended_subject": "[tracker-hygiene] Foreign row ownership check: frankenredis",
+        "recommended_thread_id": "tracker-hygiene",
+        "sample_ids": [
+          "frankenredis-fixture01"
+        ]
+      },
+      {
+        "authorization_required": true,
+        "conservation_rule": "before authorized mutation, preserve pre/post snapshots and prove total row conservation across affected stores",
+        "count": 2,
+        "owner_hints": [
+          "frankentorch"
+        ],
+        "prefix": "frankentorch",
+        "proposed_action": "ask hinted owner project to confirm authority before any move, removal, rewrite, or project-field backfill",
+        "recommended_subject": "[tracker-hygiene] Foreign row ownership check: frankentorch",
+        "recommended_thread_id": "tracker-hygiene",
+        "sample_ids": [
+          "frankentorch-fixture01",
+          "frankentorch-fixture02"
+        ]
+      }
+    ],
+    "mutation_policy": "owner-handoff-required; this report never deletes, rewrites, closes, or moves tracker rows",
+    "next_steps": [
+      "capture this source-scoped report artifact before proposing mutation",
+      "message owner_hints on Agent Mail thread tracker-hygiene with sample_ids",
+      "wait for explicit owner authorization before removing, moving, or rewriting foreign rows",
+      "if authorized, use pre/post snapshots and row-count conservation checks",
+      "if authorization is absent, continue using source_aware_queue_state and local graph exports"
+    ],
+    "schema_version": 1
+  },
   "foreign_stale_in_progress_samples": [
     {
       "age_seconds": 5600,

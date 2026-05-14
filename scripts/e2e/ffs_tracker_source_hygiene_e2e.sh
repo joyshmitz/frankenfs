@@ -368,6 +368,59 @@ if jq -s \
             })
             | sort_by(.prefix)
         ),
+        foreign_reconciliation_plan: (
+            [.[] | select(foreign_issue and open_issue) | foreign_group_row]
+            | sort_by(.prefix, .id)
+            | group_by(.prefix)
+            | map({
+                prefix: .[0].prefix,
+                count: length,
+                owner_hints: (
+                    ([.[].owner_hint] | unique) as $hints
+                    | if (($hints | length) > 1 and ($hints | index("unknown"))) then
+                        ($hints | map(select(. != "unknown")))
+                    else
+                        $hints
+                    end
+                ),
+                sample_ids: ([.[].id] | .[0:10])
+            })
+            | sort_by(.prefix)
+            | . as $groups
+            | {
+                schema_version: 1,
+                mutation_policy: "owner-handoff-required; this report never deletes, rewrites, closes, or moves tracker rows",
+                authorization_required: (($groups | length) > 0),
+                conservation_check_required: (($groups | length) > 0),
+                groups: (
+                    $groups
+                    | map({
+                        prefix: .prefix,
+                        count: .count,
+                        owner_hints: .owner_hints,
+                        sample_ids: .sample_ids,
+                        recommended_thread_id: "tracker-hygiene",
+                        recommended_subject: ("[tracker-hygiene] Foreign row ownership check: " + .prefix),
+                        proposed_action: "ask hinted owner project to confirm authority before any move, removal, rewrite, or project-field backfill",
+                        authorization_required: true,
+                        conservation_rule: "before authorized mutation, preserve pre/post snapshots and prove total row conservation across affected stores"
+                    })
+                ),
+                next_steps: (
+                    if ($groups | length) > 0 then
+                        [
+                            "capture this source-scoped report artifact before proposing mutation",
+                            "message owner_hints on Agent Mail thread tracker-hygiene with sample_ids",
+                            "wait for explicit owner authorization before removing, moving, or rewriting foreign rows",
+                            "if authorized, use pre/post snapshots and row-count conservation checks",
+                            "if authorization is absent, continue using source_aware_queue_state and local graph exports"
+                        ]
+                    else
+                        ["strict mode can be considered after a fresh zero-foreign report"]
+                    end
+                )
+            }
+        ),
         local_open_ids: ([.[] | select(local_issue and open_issue) | .id] | sort),
         local_open_rows: local_open_rows_arr,
         source_aware_ready_rows: source_aware_ready_rows_arr,
@@ -628,6 +681,10 @@ if jq -e '
     and (.stale_in_progress_rows | type == "array")
     and (.foreign_in_progress_samples | type == "array")
     and (.foreign_stale_in_progress_samples | type == "array")
+    and ((.foreign_reconciliation_plan.groups | length) == (.foreign_group_summaries | length))
+    and (.foreign_reconciliation_plan.authorization_required == ((.foreign_group_summaries | length) > 0))
+    and (.foreign_reconciliation_plan.conservation_check_required == ((.foreign_group_summaries | length) > 0))
+    and all(.foreign_reconciliation_plan.groups[]; .authorization_required == true and .recommended_thread_id == "tracker-hygiene")
     and all(.source_aware_ready_rows[]; (.blocked_by | length) == 0)
     and all(.source_aware_ready_rows[]; has("permission_gate") | not)
     and all(.permission_gated_rows[]; (.permission_gate.present == false))

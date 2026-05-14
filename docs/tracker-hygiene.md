@@ -64,6 +64,7 @@ The report writes `tracker_source_hygiene_report.json` under
 - `excluded_foreign_open_count`
 - `excluded_foreign_by_prefix`
 - `foreign_group_summaries`
+- `foreign_reconciliation_plan`
 - `foreign_open_samples`
 - `reproduction_commands`
 
@@ -119,6 +120,13 @@ including dependencies. `source_aware_ready` contains only claimable local rows:
 it excludes epics, blocked rows, foreign-looking rows, and permission-gated
 rows until the required ACK is present. These artifacts are copies; generating
 them does not close, rewrite, delete, or rename any tracker row.
+
+`foreign_reconciliation_plan` is also report-only. It turns each foreign group
+into an owner-handoff packet with the recommended Agent Mail thread, owner
+hints, sample IDs, authorization requirement, and conservation rule. It does
+not authorize mutation by itself. Use it to contact the likely owner project and
+to record the exact rule any later move, removal, rewrite, or `project` backfill
+must satisfy.
 
 ## Serialized Report Coverage Gate
 

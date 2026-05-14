@@ -41,6 +41,19 @@ expression: json
       "count": 2
     }
   ],
+  "foreign_reconciliation": {
+    "schema_version": 1,
+    "authorization_required": true,
+    "conservation_check_required": true,
+    "group_count": 4,
+    "group_prefixes": [
+      "br-r37",
+      "franken_numpy",
+      "frankenredis",
+      "frankentorch"
+    ],
+    "next_step_count": 5
+  },
   "queue_state": {
     "schema_version": 1,
     "verdict": "ready",

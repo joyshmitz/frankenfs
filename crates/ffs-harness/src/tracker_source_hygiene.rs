@@ -154,6 +154,7 @@ pub struct TrackerSourceHygieneReport {
     pub excluded_foreign_stale_in_progress_count: usize,
     pub excluded_foreign_by_prefix: Vec<TrackerPrefixCount>,
     pub foreign_group_summaries: Vec<TrackerForeignGroupSummary>,
+    pub foreign_reconciliation_plan: TrackerForeignReconciliationPlan,
     pub local_open_ids: Vec<String>,
     pub local_open_rows: Vec<TrackerIssueWorkRow>,
     pub source_aware_ready_rows: Vec<TrackerIssueWorkRow>,
@@ -210,6 +211,29 @@ pub struct TrackerForeignGroupSummary {
     pub owner_hints: Vec<String>,
     pub sample_ids: Vec<String>,
     pub sample_titles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerForeignReconciliationPlan {
+    pub schema_version: u32,
+    pub mutation_policy: String,
+    pub authorization_required: bool,
+    pub conservation_check_required: bool,
+    pub groups: Vec<TrackerForeignReconciliationGroup>,
+    pub next_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerForeignReconciliationGroup {
+    pub prefix: String,
+    pub count: usize,
+    pub owner_hints: Vec<String>,
+    pub sample_ids: Vec<String>,
+    pub recommended_thread_id: String,
+    pub recommended_subject: String,
+    pub proposed_action: String,
+    pub authorization_required: bool,
+    pub conservation_rule: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -736,6 +760,8 @@ fn build_report(
     let mut foreign_stale_in_progress_samples = foreign_stale_in_progress_rows;
     foreign_stale_in_progress_samples.truncate(20);
 
+    let foreign_group_summaries = foreign_group_summaries(&wrapped);
+
     TrackerSourceHygieneReport {
         schema_version: 1,
         issues_path: config.issues_path.clone(),
@@ -766,7 +792,8 @@ fn build_report(
         excluded_foreign_in_progress_count: foreign_in_progress,
         excluded_foreign_stale_in_progress_count: foreign_stale_in_progress,
         excluded_foreign_by_prefix: excluded_foreign_by_prefix(&wrapped),
-        foreign_group_summaries: foreign_group_summaries(&wrapped),
+        foreign_reconciliation_plan: foreign_reconciliation_plan(&foreign_group_summaries),
+        foreign_group_summaries,
         local_open_ids: sorted_ids(
             wrapped
                 .iter()
@@ -1115,6 +1142,57 @@ fn foreign_group_summaries(issues: &[TrackerIssue<'_>]) -> Vec<TrackerForeignGro
             }
         })
         .collect()
+}
+
+fn foreign_reconciliation_plan(
+    groups: &[TrackerForeignGroupSummary],
+) -> TrackerForeignReconciliationPlan {
+    let has_foreign_rows = !groups.is_empty();
+    TrackerForeignReconciliationPlan {
+        schema_version: 1,
+        mutation_policy:
+            "owner-handoff-required; this report never deletes, rewrites, closes, or moves tracker rows"
+                .to_owned(),
+        authorization_required: has_foreign_rows,
+        conservation_check_required: has_foreign_rows,
+        groups: groups
+            .iter()
+            .map(|group| TrackerForeignReconciliationGroup {
+                prefix: group.prefix.clone(),
+                count: group.count,
+                owner_hints: group.owner_hints.clone(),
+                sample_ids: group.sample_ids.clone(),
+                recommended_thread_id: "tracker-hygiene".to_owned(),
+                recommended_subject: format!(
+                    "[tracker-hygiene] Foreign row ownership check: {}",
+                    group.prefix
+                ),
+                proposed_action:
+                    "ask hinted owner project to confirm authority before any move, removal, rewrite, or project-field backfill"
+                        .to_owned(),
+                authorization_required: true,
+                conservation_rule:
+                    "before authorized mutation, preserve pre/post snapshots and prove total row conservation across affected stores"
+                        .to_owned(),
+            })
+            .collect(),
+        next_steps: if has_foreign_rows {
+            vec![
+                "capture this source-scoped report artifact before proposing mutation"
+                    .to_owned(),
+                "message owner_hints on Agent Mail thread tracker-hygiene with sample_ids"
+                    .to_owned(),
+                "wait for explicit owner authorization before removing, moving, or rewriting foreign rows"
+                    .to_owned(),
+                "if authorized, use pre/post snapshots and row-count conservation checks"
+                    .to_owned(),
+                "if authorization is absent, continue using source_aware_queue_state and local graph exports"
+                    .to_owned(),
+            ]
+        } else {
+            vec!["strict mode can be considered after a fresh zero-foreign report".to_owned()]
+        },
+    }
 }
 
 fn owner_hints_for_rows(rows: &[&TrackerIssue<'_>]) -> Vec<String> {
@@ -1592,6 +1670,21 @@ mod tests {
         Ok(())
     }
 
+    fn assert_golden_foreign_reconciliation_plan(
+        report: &TrackerSourceHygieneReport,
+        golden: &Value,
+    ) -> Result<(), String> {
+        let expected: TrackerForeignReconciliationPlan =
+            serde_json::from_value(golden_field(golden, "foreign_reconciliation_plan")?.clone())
+                .map_err(|err| err.to_string())?;
+        assert_eq!(report.foreign_reconciliation_plan, expected);
+        assert_eq!(
+            report.foreign_reconciliation_plan.groups.len(),
+            report.foreign_group_summaries.len(),
+        );
+        Ok(())
+    }
+
     fn assert_golden_local_graph_exports(
         report: &TrackerSourceHygieneReport,
         golden: &Value,
@@ -1607,34 +1700,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn committed_fixture_matches_shell_golden_core_queue_state() -> Result<(), String> {
-        let report = analyze_tracker_source_hygiene(COMMITTED_FIXTURE_ISSUES, &config())
-            .map_err(|err| err.to_string())?;
-        let golden: Value =
-            serde_json::from_str(COMMITTED_FIXTURE_GOLDEN).map_err(|err| err.to_string())?;
-        let golden_queue = golden_field(&golden, "source_aware_queue_state")?;
-
-        assert_golden_core_counts(&report, &golden)?;
-        assert_golden_queue_state(&report, golden_queue)?;
-        assert_golden_foreign_groups(&report, &golden)?;
-        assert_golden_local_graph_exports(&report, &golden)?;
-        let permission_gate = report
-            .permission_gated_rows
-            .first()
-            .ok_or_else(|| "fixture must include one permission-gated row".to_owned())?;
-        assert_eq!(
-            permission_gate.permission_gate.gate_kind,
-            "xfstests_real_run",
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn tracker_source_hygiene_report_json_shape() -> Result<(), String> {
-        let report = analyze_tracker_source_hygiene(COMMITTED_FIXTURE_ISSUES, &config())
-            .map_err(|err| err.to_string())?;
-        let local_graph_exports = report.local_graph_exports.as_ref().map(|exports| {
+    fn local_graph_exports_shape(report: &TrackerSourceHygieneReport) -> Option<Value> {
+        report.local_graph_exports.as_ref().map(|exports| {
             serde_json::json!({
                 "schema_version": exports.schema_version,
                 "mutation_policy": &exports.mutation_policy,
@@ -1651,8 +1718,11 @@ mod tests {
                     "id_count": exports.local_nonclaimable.id_count,
                 },
             })
-        });
-        let local_nonclaimable = report
+        })
+    }
+
+    fn local_nonclaimable_shape(report: &TrackerSourceHygieneReport) -> Vec<Value> {
+        report
             .local_nonclaimable_rows
             .iter()
             .map(|row| {
@@ -1670,8 +1740,29 @@ mod tests {
                         .collect::<Vec<_>>(),
                 })
             })
-            .collect::<Vec<_>>();
-        let shape = serde_json::json!({
+            .collect()
+    }
+
+    fn foreign_reconciliation_shape(report: &TrackerSourceHygieneReport) -> Value {
+        serde_json::json!({
+            "schema_version": report.foreign_reconciliation_plan.schema_version,
+            "authorization_required": report.foreign_reconciliation_plan.authorization_required,
+            "conservation_check_required": report
+                .foreign_reconciliation_plan
+                .conservation_check_required,
+            "group_count": report.foreign_reconciliation_plan.groups.len(),
+            "group_prefixes": report
+                .foreign_reconciliation_plan
+                .groups
+                .iter()
+                .map(|group| group.prefix.as_str())
+                .collect::<Vec<_>>(),
+            "next_step_count": report.foreign_reconciliation_plan.next_steps.len(),
+        })
+    }
+
+    fn report_json_shape(report: &TrackerSourceHygieneReport) -> Value {
+        serde_json::json!({
             "schema_version": report.schema_version,
             "status": &report.status,
             "mutation_policy": &report.mutation_policy,
@@ -1690,8 +1781,9 @@ mod tests {
             },
             "classifier": &report.classifier,
             "foreign_prefixes": &report.excluded_foreign_by_prefix,
+            "foreign_reconciliation": foreign_reconciliation_shape(report),
             "queue_state": &report.source_aware_queue_state,
-            "local_graph_exports": local_graph_exports,
+            "local_graph_exports": local_graph_exports_shape(report),
             "source_aware_ready_ids": report
                 .source_aware_ready_rows
                 .iter()
@@ -1707,7 +1799,7 @@ mod tests {
                 .iter()
                 .map(|row| row.id.as_str())
                 .collect::<Vec<_>>(),
-            "local_nonclaimable": local_nonclaimable,
+            "local_nonclaimable": local_nonclaimable_shape(report),
             "stale_in_progress_ids": report
                 .stale_in_progress_rows
                 .iter()
@@ -1720,7 +1812,38 @@ mod tests {
                 .collect::<Vec<_>>(),
             "reproduction_command_count": report.reproduction_commands.len(),
             "errors": &report.errors,
-        });
+        })
+    }
+
+    #[test]
+    fn committed_fixture_matches_shell_golden_core_queue_state() -> Result<(), String> {
+        let report = analyze_tracker_source_hygiene(COMMITTED_FIXTURE_ISSUES, &config())
+            .map_err(|err| err.to_string())?;
+        let golden: Value =
+            serde_json::from_str(COMMITTED_FIXTURE_GOLDEN).map_err(|err| err.to_string())?;
+        let golden_queue = golden_field(&golden, "source_aware_queue_state")?;
+
+        assert_golden_core_counts(&report, &golden)?;
+        assert_golden_queue_state(&report, golden_queue)?;
+        assert_golden_foreign_groups(&report, &golden)?;
+        assert_golden_foreign_reconciliation_plan(&report, &golden)?;
+        assert_golden_local_graph_exports(&report, &golden)?;
+        let permission_gate = report
+            .permission_gated_rows
+            .first()
+            .ok_or_else(|| "fixture must include one permission-gated row".to_owned())?;
+        assert_eq!(
+            permission_gate.permission_gate.gate_kind,
+            "xfstests_real_run",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tracker_source_hygiene_report_json_shape() -> Result<(), String> {
+        let report = analyze_tracker_source_hygiene(COMMITTED_FIXTURE_ISSUES, &config())
+            .map_err(|err| err.to_string())?;
+        let shape = report_json_shape(&report);
         let json = serde_json::to_string_pretty(&shape).map_err(|err| err.to_string())?;
         insta::assert_snapshot!("tracker_source_hygiene_report_json_shape", json);
         let report_json = serde_json::to_string(&report).map_err(|err| err.to_string())?;
