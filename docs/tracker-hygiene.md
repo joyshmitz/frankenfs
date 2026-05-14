@@ -152,6 +152,45 @@ Use uncovered required rows as the source for narrow report-coverage beads; do
 not treat the report as a proof-bundle pass, xfstests result, mounted mutation
 result, or large-host swarm campaign result.
 
+## Source-Scope Tracked-Input Policy
+
+Source-scope inventory reports are agent closeout and discovery inputs. Run the
+manifest scanner through `rch` in agent sessions:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch_target_frankenfs_source_scope \
+  cargo run --quiet -p ffs-harness -- validate-source-scope-manifest \
+  --manifest tests/source-scope-manifest/source_scope_manifest.json \
+  --workspace-root . \
+  --out artifacts/source-scope/source_scope_manifest.json
+```
+
+The scanner treats git-tracked files as canonical workspace evidence whenever
+git metadata is available. Canonical evidence appears in each source row's
+`matched_paths`, participates in `file_or_directory_hash`, and may be used for
+source-family closeout decisions. If git metadata is unavailable or incomplete,
+the report must say so through its workspace-file-source fields; do not treat a
+silent live-directory scan as canonical proof.
+
+Untracked paths are diagnostics, not canonical evidence. A dirty workspace may
+still produce a valid report when generated E2E logs, temp artifacts, or local
+backup files match a source-family glob. Those paths appear under
+`untracked_matched_path_count` and `untracked_matched_paths` with an exclusion
+reason, and their contents are excluded from `file_or_directory_hash`.
+
+When dirty diagnostics appear:
+
+1. Inspect the reported path, source family, and exclusion reason.
+2. If the file is supposed to become evidence, make a deliberate checked-in
+   artifact or a committed manifest/ledger entry that references it.
+3. If it is local run output, leave it as a diagnostic and cite only committed
+   evidence in bead closeout.
+4. Preserve local artifacts during no-delete agent sessions; do not delete
+   files merely to make a report look clean.
+5. Do not close readiness gaps from untracked-only evidence.
+6. Do not mutate foreign tracker rows as part of source-scope cleanup; follow
+   the foreign-row handoff rules below.
+
 ## Reconciliation Rules
 
 Do not delete, rewrite, close, or rename foreign-looking rows merely because

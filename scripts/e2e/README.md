@@ -84,6 +84,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 # Run docs status wording drift validation
 ./scripts/e2e/ffs_docs_status_drift_e2e.sh
 
+# Run open-ended inventory and source-scope scanner validation
+./scripts/e2e/ffs_open_ended_inventory_scanner_e2e.sh
+
 # Run repair confidence mutation-safety threshold validation
 ./scripts/e2e/ffs_repair_confidence_lab_e2e.sh
 
@@ -101,6 +104,34 @@ directories on exit during ordinary CI runs. Set
 `FFS_E2E_DISABLE_TEMP_CLEANUP=1` for operator inspection, no-delete agent
 sessions, or debugging runs that must preserve temp directories and direct
 `mktemp` logs.
+
+## Source-Scope Scanner Policy
+
+`./scripts/e2e/ffs_open_ended_inventory_scanner_e2e.sh` validates the
+open-ended note scanner and the source-scope manifest. The direct source-scope
+command for agent runs is:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch_target_frankenfs_source_scope \
+  cargo run --quiet -p ffs-harness -- validate-source-scope-manifest \
+  --manifest tests/source-scope-manifest/source_scope_manifest.json \
+  --workspace-root . \
+  --out artifacts/source-scope/source_scope_manifest.json
+```
+
+Read source-scope reports with this split in mind:
+
+- `matched_paths` and `file_or_directory_hash` are canonical only for tracked
+  inputs, or for an explicit non-git fallback that the report names.
+- `untracked_matched_path_count` and `untracked_matched_paths` are dirty
+  workspace diagnostics. They identify local output that matched a glob but was
+  excluded from canonical hashes.
+- Untracked E2E output becomes closeout evidence only when the output itself is
+  deliberately checked in or a checked-in artifact/ledger records its path and
+  hash. Otherwise it is local diagnostic context.
+- Do not delete local artifacts to silence dirty diagnostics, do not close
+  readiness gaps from untracked-only evidence, and do not mutate foreign tracker
+  rows while handling source-scope cleanup.
 
 ## xfstests Failure Triage Artifacts
 
