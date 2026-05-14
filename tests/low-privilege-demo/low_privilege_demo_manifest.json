@@ -44,7 +44,7 @@
       "expected_outcome": "executed",
       "expected_artifact_path": "artifacts/low-privilege-demo/repair_dry_run.json",
       "host_skip_reason": "",
-      "reproduction_command": "rch exec -- cargo run -p ffs-harness -- run-repair-dry-run --image tests/fixtures/repair/sample.img",
+      "reproduction_command": "rch exec -- cargo run -p ffs-harness -- validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json --select repair_dry_run_single_block_recoverable",
       "cleanup_status": "teardown_tempdir"
     },
     {
@@ -57,7 +57,7 @@
       "expected_outcome": "executed",
       "expected_artifact_path": "artifacts/low-privilege-demo/release_gate_eval.json",
       "host_skip_reason": "",
-      "reproduction_command": "rch exec -- cargo run -p ffs-harness -- evaluate-release-gate --evidence tests/fixtures/release-gate/sample-evidence.json",
+      "reproduction_command": "rch exec -- cargo test -p ffs-harness release_gate::tests -- --nocapture",
       "cleanup_status": "teardown_tempdir"
     },
     {

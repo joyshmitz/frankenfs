@@ -34,6 +34,12 @@ const ALLOWED_EXECUTION_KINDS: [&str; 5] = [
 
 const ALLOWED_OUTCOMES: [&str; 3] = ["executed", "host_skipped", "capability_blocked"];
 
+const ALLOWED_HARNESS_REPRODUCTION_COMMANDS: [&str; 3] = [
+    "validate-low-privilege-demo",
+    "validate-repair-confidence-lab",
+    "evaluate-release-gates",
+];
+
 const REQUIRED_LOW_PRIVILEGE_KINDS: [&str; 3] =
     ["parser_unit", "invariant_oracle", "repair_dry_run"];
 
@@ -174,6 +180,8 @@ fn validate_top_level(manifest: &LowPrivilegeDemoManifest, errors: &mut Vec<Stri
     }
     if manifest.command_line.trim().is_empty() {
         errors.push("low-privilege demo manifest missing command_line".to_owned());
+    } else {
+        validate_harness_reproduction_command("command_line", &manifest.command_line, errors);
     }
     if manifest.working_directory_policy.trim().is_empty() {
         errors.push("low-privilege demo manifest missing working_directory_policy".to_owned());
@@ -250,6 +258,12 @@ fn validate_lane_required_text(lane: &LowPrivilegeDemoLane, errors: &mut Vec<Str
             "lane `{}` missing reproduction_command",
             lane.lane_id
         ));
+    } else {
+        validate_harness_reproduction_command(
+            &format!("lane `{}` reproduction_command", lane.lane_id),
+            &lane.reproduction_command,
+            errors,
+        );
     }
     if lane.cleanup_status.trim().is_empty() {
         errors.push(format!("lane `{}` missing cleanup_status", lane.lane_id));
@@ -337,6 +351,30 @@ fn is_valid_sha256(value: &str) -> bool {
         return false;
     };
     suffix.len() == 64 && suffix.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn validate_harness_reproduction_command(context: &str, command: &str, errors: &mut Vec<String>) {
+    let Some(command_name) = harness_command_name(command) else {
+        return;
+    };
+    if !ALLOWED_HARNESS_REPRODUCTION_COMMANDS.contains(&command_name) {
+        errors.push(format!(
+            "{context} references unsupported ffs-harness command `{command_name}`; expected one of {}",
+            ALLOWED_HARNESS_REPRODUCTION_COMMANDS.join(", ")
+        ));
+    }
+}
+
+fn harness_command_name(command: &str) -> Option<&str> {
+    const MARKERS: [&str; 2] = [
+        "cargo run -p ffs-harness -- ",
+        "cargo run --quiet -p ffs-harness -- ",
+    ];
+    MARKERS.iter().find_map(|marker| {
+        command
+            .split_once(marker)
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+    })
 }
 
 #[must_use]
@@ -754,6 +792,36 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("missing reproduction_command"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_top_level_harness_command_is_rejected() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        manifest.command_line =
+            "rch exec -- cargo run -p ffs-harness -- run-low-privilege-demo".to_owned();
+        let report = validate_low_privilege_demo_manifest(&manifest);
+
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("command_line references unsupported ffs-harness command"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_lane_harness_command_is_rejected() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        first_lane_mut(&mut manifest)?.reproduction_command =
+            "rch exec -- cargo run -p ffs-harness -- run-repair-dry-run --image sample.img"
+                .to_owned();
+        let report = validate_low_privilege_demo_manifest(&manifest);
+
+        assert!(report.errors.iter().any(|err| {
+            err.contains("reproduction_command references unsupported ffs-harness command")
+        }));
         Ok(())
     }
 

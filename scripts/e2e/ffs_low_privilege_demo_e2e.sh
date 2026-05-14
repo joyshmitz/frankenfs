@@ -80,7 +80,7 @@ if grep -q "pub mod low_privilege_demo" crates/ffs-harness/src/lib.rs \
     && grep -q '"validate-low-privilege-demo")' crates/ffs-harness/src/main.rs \
     && grep -q "scripts/e2e/ffs_low_privilege_demo_e2e.sh" scripts/e2e/scenario_catalog.json \
     && grep -q "validate-low-privilege-demo" "$MANIFEST_JSON" \
-    && ! grep -q "run-low-privilege-demo" "$MANIFEST_JSON"; then
+    && ! grep -Eq "run-low-privilege-demo|run-repair-dry-run|evaluate-release-gate([^s]|$)" "$MANIFEST_JSON"; then
     scenario_result "low_privilege_demo_cli_wired" "PASS" "module, CLI command, catalog suite, and manifest command are wired"
 else
     scenario_result "low_privilege_demo_cli_wired" "FAIL" "missing module export, CLI command, catalog suite, or manifest command"
@@ -107,6 +107,11 @@ report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 manifest = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
 required_low_privilege = {"parser_unit", "invariant_oracle", "repair_dry_run"}
 required_host_skip = {"mounted_smoke"}
+allowed_harness_commands = {
+    "validate-low-privilege-demo",
+    "validate-repair-confidence-lab",
+    "evaluate-release-gates",
+}
 if not report["valid"]:
     raise SystemExit(report["errors"])
 if report["lane_count"] < 5:
@@ -117,8 +122,24 @@ if missing_low:
 missing_host_skip = required_host_skip - set(report["host_skipped_lanes"])
 if missing_host_skip:
     raise SystemExit(f"missing host-skipped lanes: {sorted(missing_host_skip)}")
-if "run-low-privilege-demo" in manifest["command_line"]:
-    raise SystemExit("manifest still advertises removed run-low-privilege-demo command")
+commands = [manifest["command_line"]]
+commands.extend(lane["reproduction_command"] for lane in manifest["lanes"])
+stale_commands = [
+    command
+    for command in commands
+    if "run-low-privilege-demo" in command
+    or "run-repair-dry-run" in command
+    or "evaluate-release-gate --" in command
+]
+if stale_commands:
+    raise SystemExit(f"manifest still advertises stale harness commands: {stale_commands}")
+for command in commands:
+    marker = "cargo run -p ffs-harness -- "
+    if marker not in command:
+        continue
+    command_name = command.split(marker, 1)[1].split()[0]
+    if command_name not in allowed_harness_commands:
+        raise SystemExit(f"unsupported harness command in manifest: {command_name}")
 PY
 then
     scenario_result "low_privilege_demo_coverage" "PASS" "lanes, low-privilege kinds, and host skips verified"
