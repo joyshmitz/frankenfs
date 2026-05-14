@@ -1761,6 +1761,51 @@ mod tests {
     }
 
     #[test]
+    fn live_reservation_snapshot_fixture_is_accepted_by_claimability_planner() {
+        let fixture = include_str!(
+            "../../../tests/fixtures/claimability_autopilot_live_reservation_snapshot.json"
+        );
+        let reservation: AgentMailReservationSnapshotReport =
+            serde_json::from_str(fixture).expect("live reservation snapshot fixture parses");
+        let mut tracker = base_report();
+        tracker.source_aware_ready_rows =
+            vec![work_row("bd-ready", "Ready with live reservation snapshot")];
+        tracker.source_aware_queue_state = queue_state("ready", vec!["bd-ready".to_owned()]);
+
+        let report = build_claimability_plan_report(&config(), &tracker, Some(&reservation), None);
+
+        assert!(report.validation.valid);
+        assert_eq!(report.reservation_snapshot.active_peer_conflict_count, 1);
+        assert_eq!(report.reservation_snapshot.active_self_reservation_count, 1);
+        assert_eq!(
+            report.reservation_snapshot.self_held_target_paths,
+            vec!["docs/tracker-hygiene.md"]
+        );
+        assert_eq!(
+            class_ids(&report, ClaimabilityClassification::ReservedByPeer),
+            vec!["bd-ready"]
+        );
+        let allocation = &report.reservation_allocation_plan;
+        assert_eq!(allocation.status, "safe_disjoint_suggestions");
+        assert_eq!(allocation.self_held_reservation_count, 1);
+        assert_eq!(
+            allocation.self_held_target_paths,
+            vec!["docs/tracker-hygiene.md"]
+        );
+        assert_eq!(
+            allocation.suggested_disjoint_target_paths,
+            vec![
+                "docs/tracker-hygiene.md",
+                "tests/fixtures/claimability_autopilot_live_reservation_snapshot.json",
+            ]
+        );
+        assert!(allocation.groups.iter().any(|group| {
+            group.holder == "SageMeadow"
+                && group.blocked_target_paths == vec!["crates/ffs-harness/src/claimability_plan.rs"]
+        }));
+    }
+
+    #[test]
     fn reservation_allocation_fails_closed_when_all_targets_overlap() {
         let reservation = reservation_report(
             vec!["crates/ffs-harness/src/claimability_plan.rs"],

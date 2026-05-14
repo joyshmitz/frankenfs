@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "snapshot_status": "present",
+  "snapshot_schema_version": 1,
+  "current_agent": "SapphireLotus",
+  "target_paths": [
+    "docs/tracker-hygiene.md",
+    "crates/ffs-harness/src/claimability_plan.rs",
+    "tests/fixtures/claimability_autopilot_live_reservation_snapshot.json"
+  ],
+  "source": "agent-mail-live-copy",
+  "source_freshness": "fresh",
+  "generated_at": "2033-05-18T03:30:00Z",
+  "generated_at_epoch": 1999999800,
+  "age_seconds": 200,
+  "source_max_age_seconds": 3600,
+  "conflict_classification": "active_peer_conflict",
+  "reservations": [
+    {
+      "holder": "SapphireLotus",
+      "path_pattern": "docs/tracker-hygiene.md",
+      "exclusive": true,
+      "reason": "bd-0chpv.10",
+      "created_ts": "2033-05-18T03:00:00Z",
+      "expires_ts": "2033-05-18T04:30:00Z",
+      "released_ts": null,
+      "created_epoch": 1999998000,
+      "expires_epoch": 2000003400,
+      "released_epoch": null,
+      "active": true,
+      "overlaps_target": true,
+      "conflict_classification": "self_held"
+    },
+    {
+      "holder": "SageMeadow",
+      "path_pattern": "crates/ffs-harness/src/claimability_plan.rs",
+      "exclusive": true,
+      "reason": "bd-peer-fixture",
+      "created_ts": "2033-05-18T03:05:00Z",
+      "expires_ts": "2033-05-18T04:35:00Z",
+      "released_ts": null,
+      "created_epoch": 1999998300,
+      "expires_epoch": 2000003700,
+      "released_epoch": null,
+      "active": true,
+      "overlaps_target": true,
+      "conflict_classification": "active_peer_conflict"
+    }
+  ],
+  "errors": []
+}

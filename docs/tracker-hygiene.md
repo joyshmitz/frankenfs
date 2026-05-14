@@ -214,6 +214,77 @@ The allocation plan is intentionally conservative:
 - The harness never calls MCP, claims work, releases reservations, or mutates
   `.beads/issues.jsonl` from this report path.
 
+### Live-To-Offline Reservation Snapshots
+
+`claimability-plan --reservation-report` reads an offline reservation report,
+not a live MCP response. Capture live Agent Mail state once, translate the facts
+into the report shape, and pass that file to the planner. This preserves the
+no-mutation boundary: the harness reads JSON only and never calls MCP.
+
+Use `file_reservation_paths` conflict output as the authoritative conflict
+source when it disagrees with a lightweight resource view such as
+`resource://tooling/locks`. The report should record the snapshot timestamp and
+set `source_freshness` to `fresh` only while `age_seconds <=
+source_max_age_seconds`; otherwise use `stale` or omit the snapshot.
+
+The required top-level fields are:
+
+- `current_agent`: the agent that will interpret self-held leases.
+- `generated_at`, `generated_at_epoch`, `age_seconds`,
+  `source_max_age_seconds`, and `source_freshness`: freshness metadata for the
+  captured observation.
+- `target_paths`: exact files or globs the next claim wants to reserve.
+- `conflict_classification`: aggregate status, usually
+  `active_peer_conflict`, `self_held`, `shared_observation`,
+  `no_active_conflict`, `expired`, or `malformed_timestamp`.
+- `reservations`: one row per observed lease or conflict.
+
+Each reservation row must include `holder`, `path_pattern`, `exclusive`,
+`reason`, `created_ts`, `expires_ts`, `released_ts`, `active`,
+`overlaps_target`, and row-level `conflict_classification`. Epoch fields are
+included when known so downstream reports can compare freshness without
+re-parsing timestamps.
+
+Minimal report-shaped fixture:
+
+```json
+{
+  "schema_version": 1,
+  "snapshot_status": "present",
+  "snapshot_schema_version": 1,
+  "current_agent": "SapphireLotus",
+  "target_paths": ["docs/tracker-hygiene.md"],
+  "source": "agent-mail-live-copy",
+  "source_freshness": "fresh",
+  "generated_at": "2033-05-18T03:30:00Z",
+  "generated_at_epoch": 1999999800,
+  "age_seconds": 200,
+  "source_max_age_seconds": 3600,
+  "conflict_classification": "self_held",
+  "reservations": [
+    {
+      "holder": "SapphireLotus",
+      "path_pattern": "docs/tracker-hygiene.md",
+      "exclusive": true,
+      "reason": "bd-0chpv.10",
+      "created_ts": "2033-05-18T03:00:00Z",
+      "expires_ts": "2033-05-18T04:30:00Z",
+      "released_ts": null,
+      "created_epoch": 1999998000,
+      "expires_epoch": 2000003400,
+      "released_epoch": null,
+      "active": true,
+      "overlaps_target": true,
+      "conflict_classification": "self_held"
+    }
+  ],
+  "errors": []
+}
+```
+
+The mixed current-agent plus peer fixture used by the planner tests is
+`tests/fixtures/claimability_autopilot_live_reservation_snapshot.json`.
+
 ## Strict Mode
 
 `TRACKER_SOURCE_HYGIENE_STRICT=1` fails when foreign-looking open rows exist.
