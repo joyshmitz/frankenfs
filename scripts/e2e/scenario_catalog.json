@@ -5204,6 +5204,12 @@
           "category": "error",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=source_scope_manifest_missing_family|outcome=PASS"
+        },
+        {
+          "id": "source_scope_dirty_workspace_stability",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=source_scope_dirty_workspace_stability|outcome=PASS"
         }
       ]
     },

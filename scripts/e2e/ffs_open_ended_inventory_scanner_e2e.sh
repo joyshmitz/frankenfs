@@ -26,11 +26,13 @@ POSITIVE_REPORT="$E2E_LOG_DIR/open_ended_note_positive.json"
 NEGATIVE_REPORT="$E2E_LOG_DIR/open_ended_note_negative.json"
 REAL_REPORT="$E2E_LOG_DIR/open_ended_note_real_inventory.json"
 SOURCE_SCOPE_REPORT="$E2E_LOG_DIR/source_scope_manifest_real_workspace.json"
+SOURCE_SCOPE_DIRTY_UNIT_LOG="$E2E_LOG_DIR/source_scope_dirty_workspace_unit.log"
 POSITIVE_LOG="$E2E_LOG_DIR/open_ended_note_positive.log"
 NEGATIVE_LOG="$E2E_LOG_DIR/open_ended_note_negative.log"
 REAL_LOG="$E2E_LOG_DIR/open_ended_note_real_inventory.log"
 SOURCE_SCOPE_LOG="$E2E_LOG_DIR/source_scope_manifest_real_workspace.log"
 SOURCE_SCOPE_NEGATIVE_LOG="$E2E_LOG_DIR/source_scope_manifest_missing_tests.log"
+SOURCE_SCOPE_DIRTY_SNAPSHOT="$REPO_ROOT/crates/ffs-harness/src/snapshots/ffs_harness__open_ended_inventory__tests__source_scope_scan_report_json_shape.snap"
 POSITIVE_REPRO_COMMAND="cargo run -p ffs-harness -- open-ended-note-scanner --source tests/open-ended-inventory/scanner_fixture_positive.md"
 NEGATIVE_REPRO_COMMAND="cargo run -p ffs-harness -- open-ended-note-scanner --source tests/open-ended-inventory/scanner_fixture_negative.md"
 REAL_REPRO_COMMAND="cargo run -p ffs-harness -- open-ended-note-scanner --source docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md"
@@ -380,6 +382,33 @@ else
     done
     scenario_result "source_scope_manifest_missing_family" "FAIL" "required source family omission did not fail closed"
     e2e_fail "source-scope manifest accepted a missing required source family"
+fi
+
+e2e_step "Scenario 8: source-scope dirty workspace proof runs through RCH"
+if RCH_VISIBILITY=summary \
+    RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-2}" \
+    e2e_rch_capture "$SOURCE_SCOPE_DIRTY_UNIT_LOG" \
+    env "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" \
+    cargo test -p ffs-harness source_scope_scan -- --nocapture; then
+    if grep -Fq "source_scope_scan_uses_git_tracked_files_for_canonical_hashes" "$SOURCE_SCOPE_DIRTY_UNIT_LOG" \
+        && grep -Fq "source_scope_scan_report_json_shape" "$SOURCE_SCOPE_DIRTY_UNIT_LOG" \
+        && grep -Fq '"source_path": "artifacts/e2e/20990101_000000_untracked_local/run.log"' "$SOURCE_SCOPE_DIRTY_SNAPSHOT" \
+        && grep -Fq '"exclusion_reason": "untracked path excluded from canonical source hash"' "$SOURCE_SCOPE_DIRTY_SNAPSHOT" \
+        && grep -Fq '"untracked_matched_path_count": 1' "$SOURCE_SCOPE_DIRTY_SNAPSHOT"; then
+        scenario_result "source_scope_dirty_workspace_stability" "PASS" "dirty workspace unit proof ran remotely and snapshot pins excluded untracked path"
+    else
+        sed -n '1,200p' "$SOURCE_SCOPE_DIRTY_UNIT_LOG" | while IFS= read -r line; do
+            e2e_log "  $line"
+        done
+        scenario_result "source_scope_dirty_workspace_stability" "FAIL" "dirty workspace proof or snapshot evidence missing"
+        e2e_fail "source-scope dirty workspace proof did not expose expected diagnostics"
+    fi
+else
+    sed -n '1,200p' "$SOURCE_SCOPE_DIRTY_UNIT_LOG" | while IFS= read -r line; do
+        e2e_log "  $line"
+    done
+    scenario_result "source_scope_dirty_workspace_stability" "FAIL" "dirty workspace source-scope unit proof failed"
+    e2e_fail "source-scope dirty workspace unit proof failed"
 fi
 
 e2e_pass
