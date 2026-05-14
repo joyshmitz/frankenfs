@@ -1423,7 +1423,10 @@ fn swarm_text_matches(text: &str) -> bool {
         || text.contains(SWARM_WORKLOAD_REAL_RUN_ACK_VALUE)
         || text.contains("large-host")
         || text.contains("large host")
-        || (text.contains("permissioned") && text.contains("swarm"))
+        || text.contains("permissioned swarm")
+        || text.contains("permissioned-swarm")
+        || text.contains("swarm permissioned")
+        || text.contains("swarm-permissioned")
 }
 
 fn explicit_non_permissioned_guard_matches(text: &str) -> bool {
@@ -2876,6 +2879,32 @@ mod tests {
         assert_eq!(
             report.source_aware_queue_state.claimable_ids,
             vec!["bd-validator"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn permissioned_fixture_text_with_agent_swarm_label_stays_claimable() -> Result<(), String> {
+        let issues = line(&serde_json::json!({
+            "id": "bd-planner",
+            "title": "Add source-aware claimability planner report",
+            "description": "Unit tests cover polluted br-r37 rows, permissioned bd-rchk3 rows, active peer reservation, stale in-progress with no reservation, and clean claimable task.",
+            "status": "open",
+            "priority": 1,
+            "labels": ["agent-swarm", "tracker-hygiene"]
+        }))?;
+
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
+
+        assert!(report.permission_gated_rows.is_empty());
+        assert_eq!(
+            report.source_aware_queue_state.claimable_ids,
+            vec!["bd-planner"]
+        );
+        assert_eq!(
+            report.source_aware_queue_state.permission_gated_ids.len(),
+            0
         );
         Ok(())
     }

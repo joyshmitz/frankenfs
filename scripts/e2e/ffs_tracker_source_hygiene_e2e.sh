@@ -216,7 +216,7 @@ if jq -s \
                 required_value: "xfstests-may-mutate-test-and-scratch-devices",
                 present: false
             }
-        elif (($text | test("FFS_SWARM_WORKLOAD_REAL_RUN_ACK|swarm-workload-may-use-permissioned-large-host|large-host|large host|permissioned.*swarm"; "i")) and (swarm_ack_present | not)) then
+        elif (($text | test("FFS_SWARM_WORKLOAD_REAL_RUN_ACK|swarm-workload-may-use-permissioned-large-host|large-host|large host|permissioned[ -]+swarm|swarm[ -]+permissioned"; "i")) and (swarm_ack_present | not)) then
             {
                 gate_kind: "large_host_swarm_real_run",
                 required_env: "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD,FFS_SWARM_WORKLOAD_REAL_RUN_ACK",
