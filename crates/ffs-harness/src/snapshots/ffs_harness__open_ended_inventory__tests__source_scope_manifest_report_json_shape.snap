@@ -6,7 +6,7 @@ expression: json
   "schema_version": 1,
   "manifest_id": "open_ended_inventory_source_scope_v1",
   "bead_id": "bd-lm0g9",
-  "source_count": 17,
+  "source_count": 18,
   "source_families": [
     "canonical_spec_docs",
     "conformance_docs",
@@ -24,6 +24,7 @@ expression: json
     "performance_xfstests_notes",
     "readme_status_docs",
     "repair_docs",
+    "test_control_artifacts",
     "tests"
   ],
   "non_applicable_families": [],

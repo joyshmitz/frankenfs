@@ -120,6 +120,42 @@
       "non_applicability_rationale": ""
     },
     {
+      "id": "test_control_artifacts",
+      "source_family": "test_control_artifacts",
+      "included_globs": [
+        "tests/artifact-schema-fixtures/**/*.json",
+        "tests/btrfs-*-corpus/*.json",
+        "tests/casefold-corpus/*.json",
+        "tests/chaos-replay-lab/*.json",
+        "tests/crash-replay-artifact/*.json",
+        "tests/fault-injection-corpus/*.json",
+        "tests/fuzz-smoke/*.json",
+        "tests/inventory-closeout-gate/*.json",
+        "tests/low-privilege-demo*/*.json",
+        "tests/metamorphic-workload-seeds/*.json",
+        "tests/mounted-*/*.json",
+        "tests/open-ended-inventory/*.md",
+        "tests/readiness-lab/*.json",
+        "tests/release-gates/*.json",
+        "tests/remediation-*/*.json",
+        "tests/repair-corpus/*.json"
+      ],
+      "excluded_globs": [
+        "target/**",
+        "**/.rch-target/**",
+        "tests/**/_generated/**",
+        "tests/**/_artifacts/**"
+      ],
+      "risk_category": "conformance",
+      "owner": "harness",
+      "status": "active",
+      "expected_proof_types": ["golden-fixture", "corpus-seed", "mounted-e2e"],
+      "freshness_ttl_days": 14,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
       "id": "tests",
       "source_family": "tests",
       "included_globs": [

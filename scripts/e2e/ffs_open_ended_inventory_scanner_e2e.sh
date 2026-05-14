@@ -296,6 +296,7 @@ required_families = {
     "conformance_docs",
     "conformance_fixture_artifacts",
     "fixture_manifests",
+    "test_control_artifacts",
     "tests",
     "fuzz_corpus_notes",
     "fuzz_targets",

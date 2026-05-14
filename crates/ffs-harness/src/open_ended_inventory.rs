@@ -363,13 +363,14 @@ pub const DEFAULT_SOURCE_SCOPE_MANIFEST_PATH: &str =
 const DEFAULT_SOURCE_SCOPE_MANIFEST_JSON: &str =
     include_str!("../../../tests/source-scope-manifest/source_scope_manifest.json");
 
-const REQUIRED_SOURCE_FAMILIES: [&str; 17] = [
+const REQUIRED_SOURCE_FAMILIES: [&str; 18] = [
     "readme_status_docs",
     "feature_parity_doc",
     "canonical_spec_docs",
     "conformance_docs",
     "conformance_fixture_artifacts",
     "fixture_manifests",
+    "test_control_artifacts",
     "tests",
     "fuzz_corpus_notes",
     "fuzz_targets",
@@ -409,6 +410,25 @@ const OPERATOR_RUNBOOK_DOC_GLOBS: [&str; 5] = [
     "docs/templates/*.md",
     "docs/tracker-hygiene.md",
     "docs/xfstests-known-failures.md",
+];
+
+const TEST_CONTROL_ARTIFACT_GLOBS: [&str; 16] = [
+    "tests/artifact-schema-fixtures/**/*.json",
+    "tests/btrfs-*-corpus/*.json",
+    "tests/casefold-corpus/*.json",
+    "tests/chaos-replay-lab/*.json",
+    "tests/crash-replay-artifact/*.json",
+    "tests/fault-injection-corpus/*.json",
+    "tests/fuzz-smoke/*.json",
+    "tests/inventory-closeout-gate/*.json",
+    "tests/low-privilege-demo*/*.json",
+    "tests/metamorphic-workload-seeds/*.json",
+    "tests/mounted-*/*.json",
+    "tests/open-ended-inventory/*.md",
+    "tests/readiness-lab/*.json",
+    "tests/release-gates/*.json",
+    "tests/remediation-*/*.json",
+    "tests/repair-corpus/*.json",
 ];
 
 const PERFORMANCE_CONTROL_ARTIFACT_GLOBS: [&str; 6] = [
@@ -912,6 +932,7 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
         "conformance_fixture_artifacts" => {
             validate_conformance_fixture_artifacts(entry, &excluded, errors);
         }
+        "test_control_artifacts" => validate_test_control_artifacts(entry, &excluded, errors),
         "fuzz_targets" => validate_fuzz_targets_exclusions(entry, &excluded, errors),
         "fuzz_orchestration" => validate_fuzz_orchestration_exclusions(entry, &excluded, errors),
         "operational_scripts" => validate_operational_scripts_exclusions(entry, &excluded, errors),
@@ -926,6 +947,37 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             validate_performance_control_artifacts(entry, &excluded, errors);
         }
         _ => {}
+    }
+}
+
+fn validate_test_control_artifacts(
+    entry: &SourceScopeEntry,
+    excluded: &str,
+    errors: &mut Vec<String>,
+) {
+    for required_glob in TEST_CONTROL_ARTIFACT_GLOBS {
+        if !entry
+            .included_globs
+            .iter()
+            .any(|glob| glob == required_glob)
+        {
+            errors.push(format!(
+                "source `{}` must include test control artifact glob `{required_glob}`",
+                entry.id
+            ));
+        }
+    }
+    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+        errors.push(format!(
+            "source `{}` must exclude build target paths from test control artifacts",
+            entry.id
+        ));
+    }
+    if !excluded.contains("_generated") || !excluded.contains("_artifacts") {
+        errors.push(format!(
+            "source `{}` must exclude generated test control artifact directories",
+            entry.id
+        ));
     }
 }
 
@@ -2276,6 +2328,7 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
     fn populate_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
         populate_core_source_scope_workspace(root)?;
         populate_conformance_fixture_source_scope_workspace(root)?;
+        populate_test_control_artifact_source_scope_workspace(root)?;
         populate_operator_runbook_source_scope_workspace(root)?;
         populate_performance_source_scope_workspace(root)
     }
@@ -2386,6 +2439,86 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 (
                     "conformance/golden/checksums.sha256",
                     "bd-rchk7.1  ext4_8mb_reference.json\n",
+                ),
+            ],
+        )
+    }
+
+    fn populate_test_control_artifact_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
+        write_sample_files(
+            root,
+            &[
+                (
+                    "tests/artifact-schema-fixtures/positive/positive_matrix.fixture.json",
+                    "{\"note\":\"bd-rchk7.1 artifact schema fixture\"}\n",
+                ),
+                (
+                    "tests/btrfs-multidevice-corpus/btrfs_multidevice_corpus.json",
+                    "{\"note\":\"bd-rchk7.1 btrfs multidevice corpus\"}\n",
+                ),
+                (
+                    "tests/btrfs-send-receive-corpus/btrfs_send_receive_corpus.json",
+                    "{\"note\":\"bd-rchk7.1 btrfs send receive corpus\"}\n",
+                ),
+                (
+                    "tests/casefold-corpus/casefold_corpus.json",
+                    "{\"note\":\"bd-rchk7.1 casefold corpus\"}\n",
+                ),
+                (
+                    "tests/chaos-replay-lab/chaos_replay_lab.json",
+                    "{\"note\":\"bd-rchk7.1 chaos replay lab\"}\n",
+                ),
+                (
+                    "tests/crash-replay-artifact/crash_replay_artifact.json",
+                    "{\"note\":\"bd-rchk7.1 crash replay artifact\"}\n",
+                ),
+                (
+                    "tests/fault-injection-corpus/fault_injection_corpus.json",
+                    "{\"note\":\"bd-rchk7.1 fault injection corpus\"}\n",
+                ),
+                (
+                    "tests/fuzz-smoke/fuzz_smoke_manifest.json",
+                    "{\"note\":\"bd-rchk7.1 fuzz smoke manifest\"}\n",
+                ),
+                (
+                    "tests/inventory-closeout-gate/inventory_closeout_gate.json",
+                    "{\"note\":\"bd-rchk7.1 inventory closeout gate\"}\n",
+                ),
+                (
+                    "tests/low-privilege-demo/low_privilege_demo_manifest.json",
+                    "{\"note\":\"bd-rchk7.1 low privilege demo\"}\n",
+                ),
+                (
+                    "tests/low-privilege-demo-sandbox/low_privilege_demo_sandbox.json",
+                    "{\"note\":\"bd-rchk7.1 low privilege sandbox\"}\n",
+                ),
+                (
+                    "tests/metamorphic-workload-seeds/metamorphic_workload_seed_catalog.json",
+                    "{\"note\":\"bd-rchk7.1 metamorphic workload seeds\"}\n",
+                ),
+                (
+                    "tests/mounted-write-error-classes/mounted_write_error_classes.json",
+                    "{\"note\":\"bd-rchk7.1 mounted write error classes\"}\n",
+                ),
+                (
+                    "tests/open-ended-inventory/scanner_fixture_positive.md",
+                    "NOTE open-ended scanner fixture bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "tests/readiness-lab/numa_p99_replay_fixtures.json",
+                    "{\"note\":\"bd-rchk7.1 readiness lab replay\"}\n",
+                ),
+                (
+                    "tests/release-gates/release_gate_policy_v1.json",
+                    "{\"note\":\"bd-rchk7.1 release gate policy\"}\n",
+                ),
+                (
+                    "tests/remediation-catalog/remediation_catalog.json",
+                    "{\"note\":\"bd-rchk7.1 remediation catalog\"}\n",
+                ),
+                (
+                    "tests/repair-corpus/repair_corpus.json",
+                    "{\"note\":\"bd-rchk7.1 repair corpus\"}\n",
                 ),
             ],
         )
@@ -2516,6 +2649,21 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         assert!(report.errors.iter().any(|err| {
             err.contains("missing required family `conformance_fixture_artifacts`")
         }));
+    }
+
+    #[test]
+    fn missing_test_control_artifacts_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "test_control_artifacts");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required family `test_control_artifacts`"))
+        );
     }
 
     #[test]
@@ -2981,6 +3129,27 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         assert!(report.errors.iter().any(|err| {
             err.contains("conformance/golden/*.ext4")
                 || err.contains("build target paths from conformance fixture artifacts")
+        }));
+    }
+
+    #[test]
+    fn test_control_artifacts_coverage_is_validated() {
+        let mut manifest = fixture_manifest();
+        let test_artifacts = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "test_control_artifacts")
+            .expect("test control artifact source exists");
+        test_artifacts
+            .included_globs
+            .retain(|glob| glob != "tests/remediation-*/*.json");
+        test_artifacts
+            .excluded_globs
+            .retain(|glob| !glob.contains("_generated"));
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("tests/remediation-*/*.json")
+                || err.contains("generated test control artifact directories")
         }));
     }
 
