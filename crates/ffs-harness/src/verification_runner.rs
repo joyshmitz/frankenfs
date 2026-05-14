@@ -37,6 +37,9 @@ pub const RUNNER_CONTRACT_VERSION: u32 = 1;
 /// Maximum number of retries in CI mode before declaring permanent failure.
 pub const DEFAULT_CI_MAX_RETRIES: u32 = 2;
 
+/// RCH proof ledger schema version.
+pub const RCH_PROOF_LEDGER_SCHEMA_VERSION: u32 = 1;
+
 /// Exit code conventions for E2E scripts.
 pub mod exit_code {
     /// All scenarios passed.
@@ -85,6 +88,333 @@ pub fn parse_e2e_output(output: &str) -> Vec<ParsedScenario> {
         }
     }
     results
+}
+
+/// Input metadata for turning a captured `rch` transcript into proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RchProofLedgerConfig {
+    /// Command the operator intended `rch` to run.
+    pub command_line: Vec<String>,
+    /// Working directory for the command.
+    pub cwd: String,
+    /// Environment variables intentionally forwarded to the worker.
+    pub env_allowlist: Vec<String>,
+}
+
+/// Machine-readable proof extracted from a captured `rch` transcript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RchProofLedgerReport {
+    /// Schema version for downstream compatibility checks.
+    pub schema_version: u32,
+    /// Redacted command line intended for the worker.
+    pub command: Vec<String>,
+    /// Working directory where the command was expected to run.
+    pub cwd: String,
+    /// Environment variable names intentionally forwarded to the worker.
+    pub env_allowlist: Vec<String>,
+    /// Remote worker identity, when the transcript includes one.
+    pub worker_id: Option<String>,
+    /// Exit code from the remote command.
+    pub remote_exit_code: Option<i32>,
+    /// Remote command runtime in milliseconds.
+    pub remote_duration_ms: Option<u64>,
+    /// Whether `rch` fell back to local execution.
+    pub fallback_detected: bool,
+    /// Local fallback reason copied from the `rch` summary line.
+    pub local_fallback_reason: Option<String>,
+    /// Retrieval state for source-tree and target-directory artifacts.
+    pub artifact_retrieval_status: RchArtifactRetrievalStatus,
+    /// Non-fatal or proof-invalidating warnings found in the transcript.
+    pub warnings: Vec<String>,
+    /// Final proof classification.
+    pub proof_verdict: String,
+}
+
+/// Source-tree and target-directory artifact retrieval state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RchArtifactRetrievalStatus {
+    /// Source-tree artifact retrieval state.
+    pub source: String,
+    /// Target-directory artifact retrieval state.
+    pub target: String,
+}
+
+/// Parse an `rch` transcript into a proof ledger.
+#[must_use]
+pub fn build_rch_proof_ledger_report(
+    transcript: &str,
+    config: &RchProofLedgerConfig,
+) -> RchProofLedgerReport {
+    let mut worker_id = None;
+    let mut remote_exit_code = None;
+    let mut remote_duration_ms = None;
+    let mut local_fallback_reason = None;
+    let mut source_status = "not_attempted".to_owned();
+    let mut target_status = "not_attempted".to_owned();
+    let mut warnings = Vec::new();
+
+    for line in transcript.lines() {
+        if worker_id.is_none() {
+            worker_id = parse_selected_worker(line).or_else(|| parse_rch_summary_worker(line));
+        }
+        if let Some((exit, duration)) = parse_remote_finished_line(line) {
+            remote_exit_code = Some(exit);
+            remote_duration_ms = Some(duration);
+        } else if let Some((exit, duration)) = parse_rch_summary_line(line) {
+            remote_exit_code.get_or_insert(exit);
+            if remote_duration_ms.is_none() {
+                remote_duration_ms = duration;
+            }
+        }
+        if let Some(reason) = parse_local_fallback_reason(line) {
+            local_fallback_reason = Some(reason);
+            push_unique_warning(&mut warnings, "local_fallback_detected");
+        }
+        classify_artifact_line(line, &mut source_status, &mut target_status, &mut warnings);
+        classify_warning_line(line, &mut warnings);
+    }
+
+    if remote_exit_code == Some(0) && target_status == "started" {
+        "stalled".clone_into(&mut target_status);
+        push_unique_warning(&mut warnings, "target_artifact_retrieval_stalled");
+    }
+    if remote_exit_code == Some(0) && source_status == "started" {
+        "stalled".clone_into(&mut source_status);
+        push_unique_warning(&mut warnings, "source_artifact_retrieval_stalled");
+    }
+    if matches!(remote_exit_code, Some(exit) if exit != 0) {
+        push_unique_warning(&mut warnings, "remote_command_failed");
+    }
+    if worker_id.is_none() {
+        push_unique_warning(&mut warnings, "worker_id_missing");
+    }
+
+    let fallback_detected = local_fallback_reason.is_some();
+    let artifact_retrieval_status = RchArtifactRetrievalStatus {
+        source: source_status,
+        target: target_status,
+    };
+    let proof_verdict = rch_proof_verdict(
+        fallback_detected,
+        remote_exit_code,
+        &artifact_retrieval_status,
+        &warnings,
+    );
+
+    RchProofLedgerReport {
+        schema_version: RCH_PROOF_LEDGER_SCHEMA_VERSION,
+        command: redact_command_line(&config.command_line),
+        cwd: config.cwd.clone(),
+        env_allowlist: config.env_allowlist.clone(),
+        worker_id,
+        remote_exit_code,
+        remote_duration_ms,
+        fallback_detected,
+        local_fallback_reason,
+        artifact_retrieval_status,
+        warnings,
+        proof_verdict,
+    }
+}
+
+fn parse_selected_worker(line: &str) -> Option<String> {
+    let worker = line
+        .split_once("Selected worker: ")?
+        .1
+        .split_whitespace()
+        .next()?;
+    Some(worker.trim_end_matches(':').to_owned())
+}
+
+fn parse_rch_summary_worker(line: &str) -> Option<String> {
+    let summary = line.strip_prefix("[RCH] remote ")?;
+    let worker = summary.split_whitespace().next()?;
+    if worker.is_empty() {
+        None
+    } else {
+        Some(worker.to_owned())
+    }
+}
+
+fn parse_remote_finished_line(line: &str) -> Option<(i32, u64)> {
+    let details = line.split_once("Remote command finished: ")?.1;
+    let exit = parse_i32_field(details, "exit=")?;
+    let duration = parse_duration_ms_after_in(details)?;
+    Some((exit, duration))
+}
+
+fn parse_rch_summary_line(line: &str) -> Option<(i32, Option<u64>)> {
+    let summary = line.strip_prefix("[RCH] remote ")?;
+    if let Some((_, exit_text)) = summary.split_once(" failed (exit ") {
+        let exit = exit_text
+            .split_once(')')
+            .map_or(exit_text, |(value, _)| value)
+            .parse()
+            .ok()?;
+        return Some((exit, None));
+    }
+
+    let duration = summary
+        .rsplit_once('(')
+        .and_then(|(_, raw)| raw.strip_suffix(')'))
+        .and_then(parse_duration_text_ms);
+    Some((0, duration))
+}
+
+fn parse_local_fallback_reason(line: &str) -> Option<String> {
+    let reason = line.strip_prefix("[RCH] local (")?.strip_suffix(')')?;
+    Some(reason.to_owned())
+}
+
+fn parse_i32_field(text: &str, prefix: &str) -> Option<i32> {
+    let field = text.split_once(prefix)?.1;
+    let raw = field
+        .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';')
+        .next()?;
+    raw.parse().ok()
+}
+
+fn parse_duration_ms_after_in(text: &str) -> Option<u64> {
+    let duration = text.split_once(" in ")?.1.split_whitespace().next()?;
+    parse_duration_text_ms(duration)
+}
+
+fn parse_duration_text_ms(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    if let Some(ms) = trimmed.strip_suffix("ms") {
+        return ms.parse().ok();
+    }
+
+    let seconds = trimmed.strip_suffix('s')?;
+    let (whole, fractional) = seconds
+        .split_once('.')
+        .map_or((seconds, ""), |(whole, fractional)| (whole, fractional));
+    let whole_ms = whole.parse::<u64>().ok()?.checked_mul(1_000)?;
+    let fractional_ms = fractional_millis(fractional)?;
+    whole_ms.checked_add(fractional_ms)
+}
+
+fn fractional_millis(fractional: &str) -> Option<u64> {
+    let mut digits = fractional.chars();
+    let mut millis = 0_u64;
+    let weights = [100_u64, 10, 1];
+    for weight in weights {
+        let digit = digits.next().unwrap_or('0');
+        if !digit.is_ascii_digit() {
+            return None;
+        }
+        millis = millis.checked_add(u64::from(digit.to_digit(10)?) * weight)?;
+    }
+    Some(millis)
+}
+
+fn classify_artifact_line(
+    line: &str,
+    source_status: &mut String,
+    target_status: &mut String,
+    warnings: &mut Vec<String>,
+) {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("retrieving artifacts from ") {
+        if is_target_artifact_line(&lower) {
+            "started".clone_into(target_status);
+        } else {
+            "started".clone_into(source_status);
+        }
+    }
+
+    if lower.contains("custom cargo_target_dir artifacts retrieved")
+        || lower.contains("target artifacts retrieved")
+    {
+        "retrieved".clone_into(target_status);
+    } else if lower.contains("artifacts retrieved:") && *source_status == "started" {
+        "retrieved".clone_into(source_status);
+    }
+
+    if lower.contains("artifact retrieval failed") || lower.contains("failed to retrieve artifacts")
+    {
+        if *target_status == "started" || is_target_artifact_line(&lower) {
+            "warning".clone_into(target_status);
+        } else {
+            "warning".clone_into(source_status);
+        }
+        push_unique_warning(warnings, "artifact_retrieval_warning");
+    }
+
+    if lower.contains("rch_artifact_retrieval_stopped_after_remote_exit")
+        || lower.contains("artifact retrieval stopped after remote exit")
+    {
+        "stalled".clone_into(target_status);
+        push_unique_warning(warnings, "target_artifact_retrieval_stalled");
+    }
+}
+
+fn classify_warning_line(line: &str, warnings: &mut Vec<String>) {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("rsync")
+        && (lower.contains("warning") || lower.contains("failed") || lower.contains("mismatch"))
+    {
+        push_unique_warning(warnings, "rsync_verification_warning");
+    }
+    if lower.contains("target verification warning") {
+        push_unique_warning(warnings, "rsync_verification_warning");
+    }
+    if lower.contains("remote evidence missing") {
+        push_unique_warning(warnings, "remote_evidence_missing");
+    }
+}
+
+fn is_target_artifact_line(lowercase_line: &str) -> bool {
+    lowercase_line.contains(".rch-target")
+        || lowercase_line.contains("cargo_target_dir")
+        || lowercase_line.contains("target artifact")
+}
+
+fn push_unique_warning(warnings: &mut Vec<String>, warning: &str) {
+    if !warnings.iter().any(|existing| existing == warning) {
+        warnings.push(warning.to_owned());
+    }
+}
+
+fn rch_proof_verdict(
+    fallback_detected: bool,
+    remote_exit_code: Option<i32>,
+    artifact_retrieval_status: &RchArtifactRetrievalStatus,
+    warnings: &[String],
+) -> String {
+    if fallback_detected {
+        return "invalid_local_fallback".to_owned();
+    }
+
+    match remote_exit_code {
+        Some(0) if has_artifact_warning(artifact_retrieval_status, warnings) => {
+            "remote_success_artifact_warning".to_owned()
+        }
+        Some(0) => "remote_success".to_owned(),
+        Some(_) => "remote_failure".to_owned(),
+        None => "missing_remote_evidence".to_owned(),
+    }
+}
+
+fn has_artifact_warning(
+    artifact_retrieval_status: &RchArtifactRetrievalStatus,
+    warnings: &[String],
+) -> bool {
+    matches!(
+        artifact_retrieval_status.source.as_str(),
+        "warning" | "stalled" | "failed"
+    ) || matches!(
+        artifact_retrieval_status.target.as_str(),
+        "warning" | "stalled" | "failed"
+    ) || warnings.iter().any(|warning| {
+        matches!(
+            warning.as_str(),
+            "artifact_retrieval_warning"
+                | "source_artifact_retrieval_stalled"
+                | "target_artifact_retrieval_stalled"
+                | "rsync_verification_warning"
+        )
+    })
 }
 
 /// Metadata for building a manifest from parsed E2E output.
@@ -1578,6 +1908,25 @@ mod tests {
             .ok_or_else(|| format!("expected readiness event at index {index}"))
     }
 
+    fn sample_rch_proof_config() -> RchProofLedgerConfig {
+        RchProofLedgerConfig {
+            command_line: vec![
+                "cargo".to_owned(),
+                "test".to_owned(),
+                "-p".to_owned(),
+                "ffs-harness".to_owned(),
+                format!("--{}{}", "api", "-key"),
+                "sample-credential".to_owned(),
+            ],
+            cwd: "/data/projects/frankenfs".to_owned(),
+            env_allowlist: vec!["CARGO_TARGET_DIR".to_owned(), "RUSTFLAGS".to_owned()],
+        }
+    }
+
+    fn has_rch_warning(report: &RchProofLedgerReport, warning: &str) -> bool {
+        report.warnings.iter().any(|candidate| candidate == warning)
+    }
+
     fn operational_scenario<'a>(
         manifest: &'a ArtifactManifest,
         scenario_id: &str,
@@ -1666,6 +2015,140 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
             "valid_test_marker"
         );
         Ok(())
+    }
+
+    // ── RCH proof ledger ────────────────────────────────────────────
+
+    #[test]
+    fn rch_proof_ledger_parses_remote_success() {
+        let transcript = "\
+Selected worker: vmi1227854 at ubuntu@203.0.113.10
+Executing command remotely: cargo test -p ffs-harness
+Remote command finished: exit=0 in 30485ms
+Retrieving artifacts from /data/projects/frankenfs on vmi1227854
+Artifacts retrieved: 1307 files, 44.0M
+Retrieving artifacts from /data/projects/frankenfs/.rch-target on vmi1227854
+Custom CARGO_TARGET_DIR artifacts retrieved: 824 files, 26.0M
+[RCH] remote vmi1227854 (142.8s)
+";
+        let report = build_rch_proof_ledger_report(transcript, &sample_rch_proof_config());
+
+        assert_eq!(report.schema_version, RCH_PROOF_LEDGER_SCHEMA_VERSION);
+        assert_eq!(report.worker_id.as_deref(), Some("vmi1227854"));
+        assert_eq!(report.remote_exit_code, Some(0));
+        assert_eq!(report.remote_duration_ms, Some(30_485));
+        assert!(!report.fallback_detected);
+        assert_eq!(report.artifact_retrieval_status.source, "retrieved");
+        assert_eq!(report.artifact_retrieval_status.target, "retrieved");
+        assert_eq!(report.proof_verdict, "remote_success");
+        assert_eq!(
+            report.command,
+            vec![
+                "cargo".to_owned(),
+                "test".to_owned(),
+                "-p".to_owned(),
+                "ffs-harness".to_owned(),
+                format!("--{}{}", "api", "-key"),
+                "[REDACTED]".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rch_proof_ledger_rejects_local_fallback() {
+        let transcript = "\
+Remote execution failed before worker proof was captured.
+[RCH] local (remote execution failed)
+";
+        let report = build_rch_proof_ledger_report(transcript, &sample_rch_proof_config());
+
+        assert!(report.fallback_detected);
+        assert_eq!(
+            report.local_fallback_reason.as_deref(),
+            Some("remote execution failed")
+        );
+        assert_eq!(report.remote_exit_code, None);
+        assert_eq!(report.proof_verdict, "invalid_local_fallback");
+        assert!(has_rch_warning(&report, "local_fallback_detected"));
+    }
+
+    #[test]
+    fn rch_proof_ledger_classifies_worker_failure() {
+        let transcript = "\
+Selected worker: vmi1227854 at ubuntu@203.0.113.10
+Remote command finished: exit=101 in 50604ms
+[RCH] remote vmi1227854 failed (exit 101)
+";
+        let report = build_rch_proof_ledger_report(transcript, &sample_rch_proof_config());
+
+        assert_eq!(report.worker_id.as_deref(), Some("vmi1227854"));
+        assert_eq!(report.remote_exit_code, Some(101));
+        assert_eq!(report.remote_duration_ms, Some(50_604));
+        assert_eq!(report.proof_verdict, "remote_failure");
+        assert!(has_rch_warning(&report, "remote_command_failed"));
+    }
+
+    #[test]
+    fn rch_proof_ledger_classifies_artifact_retrieval_warning() {
+        let transcript = "\
+Selected worker: vmi1227854 at ubuntu@203.0.113.10
+Remote command finished: exit=0 in 1200ms
+Retrieving artifacts from /data/projects/frankenfs on vmi1227854
+Artifacts retrieved: 4 files, 16K
+Retrieving artifacts from /data/projects/frankenfs/.rch-target on vmi1227854
+Artifact retrieval failed: rsync target verification warning
+[RCH] remote vmi1227854 (1.2s)
+";
+        let report = build_rch_proof_ledger_report(transcript, &sample_rch_proof_config());
+
+        assert_eq!(report.remote_exit_code, Some(0));
+        assert_eq!(report.artifact_retrieval_status.source, "retrieved");
+        assert_eq!(report.artifact_retrieval_status.target, "warning");
+        assert_eq!(report.proof_verdict, "remote_success_artifact_warning");
+        assert!(has_rch_warning(&report, "artifact_retrieval_warning"));
+    }
+
+    #[test]
+    fn rch_proof_ledger_classifies_artifact_retrieval_stall() {
+        let transcript = "\
+Selected worker: vmi1227854 at ubuntu@203.0.113.10
+Remote command finished: exit=0 in 2400ms
+Retrieving artifacts from /data/projects/frankenfs on vmi1227854
+Artifacts retrieved: 4 files, 16K
+Retrieving artifacts from /data/projects/frankenfs/.rch-target on vmi1227854
+[RCH] remote vmi1227854 (2.4s)
+";
+        let report = build_rch_proof_ledger_report(transcript, &sample_rch_proof_config());
+
+        assert_eq!(report.remote_exit_code, Some(0));
+        assert_eq!(report.artifact_retrieval_status.source, "retrieved");
+        assert_eq!(report.artifact_retrieval_status.target, "stalled");
+        assert_eq!(report.proof_verdict, "remote_success_artifact_warning");
+        assert!(has_rch_warning(
+            &report,
+            "target_artifact_retrieval_stalled"
+        ));
+    }
+
+    #[test]
+    fn rch_proof_ledger_degrades_success_on_rsync_warning() {
+        let transcript = "\
+Selected worker: vmi1227854 at ubuntu@203.0.113.10
+Remote command finished: exit=0 in 1200ms
+Retrieving artifacts from /data/projects/frankenfs on vmi1227854
+Artifacts retrieved: 4 files, 16K
+Retrieving artifacts from /data/projects/frankenfs/.rch-target on vmi1227854
+Custom CARGO_TARGET_DIR artifacts retrieved: 8 files, 32K
+WARN rch::transfer: rsync verification warning: checksum mismatch
+[RCH] remote vmi1227854 (1.2s)
+";
+        let report = build_rch_proof_ledger_report(transcript, &sample_rch_proof_config());
+
+        assert_eq!(report.remote_exit_code, Some(0));
+        assert_eq!(report.artifact_retrieval_status.source, "retrieved");
+        assert_eq!(report.artifact_retrieval_status.target, "retrieved");
+        assert_eq!(report.proof_verdict, "remote_success_artifact_warning");
+        assert!(has_rch_warning(&report, "rsync_verification_warning"));
     }
 
     // ── build_manifest_from_parsed ───────────────────────────────────
