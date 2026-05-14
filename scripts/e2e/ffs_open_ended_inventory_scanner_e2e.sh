@@ -296,6 +296,7 @@ required_families = {
     "fixture_manifests",
     "tests",
     "fuzz_corpus_notes",
+    "fuzz_targets",
     "harness_scripts",
     "mounted_lane_docs",
     "repair_docs",
