@@ -74,6 +74,33 @@
       "non_applicability_rationale": ""
     },
     {
+      "id": "conformance_fixture_artifacts",
+      "source_family": "conformance_fixture_artifacts",
+      "included_globs": [
+        "conformance/COVERAGE.md",
+        "conformance/DISCREPANCIES.md",
+        "conformance/PROVENANCE.md",
+        "conformance/fixtures/*.json",
+        "conformance/fixtures/checksums.sha256",
+        "conformance/golden/*.json",
+        "conformance/golden/*.txt",
+        "conformance/golden/*.ext4",
+        "conformance/golden/checksums.sha256"
+      ],
+      "excluded_globs": [
+        "target/**",
+        "**/.rch-target/**"
+      ],
+      "risk_category": "conformance",
+      "owner": "harness",
+      "status": "active",
+      "expected_proof_types": ["golden-fixture", "parser-unit", "property-test"],
+      "freshness_ttl_days": 30,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
       "id": "fixture_manifests",
       "source_family": "fixture_manifests",
       "included_globs": [

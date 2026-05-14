@@ -294,6 +294,7 @@ required_families = {
     "feature_parity_doc",
     "canonical_spec_docs",
     "conformance_docs",
+    "conformance_fixture_artifacts",
     "fixture_manifests",
     "tests",
     "fuzz_corpus_notes",

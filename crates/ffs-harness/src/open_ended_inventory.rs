@@ -363,11 +363,12 @@ pub const DEFAULT_SOURCE_SCOPE_MANIFEST_PATH: &str =
 const DEFAULT_SOURCE_SCOPE_MANIFEST_JSON: &str =
     include_str!("../../../tests/source-scope-manifest/source_scope_manifest.json");
 
-const REQUIRED_SOURCE_FAMILIES: [&str; 15] = [
+const REQUIRED_SOURCE_FAMILIES: [&str; 16] = [
     "readme_status_docs",
     "feature_parity_doc",
     "canonical_spec_docs",
     "conformance_docs",
+    "conformance_fixture_artifacts",
     "fixture_manifests",
     "tests",
     "fuzz_corpus_notes",
@@ -387,6 +388,18 @@ const CANONICAL_SPEC_DOCS: [&str; 5] = [
     "EXISTING_EXT4_BTRFS_STRUCTURE.md",
     "PROPOSED_ARCHITECTURE.md",
     "FEATURE_PARITY.md",
+];
+
+const CONFORMANCE_FIXTURE_ARTIFACT_GLOBS: [&str; 9] = [
+    "conformance/COVERAGE.md",
+    "conformance/DISCREPANCIES.md",
+    "conformance/PROVENANCE.md",
+    "conformance/fixtures/*.json",
+    "conformance/fixtures/checksums.sha256",
+    "conformance/golden/*.json",
+    "conformance/golden/*.txt",
+    "conformance/golden/*.ext4",
+    "conformance/golden/checksums.sha256",
 ];
 
 const PERFORMANCE_CONTROL_ARTIFACT_GLOBS: [&str; 6] = [
@@ -887,6 +900,9 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
                 entry.id
             ));
         }
+        "conformance_fixture_artifacts" => {
+            validate_conformance_fixture_artifacts(entry, &excluded, errors);
+        }
         "fuzz_targets" => validate_fuzz_targets_exclusions(entry, &excluded, errors),
         "fuzz_orchestration" => validate_fuzz_orchestration_exclusions(entry, &excluded, errors),
         "operational_scripts" => validate_operational_scripts_exclusions(entry, &excluded, errors),
@@ -900,6 +916,31 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             validate_performance_control_artifacts(entry, &excluded, errors);
         }
         _ => {}
+    }
+}
+
+fn validate_conformance_fixture_artifacts(
+    entry: &SourceScopeEntry,
+    excluded: &str,
+    errors: &mut Vec<String>,
+) {
+    for required_glob in CONFORMANCE_FIXTURE_ARTIFACT_GLOBS {
+        if !entry
+            .included_globs
+            .iter()
+            .any(|glob| glob == required_glob)
+        {
+            errors.push(format!(
+                "source `{}` must include conformance fixture artifact glob `{required_glob}`",
+                entry.id
+            ));
+        }
+    }
+    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+        errors.push(format!(
+            "source `{}` must exclude build target paths from conformance fixture artifacts",
+            entry.id
+        ));
     }
 }
 
@@ -2190,95 +2231,160 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         Ok(())
     }
 
-    fn populate_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
-        for (path, text) in [
-            ("README.md", "NOTE bd-rchk7.1 artifact coverage\n"),
-            ("FEATURE_PARITY.md", "bd-rchk7.1 artifact coverage\n"),
-            (
-                "COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md",
-                "NOTE canonical spec bd-rchk7.1 artifact\n",
-            ),
-            (
-                "PLAN_TO_PORT_FRANKENFS_TO_RUST.md",
-                "NOTE canonical porting plan bd-rchk7.1 artifact\n",
-            ),
-            (
-                "EXISTING_EXT4_BTRFS_STRUCTURE.md",
-                "NOTE extracted behavior bd-rchk7.1 artifact\n",
-            ),
-            (
-                "PROPOSED_ARCHITECTURE.md",
-                "NOTE architecture bd-rchk7.1 artifact\n",
-            ),
-            (
-                "docs/reports/CONFORMANCE_SAMPLE.md",
-                "NOTE conformance bd-rchk7.1 artifact\n",
-            ),
-            (
-                "tests/fixtures/sample.json",
-                "{\"note\":\"bd-rchk7.1 artifact\"}\n",
-            ),
-            (
-                "crates/ffs-harness/src/sample.rs",
-                "// NOTE bd-rchk7.1 artifact\n",
-            ),
-            (
-                "tests/fuzz_corpus/README.md",
-                "TODO fuzz bd-rchk7.1 artifact\n",
-            ),
-            (
-                "fuzz/fuzz_targets/fuzz_sample.rs",
-                "// NOTE fuzz target bd-rchk7.1 artifact\n",
-            ),
-            (
-                "fuzz/scripts/smoke_gate.sh",
-                "# NOTE fuzz orchestration bd-rchk7.1 artifact\n",
-            ),
-            (
-                "scripts/verify_golden.sh",
-                "# NOTE operational script bd-rchk7.1 artifact\n",
-            ),
-            (
-                "scripts/e2e/sample.sh",
-                "# NOTE mounted-e2e bd-rchk7.1 artifact\n",
-            ),
-            (
-                "docs/mounted/README.md",
-                "NOTE mounted path bd-rchk7.1 artifact\n",
-            ),
-            ("docs/repair/README.md", "NOTE repair bd-rchk7.1 artifact\n"),
-            (
-                "docs/performance/README.md",
-                "NOTE xfstests perf bd-rchk7.1 artifact\n",
-            ),
-            (
-                "benchmarks/performance_baseline_manifest.json",
-                "{\"note\":\"bd-rchk5 artifact\"}\n",
-            ),
-            (
-                "benchmarks/thresholds.toml",
-                "# NOTE benchmark thresholds bd-rchk5 artifact\n",
-            ),
-            (
-                "benchmarks/baselines/latest.json",
-                "{\"note\":\"bd-rchk5 latest baseline artifact\"}\n",
-            ),
-            (
-                "benchmarks/baselines/history/current.json",
-                "{\"note\":\"bd-rchk5 history artifact\"}\n",
-            ),
-            (
-                "baselines/README.md",
-                "NOTE baseline summary bd-rchk5 artifact\n",
-            ),
-            (
-                "profiles/flamegraph_cli_inspect.meta.json",
-                "{\"note\":\"bd-1ieht profile artifact\"}\n",
-            ),
-        ] {
+    fn write_sample_files(root: &Path, files: &[(&str, &str)]) -> anyhow::Result<()> {
+        for (path, text) in files {
             write_sample_file(root, path, text)?;
         }
         Ok(())
+    }
+
+    fn populate_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
+        populate_core_source_scope_workspace(root)?;
+        populate_conformance_fixture_source_scope_workspace(root)?;
+        populate_performance_source_scope_workspace(root)
+    }
+
+    fn populate_core_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
+        write_sample_files(
+            root,
+            &[
+                ("README.md", "NOTE bd-rchk7.1 artifact coverage\n"),
+                ("FEATURE_PARITY.md", "bd-rchk7.1 artifact coverage\n"),
+                (
+                    "COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md",
+                    "NOTE canonical spec bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "PLAN_TO_PORT_FRANKENFS_TO_RUST.md",
+                    "NOTE canonical porting plan bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "EXISTING_EXT4_BTRFS_STRUCTURE.md",
+                    "NOTE extracted behavior bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "PROPOSED_ARCHITECTURE.md",
+                    "NOTE architecture bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "docs/reports/CONFORMANCE_SAMPLE.md",
+                    "NOTE conformance bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "tests/fixtures/sample.json",
+                    "{\"note\":\"bd-rchk7.1 artifact\"}\n",
+                ),
+                (
+                    "crates/ffs-harness/src/sample.rs",
+                    "// NOTE bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "tests/fuzz_corpus/README.md",
+                    "TODO fuzz bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "fuzz/fuzz_targets/fuzz_sample.rs",
+                    "// NOTE fuzz target bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "fuzz/scripts/smoke_gate.sh",
+                    "# NOTE fuzz orchestration bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "scripts/verify_golden.sh",
+                    "# NOTE operational script bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "scripts/e2e/sample.sh",
+                    "# NOTE mounted-e2e bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "docs/mounted/README.md",
+                    "NOTE mounted path bd-rchk7.1 artifact\n",
+                ),
+                ("docs/repair/README.md", "NOTE repair bd-rchk7.1 artifact\n"),
+                (
+                    "docs/performance/README.md",
+                    "NOTE xfstests perf bd-rchk7.1 artifact\n",
+                ),
+            ],
+        )
+    }
+
+    fn populate_conformance_fixture_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
+        write_sample_files(
+            root,
+            &[
+                (
+                    "conformance/COVERAGE.md",
+                    "NOTE conformance coverage bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "conformance/DISCREPANCIES.md",
+                    "NOTE conformance discrepancies bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "conformance/PROVENANCE.md",
+                    "NOTE conformance provenance bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "conformance/fixtures/ext4_superblock_sparse.json",
+                    "{\"note\":\"bd-rchk7.1 conformance fixture\"}\n",
+                ),
+                (
+                    "conformance/fixtures/checksums.sha256",
+                    "bd-rchk7.1  ext4_superblock_sparse.json\n",
+                ),
+                (
+                    "conformance/golden/ext4_8mb_reference.json",
+                    "{\"note\":\"bd-rchk7.1 conformance golden\"}\n",
+                ),
+                (
+                    "conformance/golden/btrfs_item_payloads.txt",
+                    "NOTE conformance golden bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "conformance/golden/ext4_8mb_reference.ext4",
+                    "bd-rchk7.1 binary fixture placeholder\n",
+                ),
+                (
+                    "conformance/golden/checksums.sha256",
+                    "bd-rchk7.1  ext4_8mb_reference.json\n",
+                ),
+            ],
+        )
+    }
+
+    fn populate_performance_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
+        write_sample_files(
+            root,
+            &[
+                (
+                    "benchmarks/performance_baseline_manifest.json",
+                    "{\"note\":\"bd-rchk5 artifact\"}\n",
+                ),
+                (
+                    "benchmarks/thresholds.toml",
+                    "# NOTE benchmark thresholds bd-rchk5 artifact\n",
+                ),
+                (
+                    "benchmarks/baselines/latest.json",
+                    "{\"note\":\"bd-rchk5 latest baseline artifact\"}\n",
+                ),
+                (
+                    "benchmarks/baselines/history/current.json",
+                    "{\"note\":\"bd-rchk5 history artifact\"}\n",
+                ),
+                (
+                    "baselines/README.md",
+                    "NOTE baseline summary bd-rchk5 artifact\n",
+                ),
+                (
+                    "profiles/flamegraph_cli_inspect.meta.json",
+                    "{\"note\":\"bd-1ieht profile artifact\"}\n",
+                ),
+            ],
+        )
     }
 
     #[test]
@@ -2334,6 +2440,18 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .iter()
                 .any(|err| err.contains("missing required family `canonical_spec_docs`"))
         );
+    }
+
+    #[test]
+    fn missing_conformance_fixture_artifacts_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "conformance_fixture_artifacts");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("missing required family `conformance_fixture_artifacts`")
+        }));
     }
 
     #[test]
@@ -2763,6 +2881,27 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         assert!(report.errors.iter().any(|err| {
             err.contains("benchmarks/baselines/latest.json")
                 || err.contains("generated hyperfine baseline outputs")
+        }));
+    }
+
+    #[test]
+    fn conformance_fixture_artifacts_coverage_is_validated() {
+        let mut manifest = fixture_manifest();
+        let conformance = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "conformance_fixture_artifacts")
+            .expect("conformance fixture source exists");
+        conformance
+            .included_globs
+            .retain(|glob| glob != "conformance/golden/*.ext4");
+        conformance
+            .excluded_globs
+            .retain(|glob| !glob.contains(".rch-target"));
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("conformance/golden/*.ext4")
+                || err.contains("build target paths from conformance fixture artifacts")
         }));
     }
 
