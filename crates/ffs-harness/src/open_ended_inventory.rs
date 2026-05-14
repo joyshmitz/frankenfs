@@ -363,7 +363,7 @@ pub const DEFAULT_SOURCE_SCOPE_MANIFEST_PATH: &str =
 const DEFAULT_SOURCE_SCOPE_MANIFEST_JSON: &str =
     include_str!("../../../tests/source-scope-manifest/source_scope_manifest.json");
 
-const REQUIRED_SOURCE_FAMILIES: [&str; 21] = [
+const REQUIRED_SOURCE_FAMILIES: [&str; 22] = [
     "readme_status_docs",
     "agent_workflow_docs",
     "feature_parity_doc",
@@ -374,6 +374,7 @@ const REQUIRED_SOURCE_FAMILIES: [&str; 21] = [
     "fixture_manifests",
     "test_control_artifacts",
     "tests",
+    "fuzz_campaign_artifacts",
     "fuzz_corpus_notes",
     "fuzz_targets",
     "fuzz_orchestration",
@@ -427,6 +428,12 @@ const OPERATIONAL_EVIDENCE_ARTIFACT_GLOBS: [&str; 6] = [
     "docs/operator-recovery-drill.json",
     "docs/repair-confidence-mutation-safety.json",
     "docs/reports/*.md",
+];
+
+const FUZZ_CAMPAIGN_ARTIFACT_GLOBS: [&str; 3] = [
+    "artifacts/fuzz/*/campaign_summary.json",
+    "artifacts/fuzz/*/command_transcript.txt",
+    "artifacts/fuzz/*/logs/*.log",
 ];
 
 const TEST_CONTROL_ARTIFACT_GLOBS: [&str; 16] = [
@@ -952,6 +959,7 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             validate_conformance_fixture_artifacts(entry, &excluded, errors);
         }
         "test_control_artifacts" => validate_test_control_artifacts(entry, &excluded, errors),
+        "fuzz_campaign_artifacts" => validate_fuzz_campaign_artifacts(entry, &excluded, errors),
         "fuzz_targets" => validate_fuzz_targets_exclusions(entry, &excluded, errors),
         "fuzz_orchestration" => validate_fuzz_orchestration_exclusions(entry, &excluded, errors),
         "operational_scripts" => validate_operational_scripts_exclusions(entry, &excluded, errors),
@@ -969,6 +977,37 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             validate_performance_control_artifacts(entry, &excluded, errors);
         }
         _ => {}
+    }
+}
+
+fn validate_fuzz_campaign_artifacts(
+    entry: &SourceScopeEntry,
+    excluded: &str,
+    errors: &mut Vec<String>,
+) {
+    for required_glob in FUZZ_CAMPAIGN_ARTIFACT_GLOBS {
+        if !entry
+            .included_globs
+            .iter()
+            .any(|glob| glob == required_glob)
+        {
+            errors.push(format!(
+                "source `{}` must include fuzz campaign artifact glob `{required_glob}`",
+                entry.id
+            ));
+        }
+    }
+    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+        errors.push(format!(
+            "source `{}` must exclude build target paths from fuzz campaign artifacts",
+            entry.id
+        ));
+    }
+    if !excluded.contains("_generated") || !excluded.contains("artifacts/fuzz/*/artifacts/**") {
+        errors.push(format!(
+            "source `{}` must exclude generated fuzz campaign artifact directories",
+            entry.id
+        ));
     }
 }
 
@@ -2437,6 +2476,7 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         populate_operator_runbook_source_scope_workspace(root)?;
         populate_operational_evidence_artifact_source_scope_workspace(root)?;
         populate_architecture_design_doc_source_scope_workspace(root)?;
+        populate_fuzz_campaign_artifact_source_scope_workspace(root)?;
         populate_performance_source_scope_workspace(root)
     }
 
@@ -2726,6 +2766,26 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         )
     }
 
+    fn populate_fuzz_campaign_artifact_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
+        write_sample_files(
+            root,
+            &[
+                (
+                    "artifacts/fuzz/20260506_bd-rchk0_59_high_cursor_warm/campaign_summary.json",
+                    "{\"bead_id\":\"bd-rchk0.59\",\"note\":\"NOTE fuzz campaign artifact\"}\n",
+                ),
+                (
+                    "artifacts/fuzz/20260506_bd-rchk0_59_high_cursor_warm/command_transcript.txt",
+                    "bead_id=bd-rchk0.59\nNOTE fuzz command transcript artifact\n",
+                ),
+                (
+                    "artifacts/fuzz/20260506_bd-rchk0_59_high_cursor_warm/logs/fuzz_ioctl_dispatch.log",
+                    "NOTE fuzz ioctl dispatch artifact bd-rchk0.59\n",
+                ),
+            ],
+        )
+    }
+
     fn populate_performance_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
         write_sample_files(
             root,
@@ -2882,6 +2942,21 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .errors
                 .iter()
                 .any(|err| err.contains("missing required family `fuzz_corpus_notes`"))
+        );
+    }
+
+    #[test]
+    fn missing_fuzz_campaign_artifacts_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "fuzz_campaign_artifacts");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required family `fuzz_campaign_artifacts`"))
         );
     }
 
@@ -3447,6 +3522,27 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         let report = validate_source_scope_manifest(&manifest);
         assert!(report.errors.iter().any(|err| {
             err.contains("AGENTS.md") || err.contains("build target paths from agent workflow docs")
+        }));
+    }
+
+    #[test]
+    fn fuzz_campaign_artifacts_coverage_is_validated() {
+        let mut manifest = fixture_manifest();
+        let fuzz_campaign = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "fuzz_campaign_artifacts")
+            .expect("fuzz campaign artifact source exists");
+        fuzz_campaign
+            .included_globs
+            .retain(|glob| glob != "artifacts/fuzz/*/command_transcript.txt");
+        fuzz_campaign
+            .excluded_globs
+            .retain(|glob| !glob.contains("artifacts/fuzz/*/artifacts/**"));
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("artifacts/fuzz/*/command_transcript.txt")
+                || err.contains("generated fuzz campaign artifact directories")
         }));
     }
 

@@ -6,7 +6,7 @@ expression: json
   "schema_version": 1,
   "manifest_id": "open_ended_inventory_source_scope_v1",
   "bead_id": "bd-lm0g9",
-  "source_count": 21,
+  "source_count": 22,
   "source_families": [
     "agent_workflow_docs",
     "architecture_design_docs",
@@ -15,6 +15,7 @@ expression: json
     "conformance_fixture_artifacts",
     "feature_parity_doc",
     "fixture_manifests",
+    "fuzz_campaign_artifacts",
     "fuzz_corpus_notes",
     "fuzz_orchestration",
     "fuzz_targets",

@@ -300,6 +300,7 @@ required_families = {
     "fixture_manifests",
     "test_control_artifacts",
     "tests",
+    "fuzz_campaign_artifacts",
     "fuzz_corpus_notes",
     "fuzz_targets",
     "fuzz_orchestration",
