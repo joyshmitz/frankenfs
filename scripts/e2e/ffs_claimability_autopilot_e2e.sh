@@ -192,6 +192,9 @@ render_plan_markdown() {
         + "\n- Mutation policy: `\(.mutation_policy)`"
         + "\n\n## Next Actions\n"
         + (.next_safe_actions | map("- " + .) | join("\n"))
+        + "\n\n## Reservation Allocation\n"
+        + "- status: `\(.reservation_allocation_plan.status)`\n"
+        + (.reservation_allocation_plan.suggested_disjoint_target_paths | map("- `" + . + "`") | join("\n"))
         + "\n\n## Rows\n"
         + (.rows | map("- `\(.id)`: `\(.classification)`") | join("\n"))
         + "\n"
@@ -417,6 +420,24 @@ if jq -e '
     scenario_result "claimability_autopilot_peer_reserved_surface" "PASS" "plan=$PEER_PLAN_JSON reservation=$RESERVATION_FIXTURE"
 else
     scenario_result "claimability_autopilot_peer_reserved_surface" "FAIL" "plan=$PEER_PLAN_JSON reservation=$RESERVATION_FIXTURE"
+fi
+
+if jq -e '
+    (.reservation_allocation_plan.status == "safe_disjoint_suggestions")
+    and (.reservation_allocation_plan.advisory_only == true)
+    and (.reservation_allocation_plan.suggested_disjoint_target_paths == [
+        "crates/ffs-harness/src/claimability_plan.rs",
+        "docs/tracker-hygiene.md"
+    ])
+    and any(.reservation_allocation_plan.groups[]; .holder == "SageMeadow" and (.blocked_target_paths == ["scripts/e2e/ffs_claimability_autopilot_e2e.sh"]))
+    and any(.reservation_allocation_plan.safe_reservation_commands[]; contains("crates/ffs-harness/src/claimability_plan.rs") and contains("docs/tracker-hygiene.md"))
+' "$PEER_PLAN_JSON" >/dev/null \
+    && grep -q "Reservation Allocation" "$PEER_PLAN_MD" \
+    && grep -q "crates/ffs-harness/src/claimability_plan.rs" "$PEER_PLAN_MD" \
+    && grep -q "docs/tracker-hygiene.md" "$PEER_PLAN_MD"; then
+    scenario_result "claimability_autopilot_disjoint_reservation_suggestions" "PASS" "plan=$PEER_PLAN_JSON markdown=$PEER_PLAN_MD"
+else
+    scenario_result "claimability_autopilot_disjoint_reservation_suggestions" "FAIL" "plan=$PEER_PLAN_JSON markdown=$PEER_PLAN_MD"
 fi
 
 if jq -e '

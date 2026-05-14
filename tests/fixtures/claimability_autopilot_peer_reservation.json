@@ -4,7 +4,9 @@
   "snapshot_schema_version": 1,
   "current_agent": "SapphireLotus",
   "target_paths": [
-    "scripts/e2e/ffs_claimability_autopilot_e2e.sh"
+    "scripts/e2e/ffs_claimability_autopilot_e2e.sh",
+    "crates/ffs-harness/src/claimability_plan.rs",
+    "docs/tracker-hygiene.md"
   ],
   "source": "fixture",
   "source_freshness": "fresh",

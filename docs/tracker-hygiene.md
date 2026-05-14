@@ -190,6 +190,26 @@ Use `cc` sparingly. Message only agents likely to own the source project or the
 current tracker operation. If a file reservation exists for `.beads/issues.jsonl`,
 do not bypass it.
 
+## Advisory Reservation Allocation
+
+`ffs-harness claimability-plan` may consume an Agent Mail reservation snapshot
+with `--reservation-report`. The planner remains report-only, but a fresh
+snapshot can produce `reservation_allocation_plan` guidance for concurrent
+agents.
+
+The allocation plan is intentionally conservative:
+
+- It only suggests exact target paths that do not overlap an active exclusive
+  peer reservation.
+- Broad peer reservations such as `**`, wildcard target paths, stale or missing
+  snapshot freshness, and complete overlap all produce a blocked allocation
+  status with no suggested paths.
+- Suggested command text is advisory. Agents must still call Agent Mail
+  `file_reservation_paths` themselves and respect any live conflict returned by
+  the server.
+- The harness never calls MCP, claims work, releases reservations, or mutates
+  `.beads/issues.jsonl` from this report path.
+
 ## Strict Mode
 
 `TRACKER_SOURCE_HYGIENE_STRICT=1` fails when foreign-looking open rows exist.
