@@ -129,6 +129,27 @@
       "non_applicability_rationale": ""
     },
     {
+      "id": "fuzz_orchestration",
+      "source_family": "fuzz_orchestration",
+      "included_globs": [
+        "fuzz/Cargo.toml",
+        "fuzz/scripts/*.sh"
+      ],
+      "excluded_globs": [
+        "target/**",
+        "**/.rch-target/**",
+        "vendor/**"
+      ],
+      "risk_category": "fuzz",
+      "owner": "harness",
+      "status": "active",
+      "expected_proof_types": ["corpus-seed", "long-campaign", "property-test"],
+      "freshness_ttl_days": 14,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
       "id": "harness_scripts",
       "source_family": "harness_scripts",
       "included_globs": [

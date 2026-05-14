@@ -297,6 +297,7 @@ required_families = {
     "tests",
     "fuzz_corpus_notes",
     "fuzz_targets",
+    "fuzz_orchestration",
     "harness_scripts",
     "mounted_lane_docs",
     "repair_docs",

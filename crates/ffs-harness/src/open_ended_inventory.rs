@@ -363,7 +363,7 @@ pub const DEFAULT_SOURCE_SCOPE_MANIFEST_PATH: &str =
 const DEFAULT_SOURCE_SCOPE_MANIFEST_JSON: &str =
     include_str!("../../../tests/source-scope-manifest/source_scope_manifest.json");
 
-const REQUIRED_SOURCE_FAMILIES: [&str; 11] = [
+const REQUIRED_SOURCE_FAMILIES: [&str; 12] = [
     "readme_status_docs",
     "feature_parity_doc",
     "conformance_docs",
@@ -371,6 +371,7 @@ const REQUIRED_SOURCE_FAMILIES: [&str; 11] = [
     "tests",
     "fuzz_corpus_notes",
     "fuzz_targets",
+    "fuzz_orchestration",
     "harness_scripts",
     "mounted_lane_docs",
     "repair_docs",
@@ -866,6 +867,7 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             ));
         }
         "fuzz_targets" => validate_fuzz_targets_exclusions(entry, &excluded, errors),
+        "fuzz_orchestration" => validate_fuzz_orchestration_exclusions(entry, &excluded, errors),
         "harness_scripts" if !excluded.contains("_artifacts") => {
             errors.push(format!(
                 "source `{}` must exclude generated e2e artifact directories",
@@ -873,6 +875,25 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             ));
         }
         _ => {}
+    }
+}
+
+fn validate_fuzz_orchestration_exclusions(
+    entry: &SourceScopeEntry,
+    excluded: &str,
+    errors: &mut Vec<String>,
+) {
+    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+        errors.push(format!(
+            "source `{}` must exclude build target paths from fuzz orchestration source scope",
+            entry.id
+        ));
+    }
+    if !excluded.contains("vendor") {
+        errors.push(format!(
+            "source `{}` must exclude vendor paths from fuzz orchestration source scope",
+            entry.id
+        ));
     }
 }
 
@@ -2096,6 +2117,10 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 "// NOTE fuzz target bd-rchk7.1 artifact\n",
             ),
             (
+                "fuzz/scripts/smoke_gate.sh",
+                "# NOTE fuzz orchestration bd-rchk7.1 artifact\n",
+            ),
+            (
                 "scripts/e2e/sample.sh",
                 "# NOTE mounted-e2e bd-rchk7.1 artifact\n",
             ),
@@ -2196,6 +2221,21 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .errors
                 .iter()
                 .any(|err| err.contains("missing required family `fuzz_targets`"))
+        );
+    }
+
+    #[test]
+    fn missing_fuzz_orchestration_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "fuzz_orchestration");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required family `fuzz_orchestration`"))
         );
     }
 
@@ -2464,6 +2504,23 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .errors
                 .iter()
                 .any(|err| err.contains("vendor paths from fuzz target source scope"))
+        );
+
+        let mut manifest = fixture_manifest();
+        let fuzz_orchestration = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "fuzz_orchestration")
+            .expect("fuzz orchestration source exists");
+        fuzz_orchestration
+            .excluded_globs
+            .retain(|glob| !glob.contains("vendor"));
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("vendor paths from fuzz orchestration source scope"))
         );
     }
 
