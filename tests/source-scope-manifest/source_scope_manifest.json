@@ -233,6 +233,35 @@
       "non_applicability_rationale": ""
     },
     {
+      "id": "checked_in_evidence_artifacts",
+      "source_family": "checked_in_evidence_artifacts",
+      "included_globs": [
+        "artifacts/benchmarks/*.json",
+        "artifacts/optimization/*.json",
+        "artifacts/optimization/*.md",
+        "artifacts/optimization/*.tsv",
+        "artifacts/optimization/*.txt",
+        "artifacts/e2e/*/run.log",
+        "artifacts/e2e/*/*.log",
+        "artifacts/e2e/*/result.json",
+        "artifacts/parity-deferred-followups.md"
+      ],
+      "excluded_globs": [
+        "target/**",
+        "**/.rch-target/**",
+        "artifacts/**/_generated/**",
+        "artifacts/**/_artifacts/**"
+      ],
+      "risk_category": "observability",
+      "owner": "harness",
+      "status": "active",
+      "expected_proof_types": ["long-campaign", "mounted-e2e", "docs-non-goal"],
+      "freshness_ttl_days": 30,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
       "id": "fuzz_campaign_artifacts",
       "source_family": "fuzz_campaign_artifacts",
       "included_globs": [

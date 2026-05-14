@@ -363,7 +363,7 @@ pub const DEFAULT_SOURCE_SCOPE_MANIFEST_PATH: &str =
 const DEFAULT_SOURCE_SCOPE_MANIFEST_JSON: &str =
     include_str!("../../../tests/source-scope-manifest/source_scope_manifest.json");
 
-const REQUIRED_SOURCE_FAMILIES: [&str; 22] = [
+const REQUIRED_SOURCE_FAMILIES: [&str; 23] = [
     "readme_status_docs",
     "agent_workflow_docs",
     "feature_parity_doc",
@@ -374,6 +374,7 @@ const REQUIRED_SOURCE_FAMILIES: [&str; 22] = [
     "fixture_manifests",
     "test_control_artifacts",
     "tests",
+    "checked_in_evidence_artifacts",
     "fuzz_campaign_artifacts",
     "fuzz_corpus_notes",
     "fuzz_targets",
@@ -434,6 +435,18 @@ const FUZZ_CAMPAIGN_ARTIFACT_GLOBS: [&str; 3] = [
     "artifacts/fuzz/*/campaign_summary.json",
     "artifacts/fuzz/*/command_transcript.txt",
     "artifacts/fuzz/*/logs/*.log",
+];
+
+const CHECKED_IN_EVIDENCE_ARTIFACT_GLOBS: [&str; 9] = [
+    "artifacts/benchmarks/*.json",
+    "artifacts/optimization/*.json",
+    "artifacts/optimization/*.md",
+    "artifacts/optimization/*.tsv",
+    "artifacts/optimization/*.txt",
+    "artifacts/e2e/*/run.log",
+    "artifacts/e2e/*/*.log",
+    "artifacts/e2e/*/result.json",
+    "artifacts/parity-deferred-followups.md",
 ];
 
 const TEST_CONTROL_ARTIFACT_GLOBS: [&str; 16] = [
@@ -959,6 +972,9 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             validate_conformance_fixture_artifacts(entry, &excluded, errors);
         }
         "test_control_artifacts" => validate_test_control_artifacts(entry, &excluded, errors),
+        "checked_in_evidence_artifacts" => {
+            validate_checked_in_evidence_artifacts(entry, &excluded, errors);
+        }
         "fuzz_campaign_artifacts" => validate_fuzz_campaign_artifacts(entry, &excluded, errors),
         "fuzz_targets" => validate_fuzz_targets_exclusions(entry, &excluded, errors),
         "fuzz_orchestration" => validate_fuzz_orchestration_exclusions(entry, &excluded, errors),
@@ -977,6 +993,37 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             validate_performance_control_artifacts(entry, &excluded, errors);
         }
         _ => {}
+    }
+}
+
+fn validate_checked_in_evidence_artifacts(
+    entry: &SourceScopeEntry,
+    excluded: &str,
+    errors: &mut Vec<String>,
+) {
+    for required_glob in CHECKED_IN_EVIDENCE_ARTIFACT_GLOBS {
+        if !entry
+            .included_globs
+            .iter()
+            .any(|glob| glob == required_glob)
+        {
+            errors.push(format!(
+                "source `{}` must include checked-in evidence artifact glob `{required_glob}`",
+                entry.id
+            ));
+        }
+    }
+    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+        errors.push(format!(
+            "source `{}` must exclude build target paths from checked-in evidence artifacts",
+            entry.id
+        ));
+    }
+    if !excluded.contains("_generated") || !excluded.contains("_artifacts") {
+        errors.push(format!(
+            "source `{}` must exclude generated checked-in evidence artifact directories",
+            entry.id
+        ));
     }
 }
 
@@ -2477,6 +2524,7 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         populate_operational_evidence_artifact_source_scope_workspace(root)?;
         populate_architecture_design_doc_source_scope_workspace(root)?;
         populate_fuzz_campaign_artifact_source_scope_workspace(root)?;
+        populate_checked_in_evidence_artifact_source_scope_workspace(root)?;
         populate_performance_source_scope_workspace(root)
     }
 
@@ -2786,6 +2834,52 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         )
     }
 
+    fn populate_checked_in_evidence_artifact_source_scope_workspace(
+        root: &Path,
+    ) -> anyhow::Result<()> {
+        write_sample_files(
+            root,
+            &[
+                (
+                    "artifacts/benchmarks/ebr_memory_usage.json",
+                    "{\"bead_id\":\"bd-rchk5\",\"note\":\"NOTE benchmark evidence artifact\"}\n",
+                ),
+                (
+                    "artifacts/optimization/open_beads_alien_matrix.json",
+                    "{\"bead_id\":\"bd-rchk0\",\"note\":\"NOTE optimization matrix artifact\"}\n",
+                ),
+                (
+                    "artifacts/optimization/open_beads_alien_matrix.md",
+                    "NOTE optimization matrix bd-rchk0 artifact\n",
+                ),
+                (
+                    "artifacts/optimization/open_beads_alien_matrix.tsv",
+                    "row_id\tbead_id\tnote\n1\tbd-rchk0\tNOTE optimization artifact\n",
+                ),
+                (
+                    "artifacts/optimization/strace_backpressure_before.txt",
+                    "NOTE strace backpressure artifact bd-rchk0.53\n",
+                ),
+                (
+                    "artifacts/e2e/20260213_153535_ffs_ext4_rw_smoke/run.log",
+                    "SCENARIO_RESULT|scenario_id=ext4_rw|outcome=PASS|bead_id=bd-rchk0\n",
+                ),
+                (
+                    "artifacts/e2e/20260213_153535_ffs_ext4_rw_smoke/mount_rw_mnt_rw.log",
+                    "NOTE mounted evidence artifact bd-rchk0.3\n",
+                ),
+                (
+                    "artifacts/e2e/20260503_010213_ffs_operational_readiness_report/result.json",
+                    "{\"bead_id\":\"bd-rchk0.4.3\",\"status\":\"PASS\"}\n",
+                ),
+                (
+                    "artifacts/parity-deferred-followups.md",
+                    "NOTE parity deferred follow-up artifact bd-rchk0\n",
+                ),
+            ],
+        )
+    }
+
     fn populate_performance_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
         write_sample_files(
             root,
@@ -2957,6 +3051,21 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .errors
                 .iter()
                 .any(|err| err.contains("missing required family `fuzz_campaign_artifacts`"))
+        );
+    }
+
+    #[test]
+    fn missing_checked_in_evidence_artifacts_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "checked_in_evidence_artifacts");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required family `checked_in_evidence_artifacts`"))
         );
     }
 
@@ -3543,6 +3652,27 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         assert!(report.errors.iter().any(|err| {
             err.contains("artifacts/fuzz/*/command_transcript.txt")
                 || err.contains("generated fuzz campaign artifact directories")
+        }));
+    }
+
+    #[test]
+    fn checked_in_evidence_artifacts_coverage_is_validated() {
+        let mut manifest = fixture_manifest();
+        let checked_in_artifacts = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "checked_in_evidence_artifacts")
+            .expect("checked-in evidence artifact source exists");
+        checked_in_artifacts
+            .included_globs
+            .retain(|glob| glob != "artifacts/optimization/*.json");
+        checked_in_artifacts
+            .excluded_globs
+            .retain(|glob| !glob.contains("_artifacts"));
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("artifacts/optimization/*.json")
+                || err.contains("generated checked-in evidence artifact directories")
         }));
     }
 
