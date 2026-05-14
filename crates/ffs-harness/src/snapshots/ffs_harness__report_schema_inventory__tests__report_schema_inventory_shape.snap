@@ -5,6 +5,7 @@ expression: json
 {
   "schema_version": 1,
   "inventory_id": "ffs_harness_serialized_report_schema_inventory_v1",
+  "report_valid": true,
   "counts": {
     "total_rows": 13,
     "required_rows": 6,
@@ -25,6 +26,19 @@ expression: json
     "evidence_test": "readiness_lab_validation_report_json_shape",
     "snapshot_path": "crates/ffs-harness/src/snapshots/ffs_harness__readiness_lab__tests__readiness_lab_validation_report_json_shape.snap",
     "claim_effect": "advisory_only_no_public_readiness_change"
+  },
+  "first_row_result": {
+    "report_id": "authoritative_lane_decision",
+    "coverage_requirement": "required",
+    "coverage_status": "covered",
+    "module_path": "crates/ffs-harness/src/authoritative_lane_manifest.rs",
+    "rust_type": "AuthoritativeLaneDecision",
+    "downstream_consumer": "proof-bundle lane promotion and release gates",
+    "evidence_test": "authoritative_lane_decision_json_shape",
+    "snapshot_path": "crates/ffs-harness/src/snapshots/ffs_harness__authoritative_lane_manifest__tests__authoritative_lane_decision_json_shape.snap",
+    "claim_effect": "existing_release_gate_input",
+    "missing_evidence": [],
+    "errors": []
   },
   "required_report_ids": [
     "swarm_operator_report",

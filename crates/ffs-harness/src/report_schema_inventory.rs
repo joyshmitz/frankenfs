@@ -465,7 +465,8 @@ fn validate_claim_effect(
         ReportSchemaCoverageRequirement::Required => {
             if matches!(
                 row.claim_effect,
-                ReportSchemaClaimEffect::ProductEvidenceNone | ReportSchemaClaimEffect::InternalOnly
+                ReportSchemaClaimEffect::ProductEvidenceNone
+                    | ReportSchemaClaimEffect::InternalOnly
             ) {
                 missing_evidence.push("valid_claim_effect".to_owned());
                 errors.push(format!(
@@ -512,9 +513,9 @@ fn is_valid_rust_test_name(value: &str) -> bool {
     first.is_ascii_lowercase()
         && !trimmed.ends_with('_')
         && !trimmed.contains("__")
-        && trimmed
-            .chars()
-            .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_')
+        && trimmed.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        })
 }
 
 fn validate_non_empty(
