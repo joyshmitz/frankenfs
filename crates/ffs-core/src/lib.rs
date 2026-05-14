@@ -30857,9 +30857,10 @@ mod tests {
     // kernel overlayfs encoder. These regressions lock that contract.
     //
     // mknod(2) for whiteout char devices (S_IFCHR, rdev = makedev(0,0))
-    // is the OTHER half of overlayfs upper-layer parity and is tracked
-    // in a follow-up bead — dispatch_mknod currently rejects every
-    // non-regular type with EOPNOTSUPP.
+    // is the OTHER half of overlayfs upper-layer parity. The ext4 core
+    // path and FUSE dispatch now preserve supported special-node modes
+    // (char/block devices, FIFOs, and sockets), including overlayfs
+    // whiteouts, while unsupported mknod types still fail closed.
 
     #[test]
     fn ext4_trusted_overlay_opaque_xattr_round_trip() {
