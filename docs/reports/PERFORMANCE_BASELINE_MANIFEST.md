@@ -44,7 +44,7 @@ of the run artifact.
 | ARC cache       | cold-cache miss path                      | `crates/ffs-block/benches/arc_cache.rs`                               | working set > ARC capacity                                     |
 | MVCC            | optimistic commit (no conflict)           | `crates/ffs-mvcc/benches/wal_throughput.rs`                           | 1k-block append-only workload                                  |
 | MVCC            | conflict-detection rate                   | (extend `wal_throughput.rs`)                                          | concurrent writers, hot-block contention                       |
-| MVCC            | merge-proof success rate                  | (extend `wal_throughput.rs`)                                          | append-only proof variant                                      |
+| MVCC            | merge-proof success rate                  | `crates/ffs-mvcc/benches/wal_throughput.rs`                           | append-only proof variant                                      |
 | Repair / scrub  | encode throughput (LRC)                   | `crates/ffs-repair/benches/scrub_codec.rs`                            | group_size × group_count × global_parity matrix                |
 | Repair / scrub  | decode throughput (LRC)                   | `crates/ffs-repair/benches/scrub_codec.rs`                            | corrupt 1, k/2, and k blocks                                   |
 | Repair / scrub  | symbol refresh staleness latency          | `crates/ffs-repair/benches/scrub_codec.rs`                            | rolling refresh interval × block-group count                   |
@@ -218,17 +218,15 @@ baselines/<git_sha>/<timestamp>/
 The benchmark inventory above maps each row to a bench file that already
 exists, with the repair symbol refresh staleness path covered by
 `repair_symbol_refresh_staleness_latency` in
-`crates/ffs-repair/benches/scrub_codec.rs`. The remaining extensions before
-this manifest can be exercised end-to-end are:
+`crates/ffs-repair/benches/scrub_codec.rs` and the MVCC merge-proof success
+ratio covered by `mvcc_merge_proof_append_only_success_rate` in
+`crates/ffs-mvcc/benches/wal_throughput.rs`.
 
-1. **MVCC merge-proof success rate** — `wal_throughput.rs` measures
-   commit throughput but not the proof-validation success ratio.
-   Filed as an extension.
-
-The "Block I/O direct sequential 4K write" and "Block I/O random 4K
-read mix" rows reuse `arc_cache.rs` but require additional
-`Criterion::bench_function` blocks; they are extensions of the
-existing bench file rather than new files.
+The remaining benchmark extensions before the coverage matrix is fully
+exercised are the "Block I/O direct sequential 4K write" and "Block I/O random
+4K read mix" rows. They reuse `arc_cache.rs` but require additional
+`Criterion::bench_function` blocks; they are extensions of the existing bench
+file rather than new files.
 
 ## What this manifest is not
 

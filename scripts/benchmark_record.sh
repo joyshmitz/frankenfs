@@ -982,6 +982,12 @@ add_bench "ffs-mvcc contention 4 writers (criterion)" \
     "mvcc_contention_4writers" \
     "0"
 
+add_bench "ffs-mvcc merge-proof append-only success rate (criterion)" \
+    "FFS_MVCC_MERGE_PROOF_REPORT=artifacts/benchmarks/mvcc_merge_proof_success_rate.json $(cargo_bench_cmd "-p ffs-mvcc --bench wal_throughput -- mvcc_merge_proof_append_only_success_rate")" \
+    "ffs_mvcc_merge_proof_append_only_success_rate.json" \
+    "mvcc_merge_proof_append_only_success_rate" \
+    "0"
+
 add_bench "ffs-mvcc contention 8 writers (criterion)" \
     "$(cargo_bench_cmd "-p ffs-mvcc --bench wal_throughput -- mvcc_contention_8writers")" \
     "ffs_mvcc_contention_8writers.json" \

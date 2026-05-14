@@ -16,7 +16,7 @@
 use asupersync::Cx;
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_mvcc::persist::{PersistOptions, PersistentMvccStore};
-use ffs_mvcc::{CompressionAlgo, CompressionPolicy, MvccStore};
+use ffs_mvcc::{CompressionAlgo, CompressionPolicy, ConflictPolicy, MergeProof, MvccStore};
 use ffs_types::{BlockNumber, CommitSeq, TxnId};
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -213,6 +213,7 @@ struct ScenarioRuntime {
 }
 
 static EBR_REPORT: OnceLock<EbrBenchmarkReport> = OnceLock::new();
+static MERGE_PROOF_SUCCESS_REPORT: OnceLock<MergeProofSuccessReport> = OnceLock::new();
 
 fn lcg_next(state: &mut u64) -> u64 {
     *state = state
@@ -758,6 +759,117 @@ fn bench_ebr_memory_report(c: &mut Criterion) {
     });
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct MergeProofSuccessRow {
+    workload_id: String,
+    scenario: String,
+    attempts: u64,
+    conflicts: u64,
+    successful_merges: u64,
+    aborted: u64,
+    merge_success_ratio: f64,
+    elapsed_us: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MergeProofSuccessReport {
+    generated_unix_ts: u64,
+    rows: Vec<MergeProofSuccessRow>,
+}
+
+fn run_append_only_merge_proof_success(attempts: u64) -> MergeProofSuccessRow {
+    let mut store = MvccStore::new();
+    store.set_conflict_policy(ConflictPolicy::SafeMerge);
+    let block = BlockNumber(0);
+
+    let mut seed_txn = store.begin();
+    seed_txn.stage_write(block, vec![0_u8; 64]);
+    store.commit(seed_txn).expect("seed append-only block");
+
+    let started = Instant::now();
+    for idx in 0..attempts {
+        let snapshot = store.current_snapshot();
+        let base = store
+            .read_visible(block, snapshot)
+            .expect("seeded block visible")
+            .into_owned();
+        let base_len = base.len();
+
+        let mut stale_txn = store.begin();
+        let mut competing_txn = store.begin();
+        let mut competing_data = base.clone();
+        competing_data.extend_from_slice(&idx.to_le_bytes());
+        competing_txn.stage_write_with_proof(
+            block,
+            competing_data,
+            MergeProof::AppendOnly { base_len },
+        );
+        store
+            .commit(competing_txn)
+            .expect("competing append-only commit");
+
+        let mut stale_data = base;
+        stale_data.extend_from_slice(&idx.wrapping_add(0xA5A5_A5A5_A5A5_A5A5).to_le_bytes());
+        stale_txn.stage_write_with_proof(block, stale_data, MergeProof::AppendOnly { base_len });
+        store.commit(stale_txn).expect("merge-proof commit");
+    }
+
+    let metrics = *store.contention_metrics();
+    let merge_success_ratio = if metrics.total_conflicts == 0 {
+        0.0
+    } else {
+        metrics.total_merges as f64 / metrics.total_conflicts as f64
+    };
+    MergeProofSuccessRow {
+        workload_id: "mvcc_merge_proof_append_only_success_rate".to_owned(),
+        scenario: "append_only_safe_merge_conflict".to_owned(),
+        attempts,
+        conflicts: metrics.total_conflicts,
+        successful_merges: metrics.total_merges,
+        aborted: metrics.total_aborts,
+        merge_success_ratio,
+        elapsed_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+    }
+}
+
+fn merge_proof_success_output_path() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("FFS_MVCC_MERGE_PROOF_REPORT") {
+        return std::path::PathBuf::from(path);
+    }
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map_or_else(
+            || std::path::PathBuf::from("."),
+            std::path::Path::to_path_buf,
+        );
+    repo_root.join("artifacts/benchmarks/mvcc_merge_proof_success_rate.json")
+}
+
+fn write_merge_proof_success_report_json(report: &MergeProofSuccessReport) {
+    let out_path = merge_proof_success_output_path();
+    if let Some(parent) = out_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(report) {
+        let _ = fs::write(out_path, json);
+    }
+}
+
+fn merge_proof_success_report() -> &'static MergeProofSuccessReport {
+    MERGE_PROOF_SUCCESS_REPORT.get_or_init(|| {
+        let generated_unix_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let report = MergeProofSuccessReport {
+            generated_unix_ts,
+            rows: vec![run_append_only_merge_proof_success(256)],
+        };
+        write_merge_proof_success_report_json(&report);
+        report
+    })
+}
+
 /// Compare RCU vs RwLock vs Mutex read throughput under concurrent writer
 /// pressure.  Models the stat()/readdir() hot path where many readers access
 /// metadata while occasional writes update it.
@@ -1030,6 +1142,22 @@ fn bench_mvcc_contention(c: &mut Criterion) {
             });
         });
     }
+}
+
+/// Measure the proof-validation success ratio for append-only SafeMerge
+/// conflicts and emit a JSON ratio report for performance-baseline consumers.
+fn bench_merge_proof_success_rate(c: &mut Criterion) {
+    let report = merge_proof_success_report();
+    if let Some(row) = report.rows.first() {
+        black_box(row.merge_success_ratio);
+    }
+
+    c.bench_function("mvcc_merge_proof_append_only_success_rate", |b| {
+        b.iter(|| {
+            let row = run_append_only_merge_proof_success(black_box(64));
+            black_box(row.merge_success_ratio);
+        });
+    });
 }
 
 /// Measure sharded MVCC commit throughput on disjoint writer-owned block ranges.
@@ -1351,6 +1479,7 @@ criterion_group!(
     bench_rcu_read_throughput,
     bench_write_amplification,
     bench_mvcc_contention,
+    bench_merge_proof_success_rate,
     bench_sharded_mvcc_contention,
     bench_pruning_throughput,
     bench_coalesced_append,

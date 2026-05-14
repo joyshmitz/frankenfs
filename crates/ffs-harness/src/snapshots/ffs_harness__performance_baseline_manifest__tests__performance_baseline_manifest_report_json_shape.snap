@@ -6,7 +6,7 @@ expression: json
   "schema_version": 1,
   "manifest_id": "bd-rchk5.1-performance-baseline-v1",
   "valid": true,
-  "workload_count": 12,
+  "workload_count": 13,
   "shared_qa_schema_version": 1,
   "required_environment_fields": [
     "manifest_version",
@@ -145,6 +145,18 @@ expression: json
       "comparison_target": "previous_baseline_same_manifest_same_host_profile"
     },
     {
+      "workload_id": "mvcc_merge_proof_append_only_success_rate",
+      "command": "FFS_MVCC_MERGE_PROOF_REPORT=artifacts/performance/dry-run/results/mvcc_merge_proof_append_only_success_rate.json cargo bench -p ffs-mvcc --profile release-perf --bench wal_throughput -- mvcc_merge_proof_append_only_success_rate",
+      "cargo_profile": "release-perf",
+      "target_dir": "artifacts/performance/dry-run/target/mvcc_merge_proof_append_only_success_rate",
+      "artifact_path": "results/mvcc_merge_proof_append_only_success_rate.json",
+      "workload_kind": "core_non_mounted",
+      "kernel_fuse_mode": "not_required",
+      "skip_semantics": "never_skip",
+      "metric_unit": "ratio",
+      "comparison_target": "previous_baseline_same_manifest_same_host_profile"
+    },
+    {
       "workload_id": "repair_lrc_encode_throughput",
       "command": "cargo bench -p ffs-repair --profile release-perf --bench scrub_codec -- raptorq_encode_group_16blocks",
       "cargo_profile": "release-perf",
@@ -219,7 +231,7 @@ expression: json
   ],
   "workload_kind_counts": {
     "cli_inspect_parity": 1,
-    "core_non_mounted": 6,
+    "core_non_mounted": 7,
     "long_campaign_observation": 1,
     "permissioned_mounted": 2,
     "repair_scrub_refresh": 2

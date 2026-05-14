@@ -362,6 +362,53 @@
       }
     },
     {
+      "workload_id": "mvcc_merge_proof_append_only_success_rate",
+      "workstream": "mvcc",
+      "description": "AppendOnly SafeMerge proof-validation success ratio under deterministic same-block conflicts.",
+      "command_template": "FFS_MVCC_MERGE_PROOF_REPORT={artifact_dir}/results/{workload_id}.json cargo bench -p ffs-mvcc --profile {profile} --bench wal_throughput -- mvcc_merge_proof_append_only_success_rate",
+      "workload_kind": "core_non_mounted",
+      "cargo_profile": "release-perf",
+      "target_dir_template": "{artifact_dir}/target/{workload_id}",
+      "kernel_fuse_mode": "not_required",
+      "required_capabilities": ["cargo_bench", "criterion", "rch"],
+      "skip_semantics": "never_skip",
+      "dataset": "mvcc_append_only_safe_merge_conflicts",
+      "input_fixture_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444445",
+      "image_size_mib": 16,
+      "warmup_runs": 5,
+      "measured_runs": 15,
+      "metric_unit": "ratio",
+      "comparison_target": "previous_baseline_same_manifest_same_host_profile",
+      "threshold": {
+        "warn_percent": 1.0,
+        "fail_percent": 5.0,
+        "max_cv": 0.05
+      },
+      "required_raw_logs": ["stdout", "stderr", "criterion_json", "benchmark_report_json"],
+      "quarantine_policy": {
+        "stale_baseline_expiry_days": 14,
+        "claim_when_quarantined": "experimental",
+        "follow_up_bead": "bd-62jy8"
+      },
+      "claim_policy": {
+        "clean_claim_tier": "measured_authoritative",
+        "freshness_window_days": 14,
+        "overhead_budget": {
+          "max_runtime_seconds": 300.0,
+          "max_memory_mib": 4096,
+          "max_instrumentation_overhead_percent": 5.0
+        },
+        "release_claim_effect": "authoritative_claim",
+        "docs_wording_id": "perf.mvcc.merge_proof.authoritative"
+      },
+      "output_artifact": {
+        "path_template": "results/{workload_id}.json",
+        "category": "benchmark_baseline",
+        "content_type": "application/json",
+        "aggregate_key": "rows[].merge_success_ratio"
+      }
+    },
+    {
       "workload_id": "repair_lrc_encode_throughput",
       "workstream": "repair_scrub",
       "description": "LRC repair-symbol encode throughput for scrub groups.",

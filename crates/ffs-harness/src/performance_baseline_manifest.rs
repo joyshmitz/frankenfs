@@ -308,6 +308,7 @@ pub enum PerformanceMetricUnit {
     Milliseconds,
     OpsPerSec,
     MbPerSec,
+    Ratio,
 }
 
 impl PerformanceMetricUnit {
@@ -319,6 +320,7 @@ impl PerformanceMetricUnit {
             Self::Milliseconds => "milliseconds",
             Self::OpsPerSec => "ops_per_sec",
             Self::MbPerSec => "mb_per_sec",
+            Self::Ratio => "ratio",
         }
     }
 }
@@ -1535,7 +1537,7 @@ mod tests {
         let report =
             validate_performance_baseline_manifest(&manifest, "artifacts/performance/dry-run");
         assert!(report.valid, "{:?}", report.errors);
-        assert_eq!(report.workload_count, 12);
+        assert_eq!(report.workload_count, 13);
         assert_eq!(report.missing_required_workload_kinds, Vec::<String>::new());
         assert_eq!(
             report
