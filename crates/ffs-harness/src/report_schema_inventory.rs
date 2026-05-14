@@ -173,6 +173,7 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__low_privilege_demo__tests__low_privilege_demo_report_json_shape.snap",
         ),
     ];
+    rows.extend(open_ended_inventory_advisory_report_rows());
     rows.extend(corpus_and_workload_advisory_report_rows());
     rows.extend([
         covered_advisory_row(
@@ -204,6 +205,47 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
         ),
     ]);
     rows
+}
+
+fn open_ended_inventory_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
+        covered_advisory_row(
+            "open_ended_inventory_report",
+            "crates/ffs-harness/src/open_ended_inventory.rs",
+            "OpenEndedInventoryReport",
+            "validate-open-ended-inventory",
+            "open-ended fuzz and conformance inventory gate",
+            "open_ended_inventory_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__open_ended_inventory__tests__open_ended_inventory_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "open_ended_note_scan_report",
+            "crates/ffs-harness/src/open_ended_inventory.rs",
+            "OpenEndedNoteScanReport",
+            "open-ended-note-scanner",
+            "open-ended note scanner operator handoff",
+            "open_ended_note_scan_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__open_ended_inventory__tests__open_ended_note_scan_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "source_scope_manifest_report",
+            "crates/ffs-harness/src/open_ended_inventory.rs",
+            "SourceScopeManifestReport",
+            "validate-source-scope-manifest",
+            "source-scope manifest validation gate",
+            "source_scope_manifest_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__open_ended_inventory__tests__source_scope_manifest_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "source_scope_scan_report",
+            "crates/ffs-harness/src/open_ended_inventory.rs",
+            "SourceScopeScanReport",
+            "validate-source-scope-manifest",
+            "source-scope workspace scan and dirty-workspace diagnostics",
+            "source_scope_scan_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__open_ended_inventory__tests__source_scope_scan_report_json_shape.snap",
+        ),
+    ]
 }
 
 fn corpus_and_workload_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
@@ -911,12 +953,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 25);
+        assert_eq!(report.total_rows, 29);
         assert_eq!(report.required_rows, 6);
-        assert_eq!(report.advisory_only_rows, 17);
+        assert_eq!(report.advisory_only_rows, 21);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 24);
+        assert_eq!(report.covered_rows, 28);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1189,6 +1231,65 @@ mod tests {
                 .find(|row| row.report_id == report_id)
                 .expect("inventory includes readiness-lab control-plane report");
 
+            assert_eq!(row.rust_type, rust_type);
+            assert_eq!(row.producer, producer);
+            assert_eq!(
+                row.coverage_requirement,
+                ReportSchemaCoverageRequirement::AdvisoryOnly
+            );
+            assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+            assert_eq!(row.evidence_test, evidence_test);
+            assert!(row.snapshot_path.ends_with(snapshot_suffix));
+            assert_eq!(
+                row.claim_effect,
+                ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_tracks_open_ended_and_source_scope_reports() {
+        let inventory = current_report_schema_inventory();
+        for (report_id, rust_type, producer, evidence_test, snapshot_suffix) in [
+            (
+                "open_ended_inventory_report",
+                "OpenEndedInventoryReport",
+                "validate-open-ended-inventory",
+                "open_ended_inventory_report_json_shape",
+                "ffs_harness__open_ended_inventory__tests__open_ended_inventory_report_json_shape.snap",
+            ),
+            (
+                "open_ended_note_scan_report",
+                "OpenEndedNoteScanReport",
+                "open-ended-note-scanner",
+                "open_ended_note_scan_report_json_shape",
+                "ffs_harness__open_ended_inventory__tests__open_ended_note_scan_report_json_shape.snap",
+            ),
+            (
+                "source_scope_manifest_report",
+                "SourceScopeManifestReport",
+                "validate-source-scope-manifest",
+                "source_scope_manifest_report_json_shape",
+                "ffs_harness__open_ended_inventory__tests__source_scope_manifest_report_json_shape.snap",
+            ),
+            (
+                "source_scope_scan_report",
+                "SourceScopeScanReport",
+                "validate-source-scope-manifest",
+                "source_scope_scan_report_json_shape",
+                "ffs_harness__open_ended_inventory__tests__source_scope_scan_report_json_shape.snap",
+            ),
+        ] {
+            let row = inventory
+                .rows
+                .iter()
+                .find(|row| row.report_id == report_id)
+                .expect("inventory includes open-ended/source-scope report");
+
+            assert_eq!(
+                row.module_path,
+                "crates/ffs-harness/src/open_ended_inventory.rs"
+            );
             assert_eq!(row.rust_type, rust_type);
             assert_eq!(row.producer, producer);
             assert_eq!(
