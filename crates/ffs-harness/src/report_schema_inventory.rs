@@ -137,6 +137,24 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__readiness_lab__tests__readiness_lab_rch_lane_schedule_report_json_shape.snap",
         ),
         covered_advisory_row(
+            "readiness_lab_host_simulation_report",
+            "crates/ffs-harness/src/readiness_lab.rs",
+            "ReadinessLabHostSimulationReport",
+            "simulate-readiness-lab-hosts",
+            "readiness-lab advisory host-capability handoff",
+            "readiness_lab_host_simulation_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_lab__tests__readiness_lab_host_simulation_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "readiness_lab_truth_graph_report",
+            "crates/ffs-harness/src/readiness_lab.rs",
+            "ReadinessLabTruthGraphReport",
+            "build-readiness-lab-truth-graph",
+            "readiness-lab advisory evidence graph",
+            "readiness_lab_truth_graph_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_lab__tests__readiness_lab_truth_graph_report_json_shape.snap",
+        ),
+        covered_advisory_row(
             "tracker_source_hygiene_report",
             "crates/ffs-harness/src/tracker_source_hygiene.rs",
             "TrackerSourceHygieneReport",
@@ -893,12 +911,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 23);
+        assert_eq!(report.total_rows, 25);
         assert_eq!(report.required_rows, 6);
-        assert_eq!(report.advisory_only_rows, 15);
+        assert_eq!(report.advisory_only_rows, 17);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 22);
+        assert_eq!(report.covered_rows, 24);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1144,6 +1162,47 @@ mod tests {
             row.claim_effect,
             ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
         );
+    }
+
+    #[test]
+    fn inventory_tracks_readiness_lab_control_plane_reports() {
+        let inventory = current_report_schema_inventory();
+        for (report_id, rust_type, producer, evidence_test, snapshot_suffix) in [
+            (
+                "readiness_lab_host_simulation_report",
+                "ReadinessLabHostSimulationReport",
+                "simulate-readiness-lab-hosts",
+                "readiness_lab_host_simulation_report_json_shape",
+                "ffs_harness__readiness_lab__tests__readiness_lab_host_simulation_report_json_shape.snap",
+            ),
+            (
+                "readiness_lab_truth_graph_report",
+                "ReadinessLabTruthGraphReport",
+                "build-readiness-lab-truth-graph",
+                "readiness_lab_truth_graph_report_json_shape",
+                "ffs_harness__readiness_lab__tests__readiness_lab_truth_graph_report_json_shape.snap",
+            ),
+        ] {
+            let row = inventory
+                .rows
+                .iter()
+                .find(|row| row.report_id == report_id)
+                .expect("inventory includes readiness-lab control-plane report");
+
+            assert_eq!(row.rust_type, rust_type);
+            assert_eq!(row.producer, producer);
+            assert_eq!(
+                row.coverage_requirement,
+                ReportSchemaCoverageRequirement::AdvisoryOnly
+            );
+            assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+            assert_eq!(row.evidence_test, evidence_test);
+            assert!(row.snapshot_path.ends_with(snapshot_suffix));
+            assert_eq!(
+                row.claim_effect,
+                ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+            );
+        }
     }
 
     #[test]
