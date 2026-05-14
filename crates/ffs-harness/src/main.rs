@@ -31,6 +31,11 @@ use ffs_harness::{
         render_artifact_schema_fixture_markdown, validate_artifact_schema_fixture_dir,
         validate_operational_manifest,
     },
+    authoritative_environment_manifest::{
+        AUTHORITATIVE_ENVIRONMENT_MANIFEST_SCHEMA_VERSION, AuthoritativeEnvironmentDecision,
+        AuthoritativeEnvironmentManifest, MkfsVersion, ResourceLimits,
+        evaluate_authoritative_environment,
+    },
     btrfs_multidevice_corpus::{
         DEFAULT_BTRFS_MULTIDEV_CORPUS_PATH, fail_on_btrfs_multidev_corpus_errors,
         load_btrfs_multidev_corpus, render_btrfs_multidev_corpus_markdown,
@@ -319,6 +324,7 @@ use std::fs;
 use std::hint::black_box;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ffs_types::{BlockNumber, InodeNumber};
@@ -386,6 +392,51 @@ struct AdaptiveRuntimeManifestCmdArgs {
     format: ProofBundleFormat,
     reference_timestamp: Option<String>,
     current_git_sha: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct AuthoritativeEnvironmentRecordCmdArgs {
+    out_path: Option<String>,
+    manifest_id: Option<String>,
+    bead_id: Option<String>,
+    lane_id: Option<String>,
+    authoritative: bool,
+    host_id: Option<String>,
+    worker_id: Option<String>,
+    kernel: Option<String>,
+    fuse_kernel_version: Option<String>,
+    fuser_helper_version: Option<String>,
+    mkfs_versions: Vec<MkfsVersion>,
+    cargo_toolchain: Option<String>,
+    rustc_version: Option<String>,
+    mount_namespace: Option<String>,
+    privilege_model: Option<String>,
+    fs_tools: Vec<String>,
+    git_sha: Option<String>,
+    artifact_schema_version: Option<u32>,
+    probe_at_unix: Option<u64>,
+    freshness_ttl_seconds: Option<u64>,
+    now_unix: Option<u64>,
+    replay_command: Option<String>,
+    max_open_files: Option<u64>,
+    max_address_space_bytes: Option<u64>,
+    max_processes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HostProbeCommand {
+    Uname,
+    Hostname,
+    Git,
+    Fusermount3,
+    Fusermount,
+    MkfsExt4,
+    MkfsBtrfs,
+    Cargo,
+    Rustc,
+    E2fsck,
+    Btrfs,
+    Fsck,
 }
 
 #[derive(Debug)]
@@ -472,6 +523,9 @@ fn run_manifest_command(command: Option<&str>, args: &[String]) -> Option<Result
     match command {
         Some("validate-adaptive-runtime-manifest") => {
             Some(validate_adaptive_runtime_manifest_cmd(args))
+        }
+        Some("record-environment-manifest") => {
+            Some(record_authoritative_environment_manifest_cmd(args))
         }
         Some("validate-topology-runtime-advisor") => {
             Some(validate_topology_runtime_advisor_cmd(args))
@@ -4225,6 +4279,477 @@ fn current_unix_timestamp_label() -> String {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
     format!("unix:{secs}")
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn record_authoritative_environment_manifest_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_authoritative_environment_record_cmd_args(args)? else {
+        return Ok(());
+    };
+    let out_path = cmd_args.out_path.as_deref().context("--out is required")?;
+    let manifest = build_recorded_authoritative_environment_manifest(&cmd_args);
+    let decision = evaluate_authoritative_environment(&manifest, &manifest);
+
+    if manifest.authoritative
+        && !matches!(
+            decision,
+            AuthoritativeEnvironmentDecision::Authoritative { .. }
+        )
+    {
+        bail!("recorded authoritative environment manifest is not authoritative: {decision:?}");
+    }
+
+    write_text_file(
+        Path::new(out_path),
+        &format!("{}\n", serde_json::to_string_pretty(&manifest)?),
+    )?;
+    println!(
+        "authoritative environment manifest written: {} manifest_id={} authoritative={} decision={}",
+        out_path,
+        manifest.manifest_id,
+        manifest.authoritative,
+        authoritative_environment_decision_label(&decision),
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_authoritative_environment_record_cmd_args(
+    args: &[String],
+) -> Result<Option<AuthoritativeEnvironmentRecordCmdArgs>> {
+    let mut config = AuthoritativeEnvironmentRecordCmdArgs::default();
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" => {
+                config.out_path = Some(require_value(args, i, "--out")?.clone());
+                i += 2;
+            }
+            "--manifest-id" => {
+                config.manifest_id = Some(require_value(args, i, "--manifest-id")?.clone());
+                i += 2;
+            }
+            "--bead-id" => {
+                config.bead_id = Some(require_value(args, i, "--bead-id")?.clone());
+                i += 2;
+            }
+            "--lane-id" => {
+                config.lane_id = Some(require_value(args, i, "--lane-id")?.clone());
+                i += 2;
+            }
+            "--authoritative" => {
+                config.authoritative = true;
+                i += 1;
+            }
+            "--non-authoritative" => {
+                config.authoritative = false;
+                i += 1;
+            }
+            "--host-id" => {
+                config.host_id = Some(require_value(args, i, "--host-id")?.clone());
+                i += 2;
+            }
+            "--worker-id" => {
+                config.worker_id = Some(require_value(args, i, "--worker-id")?.clone());
+                i += 2;
+            }
+            "--kernel" => {
+                config.kernel = Some(require_value(args, i, "--kernel")?.clone());
+                i += 2;
+            }
+            "--fuse-kernel-version" => {
+                config.fuse_kernel_version =
+                    Some(require_value(args, i, "--fuse-kernel-version")?.clone());
+                i += 2;
+            }
+            "--fuser-helper-version" => {
+                config.fuser_helper_version =
+                    Some(require_value(args, i, "--fuser-helper-version")?.clone());
+                i += 2;
+            }
+            "--mkfs" => {
+                config
+                    .mkfs_versions
+                    .push(parse_mkfs_version_arg(require_value(args, i, "--mkfs")?)?);
+                i += 2;
+            }
+            "--cargo-toolchain" => {
+                config.cargo_toolchain = Some(require_value(args, i, "--cargo-toolchain")?.clone());
+                i += 2;
+            }
+            "--rustc-version" => {
+                config.rustc_version = Some(require_value(args, i, "--rustc-version")?.clone());
+                i += 2;
+            }
+            "--mount-namespace" => {
+                config.mount_namespace = Some(require_value(args, i, "--mount-namespace")?.clone());
+                i += 2;
+            }
+            "--privilege-model" => {
+                config.privilege_model = Some(require_value(args, i, "--privilege-model")?.clone());
+                i += 2;
+            }
+            "--fs-tool" => {
+                config
+                    .fs_tools
+                    .push(require_value(args, i, "--fs-tool")?.clone());
+                i += 2;
+            }
+            "--git-sha" => {
+                config.git_sha = Some(require_value(args, i, "--git-sha")?.clone());
+                i += 2;
+            }
+            "--artifact-schema-version" => {
+                config.artifact_schema_version = Some(
+                    require_value(args, i, "--artifact-schema-version")?
+                        .parse()
+                        .context("invalid --artifact-schema-version value")?,
+                );
+                i += 2;
+            }
+            "--probe-at-unix" => {
+                config.probe_at_unix = Some(
+                    require_value(args, i, "--probe-at-unix")?
+                        .parse()
+                        .context("invalid --probe-at-unix value")?,
+                );
+                i += 2;
+            }
+            "--freshness-ttl-seconds" => {
+                config.freshness_ttl_seconds = Some(
+                    require_value(args, i, "--freshness-ttl-seconds")?
+                        .parse()
+                        .context("invalid --freshness-ttl-seconds value")?,
+                );
+                i += 2;
+            }
+            "--now-unix" => {
+                config.now_unix = Some(
+                    require_value(args, i, "--now-unix")?
+                        .parse()
+                        .context("invalid --now-unix value")?,
+                );
+                i += 2;
+            }
+            "--replay-command" => {
+                config.replay_command = Some(require_value(args, i, "--replay-command")?.clone());
+                i += 2;
+            }
+            "--max-open-files" => {
+                config.max_open_files = Some(
+                    require_value(args, i, "--max-open-files")?
+                        .parse()
+                        .context("invalid --max-open-files value")?,
+                );
+                i += 2;
+            }
+            "--max-address-space-bytes" => {
+                config.max_address_space_bytes = Some(
+                    require_value(args, i, "--max-address-space-bytes")?
+                        .parse()
+                        .context("invalid --max-address-space-bytes value")?,
+                );
+                i += 2;
+            }
+            "--max-processes" => {
+                config.max_processes = Some(
+                    require_value(args, i, "--max-processes")?
+                        .parse()
+                        .context("invalid --max-processes value")?,
+                );
+                i += 2;
+            }
+            "--help" | "-h" => {
+                print_authoritative_environment_manifest_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown record-environment-manifest argument: {other}"),
+        }
+    }
+
+    if config.out_path.is_none() {
+        bail!("--out is required");
+    }
+    Ok(Some(config))
+}
+
+fn build_recorded_authoritative_environment_manifest(
+    config: &AuthoritativeEnvironmentRecordCmdArgs,
+) -> AuthoritativeEnvironmentManifest {
+    let now_unix = config.now_unix.unwrap_or_else(current_unix_seconds);
+    let probe_at_unix = config.probe_at_unix.unwrap_or(now_unix);
+    let git_sha = config.git_sha.clone().unwrap_or_else(default_git_sha);
+    let out_path = config
+        .out_path
+        .as_deref()
+        .unwrap_or("artifacts/env-manifest.json");
+
+    AuthoritativeEnvironmentManifest {
+        schema_version: AUTHORITATIVE_ENVIRONMENT_MANIFEST_SCHEMA_VERSION,
+        manifest_id: config
+            .manifest_id
+            .clone()
+            .unwrap_or_else(|| format!("env_{}", short_identifier(&git_sha))),
+        bead_id: config
+            .bead_id
+            .clone()
+            .unwrap_or_else(|| "bd-7mj5d".to_owned()),
+        lane_id: config
+            .lane_id
+            .clone()
+            .unwrap_or_else(|| "rchk_authoritative_v1".to_owned()),
+        authoritative: config.authoritative,
+        host_id: config.host_id.clone().unwrap_or_else(default_host_id),
+        worker_id: config.worker_id.clone().unwrap_or_else(default_worker_id),
+        kernel: config.kernel.clone().unwrap_or_else(|| {
+            command_output_line(HostProbeCommand::Uname, &["-r"])
+                .unwrap_or_else(|| "unknown".to_owned())
+        }),
+        fuse_kernel_version: config
+            .fuse_kernel_version
+            .clone()
+            .unwrap_or_else(default_fuse_kernel_version),
+        fuser_helper_version: config
+            .fuser_helper_version
+            .clone()
+            .unwrap_or_else(default_fuser_helper_version),
+        mkfs_versions: if config.mkfs_versions.is_empty() {
+            default_mkfs_versions()
+        } else {
+            config.mkfs_versions.clone()
+        },
+        cargo_toolchain: config.cargo_toolchain.clone().unwrap_or_else(|| {
+            command_output_line(HostProbeCommand::Cargo, &["--version"])
+                .unwrap_or_else(|| "cargo:unknown".to_owned())
+        }),
+        rustc_version: config.rustc_version.clone().unwrap_or_else(|| {
+            command_output_line(HostProbeCommand::Rustc, &["--version"])
+                .unwrap_or_else(|| "rustc:unknown".to_owned())
+        }),
+        mount_namespace: config
+            .mount_namespace
+            .clone()
+            .unwrap_or_else(default_mount_namespace),
+        privilege_model: config.privilege_model.clone().unwrap_or_else(|| {
+            if config.authoritative {
+                "sudo_capability".to_owned()
+            } else {
+                "unprivileged".to_owned()
+            }
+        }),
+        fs_tools: if config.fs_tools.is_empty() {
+            default_fs_tools()
+        } else {
+            config.fs_tools.clone()
+        },
+        resource_limits: ResourceLimits {
+            max_open_files: config
+                .max_open_files
+                .or_else(|| proc_limit_soft_value("Max open files"))
+                .unwrap_or(1),
+            max_address_space_bytes: config
+                .max_address_space_bytes
+                .or_else(|| proc_limit_soft_value("Max address space"))
+                .unwrap_or(u64::MAX),
+            max_processes: config
+                .max_processes
+                .or_else(|| proc_limit_soft_value("Max processes"))
+                .unwrap_or(1),
+        },
+        git_sha,
+        artifact_schema_version: config.artifact_schema_version.unwrap_or(1),
+        probe_at_unix,
+        freshness_ttl_seconds: config.freshness_ttl_seconds.unwrap_or(3_600),
+        now_unix,
+        replay_command: config.replay_command.clone().unwrap_or_else(|| {
+            format!("cargo run -p ffs-harness -- record-environment-manifest --out {out_path}")
+        }),
+    }
+}
+
+fn parse_mkfs_version_arg(raw: &str) -> Result<MkfsVersion> {
+    let mut parts = raw.splitn(3, ':');
+    let flavor = parts
+        .next()
+        .filter(|value| !value.trim().is_empty())
+        .context("--mkfs must use FLAVOR:BINARY:VERSION")?;
+    let binary = parts
+        .next()
+        .filter(|value| !value.trim().is_empty())
+        .context("--mkfs must use FLAVOR:BINARY:VERSION")?;
+    let version = parts
+        .next()
+        .filter(|value| !value.trim().is_empty())
+        .context("--mkfs must use FLAVOR:BINARY:VERSION")?;
+    Ok(MkfsVersion {
+        flavor: flavor.to_owned(),
+        binary: binary.to_owned(),
+        version: version.to_owned(),
+    })
+}
+
+fn authoritative_environment_decision_label(decision: &AuthoritativeEnvironmentDecision) -> &str {
+    match decision {
+        AuthoritativeEnvironmentDecision::Authoritative { .. } => "authoritative",
+        AuthoritativeEnvironmentDecision::Skip { .. } => "skip",
+        AuthoritativeEnvironmentDecision::RejectMismatch { .. } => "reject_mismatch",
+    }
+}
+
+fn short_identifier(value: &str) -> String {
+    value.chars().take(12).collect()
+}
+
+fn non_empty_env(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+fn default_host_id() -> String {
+    non_empty_env("HOSTNAME")
+        .or_else(|| {
+            fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        })
+        .or_else(|| command_output_line(HostProbeCommand::Hostname, &[]))
+        .unwrap_or_else(|| "unknown-host".to_owned())
+}
+
+fn default_worker_id() -> String {
+    non_empty_env("RCH_WORKER_ID")
+        .or_else(|| non_empty_env("RCH_WORKER_NAME"))
+        .or_else(|| non_empty_env("HOSTNAME"))
+        .unwrap_or_else(|| "local-worker".to_owned())
+}
+
+fn default_git_sha() -> String {
+    non_empty_env("GIT_SHA")
+        .or_else(|| command_output_line(HostProbeCommand::Git, &["rev-parse", "HEAD"]))
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn default_fuse_kernel_version() -> String {
+    fs::read_to_string("/sys/module/fuse/version")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unavailable".to_owned())
+}
+
+fn default_fuser_helper_version() -> String {
+    command_output_line(HostProbeCommand::Fusermount3, &["--version"])
+        .or_else(|| command_output_line(HostProbeCommand::Fusermount, &["--version"]))
+        .unwrap_or_else(|| "unavailable".to_owned())
+}
+
+fn default_mount_namespace() -> String {
+    fs::read_link("/proc/self/ns/mnt").map_or_else(
+        |_| "mnt:[unknown]".to_owned(),
+        |path| path.display().to_string(),
+    )
+}
+
+fn default_mkfs_versions() -> Vec<MkfsVersion> {
+    vec![
+        MkfsVersion {
+            flavor: "ext4".to_owned(),
+            binary: "mkfs.ext4".to_owned(),
+            version: command_version_or_unavailable(HostProbeCommand::MkfsExt4, &["-V"]),
+        },
+        MkfsVersion {
+            flavor: "btrfs".to_owned(),
+            binary: "mkfs.btrfs".to_owned(),
+            version: command_version_or_unavailable(HostProbeCommand::MkfsBtrfs, &["--version"]),
+        },
+    ]
+}
+
+fn default_fs_tools() -> Vec<String> {
+    vec![
+        command_tool_summary(HostProbeCommand::E2fsck, &["-V"]),
+        command_tool_summary(HostProbeCommand::Btrfs, &["--version"]),
+        command_tool_summary(HostProbeCommand::Fsck, &["--version"]),
+    ]
+}
+
+fn command_version_or_unavailable(command: HostProbeCommand, args: &[&str]) -> String {
+    command_output_line(command, args).unwrap_or_else(|| "unavailable".to_owned())
+}
+
+fn command_tool_summary(command: HostProbeCommand, args: &[&str]) -> String {
+    let version = command_version_or_unavailable(command, args);
+    let program = command.label();
+    format!("{program}:{version}")
+}
+
+fn command_output_line(command: HostProbeCommand, args: &[&str]) -> Option<String> {
+    let output = command.output(args)?;
+    let text = if output.stdout.is_empty() {
+        String::from_utf8_lossy(&output.stderr)
+    } else {
+        String::from_utf8_lossy(&output.stdout)
+    };
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
+}
+
+impl HostProbeCommand {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Uname => "uname",
+            Self::Hostname => "hostname",
+            Self::Git => "git",
+            Self::Fusermount3 => "fusermount3",
+            Self::Fusermount => "fusermount",
+            Self::MkfsExt4 => "mkfs.ext4",
+            Self::MkfsBtrfs => "mkfs.btrfs",
+            Self::Cargo => "cargo",
+            Self::Rustc => "rustc",
+            Self::E2fsck => "e2fsck",
+            Self::Btrfs => "btrfs",
+            Self::Fsck => "fsck",
+        }
+    }
+
+    fn output(self, args: &[&str]) -> Option<std::process::Output> {
+        let mut command = match self {
+            Self::Uname => Command::new("uname"),
+            Self::Hostname => Command::new("hostname"),
+            Self::Git => Command::new("git"),
+            Self::Fusermount3 => Command::new("fusermount3"),
+            Self::Fusermount => Command::new("fusermount"),
+            Self::MkfsExt4 => Command::new("mkfs.ext4"),
+            Self::MkfsBtrfs => Command::new("mkfs.btrfs"),
+            Self::Cargo => Command::new("cargo"),
+            Self::Rustc => Command::new("rustc"),
+            Self::E2fsck => Command::new("e2fsck"),
+            Self::Btrfs => Command::new("btrfs"),
+            Self::Fsck => Command::new("fsck"),
+        };
+        command.args(args).output().ok()
+    }
+}
+
+fn proc_limit_soft_value(label: &str) -> Option<u64> {
+    let limits = fs::read_to_string("/proc/self/limits").ok()?;
+    limits.lines().find_map(|line| {
+        let rest = line.strip_prefix(label)?;
+        let value = rest.split_whitespace().next()?;
+        if value == "unlimited" {
+            Some(u64::MAX)
+        } else {
+            value.parse().ok()
+        }
+    })
 }
 
 fn validate_adaptive_runtime_manifest_cmd(args: &[String]) -> Result<()> {
@@ -8459,6 +8984,9 @@ fn print_usage_core_commands() {
     println!(
         "  ffs-harness xfstests-failure-triage --baseline-manifest FILE --triage-out FILE --summary-out FILE --triage-id ID --reproduction-command CMD"
     );
+    println!(
+        "  ffs-harness record-environment-manifest --out FILE [--authoritative] [--bead-id ID] [--lane-id ID]"
+    );
     println!("  ffs-harness validate-operational-manifest <manifest.json>");
     println!(
         "  ffs-harness validate-artifact-schema-fixtures [--fixtures DIR] [--out FILE] [--summary-out FILE] [--reproduction-command CMD]"
@@ -8684,6 +9212,7 @@ fn print_usage_examples() {
     println!(
         "  ffs-harness adaptive-runtime-runner --artifact-root artifacts/adaptive-runtime/dry-run --out artifacts/adaptive-runtime/dry-run/report.json --summary-out artifacts/adaptive-runtime/dry-run/report.md"
     );
+    println!("  ffs-harness record-environment-manifest --out artifacts/env-manifest.json");
     println!(
         "  ffs-harness validate-adaptive-runtime-manifest --manifest docs/adaptive-runtime-evidence-manifest.json --out artifacts/adaptive-runtime/report.json --summary-out artifacts/adaptive-runtime/report.md"
     );
@@ -9278,6 +9807,40 @@ fn print_proof_overhead_budget_usage() {
     println!("  --out FILE                         Write JSON release-gate report to FILE");
 }
 
+fn print_authoritative_environment_manifest_usage() {
+    println!("Usage: ffs-harness record-environment-manifest [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --out FILE                         Write authoritative environment manifest JSON");
+    println!("  --authoritative                    Mark the recorded lane authoritative");
+    println!("  --non-authoritative                Mark the recorded lane non-authoritative");
+    println!("  --manifest-id ID                   Override manifest id");
+    println!("  --bead-id ID                       Override bead id (default: bd-7mj5d)");
+    println!("  --lane-id ID                       Override lane id");
+    println!("  --host-id ID                       Override host id");
+    println!("  --worker-id ID                     Override worker id");
+    println!("  --kernel VERSION                   Override kernel version");
+    println!("  --fuse-kernel-version VERSION      Override FUSE kernel version");
+    println!("  --fuser-helper-version VERSION     Override fuser helper version");
+    println!("  --mkfs FLAVOR:BINARY:VERSION       Add mkfs version entry");
+    println!("  --fs-tool TOOL                     Add filesystem tool version entry");
+    println!("  --cargo-toolchain VERSION          Override cargo toolchain");
+    println!("  --rustc-version VERSION            Override rustc version");
+    println!("  --mount-namespace NS               Override mount namespace");
+    println!(
+        "  --privilege-model MODEL            unprivileged|user_namespace|sudo_capability|rootful"
+    );
+    println!("  --git-sha SHA                      Override git SHA");
+    println!("  --artifact-schema-version N        Override artifact schema version");
+    println!("  --probe-at-unix N                  Override probe timestamp");
+    println!("  --freshness-ttl-seconds N          Override freshness TTL");
+    println!("  --now-unix N                       Override freshness reference timestamp");
+    println!("  --replay-command CMD               Override replay command");
+    println!("  --max-open-files N                 Override max open files limit");
+    println!("  --max-address-space-bytes N        Override max address-space limit");
+    println!("  --max-processes N                  Override max processes limit");
+}
+
 fn print_adaptive_runtime_manifest_usage() {
     println!("Usage: ffs-harness validate-adaptive-runtime-manifest [OPTIONS]");
     println!();
@@ -9862,6 +10425,106 @@ fn print_mounted_recovery_matrix_usage() {
     println!("Options:");
     println!("  --matrix FILE                      Read mounted recovery matrix JSON from FILE");
     println!("  --out FILE                         Write JSON validation report to FILE");
+}
+
+#[cfg(test)]
+mod authoritative_environment_manifest_cli_tests {
+    use super::*;
+
+    #[test]
+    fn record_environment_manifest_cmd_writes_replayable_manifest() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let manifest_path = dir.path().join("env-manifest.json");
+        let args = vec![
+            "--out".to_owned(),
+            manifest_path.display().to_string(),
+            "--manifest-id".to_owned(),
+            "env_cli_test".to_owned(),
+            "--bead-id".to_owned(),
+            "bd-7mj5d".to_owned(),
+            "--lane-id".to_owned(),
+            "rchk_authoritative_v1".to_owned(),
+            "--authoritative".to_owned(),
+            "--host-id".to_owned(),
+            "worker-vmi1153651".to_owned(),
+            "--worker-id".to_owned(),
+            "rch-worker-vmi1153651".to_owned(),
+            "--kernel".to_owned(),
+            "linux-6.x.y".to_owned(),
+            "--fuse-kernel-version".to_owned(),
+            "fuse-3.16".to_owned(),
+            "--fuser-helper-version".to_owned(),
+            "fuser-0.16".to_owned(),
+            "--mkfs".to_owned(),
+            "ext4:mkfs.ext4:1.47.0".to_owned(),
+            "--mkfs".to_owned(),
+            "btrfs:mkfs.btrfs:6.5.1".to_owned(),
+            "--cargo-toolchain".to_owned(),
+            "nightly-2024-edition-pinned".to_owned(),
+            "--rustc-version".to_owned(),
+            "rustc 1.85.0-nightly".to_owned(),
+            "--mount-namespace".to_owned(),
+            "mnt:[4026531840]".to_owned(),
+            "--privilege-model".to_owned(),
+            "sudo_capability".to_owned(),
+            "--fs-tool".to_owned(),
+            "e2fsck:1.47.0".to_owned(),
+            "--fs-tool".to_owned(),
+            "btrfs:6.5.1".to_owned(),
+            "--git-sha".to_owned(),
+            "abcdef1234567890".to_owned(),
+            "--artifact-schema-version".to_owned(),
+            "1".to_owned(),
+            "--probe-at-unix".to_owned(),
+            "1000".to_owned(),
+            "--freshness-ttl-seconds".to_owned(),
+            "3600".to_owned(),
+            "--now-unix".to_owned(),
+            "1500".to_owned(),
+            "--max-open-files".to_owned(),
+            "65536".to_owned(),
+            "--max-address-space-bytes".to_owned(),
+            "8589934592".to_owned(),
+            "--max-processes".to_owned(),
+            "4096".to_owned(),
+            "--replay-command".to_owned(),
+            "rch exec -- cargo run -p ffs-harness -- record-environment-manifest --out artifacts/env-manifest.json"
+                .to_owned(),
+        ];
+
+        record_authoritative_environment_manifest_cmd(&args)?;
+
+        let manifest_json = std::fs::read_to_string(&manifest_path)?;
+        let manifest: AuthoritativeEnvironmentManifest = serde_json::from_str(&manifest_json)?;
+        assert_eq!(
+            manifest.schema_version,
+            AUTHORITATIVE_ENVIRONMENT_MANIFEST_SCHEMA_VERSION
+        );
+        assert_eq!(manifest.manifest_id, "env_cli_test");
+        assert!(manifest.authoritative);
+        assert_eq!(
+            manifest.replay_command,
+            "rch exec -- cargo run -p ffs-harness -- record-environment-manifest --out artifacts/env-manifest.json"
+        );
+        assert!(matches!(
+            evaluate_authoritative_environment(&manifest, &manifest),
+            AuthoritativeEnvironmentDecision::Authoritative { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn record_environment_manifest_rejects_malformed_mkfs_arg() {
+        let args = vec![
+            "--out".to_owned(),
+            "artifacts/env-manifest.json".to_owned(),
+            "--mkfs".to_owned(),
+            "ext4:mkfs.ext4".to_owned(),
+        ];
+        let error = parse_authoritative_environment_record_cmd_args(&args)
+            .expect_err("malformed mkfs entry should be rejected");
+        assert!(error.to_string().contains("FLAVOR:BINARY:VERSION"));
+    }
 }
 
 #[cfg(test)]
