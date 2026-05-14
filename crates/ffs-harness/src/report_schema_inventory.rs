@@ -145,6 +145,15 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "tracker_source_hygiene_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__tracker_source_hygiene__tests__tracker_source_hygiene_report_json_shape.snap",
         ),
+        covered_advisory_row(
+            "low_privilege_demo_report",
+            "crates/ffs-harness/src/low_privilege_demo.rs",
+            "LowPrivilegeDemoReport",
+            "validate-low-privilege-demo",
+            "non-permissioned low-privilege demo manifest validation",
+            "low_privilege_demo_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__low_privilege_demo__tests__low_privilege_demo_report_json_shape.snap",
+        ),
     ];
     rows.extend(corpus_and_workload_advisory_report_rows());
     rows.extend([
@@ -875,12 +884,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 21);
+        assert_eq!(report.total_rows, 22);
         assert_eq!(report.required_rows, 6);
-        assert_eq!(report.advisory_only_rows, 13);
+        assert_eq!(report.advisory_only_rows, 14);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 20);
+        assert_eq!(report.covered_rows, 21);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report

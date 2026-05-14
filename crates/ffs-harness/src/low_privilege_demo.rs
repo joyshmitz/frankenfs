@@ -13,7 +13,7 @@
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write as _, fs, path::Path};
 
 pub const LOW_PRIVILEGE_DEMO_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_LOW_PRIVILEGE_DEMO_PATH: &str =
@@ -85,17 +85,32 @@ pub fn parse_low_privilege_demo_manifest(text: &str) -> Result<LowPrivilegeDemoM
         .map_err(|err| anyhow::anyhow!("failed to parse low-privilege demo manifest JSON: {err}"))
 }
 
+pub fn load_low_privilege_demo_manifest(path: &Path) -> Result<LowPrivilegeDemoManifest> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to read low-privilege demo manifest `{}`: {err}",
+            path.display()
+        )
+    })?;
+    parse_low_privilege_demo_manifest(&text)
+}
+
 pub fn validate_default_low_privilege_demo_manifest() -> Result<LowPrivilegeDemoReport> {
     let manifest = parse_low_privilege_demo_manifest(DEFAULT_LOW_PRIVILEGE_DEMO_JSON)?;
     let report = validate_low_privilege_demo_manifest(&manifest);
-    if !report.valid {
-        bail!(
-            "low-privilege demo manifest failed with {} error(s): {}",
-            report.errors.len(),
-            report.errors.join("; ")
-        );
-    }
+    fail_on_low_privilege_demo_errors(&report)?;
     Ok(report)
+}
+
+pub fn fail_on_low_privilege_demo_errors(report: &LowPrivilegeDemoReport) -> Result<()> {
+    if report.valid {
+        return Ok(());
+    }
+    bail!(
+        "low-privilege demo manifest failed with {} error(s): {}",
+        report.errors.len(),
+        report.errors.join("; ")
+    );
 }
 
 #[must_use]
@@ -324,6 +339,36 @@ fn is_valid_sha256(value: &str) -> bool {
     suffix.len() == 64 && suffix.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
+#[must_use]
+pub fn render_low_privilege_demo_markdown(report: &LowPrivilegeDemoReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(&mut out, "# Low-Privilege Demo");
+    let _ = writeln!(&mut out);
+    let _ = writeln!(&mut out, "- manifest: `{}`", report.manifest_id);
+    let _ = writeln!(&mut out, "- schema version: `{}`", report.schema_version);
+    let _ = writeln!(&mut out, "- bead: `{}`", report.bead_id);
+    let _ = writeln!(&mut out, "- valid: `{}`", report.valid);
+    let _ = writeln!(&mut out, "- lanes: `{}`", report.lane_count);
+    let _ = writeln!(
+        &mut out,
+        "- low-privilege kinds: `{}`",
+        report.low_privilege_kinds.join(", ")
+    );
+    let _ = writeln!(
+        &mut out,
+        "- host-skipped lanes: `{}`",
+        report.host_skipped_lanes.join(", ")
+    );
+    if !report.errors.is_empty() {
+        let _ = writeln!(&mut out);
+        let _ = writeln!(&mut out, "## Errors");
+        for error in &report.errors {
+            let _ = writeln!(&mut out, "- {error}");
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,6 +465,28 @@ mod tests {
         insta::assert_snapshot!("low_privilege_demo_report_json_shape", json);
         let parsed: LowPrivilegeDemoReport = serde_json::from_str(&json)?;
         assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
+    fn render_low_privilege_demo_markdown_default_manifest() -> Result<()> {
+        let report = validate_default_low_privilege_demo_manifest()?;
+        let markdown = render_low_privilege_demo_markdown(&report);
+
+        assert!(markdown.contains("# Low-Privilege Demo"));
+        assert!(markdown.contains("low-privilege kinds"));
+        assert!(markdown.contains("host-skipped lanes"));
+        Ok(())
+    }
+
+    #[test]
+    fn fail_on_errors_rejects_invalid_report() -> Result<()> {
+        let mut manifest = fixture_manifest()?;
+        manifest.schema_version += 1;
+        let report = validate_low_privilege_demo_manifest(&manifest);
+
+        assert!(!report.valid);
+        assert!(fail_on_low_privilege_demo_errors(&report).is_err());
         Ok(())
     }
 

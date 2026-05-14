@@ -82,6 +82,11 @@ use ffs_harness::{
         load_inventory_closeout_gate, render_inventory_closeout_gate_markdown,
         validate_inventory_closeout_gate,
     },
+    low_privilege_demo::{
+        DEFAULT_LOW_PRIVILEGE_DEMO_PATH, fail_on_low_privilege_demo_errors,
+        load_low_privilege_demo_manifest, render_low_privilege_demo_markdown,
+        validate_low_privilege_demo_manifest,
+    },
     low_privilege_demo_sandbox::{
         DEFAULT_LOW_PRIVILEGE_DEMO_SANDBOX_PATH, fail_on_low_privilege_demo_sandbox_errors,
         load_low_privilege_demo_sandbox, render_low_privilege_demo_sandbox_markdown,
@@ -591,6 +596,7 @@ fn run() -> Result<()> {
         Some("validate-mounted-checkpoint-survivor") => {
             validate_mounted_checkpoint_survivor_cmd(&args[1..])
         }
+        Some("validate-low-privilege-demo") => validate_low_privilege_demo_cmd(&args[1..]),
         Some("validate-low-privilege-demo-sandbox") => {
             validate_low_privilege_demo_sandbox_cmd(&args[1..])
         }
@@ -1060,6 +1066,14 @@ struct MountedCheckpointSurvivorCmdArgs {
 #[derive(Debug)]
 struct MountedRepairMutationBoundaryCmdArgs {
     matrix_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
+struct LowPrivilegeDemoCmdArgs {
+    manifest_path: String,
     out_path: Option<String>,
     summary_out_path: Option<String>,
     format: ProofBundleFormat,
@@ -1713,6 +1727,87 @@ fn parse_mounted_checkpoint_survivor_cmd_args(
 
     Ok(Some(MountedCheckpointSurvivorCmdArgs {
         matrix_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
+fn validate_low_privilege_demo_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_low_privilege_demo_cmd_args(args)? else {
+        return Ok(());
+    };
+    let manifest = load_low_privilege_demo_manifest(Path::new(&cmd_args.manifest_path))?;
+    let report = validate_low_privilege_demo_manifest(&manifest);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_low_privilege_demo_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "low-privilege demo report written: {} valid={} lanes={}",
+            path, report.valid, report.lane_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", render_low_privilege_demo_markdown(&report)),
+        )?;
+        println!("low-privilege demo summary written: {path}");
+    }
+
+    fail_on_low_privilege_demo_errors(&report)
+}
+
+fn parse_low_privilege_demo_cmd_args(args: &[String]) -> Result<Option<LowPrivilegeDemoCmdArgs>> {
+    let mut manifest_path = DEFAULT_LOW_PRIVILEGE_DEMO_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                args.get(i)
+                    .context("--manifest requires a path")?
+                    .clone_into(&mut manifest_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_low_privilege_demo_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-low-privilege-demo argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(LowPrivilegeDemoCmdArgs {
+        manifest_path,
         out_path,
         summary_out_path,
         format,
@@ -8503,6 +8598,7 @@ fn print_usage_commands() {
     print_fault_injection_corpus_usage_summary();
     print_repair_corpus_usage_summary();
     print_mounted_checkpoint_survivor_usage_summary();
+    print_low_privilege_demo_usage_summary();
     print_low_privilege_demo_sandbox_usage_summary();
     print_metamorphic_workload_seed_catalog_usage_summary();
     println!(
@@ -8643,6 +8739,7 @@ fn print_usage_examples() {
     print_fault_injection_corpus_example();
     print_repair_corpus_example();
     print_mounted_checkpoint_survivor_example();
+    print_low_privilege_demo_example();
     print_low_privilege_demo_sandbox_example();
     print_metamorphic_workload_seed_catalog_example();
     println!(
@@ -8984,6 +9081,18 @@ fn print_mounted_checkpoint_survivor_usage_summary() {
 fn print_mounted_checkpoint_survivor_example() {
     println!(
         "  ffs-harness validate-mounted-checkpoint-survivor --matrix tests/mounted-checkpoint-survivor/mounted_checkpoint_survivor.json --out artifacts/mounted-checkpoint-survivor/report.json --summary-out artifacts/mounted-checkpoint-survivor/summary.md"
+    );
+}
+
+fn print_low_privilege_demo_usage_summary() {
+    println!(
+        "  ffs-harness validate-low-privilege-demo [--manifest FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_low_privilege_demo_example() {
+    println!(
+        "  ffs-harness validate-low-privilege-demo --manifest tests/low-privilege-demo/low_privilege_demo_manifest.json --out artifacts/low-privilege-demo/report.json --summary-out artifacts/low-privilege-demo/summary.md"
     );
 }
 
@@ -9591,6 +9700,16 @@ fn print_mounted_checkpoint_survivor_usage() {
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write validation report");
     println!("  --summary-out FILE                 Write Markdown survivor summary");
+}
+
+fn print_low_privilege_demo_usage() {
+    println!("Usage: ffs-harness validate-low-privilege-demo [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --manifest FILE                    Read low-privilege demo JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report");
+    println!("  --summary-out FILE                 Write Markdown demo summary");
 }
 
 fn print_low_privilege_demo_sandbox_usage() {

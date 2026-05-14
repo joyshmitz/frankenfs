@@ -5,7 +5,7 @@
   "git_sha": "0000000000000000000000000000000000000000",
   "toolchain": "rust-nightly-2024-edition",
   "kernel": "linux-6.x",
-  "command_line": "rch exec -- cargo run -p ffs-harness -- run-low-privilege-demo --out artifacts/low-privilege-demo/sample-bundle.json",
+  "command_line": "rch exec -- cargo run -p ffs-harness -- validate-low-privilege-demo --manifest tests/low-privilege-demo/low_privilege_demo_manifest.json --out artifacts/low-privilege-demo/report.json --summary-out artifacts/low-privilege-demo/summary.md",
   "working_directory_policy": "ephemeral_tempdir_torndown_on_exit",
   "lanes": [
     {

@@ -618,6 +618,53 @@
       ]
     },
     {
+      "suite_id": "ffs_low_privilege_demo",
+      "script": "scripts/e2e/ffs_low_privilege_demo_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "low_privilege_demo_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=low_privilege_demo_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "low_privilege_demo_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=low_privilege_demo_validates|outcome=PASS"
+        },
+        {
+          "id": "low_privilege_demo_coverage",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=low_privilege_demo_coverage|outcome=PASS"
+        },
+        {
+          "id": "low_privilege_demo_invalid_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=low_privilege_demo_invalid_rejected|outcome=PASS"
+        },
+        {
+          "id": "low_privilege_demo_markdown_docs",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=low_privilege_demo_markdown_docs|outcome=PASS"
+        },
+        {
+          "id": "low_privilege_demo_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=low_privilege_demo_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_low_privilege_demo_sandbox",
       "script": "scripts/e2e/ffs_low_privilege_demo_sandbox_e2e.sh",
       "required_categories": [

@@ -393,6 +393,30 @@ status, artifact paths, reproduction commands, follow-up beads for refusals,
 and explicit host-skip rationale. Rows that require real mounted mutation
 remain metadata-only until a permissioned lane records authoritative artifacts.
 
+## Low-Privilege Demo Contract
+
+The low-privilege demo manifest lives in:
+
+- `tests/low-privilege-demo/low_privilege_demo_manifest.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-low-privilege-demo \
+  --manifest tests/low-privilege-demo/low_privilege_demo_manifest.json \
+  --out artifacts/low-privilege-demo/report.json \
+  --summary-out artifacts/low-privilege-demo/summary.md
+```
+
+This manifest is the original non-permissioned demo contract. It must keep
+parser-unit, invariant-oracle, repair-dry-run, release-gate-eval, and
+mounted-smoke-host-skipped lanes visible without claiming FUSE readiness on
+hosts that cannot mount. It also preserves capability requirements,
+capability-check commands, expected artifact paths, fixture hashes,
+reproduction commands, cleanup status, and explicit host-skip reasons. The
+checked-in manifest command line must point at `validate-low-privilege-demo`
+so the artifact can be reproduced directly from its own metadata.
+
 ## Low-Privilege Demo Sandbox Contract
 
 The low-privilege demo sandbox manifest lives in:
