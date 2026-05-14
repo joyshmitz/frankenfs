@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const INVENTORY_MARKDOWN: &str =
     include_str!("../../../docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md");
@@ -636,6 +637,8 @@ pub struct SourceScopeScanReport {
     pub manifest_id: String,
     pub bead_id: String,
     pub workspace_root: String,
+    pub workspace_file_source: String,
+    pub workspace_file_source_reason: String,
     pub source_count: usize,
     pub source_manifest_version: u32,
     pub scanned_sources: Vec<SourceScopeScanEntry>,
@@ -712,11 +715,15 @@ pub fn scan_source_scope_manifest(
 ) -> SourceScopeScanReport {
     let manifest_report = validate_source_scope_manifest(manifest);
     let mut errors = manifest_report.errors.clone();
-    let workspace_files = match collect_workspace_files(workspace_root) {
-        Ok(files) => files,
+    let workspace_files = match collect_workspace_files(workspace_root, manifest) {
+        Ok(collection) => collection,
         Err(err) => {
             errors.push(err.to_string());
-            Vec::new()
+            WorkspaceFileCollection {
+                files: Vec::new(),
+                source: "error".to_owned(),
+                reason: err.to_string(),
+            }
         }
     };
     let output_path =
@@ -729,7 +736,7 @@ pub fn scan_source_scope_manifest(
             scan_source_scope_entry(
                 entry,
                 workspace_root,
-                &workspace_files,
+                &workspace_files.files,
                 &output_path,
                 reproduction_command,
                 &mut errors,
@@ -742,6 +749,8 @@ pub fn scan_source_scope_manifest(
         manifest_id: manifest.manifest_id.clone(),
         bead_id: manifest.bead_id.clone(),
         workspace_root: workspace_root.display().to_string(),
+        workspace_file_source: workspace_files.source,
+        workspace_file_source_reason: workspace_files.reason,
         source_count: manifest.sources.len(),
         source_manifest_version: manifest.schema_version,
         scanned_sources,
@@ -1544,11 +1553,136 @@ fn collect_matched_paths(
     matched_paths
 }
 
-fn collect_workspace_files(workspace_root: &Path) -> Result<Vec<PathBuf>> {
+struct WorkspaceFileCollection {
+    files: Vec<PathBuf>,
+    source: String,
+    reason: String,
+}
+
+fn collect_workspace_files(
+    workspace_root: &Path,
+    manifest: &SourceScopeManifest,
+) -> Result<WorkspaceFileCollection> {
+    match collect_git_tracked_workspace_files(workspace_root) {
+        Ok(files) => {
+            let missing_sources = unmatched_source_scope_entries(manifest, &files);
+            if missing_sources.is_empty() {
+                Ok(WorkspaceFileCollection {
+                    files,
+                    source: "git_ls_files".to_owned(),
+                    reason: "canonical scan uses git-tracked paths".to_owned(),
+                })
+            } else {
+                let filesystem_files = collect_filesystem_workspace_files(workspace_root)?;
+                let filesystem_missing =
+                    unmatched_source_scope_entries(manifest, &filesystem_files);
+                if filesystem_missing.len() < missing_sources.len() {
+                    Ok(WorkspaceFileCollection {
+                        files: filesystem_files,
+                        source: "filesystem_fallback".to_owned(),
+                        reason: format!(
+                            "git-tracked scan incomplete for {}; filesystem fallback missing {}",
+                            missing_sources.join(","),
+                            format_missing_sources(&filesystem_missing)
+                        ),
+                    })
+                } else {
+                    Ok(WorkspaceFileCollection {
+                        files,
+                        source: "git_ls_files".to_owned(),
+                        reason: format!(
+                            "canonical scan uses git-tracked paths; missing {}",
+                            missing_sources.join(",")
+                        ),
+                    })
+                }
+            }
+        }
+        Err(git_err) => {
+            let files = collect_filesystem_workspace_files(workspace_root)?;
+            Ok(WorkspaceFileCollection {
+                files,
+                source: "filesystem_fallback".to_owned(),
+                reason: format!("git-tracked scan unavailable: {git_err}"),
+            })
+        }
+    }
+}
+
+fn collect_filesystem_workspace_files(workspace_root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     collect_workspace_files_from(workspace_root, workspace_root, &mut files)?;
     files.sort();
     Ok(files)
+}
+
+fn collect_git_tracked_workspace_files(workspace_root: &Path) -> Result<Vec<PathBuf>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .arg("ls-files")
+        .arg("-z")
+        .output()
+        .map_err(|err| anyhow::anyhow!("failed to run git ls-files: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "git ls-files exited with status {}: {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    let mut files = Vec::new();
+    for raw_path in output.stdout.split(|byte| *byte == 0) {
+        if raw_path.is_empty() {
+            continue;
+        }
+        let relative = PathBuf::from(String::from_utf8_lossy(raw_path).into_owned());
+        if workspace_root.join(&relative).is_file() {
+            files.push(relative);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn unmatched_source_scope_entries(
+    manifest: &SourceScopeManifest,
+    workspace_files: &[PathBuf],
+) -> Vec<String> {
+    manifest
+        .sources
+        .iter()
+        .filter(|entry| entry.non_applicability_rationale.trim().is_empty())
+        .filter(|entry| !source_scope_entry_has_included_match(entry, workspace_files))
+        .map(|entry| entry.id.clone())
+        .collect()
+}
+
+fn source_scope_entry_has_included_match(
+    entry: &SourceScopeEntry,
+    workspace_files: &[PathBuf],
+) -> bool {
+    workspace_files.iter().any(|relative_path| {
+        let relative = normalize_path(relative_path);
+        entry
+            .included_globs
+            .iter()
+            .any(|glob| glob_matches(glob, &relative))
+            && !entry
+                .excluded_globs
+                .iter()
+                .any(|glob| glob_matches(glob, &relative))
+    })
+}
+
+fn format_missing_sources(missing_sources: &[String]) -> String {
+    if missing_sources.is_empty() {
+        "<none>".to_owned()
+    } else {
+        missing_sources.join(",")
+    }
 }
 
 fn collect_workspace_files_from(
@@ -2151,6 +2285,7 @@ mod tests {
     };
     use std::fs;
     use std::path::Path;
+    use std::process::Command;
     use tempfile::TempDir;
 
     const POSITIVE_SCANNER_FIXTURE: &str =
@@ -2556,6 +2691,28 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
             write_sample_file(root, path, text)?;
         }
         Ok(())
+    }
+
+    fn run_git(root: &Path, args: &[&str]) -> anyhow::Result<()> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "git {:?} failed with status {}: {}",
+                args,
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    fn index_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
+        run_git(root, &["init"])?;
+        run_git(root, &["add", "."])
     }
 
     fn populate_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
@@ -3789,6 +3946,13 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
             "cargo run -p ffs-harness -- validate-source-scope-manifest",
         );
         assert!(report.valid, "scan should validate: {:?}", report.errors);
+        assert_eq!(report.workspace_file_source, "filesystem_fallback");
+        assert!(
+            report
+                .workspace_file_source_reason
+                .contains("git-tracked scan unavailable"),
+            "temp fixtures should record why they used filesystem fallback"
+        );
         assert_eq!(report.source_count, REQUIRED_SOURCE_FAMILIES.len());
         assert_eq!(
             report.source_manifest_version,
@@ -3819,6 +3983,115 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                     .contains("validate-source-scope")
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn source_scope_scan_uses_git_tracked_files_for_canonical_hashes() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        populate_source_scope_workspace(temp.path())?;
+        index_source_scope_workspace(temp.path())?;
+
+        let clean_report = scan_source_scope_manifest(
+            &fixture_manifest(),
+            temp.path(),
+            None,
+            "cargo run -p ffs-harness -- validate-source-scope-manifest",
+        );
+        assert!(
+            clean_report.valid,
+            "clean git-backed scan should validate: {:?}",
+            clean_report.errors
+        );
+        assert_eq!(clean_report.workspace_file_source, "git_ls_files");
+        assert!(
+            clean_report
+                .workspace_file_source_reason
+                .contains("git-tracked paths")
+        );
+
+        let clean_evidence = clean_report
+            .scanned_sources
+            .iter()
+            .find(|source| source.source_family == "checked_in_evidence_artifacts")
+            .expect("checked-in evidence source scanned");
+        let clean_hash = clean_evidence.file_or_directory_hash.clone();
+        let clean_path_count = clean_evidence.matched_paths.len();
+
+        write_sample_file(
+            temp.path(),
+            "artifacts/e2e/20990101_000000_untracked_local/run.log",
+            "SCENARIO_RESULT|scenario_id=local_dirty|outcome=PASS|bead_id=bd-rchk0\n",
+        )?;
+
+        let dirty_report = scan_source_scope_manifest(
+            &fixture_manifest(),
+            temp.path(),
+            None,
+            "cargo run -p ffs-harness -- validate-source-scope-manifest",
+        );
+        assert!(
+            dirty_report.valid,
+            "dirty git-backed scan should validate: {:?}",
+            dirty_report.errors
+        );
+        assert_eq!(dirty_report.workspace_file_source, "git_ls_files");
+        let dirty_evidence = dirty_report
+            .scanned_sources
+            .iter()
+            .find(|source| source.source_family == "checked_in_evidence_artifacts")
+            .expect("checked-in evidence source scanned");
+
+        assert_eq!(
+            dirty_evidence.file_or_directory_hash, clean_hash,
+            "untracked local artifacts must not perturb canonical source hashes"
+        );
+        assert_eq!(
+            dirty_evidence.matched_paths.len(),
+            clean_path_count,
+            "untracked local artifacts must not increase canonical matched paths"
+        );
+        assert!(
+            dirty_evidence.matched_paths.iter().all(|path| {
+                path.source_path != "artifacts/e2e/20990101_000000_untracked_local/run.log"
+            }),
+            "untracked local artifact should not be part of canonical matched paths"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn source_scope_scan_falls_back_when_git_index_is_incomplete() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        populate_source_scope_workspace(temp.path())?;
+        run_git(temp.path(), &["init"])?;
+        run_git(temp.path(), &["add", "README.md"])?;
+
+        let report = scan_source_scope_manifest(
+            &fixture_manifest(),
+            temp.path(),
+            None,
+            "cargo run -p ffs-harness -- validate-source-scope-manifest",
+        );
+
+        assert!(
+            report.valid,
+            "filesystem fallback should recover from incomplete git metadata: {:?}",
+            report.errors
+        );
+        assert_eq!(report.workspace_file_source, "filesystem_fallback");
+        assert!(
+            report
+                .workspace_file_source_reason
+                .contains("git-tracked scan incomplete"),
+            "fallback reason should identify incomplete git metadata"
+        );
+        assert!(
+            report
+                .workspace_file_source_reason
+                .contains("agent_workflow_docs"),
+            "fallback reason should preserve missing source ids"
+        );
         Ok(())
     }
 
