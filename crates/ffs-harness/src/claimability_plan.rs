@@ -51,7 +51,9 @@ pub struct ClaimabilityReservationSnapshotSummary {
     pub source_freshness: String,
     pub conflict_classification: String,
     pub active_peer_conflict_count: usize,
+    pub active_self_reservation_count: usize,
     pub target_paths: Vec<String>,
+    pub self_held_target_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +62,8 @@ pub struct ClaimabilityReservationAllocationPlan {
     pub advisory_only: bool,
     pub mutation_policy: String,
     pub conflict_group_count: usize,
+    pub self_held_reservation_count: usize,
+    pub self_held_target_paths: Vec<String>,
     pub suggested_disjoint_target_paths: Vec<String>,
     pub safe_reservation_commands: Vec<String>,
     pub groups: Vec<ClaimabilityReservationConflictGroup>,
@@ -328,6 +332,9 @@ fn validate_reservation_allocation_plan(
             "safe_disjoint_suggestions allocation status requires suggested paths".to_owned(),
         );
     }
+    if plan.status == "self_held_active_reservation" && plan.self_held_target_paths.is_empty() {
+        errors.push("self-held reservation allocation status requires self-held paths".to_owned());
+    }
     if plan.status.starts_with("blocked_") && !plan.suggested_disjoint_target_paths.is_empty() {
         errors.push("blocked reservation allocation status must not suggest paths".to_owned());
     }
@@ -366,6 +373,11 @@ pub fn render_claimability_plan_markdown(report: &ClaimabilityPlanReport) -> Str
     );
     let _ = writeln!(
         markdown,
+        "- Self-held reservations: `{}`",
+        report.reservation_snapshot.active_self_reservation_count
+    );
+    let _ = writeln!(
+        markdown,
         "- Suppressed bv parent epics: `{}`",
         report.bv_snapshot.suppressed_parent_epic_ids.len()
     );
@@ -386,6 +398,18 @@ pub fn render_claimability_plan_markdown(report: &ClaimabilityPlanReport) -> Str
         "- Advisory only: `{}`",
         report.reservation_allocation_plan.advisory_only
     );
+    if report
+        .reservation_allocation_plan
+        .self_held_target_paths
+        .is_empty()
+    {
+        markdown.push_str("- Self-held target paths: `none`\n");
+    } else {
+        markdown.push_str("- Self-held target paths:\n");
+        for path in &report.reservation_allocation_plan.self_held_target_paths {
+            let _ = writeln!(markdown, "  - `{}`", markdown_table_cell(path));
+        }
+    }
     if report
         .reservation_allocation_plan
         .suggested_disjoint_target_paths
@@ -436,12 +460,11 @@ fn plan_row_from_work_row(
     classification: ClaimabilityClassification,
     reservation_report: Option<&AgentMailReservationSnapshotReport>,
 ) -> ClaimabilityPlanRow {
-    let (reason, next_safe_actions) = if classification
-        == ClaimabilityClassification::ReservedByPeer
-    {
-        (
-            "active peer file reservation overlaps the planner target surface".to_owned(),
-            vec![
+    let (reason, next_safe_actions) =
+        if classification == ClaimabilityClassification::ReservedByPeer {
+            (
+                "active peer file reservation overlaps the planner target surface".to_owned(),
+                vec![
                 "do not edit reserved paths until Agent Mail reservation is released or handed off"
                     .to_owned(),
                 format!(
@@ -449,26 +472,13 @@ fn plan_row_from_work_row(
                     row.id
                 ),
             ],
-        )
-    } else {
-        (
-            "source-aware tracker report marks this row claimable".to_owned(),
-            vec![
-                format!(
-                    "br update --no-db --json --actor $AGENT_NAME --claim {}",
-                    row.id
-                ),
-                format!(
-                    "file_reservation_paths(project_key, agent_name, target_paths, reason=\"{}\")",
-                    row.id
-                ),
-                format!(
-                    "send_message(... thread_id=\"{}\", subject=\"[{}] Start: {}\")",
-                    row.id, row.id, row.title
-                ),
-            ],
-        )
-    };
+            )
+        } else {
+            (
+                "source-aware tracker report marks this row claimable".to_owned(),
+                claimable_next_actions(row, reservation_report),
+            )
+        };
     let mut reproduction_commands = vec![
         "ffs-harness claimability-plan --tracker-report tracker_source_hygiene_report.json --out claimability_plan.json"
             .to_owned(),
@@ -495,6 +505,33 @@ fn plan_row_from_work_row(
         next_safe_actions,
         reproduction_commands,
     }
+}
+
+fn claimable_next_actions(
+    row: &TrackerIssueWorkRow,
+    reservation_report: Option<&AgentMailReservationSnapshotReport>,
+) -> Vec<String> {
+    let mut actions = vec![
+        format!(
+            "br update --no-db --json --actor $AGENT_NAME --claim {}",
+            row.id
+        ),
+        format!(
+            "file_reservation_paths(project_key, agent_name, target_paths, reason=\"{}\")",
+            row.id
+        ),
+        format!(
+            "send_message(... thread_id=\"{}\", subject=\"[{}] Start: {}\")",
+            row.id, row.id, row.title
+        ),
+    ];
+    if active_self_reservation_count(reservation_report) > 0 {
+        actions.push(
+            "current-agent reservations already overlap the target surface; reuse or renew the self-held lease before editing, and release it before handoff"
+                .to_owned(),
+        );
+    }
+    actions
 }
 
 fn plan_row_from_permission_gated_row(row: &TrackerPermissionGatedRow) -> ClaimabilityPlanRow {
@@ -638,19 +675,20 @@ fn reservation_summary(
             source_freshness: "unknown".to_owned(),
             conflict_classification: "unknown".to_owned(),
             active_peer_conflict_count: 0,
+            active_self_reservation_count: 0,
             target_paths: Vec::new(),
+            self_held_target_paths: Vec::new(),
         };
     };
+    let self_held_target_paths = self_held_target_paths(report);
     ClaimabilityReservationSnapshotSummary {
         present: true,
         source_freshness: report.source_freshness.clone(),
         conflict_classification: report.conflict_classification.clone(),
-        active_peer_conflict_count: report
-            .reservations
-            .iter()
-            .filter(|row| row.conflict_classification == "active_peer_conflict")
-            .count(),
+        active_peer_conflict_count: active_peer_conflict_count(Some(report)),
+        active_self_reservation_count: active_self_reservation_count(Some(report)),
         target_paths: report.target_paths.clone(),
+        self_held_target_paths,
     }
 }
 
@@ -658,47 +696,105 @@ fn reservation_allocation_plan(
     reservation_report: Option<&AgentMailReservationSnapshotReport>,
 ) -> ClaimabilityReservationAllocationPlan {
     let Some(report) = reservation_report else {
-        return allocation_plan(
-            "unavailable_no_reservation_snapshot",
-            Vec::new(),
-            Vec::new(),
-        );
+        return unavailable_reservation_snapshot_allocation_plan();
     };
 
-    if report.source_freshness != "fresh" {
-        return allocation_plan("blocked_stale_or_unknown_snapshot", Vec::new(), Vec::new());
-    }
-    if report.target_paths.is_empty() {
-        return allocation_plan("blocked_no_target_paths", Vec::new(), Vec::new());
-    }
-    if report.target_paths.iter().any(|path| has_glob_token(path)) {
-        return allocation_plan("blocked_wildcard_target_paths", Vec::new(), Vec::new());
+    if let Some(blocked_plan) = blocked_reservation_snapshot_allocation_plan(report) {
+        return blocked_plan;
     }
 
-    let active_conflicts: Vec<&AgentMailReservationLeaseReport> = report
-        .reservations
-        .iter()
-        .filter(|lease| {
-            lease.active
-                && lease.exclusive
-                && lease.overlaps_target
-                && lease.holder != report.current_agent
-                && lease.conflict_classification == "active_peer_conflict"
-        })
-        .collect();
+    let self_held_target_paths = self_held_target_paths(report);
+    let self_held_reservation_count = active_self_reservation_count(Some(report));
+    let active_conflicts = active_peer_conflicts(report);
     if active_conflicts.is_empty() {
-        return allocation_plan("no_active_peer_conflict", Vec::new(), Vec::new());
+        return allocation_plan_without_peer_conflicts(
+            self_held_target_paths,
+            self_held_reservation_count,
+        );
     }
 
+    allocation_plan_with_peer_conflicts(
+        report,
+        &active_conflicts,
+        self_held_target_paths,
+        self_held_reservation_count,
+    )
+}
+
+fn unavailable_reservation_snapshot_allocation_plan() -> ClaimabilityReservationAllocationPlan {
+    allocation_plan(
+        "unavailable_no_reservation_snapshot",
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        0,
+    )
+}
+
+fn blocked_reservation_snapshot_allocation_plan(
+    report: &AgentMailReservationSnapshotReport,
+) -> Option<ClaimabilityReservationAllocationPlan> {
+    let blocked_status = if report.source_freshness != "fresh" {
+        Some("blocked_stale_or_unknown_snapshot")
+    } else if report.target_paths.is_empty() {
+        Some("blocked_no_target_paths")
+    } else if report.target_paths.iter().any(|path| has_glob_token(path)) {
+        Some("blocked_wildcard_target_paths")
+    } else {
+        None
+    }?;
+    Some(allocation_plan(
+        blocked_status,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        0,
+    ))
+}
+
+fn allocation_plan_without_peer_conflicts(
+    self_held_target_paths: Vec<String>,
+    self_held_reservation_count: usize,
+) -> ClaimabilityReservationAllocationPlan {
+    if self_held_target_paths.is_empty() {
+        return allocation_plan(
+            "no_active_peer_conflict",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            0,
+        );
+    }
+    allocation_plan(
+        "self_held_active_reservation",
+        Vec::new(),
+        Vec::new(),
+        self_held_target_paths,
+        self_held_reservation_count,
+    )
+}
+
+fn allocation_plan_with_peer_conflicts(
+    report: &AgentMailReservationSnapshotReport,
+    active_conflicts: &[&AgentMailReservationLeaseReport],
+    self_held_target_paths: Vec<String>,
+    self_held_reservation_count: usize,
+) -> ClaimabilityReservationAllocationPlan {
     if active_conflicts
         .iter()
         .any(|lease| is_broad_reservation_pattern(&lease.path_pattern))
     {
         let groups = active_conflicts
             .iter()
-            .map(|lease| reservation_conflict_group(report, lease, &[]))
+            .map(|&lease| reservation_conflict_group(report, lease, &[]))
             .collect::<Vec<_>>();
-        return allocation_plan("blocked_broad_peer_reservation", Vec::new(), groups);
+        return allocation_plan(
+            "blocked_broad_peer_reservation",
+            Vec::new(),
+            groups,
+            self_held_target_paths,
+            self_held_reservation_count,
+        );
     }
 
     let blocked_targets = report
@@ -707,7 +803,7 @@ fn reservation_allocation_plan(
         .filter(|target| {
             active_conflicts
                 .iter()
-                .any(|lease| reservation_patterns_may_overlap(&lease.path_pattern, target))
+                .any(|&lease| reservation_patterns_may_overlap(&lease.path_pattern, target))
         })
         .cloned()
         .collect::<BTreeSet<_>>();
@@ -720,23 +816,37 @@ fn reservation_allocation_plan(
     if suggested_paths.is_empty() {
         let groups = active_conflicts
             .iter()
-            .map(|lease| reservation_conflict_group(report, lease, &[]))
+            .map(|&lease| reservation_conflict_group(report, lease, &[]))
             .collect::<Vec<_>>();
-        return allocation_plan("blocked_no_safe_disjoint_scope", Vec::new(), groups);
+        return allocation_plan(
+            "blocked_no_safe_disjoint_scope",
+            Vec::new(),
+            groups,
+            self_held_target_paths,
+            self_held_reservation_count,
+        );
     }
 
     let commands = safe_reservation_commands(&suggested_paths);
     let groups = active_conflicts
         .iter()
-        .map(|lease| reservation_conflict_group(report, lease, &suggested_paths))
+        .map(|&lease| reservation_conflict_group(report, lease, &suggested_paths))
         .collect::<Vec<_>>();
-    allocation_plan("safe_disjoint_suggestions", commands, groups)
+    allocation_plan(
+        "safe_disjoint_suggestions",
+        commands,
+        groups,
+        self_held_target_paths,
+        self_held_reservation_count,
+    )
 }
 
 fn allocation_plan(
     status: &str,
     safe_reservation_commands: Vec<String>,
     groups: Vec<ClaimabilityReservationConflictGroup>,
+    self_held_target_paths: Vec<String>,
+    self_held_reservation_count: usize,
 ) -> ClaimabilityReservationAllocationPlan {
     let suggested_disjoint_target_paths = groups
         .iter()
@@ -749,10 +859,80 @@ fn allocation_plan(
         advisory_only: true,
         mutation_policy: "advisory-only; this planner never calls MCP, claims, releases, creates, or mutates Agent Mail reservations".to_owned(),
         conflict_group_count: groups.len(),
+        self_held_reservation_count,
+        self_held_target_paths,
         suggested_disjoint_target_paths,
         safe_reservation_commands,
         groups,
     }
+}
+
+fn active_peer_conflicts(
+    report: &AgentMailReservationSnapshotReport,
+) -> Vec<&AgentMailReservationLeaseReport> {
+    report
+        .reservations
+        .iter()
+        .filter(|lease| {
+            lease.active
+                && lease.exclusive
+                && lease.overlaps_target
+                && lease.holder != report.current_agent
+                && lease.conflict_classification == "active_peer_conflict"
+        })
+        .collect()
+}
+
+fn active_peer_conflict_count(
+    reservation_report: Option<&AgentMailReservationSnapshotReport>,
+) -> usize {
+    reservation_report.map_or(0, |report| {
+        report
+            .reservations
+            .iter()
+            .filter(|row| row.conflict_classification == "active_peer_conflict")
+            .count()
+    })
+}
+
+fn active_self_reservation_count(
+    reservation_report: Option<&AgentMailReservationSnapshotReport>,
+) -> usize {
+    reservation_report.map_or(0, |report| {
+        report
+            .reservations
+            .iter()
+            .filter(|row| {
+                row.active
+                    && row.exclusive
+                    && row.overlaps_target
+                    && row.conflict_classification == "self_held"
+            })
+            .count()
+    })
+}
+
+fn self_held_target_paths(report: &AgentMailReservationSnapshotReport) -> Vec<String> {
+    let self_held_leases = report
+        .reservations
+        .iter()
+        .filter(|lease| {
+            lease.active
+                && lease.exclusive
+                && lease.overlaps_target
+                && lease.conflict_classification == "self_held"
+        })
+        .collect::<Vec<_>>();
+    report
+        .target_paths
+        .iter()
+        .filter(|target| {
+            self_held_leases
+                .iter()
+                .any(|lease| reservation_patterns_may_overlap(&lease.path_pattern, target))
+        })
+        .cloned()
+        .collect()
 }
 
 fn reservation_conflict_group(
@@ -927,6 +1107,12 @@ fn plan_next_safe_actions(
     if reservation_summary.active_peer_conflict_count > 0 {
         actions.push(
             "wait for peer reservation release or obtain explicit handoff before editing reserved paths"
+                .to_owned(),
+        );
+    }
+    if reservation_summary.active_self_reservation_count > 0 {
+        actions.push(
+            "self-held reservations overlap the target surface; reuse or renew them while working and release them before handoff"
                 .to_owned(),
         );
     }
@@ -1164,6 +1350,24 @@ mod tests {
         target_paths: Vec<&str>,
         reservations: Vec<AgentMailReservationLeaseReport>,
     ) -> AgentMailReservationSnapshotReport {
+        let conflict_classification = if reservations
+            .iter()
+            .any(|lease| lease.conflict_classification == "active_peer_conflict")
+        {
+            "active_peer_conflict"
+        } else if reservations
+            .iter()
+            .any(|lease| lease.conflict_classification == "self_held")
+        {
+            "self_held"
+        } else if reservations
+            .iter()
+            .any(|lease| lease.conflict_classification == "shared_observation")
+        {
+            "shared_observation"
+        } else {
+            "no_active_conflict"
+        };
         AgentMailReservationSnapshotReport {
             schema_version: 1,
             snapshot_status: "present".to_owned(),
@@ -1179,7 +1383,7 @@ mod tests {
             generated_at_epoch: Some(1_768_000_000),
             age_seconds: Some(0),
             source_max_age_seconds: 3_600,
-            conflict_classification: "active_peer_conflict".to_owned(),
+            conflict_classification: conflict_classification.to_owned(),
             reservations,
             errors: Vec::new(),
         }
@@ -1385,7 +1589,7 @@ mod tests {
     }
 
     #[test]
-    fn reservation_allocation_ignores_non_peer_conflicts() {
+    fn reservation_allocation_reports_self_held_reservations() {
         let reservation = reservation_report(
             vec!["crates/ffs-harness/src/claimability_plan.rs"],
             vec![
@@ -1411,7 +1615,7 @@ mod tests {
                     true,
                     true,
                     true,
-                    "self_held_active",
+                    "self_held",
                 ),
             ],
         );
@@ -1419,11 +1623,141 @@ mod tests {
         let report =
             build_claimability_plan_report(&config(), &base_report(), Some(&reservation), None);
 
+        assert_eq!(report.reservation_snapshot.active_self_reservation_count, 1);
+        assert_eq!(
+            report.reservation_snapshot.self_held_target_paths,
+            vec!["crates/ffs-harness/src/claimability_plan.rs"]
+        );
+        assert_eq!(
+            report.reservation_allocation_plan.status,
+            "self_held_active_reservation"
+        );
+        assert_eq!(
+            report.reservation_allocation_plan.self_held_target_paths,
+            vec!["crates/ffs-harness/src/claimability_plan.rs"]
+        );
+        assert_eq!(
+            report
+                .reservation_allocation_plan
+                .self_held_reservation_count,
+            1
+        );
+        assert!(report.reservation_allocation_plan.groups.is_empty());
+        assert!(
+            report
+                .next_safe_actions
+                .iter()
+                .any(|action| action.contains("self-held reservations overlap"))
+        );
+    }
+
+    #[test]
+    fn reservation_allocation_ignores_inactive_self_reservations() {
+        let reservation = reservation_report(
+            vec!["crates/ffs-harness/src/claimability_plan.rs"],
+            vec![reservation_lease(
+                "SapphireLotus",
+                "crates/ffs-harness/src/claimability_plan.rs",
+                true,
+                false,
+                true,
+                "expired",
+            )],
+        );
+
+        let report =
+            build_claimability_plan_report(&config(), &base_report(), Some(&reservation), None);
+
+        assert_eq!(report.reservation_snapshot.active_self_reservation_count, 0);
+        assert!(
+            report
+                .reservation_snapshot
+                .self_held_target_paths
+                .is_empty()
+        );
         assert_eq!(
             report.reservation_allocation_plan.status,
             "no_active_peer_conflict"
         );
-        assert!(report.reservation_allocation_plan.groups.is_empty());
+    }
+
+    #[test]
+    fn stale_self_reservation_snapshot_fails_closed_before_reuse_guidance() {
+        let mut reservation = reservation_report(
+            vec!["crates/ffs-harness/src/claimability_plan.rs"],
+            vec![reservation_lease(
+                "SapphireLotus",
+                "crates/ffs-harness/src/claimability_plan.rs",
+                true,
+                true,
+                true,
+                "self_held",
+            )],
+        );
+        reservation.source_freshness = "stale".to_owned();
+
+        let report =
+            build_claimability_plan_report(&config(), &base_report(), Some(&reservation), None);
+
+        assert_eq!(report.reservation_snapshot.active_self_reservation_count, 1);
+        assert_eq!(
+            report.reservation_allocation_plan.status,
+            "blocked_stale_or_unknown_snapshot"
+        );
+        assert!(
+            report
+                .reservation_allocation_plan
+                .self_held_target_paths
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn mixed_self_and_peer_reservations_still_block_on_peer() {
+        let reservation = reservation_report(
+            vec![
+                "scripts/e2e/ffs_claimability_autopilot_e2e.sh",
+                "docs/tracker-hygiene.md",
+            ],
+            vec![
+                reservation_lease(
+                    "SapphireLotus",
+                    "docs/tracker-hygiene.md",
+                    true,
+                    true,
+                    true,
+                    "self_held",
+                ),
+                reservation_lease(
+                    "SageMeadow",
+                    "scripts/e2e/ffs_claimability_autopilot_e2e.sh",
+                    true,
+                    true,
+                    true,
+                    "active_peer_conflict",
+                ),
+            ],
+        );
+
+        let report =
+            build_claimability_plan_report(&config(), &base_report(), Some(&reservation), None);
+
+        assert_eq!(report.reservation_snapshot.active_peer_conflict_count, 1);
+        assert_eq!(report.reservation_snapshot.active_self_reservation_count, 1);
+        assert_eq!(
+            report.reservation_allocation_plan.status,
+            "safe_disjoint_suggestions"
+        );
+        assert_eq!(
+            report.reservation_allocation_plan.self_held_target_paths,
+            vec!["docs/tracker-hygiene.md"]
+        );
+        assert_eq!(
+            report
+                .reservation_allocation_plan
+                .self_held_reservation_count,
+            1
+        );
     }
 
     #[test]

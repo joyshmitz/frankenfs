@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "snapshot_status": "present",
+  "snapshot_schema_version": 1,
+  "current_agent": "SapphireLotus",
+  "target_paths": [
+    "scripts/e2e/ffs_claimability_autopilot_e2e.sh",
+    "crates/ffs-harness/src/claimability_plan.rs",
+    "docs/tracker-hygiene.md"
+  ],
+  "source": "fixture",
+  "source_freshness": "fresh",
+  "generated_at": "2033-05-18T03:30:00Z",
+  "generated_at_epoch": 1999999800,
+  "age_seconds": 200,
+  "source_max_age_seconds": 3600,
+  "conflict_classification": "self_held",
+  "reservations": [
+    {
+      "holder": "SapphireLotus",
+      "path_pattern": "scripts/e2e/ffs_claimability_autopilot_e2e.sh",
+      "exclusive": true,
+      "reason": "bd-autopilot-self",
+      "created_ts": "2033-05-18T03:00:00Z",
+      "expires_ts": "2033-05-18T04:30:00Z",
+      "released_ts": null,
+      "created_epoch": 1999998000,
+      "expires_epoch": 2000003400,
+      "released_epoch": null,
+      "active": true,
+      "overlaps_target": true,
+      "conflict_classification": "self_held"
+    }
+  ],
+  "errors": []
+}

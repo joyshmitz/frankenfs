@@ -46,6 +46,7 @@ POLLUTED_FIXTURE="$REPO_ROOT/tests/fixtures/claimability_autopilot_polluted.json
 PERMISSION_TRACKER_INPUT="$REPO_ROOT/tests/fixtures/claimability_autopilot_permission_gated_tracker_report.json"
 POLLUTED_TRACKER_INPUT="$REPO_ROOT/tests/fixtures/claimability_autopilot_polluted_tracker_report.json"
 RESERVATION_FIXTURE="$REPO_ROOT/tests/fixtures/claimability_autopilot_peer_reservation.json"
+SELF_RESERVATION_FIXTURE="$REPO_ROOT/tests/fixtures/claimability_autopilot_self_reservation.json"
 BV_FIXTURE="$REPO_ROOT/tests/fixtures/claimability_autopilot_bv.json"
 
 ARTIFACT_ROOT="${CLAIMABILITY_AUTOPILOT_ARTIFACT_DIR:-$REPO_ROOT/artifacts/claimability_autopilot/$(basename "$E2E_LOG_DIR")}"
@@ -57,6 +58,7 @@ FIXTURE_DIGEST_DIFF="$ARTIFACT_ROOT/fixture_sha256.diff"
 PERMISSION_CASE_DIR="$ARTIFACT_ROOT/permission_gated_zero_claimable"
 POLLUTED_CASE_DIR="$ARTIFACT_ROOT/polluted_one_claimable"
 PEER_CASE_DIR="$ARTIFACT_ROOT/peer_reserved_surface"
+SELF_CASE_DIR="$ARTIFACT_ROOT/self_reserved_surface"
 
 PERMISSION_TRACKER_REPORT="$PERMISSION_CASE_DIR/tracker_source_hygiene_report.json"
 POLLUTED_TRACKER_REPORT="$POLLUTED_CASE_DIR/tracker_source_hygiene_report.json"
@@ -67,25 +69,30 @@ POLLUTED_PLAN_JSON="$POLLUTED_CASE_DIR/claimability_plan.json"
 POLLUTED_PLAN_MD="$POLLUTED_CASE_DIR/claimability_plan.md"
 PEER_PLAN_JSON="$PEER_CASE_DIR/claimability_plan.json"
 PEER_PLAN_MD="$PEER_CASE_DIR/claimability_plan.md"
+SELF_PLAN_JSON="$SELF_CASE_DIR/claimability_plan.json"
+SELF_PLAN_MD="$SELF_CASE_DIR/claimability_plan.md"
 
 PERMISSION_TRACKER_TRANSCRIPT="$TRANSCRIPT_DIR/permission_tracker_source_hygiene.log"
 PERMISSION_PLANNER_TRANSCRIPT="$TRANSCRIPT_DIR/permission_claimability_plan.log"
 POLLUTED_TRACKER_TRANSCRIPT="$TRANSCRIPT_DIR/polluted_tracker_source_hygiene.log"
 POLLUTED_PLANNER_TRANSCRIPT="$TRANSCRIPT_DIR/polluted_claimability_plan.log"
 PEER_PLANNER_TRANSCRIPT="$TRANSCRIPT_DIR/peer_reserved_claimability_plan.log"
+SELF_PLANNER_TRANSCRIPT="$TRANSCRIPT_DIR/self_reserved_claimability_plan.log"
 
 PERMISSION_TRACKER_STDOUT="$TRANSCRIPT_DIR/permission_tracker_source_hygiene.stdout"
 PERMISSION_PLANNER_STDOUT="$TRANSCRIPT_DIR/permission_claimability_plan.stdout"
 POLLUTED_TRACKER_STDOUT="$TRANSCRIPT_DIR/polluted_tracker_source_hygiene.stdout"
 POLLUTED_PLANNER_STDOUT="$TRANSCRIPT_DIR/polluted_claimability_plan.stdout"
 PEER_PLANNER_STDOUT="$TRANSCRIPT_DIR/peer_reserved_claimability_plan.stdout"
+SELF_PLANNER_STDOUT="$TRANSCRIPT_DIR/self_reserved_claimability_plan.stdout"
 
 mkdir -p \
     "$ARTIFACT_ROOT" \
     "$TRANSCRIPT_DIR" \
     "$PERMISSION_CASE_DIR" \
     "$POLLUTED_CASE_DIR" \
-    "$PEER_CASE_DIR"
+    "$PEER_CASE_DIR" \
+    "$SELF_CASE_DIR"
 
 relative_path() {
     local path="$1"
@@ -194,6 +201,14 @@ render_plan_markdown() {
         + (.next_safe_actions | map("- " + .) | join("\n"))
         + "\n\n## Reservation Allocation\n"
         + "- status: `\(.reservation_allocation_plan.status)`\n"
+        + "- Self-held reservations: `\(.reservation_allocation_plan.self_held_reservation_count)`\n"
+        + (if (.reservation_allocation_plan.self_held_target_paths | length) == 0 then
+            "- Self-held target paths: `none`\n"
+        else
+            "- Self-held target paths:\n"
+            + (.reservation_allocation_plan.self_held_target_paths | map("  - `" + . + "`") | join("\n"))
+            + "\n"
+        end)
         + (.reservation_allocation_plan.suggested_disjoint_target_paths | map("- `" + . + "`") | join("\n"))
         + "\n\n## Rows\n"
         + (.rows | map("- `\(.id)`: `\(.classification)`") | join("\n"))
@@ -253,6 +268,7 @@ write_autopilot_summary() {
         --arg permission_tracker_input "$PERMISSION_TRACKER_INPUT" \
         --arg polluted_tracker_input "$POLLUTED_TRACKER_INPUT" \
         --arg reservation_fixture "$RESERVATION_FIXTURE" \
+        --arg self_reservation_fixture "$SELF_RESERVATION_FIXTURE" \
         --arg bv_fixture "$BV_FIXTURE" \
         --arg permission_tracker "$PERMISSION_TRACKER_REPORT" \
         --arg polluted_tracker "$POLLUTED_TRACKER_REPORT" \
@@ -262,14 +278,18 @@ write_autopilot_summary() {
         --arg polluted_plan_md "$POLLUTED_PLAN_MD" \
         --arg peer_plan_json "$PEER_PLAN_JSON" \
         --arg peer_plan_md "$PEER_PLAN_MD" \
+        --arg self_plan_json "$SELF_PLAN_JSON" \
+        --arg self_plan_md "$SELF_PLAN_MD" \
         --arg permission_tracker_transcript "$PERMISSION_TRACKER_TRANSCRIPT" \
         --arg permission_planner_transcript "$PERMISSION_PLANNER_TRANSCRIPT" \
         --arg polluted_tracker_transcript "$POLLUTED_TRACKER_TRANSCRIPT" \
         --arg polluted_planner_transcript "$POLLUTED_PLANNER_TRANSCRIPT" \
         --arg peer_planner_transcript "$PEER_PLANNER_TRANSCRIPT" \
+        --arg self_planner_transcript "$SELF_PLANNER_TRANSCRIPT" \
         --slurpfile permission_plan "$PERMISSION_PLAN_JSON" \
         --slurpfile polluted_plan "$POLLUTED_PLAN_JSON" \
         --slurpfile peer_plan "$PEER_PLAN_JSON" \
+        --slurpfile self_plan "$SELF_PLAN_JSON" \
         '{
             claimability_autopilot: {
                 schema_version: 1,
@@ -326,6 +346,22 @@ write_autopilot_summary() {
                             claimability_plan: $peer_planner_transcript
                         },
                         next_command_hints: ($peer_plan[0].next_safe_actions // [])
+                    },
+                    {
+                        case_id: "self_reserved_surface",
+                        issues_fixture: $polluted_fixture,
+                        input_report_paths: {
+                            tracker_source_hygiene: $polluted_tracker,
+                            planner_tracker_input: $polluted_tracker_input
+                        },
+                        reservation_snapshot_path: $self_reservation_fixture,
+                        bv_json_path: $bv_fixture,
+                        claimability_plan_json: $self_plan_json,
+                        claimability_plan_markdown: $self_plan_md,
+                        command_transcripts: {
+                            claimability_plan: $self_planner_transcript
+                        },
+                        next_command_hints: ($self_plan[0].next_safe_actions // [])
                     }
                 ]
             }
@@ -351,6 +387,7 @@ for fixture in \
     "$PERMISSION_TRACKER_INPUT" \
     "$POLLUTED_TRACKER_INPUT" \
     "$RESERVATION_FIXTURE" \
+    "$SELF_RESERVATION_FIXTURE" \
     "$BV_FIXTURE"; do
     if [[ ! -f "$fixture" ]]; then
         scenario_result "claimability_autopilot_artifacts_written" "FAIL" "missing fixture=$fixture"
@@ -363,6 +400,7 @@ sha256sum \
     "$PERMISSION_TRACKER_INPUT" \
     "$POLLUTED_TRACKER_INPUT" \
     "$RESERVATION_FIXTURE" \
+    "$SELF_RESERVATION_FIXTURE" \
     "$BV_FIXTURE" >"$FIXTURE_DIGEST_BEFORE"
 
 e2e_step "Run tracker hygiene and claimability planner through RCH"
@@ -370,7 +408,8 @@ if run_tracker_source_hygiene "$PERMISSION_FIXTURE" "$PERMISSION_TRACKER_REPORT"
     && run_claimability_plan "$PERMISSION_TRACKER_INPUT" "$PERMISSION_PLAN_JSON" "$PERMISSION_PLAN_MD" "$PERMISSION_PLANNER_TRANSCRIPT" \
     && run_tracker_source_hygiene "$POLLUTED_FIXTURE" "$POLLUTED_TRACKER_REPORT" "$POLLUTED_TRACKER_TRANSCRIPT" \
     && run_claimability_plan "$POLLUTED_TRACKER_INPUT" "$POLLUTED_PLAN_JSON" "$POLLUTED_PLAN_MD" "$POLLUTED_PLANNER_TRANSCRIPT" \
-    && run_claimability_plan "$POLLUTED_TRACKER_INPUT" "$PEER_PLAN_JSON" "$PEER_PLAN_MD" "$PEER_PLANNER_TRANSCRIPT" "$RESERVATION_FIXTURE"; then
+    && run_claimability_plan "$POLLUTED_TRACKER_INPUT" "$PEER_PLAN_JSON" "$PEER_PLAN_MD" "$PEER_PLANNER_TRANSCRIPT" "$RESERVATION_FIXTURE" \
+    && run_claimability_plan "$POLLUTED_TRACKER_INPUT" "$SELF_PLAN_JSON" "$SELF_PLAN_MD" "$SELF_PLANNER_TRANSCRIPT" "$SELF_RESERVATION_FIXTURE"; then
     scenario_result "claimability_autopilot_transcripts_remote_only" "PASS" "transcripts=$TRANSCRIPT_DIR"
 else
     scenario_result "claimability_autopilot_transcripts_remote_only" "FAIL" "transcripts=$TRANSCRIPT_DIR"
@@ -383,7 +422,9 @@ if [[ -s "$PERMISSION_TRACKER_REPORT" \
     && -s "$POLLUTED_PLAN_JSON" \
     && -s "$POLLUTED_PLAN_MD" \
     && -s "$PEER_PLAN_JSON" \
-    && -s "$PEER_PLAN_MD" ]]; then
+    && -s "$PEER_PLAN_MD" \
+    && -s "$SELF_PLAN_JSON" \
+    && -s "$SELF_PLAN_MD" ]]; then
     scenario_result "claimability_autopilot_artifacts_written" "PASS" "artifact_dir=$ARTIFACT_ROOT"
 else
     scenario_result "claimability_autopilot_artifacts_written" "FAIL" "missing claimability artifacts in $ARTIFACT_ROOT"
@@ -441,6 +482,24 @@ else
 fi
 
 if jq -e '
+    (.reservation_snapshot.active_peer_conflict_count == 0)
+    and (.reservation_snapshot.active_self_reservation_count == 1)
+    and (.reservation_snapshot.conflict_classification == "self_held")
+    and (.reservation_snapshot.self_held_target_paths == ["scripts/e2e/ffs_claimability_autopilot_e2e.sh"])
+    and (.reservation_allocation_plan.status == "self_held_active_reservation")
+    and (.reservation_allocation_plan.self_held_target_paths == ["scripts/e2e/ffs_claimability_autopilot_e2e.sh"])
+    and any(.rows[]; .id == "bd-autopilot-ready" and .classification == "claimable")
+    and all(.rows[]; .classification != "reserved_by_peer")
+    and any(.next_safe_actions[]; contains("self-held reservations overlap"))
+' "$SELF_PLAN_JSON" >/dev/null \
+    && grep -q "Self-held reservations" "$SELF_PLAN_MD" \
+    && grep -q "scripts/e2e/ffs_claimability_autopilot_e2e.sh" "$SELF_PLAN_MD"; then
+    scenario_result "claimability_autopilot_self_reserved_surface" "PASS" "plan=$SELF_PLAN_JSON markdown=$SELF_PLAN_MD"
+else
+    scenario_result "claimability_autopilot_self_reserved_surface" "FAIL" "plan=$SELF_PLAN_JSON markdown=$SELF_PLAN_MD"
+fi
+
+if jq -e '
     any(.rows[]; .id == "bd-autopilot-stale" and .classification == "stale_in_progress_reclaim_candidate")
     and any(.next_safe_actions[]; contains("inspect Agent Mail and live reservations before reclaiming"))
 ' "$POLLUTED_PLAN_JSON" >/dev/null; then
@@ -462,7 +521,7 @@ write_autopilot_summary
 if jq -e '
     (.claimability_autopilot.schema_version == 1)
     and (.claimability_autopilot.cleanup_status | type == "string")
-    and (.claimability_autopilot.cases | length == 3)
+    and (.claimability_autopilot.cases | length == 4)
     and all(.claimability_autopilot.cases[]; (.input_report_paths.tracker_source_hygiene | type == "string"))
     and all(.claimability_autopilot.cases[]; (.bv_json_path | test("claimability_autopilot_bv\\.json$")))
     and any(.claimability_autopilot.cases[]; .reservation_snapshot_path != null)
@@ -479,6 +538,7 @@ sha256sum \
     "$PERMISSION_TRACKER_INPUT" \
     "$POLLUTED_TRACKER_INPUT" \
     "$RESERVATION_FIXTURE" \
+    "$SELF_RESERVATION_FIXTURE" \
     "$BV_FIXTURE" >"$FIXTURE_DIGEST_AFTER"
 if diff -u "$FIXTURE_DIGEST_BEFORE" "$FIXTURE_DIGEST_AFTER" >"$FIXTURE_DIGEST_DIFF"; then
     scenario_result "claimability_autopilot_fixture_non_mutation" "PASS" "digest=$FIXTURE_DIGEST_AFTER cleanup=${FFS_E2E_DISABLE_TEMP_CLEANUP:-0}"

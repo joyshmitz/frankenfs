@@ -201,6 +201,10 @@ The allocation plan is intentionally conservative:
 
 - It only suggests exact target paths that do not overlap an active exclusive
   peer reservation.
+- Active exclusive reservations held by the current agent are classified as
+  self-held overlap, not peer blockers. Agents may continue only if that lease
+  is intentionally theirs for the current task; they should renew it while
+  working and release it before handoff.
 - Broad peer reservations such as `**`, wildcard target paths, stale or missing
   snapshot freshness, and complete overlap all produce a blocked allocation
   status with no suggested paths.
