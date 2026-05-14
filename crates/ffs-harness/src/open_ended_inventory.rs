@@ -363,9 +363,10 @@ pub const DEFAULT_SOURCE_SCOPE_MANIFEST_PATH: &str =
 const DEFAULT_SOURCE_SCOPE_MANIFEST_JSON: &str =
     include_str!("../../../tests/source-scope-manifest/source_scope_manifest.json");
 
-const REQUIRED_SOURCE_FAMILIES: [&str; 13] = [
+const REQUIRED_SOURCE_FAMILIES: [&str; 14] = [
     "readme_status_docs",
     "feature_parity_doc",
+    "canonical_spec_docs",
     "conformance_docs",
     "fixture_manifests",
     "tests",
@@ -377,6 +378,14 @@ const REQUIRED_SOURCE_FAMILIES: [&str; 13] = [
     "mounted_lane_docs",
     "repair_docs",
     "performance_xfstests_notes",
+];
+
+const CANONICAL_SPEC_DOCS: [&str; 5] = [
+    "COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md",
+    "PLAN_TO_PORT_FRANKENFS_TO_RUST.md",
+    "EXISTING_EXT4_BTRFS_STRUCTURE.md",
+    "PROPOSED_ARCHITECTURE.md",
+    "FEATURE_PARITY.md",
 ];
 
 const ALLOWED_RISK_CATEGORIES: [&str; 9] = [
@@ -860,6 +869,7 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
                 entry.id
             ));
         }
+        "canonical_spec_docs" => validate_canonical_spec_docs_coverage(entry, errors),
         "tests" => validate_tests_exclusions(entry, &excluded, missing_target_paths, errors),
         "conformance_docs" if missing_target_paths => {
             errors.push(format!(
@@ -877,6 +887,17 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             ));
         }
         _ => {}
+    }
+}
+
+fn validate_canonical_spec_docs_coverage(entry: &SourceScopeEntry, errors: &mut Vec<String>) {
+    for required_doc in CANONICAL_SPEC_DOCS {
+        if !entry.included_globs.iter().any(|glob| glob == required_doc) {
+            errors.push(format!(
+                "source `{}` must include required canonical spec doc `{required_doc}`",
+                entry.id
+            ));
+        }
     }
 }
 
@@ -2124,6 +2145,22 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
             ("README.md", "NOTE bd-rchk7.1 artifact coverage\n"),
             ("FEATURE_PARITY.md", "bd-rchk7.1 artifact coverage\n"),
             (
+                "COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md",
+                "NOTE canonical spec bd-rchk7.1 artifact\n",
+            ),
+            (
+                "PLAN_TO_PORT_FRANKENFS_TO_RUST.md",
+                "NOTE canonical porting plan bd-rchk7.1 artifact\n",
+            ),
+            (
+                "EXISTING_EXT4_BTRFS_STRUCTURE.md",
+                "NOTE extracted behavior bd-rchk7.1 artifact\n",
+            ),
+            (
+                "PROPOSED_ARCHITECTURE.md",
+                "NOTE architecture bd-rchk7.1 artifact\n",
+            ),
+            (
                 "docs/reports/CONFORMANCE_SAMPLE.md",
                 "NOTE conformance bd-rchk7.1 artifact\n",
             ),
@@ -2207,6 +2244,21 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .errors
                 .iter()
                 .any(|err| err.contains("missing required family `tests`"))
+        );
+    }
+
+    #[test]
+    fn missing_canonical_spec_docs_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "canonical_spec_docs");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required family `canonical_spec_docs`"))
         );
     }
 
@@ -2503,6 +2555,23 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
 
     #[test]
     fn required_generated_and_vendor_exclusions_are_validated() {
+        let mut manifest = fixture_manifest();
+        let canonical_specs = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "canonical_spec_docs")
+            .expect("canonical spec docs source exists");
+        canonical_specs
+            .included_globs
+            .retain(|glob| glob != "PROPOSED_ARCHITECTURE.md");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("PROPOSED_ARCHITECTURE.md"))
+        );
+
         let mut manifest = fixture_manifest();
         let tests = manifest
             .sources

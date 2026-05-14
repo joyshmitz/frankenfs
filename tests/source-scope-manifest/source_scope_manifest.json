@@ -32,6 +32,30 @@
       "non_applicability_rationale": ""
     },
     {
+      "id": "canonical_spec_docs",
+      "source_family": "canonical_spec_docs",
+      "included_globs": [
+        "COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md",
+        "PLAN_TO_PORT_FRANKENFS_TO_RUST.md",
+        "EXISTING_EXT4_BTRFS_STRUCTURE.md",
+        "PROPOSED_ARCHITECTURE.md",
+        "FEATURE_PARITY.md"
+      ],
+      "excluded_globs": [
+        "COMPREHENSIVE_SPEC_FOR_FRANKENSQLITE_V1.md",
+        "PLAN_TO_PORT_LEGACY_FS_TO_RUST.md",
+        "EXISTING_LEGACY_FS_STRUCTURE.md"
+      ],
+      "risk_category": "docs_only",
+      "owner": "release",
+      "status": "active",
+      "expected_proof_types": ["docs-non-goal"],
+      "freshness_ttl_days": 14,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
       "id": "conformance_docs",
       "source_family": "conformance_docs",
       "included_globs": [

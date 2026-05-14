@@ -292,6 +292,7 @@ report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 required_families = {
     "readme_status_docs",
     "feature_parity_doc",
+    "canonical_spec_docs",
     "conformance_docs",
     "fixture_manifests",
     "tests",
