@@ -1,0 +1,21 @@
+---
+source: crates/ffs-harness/src/open_ended_inventory.rs
+expression: shape_json
+---
+{
+  "schema_version": 1,
+  "workspace_file_source": "git_ls_files",
+  "untracked_matched_path_count": 1,
+  "checked_in_evidence_artifacts": {
+    "matched_path_count": 9,
+    "untracked_matched_path_count": 1,
+    "untracked_matched_paths": [
+      {
+        "source_path": "artifacts/e2e/20990101_000000_untracked_local/run.log",
+        "source_glob": "artifacts/e2e/*/run.log",
+        "inclusion_decision": "untracked_excluded",
+        "exclusion_reason": "untracked path excluded from canonical source hash"
+      }
+    ]
+  }
+}

@@ -639,6 +639,7 @@ pub struct SourceScopeScanReport {
     pub workspace_root: String,
     pub workspace_file_source: String,
     pub workspace_file_source_reason: String,
+    pub untracked_matched_path_count: usize,
     pub source_count: usize,
     pub source_manifest_version: u32,
     pub scanned_sources: Vec<SourceScopeScanEntry>,
@@ -664,6 +665,8 @@ pub struct SourceScopeScanEntry {
     pub output_path: String,
     pub reproduction_command: String,
     pub matched_paths: Vec<SourceScopePathDecision>,
+    pub untracked_matched_path_count: usize,
+    pub untracked_matched_paths: Vec<SourceScopeUntrackedPathDecision>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -675,6 +678,14 @@ pub struct SourceScopePathDecision {
     pub file_hash: String,
     pub matched_note_count: usize,
     pub linked_bead_or_artifact_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceScopeUntrackedPathDecision {
+    pub source_path: String,
+    pub source_glob: String,
+    pub inclusion_decision: String,
+    pub exclusion_reason: String,
 }
 
 pub fn parse_source_scope_manifest(text: &str) -> Result<SourceScopeManifest> {
@@ -721,6 +732,7 @@ pub fn scan_source_scope_manifest(
             errors.push(err.to_string());
             WorkspaceFileCollection {
                 files: Vec::new(),
+                untracked_files: Vec::new(),
                 source: "error".to_owned(),
                 reason: err.to_string(),
             }
@@ -737,12 +749,17 @@ pub fn scan_source_scope_manifest(
                 entry,
                 workspace_root,
                 &workspace_files.files,
+                &workspace_files.untracked_files,
                 &output_path,
                 reproduction_command,
                 &mut errors,
             )
         })
         .collect::<Vec<_>>();
+    let untracked_matched_path_count = scanned_sources
+        .iter()
+        .map(|entry| entry.untracked_matched_path_count)
+        .sum();
 
     SourceScopeScanReport {
         schema_version: SOURCE_SCOPE_MANIFEST_SCHEMA_VERSION,
@@ -751,6 +768,7 @@ pub fn scan_source_scope_manifest(
         workspace_root: workspace_root.display().to_string(),
         workspace_file_source: workspace_files.source,
         workspace_file_source_reason: workspace_files.reason,
+        untracked_matched_path_count,
         source_count: manifest.sources.len(),
         source_manifest_version: manifest.schema_version,
         scanned_sources,
@@ -1408,6 +1426,7 @@ fn scan_source_scope_entry(
     entry: &SourceScopeEntry,
     workspace_root: &Path,
     workspace_files: &[PathBuf],
+    untracked_files: &[PathBuf],
     output_path: &str,
     reproduction_command: &str,
     errors: &mut Vec<String>,
@@ -1423,6 +1442,8 @@ fn scan_source_scope_entry(
     }
 
     let matched_paths = collect_matched_paths(entry, workspace_root, workspace_files, errors);
+    let untracked_matched_paths = collect_untracked_matched_paths(entry, untracked_files);
+    let untracked_matched_path_count = untracked_matched_paths.len();
     let included_paths: Vec<&SourceScopePathDecision> = matched_paths
         .iter()
         .filter(|path| path.inclusion_decision == "included")
@@ -1463,6 +1484,8 @@ fn scan_source_scope_entry(
         output_path: output_path.to_owned(),
         reproduction_command: reproduction_command.to_owned(),
         matched_paths,
+        untracked_matched_path_count,
+        untracked_matched_paths,
     }
 }
 
@@ -1499,6 +1522,8 @@ fn non_applicable_scan_entry(
         output_path: output_path.to_owned(),
         reproduction_command: reproduction_command.to_owned(),
         matched_paths: Vec::new(),
+        untracked_matched_path_count: 0,
+        untracked_matched_paths: Vec::new(),
     }
 }
 
@@ -1553,8 +1578,40 @@ fn collect_matched_paths(
     matched_paths
 }
 
+fn collect_untracked_matched_paths(
+    entry: &SourceScopeEntry,
+    untracked_files: &[PathBuf],
+) -> Vec<SourceScopeUntrackedPathDecision> {
+    let mut matched_paths = Vec::new();
+    for relative_path in untracked_files {
+        let relative = normalize_path(relative_path);
+        let Some(included_glob) = entry
+            .included_globs
+            .iter()
+            .find(|glob| glob_matches(glob, &relative))
+        else {
+            continue;
+        };
+        if entry
+            .excluded_globs
+            .iter()
+            .any(|glob| glob_matches(glob, &relative))
+        {
+            continue;
+        }
+        matched_paths.push(SourceScopeUntrackedPathDecision {
+            source_path: relative,
+            source_glob: included_glob.clone(),
+            inclusion_decision: "untracked_excluded".to_owned(),
+            exclusion_reason: "untracked path excluded from canonical source hash".to_owned(),
+        });
+    }
+    matched_paths
+}
+
 struct WorkspaceFileCollection {
     files: Vec<PathBuf>,
+    untracked_files: Vec<PathBuf>,
     source: String,
     reason: String,
 }
@@ -1565,10 +1622,12 @@ fn collect_workspace_files(
 ) -> Result<WorkspaceFileCollection> {
     match collect_git_tracked_workspace_files(workspace_root) {
         Ok(files) => {
+            let untracked_files = collect_git_untracked_workspace_files(workspace_root)?;
             let missing_sources = unmatched_source_scope_entries(manifest, &files);
             if missing_sources.is_empty() {
                 Ok(WorkspaceFileCollection {
                     files,
+                    untracked_files,
                     source: "git_ls_files".to_owned(),
                     reason: "canonical scan uses git-tracked paths".to_owned(),
                 })
@@ -1579,6 +1638,7 @@ fn collect_workspace_files(
                 if filesystem_missing.len() < missing_sources.len() {
                     Ok(WorkspaceFileCollection {
                         files: filesystem_files,
+                        untracked_files: Vec::new(),
                         source: "filesystem_fallback".to_owned(),
                         reason: format!(
                             "git-tracked scan incomplete for {}; filesystem fallback missing {}",
@@ -1589,6 +1649,7 @@ fn collect_workspace_files(
                 } else {
                     Ok(WorkspaceFileCollection {
                         files,
+                        untracked_files,
                         source: "git_ls_files".to_owned(),
                         reason: format!(
                             "canonical scan uses git-tracked paths; missing {}",
@@ -1602,6 +1663,7 @@ fn collect_workspace_files(
             let files = collect_filesystem_workspace_files(workspace_root)?;
             Ok(WorkspaceFileCollection {
                 files,
+                untracked_files: Vec::new(),
                 source: "filesystem_fallback".to_owned(),
                 reason: format!("git-tracked scan unavailable: {git_err}"),
             })
@@ -1617,17 +1679,28 @@ fn collect_filesystem_workspace_files(workspace_root: &Path) -> Result<Vec<PathB
 }
 
 fn collect_git_tracked_workspace_files(workspace_root: &Path) -> Result<Vec<PathBuf>> {
+    collect_git_workspace_files(workspace_root, &["ls-files", "-z"])
+}
+
+fn collect_git_untracked_workspace_files(workspace_root: &Path) -> Result<Vec<PathBuf>> {
+    collect_git_workspace_files(
+        workspace_root,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )
+}
+
+fn collect_git_workspace_files(workspace_root: &Path, args: &[&str]) -> Result<Vec<PathBuf>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(workspace_root)
-        .arg("ls-files")
-        .arg("-z")
+        .args(args)
         .output()
-        .map_err(|err| anyhow::anyhow!("failed to run git ls-files: {err}"))?;
+        .map_err(|err| anyhow::anyhow!("failed to run git {}: {err}", args.join(" ")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(
-            "git ls-files exited with status {}: {}",
+            "git {} exited with status {}: {}",
+            args.join(" "),
             output.status,
             stderr.trim()
         );
@@ -2668,8 +2741,9 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
     use super::{
         DEFAULT_SOURCE_SCOPE_MANIFEST_JSON, REQUIRED_SOURCE_FAMILIES,
         SOURCE_SCOPE_MANIFEST_SCHEMA_VERSION, SourceScopeManifest, SourceScopeManifestReport,
-        count_note_matches, parse_source_scope_manifest, scan_source_scope_manifest,
-        validate_default_source_scope_manifest, validate_source_scope_manifest,
+        SourceScopeScanReport, count_note_matches, parse_source_scope_manifest,
+        scan_source_scope_manifest, validate_default_source_scope_manifest,
+        validate_source_scope_manifest,
     };
 
     fn fixture_manifest() -> SourceScopeManifest {
@@ -4057,6 +4131,104 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
             }),
             "untracked local artifact should not be part of canonical matched paths"
         );
+        assert_eq!(dirty_report.untracked_matched_path_count, 1);
+        assert_eq!(dirty_evidence.untracked_matched_path_count, 1);
+        assert_eq!(dirty_evidence.untracked_matched_paths.len(), 1);
+        let untracked_path = dirty_evidence
+            .untracked_matched_paths
+            .first()
+            .expect("untracked source-scope diagnostic");
+        assert_eq!(
+            untracked_path.source_path,
+            "artifacts/e2e/20990101_000000_untracked_local/run.log"
+        );
+        assert_eq!(untracked_path.inclusion_decision, "untracked_excluded");
+        assert!(
+            untracked_path
+                .exclusion_reason
+                .contains("canonical source hash")
+        );
+        assert!(
+            dirty_evidence.matched_paths.iter().any(|path| {
+                path.source_path == "artifacts/e2e/20260213_153535_ffs_ext4_rw_smoke/run.log"
+                    && path.inclusion_decision == "included"
+                    && path.file_hash.starts_with("sha256:")
+            }),
+            "tracked evidence artifact should remain canonical and hash-bearing"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn source_scope_scan_ignores_untracked_files_that_match_no_source_glob() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        populate_source_scope_workspace(temp.path())?;
+        index_source_scope_workspace(temp.path())?;
+        write_sample_file(
+            temp.path(),
+            "scratch/local-only.tmp",
+            "NOTE local scratch bd-rchk0 should not match source-scope globs\n",
+        )?;
+
+        let report = scan_source_scope_manifest(
+            &fixture_manifest(),
+            temp.path(),
+            None,
+            "cargo run -p ffs-harness -- validate-source-scope-manifest",
+        );
+
+        assert!(report.valid, "scan should validate: {:?}", report.errors);
+        assert_eq!(report.workspace_file_source, "git_ls_files");
+        assert_eq!(report.untracked_matched_path_count, 0);
+        assert!(report.scanned_sources.iter().all(|source| {
+            source
+                .untracked_matched_paths
+                .iter()
+                .all(|path| path.source_path != "scratch/local-only.tmp")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn source_scope_scan_report_json_shape() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        populate_source_scope_workspace(temp.path())?;
+        index_source_scope_workspace(temp.path())?;
+        write_sample_file(
+            temp.path(),
+            "artifacts/e2e/20990101_000000_untracked_local/run.log",
+            "SCENARIO_RESULT|scenario_id=local_dirty|outcome=PASS|bead_id=bd-rchk0\n",
+        )?;
+
+        let report = scan_source_scope_manifest(
+            &fixture_manifest(),
+            temp.path(),
+            None,
+            "cargo run -p ffs-harness -- validate-source-scope-manifest",
+        );
+        assert!(report.valid, "scan should validate: {:?}", report.errors);
+        let evidence = report
+            .scanned_sources
+            .iter()
+            .find(|source| source.source_family == "checked_in_evidence_artifacts")
+            .expect("checked-in evidence source scanned");
+
+        let shape = serde_json::json!({
+            "schema_version": report.schema_version,
+            "workspace_file_source": report.workspace_file_source,
+            "untracked_matched_path_count": report.untracked_matched_path_count,
+            "checked_in_evidence_artifacts": {
+                "matched_path_count": evidence.matched_paths.len(),
+                "untracked_matched_path_count": evidence.untracked_matched_path_count,
+                "untracked_matched_paths": evidence.untracked_matched_paths,
+            }
+        });
+        let shape_json = serde_json::to_string_pretty(&shape)?;
+        insta::assert_snapshot!("source_scope_scan_report_json_shape", shape_json);
+
+        let json = serde_json::to_string_pretty(&report)?;
+        let parsed: SourceScopeScanReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
         Ok(())
     }
 
