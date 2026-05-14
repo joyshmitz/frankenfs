@@ -173,6 +173,15 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__btrfs_multidevice_corpus__tests__btrfs_multidev_corpus_report_json_shape.snap",
         ),
         covered_advisory_row(
+            "casefold_corpus_report",
+            "crates/ffs-harness/src/casefold_corpus.rs",
+            "CasefoldCorpusReport",
+            "validate-casefold-corpus",
+            "ext4 casefold lookup/create/rename corpus gates",
+            "casefold_corpus_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__casefold_corpus__tests__casefold_corpus_report_json_shape.snap",
+        ),
+        covered_advisory_row(
             "repair_corpus_report",
             "crates/ffs-harness/src/repair_corpus.rs",
             "RepairCorpusReport",
@@ -830,12 +839,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 17);
+        assert_eq!(report.total_rows, 18);
         assert_eq!(report.required_rows, 6);
-        assert_eq!(report.advisory_only_rows, 9);
+        assert_eq!(report.advisory_only_rows, 10);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 16);
+        assert_eq!(report.covered_rows, 17);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
