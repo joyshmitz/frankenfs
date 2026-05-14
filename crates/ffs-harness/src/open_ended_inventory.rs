@@ -363,7 +363,7 @@ pub const DEFAULT_SOURCE_SCOPE_MANIFEST_PATH: &str =
 const DEFAULT_SOURCE_SCOPE_MANIFEST_JSON: &str =
     include_str!("../../../tests/source-scope-manifest/source_scope_manifest.json");
 
-const REQUIRED_SOURCE_FAMILIES: [&str; 12] = [
+const REQUIRED_SOURCE_FAMILIES: [&str; 13] = [
     "readme_status_docs",
     "feature_parity_doc",
     "conformance_docs",
@@ -372,6 +372,7 @@ const REQUIRED_SOURCE_FAMILIES: [&str; 12] = [
     "fuzz_corpus_notes",
     "fuzz_targets",
     "fuzz_orchestration",
+    "operational_scripts",
     "harness_scripts",
     "mounted_lane_docs",
     "repair_docs",
@@ -868,6 +869,7 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
         }
         "fuzz_targets" => validate_fuzz_targets_exclusions(entry, &excluded, errors),
         "fuzz_orchestration" => validate_fuzz_orchestration_exclusions(entry, &excluded, errors),
+        "operational_scripts" => validate_operational_scripts_exclusions(entry, &excluded, errors),
         "harness_scripts" if !excluded.contains("_artifacts") => {
             errors.push(format!(
                 "source `{}` must exclude generated e2e artifact directories",
@@ -875,6 +877,31 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             ));
         }
         _ => {}
+    }
+}
+
+fn validate_operational_scripts_exclusions(
+    entry: &SourceScopeEntry,
+    excluded: &str,
+    errors: &mut Vec<String>,
+) {
+    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+        errors.push(format!(
+            "source `{}` must exclude build target paths from operational script source scope",
+            entry.id
+        ));
+    }
+    if !excluded.contains("scripts/e2e") {
+        errors.push(format!(
+            "source `{}` must keep E2E scripts in the dedicated harness script source scope",
+            entry.id
+        ));
+    }
+    if !excluded.contains("scripts/archive") {
+        errors.push(format!(
+            "source `{}` must exclude archived scratch scripts from operational script source scope",
+            entry.id
+        ));
     }
 }
 
@@ -2121,6 +2148,10 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 "# NOTE fuzz orchestration bd-rchk7.1 artifact\n",
             ),
             (
+                "scripts/verify_golden.sh",
+                "# NOTE operational script bd-rchk7.1 artifact\n",
+            ),
+            (
                 "scripts/e2e/sample.sh",
                 "# NOTE mounted-e2e bd-rchk7.1 artifact\n",
             ),
@@ -2236,6 +2267,21 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .errors
                 .iter()
                 .any(|err| err.contains("missing required family `fuzz_orchestration`"))
+        );
+    }
+
+    #[test]
+    fn missing_operational_scripts_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "operational_scripts");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required family `operational_scripts`"))
         );
     }
 
@@ -2521,6 +2567,23 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .errors
                 .iter()
                 .any(|err| err.contains("vendor paths from fuzz orchestration source scope"))
+        );
+
+        let mut manifest = fixture_manifest();
+        let operational_scripts = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "operational_scripts")
+            .expect("operational script source exists");
+        operational_scripts
+            .excluded_globs
+            .retain(|glob| !glob.contains("scripts/e2e"));
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("dedicated harness script source scope"))
         );
     }
 

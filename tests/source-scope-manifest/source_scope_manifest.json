@@ -150,6 +150,29 @@
       "non_applicability_rationale": ""
     },
     {
+      "id": "operational_scripts",
+      "source_family": "operational_scripts",
+      "included_globs": [
+        "scripts/*.sh",
+        "scripts/*.py",
+        "scripts/fixtures/*.sh"
+      ],
+      "excluded_globs": [
+        "target/**",
+        "**/.rch-target/**",
+        "scripts/e2e/**",
+        "scripts/archive/**"
+      ],
+      "risk_category": "observability",
+      "owner": "harness",
+      "status": "active",
+      "expected_proof_types": ["golden-fixture", "mounted-e2e"],
+      "freshness_ttl_days": 14,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
       "id": "harness_scripts",
       "source_family": "harness_scripts",
       "included_globs": [
