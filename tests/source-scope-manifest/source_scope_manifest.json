@@ -262,6 +262,29 @@
       "non_applicability_rationale": ""
     },
     {
+      "id": "crate_manifest_and_benchmark_sources",
+      "source_family": "crate_manifest_and_benchmark_sources",
+      "included_globs": [
+        "Cargo.toml",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/*/benches/*.rs"
+      ],
+      "excluded_globs": [
+        "target/**",
+        "**/.rch-target/**",
+        "vendor/**"
+      ],
+      "risk_category": "performance",
+      "owner": "harness",
+      "status": "active",
+      "expected_proof_types": ["property-test", "long-campaign"],
+      "freshness_ttl_days": 30,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
       "id": "fuzz_campaign_artifacts",
       "source_family": "fuzz_campaign_artifacts",
       "included_globs": [

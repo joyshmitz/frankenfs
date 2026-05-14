@@ -301,6 +301,7 @@ required_families = {
     "test_control_artifacts",
     "tests",
     "checked_in_evidence_artifacts",
+    "crate_manifest_and_benchmark_sources",
     "fuzz_campaign_artifacts",
     "fuzz_corpus_notes",
     "fuzz_targets",

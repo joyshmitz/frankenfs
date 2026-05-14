@@ -363,7 +363,7 @@ pub const DEFAULT_SOURCE_SCOPE_MANIFEST_PATH: &str =
 const DEFAULT_SOURCE_SCOPE_MANIFEST_JSON: &str =
     include_str!("../../../tests/source-scope-manifest/source_scope_manifest.json");
 
-const REQUIRED_SOURCE_FAMILIES: [&str; 23] = [
+const REQUIRED_SOURCE_FAMILIES: [&str; 24] = [
     "readme_status_docs",
     "agent_workflow_docs",
     "feature_parity_doc",
@@ -374,6 +374,7 @@ const REQUIRED_SOURCE_FAMILIES: [&str; 23] = [
     "fixture_manifests",
     "test_control_artifacts",
     "tests",
+    "crate_manifest_and_benchmark_sources",
     "checked_in_evidence_artifacts",
     "fuzz_campaign_artifacts",
     "fuzz_corpus_notes",
@@ -447,6 +448,13 @@ const CHECKED_IN_EVIDENCE_ARTIFACT_GLOBS: [&str; 9] = [
     "artifacts/e2e/*/*.log",
     "artifacts/e2e/*/result.json",
     "artifacts/parity-deferred-followups.md",
+];
+
+const CRATE_MANIFEST_AND_BENCHMARK_SOURCE_GLOBS: [&str; 4] = [
+    "Cargo.toml",
+    "rust-toolchain.toml",
+    "crates/*/Cargo.toml",
+    "crates/*/benches/*.rs",
 ];
 
 const TEST_CONTROL_ARTIFACT_GLOBS: [&str; 16] = [
@@ -972,6 +980,9 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             validate_conformance_fixture_artifacts(entry, &excluded, errors);
         }
         "test_control_artifacts" => validate_test_control_artifacts(entry, &excluded, errors),
+        "crate_manifest_and_benchmark_sources" => {
+            validate_crate_manifest_and_benchmark_sources(entry, &excluded, errors);
+        }
         "checked_in_evidence_artifacts" => {
             validate_checked_in_evidence_artifacts(entry, &excluded, errors);
         }
@@ -993,6 +1004,37 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             validate_performance_control_artifacts(entry, &excluded, errors);
         }
         _ => {}
+    }
+}
+
+fn validate_crate_manifest_and_benchmark_sources(
+    entry: &SourceScopeEntry,
+    excluded: &str,
+    errors: &mut Vec<String>,
+) {
+    for required_glob in CRATE_MANIFEST_AND_BENCHMARK_SOURCE_GLOBS {
+        if !entry
+            .included_globs
+            .iter()
+            .any(|glob| glob == required_glob)
+        {
+            errors.push(format!(
+                "source `{}` must include crate manifest and benchmark source glob `{required_glob}`",
+                entry.id
+            ));
+        }
+    }
+    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+        errors.push(format!(
+            "source `{}` must exclude build target paths from crate manifests and benchmark sources",
+            entry.id
+        ));
+    }
+    if !excluded.contains("vendor") {
+        errors.push(format!(
+            "source `{}` must exclude vendor paths from crate manifests and benchmark sources",
+            entry.id
+        ));
     }
 }
 
@@ -2525,6 +2567,7 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         populate_architecture_design_doc_source_scope_workspace(root)?;
         populate_fuzz_campaign_artifact_source_scope_workspace(root)?;
         populate_checked_in_evidence_artifact_source_scope_workspace(root)?;
+        populate_crate_manifest_and_benchmark_source_scope_workspace(root)?;
         populate_performance_source_scope_workspace(root)
     }
 
@@ -2880,6 +2923,32 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         )
     }
 
+    fn populate_crate_manifest_and_benchmark_source_scope_workspace(
+        root: &Path,
+    ) -> anyhow::Result<()> {
+        write_sample_files(
+            root,
+            &[
+                (
+                    "Cargo.toml",
+                    "# NOTE workspace manifest bd-rchk0 artifact\n",
+                ),
+                (
+                    "rust-toolchain.toml",
+                    "# NOTE Rust toolchain manifest bd-rchk0 artifact\n",
+                ),
+                (
+                    "crates/ffs-block/Cargo.toml",
+                    "# NOTE crate manifest bd-rchk0 artifact\n",
+                ),
+                (
+                    "crates/ffs-block/benches/arc_cache.rs",
+                    "// bd-rchk5 benchmark source artifact\n",
+                ),
+            ],
+        )
+    }
+
     fn populate_performance_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
         write_sample_files(
             root,
@@ -3067,6 +3136,18 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .iter()
                 .any(|err| err.contains("missing required family `checked_in_evidence_artifacts`"))
         );
+    }
+
+    #[test]
+    fn missing_crate_manifest_and_benchmark_sources_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "crate_manifest_and_benchmark_sources");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("missing required family `crate_manifest_and_benchmark_sources`")
+        }));
     }
 
     #[test]
@@ -3673,6 +3754,27 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         assert!(report.errors.iter().any(|err| {
             err.contains("artifacts/optimization/*.json")
                 || err.contains("generated checked-in evidence artifact directories")
+        }));
+    }
+
+    #[test]
+    fn crate_manifest_and_benchmark_sources_coverage_is_validated() {
+        let mut manifest = fixture_manifest();
+        let crate_sources = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "crate_manifest_and_benchmark_sources")
+            .expect("crate manifest and benchmark source exists");
+        crate_sources
+            .included_globs
+            .retain(|glob| glob != "crates/*/benches/*.rs");
+        crate_sources
+            .excluded_globs
+            .retain(|glob| !glob.contains("vendor"));
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("crates/*/benches/*.rs")
+                || err.contains("vendor paths from crate manifests and benchmark sources")
         }));
     }
 
