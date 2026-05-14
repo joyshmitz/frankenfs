@@ -514,6 +514,10 @@ mod tests {
         assert!(markdown.contains("# Low-Privilege Demo"));
         assert!(markdown.contains("low-privilege kinds"));
         assert!(markdown.contains("host-skipped lanes"));
+        insta::assert_snapshot!(
+            "render_low_privilege_demo_markdown_default_manifest",
+            markdown
+        );
         Ok(())
     }
 

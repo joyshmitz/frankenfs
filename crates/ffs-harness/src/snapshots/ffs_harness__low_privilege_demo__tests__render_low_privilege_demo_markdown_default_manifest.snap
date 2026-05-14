@@ -1,0 +1,13 @@
+---
+source: crates/ffs-harness/src/low_privilege_demo.rs
+expression: markdown
+---
+# Low-Privilege Demo
+
+- manifest: `frankenfs_low_privilege_demo_v1`
+- schema version: `1`
+- bead: `bd-rchk0.5.13`
+- valid: `true`
+- lanes: `5`
+- low-privilege kinds: `invariant_oracle, parser_unit, release_gate_eval, repair_dry_run`
+- host-skipped lanes: `mounted_smoke`
