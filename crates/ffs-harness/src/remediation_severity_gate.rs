@@ -70,6 +70,12 @@ const REQUIRED_OUTCOME_COVERAGE: [&str; 7] = [
     "pass_with_experimental_caveat",
 ];
 
+const ALLOWED_HARNESS_ACTION_COMMANDS: [&str; 3] = [
+    "validate-cross-oracle-arbitration",
+    "validate-proof-bundle",
+    "validate-remediation-severity-gate",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemediationSeverityGate {
     pub schema_version: u32,
@@ -251,6 +257,7 @@ fn validate_entry(
         ));
     }
     validate_entry_required_text(entry, errors);
+    validate_harness_action_command(entry, errors);
     validate_dead_end_prevention(entry, errors);
     validate_entry_safety_invariants(entry, errors);
 }
@@ -366,6 +373,32 @@ fn validate_required_outcome_coverage(seen: &BTreeSet<String>, errors: &mut Vec<
     }
 }
 
+fn validate_harness_action_command(entry: &RemediationSeverityEntry, errors: &mut Vec<String>) {
+    let Some(command_name) = harness_command_name(&entry.immediate_action_command) else {
+        return;
+    };
+    if !ALLOWED_HARNESS_ACTION_COMMANDS.contains(&command_name) {
+        errors.push(format!(
+            "remediation `{}` immediate_action_command references unsupported ffs-harness command `{command_name}`; expected one of {}",
+            entry.remediation_id,
+            ALLOWED_HARNESS_ACTION_COMMANDS.join(", ")
+        ));
+    }
+}
+
+fn harness_command_name(command: &str) -> Option<&str> {
+    const MARKERS: [&str; 3] = [
+        "cargo run -p ffs-harness -- ",
+        "cargo run --quiet -p ffs-harness -- ",
+        "ffs-harness ",
+    ];
+    MARKERS.iter().find_map(|marker| {
+        command
+            .split_once(marker)
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+    })
+}
+
 #[must_use]
 pub fn render_remediation_severity_gate_markdown(report: &RemediationSeverityGateReport) -> String {
     let mut out = String::new();
@@ -433,6 +466,16 @@ mod tests {
             .first_mut()
             .context("missing second remediation severity gate entry")?;
         Ok((first, second))
+    }
+
+    fn entry_by_id_mut<'a>(
+        gate: &'a mut RemediationSeverityGate,
+        remediation_id: &str,
+    ) -> Result<&'a mut RemediationSeverityEntry> {
+        gate.entries
+            .iter_mut()
+            .find(|entry| entry.remediation_id == remediation_id)
+            .with_context(|| format!("missing remediation severity gate entry {remediation_id}"))
     }
 
     #[test]
@@ -559,6 +602,60 @@ mod tests {
                 .errors
                 .iter()
                 .any(|err| err.contains("is a dead end"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_harness_action_command_is_rejected() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        first_entry_mut(&mut gate)?.immediate_action_command =
+            "cargo run -p ffs-harness -- build-operator-proof-bundle --out bundle.json".to_owned();
+        let report = validate_remediation_severity_gate(&gate);
+
+        assert!(report.errors.iter().any(|err| {
+            err.contains("immediate_action_command references unsupported ffs-harness command")
+                && err.contains("build-operator-proof-bundle")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn stale_proof_bundle_uses_current_validator() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        let entry = entry_by_id_mut(&mut gate, "rem_stale_proof_bundle")?;
+
+        assert!(
+            entry
+                .immediate_action_command
+                .contains("validate-proof-bundle"),
+            "stale proof bundle remediation must point at validate-proof-bundle"
+        );
+        assert!(
+            !entry
+                .immediate_action_command
+                .contains("build-operator-proof-bundle"),
+            "stale proof bundle remediation must not advertise removed proof-bundle builder"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inconclusive_oracle_uses_current_arbitration_validator() -> Result<()> {
+        let mut gate = fixture_gate()?;
+        let entry = entry_by_id_mut(&mut gate, "rem_inconclusive_oracle_conflict")?;
+
+        assert!(
+            entry
+                .immediate_action_command
+                .contains("validate-cross-oracle-arbitration"),
+            "oracle conflict remediation must point at the current arbitration validator"
+        );
+        assert!(
+            !entry
+                .immediate_action_command
+                .contains("arbitrate-cross-oracle"),
+            "oracle conflict remediation must not advertise removed arbitration command"
         );
         Ok(())
     }

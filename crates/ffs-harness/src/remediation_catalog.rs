@@ -75,7 +75,7 @@ const REQUIRED_OUTCOME_COVERAGE: [&str; 7] = [
 
 const ALLOWED_HARNESS_REPRODUCTION_COMMANDS: [&str; 5] = [
     "fuse-capability-probe",
-    "build-operator-proof-bundle",
+    "validate-proof-bundle",
     "validate-adversarial-threat-model",
     "validate-repair-confidence-lab",
     "validate-remediation-catalog",

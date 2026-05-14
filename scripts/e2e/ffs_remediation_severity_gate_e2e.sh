@@ -112,6 +112,21 @@ required_classes = {
     "inconclusive_oracle_conflict",
     "pass_with_experimental_caveat",
 }
+allowed_harness_commands = {
+    "validate-cross-oracle-arbitration",
+    "validate-proof-bundle",
+    "validate-remediation-severity-gate",
+}
+def harness_command_name(command):
+    for marker in (
+        "cargo run -p ffs-harness -- ",
+        "cargo run --quiet -p ffs-harness -- ",
+        "ffs-harness ",
+    ):
+        if marker in command:
+            return command.split(marker, 1)[1].split()[0]
+    return None
+
 if not report["valid"]:
     raise SystemExit(report["errors"])
 if report["entry_count"] < 11:
@@ -130,6 +145,15 @@ for entry in gate["entries"]:
     has_non_goal = bool(entry.get("explicit_non_goal_rationale", "").strip())
     if has_action == has_non_goal:
         raise SystemExit(f"entry must have exactly one action or non-goal rationale: {entry['remediation_id']}")
+    command = entry["immediate_action_command"]
+    for stale_command in ("build-operator-proof-bundle", "arbitrate-cross-oracle"):
+        if stale_command in command:
+            raise SystemExit(f"stale harness command in {entry['remediation_id']}: {stale_command}")
+    command_name = harness_command_name(command)
+    if command_name and command_name not in allowed_harness_commands:
+        raise SystemExit(
+            f"unsupported ffs-harness command in {entry['remediation_id']}: {command_name}"
+        )
 PY
 then
     scenario_result "remediation_severity_gate_coverage" "PASS" "outcome coverage, blockers, docs, artifacts, and actions verified"

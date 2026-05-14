@@ -93,10 +93,10 @@
       "technical_cause": "Bundle generated_at exceeds the configured TTL or its source artifacts have changed hashes since generation.",
       "immediate_action": "Regenerate the proof bundle and rerun the release-gate evaluator before publishing readiness claims.",
       "safe_retry_policy": "regenerate_bundle_then_retry",
-      "reproduction_command": "rch exec -- cargo run -p ffs-harness -- build-operator-proof-bundle --out artifacts/proof-bundle/latest.json",
+      "reproduction_command": "rch exec -- cargo run -p ffs-harness -- validate-proof-bundle --bundle artifacts/proof/bundle/manifest.json --out artifacts/proof/bundle/report.json --summary-out artifacts/proof/bundle/summary.md",
       "artifact_links": [
-        "artifacts/proof-bundle/latest.json",
-        "artifacts/proof-bundle/latest.manifest.json"
+        "artifacts/proof/bundle/manifest.json",
+        "artifacts/proof/bundle/report.json"
       ],
       "owning_bead": "bd-rchk0.5.4",
       "escalation_path": "release@frankenfs",

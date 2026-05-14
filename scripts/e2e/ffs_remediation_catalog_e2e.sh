@@ -114,7 +114,7 @@ required_outcomes = {
 }
 allowed_harness_commands = {
     "fuse-capability-probe",
-    "build-operator-proof-bundle",
+    "validate-proof-bundle",
     "validate-adversarial-threat-model",
     "validate-repair-confidence-lab",
     "validate-remediation-catalog",
@@ -143,8 +143,9 @@ for entry in catalog["entries"]:
     if not entry["owning_bead"].startswith("bd-"):
         raise SystemExit(f"owning bead must be a bd id: {entry['id']}")
     command = entry["reproduction_command"]
-    if "run-repair-confidence-lab" in command:
-        raise SystemExit(f"stale repair-confidence runner command: {entry['id']}")
+    for stale_command in ("run-repair-confidence-lab", "build-operator-proof-bundle"):
+        if stale_command in command:
+            raise SystemExit(f"stale harness command in {entry['id']}: {stale_command}")
     for marker in (
         "cargo run -p ffs-harness -- ",
         "cargo run --quiet -p ffs-harness -- ",
