@@ -117,7 +117,7 @@ pub fn current_report_schema_inventory() -> ReportSchemaInventory {
 }
 
 fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
-    vec![
+    let mut rows = vec![
         covered_advisory_row(
             "readiness_lab_validation_report",
             "crates/ffs-harness/src/readiness_lab.rs",
@@ -145,6 +145,33 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "tracker_source_hygiene_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__tracker_source_hygiene__tests__tracker_source_hygiene_report_json_shape.snap",
         ),
+    ];
+    rows.extend(corpus_advisory_report_rows());
+    rows.extend([
+        covered_advisory_row(
+            "readiness_lab_numa_p99_replay_report",
+            "crates/ffs-harness/src/readiness_lab.rs",
+            "ReadinessLabNumaP99ReplayReport",
+            "readiness-lab NUMA/p99 replay",
+            "large-host swarm responsiveness advisory replay lane",
+            "readiness_lab_numa_p99_replay_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_lab__tests__readiness_lab_numa_p99_replay_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "readiness_action_autopilot_source_reports",
+            "crates/ffs-harness/src/readiness_action_autopilot.rs",
+            "Vec<ReadinessActionAutopilotReport>",
+            "readiness-action source fixture planner",
+            "readiness-action dry-run planner",
+            "readiness_action_autopilot_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_autopilot_report_json_shape.snap",
+        ),
+    ]);
+    rows
+}
+
+fn corpus_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
         covered_advisory_row(
             "fault_injection_corpus_report",
             "crates/ffs-harness/src/fault_injection_corpus.rs",
@@ -191,22 +218,13 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__repair_corpus__tests__repair_corpus_report_json_shape.snap",
         ),
         covered_advisory_row(
-            "readiness_lab_numa_p99_replay_report",
-            "crates/ffs-harness/src/readiness_lab.rs",
-            "ReadinessLabNumaP99ReplayReport",
-            "readiness-lab NUMA/p99 replay",
-            "large-host swarm responsiveness advisory replay lane",
-            "readiness_lab_numa_p99_replay_report_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_lab__tests__readiness_lab_numa_p99_replay_report_json_shape.snap",
-        ),
-        covered_advisory_row(
-            "readiness_action_autopilot_source_reports",
-            "crates/ffs-harness/src/readiness_action_autopilot.rs",
-            "Vec<ReadinessActionAutopilotReport>",
-            "readiness-action source fixture planner",
-            "readiness-action dry-run planner",
-            "readiness_action_autopilot_report_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_autopilot_report_json_shape.snap",
+            "workload_corpus_report",
+            "crates/ffs-harness/src/workload_corpus.rs",
+            "WorkloadCorpusValidationReport",
+            "validate-workload-corpus",
+            "P1 user-risk workload corpus proof-bundle coverage gates",
+            "workload_corpus_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__workload_corpus__tests__workload_corpus_report_json_shape.snap",
         ),
     ]
 }
@@ -839,12 +857,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 18);
+        assert_eq!(report.total_rows, 19);
         assert_eq!(report.required_rows, 6);
-        assert_eq!(report.advisory_only_rows, 10);
+        assert_eq!(report.advisory_only_rows, 11);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 17);
+        assert_eq!(report.covered_rows, 18);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
