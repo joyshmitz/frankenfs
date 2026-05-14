@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_TRACKER_SOURCE_HYGIENE_ISSUES: &str = ".beads/issues.jsonl";
 pub const DEFAULT_STALE_IN_PROGRESS_SECONDS: u64 = 21_600;
+pub const AGENT_MAIL_RESERVATION_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const DEFAULT_AGENT_MAIL_RESERVATION_SNAPSHOT_MAX_AGE_SECONDS: u64 = 3_600;
 pub const XFSTESTS_REAL_RUN_ACK_VALUE: &str = "xfstests-may-mutate-test-and-scratch-devices";
 pub const SWARM_WORKLOAD_REAL_RUN_ACK_VALUE: &str =
     "swarm-workload-may-use-permissioned-large-host";
@@ -343,6 +345,89 @@ pub struct TrackerSourceAwareQueueState {
     pub next_safe_actions: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMailReservationSnapshotConfig {
+    pub current_agent: String,
+    pub target_paths: Vec<String>,
+    pub report_now_epoch: i64,
+    pub source_max_age_seconds: u64,
+}
+
+impl Default for AgentMailReservationSnapshotConfig {
+    fn default() -> Self {
+        Self {
+            current_agent: String::new(),
+            target_paths: Vec::new(),
+            report_now_epoch: current_epoch_seconds(),
+            source_max_age_seconds: DEFAULT_AGENT_MAIL_RESERVATION_SNAPSHOT_MAX_AGE_SECONDS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMailReservationSnapshot {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub generated_at: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default, alias = "file_reservations")]
+    pub reservations: Vec<AgentMailReservationLease>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMailReservationLease {
+    #[serde(alias = "agent", alias = "agent_name")]
+    pub holder: String,
+    #[serde(alias = "path", alias = "pattern")]
+    pub path_pattern: String,
+    #[serde(default)]
+    pub exclusive: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default, alias = "created_at")]
+    pub created_ts: Option<String>,
+    #[serde(default, alias = "expires_at")]
+    pub expires_ts: Option<String>,
+    #[serde(default, alias = "released_at")]
+    pub released_ts: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMailReservationSnapshotReport {
+    pub schema_version: u32,
+    pub snapshot_status: String,
+    pub snapshot_schema_version: Option<u32>,
+    pub current_agent: String,
+    pub target_paths: Vec<String>,
+    pub source: Option<String>,
+    pub source_freshness: String,
+    pub generated_at: Option<String>,
+    pub generated_at_epoch: Option<i64>,
+    pub age_seconds: Option<i64>,
+    pub source_max_age_seconds: u64,
+    pub conflict_classification: String,
+    pub reservations: Vec<AgentMailReservationLeaseReport>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMailReservationLeaseReport {
+    pub holder: String,
+    pub path_pattern: String,
+    pub exclusive: bool,
+    pub reason: Option<String>,
+    pub created_ts: Option<String>,
+    pub expires_ts: Option<String>,
+    pub released_ts: Option<String>,
+    pub created_epoch: Option<i64>,
+    pub expires_epoch: Option<i64>,
+    pub released_epoch: Option<i64>,
+    pub active: bool,
+    pub overlaps_target: bool,
+    pub conflict_classification: String,
+}
+
 #[derive(Debug, Clone)]
 struct TrackerIssue<'a> {
     value: &'a Value,
@@ -557,6 +642,20 @@ pub fn analyze_tracker_source_hygiene(
     Ok(build_report(&issues, config))
 }
 
+pub fn analyze_agent_mail_reservation_snapshot_json(
+    snapshot_json: Option<&str>,
+    config: &AgentMailReservationSnapshotConfig,
+) -> Result<AgentMailReservationSnapshotReport> {
+    let Some(snapshot_json) = snapshot_json else {
+        return Ok(missing_agent_mail_reservation_snapshot_report(config));
+    };
+    let snapshot: AgentMailReservationSnapshot = serde_json::from_str(snapshot_json)
+        .context("failed to parse Agent Mail reservation snapshot JSON")?;
+    Ok(build_agent_mail_reservation_snapshot_report(
+        &snapshot, config,
+    ))
+}
+
 pub fn fail_on_tracker_source_hygiene_errors(report: &TrackerSourceHygieneReport) -> Result<()> {
     if !report.errors.is_empty() {
         bail!(
@@ -611,6 +710,249 @@ pub fn write_tracker_source_hygiene_local_graph_exports(
         &paths.local_nonclaimable_sha256,
         &local_nonclaimable_jsonl,
     )
+}
+
+fn missing_agent_mail_reservation_snapshot_report(
+    config: &AgentMailReservationSnapshotConfig,
+) -> AgentMailReservationSnapshotReport {
+    AgentMailReservationSnapshotReport {
+        schema_version: AGENT_MAIL_RESERVATION_SNAPSHOT_SCHEMA_VERSION,
+        snapshot_status: "missing".to_owned(),
+        snapshot_schema_version: None,
+        current_agent: config.current_agent.clone(),
+        target_paths: config.target_paths.clone(),
+        source: None,
+        source_freshness: "unknown".to_owned(),
+        generated_at: None,
+        generated_at_epoch: None,
+        age_seconds: None,
+        source_max_age_seconds: config.source_max_age_seconds,
+        conflict_classification: "unknown".to_owned(),
+        reservations: Vec::new(),
+        errors: Vec::new(),
+    }
+}
+
+fn build_agent_mail_reservation_snapshot_report(
+    snapshot: &AgentMailReservationSnapshot,
+    config: &AgentMailReservationSnapshotConfig,
+) -> AgentMailReservationSnapshotReport {
+    let mut errors = Vec::new();
+    if snapshot.schema_version != AGENT_MAIL_RESERVATION_SNAPSHOT_SCHEMA_VERSION {
+        errors.push(format!(
+            "schema_version must be {AGENT_MAIL_RESERVATION_SNAPSHOT_SCHEMA_VERSION}; got {}",
+            snapshot.schema_version
+        ));
+    }
+
+    let generated_at_epoch = parse_optional_timestamp(
+        snapshot.generated_at.as_deref(),
+        "generated_at",
+        &mut errors,
+    );
+    let age_seconds = generated_at_epoch.map(|epoch| config.report_now_epoch - epoch);
+    let source_freshness = classify_snapshot_freshness(
+        snapshot.generated_at.as_deref(),
+        generated_at_epoch,
+        age_seconds,
+        config.source_max_age_seconds,
+    );
+    let reservations: Vec<AgentMailReservationLeaseReport> = snapshot
+        .reservations
+        .iter()
+        .enumerate()
+        .map(|(index, lease)| {
+            agent_mail_reservation_lease_report(index, lease, config, &mut errors)
+        })
+        .collect();
+    let conflict_classification = aggregate_reservation_conflicts(&reservations);
+
+    AgentMailReservationSnapshotReport {
+        schema_version: AGENT_MAIL_RESERVATION_SNAPSHOT_SCHEMA_VERSION,
+        snapshot_status: "present".to_owned(),
+        snapshot_schema_version: Some(snapshot.schema_version),
+        current_agent: config.current_agent.clone(),
+        target_paths: config.target_paths.clone(),
+        source: snapshot.source.clone(),
+        source_freshness,
+        generated_at: snapshot.generated_at.clone(),
+        generated_at_epoch,
+        age_seconds,
+        source_max_age_seconds: config.source_max_age_seconds,
+        conflict_classification,
+        reservations,
+        errors,
+    }
+}
+
+fn agent_mail_reservation_lease_report(
+    index: usize,
+    lease: &AgentMailReservationLease,
+    config: &AgentMailReservationSnapshotConfig,
+    errors: &mut Vec<String>,
+) -> AgentMailReservationLeaseReport {
+    let context = format!("reservations[{index}]");
+    let created_epoch = parse_optional_timestamp(
+        lease.created_ts.as_deref(),
+        &format!("{context}.created_ts"),
+        errors,
+    );
+    let expires_epoch = parse_optional_timestamp(
+        lease.expires_ts.as_deref(),
+        &format!("{context}.expires_ts"),
+        errors,
+    );
+    let released_epoch = parse_optional_timestamp(
+        lease.released_ts.as_deref(),
+        &format!("{context}.released_ts"),
+        errors,
+    );
+
+    if lease.expires_ts.is_none() {
+        errors.push(format!(
+            "{context}.expires_ts is required for active-conflict classification"
+        ));
+    }
+
+    let malformed_timestamp = timestamp_was_malformed(lease.created_ts.as_deref(), created_epoch)
+        || timestamp_was_malformed(lease.expires_ts.as_deref(), expires_epoch)
+        || timestamp_was_malformed(lease.released_ts.as_deref(), released_epoch)
+        || lease.expires_ts.is_none();
+    let released = released_epoch.is_some();
+    let expired = expires_epoch.is_some_and(|epoch| epoch <= config.report_now_epoch);
+    let active = !malformed_timestamp && !released && !expired;
+    let overlaps_target = config
+        .target_paths
+        .iter()
+        .any(|target| reservation_patterns_overlap(&lease.path_pattern, target));
+    let conflict_classification = if malformed_timestamp {
+        "malformed_timestamp"
+    } else if released {
+        "released"
+    } else if expired {
+        "expired"
+    } else if config.target_paths.is_empty() {
+        "no_target_paths"
+    } else if !overlaps_target {
+        "non_overlapping"
+    } else if !active {
+        "inactive"
+    } else if !lease.exclusive {
+        "shared_observation"
+    } else if lease.holder == config.current_agent {
+        "self_held"
+    } else {
+        "active_peer_conflict"
+    }
+    .to_owned();
+
+    AgentMailReservationLeaseReport {
+        holder: lease.holder.clone(),
+        path_pattern: lease.path_pattern.clone(),
+        exclusive: lease.exclusive,
+        reason: lease.reason.clone(),
+        created_ts: lease.created_ts.clone(),
+        expires_ts: lease.expires_ts.clone(),
+        released_ts: lease.released_ts.clone(),
+        created_epoch,
+        expires_epoch,
+        released_epoch,
+        active,
+        overlaps_target,
+        conflict_classification,
+    }
+}
+
+fn classify_snapshot_freshness(
+    generated_at: Option<&str>,
+    generated_at_epoch: Option<i64>,
+    age_seconds: Option<i64>,
+    max_age_seconds: u64,
+) -> String {
+    if generated_at.is_none() {
+        return "unknown".to_owned();
+    }
+    match (generated_at_epoch, age_seconds) {
+        (None, _) => "invalid".to_owned(),
+        (Some(_), Some(age)) if age < 0 => "future".to_owned(),
+        (Some(_), Some(age)) if age <= i64::try_from(max_age_seconds).unwrap_or(i64::MAX) => {
+            "fresh".to_owned()
+        }
+        (Some(_), Some(_)) => "stale".to_owned(),
+        (Some(_), None) => "unknown".to_owned(),
+    }
+}
+
+fn aggregate_reservation_conflicts(reservations: &[AgentMailReservationLeaseReport]) -> String {
+    for classification in [
+        "malformed_timestamp",
+        "active_peer_conflict",
+        "self_held",
+        "shared_observation",
+    ] {
+        if reservations
+            .iter()
+            .any(|row| row.conflict_classification == classification)
+        {
+            return classification.to_owned();
+        }
+    }
+    "no_active_conflict".to_owned()
+}
+
+fn parse_optional_timestamp(
+    value: Option<&str>,
+    field: &str,
+    errors: &mut Vec<String>,
+) -> Option<i64> {
+    value.and_then(|raw| {
+        let parsed = parse_utc_timestamp_seconds(raw);
+        if parsed.is_none() {
+            errors.push(format!("{field} is not a supported UTC timestamp: {raw}"));
+        }
+        parsed
+    })
+}
+
+fn timestamp_was_malformed(raw: Option<&str>, parsed: Option<i64>) -> bool {
+    raw.is_some() && parsed.is_none()
+}
+
+fn reservation_patterns_overlap(left: &str, right: &str) -> bool {
+    left == right || wildcard_match(left, right) || wildcard_match(right, left)
+}
+
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let text = text.as_bytes();
+    let mut pattern_index = 0;
+    let mut text_index = 0;
+    let mut star_index = None;
+    let mut star_text_index = 0;
+
+    while text_index < text.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == text[text_index])
+        {
+            pattern_index += 1;
+            text_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star_index = Some(pattern_index);
+            star_text_index = text_index;
+            pattern_index += 1;
+        } else if let Some(star) = star_index {
+            pattern_index = star + 1;
+            star_text_index += 1;
+            text_index = star_text_index;
+        } else {
+            return false;
+        }
+    }
+
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1530,6 +1872,32 @@ mod tests {
             .collect()
     }
 
+    fn reservation_config() -> Result<AgentMailReservationSnapshotConfig, String> {
+        Ok(AgentMailReservationSnapshotConfig {
+            current_agent: "SapphireLotus".to_owned(),
+            target_paths: vec![".beads/issues.jsonl".to_owned()],
+            report_now_epoch: parse_utc_timestamp_seconds("2026-05-14T08:00:00Z")
+                .ok_or_else(|| "fixed test timestamp must parse".to_owned())?,
+            source_max_age_seconds: 3_600,
+        })
+    }
+
+    fn reservation_snapshot_with_generated(
+        generated_at: &str,
+        reservations: &Value,
+    ) -> Result<String, String> {
+        line(&serde_json::json!({
+            "schema_version": AGENT_MAIL_RESERVATION_SNAPSHOT_SCHEMA_VERSION,
+            "generated_at": generated_at,
+            "source": "agent-mail-fixture",
+            "reservations": reservations,
+        }))
+    }
+
+    fn reservation_snapshot(reservations: &Value) -> Result<String, String> {
+        reservation_snapshot_with_generated("2026-05-14T07:45:00Z", reservations)
+    }
+
     fn assert_golden_core_counts(
         report: &TrackerSourceHygieneReport,
         golden: &Value,
@@ -1813,6 +2181,161 @@ mod tests {
             "reproduction_command_count": report.reproduction_commands.len(),
             "errors": &report.errors,
         })
+    }
+
+    #[test]
+    fn agent_mail_reservation_missing_snapshot_is_unknown() -> Result<(), String> {
+        let report = analyze_agent_mail_reservation_snapshot_json(None, &reservation_config()?)
+            .map_err(|err| err.to_string())?;
+
+        assert_eq!(report.snapshot_status, "missing");
+        assert_eq!(report.source_freshness, "unknown");
+        assert_eq!(report.conflict_classification, "unknown");
+        assert!(report.reservations.is_empty());
+        assert!(report.errors.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn agent_mail_reservation_active_peer_conflict() -> Result<(), String> {
+        let snapshot = reservation_snapshot(&serde_json::json!([
+            {
+                "holder": "OtherAgent",
+                "path_pattern": ".beads/issues.jsonl",
+                "exclusive": true,
+                "reason": "bd-peer",
+                "created_ts": "2026-05-14T07:30:00Z",
+                "expires_ts": "2026-05-14T09:00:00Z"
+            }
+        ]))?;
+
+        let report =
+            analyze_agent_mail_reservation_snapshot_json(Some(&snapshot), &reservation_config()?)
+                .map_err(|err| err.to_string())?;
+        let row = first_item(&report.reservations, "reservation rows")?;
+
+        assert_eq!(report.snapshot_status, "present");
+        assert_eq!(report.source_freshness, "fresh");
+        assert_eq!(report.conflict_classification, "active_peer_conflict");
+        assert_eq!(row.conflict_classification, "active_peer_conflict");
+        assert!(row.active);
+        assert!(row.overlaps_target);
+        assert!(report.errors.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn agent_mail_reservation_expired_lease_is_not_active_conflict() -> Result<(), String> {
+        let snapshot = reservation_snapshot_with_generated(
+            "2026-05-14T05:00:00Z",
+            &serde_json::json!([
+                {
+                    "holder": "OtherAgent",
+                    "path_pattern": ".beads/issues.jsonl",
+                    "exclusive": true,
+                    "reason": "expired",
+                    "created_ts": "2026-05-14T06:00:00Z",
+                    "expires_ts": "2026-05-14T07:00:00Z"
+                }
+            ]),
+        )?;
+
+        let report =
+            analyze_agent_mail_reservation_snapshot_json(Some(&snapshot), &reservation_config()?)
+                .map_err(|err| err.to_string())?;
+        let row = first_item(&report.reservations, "reservation rows")?;
+
+        assert_eq!(report.source_freshness, "stale");
+        assert_eq!(report.conflict_classification, "no_active_conflict");
+        assert_eq!(row.conflict_classification, "expired");
+        assert!(!row.active);
+        assert!(row.overlaps_target);
+        assert!(report.errors.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn agent_mail_reservation_shared_observation_lease_is_nonexclusive() -> Result<(), String> {
+        let snapshot = reservation_snapshot(&serde_json::json!([
+            {
+                "holder": "OtherAgent",
+                "path_pattern": ".beads/issues.jsonl",
+                "exclusive": false,
+                "reason": "observe",
+                "created_ts": "2026-05-14T07:30:00Z",
+                "expires_ts": "2026-05-14T09:00:00Z"
+            }
+        ]))?;
+
+        let report =
+            analyze_agent_mail_reservation_snapshot_json(Some(&snapshot), &reservation_config()?)
+                .map_err(|err| err.to_string())?;
+        let row = first_item(&report.reservations, "reservation rows")?;
+
+        assert_eq!(report.conflict_classification, "shared_observation");
+        assert_eq!(row.conflict_classification, "shared_observation");
+        assert!(row.active);
+        assert!(!row.exclusive);
+        assert!(report.errors.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn agent_mail_reservation_self_held_lease_is_distinct_from_peer_conflict() -> Result<(), String>
+    {
+        let snapshot = reservation_snapshot(&serde_json::json!([
+            {
+                "holder": "SapphireLotus",
+                "path_pattern": ".beads/issues.jsonl",
+                "exclusive": true,
+                "reason": "bd-self",
+                "created_ts": "2026-05-14T07:30:00Z",
+                "expires_ts": "2026-05-14T09:00:00Z"
+            }
+        ]))?;
+
+        let report =
+            analyze_agent_mail_reservation_snapshot_json(Some(&snapshot), &reservation_config()?)
+                .map_err(|err| err.to_string())?;
+        let row = first_item(&report.reservations, "reservation rows")?;
+
+        assert_eq!(report.conflict_classification, "self_held");
+        assert_eq!(row.conflict_classification, "self_held");
+        assert!(row.active);
+        assert!(row.overlaps_target);
+        assert!(report.errors.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn agent_mail_reservation_malformed_timestamp_is_reported() -> Result<(), String> {
+        let snapshot = reservation_snapshot(&serde_json::json!([
+            {
+                "holder": "OtherAgent",
+                "path_pattern": ".beads/issues.jsonl",
+                "exclusive": true,
+                "reason": "bad timestamp",
+                "created_ts": "2026-05-14T07:30:00Z",
+                "expires_ts": "not-a-timestamp"
+            }
+        ]))?;
+
+        let report =
+            analyze_agent_mail_reservation_snapshot_json(Some(&snapshot), &reservation_config()?)
+                .map_err(|err| err.to_string())?;
+        let row = first_item(&report.reservations, "reservation rows")?;
+
+        assert_eq!(report.conflict_classification, "malformed_timestamp");
+        assert_eq!(row.conflict_classification, "malformed_timestamp");
+        assert!(!row.active);
+        assert_eq!(row.expires_epoch, None);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("expires_ts"))
+        );
+        Ok(())
     }
 
     #[test]
