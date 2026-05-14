@@ -64,6 +64,65 @@
       ]
     },
     {
+      "suite_id": "ffs_rch_proof_ledger",
+      "script": "scripts/e2e/ffs_rch_proof_ledger_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "rch_proof_ledger_cli_docs_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=rch_proof_ledger_cli_docs_wired|outcome=PASS"
+        },
+        {
+          "id": "rch_proof_ledger_artifacts_written",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=rch_proof_ledger_artifacts_written|outcome=PASS"
+        },
+        {
+          "id": "rch_proof_ledger_remote_success_contract",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=rch_proof_ledger_remote_success_contract|outcome=PASS"
+        },
+        {
+          "id": "rch_proof_ledger_artifact_warning_degraded",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=rch_proof_ledger_artifact_warning_degraded|outcome=PASS"
+        },
+        {
+          "id": "rch_proof_ledger_local_fallback_invalid",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=rch_proof_ledger_local_fallback_invalid|outcome=PASS"
+        },
+        {
+          "id": "rch_proof_ledger_operator_docs_boundaries",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=rch_proof_ledger_operator_docs_boundaries|outcome=PASS"
+        },
+        {
+          "id": "rch_proof_ledger_fixture_no_live_worker",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=rch_proof_ledger_fixture_no_live_worker|outcome=PASS"
+        },
+        {
+          "id": "rch_proof_ledger_catalog_valid",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=rch_proof_ledger_catalog_valid|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_btrfs_rw_smoke",
       "script": "scripts/e2e/ffs_btrfs_rw_smoke.sh",
       "required_categories": [

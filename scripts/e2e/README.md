@@ -2000,3 +2000,28 @@ the marker to `e2e_rch_capture_fixture_matrix_markers` only if the live helper
 emits or parses a new marker. Do not add any accepted artifact-retrieval marker;
 new classes must preserve the existing local-fallback, timeout, missing-evidence,
 and artifact-retrieval fail-closed checks.
+
+## RCH Proof Ledger Gate
+
+`ffs_rch_proof_ledger_e2e.sh` is a no-worker fixture gate for operator proof
+handoffs. It writes synthetic RCH transcripts plus JSON and Markdown ledgers
+covering clean remote success, degraded artifact retrieval, and local fallback
+rejection. The fixture lane must not invoke cargo, `rch`, or `e2e_rch_capture`.
+
+Run it with cleanup disabled when preserving artifacts for review:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 ./scripts/e2e/ffs_rch_proof_ledger_e2e.sh
+```
+
+For real transcripts, use the harness parser documented in
+`docs/runbooks/rch-proof-ledger.md`:
+
+```bash
+ffs-harness rch-proof-ledger --transcript artifacts/e2e/run/cargo_check.raw \
+  --command-arg cargo --command-arg check --command-arg -p \
+  --command-arg ffs-harness --command-arg --all-targets \
+  --cwd /data/projects/frankenfs --env CARGO_TARGET_DIR \
+  --out artifacts/e2e/run/rch_proof_ledger.json \
+  --summary-out artifacts/e2e/run/rch_proof_ledger.md
+```

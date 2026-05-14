@@ -217,6 +217,88 @@ pub fn build_rch_proof_ledger_report(
     }
 }
 
+/// Render an operator-facing Markdown summary for an RCH proof ledger.
+#[must_use]
+pub fn render_rch_proof_ledger_markdown(report: &RchProofLedgerReport) -> String {
+    let command = if report.command.is_empty() {
+        "<unknown>".to_owned()
+    } else {
+        report.command.join(" ")
+    };
+    let env_allowlist = if report.env_allowlist.is_empty() {
+        "none".to_owned()
+    } else {
+        report.env_allowlist.join(", ")
+    };
+    let warnings = if report.warnings.is_empty() {
+        "none".to_owned()
+    } else {
+        report.warnings.join(", ")
+    };
+
+    format!(
+        "\
+# RCH Proof Ledger
+
+- Schema version: `{}`
+- Verdict: `{}`
+- Worker: `{}`
+- Remote exit code: `{}`
+- Remote duration ms: `{}`
+- Fallback detected: `{}`
+- Local fallback reason: `{}`
+- Command: `{}`
+- CWD: `{}`
+- Environment allowlist: `{}`
+- Source artifact retrieval: `{}`
+- Target artifact retrieval: `{}`
+- Warnings: `{}`
+
+## Operator Decision
+
+{}
+",
+        report.schema_version,
+        report.proof_verdict,
+        report.worker_id.as_deref().unwrap_or("unknown"),
+        report
+            .remote_exit_code
+            .map_or_else(|| "unknown".to_owned(), |code| code.to_string()),
+        report
+            .remote_duration_ms
+            .map_or_else(|| "unknown".to_owned(), |duration| duration.to_string()),
+        report.fallback_detected,
+        report.local_fallback_reason.as_deref().unwrap_or("none"),
+        command,
+        report.cwd,
+        env_allowlist,
+        report.artifact_retrieval_status.source,
+        report.artifact_retrieval_status.target,
+        warnings,
+        rch_operator_decision(report),
+    )
+}
+
+fn rch_operator_decision(report: &RchProofLedgerReport) -> &'static str {
+    match report.proof_verdict.as_str() {
+        "remote_success" => {
+            "Worker-side `exit=0` is sufficient validation proof when the command, worker, and transcript match the claimed gate."
+        }
+        "remote_success_artifact_warning" => {
+            "Worker-side `exit=0` is usable proof only with a degraded-proof note naming the artifact retrieval or rsync warning."
+        }
+        "invalid_local_fallback" => {
+            "Local fallback is not remote validation proof. Rerun on RCH or report the remote-execution blocker."
+        }
+        "remote_failure" => {
+            "The remote command failed. Treat this as a failed validation or product/tooling failure according to the command transcript."
+        }
+        _ => {
+            "Remote worker evidence is incomplete. Do not claim validation until the transcript includes worker and exit evidence."
+        }
+    }
+}
+
 fn parse_selected_worker(line: &str) -> Option<String> {
     let worker = line
         .split_once("Selected worker: ")?
@@ -2149,6 +2231,26 @@ WARN rch::transfer: rsync verification warning: checksum mismatch
         assert_eq!(report.artifact_retrieval_status.target, "retrieved");
         assert_eq!(report.proof_verdict, "remote_success_artifact_warning");
         assert!(has_rch_warning(&report, "rsync_verification_warning"));
+    }
+
+    #[test]
+    fn rch_proof_ledger_markdown_summarizes_operator_decision() {
+        let transcript = "\
+Selected worker: vmi1227854 at ubuntu@203.0.113.10
+Remote command finished: exit=0 in 2400ms
+Retrieving artifacts from /data/projects/frankenfs on vmi1227854
+Artifacts retrieved: 4 files, 16K
+Retrieving artifacts from /data/projects/frankenfs/.rch-target on vmi1227854
+[RCH] remote vmi1227854 (2.4s)
+";
+        let report = build_rch_proof_ledger_report(transcript, &sample_rch_proof_config());
+        let markdown = render_rch_proof_ledger_markdown(&report);
+
+        assert!(markdown.contains("# RCH Proof Ledger"));
+        assert!(markdown.contains("Verdict: `remote_success_artifact_warning`"));
+        assert!(markdown.contains("Target artifact retrieval: `stalled`"));
+        assert!(markdown.contains("degraded-proof note"));
+        assert!(!markdown.contains("sample-credential"));
     }
 
     // ── build_manifest_from_parsed ───────────────────────────────────

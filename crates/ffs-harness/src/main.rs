@@ -290,7 +290,10 @@ use ffs_harness::{
         write_tracker_source_hygiene_local_graph_exports,
     },
     validate_btrfs_fixture, validate_ext4_fixture,
-    verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
+    verification_runner::{
+        FuseHostProbeOptions, RchProofLedgerConfig, build_rch_proof_ledger_report,
+        probe_host_fuse_capability, render_rch_proof_ledger_markdown,
+    },
     wal_group_commit_gate::{
         DEFAULT_WAL_GROUP_COMMIT_GATE_MANIFEST, fail_on_wal_group_commit_gate_errors,
         load_wal_group_commit_gate_manifest, render_wal_group_commit_gate_markdown,
@@ -583,6 +586,7 @@ fn run() -> Result<()> {
         }
         Some("validate-docs-status-drift") => validate_docs_status_drift_cmd(&args[1..]),
         Some("validate-tracker-source-hygiene") => validate_tracker_source_hygiene_cmd(&args[1..]),
+        Some("rch-proof-ledger") => rch_proof_ledger_cmd(&args[1..]),
         Some("validate-fuzz-smoke") => validate_fuzz_smoke_cmd(&args[1..]),
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
         Some("adaptive-runtime-runner") => adaptive_runtime_runner_cmd(&args[1..]),
@@ -3088,6 +3092,114 @@ fn parse_readiness_report_format(raw: &str) -> Result<ReadinessReportFormat> {
         "markdown" | "md" => Ok(ReadinessReportFormat::Markdown),
         other => bail!("invalid --format value: {other}"),
     }
+}
+
+fn rch_proof_ledger_cmd(args: &[String]) -> Result<()> {
+    let mut transcript_path: Option<String> = None;
+    let mut command_line = Vec::new();
+    let mut cwd = env::current_dir()
+        .context("failed to read current directory")?
+        .display()
+        .to_string();
+    let mut env_allowlist = Vec::new();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ReadinessReportFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--transcript" => {
+                i += 1;
+                transcript_path = Some(
+                    args.get(i)
+                        .context("--transcript requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--command-arg" => {
+                i += 1;
+                command_line.push(
+                    args.get(i)
+                        .context("--command-arg requires a value")?
+                        .to_owned(),
+                );
+            }
+            "--cwd" => {
+                i += 1;
+                args.get(i)
+                    .context("--cwd requires a path")?
+                    .clone_into(&mut cwd);
+            }
+            "--env" => {
+                i += 1;
+                env_allowlist.push(args.get(i).context("--env requires a name")?.to_owned());
+            }
+            "--format" => {
+                i += 1;
+                format = parse_readiness_report_format(
+                    args.get(i).context("--format requires json or markdown")?,
+                )?;
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_rch_proof_ledger_usage();
+                return Ok(());
+            }
+            other => bail!("unknown rch-proof-ledger argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let transcript_path = transcript_path.context("--transcript is required")?;
+    let transcript = fs::read_to_string(&transcript_path)
+        .with_context(|| format!("failed to read {transcript_path}"))?;
+    let report = build_rch_proof_ledger_report(
+        &transcript,
+        &RchProofLedgerConfig {
+            command_line,
+            cwd,
+            env_allowlist,
+        },
+    );
+    let markdown = render_rch_proof_ledger_markdown(&report);
+    let output = match format {
+        ReadinessReportFormat::Json => serde_json::to_string_pretty(&report)?,
+        ReadinessReportFormat::Markdown => markdown.clone(),
+    };
+
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "rch proof ledger written: {path} verdict={}",
+            report.proof_verdict
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = summary_out_path {
+        write_text_file(Path::new(&path), &markdown)?;
+    }
+
+    Ok(())
+}
+
+fn print_rch_proof_ledger_usage() {
+    println!(
+        "Usage: ffs-harness rch-proof-ledger --transcript FILE [--command-arg ARG ...] [--cwd DIR] [--env NAME ...] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
 }
 
 fn validate_proof_bundle_cmd(args: &[String]) -> Result<()> {
@@ -9112,6 +9224,9 @@ fn print_usage_commands() {
     print_chaos_replay_lab_usage_summary();
     print_inventory_closeout_gate_usage_summary();
     print_report_schema_inventory_usage_summary();
+    println!(
+        "  ffs-harness rch-proof-ledger --transcript FILE [--command-arg ARG ...] [--cwd DIR] [--env NAME ...] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
     println!(
         "  ffs-harness validate-remediation-catalog [--catalog FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
