@@ -155,6 +155,15 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__fault_injection_corpus__tests__fault_injection_corpus_report_json_shape.snap",
         ),
         covered_advisory_row(
+            "btrfs_send_receive_corpus_report",
+            "crates/ffs-harness/src/btrfs_send_receive_corpus.rs",
+            "BtrfsSendReceiveCorpusReport",
+            "validate-btrfs-send-receive-corpus",
+            "btrfs send/receive parser and refusal corpus gates",
+            "btrfs_send_receive_corpus_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__btrfs_send_receive_corpus__tests__btrfs_send_receive_corpus_report_json_shape.snap",
+        ),
+        covered_advisory_row(
             "repair_corpus_report",
             "crates/ffs-harness/src/repair_corpus.rs",
             "RepairCorpusReport",
@@ -812,12 +821,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 15);
+        assert_eq!(report.total_rows, 16);
         assert_eq!(report.required_rows, 6);
-        assert_eq!(report.advisory_only_rows, 7);
+        assert_eq!(report.advisory_only_rows, 8);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 14);
+        assert_eq!(report.covered_rows, 15);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
