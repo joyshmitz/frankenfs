@@ -38,8 +38,8 @@ of the run artifact.
 | Workstream      | Workload                                  | Owning bench                                                          | Image / dataset                                                |
 |-----------------|-------------------------------------------|-----------------------------------------------------------------------|----------------------------------------------------------------|
 | Block I/O       | direct sequential 4K read                 | `crates/ffs-block/benches/arc_cache.rs`                               | 64 MiB synthetic + 4K page workload                            |
-| Block I/O       | direct sequential 4K write                | (extend `arc_cache.rs`)                                               | 64 MiB synthetic                                               |
-| Block I/O       | random 4K read mix                        | `crates/ffs-block/benches/arc_cache.rs`                               | 64 MiB synthetic + 80% read/20% write                          |
+| Block I/O       | writeback sequential 4K write             | `crates/ffs-block/benches/arc_cache.rs`                               | writeback cache, 1024-block rolling 4K write window            |
+| Block I/O       | writeback random 4K write                 | `crates/ffs-block/benches/arc_cache.rs`                               | writeback cache, seeded random 1024-block 4K write targets     |
 | ARC cache       | warm-cache read latency                   | `crates/ffs-block/benches/arc_cache.rs`                               | 256 KiB working set vs ARC capacity                            |
 | ARC cache       | cold-cache miss path                      | `crates/ffs-block/benches/arc_cache.rs`                               | working set > ARC capacity                                     |
 | MVCC            | optimistic commit (no conflict)           | `crates/ffs-mvcc/benches/wal_throughput.rs`                           | 1k-block append-only workload                                  |
@@ -222,11 +222,12 @@ exists, with the repair symbol refresh staleness path covered by
 ratio covered by `mvcc_merge_proof_append_only_success_rate` in
 `crates/ffs-mvcc/benches/wal_throughput.rs`.
 
-The remaining benchmark extensions before the coverage matrix is fully
-exercised are the "Block I/O direct sequential 4K write" and "Block I/O random
-4K read mix" rows. They reuse `arc_cache.rs` but require additional
-`Criterion::bench_function` blocks; they are extensions of the existing bench
-file rather than new files.
+The manifest now includes the existing Block I/O read and writeback write rows
+from `arc_cache.rs`: `block_cache_arc_sequential_scan`,
+`writeback_write_seq_4k`, and `writeback_write_random_4k`. No Block I/O row in
+this document requires new Criterion blocks; future work should collect fresh
+measurement artifacts and compare them under the manifest rather than expanding
+this file for these paths.
 
 ## What this manifest is not
 

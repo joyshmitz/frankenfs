@@ -1537,7 +1537,7 @@ mod tests {
         let report =
             validate_performance_baseline_manifest(&manifest, "artifacts/performance/dry-run");
         assert!(report.valid, "{:?}", report.errors);
-        assert_eq!(report.workload_count, 13);
+        assert_eq!(report.workload_count, 15);
         assert_eq!(report.missing_required_workload_kinds, Vec::<String>::new());
         assert_eq!(
             report
@@ -1573,6 +1573,22 @@ mod tests {
             && row.command.contains("--out-json")
             && row.target_dir.contains("fuse_metadata_readdir_1k")
             && row.kernel_fuse_mode == PerformanceKernelFuseMode::PermissionedRequired));
+        assert!(report.command_expansions.iter().any(|row| {
+            row.workload_id == "block_io_writeback_sequential_4k_write"
+                && row.command.contains("writeback_write_seq_4k")
+                && row
+                    .target_dir
+                    .contains("block_io_writeback_sequential_4k_write")
+                && row.kernel_fuse_mode == PerformanceKernelFuseMode::NotRequired
+        }));
+        assert!(report.command_expansions.iter().any(|row| {
+            row.workload_id == "block_io_writeback_random_4k_write"
+                && row.command.contains("writeback_write_random_4k")
+                && row
+                    .target_dir
+                    .contains("block_io_writeback_random_4k_write")
+                && row.kernel_fuse_mode == PerformanceKernelFuseMode::NotRequired
+        }));
         assert!(report.command_expansions.iter().any(|row| {
             row.workload_id == "block_cache_sharded_arc_concurrent_hot_read_64threads"
                 && row

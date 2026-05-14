@@ -6,7 +6,7 @@ expression: json
   "schema_version": 1,
   "manifest_id": "bd-rchk5.1-performance-baseline-v1",
   "valid": true,
-  "workload_count": 13,
+  "workload_count": 15,
   "shared_qa_schema_version": 1,
   "required_environment_fields": [
     "manifest_version",
@@ -78,6 +78,30 @@ expression: json
       "cargo_profile": "release-perf",
       "target_dir": "artifacts/performance/dry-run/target/block_io_direct_sequential_4k_read",
       "artifact_path": "results/block_io_direct_sequential_4k_read.json",
+      "workload_kind": "core_non_mounted",
+      "kernel_fuse_mode": "not_required",
+      "skip_semantics": "never_skip",
+      "metric_unit": "nanoseconds",
+      "comparison_target": "previous_baseline_same_manifest_same_host_profile"
+    },
+    {
+      "workload_id": "block_io_writeback_sequential_4k_write",
+      "command": "cargo bench -p ffs-block --profile release-perf --bench arc_cache -- writeback_write_seq_4k",
+      "cargo_profile": "release-perf",
+      "target_dir": "artifacts/performance/dry-run/target/block_io_writeback_sequential_4k_write",
+      "artifact_path": "results/block_io_writeback_sequential_4k_write.json",
+      "workload_kind": "core_non_mounted",
+      "kernel_fuse_mode": "not_required",
+      "skip_semantics": "never_skip",
+      "metric_unit": "nanoseconds",
+      "comparison_target": "previous_baseline_same_manifest_same_host_profile"
+    },
+    {
+      "workload_id": "block_io_writeback_random_4k_write",
+      "command": "cargo bench -p ffs-block --profile release-perf --bench arc_cache -- writeback_write_random_4k",
+      "cargo_profile": "release-perf",
+      "target_dir": "artifacts/performance/dry-run/target/block_io_writeback_random_4k_write",
+      "artifact_path": "results/block_io_writeback_random_4k_write.json",
       "workload_kind": "core_non_mounted",
       "kernel_fuse_mode": "not_required",
       "skip_semantics": "never_skip",
@@ -231,7 +255,7 @@ expression: json
   ],
   "workload_kind_counts": {
     "cli_inspect_parity": 1,
-    "core_non_mounted": 7,
+    "core_non_mounted": 9,
     "long_campaign_observation": 1,
     "permissioned_mounted": 2,
     "repair_scrub_refresh": 2

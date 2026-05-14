@@ -127,6 +127,100 @@
       }
     },
     {
+      "workload_id": "block_io_writeback_sequential_4k_write",
+      "workstream": "block_io",
+      "description": "Writeback-cache 4 KiB sequential write path through the block cache harness.",
+      "command_template": "cargo bench -p ffs-block --profile {profile} --bench arc_cache -- writeback_write_seq_4k",
+      "workload_kind": "core_non_mounted",
+      "cargo_profile": "release-perf",
+      "target_dir_template": "{artifact_dir}/target/{workload_id}",
+      "kernel_fuse_mode": "not_required",
+      "required_capabilities": ["cargo_bench", "criterion", "rch"],
+      "skip_semantics": "never_skip",
+      "dataset": "synth_64mib_4k_seq_writeback",
+      "input_fixture_hash": "sha256:1212121212121212121212121212121212121212121212121212121212121212",
+      "image_size_mib": 64,
+      "warmup_runs": 10,
+      "measured_runs": 30,
+      "metric_unit": "nanoseconds",
+      "comparison_target": "previous_baseline_same_manifest_same_host_profile",
+      "threshold": {
+        "warn_percent": 12.0,
+        "fail_percent": 25.0,
+        "max_cv": 0.1
+      },
+      "required_raw_logs": ["stdout", "stderr", "criterion_json"],
+      "quarantine_policy": {
+        "stale_baseline_expiry_days": 14,
+        "claim_when_quarantined": "experimental",
+        "follow_up_bead": "bd-rchk5.2"
+      },
+      "claim_policy": {
+        "clean_claim_tier": "regression_free",
+        "freshness_window_days": 14,
+        "overhead_budget": {
+          "max_runtime_seconds": 300.0,
+          "max_memory_mib": 4096,
+          "max_instrumentation_overhead_percent": 5.0
+        },
+        "release_claim_effect": "regression_free_claim",
+        "docs_wording_id": "perf.block_io.regression_free"
+      },
+      "output_artifact": {
+        "path_template": "results/{workload_id}.json",
+        "category": "benchmark_baseline",
+        "content_type": "application/json",
+        "aggregate_key": "rows[].median_ns"
+      }
+    },
+    {
+      "workload_id": "block_io_writeback_random_4k_write",
+      "workstream": "block_io",
+      "description": "Writeback-cache 4 KiB seeded-random write path through the block cache harness.",
+      "command_template": "cargo bench -p ffs-block --profile {profile} --bench arc_cache -- writeback_write_random_4k",
+      "workload_kind": "core_non_mounted",
+      "cargo_profile": "release-perf",
+      "target_dir_template": "{artifact_dir}/target/{workload_id}",
+      "kernel_fuse_mode": "not_required",
+      "required_capabilities": ["cargo_bench", "criterion", "rch"],
+      "skip_semantics": "never_skip",
+      "dataset": "synth_64mib_4k_seeded_random_writeback",
+      "input_fixture_hash": "sha256:1313131313131313131313131313131313131313131313131313131313131313",
+      "image_size_mib": 64,
+      "warmup_runs": 10,
+      "measured_runs": 30,
+      "metric_unit": "nanoseconds",
+      "comparison_target": "previous_baseline_same_manifest_same_host_profile",
+      "threshold": {
+        "warn_percent": 12.0,
+        "fail_percent": 25.0,
+        "max_cv": 0.1
+      },
+      "required_raw_logs": ["stdout", "stderr", "criterion_json"],
+      "quarantine_policy": {
+        "stale_baseline_expiry_days": 14,
+        "claim_when_quarantined": "experimental",
+        "follow_up_bead": "bd-rchk5.2"
+      },
+      "claim_policy": {
+        "clean_claim_tier": "regression_free",
+        "freshness_window_days": 14,
+        "overhead_budget": {
+          "max_runtime_seconds": 300.0,
+          "max_memory_mib": 4096,
+          "max_instrumentation_overhead_percent": 5.0
+        },
+        "release_claim_effect": "regression_free_claim",
+        "docs_wording_id": "perf.block_io.regression_free"
+      },
+      "output_artifact": {
+        "path_template": "results/{workload_id}.json",
+        "category": "benchmark_baseline",
+        "content_type": "application/json",
+        "aggregate_key": "rows[].median_ns"
+      }
+    },
+    {
       "workload_id": "arc_cache_warm_read_latency",
       "workstream": "arc_cache",
       "description": "Warm-cache read latency with working set inside ARC capacity.",
