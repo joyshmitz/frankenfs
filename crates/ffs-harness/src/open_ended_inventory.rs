@@ -363,7 +363,7 @@ pub const DEFAULT_SOURCE_SCOPE_MANIFEST_PATH: &str =
 const DEFAULT_SOURCE_SCOPE_MANIFEST_JSON: &str =
     include_str!("../../../tests/source-scope-manifest/source_scope_manifest.json");
 
-const REQUIRED_SOURCE_FAMILIES: [&str; 16] = [
+const REQUIRED_SOURCE_FAMILIES: [&str; 17] = [
     "readme_status_docs",
     "feature_parity_doc",
     "canonical_spec_docs",
@@ -376,6 +376,7 @@ const REQUIRED_SOURCE_FAMILIES: [&str; 16] = [
     "fuzz_orchestration",
     "operational_scripts",
     "harness_scripts",
+    "operator_runbook_docs",
     "mounted_lane_docs",
     "repair_docs",
     "performance_control_artifacts",
@@ -400,6 +401,14 @@ const CONFORMANCE_FIXTURE_ARTIFACT_GLOBS: [&str; 9] = [
     "conformance/golden/*.txt",
     "conformance/golden/*.ext4",
     "conformance/golden/checksums.sha256",
+];
+
+const OPERATOR_RUNBOOK_DOC_GLOBS: [&str; 5] = [
+    "docs/runbooks/*.md",
+    "docs/release/*.md",
+    "docs/templates/*.md",
+    "docs/tracker-hygiene.md",
+    "docs/xfstests-known-failures.md",
 ];
 
 const PERFORMANCE_CONTROL_ARTIFACT_GLOBS: [&str; 6] = [
@@ -912,10 +921,36 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
                 entry.id
             ));
         }
+        "operator_runbook_docs" => validate_operator_runbook_docs(entry, &excluded, errors),
         "performance_control_artifacts" => {
             validate_performance_control_artifacts(entry, &excluded, errors);
         }
         _ => {}
+    }
+}
+
+fn validate_operator_runbook_docs(
+    entry: &SourceScopeEntry,
+    excluded: &str,
+    errors: &mut Vec<String>,
+) {
+    for required_glob in OPERATOR_RUNBOOK_DOC_GLOBS {
+        if !entry
+            .included_globs
+            .iter()
+            .any(|glob| glob == required_glob)
+        {
+            errors.push(format!(
+                "source `{}` must include operator runbook doc glob `{required_glob}`",
+                entry.id
+            ));
+        }
+    }
+    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+        errors.push(format!(
+            "source `{}` must exclude build target paths from operator runbook docs",
+            entry.id
+        ));
     }
 }
 
@@ -2241,6 +2276,7 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
     fn populate_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
         populate_core_source_scope_workspace(root)?;
         populate_conformance_fixture_source_scope_workspace(root)?;
+        populate_operator_runbook_source_scope_workspace(root)?;
         populate_performance_source_scope_workspace(root)
     }
 
@@ -2350,6 +2386,34 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 (
                     "conformance/golden/checksums.sha256",
                     "bd-rchk7.1  ext4_8mb_reference.json\n",
+                ),
+            ],
+        )
+    }
+
+    fn populate_operator_runbook_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
+        write_sample_files(
+            root,
+            &[
+                (
+                    "docs/runbooks/readiness-action-autopilot.md",
+                    "NOTE operator runbook bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "docs/release/V1.2_test_waivers.md",
+                    "NOTE release waiver bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "docs/templates/ISOMORPHISM_PROOF_TEMPLATE.md",
+                    "NOTE operator template bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "docs/tracker-hygiene.md",
+                    "NOTE tracker hygiene bd-rchk7.1 artifact\n",
+                ),
+                (
+                    "docs/xfstests-known-failures.md",
+                    "NOTE xfstests blocker bd-rchk7.1 artifact\n",
                 ),
             ],
         )
@@ -2526,6 +2590,21 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .errors
                 .iter()
                 .any(|err| err.contains("missing required family `operational_scripts`"))
+        );
+    }
+
+    #[test]
+    fn missing_operator_runbook_docs_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "operator_runbook_docs");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| { err.contains("missing required family `operator_runbook_docs`") })
         );
     }
 
@@ -2902,6 +2981,27 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         assert!(report.errors.iter().any(|err| {
             err.contains("conformance/golden/*.ext4")
                 || err.contains("build target paths from conformance fixture artifacts")
+        }));
+    }
+
+    #[test]
+    fn operator_runbook_docs_coverage_is_validated() {
+        let mut manifest = fixture_manifest();
+        let operator_docs = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "operator_runbook_docs")
+            .expect("operator runbook source exists");
+        operator_docs
+            .included_globs
+            .retain(|glob| glob != "docs/tracker-hygiene.md");
+        operator_docs
+            .excluded_globs
+            .retain(|glob| !glob.contains(".rch-target"));
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("docs/tracker-hygiene.md")
+                || err.contains("build target paths from operator runbook docs")
         }));
     }
 

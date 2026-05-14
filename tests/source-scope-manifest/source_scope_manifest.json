@@ -242,6 +242,29 @@
       "non_applicability_rationale": ""
     },
     {
+      "id": "operator_runbook_docs",
+      "source_family": "operator_runbook_docs",
+      "included_globs": [
+        "docs/runbooks/*.md",
+        "docs/release/*.md",
+        "docs/templates/*.md",
+        "docs/tracker-hygiene.md",
+        "docs/xfstests-known-failures.md"
+      ],
+      "excluded_globs": [
+        "target/**",
+        "**/.rch-target/**"
+      ],
+      "risk_category": "docs_only",
+      "owner": "release",
+      "status": "active",
+      "expected_proof_types": ["docs-non-goal", "mounted-e2e"],
+      "freshness_ttl_days": 14,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
       "id": "mounted_lane_docs",
       "source_family": "mounted_lane_docs",
       "included_globs": [

@@ -302,6 +302,7 @@ required_families = {
     "fuzz_orchestration",
     "operational_scripts",
     "harness_scripts",
+    "operator_runbook_docs",
     "mounted_lane_docs",
     "repair_docs",
     "performance_control_artifacts",
