@@ -304,6 +304,7 @@ required_families = {
     "operational_scripts",
     "harness_scripts",
     "operator_runbook_docs",
+    "operational_evidence_artifacts",
     "mounted_lane_docs",
     "repair_docs",
     "performance_control_artifacts",

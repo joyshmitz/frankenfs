@@ -6,7 +6,7 @@ expression: json
   "schema_version": 1,
   "manifest_id": "open_ended_inventory_source_scope_v1",
   "bead_id": "bd-lm0g9",
-  "source_count": 18,
+  "source_count": 19,
   "source_families": [
     "canonical_spec_docs",
     "conformance_docs",
@@ -18,6 +18,7 @@ expression: json
     "fuzz_targets",
     "harness_scripts",
     "mounted_lane_docs",
+    "operational_evidence_artifacts",
     "operational_scripts",
     "operator_runbook_docs",
     "performance_control_artifacts",

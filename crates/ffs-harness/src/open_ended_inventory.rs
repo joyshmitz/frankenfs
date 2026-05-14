@@ -363,7 +363,7 @@ pub const DEFAULT_SOURCE_SCOPE_MANIFEST_PATH: &str =
 const DEFAULT_SOURCE_SCOPE_MANIFEST_JSON: &str =
     include_str!("../../../tests/source-scope-manifest/source_scope_manifest.json");
 
-const REQUIRED_SOURCE_FAMILIES: [&str; 18] = [
+const REQUIRED_SOURCE_FAMILIES: [&str; 19] = [
     "readme_status_docs",
     "feature_parity_doc",
     "canonical_spec_docs",
@@ -378,6 +378,7 @@ const REQUIRED_SOURCE_FAMILIES: [&str; 18] = [
     "operational_scripts",
     "harness_scripts",
     "operator_runbook_docs",
+    "operational_evidence_artifacts",
     "mounted_lane_docs",
     "repair_docs",
     "performance_control_artifacts",
@@ -410,6 +411,15 @@ const OPERATOR_RUNBOOK_DOC_GLOBS: [&str; 5] = [
     "docs/templates/*.md",
     "docs/tracker-hygiene.md",
     "docs/xfstests-known-failures.md",
+];
+
+const OPERATIONAL_EVIDENCE_ARTIFACT_GLOBS: [&str; 6] = [
+    "security/*.json",
+    "docs/*-manifest.json",
+    "docs/*-contract.json",
+    "docs/operator-recovery-drill.json",
+    "docs/repair-confidence-mutation-safety.json",
+    "docs/reports/*.md",
 ];
 
 const TEST_CONTROL_ARTIFACT_GLOBS: [&str; 16] = [
@@ -943,10 +953,44 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
             ));
         }
         "operator_runbook_docs" => validate_operator_runbook_docs(entry, &excluded, errors),
+        "operational_evidence_artifacts" => {
+            validate_operational_evidence_artifacts(entry, &excluded, errors);
+        }
         "performance_control_artifacts" => {
             validate_performance_control_artifacts(entry, &excluded, errors);
         }
         _ => {}
+    }
+}
+
+fn validate_operational_evidence_artifacts(
+    entry: &SourceScopeEntry,
+    excluded: &str,
+    errors: &mut Vec<String>,
+) {
+    for required_glob in OPERATIONAL_EVIDENCE_ARTIFACT_GLOBS {
+        if !entry
+            .included_globs
+            .iter()
+            .any(|glob| glob == required_glob)
+        {
+            errors.push(format!(
+                "source `{}` must include operational evidence artifact glob `{required_glob}`",
+                entry.id
+            ));
+        }
+    }
+    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+        errors.push(format!(
+            "source `{}` must exclude build target paths from operational evidence artifacts",
+            entry.id
+        ));
+    }
+    if !excluded.contains("_generated") || !excluded.contains("_artifacts") {
+        errors.push(format!(
+            "source `{}` must exclude generated operational evidence artifact directories",
+            entry.id
+        ));
     }
 }
 
@@ -2330,6 +2374,7 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         populate_conformance_fixture_source_scope_workspace(root)?;
         populate_test_control_artifact_source_scope_workspace(root)?;
         populate_operator_runbook_source_scope_workspace(root)?;
+        populate_operational_evidence_artifact_source_scope_workspace(root)?;
         populate_performance_source_scope_workspace(root)
     }
 
@@ -2552,6 +2597,52 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         )
     }
 
+    fn populate_operational_evidence_artifact_source_scope_workspace(
+        root: &Path,
+    ) -> anyhow::Result<()> {
+        write_sample_files(
+            root,
+            &[
+                (
+                    "security/adversarial_image_threat_model.json",
+                    "{\"note\":\"bd-rchk0.5.11 hostile image evidence\"}\n",
+                ),
+                (
+                    "docs/adaptive-runtime-evidence-manifest.json",
+                    "{\"note\":\"bd-rchk0.53 adaptive runtime evidence\"}\n",
+                ),
+                (
+                    "docs/operator-recovery-drill.json",
+                    "{\"note\":\"bd-rchk0.5.8 operator recovery drill\"}\n",
+                ),
+                (
+                    "docs/topology-runtime-advisor-manifest.json",
+                    "{\"note\":\"bd-rchk0.212 topology runtime advisor\"}\n",
+                ),
+                (
+                    "docs/repair-writeback-serialization-contract.json",
+                    "{\"note\":\"bd-rchk0.1.1 repair writeback serialization\"}\n",
+                ),
+                (
+                    "docs/repair-confidence-mutation-safety.json",
+                    "{\"note\":\"bd-rchk6 repair confidence safety\"}\n",
+                ),
+                (
+                    "docs/reports/ADVERSARIAL_IMAGE_THREAT_MODEL.md",
+                    "NOTE adversarial image threat model bd-rchk0.5.11 artifact\n",
+                ),
+                (
+                    "docs/reports/SOAK_CANARY_CAMPAIGNS.md",
+                    "NOTE soak canary campaign bd-rchk0.5.9 artifact\n",
+                ),
+                (
+                    "docs/reports/PERFORMANCE_BASELINE_MANIFEST.md",
+                    "NOTE performance baseline manifest bd-rchk5 artifact\n",
+                ),
+            ],
+        )
+    }
+
     fn populate_performance_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
         write_sample_files(
             root,
@@ -2754,6 +2845,18 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .iter()
                 .any(|err| { err.contains("missing required family `operator_runbook_docs`") })
         );
+    }
+
+    #[test]
+    fn missing_operational_evidence_artifacts_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "operational_evidence_artifacts");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("missing required family `operational_evidence_artifacts`")
+        }));
     }
 
     #[test]
@@ -3171,6 +3274,27 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         assert!(report.errors.iter().any(|err| {
             err.contains("docs/tracker-hygiene.md")
                 || err.contains("build target paths from operator runbook docs")
+        }));
+    }
+
+    #[test]
+    fn operational_evidence_artifacts_coverage_is_validated() {
+        let mut manifest = fixture_manifest();
+        let operational_evidence = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "operational_evidence_artifacts")
+            .expect("operational evidence source exists");
+        operational_evidence
+            .included_globs
+            .retain(|glob| glob != "security/*.json");
+        operational_evidence
+            .excluded_globs
+            .retain(|glob| !glob.contains("_artifacts"));
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("security/*.json")
+                || err.contains("generated operational evidence artifact directories")
         }));
     }
 

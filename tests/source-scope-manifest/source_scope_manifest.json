@@ -301,6 +301,34 @@
       "non_applicability_rationale": ""
     },
     {
+      "id": "operational_evidence_artifacts",
+      "source_family": "operational_evidence_artifacts",
+      "included_globs": [
+        "security/*.json",
+        "docs/*-manifest.json",
+        "docs/*-contract.json",
+        "docs/operator-recovery-drill.json",
+        "docs/repair-confidence-mutation-safety.json",
+        "docs/reports/*.md"
+      ],
+      "excluded_globs": [
+        "target/**",
+        "**/.rch-target/**",
+        "docs/**/_generated/**",
+        "docs/**/_artifacts/**",
+        "security/**/_generated/**",
+        "security/**/_artifacts/**"
+      ],
+      "risk_category": "observability",
+      "owner": "release",
+      "status": "active",
+      "expected_proof_types": ["security-audit", "long-campaign", "docs-non-goal"],
+      "freshness_ttl_days": 14,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
       "id": "mounted_lane_docs",
       "source_family": "mounted_lane_docs",
       "included_globs": [
