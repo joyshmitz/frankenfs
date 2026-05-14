@@ -2132,11 +2132,11 @@ impl FrankenFuse {
             })
     }
 
-    /// Execute mknod for regular-file nodes without a live kernel mount.
+    /// Execute mknod without a live kernel mount.
     ///
-    /// FrankenFS does not yet expose special-node creation through `FsOps`, so
-    /// this freezes the regular-file MKNOD contract and rejects device, FIFO,
-    /// and socket nodes with `EOPNOTSUPP`.
+    /// Regular files route through `FsOps::create`, supported special nodes
+    /// route through `FsOps::mknod`, and unsupported node types fail with
+    /// `EOPNOTSUPP`.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn mknod_for_fuzzing(
@@ -9481,6 +9481,14 @@ mod tests {
             uid: u32,
             gid: u32,
         },
+        Mknod {
+            parent: InodeNumber,
+            name: String,
+            mode: u16,
+            rdev: u32,
+            uid: u32,
+            gid: u32,
+        },
         Readdir {
             ino: InodeNumber,
             offset: u64,
@@ -9768,6 +9776,40 @@ mod tests {
                     gid,
                 });
             Ok(test_inode_attr(303, FfsFileType::RegularFile, mode))
+        }
+
+        fn mknod(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            parent: InodeNumber,
+            name: &OsStr,
+            mode: u16,
+            rdev: u32,
+            uid: u32,
+            gid: u32,
+        ) -> ffs_error::Result<InodeAttr> {
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Mknod {
+                    parent,
+                    name: name.to_string_lossy().into_owned(),
+                    mode,
+                    rdev,
+                    uid,
+                    gid,
+                });
+            let kind = match mode & ffs_types::S_IFMT {
+                ffs_types::S_IFCHR => FfsFileType::CharDevice,
+                ffs_types::S_IFBLK => FfsFileType::BlockDevice,
+                ffs_types::S_IFIFO => FfsFileType::Fifo,
+                ffs_types::S_IFSOCK => FfsFileType::Socket,
+                _ => FfsFileType::RegularFile,
+            };
+            let mut attr = test_inode_attr(313, kind, mode & 0o7777);
+            attr.rdev = rdev;
+            Ok(attr)
         }
 
         fn rmdir(
@@ -10292,7 +10334,52 @@ mod tests {
     }
 
     #[test]
-    fn conformance_fuse_mknod_special_node_rejects_explicitly() {
+    fn conformance_fuse_mknod_special_node_dispatches_to_backend() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+        let mode = libc::S_IFCHR | 0o600;
+
+        let attr = fuse
+            .mknod_for_fuzzing(7, b"whiteout", mode, 0, 1001, 1002)
+            .expect("special-node mknod round trip");
+
+        assert_eq!(attr.ino, InodeNumber(313));
+        assert_eq!(attr.kind, FfsFileType::CharDevice);
+        assert_eq!(attr.perm, 0o600);
+        assert_eq!(attr.rdev, 0);
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Create,
+                },
+                MutationCall::Mknod {
+                    parent: InodeNumber(7),
+                    name: "whiteout".to_owned(),
+                    mode: ffs_types::S_IFCHR | 0o600,
+                    rdev: 0,
+                    uid: 1001,
+                    gid: 1002,
+                },
+                MutationCall::Commit,
+                MutationCall::End {
+                    op: RequestOp::Create,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_mknod_unsupported_type_rejects_before_backend() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let options = MountOptions {
             read_only: false,
@@ -10304,8 +10391,8 @@ mod tests {
         );
 
         let err = fuse
-            .mknod_for_fuzzing(7, b"fifo", libc::S_IFIFO | 0o600, 0, 1001, 1002)
-            .expect_err("special-node MKNOD is out of scope");
+            .mknod_for_fuzzing(7, b"dir", libc::S_IFDIR | 0o755, 0, 1001, 1002)
+            .expect_err("directory mknod is unsupported");
 
         assert_eq!(err, libc::EOPNOTSUPP);
         assert!(calls.lock().expect("lock calls").is_empty());
