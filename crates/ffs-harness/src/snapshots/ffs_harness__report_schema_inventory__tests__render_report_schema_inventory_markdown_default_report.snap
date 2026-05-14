@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 22 |
+| Total rows | 23 |
 | Required rows | 6 |
-| Advisory-only rows | 14 |
+| Advisory-only rows | 15 |
 | Permissioned-only rows | 1 |
-| Covered rows | 21 |
+| Covered rows | 22 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -41,6 +41,7 @@ None.
 | `proof_bundle_validation_report` | `Required` | `Covered` | none | none |
 | `readiness_action_autopilot_source_reports` | `AdvisoryOnly` | `Covered` | none | none |
 | `readiness_action_dry_run_metadata` | `Excluded` | `Excluded` | none | none |
+| `readiness_action_dry_run_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `readiness_dashboard_report` | `Required` | `Covered` | none | none |
 | `readiness_lab_numa_p99_replay_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `readiness_lab_rch_lane_schedule_report` | `AdvisoryOnly` | `Covered` | none | none |

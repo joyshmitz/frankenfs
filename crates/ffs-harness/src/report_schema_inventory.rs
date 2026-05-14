@@ -175,6 +175,15 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "readiness_action_autopilot_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_autopilot_report_json_shape.snap",
         ),
+        covered_advisory_row(
+            "readiness_action_dry_run_report",
+            "crates/ffs-harness/src/readiness_action_autopilot.rs",
+            "ReadinessActionDryRunReport",
+            "recommend-readiness-actions",
+            "readiness-action operator dry-run handoff",
+            "readiness_action_dry_run_json_report",
+            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_dry_run_json_report.snap",
+        ),
     ]);
     rows
 }
@@ -884,17 +893,22 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 22);
+        assert_eq!(report.total_rows, 23);
         assert_eq!(report.required_rows, 6);
-        assert_eq!(report.advisory_only_rows, 14);
+        assert_eq!(report.advisory_only_rows, 15);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 21);
+        assert_eq!(report.covered_rows, 22);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
                 .report_ids
                 .contains(&"swarm_operator_report".to_owned())
+        );
+        assert!(
+            report
+                .report_ids
+                .contains(&"readiness_action_dry_run_report".to_owned())
         );
         assert_eq!(report.row_results.len(), report.total_rows);
         assert_eq!(
@@ -1101,6 +1115,35 @@ mod tests {
         assert!(markdown.contains("Product evidence claim: `none`"));
         assert!(markdown.contains("`swarm_operator_report`"));
         assert!(fail_on_report_schema_inventory_errors(&report).is_err());
+    }
+
+    #[test]
+    fn inventory_tracks_readiness_action_dry_run_report() {
+        let inventory = current_report_schema_inventory();
+        let row = inventory
+            .rows
+            .iter()
+            .find(|row| row.report_id == "readiness_action_dry_run_report")
+            .expect("inventory includes readiness action dry-run report");
+
+        assert_eq!(
+            row.rust_type, "ReadinessActionDryRunReport",
+            "inventory must track the durable report emitted by recommend-readiness-actions"
+        );
+        assert_eq!(row.producer, "recommend-readiness-actions");
+        assert_eq!(
+            row.coverage_requirement,
+            ReportSchemaCoverageRequirement::AdvisoryOnly
+        );
+        assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+        assert_eq!(row.evidence_test, "readiness_action_dry_run_json_report");
+        assert!(row.snapshot_path.ends_with(
+            "ffs_harness__readiness_action_autopilot__tests__readiness_action_dry_run_json_report.snap"
+        ));
+        assert_eq!(
+            row.claim_effect,
+            ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+        );
     }
 
     #[test]
