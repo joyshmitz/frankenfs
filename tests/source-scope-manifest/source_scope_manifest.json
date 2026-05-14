@@ -253,6 +253,32 @@
       "non_applicability_rationale": ""
     },
     {
+      "id": "performance_control_artifacts",
+      "source_family": "performance_control_artifacts",
+      "included_globs": [
+        "benchmarks/*.json",
+        "benchmarks/*.toml",
+        "benchmarks/baselines/latest.json",
+        "benchmarks/baselines/history/*.json",
+        "baselines/*.md",
+        "profiles/*.meta.json"
+      ],
+      "excluded_globs": [
+        "target/**",
+        "**/.rch-target/**",
+        "baselines/hyperfine/**",
+        "profiles/smoke-*/**"
+      ],
+      "risk_category": "performance",
+      "owner": "harness",
+      "status": "active",
+      "expected_proof_types": ["long-campaign", "golden-fixture"],
+      "freshness_ttl_days": 14,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
       "id": "performance_xfstests_notes",
       "source_family": "performance_xfstests_notes",
       "included_globs": [

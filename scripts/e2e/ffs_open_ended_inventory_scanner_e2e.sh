@@ -303,6 +303,7 @@ required_families = {
     "harness_scripts",
     "mounted_lane_docs",
     "repair_docs",
+    "performance_control_artifacts",
     "performance_xfstests_notes",
 }
 if not report["valid"]:

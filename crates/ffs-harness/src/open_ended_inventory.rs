@@ -363,7 +363,7 @@ pub const DEFAULT_SOURCE_SCOPE_MANIFEST_PATH: &str =
 const DEFAULT_SOURCE_SCOPE_MANIFEST_JSON: &str =
     include_str!("../../../tests/source-scope-manifest/source_scope_manifest.json");
 
-const REQUIRED_SOURCE_FAMILIES: [&str; 14] = [
+const REQUIRED_SOURCE_FAMILIES: [&str; 15] = [
     "readme_status_docs",
     "feature_parity_doc",
     "canonical_spec_docs",
@@ -377,6 +377,7 @@ const REQUIRED_SOURCE_FAMILIES: [&str; 14] = [
     "harness_scripts",
     "mounted_lane_docs",
     "repair_docs",
+    "performance_control_artifacts",
     "performance_xfstests_notes",
 ];
 
@@ -386,6 +387,15 @@ const CANONICAL_SPEC_DOCS: [&str; 5] = [
     "EXISTING_EXT4_BTRFS_STRUCTURE.md",
     "PROPOSED_ARCHITECTURE.md",
     "FEATURE_PARITY.md",
+];
+
+const PERFORMANCE_CONTROL_ARTIFACT_GLOBS: [&str; 6] = [
+    "benchmarks/*.json",
+    "benchmarks/*.toml",
+    "benchmarks/baselines/latest.json",
+    "benchmarks/baselines/history/*.json",
+    "baselines/*.md",
+    "profiles/*.meta.json",
 ];
 
 const ALLOWED_RISK_CATEGORIES: [&str; 9] = [
@@ -886,6 +896,9 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
                 entry.id
             ));
         }
+        "performance_control_artifacts" => {
+            validate_performance_control_artifacts(entry, &excluded, errors);
+        }
         _ => {}
     }
 }
@@ -898,6 +911,43 @@ fn validate_canonical_spec_docs_coverage(entry: &SourceScopeEntry, errors: &mut 
                 entry.id
             ));
         }
+    }
+}
+
+fn validate_performance_control_artifacts(
+    entry: &SourceScopeEntry,
+    excluded: &str,
+    errors: &mut Vec<String>,
+) {
+    for required_glob in PERFORMANCE_CONTROL_ARTIFACT_GLOBS {
+        if !entry
+            .included_globs
+            .iter()
+            .any(|glob| glob == required_glob)
+        {
+            errors.push(format!(
+                "source `{}` must include performance control artifact glob `{required_glob}`",
+                entry.id
+            ));
+        }
+    }
+    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+        errors.push(format!(
+            "source `{}` must exclude build target paths from performance control artifacts",
+            entry.id
+        ));
+    }
+    if !excluded.contains("baselines/hyperfine") {
+        errors.push(format!(
+            "source `{}` must exclude generated hyperfine baseline outputs",
+            entry.id
+        ));
+    }
+    if !excluded.contains("profiles/smoke-") {
+        errors.push(format!(
+            "source `{}` must exclude generated profile smoke outputs",
+            entry.id
+        ));
     }
 }
 
@@ -2201,6 +2251,30 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 "docs/performance/README.md",
                 "NOTE xfstests perf bd-rchk7.1 artifact\n",
             ),
+            (
+                "benchmarks/performance_baseline_manifest.json",
+                "{\"note\":\"bd-rchk5 artifact\"}\n",
+            ),
+            (
+                "benchmarks/thresholds.toml",
+                "# NOTE benchmark thresholds bd-rchk5 artifact\n",
+            ),
+            (
+                "benchmarks/baselines/latest.json",
+                "{\"note\":\"bd-rchk5 latest baseline artifact\"}\n",
+            ),
+            (
+                "benchmarks/baselines/history/current.json",
+                "{\"note\":\"bd-rchk5 history artifact\"}\n",
+            ),
+            (
+                "baselines/README.md",
+                "NOTE baseline summary bd-rchk5 artifact\n",
+            ),
+            (
+                "profiles/flamegraph_cli_inspect.meta.json",
+                "{\"note\":\"bd-1ieht profile artifact\"}\n",
+            ),
         ] {
             write_sample_file(root, path, text)?;
         }
@@ -2334,6 +2408,21 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .errors
                 .iter()
                 .any(|err| err.contains("missing required family `operational_scripts`"))
+        );
+    }
+
+    #[test]
+    fn missing_performance_control_artifacts_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "performance_control_artifacts");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required family `performance_control_artifacts`"))
         );
     }
 
@@ -2654,6 +2743,27 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .iter()
                 .any(|err| err.contains("dedicated harness script source scope"))
         );
+    }
+
+    #[test]
+    fn performance_control_artifacts_exclusions_are_validated() {
+        let mut manifest = fixture_manifest();
+        let performance = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "performance_control_artifacts")
+            .expect("performance control source exists");
+        performance
+            .included_globs
+            .retain(|glob| glob != "benchmarks/baselines/latest.json");
+        performance
+            .excluded_globs
+            .retain(|glob| !glob.contains("baselines/hyperfine"));
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(report.errors.iter().any(|err| {
+            err.contains("benchmarks/baselines/latest.json")
+                || err.contains("generated hyperfine baseline outputs")
+        }));
     }
 
     #[test]
