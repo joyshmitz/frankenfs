@@ -258,6 +258,15 @@ fn open_ended_inventory_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> 
 fn mounted_writeback_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
     vec![
         covered_advisory_row(
+            "fuse_capability_report",
+            "crates/ffs-harness/src/verification_runner.rs",
+            "FuseCapabilityProbeReport",
+            "fuse-capability-probe",
+            "mounted FUSE capability and skip/fail diagnostics",
+            "fuse_capability_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__verification_runner__tests__fuse_capability_report_json_shape.snap",
+        ),
+        covered_advisory_row(
             "mounted_lane_decision",
             "crates/ffs-harness/src/mounted_lane_gate.rs",
             "MountedLaneDecision",
@@ -1349,6 +1358,98 @@ mod tests {
     use anyhow::{Result, bail};
     use serde_json::json;
 
+    struct ReportInventoryExpectation {
+        report_id: &'static str,
+        module_path: &'static str,
+        rust_type: &'static str,
+        producer: &'static str,
+        evidence_test: &'static str,
+        snapshot_suffix: &'static str,
+    }
+
+    const MOUNTED_WRITEBACK_REPORT_EXPECTATIONS: &[ReportInventoryExpectation] = &[
+        ReportInventoryExpectation {
+            report_id: "fuse_capability_report",
+            module_path: "crates/ffs-harness/src/verification_runner.rs",
+            rust_type: "FuseCapabilityProbeReport",
+            producer: "fuse-capability-probe",
+            evidence_test: "fuse_capability_report_json_shape",
+            snapshot_suffix: "ffs_harness__verification_runner__tests__fuse_capability_report_json_shape.snap",
+        },
+        ReportInventoryExpectation {
+            report_id: "mounted_lane_decision",
+            module_path: "crates/ffs-harness/src/mounted_lane_gate.rs",
+            rust_type: "MountedLaneDecision",
+            producer: "mounted lane fail-closed gate evaluator",
+            evidence_test: "mounted_lane_decision_json_shape",
+            snapshot_suffix: "ffs_harness__mounted_lane_gate__tests__mounted_lane_decision_json_shape.snap",
+        },
+        ReportInventoryExpectation {
+            report_id: "mounted_repair_policy_report",
+            module_path: "crates/ffs-harness/src/mounted_repair_policy.rs",
+            rust_type: "MountedRepairPolicyReport",
+            producer: "validate_default_mounted_repair_policy",
+            evidence_test: "mounted_repair_policy_report_json_shape",
+            snapshot_suffix: "ffs_harness__mounted_repair_policy__tests__mounted_repair_policy_report_json_shape.snap",
+        },
+        ReportInventoryExpectation {
+            report_id: "mounted_repair_mutation_boundary_report",
+            module_path: "crates/ffs-harness/src/mounted_repair_mutation_boundary.rs",
+            rust_type: "MountedRepairMutationBoundaryReport",
+            producer: "validate-mounted-repair-mutation-boundary",
+            evidence_test: "mounted_repair_mutation_boundary_report_json_shape",
+            snapshot_suffix: "ffs_harness__mounted_repair_mutation_boundary__tests__mounted_repair_mutation_boundary_report_json_shape.snap",
+        },
+        ReportInventoryExpectation {
+            report_id: "mounted_write_matrix_report",
+            module_path: "crates/ffs-harness/src/mounted_write_matrix.rs",
+            rust_type: "MountedWriteMatrixReport",
+            producer: "validate-mounted-write-matrix",
+            evidence_test: "mounted_write_matrix_report_json_shape",
+            snapshot_suffix: "ffs_harness__mounted_write_matrix__tests__mounted_write_matrix_report_json_shape.snap",
+        },
+        ReportInventoryExpectation {
+            report_id: "mounted_write_error_report",
+            module_path: "crates/ffs-harness/src/mounted_write_error_classes.rs",
+            rust_type: "MountedWriteErrorReport",
+            producer: "validate-mounted-write-error-classes",
+            evidence_test: "mounted_write_error_report_json_shape",
+            snapshot_suffix: "ffs_harness__mounted_write_error_classes__tests__mounted_write_error_report_json_shape.snap",
+        },
+        ReportInventoryExpectation {
+            report_id: "repair_writeback_serialization_report",
+            module_path: "crates/ffs-harness/src/repair_writeback_serialization.rs",
+            rust_type: "RepairWritebackSerializationReport",
+            producer: "validate-repair-writeback-serialization",
+            evidence_test: "repair_writeback_serialization_report_json_shape",
+            snapshot_suffix: "ffs_harness__repair_writeback_serialization__tests__repair_writeback_serialization_report_json_shape.snap",
+        },
+        ReportInventoryExpectation {
+            report_id: "writeback_cache_audit_report",
+            module_path: "crates/ffs-harness/src/writeback_cache_audit.rs",
+            rust_type: "WritebackCacheAuditReport",
+            producer: "validate-writeback-cache-audit",
+            evidence_test: "writeback_cache_audit_report_json_shape",
+            snapshot_suffix: "ffs_harness__writeback_cache_audit__tests__writeback_cache_audit_report_json_shape.snap",
+        },
+        ReportInventoryExpectation {
+            report_id: "writeback_ordering_report",
+            module_path: "crates/ffs-harness/src/writeback_cache_audit.rs",
+            rust_type: "WritebackOrderingReport",
+            producer: "validate-writeback-cache-ordering",
+            evidence_test: "writeback_ordering_report_json_shape",
+            snapshot_suffix: "ffs_harness__writeback_cache_audit__tests__writeback_ordering_report_json_shape.snap",
+        },
+        ReportInventoryExpectation {
+            report_id: "writeback_crash_replay_report",
+            module_path: "crates/ffs-harness/src/writeback_cache_audit.rs",
+            rust_type: "WritebackCrashReplayReport",
+            producer: "validate-writeback-cache-crash-replay",
+            evidence_test: "writeback_crash_replay_report_json_shape",
+            snapshot_suffix: "ffs_harness__writeback_cache_audit__tests__writeback_crash_replay_report_json_shape.snap",
+        },
+    ];
+
     fn row_result<'a>(
         report: &'a ReportSchemaInventoryReport,
         report_id: &str,
@@ -1383,12 +1484,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 72);
+        assert_eq!(report.total_rows, 73);
         assert_eq!(report.required_rows, 7);
-        assert_eq!(report.advisory_only_rows, 63);
+        assert_eq!(report.advisory_only_rows, 64);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 71);
+        assert_eq!(report.covered_rows, 72);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1739,96 +1840,23 @@ mod tests {
     #[test]
     fn inventory_tracks_mounted_writeback_reports() {
         let inventory = current_report_schema_inventory();
-        for (report_id, module_path, rust_type, producer, evidence_test, snapshot_suffix) in [
-            (
-                "mounted_lane_decision",
-                "crates/ffs-harness/src/mounted_lane_gate.rs",
-                "MountedLaneDecision",
-                "mounted lane fail-closed gate evaluator",
-                "mounted_lane_decision_json_shape",
-                "ffs_harness__mounted_lane_gate__tests__mounted_lane_decision_json_shape.snap",
-            ),
-            (
-                "mounted_repair_policy_report",
-                "crates/ffs-harness/src/mounted_repair_policy.rs",
-                "MountedRepairPolicyReport",
-                "validate_default_mounted_repair_policy",
-                "mounted_repair_policy_report_json_shape",
-                "ffs_harness__mounted_repair_policy__tests__mounted_repair_policy_report_json_shape.snap",
-            ),
-            (
-                "mounted_repair_mutation_boundary_report",
-                "crates/ffs-harness/src/mounted_repair_mutation_boundary.rs",
-                "MountedRepairMutationBoundaryReport",
-                "validate-mounted-repair-mutation-boundary",
-                "mounted_repair_mutation_boundary_report_json_shape",
-                "ffs_harness__mounted_repair_mutation_boundary__tests__mounted_repair_mutation_boundary_report_json_shape.snap",
-            ),
-            (
-                "mounted_write_matrix_report",
-                "crates/ffs-harness/src/mounted_write_matrix.rs",
-                "MountedWriteMatrixReport",
-                "validate-mounted-write-matrix",
-                "mounted_write_matrix_report_json_shape",
-                "ffs_harness__mounted_write_matrix__tests__mounted_write_matrix_report_json_shape.snap",
-            ),
-            (
-                "mounted_write_error_report",
-                "crates/ffs-harness/src/mounted_write_error_classes.rs",
-                "MountedWriteErrorReport",
-                "validate-mounted-write-error-classes",
-                "mounted_write_error_report_json_shape",
-                "ffs_harness__mounted_write_error_classes__tests__mounted_write_error_report_json_shape.snap",
-            ),
-            (
-                "repair_writeback_serialization_report",
-                "crates/ffs-harness/src/repair_writeback_serialization.rs",
-                "RepairWritebackSerializationReport",
-                "validate-repair-writeback-serialization",
-                "repair_writeback_serialization_report_json_shape",
-                "ffs_harness__repair_writeback_serialization__tests__repair_writeback_serialization_report_json_shape.snap",
-            ),
-            (
-                "writeback_cache_audit_report",
-                "crates/ffs-harness/src/writeback_cache_audit.rs",
-                "WritebackCacheAuditReport",
-                "validate-writeback-cache-audit",
-                "writeback_cache_audit_report_json_shape",
-                "ffs_harness__writeback_cache_audit__tests__writeback_cache_audit_report_json_shape.snap",
-            ),
-            (
-                "writeback_ordering_report",
-                "crates/ffs-harness/src/writeback_cache_audit.rs",
-                "WritebackOrderingReport",
-                "validate-writeback-cache-ordering",
-                "writeback_ordering_report_json_shape",
-                "ffs_harness__writeback_cache_audit__tests__writeback_ordering_report_json_shape.snap",
-            ),
-            (
-                "writeback_crash_replay_report",
-                "crates/ffs-harness/src/writeback_cache_audit.rs",
-                "WritebackCrashReplayReport",
-                "validate-writeback-cache-crash-replay",
-                "writeback_crash_replay_report_json_shape",
-                "ffs_harness__writeback_cache_audit__tests__writeback_crash_replay_report_json_shape.snap",
-            ),
-        ] {
+        for expectation in MOUNTED_WRITEBACK_REPORT_EXPECTATIONS {
             let row = inventory
                 .rows
                 .iter()
-                .find(|row| row.report_id == report_id)
+                .find(|row| row.report_id == expectation.report_id)
                 .expect("inventory includes mounted/writeback report");
 
-            assert_eq!(row.module_path, module_path);
-            assert_eq!(row.rust_type, rust_type);
-            assert_eq!(row.producer, producer);
+            assert_eq!(row.module_path, expectation.module_path);
+            assert_eq!(row.rust_type, expectation.rust_type);
+            assert_eq!(row.producer, expectation.producer);
             assert_eq!(
                 row.coverage_requirement,
                 ReportSchemaCoverageRequirement::AdvisoryOnly
             );
             assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
-            assert_eq!(row.evidence_test, evidence_test);
-            assert!(row.snapshot_path.ends_with(snapshot_suffix));
+            assert_eq!(row.evidence_test, expectation.evidence_test);
+            assert!(row.snapshot_path.ends_with(expectation.snapshot_suffix));
             assert_eq!(
                 row.claim_effect,
                 ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
