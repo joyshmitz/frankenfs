@@ -235,7 +235,7 @@ impl MetricHandle {
 // ── Snapshot Types ─────────────────────────────────────────────────────────
 
 /// A point-in-time snapshot of all registered metrics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
     /// Timestamp when the snapshot was taken (seconds since registry creation).
     pub elapsed_secs: f64,
@@ -244,7 +244,7 @@ pub struct MetricsSnapshot {
 }
 
 /// Snapshot of a single metric.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetricSnapshot {
     pub kind: MetricKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -254,7 +254,7 @@ pub struct MetricSnapshot {
 }
 
 /// Snapshot of histogram bucket distribution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistogramSnapshot {
     pub buckets: Vec<BucketSnapshot>,
     pub inf_count: u64,
@@ -263,7 +263,7 @@ pub struct HistogramSnapshot {
 }
 
 /// A single histogram bucket.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BucketSnapshot {
     /// Upper bound of this bucket (exclusive for values, inclusive for counts).
     pub le: u64,
@@ -729,6 +729,7 @@ mod tests {
         let snap = registry.snapshot();
         let json = serde_json::to_string_pretty(&snap)?;
         let deser: MetricsSnapshot = serde_json::from_str(&json)?;
+        assert_eq!(deser, snap);
         assert_eq!(deser.metrics.len(), 3);
         assert!(deser.metrics.contains_key("json.counter"));
         assert!(deser.metrics.contains_key("json.gauge"));
@@ -754,7 +755,9 @@ mod tests {
         let mut snap = registry.snapshot();
         snap.elapsed_secs = 0.0;
         let json = serde_json::to_string_pretty(&snap)?;
+        let deser: MetricsSnapshot = serde_json::from_str(&json)?;
 
+        assert_eq!(deser, snap);
         insta::assert_snapshot!("snapshot_json_serialization_shape", json);
         Ok(())
     }
