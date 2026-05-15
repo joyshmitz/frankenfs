@@ -214,13 +214,13 @@ fn coverage_domains_from_feature_parity(markdown: &str) -> Vec<CoverageDomain> {
     domains
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SparseFixture {
     pub size: usize,
     pub writes: Vec<FixtureWrite>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FixtureWrite {
     pub offset: usize,
     pub hex: String,
@@ -811,6 +811,7 @@ mod tests {
         let fixture = SparseFixture::from_bytes(&original);
         let json = serde_json::to_string_pretty(&fixture)?;
         let parsed: SparseFixture = serde_json::from_str(&json)?;
+        assert_eq!(parsed, fixture);
         let materialized = parsed.materialize().expect("materialize");
         assert_eq!(materialized, original);
         Ok(())
@@ -825,6 +826,7 @@ mod tests {
         assert_eq!(json, REPRESENTATIVE_SPARSE_FIXTURE_JSON_GOLDEN);
 
         let parsed: SparseFixture = serde_json::from_str(&json)?;
+        assert_eq!(parsed, fixture);
         let materialized = parsed.materialize().expect("materialize");
         assert_eq!(materialized, original);
         Ok(())
