@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 43 |
+| Total rows | 48 |
 | Required rows | 6 |
-| Advisory-only rows | 35 |
+| Advisory-only rows | 40 |
 | Permissioned-only rows | 1 |
-| Covered rows | 42 |
+| Covered rows | 47 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -31,11 +31,15 @@ None.
 |---|---|---|---|---|
 | `adaptive_runtime_evidence_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `adaptive_runtime_runner_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `adversarial_threat_model_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `ambition_evidence_matrix_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `authoritative_lane_decision` | `Required` | `Covered` | none | none |
 | `btrfs_multidev_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `btrfs_send_receive_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `casefold_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `cross_oracle_arbitration_validation_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `fault_injection_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `invariant_oracle_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `low_privilege_demo_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `metamorphic_workload_seed_catalog_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_repair_mutation_boundary_report` | `AdvisoryOnly` | `Covered` | none | none |
@@ -47,6 +51,7 @@ None.
 | `operational_readiness_report` | `Required` | `Covered` | none | none |
 | `permissioned_campaign_reports` | `PermissionedOnly` | `Covered` | none | none |
 | `proof_bundle_validation_report` | `Required` | `Covered` | none | none |
+| `proof_overhead_budget_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `readiness_action_autopilot_source_reports` | `AdvisoryOnly` | `Covered` | none | none |
 | `readiness_action_dry_run_metadata` | `Excluded` | `Excluded` | none | none |
 | `readiness_action_dry_run_report` | `AdvisoryOnly` | `Covered` | none | none |

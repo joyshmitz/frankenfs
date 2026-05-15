@@ -176,6 +176,7 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
     rows.extend(open_ended_inventory_advisory_report_rows());
     rows.extend(mounted_writeback_advisory_report_rows());
     rows.extend(adaptive_swarm_advisory_report_rows());
+    rows.extend(proof_risk_advisory_report_rows());
     rows.extend(corpus_and_workload_advisory_report_rows());
     rows.extend([
         covered_advisory_row(
@@ -382,6 +383,56 @@ fn adaptive_swarm_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "large-host swarm tail latency evidence validator",
             "swarm_tail_latency_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__swarm_tail_latency__tests__swarm_tail_latency_report_json_shape.snap",
+        ),
+    ]
+}
+
+fn proof_risk_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
+        covered_advisory_row(
+            "adversarial_threat_model_report",
+            "crates/ffs-harness/src/adversarial_threat_model.rs",
+            "AdversarialThreatModelReport",
+            "validate-adversarial-threat-model",
+            "hostile-image safety threat model validator",
+            "adversarial_threat_model_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__adversarial_threat_model__tests__adversarial_threat_model_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "ambition_evidence_matrix_report",
+            "crates/ffs-harness/src/ambition_evidence_matrix.rs",
+            "AmbitionEvidenceMatrixReport",
+            "validate-ambition-evidence-matrix",
+            "ambition evidence matrix validator",
+            "ambition_evidence_matrix_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__ambition_evidence_matrix__tests__ambition_evidence_matrix_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "cross_oracle_arbitration_validation_report",
+            "crates/ffs-harness/src/cross_oracle_arbitration.rs",
+            "CrossOracleArbitrationValidationReport",
+            "validate-cross-oracle-arbitration",
+            "cross-oracle arbitration validation gate",
+            "cross_oracle_arbitration_validation_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__cross_oracle_arbitration__tests__cross_oracle_arbitration_validation_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "invariant_oracle_report",
+            "crates/ffs-harness/src/invariant_oracle.rs",
+            "InvariantOracleReport",
+            "validate-invariant-oracle",
+            "invariant oracle trace validator",
+            "invariant_oracle_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__invariant_oracle__tests__invariant_oracle_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "proof_overhead_budget_report",
+            "crates/ffs-harness/src/proof_overhead_budget.rs",
+            "ProofOverheadBudgetReport",
+            "validate-proof-overhead-budget",
+            "proof overhead budget validator",
+            "proof_overhead_budget_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__proof_overhead_budget__tests__proof_overhead_budget_report_json_shape.snap",
         ),
     ]
 }
@@ -1091,12 +1142,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 43);
+        assert_eq!(report.total_rows, 48);
         assert_eq!(report.required_rows, 6);
-        assert_eq!(report.advisory_only_rows, 35);
+        assert_eq!(report.advisory_only_rows, 40);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 42);
+        assert_eq!(report.covered_rows, 47);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1594,6 +1645,74 @@ mod tests {
                 .iter()
                 .find(|row| row.report_id == report_id)
                 .expect("inventory includes adaptive-runtime/swarm report");
+
+            assert_eq!(row.module_path, module_path);
+            assert_eq!(row.rust_type, rust_type);
+            assert_eq!(row.producer, producer);
+            assert_eq!(
+                row.coverage_requirement,
+                ReportSchemaCoverageRequirement::AdvisoryOnly
+            );
+            assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+            assert_eq!(row.evidence_test, evidence_test);
+            assert!(row.snapshot_path.ends_with(snapshot_suffix));
+            assert_eq!(
+                row.claim_effect,
+                ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_tracks_proof_and_risk_reports() {
+        let inventory = current_report_schema_inventory();
+        for (report_id, module_path, rust_type, producer, evidence_test, snapshot_suffix) in [
+            (
+                "adversarial_threat_model_report",
+                "crates/ffs-harness/src/adversarial_threat_model.rs",
+                "AdversarialThreatModelReport",
+                "validate-adversarial-threat-model",
+                "adversarial_threat_model_report_json_shape",
+                "ffs_harness__adversarial_threat_model__tests__adversarial_threat_model_report_json_shape.snap",
+            ),
+            (
+                "ambition_evidence_matrix_report",
+                "crates/ffs-harness/src/ambition_evidence_matrix.rs",
+                "AmbitionEvidenceMatrixReport",
+                "validate-ambition-evidence-matrix",
+                "ambition_evidence_matrix_report_json_shape",
+                "ffs_harness__ambition_evidence_matrix__tests__ambition_evidence_matrix_report_json_shape.snap",
+            ),
+            (
+                "cross_oracle_arbitration_validation_report",
+                "crates/ffs-harness/src/cross_oracle_arbitration.rs",
+                "CrossOracleArbitrationValidationReport",
+                "validate-cross-oracle-arbitration",
+                "cross_oracle_arbitration_validation_report_json_shape",
+                "ffs_harness__cross_oracle_arbitration__tests__cross_oracle_arbitration_validation_report_json_shape.snap",
+            ),
+            (
+                "invariant_oracle_report",
+                "crates/ffs-harness/src/invariant_oracle.rs",
+                "InvariantOracleReport",
+                "validate-invariant-oracle",
+                "invariant_oracle_report_json_shape",
+                "ffs_harness__invariant_oracle__tests__invariant_oracle_report_json_shape.snap",
+            ),
+            (
+                "proof_overhead_budget_report",
+                "crates/ffs-harness/src/proof_overhead_budget.rs",
+                "ProofOverheadBudgetReport",
+                "validate-proof-overhead-budget",
+                "proof_overhead_budget_report_json_shape",
+                "ffs_harness__proof_overhead_budget__tests__proof_overhead_budget_report_json_shape.snap",
+            ),
+        ] {
+            let row = inventory
+                .rows
+                .iter()
+                .find(|row| row.report_id == report_id)
+                .expect("inventory includes proof/risk report");
 
             assert_eq!(row.module_path, module_path);
             assert_eq!(row.rust_type, rust_type);
