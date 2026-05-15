@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 73 |
+| Total rows | 74 |
 | Required rows | 7 |
-| Advisory-only rows | 64 |
+| Advisory-only rows | 65 |
 | Permissioned-only rows | 1 |
-| Covered rows | 72 |
+| Covered rows | 73 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -66,6 +66,7 @@ None.
 | `open_ended_note_scan_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `operational_readiness_report` | `Required` | `Covered` | none | none |
 | `operator_recovery_drill_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `performance_baseline_manifest_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `permissioned_campaign_reports` | `PermissionedOnly` | `Covered` | none | none |
 | `promotion_result` | `AdvisoryOnly` | `Covered` | none | none |
 | `proof_bundle_validation_report` | `Required` | `Covered` | none | none |

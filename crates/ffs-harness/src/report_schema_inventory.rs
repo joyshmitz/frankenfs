@@ -751,6 +751,15 @@ fn corpus_and_workload_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "swarm_workload_harness_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__swarm_workload_harness__tests__swarm_workload_harness_report_json_shape.snap",
         ),
+        covered_advisory_row(
+            "performance_baseline_manifest_report",
+            "crates/ffs-harness/src/performance_baseline_manifest.rs",
+            "PerformanceBaselineManifestReport",
+            "validate-performance-baseline-manifest",
+            "performance baseline manifest and release evidence dry-run gates",
+            "performance_baseline_manifest_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__performance_baseline_manifest__tests__performance_baseline_manifest_report_json_shape.snap",
+        ),
     ]
 }
 
@@ -1484,12 +1493,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 73);
+        assert_eq!(report.total_rows, 74);
         assert_eq!(report.required_rows, 7);
-        assert_eq!(report.advisory_only_rows, 64);
+        assert_eq!(report.advisory_only_rows, 65);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 72);
+        assert_eq!(report.covered_rows, 73);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1500,6 +1509,11 @@ mod tests {
             report
                 .report_ids
                 .contains(&"readiness_action_dry_run_report".to_owned())
+        );
+        assert!(
+            report
+                .report_ids
+                .contains(&"performance_baseline_manifest_report".to_owned())
         );
         assert_eq!(report.row_results.len(), report.total_rows);
         assert_eq!(
@@ -2134,6 +2148,39 @@ mod tests {
                 ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
             );
         }
+    }
+
+    #[test]
+    fn inventory_tracks_performance_baseline_manifest_report() {
+        let inventory = current_report_schema_inventory();
+        let row = inventory
+            .rows
+            .iter()
+            .find(|row| row.report_id == "performance_baseline_manifest_report")
+            .expect("inventory includes performance baseline manifest report");
+
+        assert_eq!(
+            row.module_path,
+            "crates/ffs-harness/src/performance_baseline_manifest.rs"
+        );
+        assert_eq!(row.rust_type, "PerformanceBaselineManifestReport");
+        assert_eq!(row.producer, "validate-performance-baseline-manifest");
+        assert_eq!(
+            row.coverage_requirement,
+            ReportSchemaCoverageRequirement::AdvisoryOnly
+        );
+        assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+        assert_eq!(
+            row.evidence_test,
+            "performance_baseline_manifest_report_json_shape"
+        );
+        assert!(row.snapshot_path.ends_with(
+            "ffs_harness__performance_baseline_manifest__tests__performance_baseline_manifest_report_json_shape.snap"
+        ));
+        assert_eq!(
+            row.claim_effect,
+            ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+        );
     }
 
     #[test]
