@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 78 |
+| Total rows | 79 |
 | Required rows | 7 |
-| Advisory-only rows | 69 |
+| Advisory-only rows | 70 |
 | Permissioned-only rows | 1 |
-| Covered rows | 77 |
+| Covered rows | 78 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -107,3 +107,4 @@ None.
 | `writeback_cache_audit_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `writeback_crash_replay_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `writeback_ordering_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `xfstests_failure_triage_report` | `AdvisoryOnly` | `Covered` | none | none |

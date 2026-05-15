@@ -594,6 +594,15 @@ fn governance_durability_advisory_report_rows() -> Vec<ReportSchemaInventoryRow>
             "crates/ffs-harness/src/snapshots/ffs_harness__docs_status_drift__tests__docs_status_drift_report_json_shape.snap",
         ),
         covered_advisory_row(
+            "xfstests_failure_triage_report",
+            "crates/ffs-harness/src/xfstests.rs",
+            "XfstestsFailureTriageReport",
+            "xfstests-failure-triage",
+            "xfstests product-failure triage and follow-up bead extraction",
+            "xfstests_failure_triage_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__xfstests__tests__xfstests_failure_triage_report_json_shape.snap",
+        ),
+        covered_advisory_row(
             "inventory_closeout_gate_report",
             "crates/ffs-harness/src/inventory_closeout_gate.rs",
             "InventoryCloseoutReport",
@@ -1539,12 +1548,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 78);
+        assert_eq!(report.total_rows, 79);
         assert_eq!(report.required_rows, 7);
-        assert_eq!(report.advisory_only_rows, 69);
+        assert_eq!(report.advisory_only_rows, 70);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 77);
+        assert_eq!(report.covered_rows, 78);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1576,6 +1585,11 @@ mod tests {
             report
                 .report_ids
                 .contains(&"soak_canary_campaign_report".to_owned())
+        );
+        assert!(
+            report
+                .report_ids
+                .contains(&"xfstests_failure_triage_report".to_owned())
         );
         assert_eq!(report.row_results.len(), report.total_rows);
         assert_eq!(
@@ -2333,6 +2347,40 @@ mod tests {
             row.snapshot_path
                 .ends_with("ffs_harness__fuzz_smoke__tests__fuzz_smoke_report_json_shape.snap")
         );
+        assert_eq!(
+            row.claim_effect,
+            ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+        );
+    }
+
+    #[test]
+    fn inventory_tracks_xfstests_failure_triage_report() {
+        let inventory = current_report_schema_inventory();
+        let row = inventory
+            .rows
+            .iter()
+            .find(|row| row.report_id == "xfstests_failure_triage_report")
+            .expect("inventory includes xfstests failure triage report");
+
+        assert_eq!(row.module_path, "crates/ffs-harness/src/xfstests.rs");
+        assert_eq!(row.rust_type, "XfstestsFailureTriageReport");
+        assert_eq!(row.producer, "xfstests-failure-triage");
+        assert_eq!(
+            row.downstream_consumer,
+            "xfstests product-failure triage and follow-up bead extraction"
+        );
+        assert_eq!(
+            row.coverage_requirement,
+            ReportSchemaCoverageRequirement::AdvisoryOnly
+        );
+        assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+        assert_eq!(
+            row.evidence_test,
+            "xfstests_failure_triage_report_json_shape"
+        );
+        assert!(row.snapshot_path.ends_with(
+            "ffs_harness__xfstests__tests__xfstests_failure_triage_report_json_shape.snap"
+        ));
         assert_eq!(
             row.claim_effect,
             ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
