@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 81 |
-| Required rows | 7 |
-| Advisory-only rows | 72 |
+| Total rows | 85 |
+| Required rows | 8 |
+| Advisory-only rows | 75 |
 | Permissioned-only rows | 1 |
-| Covered rows | 80 |
+| Covered rows | 84 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -43,6 +43,7 @@ None.
 | `casefold_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `chaos_replay_lab_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `consistency_verdict` | `AdvisoryOnly` | `Covered` | none | none |
+| `crash_replay_artifact_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `crash_replay_suite_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `cross_oracle_arbitration_validation_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `deferred_parity_audit_report` | `AdvisoryOnly` | `Covered` | none | none |
@@ -63,12 +64,14 @@ None.
 | `mounted_recovery_matrix_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_repair_mutation_boundary_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_repair_policy_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `mounted_write_errno_budget_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_write_error_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_write_matrix_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `open_ended_inventory_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `open_ended_note_scan_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `operational_readiness_report` | `Required` | `Covered` | none | none |
 | `operator_recovery_drill_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `parity_report` | `Required` | `Covered` | none | none |
 | `performance_baseline_manifest_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `performance_delta_closeout_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `permissioned_campaign_reports` | `PermissionedOnly` | `Covered` | none | none |
@@ -78,6 +81,7 @@ None.
 | `readiness_action_autopilot_source_reports` | `AdvisoryOnly` | `Covered` | none | none |
 | `readiness_action_dry_run_metadata` | `Excluded` | `Excluded` | none | none |
 | `readiness_action_dry_run_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `readiness_action_fixture_validation_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `readiness_dashboard_report` | `Required` | `Covered` | none | none |
 | `readiness_lab_host_simulation_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `readiness_lab_numa_p99_replay_report` | `AdvisoryOnly` | `Covered` | none | none |

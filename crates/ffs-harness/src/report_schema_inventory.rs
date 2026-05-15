@@ -120,6 +120,7 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
     let mut rows = readiness_foundation_advisory_report_rows();
     rows.extend(open_ended_inventory_advisory_report_rows());
     rows.extend(mounted_writeback_advisory_report_rows());
+    rows.extend(mounted_write_errno_advisory_report_rows());
     rows.extend(mounted_oracle_recovery_advisory_report_rows());
     rows.extend(adaptive_swarm_advisory_report_rows());
     rows.extend(proof_risk_advisory_report_rows());
@@ -225,6 +226,15 @@ fn readiness_foundation_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> 
             "swarm operator report CLI validation and E2E proof handoff",
             "swarm_operator_validation_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__swarm_operator_report__tests__swarm_operator_validation_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "readiness_action_fixture_validation_report",
+            "crates/ffs-harness/src/readiness_action_autopilot.rs",
+            "ReadinessActionFixtureValidationReport",
+            "validate_readiness_action_fixture_set",
+            "readiness-action planner fixture validation and dry-run recommendation coverage",
+            "readiness_action_fixture_validation_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_fixture_validation_report_json_shape.snap",
         ),
     ]
 }
@@ -363,6 +373,18 @@ fn mounted_writeback_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__writeback_cache_audit__tests__writeback_crash_replay_report_json_shape.snap",
         ),
     ]
+}
+
+fn mounted_write_errno_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![covered_advisory_row(
+        "mounted_write_errno_budget_report",
+        "crates/ffs-harness/src/mounted_write_errno_budget.rs",
+        "MountedWriteErrnoBudgetReport",
+        "validate_default_mounted_write_errno_budget",
+        "mounted write errno parity budget and broad-fallback follow-up gating",
+        "default_budget_report_json_shape",
+        "crates/ffs-harness/src/snapshots/ffs_harness__mounted_write_errno_budget__tests__default_budget_report_json_shape.snap",
+    )]
 }
 
 fn mounted_oracle_recovery_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
@@ -799,6 +821,15 @@ fn corpus_and_workload_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
 fn e2e_repro_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
     vec![
         covered_advisory_row(
+            "crash_replay_artifact_report",
+            "crates/ffs-harness/src/crash_replay_artifact.rs",
+            "CrashReplayArtifactReport",
+            "validate_default_crash_replay_artifact",
+            "crash replay artifact survivor-set verification and fail-closed proof handoff",
+            "crash_replay_artifact_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__crash_replay_artifact__tests__crash_replay_artifact_report_json_shape.snap",
+        ),
+        covered_advisory_row(
             "crash_replay_suite_report",
             "crates/ffs-harness/src/e2e.rs",
             "CrashReplaySuiteReport",
@@ -844,6 +875,16 @@ fn performance_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
 
 fn required_report_rows() -> Vec<ReportSchemaInventoryRow> {
     vec![
+        covered_required_row(
+            "parity_report",
+            "crates/ffs-harness/src/lib.rs",
+            "ParityReport",
+            "parity",
+            "FEATURE_PARITY quantitative CLI output and tracked V1 parity claims",
+            "parity_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__tests__parity_report_json_shape.snap",
+            ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange,
+        ),
         covered_required_row(
             "swarm_operator_report",
             "crates/ffs-harness/src/swarm_operator_report.rs",
@@ -1505,6 +1546,14 @@ mod tests {
             snapshot_suffix: "ffs_harness__mounted_write_error_classes__tests__mounted_write_error_report_json_shape.snap",
         },
         ReportInventoryExpectation {
+            report_id: "mounted_write_errno_budget_report",
+            module_path: "crates/ffs-harness/src/mounted_write_errno_budget.rs",
+            rust_type: "MountedWriteErrnoBudgetReport",
+            producer: "validate_default_mounted_write_errno_budget",
+            evidence_test: "default_budget_report_json_shape",
+            snapshot_suffix: "ffs_harness__mounted_write_errno_budget__tests__default_budget_report_json_shape.snap",
+        },
+        ReportInventoryExpectation {
             report_id: "repair_writeback_serialization_report",
             module_path: "crates/ffs-harness/src/repair_writeback_serialization.rs",
             rust_type: "RepairWritebackSerializationReport",
@@ -1572,12 +1621,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 81);
-        assert_eq!(report.required_rows, 7);
-        assert_eq!(report.advisory_only_rows, 72);
+        assert_eq!(report.total_rows, 85);
+        assert_eq!(report.required_rows, 8);
+        assert_eq!(report.advisory_only_rows, 75);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 80);
+        assert_eq!(report.covered_rows, 84);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1614,6 +1663,22 @@ mod tests {
             report
                 .report_ids
                 .contains(&"xfstests_failure_triage_report".to_owned())
+        );
+        assert!(report.report_ids.contains(&"parity_report".to_owned()));
+        assert!(
+            report
+                .report_ids
+                .contains(&"crash_replay_artifact_report".to_owned())
+        );
+        assert!(
+            report
+                .report_ids
+                .contains(&"mounted_write_errno_budget_report".to_owned())
+        );
+        assert!(
+            report
+                .report_ids
+                .contains(&"readiness_action_fixture_validation_report".to_owned())
         );
         assert!(
             report
@@ -1760,8 +1825,8 @@ mod tests {
         let row = inventory
             .rows
             .iter_mut()
-            .find(|row| row.coverage_requirement == ReportSchemaCoverageRequirement::Required)
-            .expect("fixture includes a required row");
+            .find(|row| row.report_id == "swarm_operator_report")
+            .expect("fixture includes swarm operator report");
         row.coverage_status = ReportSchemaCoverageStatus::Missing;
         row.evidence_test.clear();
         row.snapshot_path.clear();
@@ -1850,6 +1915,71 @@ mod tests {
         assert_eq!(row.evidence_test, "readiness_action_dry_run_json_report");
         assert!(row.snapshot_path.ends_with(
             "ffs_harness__readiness_action_autopilot__tests__readiness_action_dry_run_json_report.snap"
+        ));
+        assert_eq!(
+            row.claim_effect,
+            ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+        );
+    }
+
+    #[test]
+    fn inventory_tracks_public_parity_report() {
+        let inventory = current_report_schema_inventory();
+        let row = inventory
+            .rows
+            .iter()
+            .find(|row| row.report_id == "parity_report")
+            .expect("inventory includes public parity report");
+
+        assert_eq!(row.module_path, "crates/ffs-harness/src/lib.rs");
+        assert_eq!(row.rust_type, "ParityReport");
+        assert_eq!(row.producer, "parity");
+        assert_eq!(
+            row.downstream_consumer,
+            "FEATURE_PARITY quantitative CLI output and tracked V1 parity claims"
+        );
+        assert_eq!(
+            row.coverage_requirement,
+            ReportSchemaCoverageRequirement::Required
+        );
+        assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+        assert_eq!(row.evidence_test, "parity_report_json_shape");
+        assert!(
+            row.snapshot_path
+                .ends_with("ffs_harness__tests__parity_report_json_shape.snap")
+        );
+        assert_eq!(
+            row.claim_effect,
+            ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+        );
+    }
+
+    #[test]
+    fn inventory_tracks_readiness_action_fixture_validation_report() {
+        let inventory = current_report_schema_inventory();
+        let row = inventory
+            .rows
+            .iter()
+            .find(|row| row.report_id == "readiness_action_fixture_validation_report")
+            .expect("inventory includes readiness action fixture validation report");
+
+        assert_eq!(
+            row.module_path,
+            "crates/ffs-harness/src/readiness_action_autopilot.rs"
+        );
+        assert_eq!(row.rust_type, "ReadinessActionFixtureValidationReport");
+        assert_eq!(row.producer, "validate_readiness_action_fixture_set");
+        assert_eq!(
+            row.coverage_requirement,
+            ReportSchemaCoverageRequirement::AdvisoryOnly
+        );
+        assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+        assert_eq!(
+            row.evidence_test,
+            "readiness_action_fixture_validation_report_json_shape"
+        );
+        assert!(row.snapshot_path.ends_with(
+            "ffs_harness__readiness_action_autopilot__tests__readiness_action_fixture_validation_report_json_shape.snap"
         ));
         assert_eq!(
             row.claim_effect,
@@ -2460,6 +2590,40 @@ mod tests {
                 ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
             );
         }
+    }
+
+    #[test]
+    fn inventory_tracks_crash_replay_artifact_report() {
+        let inventory = current_report_schema_inventory();
+        let row = inventory
+            .rows
+            .iter()
+            .find(|row| row.report_id == "crash_replay_artifact_report")
+            .expect("inventory includes crash replay artifact report");
+
+        assert_eq!(
+            row.module_path,
+            "crates/ffs-harness/src/crash_replay_artifact.rs"
+        );
+        assert_eq!(row.rust_type, "CrashReplayArtifactReport");
+        assert_eq!(row.producer, "validate_default_crash_replay_artifact");
+        assert_eq!(
+            row.downstream_consumer,
+            "crash replay artifact survivor-set verification and fail-closed proof handoff"
+        );
+        assert_eq!(
+            row.coverage_requirement,
+            ReportSchemaCoverageRequirement::AdvisoryOnly
+        );
+        assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+        assert_eq!(row.evidence_test, "crash_replay_artifact_report_json_shape");
+        assert!(row.snapshot_path.ends_with(
+            "ffs_harness__crash_replay_artifact__tests__crash_replay_artifact_report_json_shape.snap"
+        ));
+        assert_eq!(
+            row.claim_effect,
+            ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+        );
     }
 
     #[test]
