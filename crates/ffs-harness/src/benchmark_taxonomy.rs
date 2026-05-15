@@ -332,7 +332,7 @@ pub struct SerializableEnvelope {
 }
 
 /// The complete benchmark taxonomy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Taxonomy {
     /// Taxonomy schema version.
     pub version: u32,
@@ -1308,9 +1308,7 @@ mod tests {
         let taxonomy = Taxonomy::canonical();
         let json = serde_json::to_string_pretty(&taxonomy)?;
         let parsed: Taxonomy = serde_json::from_str(&json)?;
-        assert_eq!(parsed.version, taxonomy.version);
-        assert_eq!(parsed.operations.len(), taxonomy.operations.len());
-        assert_eq!(parsed.host_profiles.len(), taxonomy.host_profiles.len());
+        assert_eq!(parsed, taxonomy);
         Ok(())
     }
 
