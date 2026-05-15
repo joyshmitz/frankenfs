@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 48 |
+| Total rows | 54 |
 | Required rows | 6 |
-| Advisory-only rows | 40 |
+| Advisory-only rows | 46 |
 | Permissioned-only rows | 1 |
-| Covered rows | 47 |
+| Covered rows | 53 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -49,6 +49,7 @@ None.
 | `open_ended_inventory_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `open_ended_note_scan_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `operational_readiness_report` | `Required` | `Covered` | none | none |
+| `operator_recovery_drill_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `permissioned_campaign_reports` | `PermissionedOnly` | `Covered` | none | none |
 | `proof_bundle_validation_report` | `Required` | `Covered` | none | none |
 | `proof_overhead_budget_report` | `AdvisoryOnly` | `Covered` | none | none |
@@ -62,10 +63,15 @@ None.
 | `readiness_lab_truth_graph_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `readiness_lab_validation_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `release_gate_evaluation_report` | `Required` | `Covered` | none | none |
+| `remediation_catalog_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `remediation_severity_gate_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `repair_confidence_lab_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `repair_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `repair_writeback_serialization_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `scrub_repair_scheduler_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `source_scope_manifest_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `source_scope_scan_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `support_state_accounting_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `swarm_cache_controller_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `swarm_operator_report` | `Required` | `Covered` | none | none |
 | `swarm_tail_latency_report` | `AdvisoryOnly` | `Covered` | none | none |

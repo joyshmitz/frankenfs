@@ -177,6 +177,7 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
     rows.extend(mounted_writeback_advisory_report_rows());
     rows.extend(adaptive_swarm_advisory_report_rows());
     rows.extend(proof_risk_advisory_report_rows());
+    rows.extend(recovery_remediation_advisory_report_rows());
     rows.extend(corpus_and_workload_advisory_report_rows());
     rows.extend([
         covered_advisory_row(
@@ -433,6 +434,65 @@ fn proof_risk_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "proof overhead budget validator",
             "proof_overhead_budget_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__proof_overhead_budget__tests__proof_overhead_budget_report_json_shape.snap",
+        ),
+    ]
+}
+
+fn recovery_remediation_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
+        covered_advisory_row(
+            "operator_recovery_drill_report",
+            "crates/ffs-harness/src/operator_recovery_drill.rs",
+            "OperatorRecoveryDrillReport",
+            "validate-operator-recovery-drill",
+            "operator recovery drill validator",
+            "operator_recovery_drill_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__operator_recovery_drill__tests__operator_recovery_drill_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "remediation_catalog_report",
+            "crates/ffs-harness/src/remediation_catalog.rs",
+            "RemediationCatalogReport",
+            "validate-remediation-catalog",
+            "remediation catalog validator",
+            "remediation_catalog_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__remediation_catalog__tests__remediation_catalog_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "remediation_severity_gate_report",
+            "crates/ffs-harness/src/remediation_severity_gate.rs",
+            "RemediationSeverityGateReport",
+            "validate-remediation-severity-gate",
+            "remediation severity gate validator",
+            "remediation_severity_gate_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__remediation_severity_gate__tests__remediation_severity_gate_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "repair_confidence_lab_report",
+            "crates/ffs-harness/src/repair_confidence_lab.rs",
+            "RepairConfidenceLabReport",
+            "validate-repair-confidence-lab",
+            "repair confidence lab validator",
+            "repair_confidence_lab_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__repair_confidence_lab__tests__repair_confidence_lab_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "scrub_repair_scheduler_report",
+            "crates/ffs-harness/src/scrub_repair_scheduler.rs",
+            "ScrubRepairSchedulerReport",
+            "validate-scrub-repair-scheduler",
+            "scrub repair scheduler manifest validator",
+            "scrub_repair_scheduler_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__scrub_repair_scheduler__tests__scrub_repair_scheduler_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "support_state_accounting_report",
+            "crates/ffs-harness/src/support_state_accounting.rs",
+            "SupportStateAccountingReport",
+            "validate-support-state-accounting",
+            "support-state accounting validator",
+            "support_state_accounting_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__support_state_accounting__tests__support_state_accounting_report_json_shape.snap",
         ),
     ]
 }
@@ -1142,12 +1202,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 48);
+        assert_eq!(report.total_rows, 54);
         assert_eq!(report.required_rows, 6);
-        assert_eq!(report.advisory_only_rows, 40);
+        assert_eq!(report.advisory_only_rows, 46);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 47);
+        assert_eq!(report.covered_rows, 53);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1713,6 +1773,82 @@ mod tests {
                 .iter()
                 .find(|row| row.report_id == report_id)
                 .expect("inventory includes proof/risk report");
+
+            assert_eq!(row.module_path, module_path);
+            assert_eq!(row.rust_type, rust_type);
+            assert_eq!(row.producer, producer);
+            assert_eq!(
+                row.coverage_requirement,
+                ReportSchemaCoverageRequirement::AdvisoryOnly
+            );
+            assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+            assert_eq!(row.evidence_test, evidence_test);
+            assert!(row.snapshot_path.ends_with(snapshot_suffix));
+            assert_eq!(
+                row.claim_effect,
+                ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_tracks_recovery_and_remediation_reports() {
+        let inventory = current_report_schema_inventory();
+        for (report_id, module_path, rust_type, producer, evidence_test, snapshot_suffix) in [
+            (
+                "operator_recovery_drill_report",
+                "crates/ffs-harness/src/operator_recovery_drill.rs",
+                "OperatorRecoveryDrillReport",
+                "validate-operator-recovery-drill",
+                "operator_recovery_drill_report_json_shape",
+                "ffs_harness__operator_recovery_drill__tests__operator_recovery_drill_report_json_shape.snap",
+            ),
+            (
+                "remediation_catalog_report",
+                "crates/ffs-harness/src/remediation_catalog.rs",
+                "RemediationCatalogReport",
+                "validate-remediation-catalog",
+                "remediation_catalog_report_json_shape",
+                "ffs_harness__remediation_catalog__tests__remediation_catalog_report_json_shape.snap",
+            ),
+            (
+                "remediation_severity_gate_report",
+                "crates/ffs-harness/src/remediation_severity_gate.rs",
+                "RemediationSeverityGateReport",
+                "validate-remediation-severity-gate",
+                "remediation_severity_gate_report_json_shape",
+                "ffs_harness__remediation_severity_gate__tests__remediation_severity_gate_report_json_shape.snap",
+            ),
+            (
+                "repair_confidence_lab_report",
+                "crates/ffs-harness/src/repair_confidence_lab.rs",
+                "RepairConfidenceLabReport",
+                "validate-repair-confidence-lab",
+                "repair_confidence_lab_report_json_shape",
+                "ffs_harness__repair_confidence_lab__tests__repair_confidence_lab_report_json_shape.snap",
+            ),
+            (
+                "scrub_repair_scheduler_report",
+                "crates/ffs-harness/src/scrub_repair_scheduler.rs",
+                "ScrubRepairSchedulerReport",
+                "validate-scrub-repair-scheduler",
+                "scrub_repair_scheduler_report_json_shape",
+                "ffs_harness__scrub_repair_scheduler__tests__scrub_repair_scheduler_report_json_shape.snap",
+            ),
+            (
+                "support_state_accounting_report",
+                "crates/ffs-harness/src/support_state_accounting.rs",
+                "SupportStateAccountingReport",
+                "validate-support-state-accounting",
+                "support_state_accounting_report_json_shape",
+                "ffs_harness__support_state_accounting__tests__support_state_accounting_report_json_shape.snap",
+            ),
+        ] {
+            let row = inventory
+                .rows
+                .iter()
+                .find(|row| row.report_id == report_id)
+                .expect("inventory includes recovery/remediation report");
 
             assert_eq!(row.module_path, module_path);
             assert_eq!(row.rust_type, rust_type);
