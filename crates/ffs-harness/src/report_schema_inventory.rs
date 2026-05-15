@@ -355,6 +355,7 @@ fn mounted_writeback_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "repair_writeback_serialization_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__repair_writeback_serialization__tests__repair_writeback_serialization_report_json_shape.snap",
         ),
+        rw_background_repair_gate_report_row(),
         covered_advisory_row(
             "writeback_cache_audit_report",
             "crates/ffs-harness/src/writeback_cache_audit.rs",
@@ -383,6 +384,18 @@ fn mounted_writeback_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__writeback_cache_audit__tests__writeback_crash_replay_report_json_shape.snap",
         ),
     ]
+}
+
+fn rw_background_repair_gate_report_row() -> ReportSchemaInventoryRow {
+    covered_advisory_row(
+        "rw_background_repair_gate",
+        "crates/ffs-harness/src/rw_background_repair_gate.rs",
+        "RwBackgroundRepairGate",
+        "evaluate_rw_background_repair_gate",
+        "rw background-repair opt-in gate and fail-closed operator workflow",
+        "happy_gate_json_shape",
+        "crates/ffs-harness/src/snapshots/ffs_harness__rw_background_repair_gate__tests__happy_gate_json_shape.snap",
+    )
 }
 
 fn rch_proof_ledger_report_row() -> ReportSchemaInventoryRow {
@@ -1711,6 +1724,14 @@ mod tests {
             snapshot_suffix: "ffs_harness__repair_writeback_serialization__tests__repair_writeback_serialization_report_json_shape.snap",
         },
         ReportInventoryExpectation {
+            report_id: "rw_background_repair_gate",
+            module_path: "crates/ffs-harness/src/rw_background_repair_gate.rs",
+            rust_type: "RwBackgroundRepairGate",
+            producer: "evaluate_rw_background_repair_gate",
+            evidence_test: "happy_gate_json_shape",
+            snapshot_suffix: "ffs_harness__rw_background_repair_gate__tests__happy_gate_json_shape.snap",
+        },
+        ReportInventoryExpectation {
             report_id: "writeback_cache_audit_report",
             module_path: "crates/ffs-harness/src/writeback_cache_audit.rs",
             rust_type: "WritebackCacheAuditReport",
@@ -1770,12 +1791,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 98);
+        assert_eq!(report.total_rows, 99);
         assert_eq!(report.required_rows, 8);
-        assert_eq!(report.advisory_only_rows, 88);
+        assert_eq!(report.advisory_only_rows, 89);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 97);
+        assert_eq!(report.covered_rows, 98);
         assert_eq!(report.missing_rows, 0);
         for report_id in [
             "swarm_operator_report",
@@ -1785,6 +1806,7 @@ mod tests {
             "perf_comparison_context",
             "perf_regression_baseline",
             "perf_triage_decision",
+            "rw_background_repair_gate",
             "fuzz_dashboard_campaign_summary",
             "fuzz_dashboard_regression_alert",
             "tabletop_drill_canonical_drills",

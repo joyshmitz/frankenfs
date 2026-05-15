@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 98 |
+| Total rows | 99 |
 | Required rows | 8 |
-| Advisory-only rows | 88 |
+| Advisory-only rows | 89 |
 | Permissioned-only rows | 1 |
-| Covered rows | 97 |
+| Covered rows | 98 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -104,6 +104,7 @@ None.
 | `repair_confidence_lab_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `repair_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `repair_writeback_serialization_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `rw_background_repair_gate` | `AdvisoryOnly` | `Covered` | none | none |
 | `scrub_repair_scheduler_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `soak_canary_campaign_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `source_scope_manifest_report` | `AdvisoryOnly` | `Covered` | none | none |
