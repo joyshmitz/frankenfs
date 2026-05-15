@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 // ── Baseline file format ────────────────────────────────────────────────────
 
 /// Structured performance baseline as emitted by `benchmark_record.sh`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PerfBaseline {
     pub generated_at: String,
     #[serde(default)]
@@ -19,7 +19,7 @@ pub struct PerfBaseline {
 }
 
 /// A single operation measurement within a baseline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BaselineMeasurement {
     pub operation: String,
     #[serde(default)]
@@ -214,6 +214,7 @@ mod tests {
         insta::assert_snapshot!("perf_baseline_json_shape", json);
 
         let parsed = parse_baseline(&json)?;
+        assert_eq!(parsed, baseline);
         assert_eq!(parsed.generated_at, "2026-02-17T00:00:00Z");
         assert_eq!(parsed.commit, "abc123");
         assert_eq!(parsed.measurements.len(), 2);
