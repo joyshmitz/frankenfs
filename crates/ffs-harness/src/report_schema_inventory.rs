@@ -689,6 +689,15 @@ fn corpus_and_workload_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__fault_injection_corpus__tests__fault_injection_corpus_report_json_shape.snap",
         ),
         covered_advisory_row(
+            "fuzz_smoke_report",
+            "crates/ffs-harness/src/fuzz_smoke.rs",
+            "FuzzSmokeReport",
+            "validate-fuzz-smoke",
+            "fuzz target smoke validation and CI dashboard gates",
+            "fuzz_smoke_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__fuzz_smoke__tests__fuzz_smoke_report_json_shape.snap",
+        ),
+        covered_advisory_row(
             "btrfs_send_receive_corpus_report",
             "crates/ffs-harness/src/btrfs_send_receive_corpus.rs",
             "BtrfsSendReceiveCorpusReport",
@@ -1493,12 +1502,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 74);
+        assert_eq!(report.total_rows, 75);
         assert_eq!(report.required_rows, 7);
-        assert_eq!(report.advisory_only_rows, 65);
+        assert_eq!(report.advisory_only_rows, 66);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 73);
+        assert_eq!(report.covered_rows, 74);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1515,6 +1524,7 @@ mod tests {
                 .report_ids
                 .contains(&"performance_baseline_manifest_report".to_owned())
         );
+        assert!(report.report_ids.contains(&"fuzz_smoke_report".to_owned()));
         assert_eq!(report.row_results.len(), report.total_rows);
         assert_eq!(
             report.row_results[0].report_id,
@@ -2177,6 +2187,34 @@ mod tests {
         assert!(row.snapshot_path.ends_with(
             "ffs_harness__performance_baseline_manifest__tests__performance_baseline_manifest_report_json_shape.snap"
         ));
+        assert_eq!(
+            row.claim_effect,
+            ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+        );
+    }
+
+    #[test]
+    fn inventory_tracks_fuzz_smoke_report() {
+        let inventory = current_report_schema_inventory();
+        let row = inventory
+            .rows
+            .iter()
+            .find(|row| row.report_id == "fuzz_smoke_report")
+            .expect("inventory includes fuzz smoke report");
+
+        assert_eq!(row.module_path, "crates/ffs-harness/src/fuzz_smoke.rs");
+        assert_eq!(row.rust_type, "FuzzSmokeReport");
+        assert_eq!(row.producer, "validate-fuzz-smoke");
+        assert_eq!(
+            row.coverage_requirement,
+            ReportSchemaCoverageRequirement::AdvisoryOnly
+        );
+        assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+        assert_eq!(row.evidence_test, "fuzz_smoke_report_json_shape");
+        assert!(
+            row.snapshot_path
+                .ends_with("ffs_harness__fuzz_smoke__tests__fuzz_smoke_report_json_shape.snap")
+        );
         assert_eq!(
             row.claim_effect,
             ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange

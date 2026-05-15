@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 74 |
+| Total rows | 75 |
 | Required rows | 7 |
-| Advisory-only rows | 65 |
+| Advisory-only rows | 66 |
 | Permissioned-only rows | 1 |
-| Covered rows | 73 |
+| Covered rows | 74 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -48,6 +48,7 @@ None.
 | `docs_status_drift_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `fault_injection_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `fuse_capability_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `fuzz_smoke_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `invariant_oracle_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `inventory_closeout_gate_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `low_privilege_demo_report` | `AdvisoryOnly` | `Covered` | none | none |
