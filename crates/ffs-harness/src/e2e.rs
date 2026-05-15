@@ -885,7 +885,7 @@ pub struct CrashReplaySurvivorSet {
 }
 
 /// Result for one crash point replay.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CrashReplayCaseResult {
     pub lane_type: CrashReplayLane,
     pub crash_point: CrashPoint,
@@ -903,7 +903,7 @@ pub struct CrashReplayCaseResult {
 }
 
 /// Result for one generated schedule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CrashReplayScheduleResult {
     pub schedule_id: u32,
     pub seed: u64,
@@ -941,7 +941,7 @@ impl Default for CrashReplaySuiteConfig {
 }
 
 /// Aggregate result of the crash-replay suite.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CrashReplaySuiteReport {
     pub schedule_count: u32,
     pub passed_schedules: u32,
@@ -1950,7 +1950,7 @@ impl FsxOperation {
 }
 
 /// Failure details for fsx stress runs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FsxFailureReport {
     pub operation_index: u64,
     pub operation: FsxOperation,
@@ -1960,7 +1960,7 @@ pub struct FsxFailureReport {
 }
 
 /// Aggregate result for an fsx stress run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FsxStressReport {
     pub seed: u64,
     pub operation_count: u64,
@@ -3572,10 +3572,7 @@ mod tests {
         let json = serde_json::to_string_pretty(&report)?;
         insta::assert_snapshot!("crash_replay_suite_report_json_shape", json);
         let parsed: CrashReplaySuiteReport = serde_json::from_str(&json)?;
-        assert_eq!(parsed.schedule_count, 1);
-        assert_eq!(parsed.results.len(), 1);
-        assert_eq!(parsed.results[0].case_results.len(), 1);
-        assert!(parsed.results[0].case_results[0].passed);
+        assert_eq!(parsed, report);
         Ok(())
     }
 
@@ -3613,9 +3610,7 @@ mod tests {
         let json = serde_json::to_string_pretty(&report)?;
         insta::assert_snapshot!("fsx_stress_report_json_shape", json);
         let parsed: FsxStressReport = serde_json::from_str(&json)?;
-        assert!(!parsed.passed);
-        assert_eq!(parsed.failure.expect("failure").operation_index, 3);
-        assert_eq!(parsed.operation_mix.get("write"), Some(&2));
+        assert_eq!(parsed, report);
         Ok(())
     }
 
