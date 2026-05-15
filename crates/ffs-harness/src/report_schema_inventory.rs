@@ -821,6 +821,15 @@ fn control_plane_contract_advisory_report_rows() -> Vec<ReportSchemaInventoryRow
             "crates/ffs-harness/src/snapshots/ffs_harness__health_consistency__tests__consistency_verdict_json_shape.snap",
         ),
         covered_advisory_row(
+            "benchmark_taxonomy",
+            "crates/ffs-harness/src/benchmark_taxonomy.rs",
+            "Taxonomy",
+            "canonical benchmark taxonomy",
+            "performance regression taxonomy and benchmark coverage gates",
+            "canonical_taxonomy_json_snapshot",
+            "crates/ffs-harness/src/snapshots/ffs_harness__benchmark_taxonomy__tests__canonical_taxonomy_v1.snap",
+        ),
+        covered_advisory_row(
             "metrics_snapshot",
             "crates/ffs-harness/src/metrics.rs",
             "MetricsSnapshot",
@@ -1818,12 +1827,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 102);
+        assert_eq!(report.total_rows, 103);
         assert_eq!(report.required_rows, 8);
-        assert_eq!(report.advisory_only_rows, 92);
+        assert_eq!(report.advisory_only_rows, 93);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 101);
+        assert_eq!(report.covered_rows, 102);
         assert_eq!(report.missing_rows, 0);
         for report_id in [
             "swarm_operator_report",
@@ -3313,6 +3322,14 @@ mod tests {
                 "health consistency validator",
                 "consistency_verdict_json_shape",
                 "ffs_harness__health_consistency__tests__consistency_verdict_json_shape.snap",
+            ),
+            (
+                "benchmark_taxonomy",
+                "crates/ffs-harness/src/benchmark_taxonomy.rs",
+                "Taxonomy",
+                "canonical benchmark taxonomy",
+                "canonical_taxonomy_json_snapshot",
+                "ffs_harness__benchmark_taxonomy__tests__canonical_taxonomy_v1.snap",
             ),
             (
                 "metrics_snapshot",
