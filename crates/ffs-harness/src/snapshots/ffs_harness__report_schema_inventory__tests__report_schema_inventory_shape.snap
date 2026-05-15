@@ -9,11 +9,11 @@ expression: json
   "reproduction_command": "ffs-harness validate-report-schema-inventory --out artifacts/report-schema-inventory/report.json --summary-out artifacts/report-schema-inventory/report.md",
   "report_valid": true,
   "counts": {
-    "total_rows": 63,
-    "required_rows": 6,
-    "advisory_only_rows": 55,
+    "total_rows": 71,
+    "required_rows": 7,
+    "advisory_only_rows": 62,
     "permissioned_only_rows": 1,
-    "covered_rows": 62,
+    "covered_rows": 70,
     "missing_rows": 0,
     "excluded_rows": 1
   },
@@ -49,7 +49,8 @@ expression: json
     "release_gate_evaluation_report",
     "operational_readiness_report",
     "readiness_dashboard_report",
-    "authoritative_lane_decision"
+    "authoritative_lane_decision",
+    "authoritative_environment_decision"
   ],
   "excluded_report_ids": [
     "readiness_action_dry_run_metadata"

@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 63 |
-| Required rows | 6 |
-| Advisory-only rows | 55 |
+| Total rows | 71 |
+| Required rows | 7 |
+| Advisory-only rows | 62 |
 | Permissioned-only rows | 1 |
-| Covered rows | 62 |
+| Covered rows | 70 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -33,11 +33,16 @@ None.
 | `adaptive_runtime_runner_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `adversarial_threat_model_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `ambition_evidence_matrix_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `artifact_schema_fixture_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `authoritative_environment_decision` | `Required` | `Covered` | none | none |
 | `authoritative_lane_decision` | `Required` | `Covered` | none | none |
+| `btrfs_capability_drift_contract` | `AdvisoryOnly` | `Covered` | none | none |
 | `btrfs_multidev_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `btrfs_send_receive_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `canonical_error_scenarios` | `AdvisoryOnly` | `Covered` | none | none |
 | `casefold_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `chaos_replay_lab_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `consistency_verdict` | `AdvisoryOnly` | `Covered` | none | none |
 | `cross_oracle_arbitration_validation_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `deferred_parity_audit_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `docs_status_drift_report` | `AdvisoryOnly` | `Covered` | none | none |
@@ -47,6 +52,7 @@ None.
 | `low_privilege_demo_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `low_privilege_demo_sandbox_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `metamorphic_workload_seed_catalog_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `metrics_snapshot` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_checkpoint_survivor_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_differential_validation_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_recovery_matrix_report` | `AdvisoryOnly` | `Covered` | none | none |
@@ -59,6 +65,7 @@ None.
 | `operational_readiness_report` | `Required` | `Covered` | none | none |
 | `operator_recovery_drill_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `permissioned_campaign_reports` | `PermissionedOnly` | `Covered` | none | none |
+| `promotion_result` | `AdvisoryOnly` | `Covered` | none | none |
 | `proof_bundle_validation_report` | `Required` | `Covered` | none | none |
 | `proof_overhead_budget_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `readiness_action_autopilot_source_reports` | `AdvisoryOnly` | `Covered` | none | none |
@@ -79,6 +86,7 @@ None.
 | `scrub_repair_scheduler_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `source_scope_manifest_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `source_scope_scan_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `structured_log_contract` | `AdvisoryOnly` | `Covered` | none | none |
 | `support_state_accounting_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `swarm_cache_controller_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `swarm_operator_report` | `Required` | `Covered` | none | none |
