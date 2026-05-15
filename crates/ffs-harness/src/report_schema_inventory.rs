@@ -178,6 +178,7 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
     rows.extend(adaptive_swarm_advisory_report_rows());
     rows.extend(proof_risk_advisory_report_rows());
     rows.extend(recovery_remediation_advisory_report_rows());
+    rows.extend(governance_durability_advisory_report_rows());
     rows.extend(corpus_and_workload_advisory_report_rows());
     rows.extend([
         covered_advisory_row(
@@ -493,6 +494,65 @@ fn recovery_remediation_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> 
             "support-state accounting validator",
             "support_state_accounting_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__support_state_accounting__tests__support_state_accounting_report_json_shape.snap",
+        ),
+    ]
+}
+
+fn governance_durability_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
+        covered_advisory_row(
+            "chaos_replay_lab_report",
+            "crates/ffs-harness/src/chaos_replay_lab.rs",
+            "ChaosReplayLabReport",
+            "validate-chaos-replay-lab",
+            "chaos replay lab validator",
+            "chaos_replay_lab_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__chaos_replay_lab__tests__chaos_replay_lab_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "deferred_parity_audit_report",
+            "crates/ffs-harness/src/deferred_parity_audit.rs",
+            "DeferredParityAuditReport",
+            "validate-deferred-parity-audit",
+            "deferred parity audit validator",
+            "deferred_parity_audit_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__deferred_parity_audit__tests__deferred_parity_audit_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "docs_status_drift_report",
+            "crates/ffs-harness/src/docs_status_drift.rs",
+            "DocsStatusDriftReport",
+            "validate-docs-status-drift",
+            "docs/status drift validator",
+            "docs_status_drift_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__docs_status_drift__tests__docs_status_drift_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "inventory_closeout_gate_report",
+            "crates/ffs-harness/src/inventory_closeout_gate.rs",
+            "InventoryCloseoutReport",
+            "validate-inventory-closeout-gate",
+            "inventory closeout gate validator",
+            "inventory_closeout_gate_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__inventory_closeout_gate__tests__inventory_closeout_gate_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "low_privilege_demo_sandbox_report",
+            "crates/ffs-harness/src/low_privilege_demo_sandbox.rs",
+            "LowPrivilegeDemoSandboxReport",
+            "validate-low-privilege-demo-sandbox",
+            "low-privilege demo sandbox validator",
+            "low_privilege_demo_sandbox_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__low_privilege_demo_sandbox__tests__low_privilege_demo_sandbox_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "wal_group_commit_gate_report",
+            "crates/ffs-harness/src/wal_group_commit_gate.rs",
+            "WalGroupCommitGateReport",
+            "validate-wal-group-commit-gate",
+            "WAL group commit gate validator",
+            "wal_group_commit_gate_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__wal_group_commit_gate__tests__wal_group_commit_gate_report_json_shape.snap",
         ),
     ]
 }
@@ -1202,12 +1262,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 54);
+        assert_eq!(report.total_rows, 60);
         assert_eq!(report.required_rows, 6);
-        assert_eq!(report.advisory_only_rows, 46);
+        assert_eq!(report.advisory_only_rows, 52);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 53);
+        assert_eq!(report.covered_rows, 59);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1849,6 +1909,82 @@ mod tests {
                 .iter()
                 .find(|row| row.report_id == report_id)
                 .expect("inventory includes recovery/remediation report");
+
+            assert_eq!(row.module_path, module_path);
+            assert_eq!(row.rust_type, rust_type);
+            assert_eq!(row.producer, producer);
+            assert_eq!(
+                row.coverage_requirement,
+                ReportSchemaCoverageRequirement::AdvisoryOnly
+            );
+            assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+            assert_eq!(row.evidence_test, evidence_test);
+            assert!(row.snapshot_path.ends_with(snapshot_suffix));
+            assert_eq!(
+                row.claim_effect,
+                ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_tracks_governance_and_durability_reports() {
+        let inventory = current_report_schema_inventory();
+        for (report_id, module_path, rust_type, producer, evidence_test, snapshot_suffix) in [
+            (
+                "chaos_replay_lab_report",
+                "crates/ffs-harness/src/chaos_replay_lab.rs",
+                "ChaosReplayLabReport",
+                "validate-chaos-replay-lab",
+                "chaos_replay_lab_report_json_shape",
+                "ffs_harness__chaos_replay_lab__tests__chaos_replay_lab_report_json_shape.snap",
+            ),
+            (
+                "deferred_parity_audit_report",
+                "crates/ffs-harness/src/deferred_parity_audit.rs",
+                "DeferredParityAuditReport",
+                "validate-deferred-parity-audit",
+                "deferred_parity_audit_report_json_shape",
+                "ffs_harness__deferred_parity_audit__tests__deferred_parity_audit_report_json_shape.snap",
+            ),
+            (
+                "docs_status_drift_report",
+                "crates/ffs-harness/src/docs_status_drift.rs",
+                "DocsStatusDriftReport",
+                "validate-docs-status-drift",
+                "docs_status_drift_report_json_shape",
+                "ffs_harness__docs_status_drift__tests__docs_status_drift_report_json_shape.snap",
+            ),
+            (
+                "inventory_closeout_gate_report",
+                "crates/ffs-harness/src/inventory_closeout_gate.rs",
+                "InventoryCloseoutReport",
+                "validate-inventory-closeout-gate",
+                "inventory_closeout_gate_report_json_shape",
+                "ffs_harness__inventory_closeout_gate__tests__inventory_closeout_gate_report_json_shape.snap",
+            ),
+            (
+                "low_privilege_demo_sandbox_report",
+                "crates/ffs-harness/src/low_privilege_demo_sandbox.rs",
+                "LowPrivilegeDemoSandboxReport",
+                "validate-low-privilege-demo-sandbox",
+                "low_privilege_demo_sandbox_report_json_shape",
+                "ffs_harness__low_privilege_demo_sandbox__tests__low_privilege_demo_sandbox_report_json_shape.snap",
+            ),
+            (
+                "wal_group_commit_gate_report",
+                "crates/ffs-harness/src/wal_group_commit_gate.rs",
+                "WalGroupCommitGateReport",
+                "validate-wal-group-commit-gate",
+                "wal_group_commit_gate_report_json_shape",
+                "ffs_harness__wal_group_commit_gate__tests__wal_group_commit_gate_report_json_shape.snap",
+            ),
+        ] {
+            let row = inventory
+                .rows
+                .iter()
+                .find(|row| row.report_id == report_id)
+                .expect("inventory includes governance/durability report");
 
             assert_eq!(row.module_path, module_path);
             assert_eq!(row.rust_type, rust_type);

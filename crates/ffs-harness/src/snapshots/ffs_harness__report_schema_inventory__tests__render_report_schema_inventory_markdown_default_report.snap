@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 54 |
+| Total rows | 60 |
 | Required rows | 6 |
-| Advisory-only rows | 46 |
+| Advisory-only rows | 52 |
 | Permissioned-only rows | 1 |
-| Covered rows | 53 |
+| Covered rows | 59 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -37,10 +37,15 @@ None.
 | `btrfs_multidev_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `btrfs_send_receive_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `casefold_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `chaos_replay_lab_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `cross_oracle_arbitration_validation_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `deferred_parity_audit_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `docs_status_drift_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `fault_injection_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `invariant_oracle_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `inventory_closeout_gate_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `low_privilege_demo_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `low_privilege_demo_sandbox_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `metamorphic_workload_seed_catalog_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_repair_mutation_boundary_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_repair_policy_report` | `AdvisoryOnly` | `Covered` | none | none |
@@ -79,6 +84,7 @@ None.
 | `topology_runtime_advisor_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `topology_runtime_advisor_scoring_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `tracker_source_hygiene_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `wal_group_commit_gate_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `workload_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `writeback_cache_audit_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `writeback_crash_replay_report` | `AdvisoryOnly` | `Covered` | none | none |
