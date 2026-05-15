@@ -291,6 +291,7 @@ fn open_ended_inventory_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> 
 
 fn mounted_writeback_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
     vec![
+        rch_proof_ledger_report_row(),
         covered_advisory_row(
             "fuse_capability_report",
             "crates/ffs-harness/src/verification_runner.rs",
@@ -382,6 +383,18 @@ fn mounted_writeback_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__writeback_cache_audit__tests__writeback_crash_replay_report_json_shape.snap",
         ),
     ]
+}
+
+fn rch_proof_ledger_report_row() -> ReportSchemaInventoryRow {
+    covered_advisory_row(
+        "rch_proof_ledger_report",
+        "crates/ffs-harness/src/verification_runner.rs",
+        "RchProofLedgerReport",
+        "rch-proof-ledger",
+        "remote RCH proof preservation and readiness action autopilot degraded-proof decisions",
+        "rch_proof_ledger_report_json_shape",
+        "crates/ffs-harness/src/snapshots/ffs_harness__verification_runner__tests__rch_proof_ledger_report_json_shape.snap",
+    )
 }
 
 fn mounted_write_errno_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
@@ -1507,6 +1520,14 @@ mod tests {
 
     const MOUNTED_WRITEBACK_REPORT_EXPECTATIONS: &[ReportInventoryExpectation] = &[
         ReportInventoryExpectation {
+            report_id: "rch_proof_ledger_report",
+            module_path: "crates/ffs-harness/src/verification_runner.rs",
+            rust_type: "RchProofLedgerReport",
+            producer: "rch-proof-ledger",
+            evidence_test: "rch_proof_ledger_report_json_shape",
+            snapshot_suffix: "ffs_harness__verification_runner__tests__rch_proof_ledger_report_json_shape.snap",
+        },
+        ReportInventoryExpectation {
             report_id: "fuse_capability_report",
             module_path: "crates/ffs-harness/src/verification_runner.rs",
             rust_type: "FuseCapabilityProbeReport",
@@ -1630,12 +1651,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 86);
+        assert_eq!(report.total_rows, 87);
         assert_eq!(report.required_rows, 8);
-        assert_eq!(report.advisory_only_rows, 76);
+        assert_eq!(report.advisory_only_rows, 77);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 85);
+        assert_eq!(report.covered_rows, 86);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -2028,6 +2049,40 @@ mod tests {
         assert_eq!(row.evidence_test, "claimability_plan_report_json_shape");
         assert!(row.snapshot_path.ends_with(
             "ffs_harness__claimability_plan__tests__claimability_plan_report_json_shape.snap"
+        ));
+        assert_eq!(
+            row.claim_effect,
+            ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+        );
+    }
+
+    #[test]
+    fn inventory_tracks_rch_proof_ledger_report() {
+        let inventory = current_report_schema_inventory();
+        let row = inventory
+            .rows
+            .iter()
+            .find(|row| row.report_id == "rch_proof_ledger_report")
+            .expect("inventory includes rch proof ledger report");
+
+        assert_eq!(
+            row.module_path,
+            "crates/ffs-harness/src/verification_runner.rs"
+        );
+        assert_eq!(row.rust_type, "RchProofLedgerReport");
+        assert_eq!(row.producer, "rch-proof-ledger");
+        assert_eq!(
+            row.downstream_consumer,
+            "remote RCH proof preservation and readiness action autopilot degraded-proof decisions"
+        );
+        assert_eq!(
+            row.coverage_requirement,
+            ReportSchemaCoverageRequirement::AdvisoryOnly
+        );
+        assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+        assert_eq!(row.evidence_test, "rch_proof_ledger_report_json_shape");
+        assert!(row.snapshot_path.ends_with(
+            "ffs_harness__verification_runner__tests__rch_proof_ledger_report_json_shape.snap"
         ));
         assert_eq!(
             row.claim_effect,

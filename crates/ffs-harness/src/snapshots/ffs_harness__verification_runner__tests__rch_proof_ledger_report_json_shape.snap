@@ -1,0 +1,33 @@
+---
+source: crates/ffs-harness/src/verification_runner.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "command": [
+    "cargo",
+    "test",
+    "-p",
+    "ffs-harness",
+    "--api-key",
+    "[REDACTED]"
+  ],
+  "cwd": "/data/projects/frankenfs",
+  "env_allowlist": [
+    "CARGO_TARGET_DIR",
+    "RUSTFLAGS"
+  ],
+  "worker_id": "vmi1227854",
+  "remote_exit_code": 0,
+  "remote_duration_ms": 2400,
+  "fallback_detected": false,
+  "local_fallback_reason": null,
+  "artifact_retrieval_status": {
+    "source": "retrieved",
+    "target": "stalled"
+  },
+  "warnings": [
+    "target_artifact_retrieval_stalled"
+  ],
+  "proof_verdict": "remote_success_artifact_warning"
+}

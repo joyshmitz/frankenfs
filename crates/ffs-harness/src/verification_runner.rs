@@ -2009,6 +2009,18 @@ mod tests {
         report.warnings.iter().any(|candidate| candidate == warning)
     }
 
+    fn artifact_warning_rch_proof_report() -> RchProofLedgerReport {
+        let transcript = "\
+Selected worker: vmi1227854 at ubuntu@203.0.113.10
+Remote command finished: exit=0 in 2400ms
+Retrieving artifacts from /data/projects/frankenfs on vmi1227854
+Artifacts retrieved: 4 files, 16K
+Retrieving artifacts from /data/projects/frankenfs/.rch-target on vmi1227854
+[RCH] remote vmi1227854 (2.4s)
+";
+        build_rch_proof_ledger_report(transcript, &sample_rch_proof_config())
+    }
+
     fn operational_scenario<'a>(
         manifest: &'a ArtifactManifest,
         scenario_id: &str,
@@ -2235,21 +2247,36 @@ WARN rch::transfer: rsync verification warning: checksum mismatch
 
     #[test]
     fn rch_proof_ledger_markdown_summarizes_operator_decision() {
-        let transcript = "\
-Selected worker: vmi1227854 at ubuntu@203.0.113.10
-Remote command finished: exit=0 in 2400ms
-Retrieving artifacts from /data/projects/frankenfs on vmi1227854
-Artifacts retrieved: 4 files, 16K
-Retrieving artifacts from /data/projects/frankenfs/.rch-target on vmi1227854
-[RCH] remote vmi1227854 (2.4s)
-";
-        let report = build_rch_proof_ledger_report(transcript, &sample_rch_proof_config());
+        let report = artifact_warning_rch_proof_report();
         let markdown = render_rch_proof_ledger_markdown(&report);
 
         assert!(markdown.contains("# RCH Proof Ledger"));
         assert!(markdown.contains("Verdict: `remote_success_artifact_warning`"));
         assert!(markdown.contains("Target artifact retrieval: `stalled`"));
         assert!(markdown.contains("degraded-proof note"));
+        assert!(!markdown.contains("sample-credential"));
+    }
+
+    #[test]
+    fn rch_proof_ledger_report_json_shape() -> Result<(), serde_json::Error> {
+        let report = artifact_warning_rch_proof_report();
+        let json = serde_json::to_string_pretty(&report)?;
+
+        insta::assert_snapshot!("rch_proof_ledger_report_json_shape", json);
+        let parsed: RchProofLedgerReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
+    fn render_rch_proof_ledger_markdown_artifact_warning_snapshot() {
+        let report = artifact_warning_rch_proof_report();
+        let markdown = render_rch_proof_ledger_markdown(&report);
+
+        insta::assert_snapshot!(
+            "render_rch_proof_ledger_markdown_artifact_warning",
+            markdown
+        );
         assert!(!markdown.contains("sample-credential"));
     }
 

@@ -1,0 +1,23 @@
+---
+source: crates/ffs-harness/src/verification_runner.rs
+expression: markdown
+---
+# RCH Proof Ledger
+
+- Schema version: `1`
+- Verdict: `remote_success_artifact_warning`
+- Worker: `vmi1227854`
+- Remote exit code: `0`
+- Remote duration ms: `2400`
+- Fallback detected: `false`
+- Local fallback reason: `none`
+- Command: `cargo test -p ffs-harness --api-key [REDACTED]`
+- CWD: `/data/projects/frankenfs`
+- Environment allowlist: `CARGO_TARGET_DIR, RUSTFLAGS`
+- Source artifact retrieval: `retrieved`
+- Target artifact retrieval: `stalled`
+- Warnings: `target_artifact_retrieval_stalled`
+
+## Operator Decision
+
+Worker-side `exit=0` is usable proof only with a degraded-proof note naming the artifact retrieval or rsync warning.
