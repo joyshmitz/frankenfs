@@ -113,6 +113,15 @@ pub struct ParityReport {
     pub overall_coverage_percent: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileReadPathReport {
+    pub mode: String,
+    pub fixture: String,
+    pub duration_ms: u128,
+    pub iterations: u64,
+    pub checksum: u64,
+}
+
 impl ParityReport {
     #[must_use]
     pub fn current() -> Self {
@@ -726,6 +735,23 @@ mod tests {
 
         assert_eq!(serde_json::to_string_pretty(&parsed)?, json);
         insta::assert_snapshot!("parity_report_json_shape", json);
+        Ok(())
+    }
+
+    #[test]
+    fn profile_read_path_report_json_shape() -> Result<(), serde_json::Error> {
+        let report = ProfileReadPathReport {
+            mode: "direct-read".to_owned(),
+            fixture: "conformance/golden/ext4_8mb_reference.ext4".to_owned(),
+            duration_ms: 1_000,
+            iterations: 42,
+            checksum: 73,
+        };
+        let json = serde_json::to_string_pretty(&report)?;
+        let parsed: ProfileReadPathReport = serde_json::from_str(&json)?;
+
+        assert_eq!(parsed, report);
+        insta::assert_snapshot!("profile_read_path_report_json_shape", json);
         Ok(())
     }
 

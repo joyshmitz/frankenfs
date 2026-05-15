@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 101 |
+| Total rows | 102 |
 | Required rows | 8 |
-| Advisory-only rows | 91 |
+| Advisory-only rows | 92 |
 | Permissioned-only rows | 1 |
-| Covered rows | 100 |
+| Covered rows | 101 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -86,6 +86,7 @@ None.
 | `performance_baseline_manifest_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `performance_delta_closeout_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `permissioned_campaign_reports` | `PermissionedOnly` | `Covered` | none | none |
+| `profile_read_path_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `promotion_result` | `AdvisoryOnly` | `Covered` | none | none |
 | `proof_bundle_validation_report` | `Required` | `Covered` | none | none |
 | `proof_overhead_budget_report` | `AdvisoryOnly` | `Covered` | none | none |

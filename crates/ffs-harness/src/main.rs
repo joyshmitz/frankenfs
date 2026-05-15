@@ -5,7 +5,7 @@ use asupersync::Cx;
 use ffs_core::{OpenFs, OpenOptions};
 use ffs_fuse::{FrankenFuse, MountOptions};
 use ffs_harness::{
-    ParityReport,
+    ParityReport, ProfileReadPathReport,
     adaptive_runtime_manifest::{
         AdaptiveRuntimeEvidenceValidationConfig, AdaptiveRuntimeRunnerCleanupStatus,
         AdaptiveRuntimeRunnerConfig, AdaptiveRuntimeRunnerMode,
@@ -900,16 +900,15 @@ fn profile_read_path_cmd(args: &[String]) -> Result<()> {
         }
     }
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "mode": args.mode.label(),
-            "fixture": args.fixture,
-            "duration_ms": args.duration.as_millis(),
-            "iterations": iterations,
-            "checksum": checksum,
-        }))?
-    );
+    let report = ProfileReadPathReport {
+        mode: args.mode.label().to_owned(),
+        fixture: args.fixture.display().to_string(),
+        duration_ms: args.duration.as_millis(),
+        iterations,
+        checksum,
+    };
+
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 

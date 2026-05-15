@@ -1042,6 +1042,15 @@ fn performance_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "triage_decision_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__perf_triage__tests__triage_decision_json_shape.snap",
         ),
+        covered_advisory_row(
+            "profile_read_path_report",
+            "crates/ffs-harness/src/lib.rs",
+            "ProfileReadPathReport",
+            "profile-read-path",
+            "repeatable in-process inspect and FUSE read profiling loops",
+            "profile_read_path_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__tests__profile_read_path_report_json_shape.snap",
+        ),
     ]
 }
 
@@ -1809,18 +1818,19 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 101);
+        assert_eq!(report.total_rows, 102);
         assert_eq!(report.required_rows, 8);
-        assert_eq!(report.advisory_only_rows, 91);
+        assert_eq!(report.advisory_only_rows, 92);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 100);
+        assert_eq!(report.covered_rows, 101);
         assert_eq!(report.missing_rows, 0);
         for report_id in [
             "swarm_operator_report",
             "readiness_action_dry_run_report",
             "performance_baseline_manifest_report",
             "performance_delta_closeout_report",
+            "profile_read_path_report",
             "operational_evidence_index",
             "invariant_oracle_consumer_report",
             "perf_comparison_context",

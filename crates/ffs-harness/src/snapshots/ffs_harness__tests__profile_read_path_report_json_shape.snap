@@ -1,0 +1,11 @@
+---
+source: crates/ffs-harness/src/lib.rs
+expression: json
+---
+{
+  "mode": "direct-read",
+  "fixture": "conformance/golden/ext4_8mb_reference.ext4",
+  "duration_ms": 1000,
+  "iterations": 42,
+  "checksum": 73
+}
