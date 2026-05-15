@@ -2680,6 +2680,7 @@ mod tests {
         let manifest = sample_manifest();
         let json = serde_json::to_string_pretty(&manifest)?;
         let parsed: ArtifactManifest = serde_json::from_str(&json)?;
+        assert_eq!(parsed, manifest);
         assert_eq!(parsed.run_id, manifest.run_id);
         assert_eq!(parsed.gate_id, manifest.gate_id);
         assert_eq!(parsed.scenarios.len(), manifest.scenarios.len());
