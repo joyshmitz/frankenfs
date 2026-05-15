@@ -1906,6 +1906,11 @@ mod tests {
         let decoded: PerformanceDeltaCloseoutReport = serde_json::from_str(&full_json)?;
         let original_json: Value = serde_json::from_str(&full_json)?;
         assert_eq!(serde_json::to_value(&decoded)?, original_json);
+        // Normalize through JSON text so finite f64s use the artifact representation.
+        let normalized_json = serde_json::to_string(&report)?;
+        let normalized_report: PerformanceDeltaCloseoutReport =
+            serde_json::from_str(&normalized_json)?;
+        assert_eq!(decoded, normalized_report);
         assert_eq!(decoded.schema_version, report.schema_version);
         assert_eq!(decoded.closeout_id, report.closeout_id);
         assert_eq!(decoded.source_bead_id, report.source_bead_id);
