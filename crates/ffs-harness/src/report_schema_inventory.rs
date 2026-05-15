@@ -117,7 +117,50 @@ pub fn current_report_schema_inventory() -> ReportSchemaInventory {
 }
 
 fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
-    let mut rows = vec![
+    let mut rows = readiness_foundation_advisory_report_rows();
+    rows.extend(open_ended_inventory_advisory_report_rows());
+    rows.extend(mounted_writeback_advisory_report_rows());
+    rows.extend(mounted_oracle_recovery_advisory_report_rows());
+    rows.extend(adaptive_swarm_advisory_report_rows());
+    rows.extend(proof_risk_advisory_report_rows());
+    rows.extend(recovery_remediation_advisory_report_rows());
+    rows.extend(governance_durability_advisory_report_rows());
+    rows.extend(control_plane_contract_advisory_report_rows());
+    rows.extend(corpus_and_workload_advisory_report_rows());
+    rows.extend([
+        covered_advisory_row(
+            "readiness_lab_numa_p99_replay_report",
+            "crates/ffs-harness/src/readiness_lab.rs",
+            "ReadinessLabNumaP99ReplayReport",
+            "readiness-lab NUMA/p99 replay",
+            "large-host swarm responsiveness advisory replay lane",
+            "readiness_lab_numa_p99_replay_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_lab__tests__readiness_lab_numa_p99_replay_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "readiness_action_autopilot_source_reports",
+            "crates/ffs-harness/src/readiness_action_autopilot.rs",
+            "Vec<ReadinessActionAutopilotReport>",
+            "readiness-action source fixture planner",
+            "readiness-action dry-run planner",
+            "readiness_action_autopilot_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_autopilot_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "readiness_action_dry_run_report",
+            "crates/ffs-harness/src/readiness_action_autopilot.rs",
+            "ReadinessActionDryRunReport",
+            "recommend-readiness-actions",
+            "readiness-action operator dry-run handoff",
+            "readiness_action_dry_run_json_report",
+            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_dry_run_json_report.snap",
+        ),
+    ]);
+    rows
+}
+
+fn readiness_foundation_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
         covered_advisory_row(
             "readiness_lab_validation_report",
             "crates/ffs-harness/src/readiness_lab.rs",
@@ -172,46 +215,16 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "low_privilege_demo_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__low_privilege_demo__tests__low_privilege_demo_report_json_shape.snap",
         ),
-    ];
-    rows.extend(open_ended_inventory_advisory_report_rows());
-    rows.extend(mounted_writeback_advisory_report_rows());
-    rows.extend(mounted_oracle_recovery_advisory_report_rows());
-    rows.extend(adaptive_swarm_advisory_report_rows());
-    rows.extend(proof_risk_advisory_report_rows());
-    rows.extend(recovery_remediation_advisory_report_rows());
-    rows.extend(governance_durability_advisory_report_rows());
-    rows.extend(control_plane_contract_advisory_report_rows());
-    rows.extend(corpus_and_workload_advisory_report_rows());
-    rows.extend([
         covered_advisory_row(
-            "readiness_lab_numa_p99_replay_report",
-            "crates/ffs-harness/src/readiness_lab.rs",
-            "ReadinessLabNumaP99ReplayReport",
-            "readiness-lab NUMA/p99 replay",
-            "large-host swarm responsiveness advisory replay lane",
-            "readiness_lab_numa_p99_replay_report_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_lab__tests__readiness_lab_numa_p99_replay_report_json_shape.snap",
+            "swarm_operator_validation_report",
+            "crates/ffs-harness/src/swarm_operator_report.rs",
+            "SwarmOperatorValidationReport",
+            "validate-swarm-operator-report",
+            "swarm operator report CLI validation and E2E proof handoff",
+            "swarm_operator_validation_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__swarm_operator_report__tests__swarm_operator_validation_report_json_shape.snap",
         ),
-        covered_advisory_row(
-            "readiness_action_autopilot_source_reports",
-            "crates/ffs-harness/src/readiness_action_autopilot.rs",
-            "Vec<ReadinessActionAutopilotReport>",
-            "readiness-action source fixture planner",
-            "readiness-action dry-run planner",
-            "readiness_action_autopilot_report_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_autopilot_report_json_shape.snap",
-        ),
-        covered_advisory_row(
-            "readiness_action_dry_run_report",
-            "crates/ffs-harness/src/readiness_action_autopilot.rs",
-            "ReadinessActionDryRunReport",
-            "recommend-readiness-actions",
-            "readiness-action operator dry-run handoff",
-            "readiness_action_dry_run_json_report",
-            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_dry_run_json_report.snap",
-        ),
-    ]);
-    rows
+    ]
 }
 
 fn open_ended_inventory_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
@@ -1502,12 +1515,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 75);
+        assert_eq!(report.total_rows, 76);
         assert_eq!(report.required_rows, 7);
-        assert_eq!(report.advisory_only_rows, 66);
+        assert_eq!(report.advisory_only_rows, 67);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 74);
+        assert_eq!(report.covered_rows, 75);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1525,6 +1538,11 @@ mod tests {
                 .contains(&"performance_baseline_manifest_report".to_owned())
         );
         assert!(report.report_ids.contains(&"fuzz_smoke_report".to_owned()));
+        assert!(
+            report
+                .report_ids
+                .contains(&"swarm_operator_validation_report".to_owned())
+        );
         assert_eq!(report.row_results.len(), report.total_rows);
         assert_eq!(
             report.row_results[0].report_id,
@@ -1754,6 +1772,39 @@ mod tests {
         assert_eq!(row.evidence_test, "readiness_action_dry_run_json_report");
         assert!(row.snapshot_path.ends_with(
             "ffs_harness__readiness_action_autopilot__tests__readiness_action_dry_run_json_report.snap"
+        ));
+        assert_eq!(
+            row.claim_effect,
+            ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+        );
+    }
+
+    #[test]
+    fn inventory_tracks_swarm_operator_validation_report() {
+        let inventory = current_report_schema_inventory();
+        let row = inventory
+            .rows
+            .iter()
+            .find(|row| row.report_id == "swarm_operator_validation_report")
+            .expect("inventory includes swarm operator validation report");
+
+        assert_eq!(
+            row.module_path,
+            "crates/ffs-harness/src/swarm_operator_report.rs"
+        );
+        assert_eq!(row.rust_type, "SwarmOperatorValidationReport");
+        assert_eq!(row.producer, "validate-swarm-operator-report");
+        assert_eq!(
+            row.coverage_requirement,
+            ReportSchemaCoverageRequirement::AdvisoryOnly
+        );
+        assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+        assert_eq!(
+            row.evidence_test,
+            "swarm_operator_validation_report_json_shape"
+        );
+        assert!(row.snapshot_path.ends_with(
+            "ffs_harness__swarm_operator_report__tests__swarm_operator_validation_report_json_shape.snap"
         ));
         assert_eq!(
             row.claim_effect,

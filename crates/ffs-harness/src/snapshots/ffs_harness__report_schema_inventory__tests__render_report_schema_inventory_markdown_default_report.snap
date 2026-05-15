@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 75 |
+| Total rows | 76 |
 | Required rows | 7 |
-| Advisory-only rows | 66 |
+| Advisory-only rows | 67 |
 | Permissioned-only rows | 1 |
-| Covered rows | 74 |
+| Covered rows | 75 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -94,6 +94,7 @@ None.
 | `support_state_accounting_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `swarm_cache_controller_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `swarm_operator_report` | `Required` | `Covered` | none | none |
+| `swarm_operator_validation_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `swarm_tail_latency_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `swarm_workload_harness_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `topology_runtime_advisor_report` | `AdvisoryOnly` | `Covered` | none | none |
