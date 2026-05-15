@@ -637,7 +637,7 @@ fn recovery_remediation_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> 
 }
 
 fn governance_durability_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
-    vec![
+    let mut rows = vec![
         covered_advisory_row(
             "chaos_replay_lab_report",
             "crates/ffs-harness/src/chaos_replay_lab.rs",
@@ -674,24 +674,10 @@ fn governance_durability_advisory_report_rows() -> Vec<ReportSchemaInventoryRow>
             "docs_status_drift_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__docs_status_drift__tests__docs_status_drift_report_json_shape.snap",
         ),
-        covered_advisory_row(
-            "xfstests_baseline_manifest",
-            "crates/ffs-harness/src/xfstests.rs",
-            "XfstestsBaselineManifest",
-            "xfstests-baseline-manifest",
-            "xfstests baseline dry-run evidence and failure triage input",
-            "xfstests_baseline_manifest_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__xfstests__tests__xfstests_baseline_manifest_json_shape.snap",
-        ),
-        covered_advisory_row(
-            "xfstests_failure_triage_report",
-            "crates/ffs-harness/src/xfstests.rs",
-            "XfstestsFailureTriageReport",
-            "xfstests-failure-triage",
-            "xfstests product-failure triage and follow-up bead extraction",
-            "xfstests_failure_triage_report_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__xfstests__tests__xfstests_failure_triage_report_json_shape.snap",
-        ),
+    ];
+
+    rows.extend(governance_durability_decision_advisory_report_rows());
+    rows.extend([
         covered_advisory_row(
             "inventory_closeout_gate_report",
             "crates/ffs-harness/src/inventory_closeout_gate.rs",
@@ -727,6 +713,40 @@ fn governance_durability_advisory_report_rows() -> Vec<ReportSchemaInventoryRow>
             "WAL group commit gate validator",
             "wal_group_commit_gate_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__wal_group_commit_gate__tests__wal_group_commit_gate_report_json_shape.snap",
+        ),
+    ]);
+
+    rows
+}
+
+fn governance_durability_decision_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
+        covered_advisory_row(
+            "oq_decision_matrix_canonical_matrix",
+            "crates/ffs-harness/src/oq_decision_matrix.rs",
+            "Vec<OqDecision>",
+            "canonical_matrix",
+            "OQ decision integration gate and program-gate decision capture",
+            "canonical_matrix_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__oq_decision_matrix__tests__canonical_matrix_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "xfstests_baseline_manifest",
+            "crates/ffs-harness/src/xfstests.rs",
+            "XfstestsBaselineManifest",
+            "xfstests-baseline-manifest",
+            "xfstests baseline dry-run evidence and failure triage input",
+            "xfstests_baseline_manifest_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__xfstests__tests__xfstests_baseline_manifest_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "xfstests_failure_triage_report",
+            "crates/ffs-harness/src/xfstests.rs",
+            "XfstestsFailureTriageReport",
+            "xfstests-failure-triage",
+            "xfstests product-failure triage and follow-up bead extraction",
+            "xfstests_failure_triage_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__xfstests__tests__xfstests_failure_triage_report_json_shape.snap",
         ),
     ]
 }
@@ -1723,12 +1743,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 94);
+        assert_eq!(report.total_rows, 95);
         assert_eq!(report.required_rows, 8);
-        assert_eq!(report.advisory_only_rows, 84);
+        assert_eq!(report.advisory_only_rows, 85);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 93);
+        assert_eq!(report.covered_rows, 94);
         assert_eq!(report.missing_rows, 0);
         for report_id in [
             "swarm_operator_report",
@@ -1740,6 +1760,7 @@ mod tests {
             "tabletop_drill_canonical_drills",
             "tabletop_drill_result",
             "deferred_parity_audit_gap_classes",
+            "oq_decision_matrix_canonical_matrix",
             "fuzz_smoke_report",
             "swarm_operator_validation_report",
             "soak_canary_campaign_report",
@@ -2971,6 +2992,14 @@ mod tests {
                 "ffs_harness__docs_status_drift__tests__docs_status_drift_report_json_shape.snap",
             ),
             (
+                "oq_decision_matrix_canonical_matrix",
+                "crates/ffs-harness/src/oq_decision_matrix.rs",
+                "Vec<OqDecision>",
+                "canonical_matrix",
+                "canonical_matrix_json_shape",
+                "ffs_harness__oq_decision_matrix__tests__canonical_matrix_json_shape.snap",
+            ),
+            (
                 "inventory_closeout_gate_report",
                 "crates/ffs-harness/src/inventory_closeout_gate.rs",
                 "InventoryCloseoutReport",
@@ -3024,6 +3053,42 @@ mod tests {
                 ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
             );
         }
+    }
+
+    #[test]
+    fn inventory_tracks_oq_decision_matrix_schema() {
+        let inventory = current_report_schema_inventory();
+        let row = inventory
+            .rows
+            .iter()
+            .find(|row| row.report_id == "oq_decision_matrix_canonical_matrix")
+            .expect("inventory includes OQ decision matrix schema");
+
+        assert_eq!(
+            row.module_path,
+            "crates/ffs-harness/src/oq_decision_matrix.rs"
+        );
+        assert_eq!(row.rust_type, "Vec<OqDecision>");
+        assert_eq!(row.producer, "canonical_matrix");
+        assert_eq!(
+            row.downstream_consumer,
+            "OQ decision integration gate and program-gate decision capture"
+        );
+        assert_eq!(
+            row.coverage_requirement,
+            ReportSchemaCoverageRequirement::AdvisoryOnly
+        );
+        assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+        assert_eq!(row.evidence_test, "canonical_matrix_json_shape");
+        assert!(
+            row.snapshot_path.ends_with(
+                "ffs_harness__oq_decision_matrix__tests__canonical_matrix_json_shape.snap"
+            )
+        );
+        assert_eq!(
+            row.claim_effect,
+            ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+        );
     }
 
     #[test]
