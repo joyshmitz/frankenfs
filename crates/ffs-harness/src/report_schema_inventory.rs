@@ -657,6 +657,15 @@ fn governance_durability_advisory_report_rows() -> Vec<ReportSchemaInventoryRow>
             "crates/ffs-harness/src/snapshots/ffs_harness__deferred_parity_audit__tests__deferred_parity_audit_report_json_shape.snap",
         ),
         covered_advisory_row(
+            "deferred_parity_audit_gap_classes",
+            "crates/ffs-harness/src/deferred_parity_audit.rs",
+            "[&str; 20]",
+            "GAP_CLASSES",
+            "deferred parity audit classifier and release-gate downgrade policy",
+            "gap_classes_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__deferred_parity_audit__tests__gap_classes_json_shape.snap",
+        ),
+        covered_advisory_row(
             "docs_status_drift_report",
             "crates/ffs-harness/src/docs_status_drift.rs",
             "DocsStatusDriftReport",
@@ -1714,12 +1723,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 93);
+        assert_eq!(report.total_rows, 94);
         assert_eq!(report.required_rows, 8);
-        assert_eq!(report.advisory_only_rows, 83);
+        assert_eq!(report.advisory_only_rows, 84);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 92);
+        assert_eq!(report.covered_rows, 93);
         assert_eq!(report.missing_rows, 0);
         for report_id in [
             "swarm_operator_report",
@@ -1730,6 +1739,7 @@ mod tests {
             "fuzz_dashboard_regression_alert",
             "tabletop_drill_canonical_drills",
             "tabletop_drill_result",
+            "deferred_parity_audit_gap_classes",
             "fuzz_smoke_report",
             "swarm_operator_validation_report",
             "soak_canary_campaign_report",
@@ -2604,6 +2614,42 @@ mod tests {
     }
 
     #[test]
+    fn inventory_tracks_deferred_parity_gap_class_contract() {
+        let inventory = current_report_schema_inventory();
+        let row = inventory
+            .rows
+            .iter()
+            .find(|row| row.report_id == "deferred_parity_audit_gap_classes")
+            .expect("inventory includes deferred parity audit gap classes");
+
+        assert_eq!(
+            row.module_path,
+            "crates/ffs-harness/src/deferred_parity_audit.rs"
+        );
+        assert_eq!(row.rust_type, "[&str; 20]");
+        assert_eq!(row.producer, "GAP_CLASSES");
+        assert_eq!(
+            row.downstream_consumer,
+            "deferred parity audit classifier and release-gate downgrade policy"
+        );
+        assert_eq!(
+            row.coverage_requirement,
+            ReportSchemaCoverageRequirement::AdvisoryOnly
+        );
+        assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+        assert_eq!(row.evidence_test, "gap_classes_json_shape");
+        assert!(
+            row.snapshot_path.ends_with(
+                "ffs_harness__deferred_parity_audit__tests__gap_classes_json_shape.snap"
+            )
+        );
+        assert_eq!(
+            row.claim_effect,
+            ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+        );
+    }
+
+    #[test]
     fn inventory_tracks_performance_baseline_manifest_report() {
         let inventory = current_report_schema_inventory();
         let row = inventory
@@ -2907,6 +2953,14 @@ mod tests {
                 "validate-deferred-parity-audit",
                 "deferred_parity_audit_report_json_shape",
                 "ffs_harness__deferred_parity_audit__tests__deferred_parity_audit_report_json_shape.snap",
+            ),
+            (
+                "deferred_parity_audit_gap_classes",
+                "crates/ffs-harness/src/deferred_parity_audit.rs",
+                "[&str; 20]",
+                "GAP_CLASSES",
+                "gap_classes_json_shape",
+                "ffs_harness__deferred_parity_audit__tests__gap_classes_json_shape.snap",
             ),
             (
                 "docs_status_drift_report",
