@@ -210,6 +210,15 @@ fn readiness_foundation_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> 
             "crates/ffs-harness/src/snapshots/ffs_harness__tracker_source_hygiene__tests__tracker_source_hygiene_report_json_shape.snap",
         ),
         covered_advisory_row(
+            "claimability_plan_report",
+            "crates/ffs-harness/src/claimability_plan.rs",
+            "ClaimabilityPlanReport",
+            "claimability-plan",
+            "source-aware queue guidance and Agent Mail reservation handoff",
+            "claimability_plan_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__claimability_plan__tests__claimability_plan_report_json_shape.snap",
+        ),
+        covered_advisory_row(
             "low_privilege_demo_report",
             "crates/ffs-harness/src/low_privilege_demo.rs",
             "LowPrivilegeDemoReport",
@@ -1621,12 +1630,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 85);
+        assert_eq!(report.total_rows, 86);
         assert_eq!(report.required_rows, 8);
-        assert_eq!(report.advisory_only_rows, 75);
+        assert_eq!(report.advisory_only_rows, 76);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 84);
+        assert_eq!(report.covered_rows, 85);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1679,6 +1688,11 @@ mod tests {
             report
                 .report_ids
                 .contains(&"readiness_action_fixture_validation_report".to_owned())
+        );
+        assert!(
+            report
+                .report_ids
+                .contains(&"claimability_plan_report".to_owned())
         );
         assert!(
             report
@@ -1980,6 +1994,40 @@ mod tests {
         );
         assert!(row.snapshot_path.ends_with(
             "ffs_harness__readiness_action_autopilot__tests__readiness_action_fixture_validation_report_json_shape.snap"
+        ));
+        assert_eq!(
+            row.claim_effect,
+            ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+        );
+    }
+
+    #[test]
+    fn inventory_tracks_claimability_plan_report() {
+        let inventory = current_report_schema_inventory();
+        let row = inventory
+            .rows
+            .iter()
+            .find(|row| row.report_id == "claimability_plan_report")
+            .expect("inventory includes claimability plan report");
+
+        assert_eq!(
+            row.module_path,
+            "crates/ffs-harness/src/claimability_plan.rs"
+        );
+        assert_eq!(row.rust_type, "ClaimabilityPlanReport");
+        assert_eq!(row.producer, "claimability-plan");
+        assert_eq!(
+            row.downstream_consumer,
+            "source-aware queue guidance and Agent Mail reservation handoff"
+        );
+        assert_eq!(
+            row.coverage_requirement,
+            ReportSchemaCoverageRequirement::AdvisoryOnly
+        );
+        assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+        assert_eq!(row.evidence_test, "claimability_plan_report_json_shape");
+        assert!(row.snapshot_path.ends_with(
+            "ffs_harness__claimability_plan__tests__claimability_plan_report_json_shape.snap"
         ));
         assert_eq!(
             row.claim_effect,

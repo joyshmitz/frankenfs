@@ -1414,6 +1414,100 @@ mod tests {
         }
     }
 
+    fn mixed_guidance_report() -> ClaimabilityPlanReport {
+        let mut tracker = base_report();
+        tracker.permission_gated_rows = vec![TrackerPermissionGatedRow {
+            id: "bd-rchk3".to_owned(),
+            title: "Run permissioned swarm workload".to_owned(),
+            status: "open".to_owned(),
+            priority: Some(1),
+            issue_type: Some("task".to_owned()),
+            source_repo: Some(".".to_owned()),
+            assignee: None,
+            blocked_by: Vec::new(),
+            permission_gate: permission_gate(),
+        }];
+        let mut blocked = work_row("bd-rchk3.4", "Convert xfstests failures");
+        blocked.blocked_by = vec![TrackerDependencyStatus {
+            id: "bd-rchk3.3".to_owned(),
+            status: "open".to_owned(),
+        }];
+        tracker.blocked_local_rows = vec![blocked];
+        tracker.local_nonclaimable_rows = vec![TrackerLocalNonclaimableRow {
+            id: "bd-rchk0".to_owned(),
+            title: "Parent epic".to_owned(),
+            status: "open".to_owned(),
+            priority: Some(1),
+            issue_type: Some("epic".to_owned()),
+            source_repo: Some(".".to_owned()),
+            assignee: None,
+            reason: "epic".to_owned(),
+            blocked_by: Vec::new(),
+            permission_gate: None,
+        }];
+        tracker.stale_in_progress_rows = vec![TrackerIssueProgressRow {
+            id: "bd-stale".to_owned(),
+            title: "Stale claim".to_owned(),
+            status: "in_progress".to_owned(),
+            priority: Some(1),
+            issue_type: Some("task".to_owned()),
+            source_repo: Some(".".to_owned()),
+            assignee: Some("OldAgent".to_owned()),
+            blocked_by: Vec::new(),
+            created_at: Some("2026-05-13T00:00:00Z".to_owned()),
+            updated_at: Some("2026-05-13T00:00:00Z".to_owned()),
+            last_activity_epoch: Some(1_767_900_000),
+            age_seconds: Some(100_000),
+            stale_after_seconds: 3_600,
+            stale: true,
+        }];
+        tracker.foreign_open_samples = vec![TrackerIssueSample {
+            id: "br-r37".to_owned(),
+            title: "Foreign tracker row".to_owned(),
+            status: "open".to_owned(),
+            priority: Some(1),
+            issue_type: Some("task".to_owned()),
+            source_repo: Some("../other".to_owned()),
+        }];
+        tracker.source_aware_queue_state = queue_state("blocked_or_permission_gated", Vec::new());
+
+        let reservation = reservation_report(
+            vec![
+                "scripts/e2e/ffs_claimability_autopilot_e2e.sh",
+                "docs/tracker-hygiene.md",
+                "crates/ffs-harness/src/claimability_plan.rs",
+            ],
+            vec![
+                reservation_lease(
+                    "SageMeadow",
+                    "scripts/e2e/ffs_claimability_autopilot_e2e.sh",
+                    true,
+                    true,
+                    true,
+                    "active_peer_conflict",
+                ),
+                reservation_lease(
+                    "SapphireLotus",
+                    "docs/tracker-hygiene.md",
+                    true,
+                    true,
+                    true,
+                    "self_held",
+                ),
+            ],
+        );
+        let bv = serde_json::json!({
+            "recommendations": [
+                {"id": "bd-rchk0", "title": "Parent epic"}
+            ]
+        });
+        let mut cfg = config();
+        cfg.reservation_report_path = Some("agent_mail_reservations.json".to_owned());
+        cfg.bv_report_path = Some("bv_robot_next.json".to_owned());
+
+        build_claimability_plan_report(&cfg, &tracker, Some(&reservation), Some(&bv))
+    }
+
     #[test]
     fn clean_claimable_task_gets_exact_start_actions() {
         let mut tracker = base_report();
@@ -1918,5 +2012,24 @@ mod tests {
                 .iter()
                 .any(|action| { action.contains("do not claim raw bv parent epics") })
         );
+    }
+
+    #[test]
+    fn render_claimability_plan_markdown_mixed_guidance_snapshot() {
+        let report = mixed_guidance_report();
+        let markdown = render_claimability_plan_markdown(&report);
+
+        insta::assert_snapshot!("render_claimability_plan_markdown_mixed_guidance", markdown);
+    }
+
+    #[test]
+    fn claimability_plan_report_json_shape() -> Result<()> {
+        let report = mixed_guidance_report();
+        let json = serde_json::to_string_pretty(&report)?;
+
+        insta::assert_snapshot!("claimability_plan_report_json_shape", json);
+        let parsed: ClaimabilityPlanReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
     }
 }

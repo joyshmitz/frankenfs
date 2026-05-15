@@ -1,0 +1,213 @@
+---
+source: crates/ffs-harness/src/claimability_plan.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "status": "pass",
+  "generated_at": "2026-05-14T00:00:00Z",
+  "mutation_policy": "report-only; this planner never claims, closes, deletes, rewrites, or edits tracker rows",
+  "tracker_report_path": "tracker_source_hygiene_report.json",
+  "reservation_report_path": "agent_mail_reservations.json",
+  "bv_report_path": "bv_robot_next.json",
+  "tracker_queue_verdict": "blocked_or_permission_gated",
+  "source_aware_claimable_ids": [],
+  "reservation_snapshot": {
+    "present": true,
+    "source_freshness": "fresh",
+    "conflict_classification": "active_peer_conflict",
+    "active_peer_conflict_count": 1,
+    "active_self_reservation_count": 1,
+    "target_paths": [
+      "scripts/e2e/ffs_claimability_autopilot_e2e.sh",
+      "docs/tracker-hygiene.md",
+      "crates/ffs-harness/src/claimability_plan.rs"
+    ],
+    "self_held_target_paths": [
+      "docs/tracker-hygiene.md"
+    ]
+  },
+  "reservation_allocation_plan": {
+    "status": "safe_disjoint_suggestions",
+    "advisory_only": true,
+    "mutation_policy": "advisory-only; this planner never calls MCP, claims, releases, creates, or mutates Agent Mail reservations",
+    "conflict_group_count": 1,
+    "self_held_reservation_count": 1,
+    "self_held_target_paths": [
+      "docs/tracker-hygiene.md"
+    ],
+    "suggested_disjoint_target_paths": [
+      "crates/ffs-harness/src/claimability_plan.rs",
+      "docs/tracker-hygiene.md"
+    ],
+    "safe_reservation_commands": [
+      "file_reservation_paths(project_key, agent_name, paths=[\"docs/tracker-hygiene.md\",\"crates/ffs-harness/src/claimability_plan.rs\"], exclusive=true, reason=\"disjoint claimability-plan suggestion\")"
+    ],
+    "groups": [
+      {
+        "holder": "SageMeadow",
+        "path_pattern": "scripts/e2e/ffs_claimability_autopilot_e2e.sh",
+        "reason": "bd-ready",
+        "exclusive": true,
+        "conflict_classification": "active_peer_conflict",
+        "overlap_reason": "exclusive active peer reservation overlaps one or more target paths",
+        "blocked_target_paths": [
+          "scripts/e2e/ffs_claimability_autopilot_e2e.sh"
+        ],
+        "suggested_disjoint_target_paths": [
+          "docs/tracker-hygiene.md",
+          "crates/ffs-harness/src/claimability_plan.rs"
+        ],
+        "safe_reservation_commands": [
+          "file_reservation_paths(project_key, agent_name, paths=[\"docs/tracker-hygiene.md\",\"crates/ffs-harness/src/claimability_plan.rs\"], exclusive=true, reason=\"disjoint claimability-plan suggestion\")"
+        ]
+      }
+    ]
+  },
+  "bv_snapshot": {
+    "present": true,
+    "recommendation_count": 1,
+    "parent_epic_recommendation_ids": [
+      "bd-rchk0"
+    ],
+    "suppressed_parent_epic_ids": [
+      "bd-rchk0"
+    ]
+  },
+  "rows": [
+    {
+      "id": "bd-rchk0",
+      "title": "Parent epic",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "epic",
+      "source_repo": ".",
+      "assignee": null,
+      "classification": "parent_epic",
+      "reason": "parent epic is planning context, not a direct claim",
+      "blocked_by": [],
+      "owner_handoff_required": false,
+      "next_safe_actions": [
+        "create or claim a narrow child bead under bd-rchk0 instead of claiming the parent epic"
+      ],
+      "reproduction_commands": [
+        "bv --robot-next",
+        "ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl"
+      ]
+    },
+    {
+      "id": "bd-rchk3",
+      "title": "Run permissioned swarm workload",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "task",
+      "source_repo": ".",
+      "assignee": null,
+      "classification": "permission_gated",
+      "reason": "requires explicit permission gate FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD,FFS_SWARM_WORKLOAD_REAL_RUN_ACK=1,swarm-workload-may-use-permissioned-large-host",
+      "blocked_by": [],
+      "permission_gate": {
+        "gate_kind": "large_host_swarm_real_run",
+        "required_env": "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD,FFS_SWARM_WORKLOAD_REAL_RUN_ACK",
+        "required_value": "1,swarm-workload-may-use-permissioned-large-host",
+        "present": false
+      },
+      "owner_handoff_required": false,
+      "next_safe_actions": [
+        "request exact ACK FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD,FFS_SWARM_WORKLOAD_REAL_RUN_ACK=1,swarm-workload-may-use-permissioned-large-host before running or claiming bd-rchk3"
+      ],
+      "reproduction_commands": [
+        "ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl"
+      ]
+    },
+    {
+      "id": "bd-rchk3.4",
+      "title": "Convert xfstests failures",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "task",
+      "source_repo": ".",
+      "assignee": null,
+      "classification": "blocked",
+      "reason": "blocked_by=bd-rchk3.3",
+      "blocked_by": [
+        {
+          "id": "bd-rchk3.3",
+          "status": "open"
+        }
+      ],
+      "owner_handoff_required": false,
+      "next_safe_actions": [
+        "complete blockers for bd-rchk3.4 before claiming"
+      ],
+      "reproduction_commands": [
+        "ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl"
+      ]
+    },
+    {
+      "id": "bd-stale",
+      "title": "Stale claim",
+      "status": "in_progress",
+      "priority": 1,
+      "issue_type": "task",
+      "source_repo": ".",
+      "assignee": "OldAgent",
+      "classification": "stale_in_progress_reclaim_candidate",
+      "reason": "in-progress row is stale after 3600 seconds",
+      "blocked_by": [],
+      "owner_handoff_required": false,
+      "next_safe_actions": [
+        "inspect Agent Mail thread bd-stale and live reservations before reopening or reclaiming"
+      ],
+      "reproduction_commands": [
+        "ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl"
+      ]
+    },
+    {
+      "id": "br-r37",
+      "title": "Foreign tracker row",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "task",
+      "source_repo": "../other",
+      "assignee": null,
+      "classification": "foreign_excluded",
+      "reason": "foreign-looking row is owner-handoff only",
+      "blocked_by": [],
+      "owner_handoff_required": true,
+      "next_safe_actions": [
+        "message owner project before moving, closing, rewriting, or claiming foreign row br-r37"
+      ],
+      "reproduction_commands": [
+        "ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl"
+      ]
+    }
+  ],
+  "next_safe_actions": [
+    "clear blockers before claiming blocked local rows",
+    "do not claim raw bv parent epics when source_aware_queue_state.claimable_ids is empty: bd-rchk0",
+    "do not run permission-gated rows without the exact required ACK",
+    "inspect Agent Mail and live reservations before reclaiming stale in-progress rows",
+    "preserve foreign rows as owner-handoff only; do not mutate them locally",
+    "self-held reservations overlap the target surface; reuse or renew them while working and release them before handoff",
+    "wait for peer reservation release or obtain explicit handoff before editing reserved paths"
+  ],
+  "reproduction_commands": [
+    "ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl --out tracker_source_hygiene_report.json",
+    "ffs-harness claimability-plan --tracker-report tracker_source_hygiene_report.json --reservation-report agent_mail_reservations.json --bv-report bv_robot_next.json --out claimability_plan.json"
+  ],
+  "validation": {
+    "schema_version": 1,
+    "valid": true,
+    "row_count": 5,
+    "classifications_seen": [
+      "permission_gated",
+      "blocked",
+      "parent_epic",
+      "stale_in_progress_reclaim_candidate",
+      "foreign_excluded"
+    ],
+    "errors": []
+  },
+  "errors": []
+}

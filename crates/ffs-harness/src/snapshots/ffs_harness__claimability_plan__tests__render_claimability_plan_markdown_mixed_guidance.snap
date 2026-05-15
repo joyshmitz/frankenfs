@@ -1,0 +1,49 @@
+---
+source: crates/ffs-harness/src/claimability_plan.rs
+expression: markdown
+---
+# Claimability Plan
+
+- Status: `pass`
+- Generated at: `2026-05-14T00:00:00Z`
+- Tracker queue verdict: `blocked_or_permission_gated`
+- Rows: `5`
+- Reservation conflict: `active_peer_conflict`
+- Self-held reservations: `1`
+- Suppressed bv parent epics: `1`
+
+## Next Safe Actions
+
+- `clear blockers before claiming blocked local rows`
+- `do not claim raw bv parent epics when source_aware_queue_state.claimable_ids is empty: bd-rchk0`
+- `do not run permission-gated rows without the exact required ACK`
+- `inspect Agent Mail and live reservations before reclaiming stale in-progress rows`
+- `preserve foreign rows as owner-handoff only; do not mutate them locally`
+- `self-held reservations overlap the target surface; reuse or renew them while working and release them before handoff`
+- `wait for peer reservation release or obtain explicit handoff before editing reserved paths`
+
+## Reservation Allocation
+
+- Status: `safe_disjoint_suggestions`
+- Advisory only: `true`
+- Self-held target paths:
+  - `docs/tracker-hygiene.md`
+- Suggested disjoint target paths:
+  - `crates/ffs-harness/src/claimability_plan.rs`
+  - `docs/tracker-hygiene.md`
+- Safe reservation command: `file_reservation_paths(project_key, agent_name, paths=["docs/tracker-hygiene.md","crates/ffs-harness/src/claimability_plan.rs"], exclusive=true, reason="disjoint claimability-plan suggestion")`
+
+## Rows
+
+| ID | Classification | Status | Reason | Next Action |
+|---|---|---|---|---|
+| `bd-rchk0` | `ParentEpic` | `open` | parent epic is planning context, not a direct claim | `create or claim a narrow child bead under bd-rchk0 instead of claiming the parent epic` |
+| `bd-rchk3` | `PermissionGated` | `open` | requires explicit permission gate FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD,FFS_SWARM_WORKLOAD_REAL_RUN_ACK=1,swarm-workload-may-use-permissioned-large-host | `request exact ACK FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD,FFS_SWARM_WORKLOAD_REAL_RUN_ACK=1,swarm-workload-may-use-permissioned-large-host before running or claiming bd-rchk3` |
+| `bd-rchk3.4` | `Blocked` | `open` | blocked_by=bd-rchk3.3 | `complete blockers for bd-rchk3.4 before claiming` |
+| `bd-stale` | `StaleInProgressReclaimCandidate` | `in_progress` | in-progress row is stale after 3600 seconds | `inspect Agent Mail thread bd-stale and live reservations before reopening or reclaiming` |
+| `br-r37` | `ForeignExcluded` | `open` | foreign-looking row is owner-handoff only | `message owner project before moving, closing, rewriting, or claiming foreign row br-r37` |
+
+## Reproduction
+
+- `ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl --out tracker_source_hygiene_report.json`
+- `ffs-harness claimability-plan --tracker-report tracker_source_hygiene_report.json --reservation-report agent_mail_reservations.json --bv-report bv_robot_next.json --out claimability_plan.json`

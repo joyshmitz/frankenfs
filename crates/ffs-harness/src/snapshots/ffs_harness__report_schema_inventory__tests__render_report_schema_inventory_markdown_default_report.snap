@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 85 |
+| Total rows | 86 |
 | Required rows | 8 |
-| Advisory-only rows | 75 |
+| Advisory-only rows | 76 |
 | Permissioned-only rows | 1 |
-| Covered rows | 84 |
+| Covered rows | 85 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -42,6 +42,7 @@ None.
 | `canonical_error_scenarios` | `AdvisoryOnly` | `Covered` | none | none |
 | `casefold_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `chaos_replay_lab_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `claimability_plan_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `consistency_verdict` | `AdvisoryOnly` | `Covered` | none | none |
 | `crash_replay_artifact_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `crash_replay_suite_report` | `AdvisoryOnly` | `Covered` | none | none |
