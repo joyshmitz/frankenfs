@@ -97,7 +97,7 @@ const COVERAGE_SUMMARY_HEADING: &str = "Coverage Summary";
 pub const EXT4_MMP_FIXTURE_CHECKSUM_SEED: u32 = 0xAABB_CCDD;
 const EXT4_MMP_FIXTURE_CHECKSUM_OFFSET: usize = 0x3FC;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CoverageDomain {
     pub domain: String,
     pub implemented: u32,
@@ -105,7 +105,7 @@ pub struct CoverageDomain {
     pub coverage_percent: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ParityReport {
     pub domains: Vec<CoverageDomain>,
     pub overall_implemented: u32,
@@ -717,13 +717,7 @@ mod tests {
         let json = serde_json::to_string_pretty(&report)?;
         let parsed: ParityReport = serde_json::from_str(&json)?;
 
-        assert_eq!(
-            serde_json::to_value(&parsed)?,
-            serde_json::to_value(&report)?
-        );
-        assert_eq!(parsed.domains.len(), report.domains.len());
-        assert_eq!(parsed.overall_implemented, report.overall_implemented);
-        assert_eq!(parsed.overall_total, report.overall_total);
+        assert_eq!(parsed, report);
         Ok(())
     }
 
@@ -733,6 +727,7 @@ mod tests {
         let json = serde_json::to_string_pretty(&report)?;
         let parsed: ParityReport = serde_json::from_str(&json)?;
 
+        assert_eq!(parsed, report);
         assert_eq!(serde_json::to_string_pretty(&parsed)?, json);
         insta::assert_snapshot!("parity_report_json_shape", json);
         Ok(())
