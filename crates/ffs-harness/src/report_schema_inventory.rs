@@ -127,6 +127,7 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
     rows.extend(governance_durability_advisory_report_rows());
     rows.extend(control_plane_contract_advisory_report_rows());
     rows.extend(corpus_and_workload_advisory_report_rows());
+    rows.extend(performance_advisory_report_rows());
     rows.extend([
         covered_advisory_row(
             "readiness_lab_numa_p99_replay_report",
@@ -782,6 +783,11 @@ fn corpus_and_workload_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "swarm_workload_harness_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__swarm_workload_harness__tests__swarm_workload_harness_report_json_shape.snap",
         ),
+    ]
+}
+
+fn performance_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
         covered_advisory_row(
             "performance_baseline_manifest_report",
             "crates/ffs-harness/src/performance_baseline_manifest.rs",
@@ -790,6 +796,15 @@ fn corpus_and_workload_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "performance baseline manifest and release evidence dry-run gates",
             "performance_baseline_manifest_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__performance_baseline_manifest__tests__performance_baseline_manifest_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "performance_delta_closeout_report",
+            "crates/ffs-harness/src/performance_delta_closeout.rs",
+            "PerformanceDeltaCloseoutReport",
+            "performance-delta-closeout",
+            "performance delta closeout and release evidence follow-up gates",
+            "performance_delta_closeout_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__performance_delta_closeout__tests__performance_delta_closeout_report_json_shape.snap",
         ),
     ]
 }
@@ -1524,12 +1539,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 77);
+        assert_eq!(report.total_rows, 78);
         assert_eq!(report.required_rows, 7);
-        assert_eq!(report.advisory_only_rows, 68);
+        assert_eq!(report.advisory_only_rows, 69);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 76);
+        assert_eq!(report.covered_rows, 77);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1545,6 +1560,11 @@ mod tests {
             report
                 .report_ids
                 .contains(&"performance_baseline_manifest_report".to_owned())
+        );
+        assert!(
+            report
+                .report_ids
+                .contains(&"performance_delta_closeout_report".to_owned())
         );
         assert!(report.report_ids.contains(&"fuzz_smoke_report".to_owned()));
         assert!(
@@ -2251,6 +2271,39 @@ mod tests {
         );
         assert!(row.snapshot_path.ends_with(
             "ffs_harness__performance_baseline_manifest__tests__performance_baseline_manifest_report_json_shape.snap"
+        ));
+        assert_eq!(
+            row.claim_effect,
+            ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+        );
+    }
+
+    #[test]
+    fn inventory_tracks_performance_delta_closeout_report() {
+        let inventory = current_report_schema_inventory();
+        let row = inventory
+            .rows
+            .iter()
+            .find(|row| row.report_id == "performance_delta_closeout_report")
+            .expect("inventory includes performance delta closeout report");
+
+        assert_eq!(
+            row.module_path,
+            "crates/ffs-harness/src/performance_delta_closeout.rs"
+        );
+        assert_eq!(row.rust_type, "PerformanceDeltaCloseoutReport");
+        assert_eq!(row.producer, "performance-delta-closeout");
+        assert_eq!(
+            row.coverage_requirement,
+            ReportSchemaCoverageRequirement::AdvisoryOnly
+        );
+        assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+        assert_eq!(
+            row.evidence_test,
+            "performance_delta_closeout_report_json_shape"
+        );
+        assert!(row.snapshot_path.ends_with(
+            "ffs_harness__performance_delta_closeout__tests__performance_delta_closeout_report_json_shape.snap"
         ));
         assert_eq!(
             row.claim_effect,
