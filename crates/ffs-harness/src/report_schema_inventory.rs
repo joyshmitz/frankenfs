@@ -611,6 +611,15 @@ fn governance_durability_advisory_report_rows() -> Vec<ReportSchemaInventoryRow>
             "crates/ffs-harness/src/snapshots/ffs_harness__low_privilege_demo_sandbox__tests__low_privilege_demo_sandbox_report_json_shape.snap",
         ),
         covered_advisory_row(
+            "soak_canary_campaign_report",
+            "crates/ffs-harness/src/soak_canary_campaign.rs",
+            "SoakCanaryCampaignReport",
+            "validate-soak-canary-campaigns",
+            "endurance and canary campaign proof-bundle/release-gate consumers",
+            "soak_canary_campaign_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__soak_canary_campaign__tests__soak_canary_campaign_report_json_shape.snap",
+        ),
+        covered_advisory_row(
             "wal_group_commit_gate_report",
             "crates/ffs-harness/src/wal_group_commit_gate.rs",
             "WalGroupCommitGateReport",
@@ -1515,12 +1524,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 76);
+        assert_eq!(report.total_rows, 77);
         assert_eq!(report.required_rows, 7);
-        assert_eq!(report.advisory_only_rows, 67);
+        assert_eq!(report.advisory_only_rows, 68);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 75);
+        assert_eq!(report.covered_rows, 76);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1542,6 +1551,11 @@ mod tests {
             report
                 .report_ids
                 .contains(&"swarm_operator_validation_report".to_owned())
+        );
+        assert!(
+            report
+                .report_ids
+                .contains(&"soak_canary_campaign_report".to_owned())
         );
         assert_eq!(report.row_results.len(), report.total_rows);
         assert_eq!(
@@ -2315,6 +2329,14 @@ mod tests {
                 "validate-low-privilege-demo-sandbox",
                 "low_privilege_demo_sandbox_report_json_shape",
                 "ffs_harness__low_privilege_demo_sandbox__tests__low_privilege_demo_sandbox_report_json_shape.snap",
+            ),
+            (
+                "soak_canary_campaign_report",
+                "crates/ffs-harness/src/soak_canary_campaign.rs",
+                "SoakCanaryCampaignReport",
+                "validate-soak-canary-campaigns",
+                "soak_canary_campaign_report_json_shape",
+                "ffs_harness__soak_canary_campaign__tests__soak_canary_campaign_report_json_shape.snap",
             ),
             (
                 "wal_group_commit_gate_report",
