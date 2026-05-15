@@ -687,6 +687,15 @@ fn governance_durability_advisory_report_rows() -> Vec<ReportSchemaInventoryRow>
             "docs_status_drift_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__docs_status_drift__tests__docs_status_drift_report_json_shape.snap",
         ),
+        covered_advisory_row(
+            "operational_evidence_index",
+            "crates/ffs-harness/src/operational_evidence_index.rs",
+            "OperationalEvidenceIndex",
+            "operational-evidence-index",
+            "readiness dashboard latest-truth aggregation and operator handoff",
+            "operational_evidence_index_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__operational_evidence_index__tests__operational_evidence_index_json_shape.snap",
+        ),
     ];
 
     rows.extend(governance_durability_decision_advisory_report_rows());
@@ -1791,18 +1800,19 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 99);
+        assert_eq!(report.total_rows, 100);
         assert_eq!(report.required_rows, 8);
-        assert_eq!(report.advisory_only_rows, 89);
+        assert_eq!(report.advisory_only_rows, 90);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 98);
+        assert_eq!(report.covered_rows, 99);
         assert_eq!(report.missing_rows, 0);
         for report_id in [
             "swarm_operator_report",
             "readiness_action_dry_run_report",
             "performance_baseline_manifest_report",
             "performance_delta_closeout_report",
+            "operational_evidence_index",
             "perf_comparison_context",
             "perf_regression_baseline",
             "perf_triage_decision",

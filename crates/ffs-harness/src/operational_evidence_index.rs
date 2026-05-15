@@ -1166,6 +1166,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn operational_evidence_index_json_shape() -> Result<()> {
+        let json = serde_json::to_string_pretty(&sample_markdown_evidence_index())
+            .context("serialize operational evidence index fixture")?;
+
+        insta::assert_snapshot!("operational_evidence_index_json_shape", json);
+        Ok(())
+    }
+
     fn sample_markdown_evidence_index() -> OperationalEvidenceIndex {
         let selected_record_id =
             "swarm.responsiveness:p99_authoritative:bd-rchk0.53.8:run-large-host:0";

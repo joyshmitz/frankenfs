@@ -1,0 +1,180 @@
+---
+source: crates/ffs-harness/src/operational_evidence_index.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "index_id": "frankenfs-operational-evidence-index:v1",
+  "source_root": "artifacts/readiness",
+  "readiness_report_id": "operational-readiness:fixture",
+  "source_record_count": 4,
+  "selected_record_count": 1,
+  "authoritative_record_count": 2,
+  "stale_record_count": 1,
+  "missing_raw_log_record_count": 1,
+  "conflict_count": 1,
+  "duplicate_run_id_count": 1,
+  "host_downgrade_count": 1,
+  "records": [
+    {
+      "record_id": "swarm.responsiveness:p99_authoritative:bd-rchk0.53.8:run-large-host:0",
+      "lane_id": "swarm.responsiveness",
+      "scenario_id": "p99_authoritative",
+      "bead_id": "bd-rchk0.53.8",
+      "git_sha": "abc123",
+      "run_id": "run-large-host",
+      "gate_id": "release_gate",
+      "source_path": "artifacts/swarm/run-large-host/operational.json",
+      "source_kind": "artifact_manifest",
+      "host_class": "permissioned_large_host",
+      "freshness": "fresh",
+      "outcome": "pass",
+      "taxonomy_class": "product_behavior",
+      "release_claim_effect": "strengthens",
+      "raw_log_paths": [
+        "artifacts/swarm/large-host/raw.log",
+        "artifacts/swarm/large-host/stderr.log"
+      ],
+      "artifact_refs": [],
+      "missing_raw_logs": false,
+      "authoritative": true,
+      "selected": true,
+      "stale_git_sha": false,
+      "stale_artifact": false,
+      "reproduction_command": null,
+      "cleanup_status": "preserved_artifacts",
+      "remediation_hint": null,
+      "detail": null
+    },
+    {
+      "record_id": "swarm.responsiveness:p99_authoritative:bd-rchk0.53.8:run-smoke:1",
+      "lane_id": "swarm.responsiveness",
+      "scenario_id": "p99_authoritative",
+      "bead_id": "bd-rchk0.53.8",
+      "git_sha": "abc123",
+      "run_id": "run-smoke",
+      "gate_id": "release_gate",
+      "source_path": "artifacts/swarm/run-smoke/operational.json",
+      "source_kind": "artifact_manifest",
+      "host_class": "capability_downgraded",
+      "freshness": "fresh",
+      "outcome": "fail",
+      "taxonomy_class": "product_behavior",
+      "release_claim_effect": "blocks",
+      "raw_log_paths": [
+        "artifacts/swarm/smoke/raw.log"
+      ],
+      "artifact_refs": [],
+      "missing_raw_logs": false,
+      "authoritative": true,
+      "selected": false,
+      "stale_git_sha": false,
+      "stale_artifact": false,
+      "reproduction_command": null,
+      "cleanup_status": "preserved_artifacts",
+      "remediation_hint": null,
+      "detail": null
+    },
+    {
+      "record_id": "xfstests:generic_001:bd-rchk3.3:run-duplicate:2",
+      "lane_id": "xfstests",
+      "scenario_id": "generic_001",
+      "bead_id": "bd-rchk3.3",
+      "git_sha": "abc123",
+      "run_id": "run-duplicate",
+      "gate_id": "xfstests",
+      "source_path": "artifacts/xfstests/generic_001.json",
+      "source_kind": "artifact_manifest",
+      "host_class": "developer_smoke",
+      "freshness": "stale",
+      "outcome": "skip",
+      "taxonomy_class": "host_capability_skip",
+      "release_claim_effect": "follow_up_only",
+      "raw_log_paths": [],
+      "artifact_refs": [],
+      "missing_raw_logs": true,
+      "authoritative": false,
+      "selected": false,
+      "stale_git_sha": false,
+      "stale_artifact": true,
+      "reproduction_command": null,
+      "cleanup_status": null,
+      "remediation_hint": "rerun permissioned xfstests lane",
+      "detail": null
+    },
+    {
+      "record_id": "xfstests:generic_002:bd-rchk3.3:run-duplicate:3",
+      "lane_id": "xfstests",
+      "scenario_id": "generic_002",
+      "bead_id": "bd-rchk3.3",
+      "git_sha": "abc123",
+      "run_id": "run-duplicate",
+      "gate_id": "xfstests",
+      "source_path": "artifacts/xfstests/generic_002.json",
+      "source_kind": "artifact_manifest",
+      "host_class": "developer_smoke",
+      "freshness": "fresh",
+      "outcome": "skip",
+      "taxonomy_class": "host_capability_skip",
+      "release_claim_effect": "follow_up_only",
+      "raw_log_paths": [],
+      "artifact_refs": [],
+      "missing_raw_logs": true,
+      "authoritative": false,
+      "selected": false,
+      "stale_git_sha": false,
+      "stale_artifact": false,
+      "reproduction_command": null,
+      "cleanup_status": null,
+      "remediation_hint": "rerun permissioned xfstests lane",
+      "detail": null
+    }
+  ],
+  "selections": [
+    {
+      "lane_id": "swarm.responsiveness",
+      "scenario_id": "p99_authoritative",
+      "bead_id": "bd-rchk0.53.8",
+      "selected_record_id": "swarm.responsiveness:p99_authoritative:bd-rchk0.53.8:run-large-host:0",
+      "selected_run_id": "run-large-host",
+      "selected_source_path": "artifacts/swarm/large-host/operational.json",
+      "selected_outcome": "pass",
+      "selected_release_claim_effect": "strengthens",
+      "superseded_record_ids": [
+        "swarm.responsiveness:p99_authoritative:bd-rchk0.53.8:run-smoke:1"
+      ]
+    }
+  ],
+  "conflicts": [
+    {
+      "lane_id": "swarm.responsiveness",
+      "scenario_id": "p99_authoritative",
+      "bead_id": "bd-rchk0.53.8",
+      "outcomes": [
+        "pass",
+        "fail"
+      ],
+      "record_ids": [
+        "swarm.responsiveness:p99_authoritative:bd-rchk0.53.8:run-large-host:0",
+        "swarm.responsiveness:p99_authoritative:bd-rchk0.53.8:run-smoke:1"
+      ],
+      "source_paths": [
+        "artifacts/swarm/large-host/operational.json",
+        "artifacts/swarm/smoke/operational.json"
+      ]
+    }
+  ],
+  "duplicate_run_ids": [
+    {
+      "run_id": "run-duplicate",
+      "record_ids": [
+        "xfstests:generic_001:bd-rchk3.3:run-duplicate:2",
+        "xfstests:generic_002:bd-rchk3.3:run-duplicate:3"
+      ],
+      "source_paths": [
+        "artifacts/xfstests/generic_001.json",
+        "artifacts/xfstests/generic_002.json"
+      ]
+    }
+  ]
+}
