@@ -552,6 +552,15 @@ fn proof_risk_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__cross_oracle_arbitration__tests__cross_oracle_arbitration_validation_report_json_shape.snap",
         ),
         covered_advisory_row(
+            "invariant_oracle_consumer_report",
+            "crates/ffs-harness/src/invariant_oracle.rs",
+            "InvariantOracleConsumerReport",
+            "validate-invariant-oracle --report",
+            "invariant oracle proof-bundle consumer validation",
+            "invariant_oracle_consumer_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__invariant_oracle__tests__invariant_oracle_consumer_report_json_shape.snap",
+        ),
+        covered_advisory_row(
             "invariant_oracle_report",
             "crates/ffs-harness/src/invariant_oracle.rs",
             "InvariantOracleReport",
@@ -1800,12 +1809,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 100);
+        assert_eq!(report.total_rows, 101);
         assert_eq!(report.required_rows, 8);
-        assert_eq!(report.advisory_only_rows, 90);
+        assert_eq!(report.advisory_only_rows, 91);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 99);
+        assert_eq!(report.covered_rows, 100);
         assert_eq!(report.missing_rows, 0);
         for report_id in [
             "swarm_operator_report",
@@ -1813,6 +1822,7 @@ mod tests {
             "performance_baseline_manifest_report",
             "performance_delta_closeout_report",
             "operational_evidence_index",
+            "invariant_oracle_consumer_report",
             "perf_comparison_context",
             "perf_regression_baseline",
             "perf_triage_decision",
@@ -2534,6 +2544,14 @@ mod tests {
                 "validate-cross-oracle-arbitration",
                 "cross_oracle_arbitration_validation_report_json_shape",
                 "ffs_harness__cross_oracle_arbitration__tests__cross_oracle_arbitration_validation_report_json_shape.snap",
+            ),
+            (
+                "invariant_oracle_consumer_report",
+                "crates/ffs-harness/src/invariant_oracle.rs",
+                "InvariantOracleConsumerReport",
+                "validate-invariant-oracle --report",
+                "invariant_oracle_consumer_report_json_shape",
+                "ffs_harness__invariant_oracle__tests__invariant_oracle_consumer_report_json_shape.snap",
             ),
             (
                 "invariant_oracle_report",

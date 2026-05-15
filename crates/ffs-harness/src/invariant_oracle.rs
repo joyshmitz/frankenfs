@@ -159,6 +159,15 @@ pub struct InvariantOracleReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvariantOracleConsumerReport {
+    pub schema_version: u32,
+    pub model_version: String,
+    pub trace_id: String,
+    pub valid: bool,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvariantViolationReport {
     pub model_version: String,
     pub trace_id: String,
@@ -339,6 +348,20 @@ pub fn validate_invariant_trace(trace: &InvariantTrace) -> InvariantOracleReport
         errors,
         reproduction_command: trace.reproduction_command.clone(),
         required_artifacts: collect_required_artifacts(trace),
+    }
+}
+
+#[must_use]
+pub fn build_invariant_oracle_consumer_report(
+    report: &InvariantOracleReport,
+) -> InvariantOracleConsumerReport {
+    let errors = validate_invariant_oracle_report(report);
+    InvariantOracleConsumerReport {
+        schema_version: report.schema_version,
+        model_version: report.model_version.clone(),
+        trace_id: report.trace_id.clone(),
+        valid: errors.is_empty(),
+        errors,
     }
 }
 
@@ -1894,6 +1917,23 @@ mod tests {
 
         let roundtrip: InvariantOracleReport = serde_json::from_str(&json)?;
         assert_eq!(roundtrip, report);
+        Ok(())
+    }
+
+    #[test]
+    fn invariant_oracle_consumer_report_json_shape() -> Result<()> {
+        let mut report = validate_invariant_trace(&valid_trace());
+        report.model_version = "unknown-model".to_owned();
+
+        let consumer_report = build_invariant_oracle_consumer_report(&report);
+        assert!(!consumer_report.valid);
+        assert_eq!(consumer_report.errors.len(), 1);
+
+        let json = serde_json::to_string_pretty(&consumer_report)?;
+        insta::assert_snapshot!("invariant_oracle_consumer_report_json_shape", json);
+
+        let roundtrip: InvariantOracleConsumerReport = serde_json::from_str(&json)?;
+        assert_eq!(roundtrip, consumer_report);
         Ok(())
     }
 

@@ -82,8 +82,8 @@ use ffs_harness::{
         run_fuzz_smoke_manifest,
     },
     invariant_oracle::{
-        fail_on_invariant_oracle_errors, load_invariant_oracle_report, load_invariant_trace,
-        render_invariant_oracle_markdown, validate_invariant_oracle_report,
+        build_invariant_oracle_consumer_report, fail_on_invariant_oracle_errors,
+        load_invariant_oracle_report, load_invariant_trace, render_invariant_oracle_markdown,
         validate_invariant_trace,
     },
     inventory_closeout_gate::{
@@ -3396,25 +3396,22 @@ fn validate_invariant_oracle_report_cmd(
     format: ProofBundleFormat,
 ) -> Result<()> {
     let report = load_invariant_oracle_report(Path::new(report_path))?;
-    let errors = validate_invariant_oracle_report(&report);
-    let valid = errors.is_empty();
+    let consumer_report = build_invariant_oracle_consumer_report(&report);
     let output = match format {
-        ProofBundleFormat::Json => serde_json::to_string_pretty(&serde_json::json!({
-            "schema_version": report.schema_version,
-            "model_version": report.model_version,
-            "trace_id": report.trace_id,
-            "valid": valid,
-            "errors": &errors,
-        }))?,
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&consumer_report)?,
         ProofBundleFormat::Markdown => {
             let mut summary = String::new();
             summary.push_str("# Invariant Oracle Consumer Report\n\n");
-            let _ = writeln!(summary, "- Trace: `{}`", report.trace_id);
-            let _ = writeln!(summary, "- Model version: `{}`", report.model_version);
-            let _ = writeln!(summary, "- Valid: `{valid}`");
-            if !errors.is_empty() {
+            let _ = writeln!(summary, "- Trace: `{}`", consumer_report.trace_id);
+            let _ = writeln!(
+                summary,
+                "- Model version: `{}`",
+                consumer_report.model_version
+            );
+            let _ = writeln!(summary, "- Valid: `{}`", consumer_report.valid);
+            if !consumer_report.errors.is_empty() {
                 summary.push_str("\n## Errors\n\n");
-                for error in &errors {
+                for error in &consumer_report.errors {
                     let _ = writeln!(summary, "- {error}");
                 }
             }
@@ -3424,15 +3421,18 @@ fn validate_invariant_oracle_report_cmd(
 
     if let Some(path) = out_path {
         write_text_file(Path::new(path), &format!("{output}\n"))?;
-        println!("invariant oracle consumer report written: {path} valid={valid}");
+        println!(
+            "invariant oracle consumer report written: {path} valid={}",
+            consumer_report.valid
+        );
     } else {
         println!("{output}");
     }
 
-    if !valid {
+    if !consumer_report.valid {
         bail!(
             "invariant oracle report artifact validation failed: errors={}",
-            errors.len()
+            consumer_report.errors.len()
         );
     }
     Ok(())
