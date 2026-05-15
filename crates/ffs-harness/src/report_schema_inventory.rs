@@ -773,16 +773,18 @@ fn control_plane_contract_advisory_report_rows() -> Vec<ReportSchemaInventoryRow
 }
 
 fn corpus_and_workload_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
-    vec![
-        covered_advisory_row(
-            "fault_injection_corpus_report",
-            "crates/ffs-harness/src/fault_injection_corpus.rs",
-            "FaultInjectionCorpusReport",
-            "validate-fault-injection-corpus",
-            "repair confidence and fault coverage corpus gates",
-            "fault_injection_corpus_report_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__fault_injection_corpus__tests__fault_injection_corpus_report_json_shape.snap",
-        ),
+    let mut rows = vec![covered_advisory_row(
+        "fault_injection_corpus_report",
+        "crates/ffs-harness/src/fault_injection_corpus.rs",
+        "FaultInjectionCorpusReport",
+        "validate-fault-injection-corpus",
+        "repair confidence and fault coverage corpus gates",
+        "fault_injection_corpus_report_json_shape",
+        "crates/ffs-harness/src/snapshots/ffs_harness__fault_injection_corpus__tests__fault_injection_corpus_report_json_shape.snap",
+    )];
+
+    rows.extend(fuzz_dashboard_advisory_report_rows());
+    rows.extend([
         covered_advisory_row(
             "fuzz_smoke_report",
             "crates/ffs-harness/src/fuzz_smoke.rs",
@@ -854,6 +856,31 @@ fn corpus_and_workload_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "large-host swarm workload manifest validation gates",
             "swarm_workload_harness_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__swarm_workload_harness__tests__swarm_workload_harness_report_json_shape.snap",
+        ),
+    ]);
+
+    rows
+}
+
+fn fuzz_dashboard_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
+        covered_advisory_row(
+            "fuzz_dashboard_campaign_summary",
+            "crates/ffs-harness/src/fuzz_dashboard.rs",
+            "CampaignSummary",
+            "fuzz/scripts/nightly_fuzz.sh",
+            "fuzz dashboard health assessment and trend visibility gates",
+            "campaign_summary_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__fuzz_dashboard__tests__campaign_summary_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "fuzz_dashboard_regression_alert",
+            "crates/ffs-harness/src/fuzz_dashboard.rs",
+            "RegressionAlert",
+            "detect_regressions",
+            "fuzz dashboard regression alerts and operator triage",
+            "regression_alert_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__fuzz_dashboard__tests__regression_alert_json_shape.snap",
         ),
     ]
 }
@@ -1669,18 +1696,20 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 89);
+        assert_eq!(report.total_rows, 91);
         assert_eq!(report.required_rows, 8);
-        assert_eq!(report.advisory_only_rows, 79);
+        assert_eq!(report.advisory_only_rows, 81);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 88);
+        assert_eq!(report.covered_rows, 90);
         assert_eq!(report.missing_rows, 0);
         for report_id in [
             "swarm_operator_report",
             "readiness_action_dry_run_report",
             "performance_baseline_manifest_report",
             "performance_delta_closeout_report",
+            "fuzz_dashboard_campaign_summary",
+            "fuzz_dashboard_regression_alert",
             "fuzz_smoke_report",
             "swarm_operator_validation_report",
             "soak_canary_campaign_report",
@@ -2573,6 +2602,51 @@ mod tests {
             row.claim_effect,
             ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
         );
+    }
+
+    #[test]
+    fn inventory_tracks_fuzz_dashboard_json_contracts() {
+        let inventory = current_report_schema_inventory();
+        for (report_id, rust_type, producer, downstream_consumer, evidence_test, snapshot_suffix) in [
+            (
+                "fuzz_dashboard_campaign_summary",
+                "CampaignSummary",
+                "fuzz/scripts/nightly_fuzz.sh",
+                "fuzz dashboard health assessment and trend visibility gates",
+                "campaign_summary_json_shape",
+                "ffs_harness__fuzz_dashboard__tests__campaign_summary_json_shape.snap",
+            ),
+            (
+                "fuzz_dashboard_regression_alert",
+                "RegressionAlert",
+                "detect_regressions",
+                "fuzz dashboard regression alerts and operator triage",
+                "regression_alert_json_shape",
+                "ffs_harness__fuzz_dashboard__tests__regression_alert_json_shape.snap",
+            ),
+        ] {
+            let row = inventory
+                .rows
+                .iter()
+                .find(|row| row.report_id == report_id)
+                .expect("inventory includes fuzz dashboard JSON contract");
+
+            assert_eq!(row.module_path, "crates/ffs-harness/src/fuzz_dashboard.rs");
+            assert_eq!(row.rust_type, rust_type);
+            assert_eq!(row.producer, producer);
+            assert_eq!(row.downstream_consumer, downstream_consumer);
+            assert_eq!(
+                row.coverage_requirement,
+                ReportSchemaCoverageRequirement::AdvisoryOnly
+            );
+            assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+            assert_eq!(row.evidence_test, evidence_test);
+            assert!(row.snapshot_path.ends_with(snapshot_suffix));
+            assert_eq!(
+                row.claim_effect,
+                ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+            );
+        }
     }
 
     #[test]
