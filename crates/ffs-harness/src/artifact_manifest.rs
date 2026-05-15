@@ -1808,7 +1808,7 @@ pub struct ArtifactSchemaFixture {
 }
 
 /// Per-fixture validation row emitted by the executable fixture suite.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactSchemaFixtureRow {
     /// Stable fixture identifier.
     pub fixture_id: String,
@@ -1833,7 +1833,7 @@ pub struct ArtifactSchemaFixtureRow {
 }
 
 /// Executable artifact-schema fixture suite report.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactSchemaFixtureReport {
     /// Report schema version.
     pub schema_version: u32,
@@ -4054,6 +4054,7 @@ mod tests {
 
         let json = serde_json::to_string_pretty(&report)?;
         let parsed: ArtifactSchemaFixtureReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
         assert!(parsed.valid, "parsed fixture report errors: {parsed:#?}");
         assert_eq!(parsed.schema_version, report.schema_version);
         assert_eq!(parsed.validator_version, report.validator_version);
