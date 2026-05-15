@@ -2552,7 +2552,9 @@ mod tests {
             dry_run_metadata(),
         );
         let json = serde_json::to_string_pretty(&report)?;
+        let decoded: ReadinessActionDryRunReport = serde_json::from_str(&json)?;
 
+        assert_eq!(decoded, report);
         insta::assert_snapshot!("readiness_action_dry_run_json_report", json);
         Ok(())
     }
