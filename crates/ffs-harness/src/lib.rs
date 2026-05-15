@@ -503,7 +503,7 @@ pub fn validate_mmp_block_fixture(path: &Path) -> Result<Ext4MmpBlock> {
 // pipeline (scripts/capture_ext4_reference.sh) produces JSON in this
 // format; conformance tests parse it and compare against ffs-ondisk.
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoldenReference {
     pub version: u32,
     pub source: String,
@@ -513,14 +513,14 @@ pub struct GoldenReference {
     pub files: Vec<GoldenFile>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoldenImageParams {
     pub size_bytes: u64,
     pub block_size: u32,
     pub volume_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoldenSuperblock {
     pub block_size: u32,
     pub blocks_count: u64,
@@ -530,19 +530,19 @@ pub struct GoldenSuperblock {
     pub free_inodes_count: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoldenDirectory {
     pub path: String,
     pub entries: Vec<GoldenDirEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoldenDirEntry {
     pub name: String,
     pub file_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoldenFile {
     pub path: String,
     pub size: u64,
@@ -747,6 +747,52 @@ mod tests {
 
         assert_eq!(parsed, report);
         insta::assert_snapshot!("profile_read_path_report_json_shape", json);
+        Ok(())
+    }
+
+    #[test]
+    fn golden_reference_json_round_trip_preserves_full_fixture() -> Result<(), serde_json::Error> {
+        let golden = GoldenReference {
+            version: 1,
+            source: "synthetic-ext4-reference".to_owned(),
+            image_params: GoldenImageParams {
+                size_bytes: 8 * 1024 * 1024,
+                block_size: 4096,
+                volume_name: "ffs-golden".to_owned(),
+            },
+            superblock: GoldenSuperblock {
+                block_size: 4096,
+                blocks_count: 2048,
+                inodes_count: 1024,
+                volume_name: "ffs-golden".to_owned(),
+                free_blocks_count: 1984,
+                free_inodes_count: 1001,
+            },
+            directories: vec![GoldenDirectory {
+                path: "/".to_owned(),
+                entries: vec![
+                    GoldenDirEntry {
+                        name: "hello.txt".to_owned(),
+                        file_type: "regular".to_owned(),
+                    },
+                    GoldenDirEntry {
+                        name: "nested".to_owned(),
+                        file_type: "directory".to_owned(),
+                    },
+                ],
+            }],
+            files: vec![GoldenFile {
+                path: "/hello.txt".to_owned(),
+                size: 5,
+                content: b"hello".to_vec(),
+            }],
+        };
+
+        let json = serde_json::to_string_pretty(&golden)?;
+        let parsed: GoldenReference = serde_json::from_str(&json)?;
+
+        assert_eq!(parsed, golden);
+        assert_eq!(serde_json::to_string_pretty(&parsed)?, json);
         Ok(())
     }
 
