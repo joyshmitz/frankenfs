@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 37 |
+| Total rows | 43 |
 | Required rows | 6 |
-| Advisory-only rows | 29 |
+| Advisory-only rows | 35 |
 | Permissioned-only rows | 1 |
-| Covered rows | 36 |
+| Covered rows | 42 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -29,6 +29,8 @@ None.
 
 | Report ID | Requirement | Status | Missing Evidence | Errors |
 |---|---|---|---|---|
+| `adaptive_runtime_evidence_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `adaptive_runtime_runner_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `authoritative_lane_decision` | `Required` | `Covered` | none | none |
 | `btrfs_multidev_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `btrfs_send_receive_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
@@ -59,8 +61,12 @@ None.
 | `repair_writeback_serialization_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `source_scope_manifest_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `source_scope_scan_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `swarm_cache_controller_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `swarm_operator_report` | `Required` | `Covered` | none | none |
+| `swarm_tail_latency_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `swarm_workload_harness_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `topology_runtime_advisor_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `topology_runtime_advisor_scoring_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `tracker_source_hygiene_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `workload_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `writeback_cache_audit_report` | `AdvisoryOnly` | `Covered` | none | none |

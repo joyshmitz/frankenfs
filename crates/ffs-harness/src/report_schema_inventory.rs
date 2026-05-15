@@ -175,6 +175,7 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
     ];
     rows.extend(open_ended_inventory_advisory_report_rows());
     rows.extend(mounted_writeback_advisory_report_rows());
+    rows.extend(adaptive_swarm_advisory_report_rows());
     rows.extend(corpus_and_workload_advisory_report_rows());
     rows.extend([
         covered_advisory_row(
@@ -322,6 +323,65 @@ fn mounted_writeback_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "writeback-cache crash/replay oracle validator",
             "writeback_crash_replay_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__writeback_cache_audit__tests__writeback_crash_replay_report_json_shape.snap",
+        ),
+    ]
+}
+
+fn adaptive_swarm_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
+        covered_advisory_row(
+            "adaptive_runtime_evidence_report",
+            "crates/ffs-harness/src/adaptive_runtime_manifest.rs",
+            "AdaptiveRuntimeEvidenceReport",
+            "validate-adaptive-runtime-manifest",
+            "adaptive runtime evidence manifest validator",
+            "adaptive_runtime_evidence_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__adaptive_runtime_manifest__tests__adaptive_runtime_evidence_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "adaptive_runtime_runner_report",
+            "crates/ffs-harness/src/adaptive_runtime_manifest.rs",
+            "AdaptiveRuntimeRunnerReport",
+            "adaptive-runtime-runner",
+            "adaptive runtime dry-run and capability probe runner",
+            "adaptive_runtime_runner_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__adaptive_runtime_manifest__tests__adaptive_runtime_runner_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "topology_runtime_advisor_report",
+            "crates/ffs-harness/src/topology_runtime_advisor.rs",
+            "TopologyRuntimeAdvisorReport",
+            "validate-topology-runtime-advisor",
+            "topology runtime advisor manifest validator",
+            "topology_runtime_advisor_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__topology_runtime_advisor__tests__topology_runtime_advisor_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "topology_runtime_advisor_scoring_report",
+            "crates/ffs-harness/src/topology_runtime_advisor.rs",
+            "TopologyRuntimeAdvisorScoringReport",
+            "score-topology-runtime-advisor",
+            "topology runtime advisor scoring gate",
+            "topology_runtime_advisor_scoring_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__topology_runtime_advisor__tests__topology_runtime_advisor_scoring_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "swarm_cache_controller_report",
+            "crates/ffs-harness/src/swarm_cache_controller.rs",
+            "SwarmCacheValidationReport",
+            "validate-swarm-cache-controller",
+            "swarm cache controller contract validator",
+            "swarm_cache_controller_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__swarm_cache_controller__tests__swarm_cache_controller_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "swarm_tail_latency_report",
+            "crates/ffs-harness/src/swarm_tail_latency.rs",
+            "SwarmTailLatencyReport",
+            "validate-swarm-tail-latency",
+            "large-host swarm tail latency evidence validator",
+            "swarm_tail_latency_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__swarm_tail_latency__tests__swarm_tail_latency_report_json_shape.snap",
         ),
     ]
 }
@@ -1031,12 +1091,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 37);
+        assert_eq!(report.total_rows, 43);
         assert_eq!(report.required_rows, 6);
-        assert_eq!(report.advisory_only_rows, 29);
+        assert_eq!(report.advisory_only_rows, 35);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 36);
+        assert_eq!(report.covered_rows, 42);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1051,7 +1111,7 @@ mod tests {
         assert_eq!(report.row_results.len(), report.total_rows);
         assert_eq!(
             report.row_results[0].report_id,
-            "authoritative_lane_decision"
+            "adaptive_runtime_evidence_report"
         );
         assert!(report.uncovered_required_report_ids.is_empty());
         assert!(report.row_results.iter().all(|row| row.errors.is_empty()));
@@ -1458,6 +1518,82 @@ mod tests {
                 .iter()
                 .find(|row| row.report_id == report_id)
                 .expect("inventory includes mounted/writeback report");
+
+            assert_eq!(row.module_path, module_path);
+            assert_eq!(row.rust_type, rust_type);
+            assert_eq!(row.producer, producer);
+            assert_eq!(
+                row.coverage_requirement,
+                ReportSchemaCoverageRequirement::AdvisoryOnly
+            );
+            assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+            assert_eq!(row.evidence_test, evidence_test);
+            assert!(row.snapshot_path.ends_with(snapshot_suffix));
+            assert_eq!(
+                row.claim_effect,
+                ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_tracks_adaptive_runtime_and_swarm_reports() {
+        let inventory = current_report_schema_inventory();
+        for (report_id, module_path, rust_type, producer, evidence_test, snapshot_suffix) in [
+            (
+                "adaptive_runtime_evidence_report",
+                "crates/ffs-harness/src/adaptive_runtime_manifest.rs",
+                "AdaptiveRuntimeEvidenceReport",
+                "validate-adaptive-runtime-manifest",
+                "adaptive_runtime_evidence_report_json_shape",
+                "ffs_harness__adaptive_runtime_manifest__tests__adaptive_runtime_evidence_report_json_shape.snap",
+            ),
+            (
+                "adaptive_runtime_runner_report",
+                "crates/ffs-harness/src/adaptive_runtime_manifest.rs",
+                "AdaptiveRuntimeRunnerReport",
+                "adaptive-runtime-runner",
+                "adaptive_runtime_runner_report_json_shape",
+                "ffs_harness__adaptive_runtime_manifest__tests__adaptive_runtime_runner_report_json_shape.snap",
+            ),
+            (
+                "topology_runtime_advisor_report",
+                "crates/ffs-harness/src/topology_runtime_advisor.rs",
+                "TopologyRuntimeAdvisorReport",
+                "validate-topology-runtime-advisor",
+                "topology_runtime_advisor_report_json_shape",
+                "ffs_harness__topology_runtime_advisor__tests__topology_runtime_advisor_report_json_shape.snap",
+            ),
+            (
+                "topology_runtime_advisor_scoring_report",
+                "crates/ffs-harness/src/topology_runtime_advisor.rs",
+                "TopologyRuntimeAdvisorScoringReport",
+                "score-topology-runtime-advisor",
+                "topology_runtime_advisor_scoring_report_json_shape",
+                "ffs_harness__topology_runtime_advisor__tests__topology_runtime_advisor_scoring_report_json_shape.snap",
+            ),
+            (
+                "swarm_cache_controller_report",
+                "crates/ffs-harness/src/swarm_cache_controller.rs",
+                "SwarmCacheValidationReport",
+                "validate-swarm-cache-controller",
+                "swarm_cache_controller_report_json_shape",
+                "ffs_harness__swarm_cache_controller__tests__swarm_cache_controller_report_json_shape.snap",
+            ),
+            (
+                "swarm_tail_latency_report",
+                "crates/ffs-harness/src/swarm_tail_latency.rs",
+                "SwarmTailLatencyReport",
+                "validate-swarm-tail-latency",
+                "swarm_tail_latency_report_json_shape",
+                "ffs_harness__swarm_tail_latency__tests__swarm_tail_latency_report_json_shape.snap",
+            ),
+        ] {
+            let row = inventory
+                .rows
+                .iter()
+                .find(|row| row.report_id == report_id)
+                .expect("inventory includes adaptive-runtime/swarm report");
 
             assert_eq!(row.module_path, module_path);
             assert_eq!(row.rust_type, rust_type);
