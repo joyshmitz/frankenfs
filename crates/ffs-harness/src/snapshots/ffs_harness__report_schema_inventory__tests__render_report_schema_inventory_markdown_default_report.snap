@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 91 |
+| Total rows | 93 |
 | Required rows | 8 |
-| Advisory-only rows | 81 |
+| Advisory-only rows | 83 |
 | Permissioned-only rows | 1 |
-| Covered rows | 90 |
+| Covered rows | 92 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -110,6 +110,8 @@ None.
 | `swarm_operator_validation_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `swarm_tail_latency_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `swarm_workload_harness_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `tabletop_drill_canonical_drills` | `AdvisoryOnly` | `Covered` | none | none |
+| `tabletop_drill_result` | `AdvisoryOnly` | `Covered` | none | none |
 | `topology_runtime_advisor_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `topology_runtime_advisor_scoring_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `tracker_source_hygiene_report` | `AdvisoryOnly` | `Covered` | none | none |
