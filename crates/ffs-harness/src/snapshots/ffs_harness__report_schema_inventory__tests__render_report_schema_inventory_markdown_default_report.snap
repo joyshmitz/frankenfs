@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 95 |
+| Total rows | 98 |
 | Required rows | 8 |
-| Advisory-only rows | 85 |
+| Advisory-only rows | 88 |
 | Permissioned-only rows | 1 |
-| Covered rows | 94 |
+| Covered rows | 97 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -78,6 +78,9 @@ None.
 | `operator_recovery_drill_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `oq_decision_matrix_canonical_matrix` | `AdvisoryOnly` | `Covered` | none | none |
 | `parity_report` | `Required` | `Covered` | none | none |
+| `perf_comparison_context` | `AdvisoryOnly` | `Covered` | none | none |
+| `perf_regression_baseline` | `AdvisoryOnly` | `Covered` | none | none |
+| `perf_triage_decision` | `AdvisoryOnly` | `Covered` | none | none |
 | `performance_baseline_manifest_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `performance_delta_closeout_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `permissioned_campaign_reports` | `PermissionedOnly` | `Covered` | none | none |

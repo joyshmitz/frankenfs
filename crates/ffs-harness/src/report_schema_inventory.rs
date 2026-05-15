@@ -984,6 +984,33 @@ fn performance_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "performance_delta_closeout_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__performance_delta_closeout__tests__performance_delta_closeout_report_json_shape.snap",
         ),
+        covered_advisory_row(
+            "perf_comparison_context",
+            "crates/ffs-harness/src/perf_comparison.rs",
+            "ComparisonContext",
+            "RegressionComparator::compare_with_context",
+            "performance comparator structured log context and regression triage consumers",
+            "comparison_context_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__perf_comparison__tests__comparison_context_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "perf_regression_baseline",
+            "crates/ffs-harness/src/perf_regression.rs",
+            "PerfBaseline",
+            "parse_baseline",
+            "benchmark_record baseline parser and performance regression thresholds",
+            "perf_baseline_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__perf_regression__tests__perf_baseline_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "perf_triage_decision",
+            "crates/ffs-harness/src/perf_triage.rs",
+            "TriageDecision",
+            "classify_triage",
+            "performance regression triage runbook and operator follow-up routing",
+            "triage_decision_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__perf_triage__tests__triage_decision_json_shape.snap",
+        ),
     ]
 }
 
@@ -1743,18 +1770,21 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 95);
+        assert_eq!(report.total_rows, 98);
         assert_eq!(report.required_rows, 8);
-        assert_eq!(report.advisory_only_rows, 85);
+        assert_eq!(report.advisory_only_rows, 88);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 94);
+        assert_eq!(report.covered_rows, 97);
         assert_eq!(report.missing_rows, 0);
         for report_id in [
             "swarm_operator_report",
             "readiness_action_dry_run_report",
             "performance_baseline_manifest_report",
             "performance_delta_closeout_report",
+            "perf_comparison_context",
+            "perf_regression_baseline",
+            "perf_triage_decision",
             "fuzz_dashboard_campaign_summary",
             "fuzz_dashboard_regression_alert",
             "tabletop_drill_canonical_drills",
@@ -2734,6 +2764,70 @@ mod tests {
             row.claim_effect,
             ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
         );
+    }
+
+    #[test]
+    fn inventory_tracks_performance_helper_schemas() {
+        let inventory = current_report_schema_inventory();
+        for (
+            report_id,
+            module_path,
+            rust_type,
+            producer,
+            downstream_consumer,
+            evidence_test,
+            snapshot_suffix,
+        ) in [
+            (
+                "perf_comparison_context",
+                "crates/ffs-harness/src/perf_comparison.rs",
+                "ComparisonContext",
+                "RegressionComparator::compare_with_context",
+                "performance comparator structured log context and regression triage consumers",
+                "comparison_context_json_shape",
+                "ffs_harness__perf_comparison__tests__comparison_context_json_shape.snap",
+            ),
+            (
+                "perf_regression_baseline",
+                "crates/ffs-harness/src/perf_regression.rs",
+                "PerfBaseline",
+                "parse_baseline",
+                "benchmark_record baseline parser and performance regression thresholds",
+                "perf_baseline_json_shape",
+                "ffs_harness__perf_regression__tests__perf_baseline_json_shape.snap",
+            ),
+            (
+                "perf_triage_decision",
+                "crates/ffs-harness/src/perf_triage.rs",
+                "TriageDecision",
+                "classify_triage",
+                "performance regression triage runbook and operator follow-up routing",
+                "triage_decision_json_shape",
+                "ffs_harness__perf_triage__tests__triage_decision_json_shape.snap",
+            ),
+        ] {
+            let row = inventory
+                .rows
+                .iter()
+                .find(|row| row.report_id == report_id)
+                .expect("inventory includes performance helper schema");
+
+            assert_eq!(row.module_path, module_path);
+            assert_eq!(row.rust_type, rust_type);
+            assert_eq!(row.producer, producer);
+            assert_eq!(row.downstream_consumer, downstream_consumer);
+            assert_eq!(
+                row.coverage_requirement,
+                ReportSchemaCoverageRequirement::AdvisoryOnly
+            );
+            assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+            assert_eq!(row.evidence_test, evidence_test);
+            assert!(row.snapshot_path.ends_with(snapshot_suffix));
+            assert_eq!(
+                row.claim_effect,
+                ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+            );
+        }
     }
 
     #[test]
