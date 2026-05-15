@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 87 |
+| Total rows | 88 |
 | Required rows | 8 |
-| Advisory-only rows | 77 |
+| Advisory-only rows | 78 |
 | Permissioned-only rows | 1 |
-| Covered rows | 86 |
+| Covered rows | 87 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -46,6 +46,7 @@ None.
 | `consistency_verdict` | `AdvisoryOnly` | `Covered` | none | none |
 | `crash_replay_artifact_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `crash_replay_suite_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `cross_oracle_arbitration_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `cross_oracle_arbitration_validation_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `deferred_parity_audit_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `docs_status_drift_report` | `AdvisoryOnly` | `Covered` | none | none |

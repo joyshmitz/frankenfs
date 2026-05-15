@@ -521,6 +521,15 @@ fn proof_risk_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__ambition_evidence_matrix__tests__ambition_evidence_matrix_report_json_shape.snap",
         ),
         covered_advisory_row(
+            "cross_oracle_arbitration_report",
+            "crates/ffs-harness/src/cross_oracle_arbitration.rs",
+            "CrossOracleArbitrationReport",
+            "validate-cross-oracle-arbitration",
+            "cross-oracle arbitration proof-bundle input",
+            "cross_oracle_arbitration_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__cross_oracle_arbitration__tests__cross_oracle_arbitration_report_json_shape.snap",
+        ),
+        covered_advisory_row(
             "cross_oracle_arbitration_validation_report",
             "crates/ffs-harness/src/cross_oracle_arbitration.rs",
             "CrossOracleArbitrationValidationReport",
@@ -1651,76 +1660,36 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 87);
+        assert_eq!(report.total_rows, 88);
         assert_eq!(report.required_rows, 8);
-        assert_eq!(report.advisory_only_rows, 77);
+        assert_eq!(report.advisory_only_rows, 78);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 86);
+        assert_eq!(report.covered_rows, 87);
         assert_eq!(report.missing_rows, 0);
-        assert!(
-            report
-                .report_ids
-                .contains(&"swarm_operator_report".to_owned())
-        );
-        assert!(
-            report
-                .report_ids
-                .contains(&"readiness_action_dry_run_report".to_owned())
-        );
-        assert!(
-            report
-                .report_ids
-                .contains(&"performance_baseline_manifest_report".to_owned())
-        );
-        assert!(
-            report
-                .report_ids
-                .contains(&"performance_delta_closeout_report".to_owned())
-        );
-        assert!(report.report_ids.contains(&"fuzz_smoke_report".to_owned()));
-        assert!(
-            report
-                .report_ids
-                .contains(&"swarm_operator_validation_report".to_owned())
-        );
-        assert!(
-            report
-                .report_ids
-                .contains(&"soak_canary_campaign_report".to_owned())
-        );
-        assert!(
-            report
-                .report_ids
-                .contains(&"xfstests_failure_triage_report".to_owned())
-        );
-        assert!(report.report_ids.contains(&"parity_report".to_owned()));
-        assert!(
-            report
-                .report_ids
-                .contains(&"crash_replay_artifact_report".to_owned())
-        );
-        assert!(
-            report
-                .report_ids
-                .contains(&"mounted_write_errno_budget_report".to_owned())
-        );
-        assert!(
-            report
-                .report_ids
-                .contains(&"readiness_action_fixture_validation_report".to_owned())
-        );
-        assert!(
-            report
-                .report_ids
-                .contains(&"claimability_plan_report".to_owned())
-        );
-        assert!(
-            report
-                .report_ids
-                .contains(&"crash_replay_suite_report".to_owned())
-        );
-        assert!(report.report_ids.contains(&"fsx_stress_report".to_owned()));
+        for report_id in [
+            "swarm_operator_report",
+            "readiness_action_dry_run_report",
+            "performance_baseline_manifest_report",
+            "performance_delta_closeout_report",
+            "fuzz_smoke_report",
+            "swarm_operator_validation_report",
+            "soak_canary_campaign_report",
+            "xfstests_failure_triage_report",
+            "parity_report",
+            "crash_replay_artifact_report",
+            "mounted_write_errno_budget_report",
+            "readiness_action_fixture_validation_report",
+            "cross_oracle_arbitration_report",
+            "claimability_plan_report",
+            "crash_replay_suite_report",
+            "fsx_stress_report",
+        ] {
+            assert!(
+                report.report_ids.iter().any(|id| id == report_id),
+                "missing report id {report_id}"
+            );
+        }
         assert_eq!(report.row_results.len(), report.total_rows);
         assert_eq!(
             report.row_results[0].report_id,
@@ -2397,6 +2366,14 @@ mod tests {
                 "validate-ambition-evidence-matrix",
                 "ambition_evidence_matrix_report_json_shape",
                 "ffs_harness__ambition_evidence_matrix__tests__ambition_evidence_matrix_report_json_shape.snap",
+            ),
+            (
+                "cross_oracle_arbitration_report",
+                "crates/ffs-harness/src/cross_oracle_arbitration.rs",
+                "CrossOracleArbitrationReport",
+                "validate-cross-oracle-arbitration",
+                "cross_oracle_arbitration_report_json_shape",
+                "ffs_harness__cross_oracle_arbitration__tests__cross_oracle_arbitration_report_json_shape.snap",
             ),
             (
                 "cross_oracle_arbitration_validation_report",
