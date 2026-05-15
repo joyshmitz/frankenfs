@@ -127,6 +127,7 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
     rows.extend(governance_durability_advisory_report_rows());
     rows.extend(control_plane_contract_advisory_report_rows());
     rows.extend(corpus_and_workload_advisory_report_rows());
+    rows.extend(e2e_repro_advisory_report_rows());
     rows.extend(performance_advisory_report_rows());
     rows.extend([
         covered_advisory_row(
@@ -791,6 +792,29 @@ fn corpus_and_workload_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "large-host swarm workload manifest validation gates",
             "swarm_workload_harness_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__swarm_workload_harness__tests__swarm_workload_harness_report_json_shape.snap",
+        ),
+    ]
+}
+
+fn e2e_repro_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
+        covered_advisory_row(
+            "crash_replay_suite_report",
+            "crates/ffs-harness/src/e2e.rs",
+            "CrashReplaySuiteReport",
+            "run-crash-replay",
+            "deterministic crash replay schedule artifacts and repro packs",
+            "crash_replay_suite_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__e2e__tests__crash_replay_suite_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "fsx_stress_report",
+            "crates/ffs-harness/src/e2e.rs",
+            "FsxStressReport",
+            "run-fsx-stress",
+            "fsx-style stress artifacts and repair-integrity repro packs",
+            "fsx_stress_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__e2e__tests__fsx_stress_report_json_shape.snap",
         ),
     ]
 }
@@ -1548,12 +1572,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 79);
+        assert_eq!(report.total_rows, 81);
         assert_eq!(report.required_rows, 7);
-        assert_eq!(report.advisory_only_rows, 70);
+        assert_eq!(report.advisory_only_rows, 72);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 78);
+        assert_eq!(report.covered_rows, 80);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1591,6 +1615,12 @@ mod tests {
                 .report_ids
                 .contains(&"xfstests_failure_triage_report".to_owned())
         );
+        assert!(
+            report
+                .report_ids
+                .contains(&"crash_replay_suite_report".to_owned())
+        );
+        assert!(report.report_ids.contains(&"fsx_stress_report".to_owned()));
         assert_eq!(report.row_results.len(), report.total_rows);
         assert_eq!(
             report.row_results[0].report_id,
@@ -2385,6 +2415,51 @@ mod tests {
             row.claim_effect,
             ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
         );
+    }
+
+    #[test]
+    fn inventory_tracks_e2e_repro_report_schemas() {
+        let inventory = current_report_schema_inventory();
+        for (report_id, rust_type, producer, downstream_consumer, evidence_test, snapshot_suffix) in [
+            (
+                "crash_replay_suite_report",
+                "CrashReplaySuiteReport",
+                "run-crash-replay",
+                "deterministic crash replay schedule artifacts and repro packs",
+                "crash_replay_suite_report_json_shape",
+                "ffs_harness__e2e__tests__crash_replay_suite_report_json_shape.snap",
+            ),
+            (
+                "fsx_stress_report",
+                "FsxStressReport",
+                "run-fsx-stress",
+                "fsx-style stress artifacts and repair-integrity repro packs",
+                "fsx_stress_report_json_shape",
+                "ffs_harness__e2e__tests__fsx_stress_report_json_shape.snap",
+            ),
+        ] {
+            let row = inventory
+                .rows
+                .iter()
+                .find(|row| row.report_id == report_id)
+                .expect("inventory includes e2e repro report");
+
+            assert_eq!(row.module_path, "crates/ffs-harness/src/e2e.rs");
+            assert_eq!(row.rust_type, rust_type);
+            assert_eq!(row.producer, producer);
+            assert_eq!(row.downstream_consumer, downstream_consumer);
+            assert_eq!(
+                row.coverage_requirement,
+                ReportSchemaCoverageRequirement::AdvisoryOnly
+            );
+            assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+            assert_eq!(row.evidence_test, evidence_test);
+            assert!(row.snapshot_path.ends_with(snapshot_suffix));
+            assert_eq!(
+                row.claim_effect,
+                ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+            );
+        }
     }
 
     #[test]

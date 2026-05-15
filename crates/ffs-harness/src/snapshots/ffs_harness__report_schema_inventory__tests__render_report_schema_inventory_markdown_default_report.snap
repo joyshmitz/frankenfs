@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 79 |
+| Total rows | 81 |
 | Required rows | 7 |
-| Advisory-only rows | 70 |
+| Advisory-only rows | 72 |
 | Permissioned-only rows | 1 |
-| Covered rows | 78 |
+| Covered rows | 80 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -43,10 +43,12 @@ None.
 | `casefold_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `chaos_replay_lab_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `consistency_verdict` | `AdvisoryOnly` | `Covered` | none | none |
+| `crash_replay_suite_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `cross_oracle_arbitration_validation_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `deferred_parity_audit_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `docs_status_drift_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `fault_injection_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `fsx_stress_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `fuse_capability_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `fuzz_smoke_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `invariant_oracle_report` | `AdvisoryOnly` | `Covered` | none | none |
