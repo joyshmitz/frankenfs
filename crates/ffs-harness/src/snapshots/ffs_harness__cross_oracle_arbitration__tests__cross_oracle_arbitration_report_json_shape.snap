@@ -1,0 +1,391 @@
+---
+source: crates/ffs-harness/src/cross_oracle_arbitration.rs
+expression: shape_json
+---
+{
+  "schema_version": 1,
+  "bead_id": "bd-zj57e",
+  "generated_at": "2026-05-03T00:00:00Z",
+  "runner": "scripts/e2e/ffs_cross_oracle_arbitration_e2e.sh",
+  "arbitration_count": 9,
+  "artifact_path_count": 27,
+  "category_counts": {
+    "fixture_bug": 1,
+    "frankenfs_product_bug": 1,
+    "harness_bug": 1,
+    "host_capability_gap": 1,
+    "inconclusive_conflict": 1,
+    "kernel_baseline_issue": 1,
+    "model_bug": 1,
+    "repair_oracle_gap": 1,
+    "unsupported_scope": 1
+  },
+  "status_counts": {
+    "resolved": 4,
+    "scoped_out": 1,
+    "unresolved": 4
+  },
+  "release_effect_counts": {
+    "downgrade": 5,
+    "fail_closed": 4
+  },
+  "oracle_kind_counts": {
+    "crash_replay_survivor": 3,
+    "invariant_trace": 4,
+    "mounted_differential": 6,
+    "release_gate_status": 5,
+    "repair_confidence": 1
+  },
+  "evidence_status_counts": {
+    "error": 1,
+    "fail": 8,
+    "missing": 1,
+    "pass": 6,
+    "skip": 2,
+    "stale": 1
+  },
+  "blocked_public_claims": [
+    "background_scrub_mutation",
+    "data_integrity",
+    "mounted_writes",
+    "mutating_repair",
+    "proof_bundle_completeness",
+    "writeback_cache"
+  ],
+  "arbitrations": [
+    {
+      "arbitration_id": "arb_model_bug",
+      "status": "resolved",
+      "classification": "model_bug",
+      "source_oracles": [
+        {
+          "oracle_kind": "invariant_trace",
+          "status": "fail",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        },
+        {
+          "oracle_kind": "mounted_differential",
+          "status": "pass",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        }
+      ],
+      "confidence": "high",
+      "release_gate_effect": "downgrade",
+      "release_gate_count": 2,
+      "blocked_public_claims": [
+        "proof_bundle_completeness"
+      ],
+      "has_remediation": true,
+      "has_follow_up_bead": false,
+      "has_non_goal_reason": false,
+      "artifact_path_count": 3,
+      "log_field_count": 11,
+      "has_output_path": true,
+      "has_reproduction_command": true
+    },
+    {
+      "arbitration_id": "arb_kernel_baseline_issue",
+      "status": "unresolved",
+      "classification": "kernel_baseline_issue",
+      "source_oracles": [
+        {
+          "oracle_kind": "mounted_differential",
+          "status": "stale",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        },
+        {
+          "oracle_kind": "release_gate_status",
+          "status": "fail",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        }
+      ],
+      "confidence": "high",
+      "release_gate_effect": "fail_closed",
+      "release_gate_count": 2,
+      "blocked_public_claims": [
+        "mounted_writes"
+      ],
+      "has_remediation": true,
+      "has_follow_up_bead": true,
+      "has_non_goal_reason": false,
+      "artifact_path_count": 3,
+      "log_field_count": 11,
+      "has_output_path": true,
+      "has_reproduction_command": true
+    },
+    {
+      "arbitration_id": "arb_frankenfs_product_bug",
+      "status": "unresolved",
+      "classification": "frankenfs_product_bug",
+      "source_oracles": [
+        {
+          "oracle_kind": "invariant_trace",
+          "status": "fail",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        },
+        {
+          "oracle_kind": "mounted_differential",
+          "status": "fail",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        },
+        {
+          "oracle_kind": "release_gate_status",
+          "status": "fail",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        }
+      ],
+      "confidence": "high",
+      "release_gate_effect": "fail_closed",
+      "release_gate_count": 2,
+      "blocked_public_claims": [
+        "mounted_writes",
+        "data_integrity"
+      ],
+      "has_remediation": true,
+      "has_follow_up_bead": true,
+      "has_non_goal_reason": false,
+      "artifact_path_count": 4,
+      "log_field_count": 11,
+      "has_output_path": true,
+      "has_reproduction_command": true
+    },
+    {
+      "arbitration_id": "arb_harness_bug",
+      "status": "resolved",
+      "classification": "harness_bug",
+      "source_oracles": [
+        {
+          "oracle_kind": "crash_replay_survivor",
+          "status": "error",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        },
+        {
+          "oracle_kind": "invariant_trace",
+          "status": "pass",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        }
+      ],
+      "confidence": "high",
+      "release_gate_effect": "downgrade",
+      "release_gate_count": 2,
+      "blocked_public_claims": [
+        "proof_bundle_completeness"
+      ],
+      "has_remediation": true,
+      "has_follow_up_bead": false,
+      "has_non_goal_reason": false,
+      "artifact_path_count": 3,
+      "log_field_count": 11,
+      "has_output_path": true,
+      "has_reproduction_command": true
+    },
+    {
+      "arbitration_id": "arb_fixture_bug",
+      "status": "resolved",
+      "classification": "fixture_bug",
+      "source_oracles": [
+        {
+          "oracle_kind": "mounted_differential",
+          "status": "fail",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        },
+        {
+          "oracle_kind": "crash_replay_survivor",
+          "status": "pass",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        }
+      ],
+      "confidence": "high",
+      "release_gate_effect": "downgrade",
+      "release_gate_count": 2,
+      "blocked_public_claims": [
+        "proof_bundle_completeness"
+      ],
+      "has_remediation": true,
+      "has_follow_up_bead": false,
+      "has_non_goal_reason": false,
+      "artifact_path_count": 3,
+      "log_field_count": 11,
+      "has_output_path": true,
+      "has_reproduction_command": true
+    },
+    {
+      "arbitration_id": "arb_unsupported_scope",
+      "status": "scoped_out",
+      "classification": "unsupported_scope",
+      "source_oracles": [
+        {
+          "oracle_kind": "mounted_differential",
+          "status": "skip",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        },
+        {
+          "oracle_kind": "release_gate_status",
+          "status": "pass",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        }
+      ],
+      "confidence": "high",
+      "release_gate_effect": "downgrade",
+      "release_gate_count": 2,
+      "blocked_public_claims": [
+        "writeback_cache"
+      ],
+      "has_remediation": true,
+      "has_follow_up_bead": false,
+      "has_non_goal_reason": true,
+      "artifact_path_count": 3,
+      "log_field_count": 11,
+      "has_output_path": true,
+      "has_reproduction_command": true
+    },
+    {
+      "arbitration_id": "arb_host_capability_gap",
+      "status": "resolved",
+      "classification": "host_capability_gap",
+      "source_oracles": [
+        {
+          "oracle_kind": "mounted_differential",
+          "status": "skip",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        },
+        {
+          "oracle_kind": "release_gate_status",
+          "status": "pass",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        }
+      ],
+      "confidence": "high",
+      "release_gate_effect": "downgrade",
+      "release_gate_count": 2,
+      "blocked_public_claims": [
+        "mounted_writes"
+      ],
+      "has_remediation": true,
+      "has_follow_up_bead": false,
+      "has_non_goal_reason": false,
+      "artifact_path_count": 3,
+      "log_field_count": 11,
+      "has_output_path": true,
+      "has_reproduction_command": true
+    },
+    {
+      "arbitration_id": "arb_repair_oracle_gap",
+      "status": "unresolved",
+      "classification": "repair_oracle_gap",
+      "source_oracles": [
+        {
+          "oracle_kind": "repair_confidence",
+          "status": "missing",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": true,
+          "has_sha256_hash": false
+        },
+        {
+          "oracle_kind": "release_gate_status",
+          "status": "fail",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        }
+      ],
+      "confidence": "high",
+      "release_gate_effect": "fail_closed",
+      "release_gate_count": 2,
+      "blocked_public_claims": [
+        "mutating_repair",
+        "background_scrub_mutation"
+      ],
+      "has_remediation": true,
+      "has_follow_up_bead": true,
+      "has_non_goal_reason": false,
+      "artifact_path_count": 2,
+      "log_field_count": 11,
+      "has_output_path": true,
+      "has_reproduction_command": true
+    },
+    {
+      "arbitration_id": "arb_inconclusive_conflict",
+      "status": "unresolved",
+      "classification": "inconclusive_conflict",
+      "source_oracles": [
+        {
+          "oracle_kind": "invariant_trace",
+          "status": "pass",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        },
+        {
+          "oracle_kind": "crash_replay_survivor",
+          "status": "fail",
+          "has_artifact_path": true,
+          "has_observed_at": true,
+          "uses_missing_hash": false,
+          "has_sha256_hash": true
+        }
+      ],
+      "confidence": "high",
+      "release_gate_effect": "fail_closed",
+      "release_gate_count": 2,
+      "blocked_public_claims": [
+        "data_integrity"
+      ],
+      "has_remediation": true,
+      "has_follow_up_bead": true,
+      "has_non_goal_reason": false,
+      "artifact_path_count": 3,
+      "log_field_count": 11,
+      "has_output_path": true,
+      "has_reproduction_command": true
+    }
+  ]
+}

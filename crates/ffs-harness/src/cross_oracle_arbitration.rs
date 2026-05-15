@@ -1103,6 +1103,92 @@ mod tests {
         }
     }
 
+    fn compact_cross_oracle_report_shape(
+        report: &CrossOracleArbitrationReport,
+    ) -> serde_json::Value {
+        let mut category_counts = std::collections::BTreeMap::<&str, usize>::new();
+        let mut status_counts = std::collections::BTreeMap::<&str, usize>::new();
+        let mut release_effect_counts = std::collections::BTreeMap::<&str, usize>::new();
+        let mut oracle_kind_counts = std::collections::BTreeMap::<&str, usize>::new();
+        let mut evidence_status_counts = std::collections::BTreeMap::<&str, usize>::new();
+        let mut blocked_claims = std::collections::BTreeSet::<&str>::new();
+
+        let arbitrations = report
+            .arbitrations
+            .iter()
+            .map(|arbitration| {
+                *category_counts
+                    .entry(arbitration.classification.label())
+                    .or_insert(0) += 1;
+                *status_counts.entry(arbitration.status.label()).or_insert(0) += 1;
+                *release_effect_counts
+                    .entry(arbitration.release_gate_impact.effect.label())
+                    .or_insert(0) += 1;
+                for claim in &arbitration.blocked_public_claims {
+                    blocked_claims.insert(claim.label());
+                }
+                let sources = arbitration
+                    .source_oracles
+                    .iter()
+                    .map(|source| {
+                        *oracle_kind_counts
+                            .entry(source.oracle_kind.label())
+                            .or_insert(0) += 1;
+                        *evidence_status_counts
+                            .entry(source.status.label())
+                            .or_insert(0) += 1;
+                        serde_json::json!({
+                            "oracle_kind": source.oracle_kind.label(),
+                            "status": source.status.label(),
+                            "has_artifact_path": !source.artifact_path.is_empty(),
+                            "has_observed_at": !source.observed_at.is_empty(),
+                            "uses_missing_hash": source.artifact_sha256 == "missing",
+                            "has_sha256_hash": is_sha256_hex(&source.artifact_sha256),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+                serde_json::json!({
+                    "arbitration_id": &arbitration.arbitration_id,
+                    "status": arbitration.status.label(),
+                    "classification": arbitration.classification.label(),
+                    "source_oracles": sources,
+                    "confidence": arbitration.confidence.label(),
+                    "release_gate_effect": arbitration.release_gate_impact.effect.label(),
+                    "release_gate_count": arbitration.release_gate_impact.gates.len(),
+                    "blocked_public_claims": arbitration
+                        .blocked_public_claims
+                        .iter()
+                        .map(|claim| claim.label())
+                        .collect::<Vec<_>>(),
+                    "has_remediation": arbitration.remediation_id.is_some(),
+                    "has_follow_up_bead": arbitration.follow_up_bead_id.is_some(),
+                    "has_non_goal_reason": arbitration.non_goal_reason.is_some(),
+                    "artifact_path_count": arbitration.artifact_paths.len(),
+                    "log_field_count": arbitration.log_fields.len(),
+                    "has_output_path": !arbitration.output_path.is_empty(),
+                    "has_reproduction_command": !arbitration.reproduction_command.is_empty(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        serde_json::json!({
+            "schema_version": report.schema_version,
+            "bead_id": &report.bead_id,
+            "generated_at": &report.generated_at,
+            "runner": &report.runner,
+            "arbitration_count": report.arbitrations.len(),
+            "artifact_path_count": report.artifact_paths.len(),
+            "category_counts": category_counts,
+            "status_counts": status_counts,
+            "release_effect_counts": release_effect_counts,
+            "oracle_kind_counts": oracle_kind_counts,
+            "evidence_status_counts": evidence_status_counts,
+            "blocked_public_claims": blocked_claims.into_iter().collect::<Vec<_>>(),
+            "arbitrations": arbitrations,
+        })
+    }
+
     fn arbitration_mut<'a>(
         report: &'a mut CrossOracleArbitrationReport,
         arbitration_id: &str,
@@ -1242,6 +1328,24 @@ mod tests {
         assert!(markdown.contains("data_integrity"));
         assert!(markdown.contains("arb_frankenfs_product_bug"));
         assert!(markdown.contains("validate-cross-oracle-arbitration"));
+    }
+
+    #[test]
+    fn cross_oracle_arbitration_report_json_shape() -> Result<()> {
+        let report = valid_report();
+        let json = serde_json::to_string_pretty(&report)?;
+
+        let parsed: CrossOracleArbitrationReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+
+        let validation = validate_cross_oracle_arbitration_report(&parsed);
+        assert!(validation.valid, "{:?}", validation.errors);
+        assert_eq!(validation.arbitration_count, 9);
+        assert_eq!(validation.fail_closed_count, 4);
+
+        let shape_json = serde_json::to_string_pretty(&compact_cross_oracle_report_shape(&parsed))?;
+        insta::assert_snapshot!("cross_oracle_arbitration_report_json_shape", shape_json);
+        Ok(())
     }
 
     #[test]
