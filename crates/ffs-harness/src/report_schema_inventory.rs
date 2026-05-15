@@ -258,6 +258,15 @@ fn open_ended_inventory_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> 
 fn mounted_writeback_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
     vec![
         covered_advisory_row(
+            "mounted_lane_decision",
+            "crates/ffs-harness/src/mounted_lane_gate.rs",
+            "MountedLaneDecision",
+            "mounted lane fail-closed gate evaluator",
+            "mounted FUSE lane skip/fail/pass decision gate",
+            "mounted_lane_decision_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__mounted_lane_gate__tests__mounted_lane_decision_json_shape.snap",
+        ),
+        covered_advisory_row(
             "mounted_repair_policy_report",
             "crates/ffs-harness/src/mounted_repair_policy.rs",
             "MountedRepairPolicyReport",
@@ -1374,12 +1383,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 71);
+        assert_eq!(report.total_rows, 72);
         assert_eq!(report.required_rows, 7);
-        assert_eq!(report.advisory_only_rows, 62);
+        assert_eq!(report.advisory_only_rows, 63);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 70);
+        assert_eq!(report.covered_rows, 71);
         assert_eq!(report.missing_rows, 0);
         assert!(
             report
@@ -1731,6 +1740,14 @@ mod tests {
     fn inventory_tracks_mounted_writeback_reports() {
         let inventory = current_report_schema_inventory();
         for (report_id, module_path, rust_type, producer, evidence_test, snapshot_suffix) in [
+            (
+                "mounted_lane_decision",
+                "crates/ffs-harness/src/mounted_lane_gate.rs",
+                "MountedLaneDecision",
+                "mounted lane fail-closed gate evaluator",
+                "mounted_lane_decision_json_shape",
+                "ffs_harness__mounted_lane_gate__tests__mounted_lane_decision_json_shape.snap",
+            ),
             (
                 "mounted_repair_policy_report",
                 "crates/ffs-harness/src/mounted_repair_policy.rs",

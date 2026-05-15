@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 71 |
+| Total rows | 72 |
 | Required rows | 7 |
-| Advisory-only rows | 62 |
+| Advisory-only rows | 63 |
 | Permissioned-only rows | 1 |
-| Covered rows | 70 |
+| Covered rows | 71 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -55,6 +55,7 @@ None.
 | `metrics_snapshot` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_checkpoint_survivor_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_differential_validation_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `mounted_lane_decision` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_recovery_matrix_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_repair_mutation_boundary_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_repair_policy_report` | `AdvisoryOnly` | `Covered` | none | none |
