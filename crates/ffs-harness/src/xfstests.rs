@@ -3058,6 +3058,50 @@ mod tests {
         }
     }
 
+    fn compact_baseline_manifest_shape(manifest: &XfstestsBaselineManifest) -> serde_json::Value {
+        let cases = manifest
+            .cases
+            .iter()
+            .map(|case| {
+                serde_json::json!({
+                    "test_id": &case.test_id,
+                    "status": case.status.as_str(),
+                    "raw_artifact_ref_count": case.raw_artifact_refs.len(),
+                    "has_raw_log_hash": !case.raw_log_hash.is_empty(),
+                    "has_not_run_reason": case.not_run_reason.is_some(),
+                    "has_resume_command": !case.resume_command.is_empty(),
+                    "cleanup_status": &case.cleanup_status,
+                    "immutable_raw_artifacts": case.immutable_raw_artifacts,
+                    "classification": &case.classification,
+                    "has_remediation": case.remediation.is_some(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        serde_json::json!({
+            "schema_version": manifest.schema_version,
+            "baseline_id": &manifest.baseline_id,
+            "bead_id": &manifest.bead_id,
+            "subset_version": &manifest.subset_version,
+            "environment": {
+                "manifest_id": &manifest.environment.manifest_id,
+                "age_secs": manifest.environment.age_secs,
+                "max_age_secs": manifest.environment.max_age_secs,
+                "freshness_verdict": &manifest.environment.freshness_verdict,
+            },
+            "status_vocabulary": &manifest.status_vocabulary,
+            "raw_artifact_policy": &manifest.raw_artifact_policy,
+            "generated_summary_path": &manifest.generated_summary_path,
+            "checkpoint_id": &manifest.checkpoint_id,
+            "cleanup_status": &manifest.cleanup_status,
+            "output_paths": &manifest.output_paths,
+            "disposition_counts": &manifest.disposition_counts,
+            "raw_artifact_count": manifest.raw_artifacts.len(),
+            "case_count": manifest.cases.len(),
+            "cases": cases,
+        })
+    }
+
     #[test]
     fn parse_check_output_classifies_statuses_and_duration() {
         let selected = vec![
@@ -3954,6 +3998,50 @@ generic/001  2s ... pass\n";
             "render_xfstests_baseline_markdown_not_run_snapshot",
             markdown
         );
+    }
+
+    #[test]
+    fn xfstests_baseline_manifest_json_shape() -> Result<()> {
+        let tmp = tempdir()?;
+        let raw = tmp.path().join("check.log");
+        fs::write(
+            &raw,
+            "generic/001 pass\ngeneric/002 failed\ngeneric/003 skipped\ngeneric/004 not run\ngeneric/005 interrupted\ngeneric/006 resumed\n",
+        )?;
+        let mut failed = baseline_case("generic/002", XfstestsBaselineRowStatus::Failed);
+        failed.not_run_reason = Some("EIO after fsync boundary".to_owned());
+        let mut not_run = baseline_case("generic/004", XfstestsBaselineRowStatus::NotRun);
+        not_run.not_run_reason = Some("selected row did not execute".to_owned());
+        let interrupted = baseline_case("generic/005", XfstestsBaselineRowStatus::Interrupted);
+        let resumed = baseline_case("generic/006", XfstestsBaselineRowStatus::Resumed);
+        let manifest = manifest_with_cases(
+            &raw,
+            vec![
+                baseline_case("generic/001", XfstestsBaselineRowStatus::Passed),
+                failed,
+                baseline_case("generic/003", XfstestsBaselineRowStatus::Skipped),
+                not_run,
+                interrupted,
+                resumed,
+            ],
+        );
+
+        let json = serde_json::to_string_pretty(&manifest)?;
+        let parsed: XfstestsBaselineManifest = serde_json::from_str(&json)?;
+        assert_eq!(parsed, manifest);
+        assert!(validate_xfstests_baseline_manifest(&parsed).is_empty());
+        assert_eq!(parsed.bead_id, XFSTESTS_BASELINE_BEAD_ID);
+        assert_eq!(parsed.cases.len(), 6);
+        assert_eq!(parsed.disposition_counts.get("passed"), Some(&1));
+        assert_eq!(parsed.disposition_counts.get("failed"), Some(&1));
+        assert_eq!(parsed.disposition_counts.get("skipped"), Some(&1));
+        assert_eq!(parsed.disposition_counts.get("not_run"), Some(&1));
+        assert_eq!(parsed.disposition_counts.get("interrupted"), Some(&1));
+        assert_eq!(parsed.disposition_counts.get("resumed"), Some(&1));
+
+        let shape_json = serde_json::to_string_pretty(&compact_baseline_manifest_shape(&parsed))?;
+        insta::assert_snapshot!("xfstests_baseline_manifest_json_shape", shape_json);
+        Ok(())
     }
 
     #[test]

@@ -1,0 +1,119 @@
+---
+source: crates/ffs-harness/src/xfstests.rs
+expression: shape_json
+---
+{
+  "schema_version": 1,
+  "baseline_id": "xfstests-baseline-test",
+  "bead_id": "bd-rchk3.3",
+  "subset_version": "xfstests-curated-v1",
+  "environment": {
+    "manifest_id": "sha256:env",
+    "age_secs": 0,
+    "max_age_secs": 3600,
+    "freshness_verdict": "fresh"
+  },
+  "status_vocabulary": [
+    "passed",
+    "failed",
+    "skipped",
+    "not_run",
+    "unsupported",
+    "host_blocked",
+    "harness_failed",
+    "interrupted",
+    "resumed"
+  ],
+  "raw_artifact_policy": "raw artifacts are immutable inputs",
+  "generated_summary_path": "baseline_report.md",
+  "checkpoint_id": "checkpoint:001",
+  "cleanup_status": "artifacts_preserved",
+  "output_paths": {
+    "baseline_manifest_json": "baseline_manifest.json",
+    "baseline_report_md": "baseline_report.md"
+  },
+  "disposition_counts": {
+    "failed": 1,
+    "interrupted": 1,
+    "not_run": 1,
+    "passed": 1,
+    "resumed": 1,
+    "skipped": 1
+  },
+  "raw_artifact_count": 1,
+  "case_count": 6,
+  "cases": [
+    {
+      "test_id": "generic/001",
+      "status": "passed",
+      "raw_artifact_ref_count": 1,
+      "has_raw_log_hash": true,
+      "has_not_run_reason": false,
+      "has_resume_command": true,
+      "cleanup_status": "artifacts_preserved",
+      "immutable_raw_artifacts": true,
+      "classification": "product_actionable",
+      "has_remediation": false
+    },
+    {
+      "test_id": "generic/002",
+      "status": "failed",
+      "raw_artifact_ref_count": 1,
+      "has_raw_log_hash": true,
+      "has_not_run_reason": true,
+      "has_resume_command": true,
+      "cleanup_status": "artifacts_preserved",
+      "immutable_raw_artifacts": true,
+      "classification": "product_actionable",
+      "has_remediation": false
+    },
+    {
+      "test_id": "generic/003",
+      "status": "skipped",
+      "raw_artifact_ref_count": 1,
+      "has_raw_log_hash": true,
+      "has_not_run_reason": false,
+      "has_resume_command": true,
+      "cleanup_status": "artifacts_preserved",
+      "immutable_raw_artifacts": true,
+      "classification": "product_actionable",
+      "has_remediation": false
+    },
+    {
+      "test_id": "generic/004",
+      "status": "not_run",
+      "raw_artifact_ref_count": 1,
+      "has_raw_log_hash": true,
+      "has_not_run_reason": true,
+      "has_resume_command": true,
+      "cleanup_status": "artifacts_preserved",
+      "immutable_raw_artifacts": true,
+      "classification": "product_actionable",
+      "has_remediation": true
+    },
+    {
+      "test_id": "generic/005",
+      "status": "interrupted",
+      "raw_artifact_ref_count": 1,
+      "has_raw_log_hash": true,
+      "has_not_run_reason": false,
+      "has_resume_command": true,
+      "cleanup_status": "artifacts_preserved",
+      "immutable_raw_artifacts": true,
+      "classification": "product_actionable",
+      "has_remediation": true
+    },
+    {
+      "test_id": "generic/006",
+      "status": "resumed",
+      "raw_artifact_ref_count": 1,
+      "has_raw_log_hash": true,
+      "has_not_run_reason": false,
+      "has_resume_command": true,
+      "cleanup_status": "artifacts_preserved",
+      "immutable_raw_artifacts": true,
+      "classification": "product_actionable",
+      "has_remediation": false
+    }
+  ]
+}
