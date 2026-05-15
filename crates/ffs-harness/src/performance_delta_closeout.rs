@@ -1904,6 +1904,8 @@ mod tests {
 
         let full_json = serde_json::to_string_pretty(&report)?;
         let decoded: PerformanceDeltaCloseoutReport = serde_json::from_str(&full_json)?;
+        let original_json: Value = serde_json::from_str(&full_json)?;
+        assert_eq!(serde_json::to_value(&decoded)?, original_json);
         assert_eq!(decoded.schema_version, report.schema_version);
         assert_eq!(decoded.closeout_id, report.closeout_id);
         assert_eq!(decoded.source_bead_id, report.source_bead_id);
