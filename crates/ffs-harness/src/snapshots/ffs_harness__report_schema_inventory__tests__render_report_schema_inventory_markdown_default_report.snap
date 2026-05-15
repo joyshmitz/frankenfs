@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 29 |
+| Total rows | 37 |
 | Required rows | 6 |
-| Advisory-only rows | 21 |
+| Advisory-only rows | 29 |
 | Permissioned-only rows | 1 |
-| Covered rows | 28 |
+| Covered rows | 36 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -36,6 +36,10 @@ None.
 | `fault_injection_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `low_privilege_demo_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `metamorphic_workload_seed_catalog_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `mounted_repair_mutation_boundary_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `mounted_repair_policy_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `mounted_write_error_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `mounted_write_matrix_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `open_ended_inventory_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `open_ended_note_scan_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `operational_readiness_report` | `Required` | `Covered` | none | none |
@@ -52,9 +56,13 @@ None.
 | `readiness_lab_validation_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `release_gate_evaluation_report` | `Required` | `Covered` | none | none |
 | `repair_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `repair_writeback_serialization_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `source_scope_manifest_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `source_scope_scan_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `swarm_operator_report` | `Required` | `Covered` | none | none |
 | `swarm_workload_harness_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `tracker_source_hygiene_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `workload_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `writeback_cache_audit_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `writeback_crash_replay_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `writeback_ordering_report` | `AdvisoryOnly` | `Covered` | none | none |
