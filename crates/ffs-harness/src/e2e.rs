@@ -26,7 +26,7 @@ fn e2e_step_timer_start() -> Instant {
 // ── Structured JSON log types ───────────────────────────────────────────────
 
 /// A single structured log entry for an E2E test step.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct E2eLogEntry {
     pub ts: String,
     pub test: String,
@@ -3009,11 +3009,12 @@ mod tests {
         let lines: Vec<&str> = ndjson.lines().collect();
         assert_eq!(lines.len(), 2);
 
-        // Each line should be valid JSON.
-        for line in lines {
-            let parsed: E2eLogEntry = serde_json::from_str(line).unwrap();
-            assert_eq!(parsed.test, "t");
-        }
+        let parsed = lines
+            .iter()
+            .map(|line| serde_json::from_str::<E2eLogEntry>(line))
+            .collect::<serde_json::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(parsed.as_slice(), log.entries());
     }
 
     #[test]
