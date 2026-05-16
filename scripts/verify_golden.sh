@@ -44,7 +44,8 @@ Usage:
 
 Options:
   --update          Regenerate checksum manifests after intentional changes.
-  --checksums-only  Verify checksum manifests and git-tracked entries only.
+  --checksums-only  Verify checksum manifests, git-tracked entries, and
+                    tracked artifact coverage only.
 EOF
 }
 
@@ -116,6 +117,70 @@ verify_manifest_entries_tracked() {
     fi
 }
 
+checksum_manifest_tracks_extension() {
+    local file="$1"
+    shift
+
+    local extension="${file##*.}"
+    if [ "$extension" = "$file" ]; then
+        return 1
+    fi
+
+    local tracked
+    for tracked in "$@"; do
+        if [ "${extension,,}" = "${tracked,,}" ]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+verify_tracked_artifacts_listed() {
+    local dir="$1"
+    local manifest="$2"
+    local label="$3"
+    shift 3
+    local tracked_extensions=("$@")
+    local line digest file tracked_path artifact_file
+    local unlisted=0
+    local -A listed_files=()
+
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        digest="${line%% *}"
+        file="${line#*  }"
+        if [ "$file" = "$line" ]; then
+            file="${line#* }"
+        fi
+        file="${file#\*}"
+
+        if [ -z "$digest" ] || [ -z "$file" ] || [ "$file" = "$line" ]; then
+            continue
+        fi
+
+        listed_files["$file"]=1
+    done < "$dir/$manifest"
+
+    while IFS= read -r tracked_path; do
+        artifact_file="${tracked_path#"$dir"/}"
+        if [ "$artifact_file" = "$tracked_path" ]; then
+            continue
+        fi
+        if ! checksum_manifest_tracks_extension "$artifact_file" "${tracked_extensions[@]}"; then
+            continue
+        fi
+        if [ -z "${listed_files[$artifact_file]+x}" ]; then
+            fail "$label tracked artifact is missing from checksum manifest $manifest: $artifact_file"
+            unlisted=1
+        fi
+    done < <(git ls-files -- "$dir")
+
+    if [ "$unlisted" -eq 0 ]; then
+        pass "$label tracked artifacts are listed in checksum manifest"
+    fi
+}
+
 case "${1:-}" in
     "")
         ;;
@@ -148,6 +213,7 @@ else
     echo "  Run: scripts/verify_golden.sh --update  (after verifying changes are correct)"
 fi
 verify_manifest_entries_tracked conformance/fixtures checksums.sha256 "conformance/fixtures"
+verify_tracked_artifacts_listed conformance/fixtures checksums.sha256 "conformance/fixtures" json
 
 # ── 2. Golden reference checksums ────────────────────────────────
 echo "--- Golden reference checksums ---"
@@ -158,6 +224,7 @@ else
     echo "  Run: scripts/verify_golden.sh --update  (after verifying changes are correct)"
 fi
 verify_manifest_entries_tracked conformance/golden checksums.sha256 "conformance/golden"
+verify_tracked_artifacts_listed conformance/golden checksums.sha256 "conformance/golden" json txt
 
 # ── 3. Legacy fixture checksums ───────────────────────────────────
 echo "--- Legacy fixture checksums ---"
@@ -168,6 +235,7 @@ else
     echo "  Run: scripts/verify_golden.sh --update  (after verifying changes are correct)"
 fi
 verify_manifest_entries_tracked tests/fixtures/golden checksums.txt "tests/fixtures/golden"
+verify_tracked_artifacts_listed tests/fixtures/golden checksums.txt "tests/fixtures/golden" json
 
 if [ "$CHECKSUMS_ONLY" -eq 1 ]; then
     echo ""
