@@ -1073,7 +1073,7 @@ fn performance_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
 }
 
 fn required_report_rows() -> Vec<ReportSchemaInventoryRow> {
-    vec![
+    let mut rows = vec![
         covered_required_row(
             "parity_report",
             "crates/ffs-harness/src/lib.rs",
@@ -1134,6 +1134,23 @@ fn required_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__readiness_dashboard__tests__readiness_dashboard_report_json_shape.snap",
             ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange,
         ),
+    ];
+    rows.extend(authoritative_control_plane_required_rows());
+    rows
+}
+
+fn authoritative_control_plane_required_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
+        covered_required_row(
+            "authoritative_lane_manifest",
+            "crates/ffs-harness/src/authoritative_lane_manifest.rs",
+            "AuthoritativeLaneManifest",
+            "authoritative lane manifest evaluator",
+            "proof-bundle lane promotion and release gates",
+            "authoritative_lane_manifest_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__authoritative_lane_manifest__tests__authoritative_lane_manifest_json_shape.snap",
+            ReportSchemaClaimEffect::ExistingReleaseGateInput,
+        ),
         covered_required_row(
             "authoritative_lane_decision",
             "crates/ffs-harness/src/authoritative_lane_manifest.rs",
@@ -1142,6 +1159,16 @@ fn required_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "proof-bundle lane promotion and release gates",
             "authoritative_lane_decision_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__authoritative_lane_manifest__tests__authoritative_lane_decision_json_shape.snap",
+            ReportSchemaClaimEffect::ExistingReleaseGateInput,
+        ),
+        covered_required_row(
+            "authoritative_environment_manifest",
+            "crates/ffs-harness/src/authoritative_environment_manifest.rs",
+            "AuthoritativeEnvironmentManifest",
+            "record-authoritative-environment-manifest",
+            "authoritative worker replay and release-gate environment checks",
+            "authoritative_environment_manifest_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__authoritative_environment_manifest__tests__authoritative_environment_manifest_json_shape.snap",
             ReportSchemaClaimEffect::ExistingReleaseGateInput,
         ),
         covered_required_row(
@@ -1836,12 +1863,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 104);
-        assert_eq!(report.required_rows, 8);
+        assert_eq!(report.total_rows, 106);
+        assert_eq!(report.required_rows, 10);
         assert_eq!(report.advisory_only_rows, 94);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 103);
+        assert_eq!(report.covered_rows, 105);
         assert_eq!(report.missing_rows, 0);
         for report_id in [
             "swarm_operator_report",
@@ -3332,6 +3359,50 @@ mod tests {
             row.claim_effect,
             ReportSchemaClaimEffect::ExistingReleaseGateInput
         );
+    }
+
+    #[test]
+    fn inventory_tracks_required_authoritative_manifest_contract_schemas() {
+        let inventory = current_report_schema_inventory();
+        for (report_id, module_path, rust_type, producer, evidence_test, snapshot_suffix) in [
+            (
+                "authoritative_lane_manifest",
+                "crates/ffs-harness/src/authoritative_lane_manifest.rs",
+                "AuthoritativeLaneManifest",
+                "authoritative lane manifest evaluator",
+                "authoritative_lane_manifest_json_shape",
+                "ffs_harness__authoritative_lane_manifest__tests__authoritative_lane_manifest_json_shape.snap",
+            ),
+            (
+                "authoritative_environment_manifest",
+                "crates/ffs-harness/src/authoritative_environment_manifest.rs",
+                "AuthoritativeEnvironmentManifest",
+                "record-authoritative-environment-manifest",
+                "authoritative_environment_manifest_json_shape",
+                "ffs_harness__authoritative_environment_manifest__tests__authoritative_environment_manifest_json_shape.snap",
+            ),
+        ] {
+            let row = inventory
+                .rows
+                .iter()
+                .find(|row| row.report_id == report_id)
+                .expect("inventory includes authoritative manifest contract");
+
+            assert_eq!(row.module_path, module_path);
+            assert_eq!(row.rust_type, rust_type);
+            assert_eq!(row.producer, producer);
+            assert_eq!(
+                row.coverage_requirement,
+                ReportSchemaCoverageRequirement::Required
+            );
+            assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+            assert_eq!(row.evidence_test, evidence_test);
+            assert!(row.snapshot_path.ends_with(snapshot_suffix));
+            assert_eq!(
+                row.claim_effect,
+                ReportSchemaClaimEffect::ExistingReleaseGateInput
+            );
+        }
     }
 
     #[test]

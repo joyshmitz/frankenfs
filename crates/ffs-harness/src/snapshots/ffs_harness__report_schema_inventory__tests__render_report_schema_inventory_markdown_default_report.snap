@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 104 |
-| Required rows | 8 |
+| Total rows | 106 |
+| Required rows | 10 |
 | Advisory-only rows | 94 |
 | Permissioned-only rows | 1 |
-| Covered rows | 103 |
+| Covered rows | 105 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -35,7 +35,9 @@ None.
 | `ambition_evidence_matrix_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `artifact_schema_fixture_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `authoritative_environment_decision` | `Required` | `Covered` | none | none |
+| `authoritative_environment_manifest` | `Required` | `Covered` | none | none |
 | `authoritative_lane_decision` | `Required` | `Covered` | none | none |
+| `authoritative_lane_manifest` | `Required` | `Covered` | none | none |
 | `benchmark_taxonomy` | `AdvisoryOnly` | `Covered` | none | none |
 | `btrfs_capability_drift_contract` | `AdvisoryOnly` | `Covered` | none | none |
 | `btrfs_multidev_corpus_report` | `AdvisoryOnly` | `Covered` | none | none |
