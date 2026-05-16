@@ -1168,10 +1168,14 @@ mod tests {
 
     #[test]
     fn operational_evidence_index_json_shape() -> Result<()> {
-        let json = serde_json::to_string_pretty(&sample_markdown_evidence_index())
+        let fixture = sample_markdown_evidence_index();
+        let json = serde_json::to_string_pretty(&fixture)
             .context("serialize operational evidence index fixture")?;
 
         insta::assert_snapshot!("operational_evidence_index_json_shape", json);
+        let parsed: OperationalEvidenceIndex =
+            serde_json::from_str(&json).context("parse operational evidence index fixture")?;
+        assert_eq!(parsed, fixture);
         Ok(())
     }
 
