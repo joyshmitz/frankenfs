@@ -7,11 +7,11 @@ expression: json
   "status": "pass",
   "mutation_policy": "report-only; this command never deletes, rewrites, closes, or edits tracker rows",
   "counts": {
-    "total_rows": 38,
-    "local_total": 8,
+    "total_rows": 39,
+    "local_total": 9,
     "foreign_total": 30,
-    "open_total": 32,
-    "local_open": 5,
+    "open_total": 33,
+    "local_open": 6,
     "foreign_open": 27,
     "foreign_in_progress": 2,
     "excluded_foreign_open_count": 27,
@@ -58,11 +58,11 @@ expression: json
     "schema_version": 1,
     "verdict": "ready",
     "claimable_count": 2,
-    "local_open_count": 5,
+    "local_open_count": 6,
     "local_epic_count": 1,
-    "blocked_local_count": 1,
-    "permission_gated_count": 1,
-    "local_nonclaimable_count": 3,
+    "blocked_local_count": 2,
+    "permission_gated_count": 2,
+    "local_nonclaimable_count": 4,
     "local_in_progress_count": 2,
     "stale_in_progress_count": 1,
     "excluded_foreign_open_count": 27,
@@ -79,14 +79,17 @@ expression: json
       "bd-fixture-epic"
     ],
     "blocked_local_ids": [
+      "bd-fixture-permissioned-blocked",
       "bd-fixture-blocked"
     ],
     "permission_gated_ids": [
-      "bd-fixture-permissioned"
+      "bd-fixture-permissioned",
+      "bd-fixture-permissioned-blocked"
     ],
     "local_nonclaimable_ids": [
       "bd-fixture-epic",
       "bd-fixture-permissioned",
+      "bd-fixture-permissioned-blocked",
       "bd-fixture-blocked"
     ],
     "local_in_progress_ids": [
@@ -104,16 +107,16 @@ expression: json
     "schema_version": 1,
     "mutation_policy": "report-only; exports copy matching source rows without editing tracker state",
     "local_open": {
-      "row_count": 5,
-      "id_count": 5
+      "row_count": 6,
+      "id_count": 6
     },
     "source_aware_ready": {
       "row_count": 2,
       "id_count": 2
     },
     "local_nonclaimable": {
-      "row_count": 3,
-      "id_count": 3
+      "row_count": 4,
+      "id_count": 4
     }
   },
   "source_aware_ready_ids": [
@@ -121,9 +124,11 @@ expression: json
     "bd-fixture-blocker"
   ],
   "permission_gated_ids": [
-    "bd-fixture-permissioned"
+    "bd-fixture-permissioned",
+    "bd-fixture-permissioned-blocked"
   ],
   "blocked_local_ids": [
+    "bd-fixture-permissioned-blocked",
     "bd-fixture-blocked"
   ],
   "local_nonclaimable": [
@@ -138,6 +143,14 @@ expression: json
       "reason": "permission_gated",
       "permission_gate_kind": "xfstests_real_run",
       "blocked_by": []
+    },
+    {
+      "id": "bd-fixture-permissioned-blocked",
+      "reason": "permission_gated",
+      "permission_gate_kind": "xfstests_real_run",
+      "blocked_by": [
+        "bd-fixture-blocker"
+      ]
     },
     {
       "id": "bd-fixture-blocked",

@@ -8,6 +8,21 @@
           "status": "open"
         }
       ],
+      "id": "bd-fixture-permissioned-blocked",
+      "issue_type": "task",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture permission-gated and blocked xfstests row"
+    },
+    {
+      "assignee": null,
+      "blocked_by": [
+        {
+          "id": "bd-fixture-blocker",
+          "status": "open"
+        }
+      ],
       "id": "bd-fixture-blocked",
       "issue_type": "task",
       "priority": 2,
@@ -420,16 +435,16 @@
     "local_nonclaimable": {
       "checksum_path": "[LOCAL_NONCLAIMABLE_SHA256]",
       "consumer_hint": "Use this JSONL to explain why local open rows are not claimable; reasons are epic, permission_gated, or blocked.",
-      "id_count": 3,
+      "id_count": 4,
       "path": "[LOCAL_NONCLAIMABLE_JSONL]",
-      "row_count": 3
+      "row_count": 4
     },
     "local_open": {
       "checksum_path": "[LOCAL_OPEN_SHA256]",
       "consumer_hint": "Use this JSONL as a local-only tracker input when br or bv output is polluted by foreign rows.",
-      "id_count": 5,
+      "id_count": 6,
       "path": "[LOCAL_OPEN_JSONL]",
-      "row_count": 5
+      "row_count": 6
     },
     "mutation_policy": "report-only; exports copy matching source rows without editing tracker state",
     "schema_version": 1,
@@ -513,6 +528,28 @@
           "status": "open"
         }
       ],
+      "id": "bd-fixture-permissioned-blocked",
+      "issue_type": "task",
+      "permission_gate": {
+        "gate_kind": "xfstests_real_run",
+        "present": false,
+        "required_env": "XFSTESTS_REAL_RUN_ACK",
+        "required_value": "xfstests-may-mutate-test-and-scratch-devices"
+      },
+      "priority": 1,
+      "reason": "permission_gated",
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture permission-gated and blocked xfstests row"
+    },
+    {
+      "assignee": null,
+      "blocked_by": [
+        {
+          "id": "bd-fixture-blocker",
+          "status": "open"
+        }
+      ],
       "id": "bd-fixture-blocked",
       "issue_type": "task",
       "permission_gate": null,
@@ -523,12 +560,13 @@
       "title": "Fixture local blocked row"
     }
   ],
-  "local_open": 5,
+  "local_open": 6,
   "local_open_ids": [
     "bd-fixture-blocked",
     "bd-fixture-blocker",
     "bd-fixture-epic",
     "bd-fixture-permissioned",
+    "bd-fixture-permissioned-blocked",
     "bd-fixture-ready"
   ],
   "local_open_rows": [
@@ -551,6 +589,21 @@
       "source_repo": ".",
       "status": "open",
       "title": "Fixture permission-gated xfstests row"
+    },
+    {
+      "assignee": null,
+      "blocked_by": [
+        {
+          "id": "bd-fixture-blocker",
+          "status": "open"
+        }
+      ],
+      "id": "bd-fixture-permissioned-blocked",
+      "issue_type": "task",
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture permission-gated and blocked xfstests row"
     },
     {
       "assignee": null,
@@ -588,9 +641,9 @@
       "title": "Fixture local blocker row"
     }
   ],
-  "local_total": 8,
+  "local_total": 9,
   "mutation_policy": "report-only; this command never deletes, rewrites, closes, or edits tracker rows",
-  "open_total": 32,
+  "open_total": 33,
   "permission_gated_rows": [
     {
       "assignee": null,
@@ -607,6 +660,27 @@
       "source_repo": ".",
       "status": "open",
       "title": "Fixture permission-gated xfstests row"
+    },
+    {
+      "assignee": null,
+      "blocked_by": [
+        {
+          "id": "bd-fixture-blocker",
+          "status": "open"
+        }
+      ],
+      "id": "bd-fixture-permissioned-blocked",
+      "issue_type": "task",
+      "permission_gate": {
+        "gate_kind": "xfstests_real_run",
+        "present": false,
+        "required_env": "XFSTESTS_REAL_RUN_ACK",
+        "required_value": "xfstests-may-mutate-test-and-scratch-devices"
+      },
+      "priority": 1,
+      "source_repo": ".",
+      "status": "open",
+      "title": "Fixture permission-gated and blocked xfstests row"
     }
   ],
   "report_now_epoch": 2000000000,
@@ -622,8 +696,9 @@
   "run_id": "[RUN_ID]",
   "schema_version": 1,
   "source_aware_queue_state": {
-    "blocked_local_count": 1,
+    "blocked_local_count": 2,
     "blocked_local_ids": [
+      "bd-fixture-permissioned-blocked",
       "bd-fixture-blocked"
     ],
     "claimable_count": 2,
@@ -646,19 +721,21 @@
       "bd-fixture-in-progress-fresh",
       "bd-fixture-in-progress-stale"
     ],
-    "local_nonclaimable_count": 3,
+    "local_nonclaimable_count": 4,
     "local_nonclaimable_ids": [
       "bd-fixture-epic",
       "bd-fixture-permissioned",
+      "bd-fixture-permissioned-blocked",
       "bd-fixture-blocked"
     ],
-    "local_open_count": 5,
+    "local_open_count": 6,
     "next_safe_actions": [
       "claim one source_aware_ready row before creating fallback work"
     ],
-    "permission_gated_count": 1,
+    "permission_gated_count": 2,
     "permission_gated_ids": [
-      "bd-fixture-permissioned"
+      "bd-fixture-permissioned",
+      "bd-fixture-permissioned-blocked"
     ],
     "schema_version": 1,
     "stale_in_progress_count": 1,
@@ -709,5 +786,5 @@
   ],
   "status": "pass",
   "strict": false,
-  "total_rows": 38
+  "total_rows": 39
 }
