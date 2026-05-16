@@ -274,6 +274,10 @@ pub fn run_fuzz_smoke_manifest(
     hasher.update(b"\0");
 
     if errors.is_empty() {
+        validate_seed_source_files(manifest, workspace_root, &mut errors);
+    }
+
+    if errors.is_empty() {
         for seed in &manifest.seeds {
             let result = run_seed(seed, manifest.default_timeout_ms, workspace_root);
             update_corpus_checksum(&mut hasher, &result);
@@ -442,6 +446,11 @@ fn validate_seeds(seeds: &[FuzzSmokeSeed], errors: &mut Vec<String>) {
         }
         if seed.source.trim().is_empty() {
             errors.push(format!("fuzz-smoke seed `{}` missing source", seed.seed_id));
+        } else if !is_workspace_relative_seed_path(&seed.source) {
+            errors.push(format!(
+                "fuzz-smoke seed `{}` source must be workspace-relative without parent-directory segments",
+                seed.seed_id
+            ));
         }
         if seed.provenance.trim().is_empty() {
             errors.push(format!(
@@ -490,6 +499,26 @@ fn validate_seeds(seeds: &[FuzzSmokeSeed], errors: &mut Vec<String>) {
         if !targets.contains(required_target) {
             errors.push(format!(
                 "fuzz-smoke manifest missing seed for required target `{required_target}`"
+            ));
+        }
+    }
+}
+
+fn validate_seed_source_files(
+    manifest: &FuzzSmokeManifest,
+    workspace_root: &Path,
+    errors: &mut Vec<String>,
+) {
+    for seed in &manifest.seeds {
+        if !is_workspace_relative_seed_path(&seed.source) {
+            continue;
+        }
+
+        let source_path = workspace_root.join(&seed.source);
+        if !source_path.is_file() {
+            errors.push(format!(
+                "fuzz-smoke seed `{}` source `{}` must reference an existing file",
+                seed.seed_id, seed.source
             ));
         }
     }
@@ -1107,6 +1136,21 @@ mod tests {
     }
 
     #[test]
+    fn parent_directory_seed_sources_are_rejected() -> Result<()> {
+        let mut manifest = default_manifest()?;
+        first_seed_mut(&mut manifest)?.source = "../outside-workspace.md".to_owned();
+
+        let errors = validate_fuzz_smoke_manifest(&manifest);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("source must be workspace-relative")),
+            "{errors:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn missing_artifact_contract_fields_are_rejected() -> Result<()> {
         let mut manifest = default_manifest()?;
         manifest
@@ -1147,6 +1191,24 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("missing provenance")),
             "{errors:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_seed_source_file_invalidates_report() -> Result<()> {
+        let mut manifest = default_manifest()?;
+        first_seed_mut(&mut manifest)?.source = "tests/fuzz_corpus/missing-source.md".to_owned();
+
+        let report = run_fuzz_smoke_manifest(&manifest, &workspace_root());
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("must reference an existing file")),
+            "{:?}",
+            report.errors
         );
         Ok(())
     }
