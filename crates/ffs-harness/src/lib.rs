@@ -703,6 +703,25 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_chunk_fixture_rejects_uncovered_chunk_root_mapping() -> Result<()> {
+        let path = fixture_path("btrfs_superblock_with_chunks.json");
+        let mut data = load_sparse_fixture(&path).expect("load btrfs chunk fixture");
+        data[0x58..0x60].copy_from_slice(&(8_u64 * 1024 * 1024).to_le_bytes());
+
+        let fixture = SparseFixture::from_bytes(&data);
+        let fixture_file = tempfile::NamedTempFile::new()?;
+        fs::write(fixture_file.path(), serde_json::to_vec(&fixture)?)?;
+
+        let err = validate_btrfs_chunk_fixture(fixture_file.path()).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("mapping chunk_root (0x800000) is not covered by sys_chunk_array"),
+            "{message}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn btrfs_chunk_fixture_rejects_uncovered_log_root_mapping() -> Result<()> {
         let path = fixture_path("btrfs_superblock_with_chunks.json");
         let mut data = load_sparse_fixture(&path).expect("load btrfs chunk fixture");
