@@ -1,0 +1,8 @@
+---
+source: crates/ffs-harness/src/main.rs
+expression: stderr_log
+---
+readiness-action-dry-run stderr
+no reproduction commands executed
+permissioned, destructive, and stale-evidence commands stayed dry-run only
+cleanup_status=not_required_dry_run

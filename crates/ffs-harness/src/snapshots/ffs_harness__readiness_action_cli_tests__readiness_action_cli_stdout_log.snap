@@ -1,0 +1,15 @@
+---
+source: crates/ffs-harness/src/main.rs
+expression: normalized_stdout_log
+---
+readiness-action-dry-run
+report_id=cli_dry_run_test
+dry_run=true
+recommendations=8
+suppressed_duplicates=0
+scenarios=8
+json_report_path=[TMP]/readiness-actions.json
+markdown_report_path=[TMP]/readiness-actions.md
+stdout_log_path=[TMP]/stdout.log
+stderr_log_path=[TMP]/stderr.log
+cleanup_status=not_required_dry_run

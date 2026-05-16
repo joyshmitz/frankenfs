@@ -10836,12 +10836,16 @@ mod readiness_action_cli_tests {
         assert!(markdown.contains("DowngradeRequired"));
 
         let stdout_log = std::fs::read_to_string(&stdout_log_path)?;
+        let temp_dir = dir.path().display().to_string();
+        let normalized_stdout_log = stdout_log.replace(&temp_dir, "[TMP]");
+        insta::assert_snapshot!("readiness_action_cli_stdout_log", normalized_stdout_log);
         assert!(stdout_log.contains("readiness-action-dry-run"));
         assert!(stdout_log.contains("recommendations=8"));
         assert!(stdout_log.contains("scenarios=8"));
         assert!(stdout_log.contains("cleanup_status=not_required_dry_run"));
 
         let stderr_log = std::fs::read_to_string(&stderr_log_path)?;
+        insta::assert_snapshot!("readiness_action_cli_stderr_log", stderr_log);
         assert!(stderr_log.contains("no reproduction commands executed"));
         assert!(stderr_log.contains("stale-evidence commands stayed dry-run only"));
         Ok(())
