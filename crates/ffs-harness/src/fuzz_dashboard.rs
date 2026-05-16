@@ -8,6 +8,7 @@
 //! - Crash-discovery velocity for prioritizing triage effort.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeSet;
 
 /// Default threshold: throughput drop of more than 50% triggers a regression alert.
@@ -325,39 +326,16 @@ pub fn validate_campaign_summary(summary: &CampaignSummary) -> Vec<String> {
 /// Check that the nightly campaign script produces the expected JSON schema.
 #[must_use]
 pub fn validate_campaign_schema(json: &str) -> Vec<SchemaCheck> {
-    let mut checks = Vec::new();
+    let parsed = serde_json::from_str::<Value>(json).ok();
+    let root = parsed.as_ref().and_then(Value::as_object);
 
-    let has_campaign_id = json.contains("\"campaign_id\"");
-    checks.push(SchemaCheck {
-        field: "campaign_id".to_owned(),
-        present: has_campaign_id,
-    });
-
-    let has_commit_sha = json.contains("\"commit_sha\"");
-    checks.push(SchemaCheck {
-        field: "commit_sha".to_owned(),
-        present: has_commit_sha,
-    });
-
-    let has_config = json.contains("\"config\"");
-    checks.push(SchemaCheck {
-        field: "config".to_owned(),
-        present: has_config,
-    });
-
-    let has_totals = json.contains("\"totals\"");
-    checks.push(SchemaCheck {
-        field: "totals".to_owned(),
-        present: has_totals,
-    });
-
-    let has_targets = json.contains("\"targets\"");
-    checks.push(SchemaCheck {
-        field: "targets".to_owned(),
-        present: has_targets,
-    });
-
-    checks
+    ["campaign_id", "commit_sha", "config", "totals", "targets"]
+        .into_iter()
+        .map(|field| SchemaCheck {
+            field: field.to_owned(),
+            present: root.is_some_and(|object| object.contains_key(field)),
+        })
+        .collect()
 }
 
 /// Result of checking a required field in the campaign schema.
@@ -728,6 +706,30 @@ mod tests {
             assert!(check.present, "field {} missing", check.field);
         }
         Ok(())
+    }
+
+    #[test]
+    fn validate_schema_checks_ignore_string_literal_false_positives() {
+        let json = r#"{
+            "notes": "\"campaign_id\" \"commit_sha\" \"config\" \"totals\" \"targets\""
+        }"#;
+
+        let checks = validate_campaign_schema(json);
+        assert_eq!(checks.len(), 5);
+        for check in &checks {
+            assert!(
+                !check.present,
+                "schema field {} should not be satisfied by string contents",
+                check.field
+            );
+        }
+    }
+
+    #[test]
+    fn validate_schema_checks_malformed_json_as_absent_fields() {
+        let checks = validate_campaign_schema(r#"{"campaign_id": "unterminated"#);
+        assert_eq!(checks.len(), 5);
+        assert!(checks.iter().all(|check| !check.present));
     }
 
     #[test]
