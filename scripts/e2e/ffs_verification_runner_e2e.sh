@@ -129,6 +129,49 @@ JSON
     return "$status"
 }
 
+verify_run_gate_marker_contract() {
+    if ! command -v jq >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local probe_dir probe_script relative_script probe_log manifest_path
+    probe_dir="$E2E_LOG_DIR/run_gate_marker_contract_probe"
+    probe_script="$probe_dir/probe_marker_script.sh"
+    probe_log="$probe_dir/run_gate.log"
+
+    mkdir -p "$probe_dir"
+    cat >"$probe_script" <<'PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_valid_marker|outcome=PASS|detail=quote_"probe"\path'
+printf '%s\n' 'SCENARIO_RESULT|scenario_id=Upper_case_bad|outcome=PASS'
+printf '%s\n' 'SCENARIO_RESULT|scenario_id=too_short|outcome=PASS'
+printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_invalid_outcome|outcome=SKIP'
+printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_status_only|status=PASS'
+printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_duplicate_outcome|outcome=PASS|outcome=FAIL'
+printf '%s\n' 'SCENARIO_RESULT_EXTRA|scenario_id=gate_extra_prefix|outcome=PASS'
+PROBE
+
+    relative_script="${probe_script#$REPO_ROOT/}"
+    if ! scripts/e2e/run_gate.sh --gate-id run_gate_marker_contract "$relative_script" \
+        >"$probe_log" 2>&1; then
+        return 1
+    fi
+
+    manifest_path=$(sed -n 's/^Manifest: //p' "$probe_log" | tail -n 1)
+    [[ -n "$manifest_path" && -f "$manifest_path" ]] || return 1
+
+    jq -e '
+        .gate_id == "run_gate_marker_contract"
+        and .verdict == "PASS"
+        and (.script_results | length == 1)
+        and (.script_results[0].scenarios | length == 1)
+        and .script_results[0].scenarios[0].scenario_id == "gate_valid_marker"
+        and .script_results[0].scenarios[0].outcome == "PASS"
+        and .script_results[0].scenarios[0].detail == "quote_\"probe\"\\path"
+    ' "$manifest_path" >/dev/null
+}
+
 init_git_clean_probe_repo() {
     local repo_dir="$1"
 
@@ -606,10 +649,10 @@ for feature in "--gate-id" "--ci" "--retries" "--catalog" "--conformance" "gate_
     fi
 done
 
-if [[ $GATE_FEATURES -eq 6 ]]; then
-    scenario_result "gate_runner_features" "PASS" "All 6 runner features present"
+if [[ $GATE_FEATURES -eq 6 ]] && verify_run_gate_marker_contract; then
+    scenario_result "gate_runner_features" "PASS" "All 6 runner features present; marker contract probe passed"
 else
-    scenario_result "gate_runner_features" "FAIL" "Only ${GATE_FEATURES}/6 features found"
+    scenario_result "gate_runner_features" "FAIL" "Feature count ${GATE_FEATURES}/6 or marker contract probe failed"
 fi
 
 #######################################

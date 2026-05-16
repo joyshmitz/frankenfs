@@ -108,6 +108,43 @@ TOTAL=0
 SCRIPT_RESULTS_JSON="["
 FIRST_RESULT=true
 
+gate_json_escape() {
+    local value="$1"
+
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\t'/\\t}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\n'/\\n}"
+
+    printf '%s\n' "$value"
+}
+
+gate_marker_field_count() {
+    local haystack="$1"
+    local needle="$2"
+    local count=0
+
+    while [[ "$haystack" == *"$needle"* ]]; do
+        haystack="${haystack#*"$needle"}"
+        count=$((count + 1))
+    done
+
+    printf '%s\n' "$count"
+}
+
+gate_scenario_id_is_valid() {
+    local value="$1"
+
+    [[ "$value" =~ ^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$ ]]
+}
+
+gate_outcome_is_valid() {
+    local value="$1"
+
+    [[ "$value" == "PASS" || "$value" == "FAIL" ]]
+}
+
 check_direct_cargo_conformance() {
     local script_path="$1"
     awk '
@@ -244,12 +281,22 @@ for script in "${SCRIPTS[@]}"; do
     scenarios_first=true
     if [[ -n "$script_output" && -f "$script_output" ]]; then
         while IFS= read -r line; do
+            sid_count=$(gate_marker_field_count "$line" "|scenario_id=")
+            outcome_count=$(gate_marker_field_count "$line" "|outcome=")
+            detail_count=$(gate_marker_field_count "$line" "|detail=")
             sid=$(echo "$line" | sed -n 's/.*scenario_id=\([^|]*\).*/\1/p')
             outcome=$(echo "$line" | sed -n 's/.*outcome=\([^|]*\).*/\1/p')
-            [[ -z "$outcome" ]] && outcome=$(echo "$line" | sed -n 's/.*status=\([^|]*\).*/\1/p')
             detail=$(echo "$line" | sed -n 's/.*detail=\(.*\)/\1/p')
             [[ -z "$sid" || -z "$outcome" ]] && continue
-            detail=$(echo "$detail" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            [[ "$sid_count" -eq 1 ]] || continue
+            [[ "$outcome_count" -eq 1 ]] || continue
+            [[ "$detail_count" -le 1 ]] || continue
+            gate_scenario_id_is_valid "$sid" || continue
+            gate_outcome_is_valid "$outcome" || continue
+
+            sid=$(gate_json_escape "$sid")
+            outcome=$(gate_json_escape "$outcome")
+            detail=$(gate_json_escape "$detail")
 
             if [[ "$scenarios_first" == "true" ]]; then
                 scenarios_first=false
@@ -261,7 +308,7 @@ for script in "${SCRIPTS[@]}"; do
             else
                 scenarios_json+="{\"scenario_id\":\"$sid\",\"outcome\":\"$outcome\"}"
             fi
-        done < <(grep "SCENARIO_RESULT" "$script_output" 2>/dev/null || true)
+        done < <(grep "^SCENARIO_RESULT|" "$script_output" 2>/dev/null || true)
     fi
     scenarios_json+="]"
 
@@ -280,7 +327,9 @@ for script in "${SCRIPTS[@]}"; do
     else
         SCRIPT_RESULTS_JSON+=","
     fi
-    SCRIPT_RESULTS_JSON+="{\"script\":\"$script\",\"verdict\":\"$result_verdict\",\"attempts\":$attempts,\"scenarios\":$scenarios_json}"
+    script_json=$(gate_json_escape "$script")
+    result_verdict_json=$(gate_json_escape "$result_verdict")
+    SCRIPT_RESULTS_JSON+="{\"script\":\"$script_json\",\"verdict\":\"$result_verdict_json\",\"attempts\":$attempts,\"scenarios\":$scenarios_json}"
 done
 
 SCRIPT_RESULTS_JSON+="]"
