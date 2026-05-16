@@ -145,7 +145,71 @@ else
     scenario_result "report_schema_inventory_json_contract" "FAIL" "JSON report contract failed"
 fi
 
-e2e_step "Scenario 4: Markdown summary points at row coverage instead of readiness claims"
+e2e_step "Scenario 4: covered evidence tests resolve to declared module tests"
+if python3 - "$REPORT_JSON" <<'PY'
+import json
+import os
+import pathlib
+import re
+import sys
+
+repo_root = pathlib.Path(os.environ["REPO_ROOT"])
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+errors = []
+
+def has_test_function(source, evidence_test):
+    fn_pattern = re.compile(rf"(?m)^\s*(?:pub\s+)?fn\s+{re.escape(evidence_test)}\s*\(")
+    for match in fn_pattern.finditer(source):
+        preceding_lines = source[: match.start()].splitlines()[-8:]
+        if any(line.strip() == "#[test]" for line in preceding_lines):
+            return True
+    return False
+
+def has_snapshot_assertion(source, evidence_test):
+    snapshot_pattern = re.compile(
+        rf'(?s)(?:insta::)?assert_(?:json_|debug_)?snapshot!\s*\(\s*"{re.escape(evidence_test)}"'
+    )
+    for match in snapshot_pattern.finditer(source):
+        preceding_lines = source[: match.start()].splitlines()[-120:]
+        if any(line.strip() == "#[test]" for line in preceding_lines):
+            return True
+    return False
+
+for row in report["row_results"]:
+    if row["coverage_status"] != "covered":
+        continue
+
+    report_id = row["report_id"]
+    module_path = row["module_path"].strip()
+    evidence_test = row["evidence_test"].strip()
+    if not module_path or not evidence_test:
+        errors.append(f"{report_id}: covered row missing module_path or evidence_test")
+        continue
+
+    source_path = repo_root / module_path
+    if not source_path.is_file():
+        errors.append(f"{report_id}: module_path not found: {module_path}")
+        continue
+
+    source = source_path.read_text(encoding="utf-8")
+    if not has_test_function(source, evidence_test) and not has_snapshot_assertion(
+        source, evidence_test
+    ):
+        errors.append(
+            f"{report_id}: evidence_test `{evidence_test}` is not a #[test] function "
+            f"or insta snapshot assertion in {module_path}"
+        )
+
+if errors:
+    raise SystemExit("\n".join(errors[:20]))
+PY
+then
+    scenario_result "report_schema_inventory_evidence_tests_resolve" "PASS" "covered evidence_test names resolve to #[test] functions or insta snapshot assertions in declared modules"
+else
+    scenario_result "report_schema_inventory_evidence_tests_resolve" "FAIL" "one or more covered evidence_test names did not resolve to declared module evidence"
+fi
+
+e2e_step "Scenario 5: Markdown summary points at row coverage instead of readiness claims"
 if grep -q "# Report Schema Inventory" "$SUMMARY_MD" \
     && grep -q "Product evidence claim: \`none\`" "$SUMMARY_MD" \
     && grep -q "Uncovered Required Reports" "$SUMMARY_MD" \
@@ -157,14 +221,14 @@ else
     scenario_result "report_schema_inventory_markdown_summary" "FAIL" "Markdown summary missing required sections"
 fi
 
-e2e_step "Scenario 5: scenario catalog accepts the new E2E suite"
+e2e_step "Scenario 6: scenario catalog accepts the new E2E suite"
 if e2e_validate_scenario_catalog; then
     scenario_result "report_schema_inventory_catalog_valid" "PASS" "scenario catalog validates with report schema suite"
 else
     scenario_result "report_schema_inventory_catalog_valid" "FAIL" "scenario catalog validation failed"
 fi
 
-e2e_step "Scenario 6: focused report schema inventory unit tests pass"
+e2e_step "Scenario 7: focused report schema inventory unit tests pass"
 if e2e_rch_capture "$UNIT_LOG" cargo test -p ffs-harness report_schema_inventory -- --nocapture \
     && grep -q "report_schema_inventory_shape" "$UNIT_LOG" \
     && grep -q "report_markdown_summary_names_claim_and_uncovered_rows" "$UNIT_LOG"; then

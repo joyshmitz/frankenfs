@@ -938,6 +938,12 @@
           "evidence": "SCENARIO_RESULT|scenario_id=report_schema_inventory_json_contract|outcome=PASS"
         },
         {
+          "id": "report_schema_inventory_evidence_tests_resolve",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=report_schema_inventory_evidence_tests_resolve|outcome=PASS"
+        },
+        {
           "id": "report_schema_inventory_markdown_summary",
           "category": "happy",
           "status": "active",
