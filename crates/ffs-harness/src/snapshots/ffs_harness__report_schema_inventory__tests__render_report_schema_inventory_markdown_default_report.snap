@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 107 |
+| Total rows | 108 |
 | Required rows | 10 |
-| Advisory-only rows | 95 |
+| Advisory-only rows | 96 |
 | Permissioned-only rows | 1 |
-| Covered rows | 106 |
+| Covered rows | 107 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -61,6 +61,7 @@ None.
 | `fuzz_dashboard_campaign_summary` | `AdvisoryOnly` | `Covered` | none | none |
 | `fuzz_dashboard_regression_alert` | `AdvisoryOnly` | `Covered` | none | none |
 | `fuzz_smoke_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `hysteresis_tracker` | `AdvisoryOnly` | `Covered` | none | none |
 | `invariant_oracle_consumer_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `invariant_oracle_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `inventory_closeout_gate_report` | `AdvisoryOnly` | `Covered` | none | none |

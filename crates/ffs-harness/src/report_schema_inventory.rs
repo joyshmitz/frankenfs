@@ -1052,6 +1052,15 @@ fn performance_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__perf_comparison__tests__comparison_context_json_shape.snap",
         ),
         covered_advisory_row(
+            "hysteresis_tracker",
+            "crates/ffs-harness/src/perf_comparison.rs",
+            "HysteresisTracker",
+            "HysteresisTracker::record",
+            "performance regression anti-flake state and runbook triage consumers",
+            "hysteresis_tracker_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__perf_comparison__tests__hysteresis_tracker_json_shape.snap",
+        ),
+        covered_advisory_row(
             "perf_regression_baseline",
             "crates/ffs-harness/src/perf_regression.rs",
             "PerfBaseline",
@@ -1872,12 +1881,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 107);
+        assert_eq!(report.total_rows, 108);
         assert_eq!(report.required_rows, 10);
-        assert_eq!(report.advisory_only_rows, 95);
+        assert_eq!(report.advisory_only_rows, 96);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 106);
+        assert_eq!(report.covered_rows, 107);
         assert_eq!(report.missing_rows, 0);
         for report_id in [
             "swarm_operator_report",
@@ -1891,6 +1900,7 @@ mod tests {
             "perf_comparison_context",
             "perf_regression_baseline",
             "perf_triage_decision",
+            "hysteresis_tracker",
             "rw_background_repair_gate",
             "fuzz_dashboard_campaign_summary",
             "fuzz_dashboard_regression_alert",
@@ -2939,6 +2949,15 @@ mod tests {
                 "performance comparator structured log context and regression triage consumers",
                 "comparison_context_json_shape",
                 "ffs_harness__perf_comparison__tests__comparison_context_json_shape.snap",
+            ),
+            (
+                "hysteresis_tracker",
+                "crates/ffs-harness/src/perf_comparison.rs",
+                "HysteresisTracker",
+                "HysteresisTracker::record",
+                "performance regression anti-flake state and runbook triage consumers",
+                "hysteresis_tracker_json_shape",
+                "ffs_harness__perf_comparison__tests__hysteresis_tracker_json_shape.snap",
             ),
             (
                 "perf_regression_baseline",
