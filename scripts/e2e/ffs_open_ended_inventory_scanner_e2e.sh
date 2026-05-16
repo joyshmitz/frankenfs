@@ -354,6 +354,17 @@ for source in report["scanned_sources"]:
 tests_source = next(source for source in report["scanned_sources"] if source["source_family"] == "tests")
 if any(path["source_path"].startswith("vendor/") for path in tests_source["matched_paths"]):
     raise SystemExit("source-scope tests scan should not include vendored paths")
+harness_source = next(source for source in report["scanned_sources"] if source["source_family"] == "harness_scripts")
+required_harness_globs = {
+    "scripts/e2e/**/*.sh",
+    "scripts/e2e/**/*.py",
+    "scripts/e2e/**/*.json",
+}
+missing_harness_globs = required_harness_globs - set(harness_source["included_globs"])
+if missing_harness_globs:
+    raise SystemExit(f"harness_scripts source missing globs: {sorted(missing_harness_globs)}")
+if "scripts/e2e/_artifacts/**" not in harness_source["excluded_globs"]:
+    raise SystemExit("harness_scripts source must exclude generated e2e artifacts")
 PY
     scenario_result "source_scope_manifest_real_workspace" "PASS" "real workspace source-scope scan is valid"
 else

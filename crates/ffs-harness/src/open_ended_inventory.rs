@@ -486,6 +486,12 @@ const PERFORMANCE_CONTROL_ARTIFACT_GLOBS: [&str; 6] = [
     "profiles/*.meta.json",
 ];
 
+const HARNESS_SCRIPT_GLOBS: [&str; 3] = [
+    "scripts/e2e/**/*.sh",
+    "scripts/e2e/**/*.py",
+    "scripts/e2e/**/*.json",
+];
+
 const ALLOWED_RISK_CATEGORIES: [&str; 9] = [
     "data_safety",
     "parser",
@@ -1017,12 +1023,7 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
         "fuzz_targets" => validate_fuzz_targets_exclusions(entry, &excluded, errors),
         "fuzz_orchestration" => validate_fuzz_orchestration_exclusions(entry, &excluded, errors),
         "operational_scripts" => validate_operational_scripts_exclusions(entry, &excluded, errors),
-        "harness_scripts" if !excluded.contains("_artifacts") => {
-            errors.push(format!(
-                "source `{}` must exclude generated e2e artifact directories",
-                entry.id
-            ));
-        }
+        "harness_scripts" => validate_harness_scripts(entry, &excluded, errors),
         "operator_runbook_docs" => validate_operator_runbook_docs(entry, &excluded, errors),
         "operational_evidence_artifacts" => {
             validate_operational_evidence_artifacts(entry, &excluded, errors);
@@ -1359,6 +1360,27 @@ fn validate_operational_scripts_exclusions(
     if !excluded.contains("scripts/archive") {
         errors.push(format!(
             "source `{}` must exclude archived scratch scripts from operational script source scope",
+            entry.id
+        ));
+    }
+}
+
+fn validate_harness_scripts(entry: &SourceScopeEntry, excluded: &str, errors: &mut Vec<String>) {
+    for required_glob in HARNESS_SCRIPT_GLOBS {
+        if !entry
+            .included_globs
+            .iter()
+            .any(|glob| glob == required_glob)
+        {
+            errors.push(format!(
+                "source `{}` must include harness script glob `{required_glob}`",
+                entry.id
+            ));
+        }
+    }
+    if !excluded.contains("scripts/e2e/_artifacts") {
+        errors.push(format!(
+            "source `{}` must exclude generated e2e artifact directories",
             entry.id
         ));
     }
@@ -3427,6 +3449,21 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
     }
 
     #[test]
+    fn missing_harness_scripts_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "harness_scripts");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required family `harness_scripts`"))
+        );
+    }
+
+    #[test]
     fn missing_operator_runbook_docs_family_is_rejected() {
         let mut manifest = fixture_manifest();
         manifest
@@ -3799,6 +3836,48 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .errors
                 .iter()
                 .any(|err| err.contains("dedicated harness script source scope"))
+        );
+    }
+
+    #[test]
+    fn harness_script_source_globs_are_validated() {
+        let mut manifest = fixture_manifest();
+        let harness_scripts = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "harness_scripts")
+            .expect("harness script source exists");
+        harness_scripts
+            .included_globs
+            .retain(|glob| glob == "scripts/e2e/**/*.sh");
+        harness_scripts
+            .excluded_globs
+            .retain(|glob| !glob.contains("_artifacts"));
+
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("scripts/e2e/**/*.py")),
+            "missing Python harness glob should be rejected: {:?}",
+            report.errors
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("scripts/e2e/**/*.json")),
+            "missing JSON harness glob should be rejected: {:?}",
+            report.errors
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("generated e2e artifact directories")),
+            "missing generated-artifact exclusion should be rejected: {:?}",
+            report.errors
         );
     }
 
