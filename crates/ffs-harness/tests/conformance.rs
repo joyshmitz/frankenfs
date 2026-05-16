@@ -388,6 +388,11 @@ const GOLDEN_PROVENANCE_SOURCE_IMAGES: u8 = 1 << 1;
 const GOLDEN_PROVENANCE_MKFS_VERSION: u8 = 1 << 2;
 const GOLDEN_PROVENANCE_COMMAND: u8 = 1 << 3;
 
+const EXACT_PROVENANCE_GOLDENS: &[&str] = &[
+    "btrfs_item_payloads.txt",
+    "ext4_fscrypt_legacy_policy_transport_discrepancy.json",
+];
+
 impl<'a> FixtureProvenanceSection<'a> {
     fn new(header: &'a str) -> Self {
         Self { header, fields: 0 }
@@ -474,7 +479,7 @@ impl<'a> GoldenProvenanceSection<'a> {
             .split('/')
             .map(str::trim)
             .map(|token| token.split_whitespace().next().unwrap_or(""))
-            .any(|pattern| provenance_pattern_matches(pattern, artifact))
+            .any(|pattern| golden_provenance_pattern_matches(pattern, artifact))
     }
 }
 
@@ -569,6 +574,39 @@ fn provenance_pattern_matches(pattern: &str, artifact: &str) -> bool {
         && !suffix.is_empty()
         && artifact.starts_with(prefix)
         && artifact.ends_with(suffix)
+}
+
+fn golden_provenance_pattern_matches(pattern: &str, artifact: &str) -> bool {
+    if EXACT_PROVENANCE_GOLDENS.contains(&artifact) {
+        pattern == artifact
+    } else {
+        provenance_pattern_matches(pattern, artifact)
+    }
+}
+
+#[test]
+fn specialized_golden_provenance_rejects_broad_wildcards() {
+    assert!(
+        provenance_pattern_matches(
+            "ext4_*.json",
+            "ext4_fscrypt_legacy_policy_transport_discrepancy.json",
+        ),
+        "raw wildcard matching documents the old false-positive shape"
+    );
+    assert!(
+        !golden_provenance_pattern_matches(
+            "ext4_*.json",
+            "ext4_fscrypt_legacy_policy_transport_discrepancy.json",
+        ),
+        "fscrypt transport discrepancy goldens require exact provenance"
+    );
+    assert!(
+        golden_provenance_pattern_matches(
+            "ext4_fscrypt_legacy_policy_transport_discrepancy.json",
+            "ext4_fscrypt_legacy_policy_transport_discrepancy.json",
+        ),
+        "an exact specialized golden provenance section should satisfy coverage"
+    );
 }
 
 #[test]
