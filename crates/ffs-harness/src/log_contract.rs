@@ -290,10 +290,19 @@ pub mod e2e_marker {
 
         for part in parts {
             if let Some(val) = part.strip_prefix("scenario_id=") {
+                if scenario_id.is_some() {
+                    return None;
+                }
                 scenario_id = Some(val);
             } else if let Some(val) = part.strip_prefix("outcome=") {
+                if outcome_val.is_some() {
+                    return None;
+                }
                 outcome_val = Some(val);
             } else if let Some(val) = part.strip_prefix("detail=") {
+                if detail.is_some() {
+                    return None;
+                }
                 detail = Some(val);
             }
         }
@@ -526,10 +535,43 @@ mod tests {
     }
 
     #[test]
+    fn e2e_marker_parse_allows_extension_fields() -> Result<(), &'static str> {
+        let line = "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_case|outcome=PASS|duration_ms=7";
+        let (id, outcome_val, detail) =
+            e2e_marker::parse_marker(line).ok_or("expected extension e2e marker")?;
+        assert_eq!(id, "mounted_diff_ext4_case");
+        assert_eq!(outcome_val, "PASS");
+        assert!(detail.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn e2e_marker_parse_invalid() {
         assert!(e2e_marker::parse_marker("not a marker").is_none());
         assert!(e2e_marker::parse_marker("SCENARIO_RESULT|outcome=PASS").is_none());
         assert!(e2e_marker::parse_marker("SCENARIO_RESULT|scenario_id=x").is_none());
+    }
+
+    #[test]
+    fn e2e_marker_parse_rejects_duplicate_core_fields() {
+        assert!(
+            e2e_marker::parse_marker(
+                "SCENARIO_RESULT|scenario_id=first_valid_marker|scenario_id=second_valid_marker|outcome=PASS"
+            )
+            .is_none()
+        );
+        assert!(
+            e2e_marker::parse_marker(
+                "SCENARIO_RESULT|scenario_id=valid_test_marker|outcome=PASS|outcome=FAIL"
+            )
+            .is_none()
+        );
+        assert!(
+            e2e_marker::parse_marker(
+                "SCENARIO_RESULT|scenario_id=valid_test_marker|outcome=FAIL|detail=one|detail=two"
+            )
+            .is_none()
+        );
     }
 
     #[test]
