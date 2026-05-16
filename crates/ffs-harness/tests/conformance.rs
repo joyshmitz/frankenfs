@@ -721,17 +721,77 @@ fn ext4_group_desc_64byte_fixture_re_encodes_byte_identical() {
 fn ext4_inode_fixtures_conform() {
     let file_inode = validate_inode_fixture(&fixture_path("ext4_inode_regular_file.json"))
         .expect("regular file inode");
-    assert_eq!(
-        file_inode.mode & 0o17_0000,
-        0o10_0000,
-        "should be regular file"
-    );
+    assert_eq!(file_inode.mode, 0o10_0644);
+    assert_eq!(file_inode.uid, 1000);
+    assert_eq!(file_inode.gid, 1000);
     assert_eq!(file_inode.size, 1024);
+    assert_eq!(file_inode.links_count, 1);
+    assert_eq!(file_inode.blocks, 8);
+    assert_eq!(file_inode.flags, EXT4_EXTENTS_FL);
+    assert_eq!(file_inode.version, 0);
+    assert_eq!(file_inode.generation, 42);
+    assert_eq!(file_inode.file_acl, 0);
+    assert_eq!(file_inode.extra_isize, 32);
+    assert_eq!(file_inode.checksum, 0);
+    assert_eq!(file_inode.version_hi, 0);
+    assert_eq!(file_inode.projid, 0);
+    assert_eq!(file_inode.extent_bytes.len(), 60);
+    assert_eq!(file_inode.xattr_ibody.len(), 96);
+    assert!(file_inode.xattr_ibody.iter().all(|&byte| byte == 0));
+
+    let (file_extent_header, file_extent_tree) =
+        ffs_ondisk::parse_extent_tree(&file_inode.extent_bytes)
+            .expect("regular file inode extent tree");
+    assert_eq!(file_extent_header.magic, 0xF30A);
+    assert_eq!(file_extent_header.entries, 1);
+    assert_eq!(file_extent_header.max_entries, 4);
+    assert_eq!(file_extent_header.depth, 0);
+    assert_eq!(file_extent_header.generation, 0);
+    let ExtentTree::Leaf(file_extents) = file_extent_tree else {
+        panic!("regular file inode should contain leaf extents");
+    };
+    assert_eq!(file_extents.len(), 1);
+    assert_eq!(file_extents[0].logical_block, 0);
+    assert_eq!(file_extents[0].actual_len(), 1);
+    assert_eq!(file_extents[0].physical_start, 10);
+    assert!(!file_extents[0].is_unwritten());
 
     let dir_inode = validate_inode_fixture(&fixture_path("ext4_inode_directory.json"))
         .expect("directory inode");
-    assert_eq!(dir_inode.mode & 0o17_0000, 0o4_0000, "should be directory");
+    assert_eq!(dir_inode.mode, 0o4_0755);
+    assert_eq!(dir_inode.uid, 0);
+    assert_eq!(dir_inode.gid, 0);
+    assert_eq!(dir_inode.size, 4096);
     assert_eq!(dir_inode.links_count, 2);
+    assert_eq!(dir_inode.blocks, 8);
+    assert_eq!(dir_inode.flags, EXT4_EXTENTS_FL);
+    assert_eq!(dir_inode.version, 0);
+    assert_eq!(dir_inode.generation, 1);
+    assert_eq!(dir_inode.file_acl, 0);
+    assert_eq!(dir_inode.extra_isize, 32);
+    assert_eq!(dir_inode.checksum, 0);
+    assert_eq!(dir_inode.version_hi, 0);
+    assert_eq!(dir_inode.projid, 0);
+    assert_eq!(dir_inode.extent_bytes.len(), 60);
+    assert_eq!(dir_inode.xattr_ibody.len(), 96);
+    assert!(dir_inode.xattr_ibody.iter().all(|&byte| byte == 0));
+
+    let (dir_extent_header, dir_extent_tree) =
+        ffs_ondisk::parse_extent_tree(&dir_inode.extent_bytes)
+            .expect("directory inode extent tree");
+    assert_eq!(dir_extent_header.magic, 0xF30A);
+    assert_eq!(dir_extent_header.entries, 1);
+    assert_eq!(dir_extent_header.max_entries, 4);
+    assert_eq!(dir_extent_header.depth, 0);
+    assert_eq!(dir_extent_header.generation, 0);
+    let ExtentTree::Leaf(dir_extents) = dir_extent_tree else {
+        panic!("directory inode should contain leaf extents");
+    };
+    assert_eq!(dir_extents.len(), 1);
+    assert_eq!(dir_extents[0].logical_block, 0);
+    assert_eq!(dir_extents[0].actual_len(), 1);
+    assert_eq!(dir_extents[0].physical_start, 20);
+    assert!(!dir_extents[0].is_unwritten());
 }
 
 #[test]
