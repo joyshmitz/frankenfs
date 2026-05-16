@@ -1441,6 +1441,7 @@ fn validate_row(
         validate_safe_relative_path(row, "snapshot_path", &row.snapshot_path, &mut errors);
         validate_existing_snapshot_path(row, &row.snapshot_path, &mut errors);
         validate_snapshot_path_matches_evidence(row, &row.snapshot_path, &mut errors);
+        validate_snapshot_path_matches_module(row, &row.snapshot_path, &mut errors);
     }
 
     validate_coverage_fields(row, &mut missing_evidence, &mut errors);
@@ -1723,6 +1724,61 @@ fn snapshot_suffixes_for_evidence_test(row: &ReportSchemaInventoryRow) -> BTreeS
         suffixes.insert(format!("__tests__{label}.snap"));
     }
     suffixes
+}
+
+fn validate_snapshot_path_matches_module(
+    row: &ReportSchemaInventoryRow,
+    value: &str,
+    errors: &mut Vec<String>,
+) {
+    if !is_safe_relative_path(value) || !is_safe_relative_path(&row.module_path) {
+        return;
+    }
+
+    let Some(actual_prefix) = snapshot_module_prefix(value) else {
+        return;
+    };
+    let Some(expected_prefix) = expected_snapshot_module_prefix(&row.module_path) else {
+        return;
+    };
+
+    if actual_prefix != expected_prefix {
+        errors.push(format!(
+            "row `{}` snapshot_path module prefix must match module_path `{}`, got `{actual_prefix}`",
+            row.report_id, row.module_path
+        ));
+    }
+}
+
+fn snapshot_module_prefix(snapshot_path: &str) -> Option<&str> {
+    let file_name = Path::new(snapshot_path).file_name()?.to_str()?;
+    let snapshot_name = file_name.strip_suffix(".snap")?;
+    snapshot_name
+        .split_once("__tests__")
+        .map(|(module_prefix, _test_name)| module_prefix)
+}
+
+fn expected_snapshot_module_prefix(module_path: &str) -> Option<String> {
+    let path = Path::new(module_path);
+    if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+        return None;
+    }
+
+    let relative = path.strip_prefix("crates/ffs-harness/src").ok()?;
+    let without_extension = relative.with_extension("");
+    let mut pieces = vec!["ffs_harness".to_owned()];
+    for component in without_extension.components() {
+        let Component::Normal(piece) = component else {
+            return None;
+        };
+        pieces.push(piece.to_str()?.to_owned());
+    }
+
+    if pieces.len() == 2 && pieces.get(1).is_some_and(|piece| piece == "lib") {
+        Some("ffs_harness".to_owned())
+    } else {
+        Some(pieces.join("__"))
+    }
 }
 
 fn rust_function_body<'a>(source: &'a str, function_name: &str) -> Option<&'a str> {
@@ -2329,6 +2385,25 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_snapshot_module_path_fails() {
+        let mut inventory = current_report_schema_inventory();
+        let report_id = inventory.rows[0].report_id.clone();
+        inventory.rows[0].module_path = "crates/ffs-harness/src/metrics.rs".to_owned();
+
+        let report = validate_report_schema_inventory(&inventory);
+        let result = row_result(&report, &report_id);
+
+        assert!(!report.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("snapshot_path module prefix")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
     fn excluded_rows_require_reason() {
         let mut inventory = current_report_schema_inventory();
         let row = inventory
@@ -2440,6 +2515,32 @@ mod tests {
         assert!(
             mismatched_snapshots.is_empty(),
             "covered report schema rows must correlate snapshot_path to evidence_test: {mismatched_snapshots:?}"
+        );
+    }
+
+    #[test]
+    fn covered_rows_correlate_snapshot_paths_to_modules() {
+        let inventory = current_report_schema_inventory();
+        let mismatched_modules = inventory
+            .rows
+            .iter()
+            .filter(|row| row.coverage_status == ReportSchemaCoverageStatus::Covered)
+            .filter(|row| {
+                snapshot_module_prefix(&row.snapshot_path)
+                    != expected_snapshot_module_prefix(&row.module_path).as_deref()
+            })
+            .map(|row| {
+                (
+                    row.report_id.clone(),
+                    row.module_path.clone(),
+                    row.snapshot_path.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            mismatched_modules.is_empty(),
+            "covered report schema rows must correlate snapshot_path to module_path: {mismatched_modules:?}"
         );
     }
 
