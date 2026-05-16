@@ -9071,6 +9071,48 @@ mod tests {
     // ── Xattr parsing tests ─────────────────────────────────────────────
 
     #[test]
+    fn parse_xattr_entry_kernel_offsets_match_xattr_h() {
+        // fs/ext4/xattr.h struct ext4_xattr_entry:
+        //   e_name_len:u8 @0, e_name_index:u8 @1,
+        //   e_value_offs:le16 @2, e_value_block:le32 @4,
+        //   e_value_size:le32 @8, e_hash:le32 @12, e_name[] @16.
+        let mut data = vec![0_u8; 256];
+        let name = b"kernel";
+        let value = b"layout";
+        let value_offs = 128_u16;
+        let value_size = u32::try_from(value.len()).expect("fixed value length fits u32");
+
+        data[0] = u8::try_from(name.len()).expect("fixed name length fits u8");
+        data[1] = ffs_types::EXT4_XATTR_INDEX_SECURITY;
+        data[2..4].copy_from_slice(&value_offs.to_le_bytes());
+        data[4..8].copy_from_slice(&0_u32.to_le_bytes());
+        data[8..12].copy_from_slice(&value_size.to_le_bytes());
+        data[12..16].copy_from_slice(&0xA5A5_5A5A_u32.to_le_bytes());
+        data[16..16 + name.len()].copy_from_slice(name);
+
+        let entry_len = (16 + name.len() + 3) & !3;
+        data[entry_len] = 0;
+        data[entry_len + 1] = 0;
+        let value_start = usize::from(value_offs);
+        data[value_start..value_start + value.len()].copy_from_slice(value);
+
+        let entries = super::parse_xattr_entries(&data, &data, 0)
+            .expect("kernel-stamped xattr entry must parse");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].name_index,
+            ffs_types::EXT4_XATTR_INDEX_SECURITY,
+            "e_name_index @0x01"
+        );
+        assert_eq!(&entries[0].name, name, "e_name @0x10");
+        assert_eq!(
+            &entries[0].value, value,
+            "e_value_offs @0x02 + e_value_size @0x08"
+        );
+        assert_eq!(entries[0].full_name(), "security.kernel");
+    }
+
+    #[test]
     fn parse_xattr_entries_basic() {
         // Build a minimal xattr entry: name_index=1 (user), name="test", value="val"
         let mut data = vec![0_u8; 256];
