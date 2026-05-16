@@ -124,6 +124,20 @@ fn fuzz_target_registration_check(
     }
 }
 
+fn pipeline_script_check(repo_root: &Path, component: &str, script_name: &str) -> PipelineCheck {
+    let path = repo_root.join("fuzz").join("scripts").join(script_name);
+    let found = path.exists();
+    PipelineCheck {
+        component: component.to_owned(),
+        passed: found,
+        detail: if found {
+            format!("{script_name} found")
+        } else {
+            format!("{script_name} missing")
+        },
+    }
+}
+
 /// A discovered crash artifact from a fuzz campaign.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrashArtifact {
@@ -379,29 +393,25 @@ pub fn validate_pipeline(repo_root: &str) -> Vec<PipelineCheck> {
     });
 
     // Check minimize script exists
-    let minimize_exists =
-        Path::new(&format!("{repo_root}/fuzz/scripts/minimize_corpus.sh")).exists();
-    checks.push(PipelineCheck {
-        component: "minimize_script".to_owned(),
-        passed: minimize_exists,
-        detail: if minimize_exists {
-            "minimize_corpus.sh found".to_owned()
-        } else {
-            "minimize_corpus.sh missing".to_owned()
-        },
-    });
+    checks.push(pipeline_script_check(
+        repo_root_path,
+        "minimize_script",
+        "minimize_corpus.sh",
+    ));
 
     // Check nightly campaign script exists
-    let nightly_exists = Path::new(&format!("{repo_root}/fuzz/scripts/nightly_fuzz.sh")).exists();
-    checks.push(PipelineCheck {
-        component: "nightly_script".to_owned(),
-        passed: nightly_exists,
-        detail: if nightly_exists {
-            "nightly_fuzz.sh found".to_owned()
-        } else {
-            "nightly_fuzz.sh missing".to_owned()
-        },
-    });
+    checks.push(pipeline_script_check(
+        repo_root_path,
+        "nightly_script",
+        "nightly_fuzz.sh",
+    ));
+
+    // Check crash promotion script exists
+    checks.push(pipeline_script_check(
+        repo_root_path,
+        "promote_script",
+        "promote_crash.sh",
+    ));
 
     // Check dictionaries exist
     let dict_count = ["ext4.dict", "btrfs.dict"]
@@ -468,6 +478,7 @@ mod tests {
         root: &Path,
         manifest_targets: &[&str],
         source_targets: &[&str],
+        include_promote_script: bool,
     ) -> std::io::Result<()> {
         let fuzz_dir = root.join("fuzz");
         let source_dir = fuzz_dir.join("fuzz_targets");
@@ -502,6 +513,9 @@ mod tests {
 
         std::fs::write(script_dir.join("minimize_corpus.sh"), "#!/bin/sh\n")?;
         std::fs::write(script_dir.join("nightly_fuzz.sh"), "#!/bin/sh\n")?;
+        if include_promote_script {
+            std::fs::write(script_dir.join("promote_crash.sh"), "#!/bin/sh\n")?;
+        }
         std::fs::write(dictionary_dir.join("ext4.dict"), "\"ext4\"\n")?;
         std::fs::write(dictionary_dir.join("btrfs.dict"), "\"btrfs\"\n")?;
         std::fs::write(
@@ -537,6 +551,7 @@ mod tests {
             temp.path(),
             &["fuzz_registered"],
             &["fuzz_registered", "fuzz_unregistered"],
+            true,
         )?;
 
         let root = temp
@@ -557,6 +572,38 @@ mod tests {
             registration.detail.contains("fuzz_unregistered"),
             "registration detail should identify the source-only target: {}",
             registration.detail
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pipeline_validation_rejects_missing_promote_script() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        write_minimal_pipeline_fixture(
+            temp.path(),
+            &["fuzz_registered"],
+            &["fuzz_registered"],
+            false,
+        )?;
+
+        let root = temp
+            .path()
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("temp path must be utf-8"))?;
+        let checks = validate_pipeline(root);
+        let promote = checks
+            .iter()
+            .find(|check| check.component == "promote_script")
+            .ok_or_else(|| std::io::Error::other("promote script check missing"))?;
+
+        assert!(
+            !promote.passed,
+            "missing promote_crash.sh should fail pipeline validation"
+        );
+        assert!(
+            promote.detail.contains("promote_crash.sh missing"),
+            "promote detail should identify the missing script: {}",
+            promote.detail
         );
         Ok(())
     }
