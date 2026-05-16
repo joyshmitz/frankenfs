@@ -1435,6 +1435,7 @@ fn validate_row(
 
     if !row.snapshot_path.is_empty() {
         validate_safe_relative_path(row, "snapshot_path", &row.snapshot_path, &mut errors);
+        validate_existing_snapshot_path(row, &row.snapshot_path, &mut errors);
     }
 
     validate_coverage_fields(row, &mut missing_evidence, &mut errors);
@@ -1613,17 +1614,50 @@ fn validate_safe_relative_path(
     value: &str,
     errors: &mut Vec<String>,
 ) {
-    let path = Path::new(value);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-    {
+    if !is_safe_relative_path(value) {
         errors.push(format!(
             "row `{}` {field} must be a safe relative path, got `{value}`",
             row.report_id
         ));
     }
+}
+
+fn validate_existing_snapshot_path(
+    row: &ReportSchemaInventoryRow,
+    value: &str,
+    errors: &mut Vec<String>,
+) {
+    if !is_safe_relative_path(value) {
+        return;
+    }
+    if Path::new(value).extension().and_then(|ext| ext.to_str()) != Some("snap") {
+        errors.push(format!(
+            "row `{}` snapshot_path must point at a .snap file, got `{value}`",
+            row.report_id
+        ));
+        return;
+    }
+    if !workspace_relative_path(value).is_file() {
+        errors.push(format!(
+            "row `{}` snapshot_path must point at an existing .snap file, got `{value}`",
+            row.report_id
+        ));
+    }
+}
+
+fn is_safe_relative_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !path.is_absolute()
+        && !path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn workspace_relative_path(value: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join(value)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2080,6 +2114,27 @@ mod tests {
     }
 
     #[test]
+    fn missing_snapshot_path_fails() {
+        let mut inventory = current_report_schema_inventory();
+        let report_id = inventory.rows[0].report_id.clone();
+        inventory.rows[0].snapshot_path =
+            "crates/ffs-harness/src/snapshots/missing_report_schema_inventory_snapshot.snap"
+                .to_owned();
+
+        let report = validate_report_schema_inventory(&inventory);
+        let result = row_result(&report, &report_id);
+
+        assert!(!report.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("existing .snap file")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
     fn excluded_rows_require_reason() {
         let mut inventory = current_report_schema_inventory();
         let row = inventory
@@ -2152,6 +2207,23 @@ mod tests {
 
         assert_eq!(row_ids, sorted_ids);
         assert_eq!(report.report_ids, sorted_ids);
+    }
+
+    #[test]
+    fn covered_rows_name_checked_in_snapshot_files() {
+        let inventory = current_report_schema_inventory();
+        let missing_snapshots = inventory
+            .rows
+            .iter()
+            .filter(|row| row.coverage_status == ReportSchemaCoverageStatus::Covered)
+            .filter(|row| !workspace_relative_path(&row.snapshot_path).is_file())
+            .map(|row| (row.report_id.clone(), row.snapshot_path.clone()))
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing_snapshots.is_empty(),
+            "covered report schema rows must name existing snapshot files: {missing_snapshots:?}"
+        );
     }
 
     #[test]
