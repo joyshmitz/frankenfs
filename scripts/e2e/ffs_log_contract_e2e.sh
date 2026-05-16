@@ -252,6 +252,7 @@ mkdir -p "$SUMMARY_PROBE_DIR"
 MARKER_PREFIX="SCENARIO_RESULT|scenario_id="
 {
     printf '%s%s|outcome=PASS|duration_ms=7\n' "$MARKER_PREFIX" "valid_probe_marker"
+    printf 'SCENARIO_RESULT|scenario_id=json_escape_"probe"\\path|outcome=PASS"quoted\\slash\n'
     printf 'SCENARIO_RESULT|outcome=PASS\n'
     printf '%s%s\n' "$MARKER_PREFIX" "missing_outcome_probe"
     printf '%s|outcome=PASS\n' "$MARKER_PREFIX"
@@ -270,10 +271,13 @@ if (
 ) >"$SUMMARY_PROBE_DIR/emit.log" 2>&1 \
     && jq -e '
         .verdict == "PASS"
-        and (.scenarios | length == 1)
+        and (.scenarios | length == 2)
         and (.scenarios[0].scenario_id == "valid_probe_marker")
         and (.scenarios[0].outcome == "PASS")
         and (.scenarios[0] | has("detail") | not)
+        and (.scenarios[1].scenario_id == "json_escape_\"probe\"\\path")
+        and (.scenarios[1].outcome == "PASS\"quoted\\slash")
+        and (.scenarios[1] | has("detail") | not)
         and (.invalid_scenario_marker_count == 7)
         and (.invalid_scenario_markers | length == 7)
         and ([.invalid_scenario_markers[].reason] | sort == [

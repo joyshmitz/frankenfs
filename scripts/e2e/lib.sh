@@ -1319,7 +1319,9 @@ e2e_emit_json_summary() {
             scenarios_json+=","
         fi
 
-        # Escape JSON special characters in detail
+        # Escape JSON special characters in accepted marker fields.
+        scenario_id=$(e2e_json_escape "$scenario_id")
+        outcome=$(e2e_json_escape "$outcome")
         detail=$(e2e_json_escape "$detail")
 
         if [[ -n "$detail" ]]; then
