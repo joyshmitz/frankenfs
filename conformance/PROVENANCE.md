@@ -105,7 +105,7 @@ All fixtures are hand-crafted JSON files that encode sparse binary data using th
 - **Author:** Claude Opus 4.5
 - **Reference:** btrfs_tree.h `struct btrfs_dev_item`
 - **Description:** Device item for 1TB device with 512GB used
-- **Verification:** devid, total_bytes, bytes_used, sector_size verified
+- **Verification:** devid, total_bytes, bytes_used, sector_size, dev_group, seek_speed, bandwidth, uuid, and fsid verified
 
 ## Golden Files
 
