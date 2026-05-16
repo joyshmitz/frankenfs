@@ -3154,6 +3154,19 @@ fn rec_len_from_disk(raw: u16, block_size: u32) -> u32 {
     (len & 0xFFFC) | ((len & 0x3) << 16)
 }
 
+fn is_dir_checksum_tail(inode: u32, name_len: u8, file_type_raw: u8, rec_len: u32) -> bool {
+    inode == 0 && name_len == 0 && file_type_raw == EXT4_FT_DIR_CSUM && rec_len == 12
+}
+
+fn is_malformed_dir_checksum_tail(
+    inode: u32,
+    name_len: u8,
+    file_type_raw: u8,
+    rec_len: u32,
+) -> bool {
+    inode == 0 && name_len != 0 && file_type_raw == EXT4_FT_DIR_CSUM && rec_len == 12
+}
+
 /// Parse all directory entries from a single directory data block.
 ///
 /// Returns the entries (excluding checksum tails) and an optional
@@ -3193,8 +3206,17 @@ pub fn parse_dir_block(
                 field: "de_rec_len",
                 reason: "overflow",
             })?;
-        let is_tail =
-            inode == 0 && name_len == 0 && file_type_raw == EXT4_FT_DIR_CSUM && rec_len == 12;
+        let is_tail_position =
+            entry_end <= block.len() && block[entry_end..].iter().all(|&b| b == 0);
+        if is_tail_position
+            && is_malformed_dir_checksum_tail(inode, name_len, file_type_raw, rec_len)
+        {
+            return Err(ParseError::InvalidField {
+                field: "dir_block_tail",
+                reason: "malformed checksum tail header",
+            });
+        }
+        let is_tail = is_dir_checksum_tail(inode, name_len, file_type_raw, rec_len);
 
         // Detect checksum tail: inode=0, name_len=0, file_type=0xDE, rec_len=12
         if is_tail {
@@ -3531,8 +3553,7 @@ impl<'a> DirBlockIter<'a> {
                     reason: "overflow",
                 })?;
         if entry_end > self.block.len() {
-            let is_tail =
-                inode == 0 && name_len == 0 && file_type_raw == EXT4_FT_DIR_CSUM && rec_len == 12;
+            let is_tail = is_dir_checksum_tail(inode, name_len, file_type_raw, rec_len);
             if !is_tail {
                 return Err(ParseError::InvalidField {
                     field: "de_rec_len",
@@ -3551,10 +3572,21 @@ impl<'a> DirBlockIter<'a> {
     }
 
     fn is_checksum_tail(header: DirEntryHeader) -> bool {
-        header.inode == 0
-            && header.name_len == 0
-            && header.file_type_raw == EXT4_FT_DIR_CSUM
-            && header.rec_len == 12
+        is_dir_checksum_tail(
+            header.inode,
+            header.name_len,
+            header.file_type_raw,
+            header.rec_len,
+        )
+    }
+
+    fn is_malformed_checksum_tail(header: DirEntryHeader) -> bool {
+        is_malformed_dir_checksum_tail(
+            header.inode,
+            header.name_len,
+            header.file_type_raw,
+            header.rec_len,
+        )
     }
 
     fn consume_tail(&mut self) -> Result<(), ParseError> {
@@ -3619,6 +3651,15 @@ impl<'a> Iterator for DirBlockIter<'a> {
                     return Some(Err(err));
                 }
                 return None;
+            }
+            let is_tail_position = header.entry_end <= self.block.len()
+                && self.block[header.entry_end..].iter().all(|&b| b == 0);
+            if is_tail_position && Self::is_malformed_checksum_tail(header) {
+                self.done = true;
+                return Some(Err(ParseError::InvalidField {
+                    field: "dir_block_tail",
+                    reason: "malformed checksum tail header",
+                }));
             }
 
             // Skip deleted entries (inode == 0)
@@ -7379,6 +7420,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_dir_block_rejects_malformed_checksum_tail_header() {
+        let block_size = 32_u32;
+        let mut block = vec![0_u8; block_size as usize];
+
+        write_dir_entry(&mut block, 0, 2, 2, b".", 20);
+
+        let tail_off = 20_usize;
+        block[tail_off..tail_off + 4].copy_from_slice(&0_u32.to_le_bytes());
+        block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
+        block[tail_off + 6] = 1;
+        block[tail_off + 7] = EXT4_FT_DIR_CSUM;
+
+        let err = parse_dir_block(&block, block_size).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "dir_block_tail",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn parse_dir_block_allows_checksum_tail_with_zero_padding() {
         let block_size = 32_u32;
         let mut block = vec![0_u8; block_size as usize];
@@ -7631,6 +7695,31 @@ mod tests {
         block[tail_off + 7] = EXT4_FT_DIR_CSUM;
         block[tail_off + 8..tail_off + 12].copy_from_slice(&0xCAFE_BABE_u32.to_le_bytes());
         block[tail_off + 12] = 1;
+
+        let mut iter = iter_dir_block(&block, block_size);
+        assert!(iter.next().unwrap().is_ok());
+        let err = iter.next().unwrap().unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "dir_block_tail",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dir_iter_rejects_malformed_checksum_tail_header() {
+        let block_size = 32_u32;
+        let mut block = vec![0_u8; block_size as usize];
+
+        write_dir_entry(&mut block, 0, 2, 2, b".", 20);
+
+        let tail_off = 20_usize;
+        block[tail_off..tail_off + 4].copy_from_slice(&0_u32.to_le_bytes());
+        block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
+        block[tail_off + 6] = 1;
+        block[tail_off + 7] = EXT4_FT_DIR_CSUM;
 
         let mut iter = iter_dir_block(&block, block_size);
         assert!(iter.next().unwrap().is_ok());

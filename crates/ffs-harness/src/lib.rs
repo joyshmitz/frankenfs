@@ -657,6 +657,27 @@ mod tests {
     }
 
     #[test]
+    fn ext4_dir_block_malformed_fixtures_reject() {
+        for fixture in [
+            "ext4_dir_block_name_len_overflow.json",
+            "ext4_dir_block_rec_len_too_small.json",
+            "ext4_dir_block_rec_len_too_small_min12.json",
+            "ext4_dir_block_rec_len_unaligned.json",
+            "ext4_dir_block_tail_bad_header.json",
+            "ext4_dir_block_tail_padding_nonzero.json",
+            "ext4_dir_block_truncated_tail.json",
+        ] {
+            let path = fixture_path(fixture);
+            let err = validate_dir_block_fixture(&path, 4096).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(
+                message.contains("failed dir block parse"),
+                "{fixture}: {message}"
+            );
+        }
+    }
+
+    #[test]
     fn btrfs_chunk_fixture_parses() {
         let path = fixture_path("btrfs_superblock_with_chunks.json");
         let (sb, chunks) = validate_btrfs_chunk_fixture(&path).expect("btrfs chunk fixture parse");
