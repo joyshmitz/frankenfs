@@ -381,6 +381,8 @@ e2e_validate_scenario_catalog() {
         fi
 
         local -A seen_categories=()
+        local -A active_scenario_ids=()
+        local -a active_scenario_patterns=()
         local active_count=0
 
         while IFS= read -r scenario_b64; do
@@ -421,6 +423,15 @@ e2e_validate_scenario_catalog() {
             if ! e2e_catalog_evidence_present "$evidence" "$script_path"; then
                 e2e_fail "Suite '$suite_id' evidence marker not found in $script_rel: $evidence"
             fi
+            if [[ -n "$scenario_id" ]]; then
+                active_scenario_ids["$scenario_id"]=1
+            fi
+            if [[ "$evidence" =~ ^SCENARIO_RESULT\|scenario_id=([^|]+)\|outcome= ]]; then
+                active_scenario_ids["${BASH_REMATCH[1]}"]=1
+            fi
+            if [[ -n "$scenario_pattern" ]]; then
+                active_scenario_patterns+=("$scenario_pattern")
+            fi
         done < <(
             jq -r --arg suite_id "$suite_id" '
                 .suites[]
@@ -429,6 +440,37 @@ e2e_validate_scenario_catalog() {
                 | @base64
             ' "$catalog_path"
         )
+
+        local emitted_id pattern matched
+        local -a uncataloged_ids=()
+        while IFS= read -r emitted_id; do
+            [[ -n "$emitted_id" ]] || continue
+            if [[ -n "${active_scenario_ids[$emitted_id]:-}" ]]; then
+                continue
+            fi
+
+            matched=0
+            for pattern in "${active_scenario_patterns[@]}"; do
+                if [[ "$emitted_id" =~ $pattern ]]; then
+                    matched=1
+                    break
+                fi
+            done
+
+            if ((matched == 0)); then
+                uncataloged_ids+=("$emitted_id")
+            fi
+        done < <(
+            grep -v '^[[:space:]]*#' "$script_path" \
+                | sed -n -E \
+                    -e 's/^[[:space:]]*(scenario_result|log_scenario)[[:space:]]+"([A-Za-z0-9_]+)".*/\2/p' \
+                    -e "s/^[[:space:]]*(scenario_result|log_scenario)[[:space:]]+'([A-Za-z0-9_]+)'.*/\2/p" \
+                    -e 's/^[[:space:]]*SCENARIO_RESULT\|scenario_id=([A-Za-z0-9_]+)\|outcome=.*/\1/p' \
+                | sort -u
+        )
+        if ((${#uncataloged_ids[@]} > 0)); then
+            e2e_fail "Suite '$suite_id' script emits uncataloged static scenario IDs: ${uncataloged_ids[*]}"
+        fi
 
         if (( active_count == 0 )); then
             e2e_fail "Suite '$suite_id' has no active scenarios in catalog"

@@ -17,6 +17,7 @@
 # 13. Shared E2E artifact directories are unique under concurrent starts
 # 14. Scenario catalog id_pattern sample validation fails closed
 # 15. Verification gate scenario_catalog_valid uses the full catalog validator
+# 16. Scenario catalog rejects uncataloged static scenario_result IDs
 #
 # Usage: ./scripts/e2e/ffs_verification_runner_e2e.sh
 #
@@ -362,6 +363,55 @@ JSON
         && grep -Fq "generated id_pattern sample does not match scenario_id_regex" "$probe_log"
 }
 
+verify_catalog_rejects_uncataloged_static_scenario_result() {
+    local probe_dir bad_catalog probe_script probe_log status
+    probe_dir="$E2E_TEMP_DIR/catalog_uncataloged_static_probe"
+    bad_catalog="$probe_dir/scenario_catalog.json"
+    probe_script="$probe_dir/scripts/e2e/bad_catalog_probe_e2e.sh"
+    probe_log="$probe_dir/catalog_validation.log"
+
+    mkdir -p "$(dirname "$probe_script")"
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'scenario_result "cataloged_probe_case" "PASS" "cataloged"'
+        printf '%s\n' 'scenario_result "uncataloged_probe_case" "PASS" "uncataloged"'
+    } >"$probe_script"
+
+    cat >"$bad_catalog" <<'JSON'
+{
+  "catalog_version": "probe",
+  "scenario_id_regex": "^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$",
+  "taxonomy": ["happy"],
+  "suites": [
+    {
+      "suite_id": "bad_catalog_probe",
+      "script": "scripts/e2e/bad_catalog_probe_e2e.sh",
+      "required_categories": ["happy"],
+      "scenarios": [
+        {
+          "id": "cataloged_probe_case",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=cataloged_probe_case|outcome=PASS"
+        }
+      ]
+    }
+  ]
+}
+JSON
+
+    set +e
+    (
+        cd "$probe_dir"
+        REPO_ROOT="$probe_dir" E2E_LOG_FILE="$probe_log" e2e_validate_scenario_catalog "$bad_catalog"
+    ) >"$probe_dir/stdout.log" 2>"$probe_dir/stderr.log"
+    status=$?
+    set -e
+
+    [[ "$status" -ne 0 ]] \
+        && grep -Fq "script emits uncataloged static scenario IDs: uncataloged_probe_case" "$probe_log"
+}
+
 verify_verification_gate_catalog_valid_uses_full_validator() {
     local gate_path block_path
     gate_path="$REPO_ROOT/scripts/e2e/ffs_verification_gate_e2e.sh"
@@ -523,9 +573,20 @@ else
 fi
 
 #######################################
-# Scenario 4h: verification gate catalog-valid marker uses full validator
+# Scenario 4h: scenario catalog rejects uncataloged static scenario IDs
 #######################################
-e2e_step "Scenario 4h: verification gate scenario_catalog_valid uses full validator"
+e2e_step "Scenario 4h: scenario catalog uncataloged static scenario-result fail-closed check"
+
+if verify_catalog_rejects_uncataloged_static_scenario_result; then
+    scenario_result "catalog_rejects_uncataloged_static_scenario_result" "PASS" "Static scenario_result IDs absent from the catalog are rejected"
+else
+    scenario_result "catalog_rejects_uncataloged_static_scenario_result" "FAIL" "Uncataloged static scenario_result ID was not rejected"
+fi
+
+#######################################
+# Scenario 4i: verification gate catalog-valid marker uses full validator
+#######################################
+e2e_step "Scenario 4i: verification gate scenario_catalog_valid uses full validator"
 
 if verify_verification_gate_catalog_valid_uses_full_validator; then
     scenario_result "verification_gate_catalog_valid_full_validator" "PASS" "scenario_catalog_valid is backed by e2e_validate_scenario_catalog"

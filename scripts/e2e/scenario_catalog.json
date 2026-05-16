@@ -60,6 +60,12 @@
           "category": "happy",
           "status": "active",
           "evidence": "cli_triage_runbook_exists"
+        },
+        {
+          "id": "cli_smoke_mount_probe",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=cli_smoke_mount_probe|outcome=PASS"
         }
       ]
     },
@@ -2230,6 +2236,12 @@
           "evidence": "SCENARIO_RESULT|scenario_id=catalog_id_pattern_sample_rejects_bad_patterns|outcome=PASS"
         },
         {
+          "id": "catalog_rejects_uncataloged_static_scenario_result",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=catalog_rejects_uncataloged_static_scenario_result|outcome=PASS"
+        },
+        {
           "id": "verification_gate_catalog_valid_full_validator",
           "category": "error",
           "status": "active",
@@ -2272,6 +2284,12 @@
           "evidence": "SCENARIO_RESULT|scenario_id=permissioned_fuse_lane_artifacts|outcome=PASS"
         },
         {
+          "id": "permissioned_fuse_lane_rch_harness_binary",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=permissioned_fuse_lane_rch_harness_binary|outcome=PASS"
+        },
+        {
           "id": "permissioned_btrfs_lane_controls",
           "category": "edge",
           "status": "active",
@@ -2300,6 +2318,12 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=catalog_production_fuse_matrix|outcome=PASS"
+        },
+        {
+          "id": "mounted_write_error_classes_direct_rch_cargo",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_write_error_classes_direct_rch_cargo|outcome=PASS"
         }
       ]
     },
@@ -3770,6 +3794,30 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=performance_manifest_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "performance_mount_probe_structured_failure",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_mount_probe_structured_failure|outcome=PASS"
+        },
+        {
+          "id": "performance_mount_probe_disables_background_scrub",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_mount_probe_disables_background_scrub|outcome=PASS"
+        },
+        {
+          "id": "performance_mount_pending_artifact_preserves_probe",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_mount_pending_artifact_preserves_probe|outcome=PASS"
+        },
+        {
+          "id": "performance_mount_measured_artifact_preserves_probe",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_mount_measured_artifact_preserves_probe|outcome=PASS"
         }
       ]
     },
@@ -4777,6 +4825,30 @@
           "evidence": "scenario_result \"proof_bundle_redaction_placeholder_rejected\" \"PASS\""
         },
         {
+          "id": "proof_bundle_raw_log_hash_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"proof_bundle_raw_log_hash_rejected\" \"PASS\""
+        },
+        {
+          "id": "proof_bundle_traversal_path_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"proof_bundle_traversal_path_rejected\" \"PASS\""
+        },
+        {
+          "id": "proof_bundle_env_secret_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"proof_bundle_env_secret_rejected\" \"PASS\""
+        },
+        {
+          "id": "proof_bundle_missing_redaction_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"proof_bundle_missing_redaction_rejected\" \"PASS\""
+        },
+        {
           "id": "proof_bundle_unit_tests",
           "category": "happy",
           "status": "active",
@@ -5154,6 +5226,12 @@
           "evidence": "SCENARIO_RESULT|scenario_id=docs_status_flat_parity_fails|outcome=PASS"
         },
         {
+          "id": "docs_status_release_gate_overclaim_fails",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=docs_status_release_gate_overclaim_fails|outcome=PASS"
+        },
+        {
           "id": "docs_status_unit_tests",
           "category": "happy",
           "status": "active",
@@ -5256,6 +5334,18 @@
           "category": "edge",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=claimability_autopilot_peer_reserved_surface|outcome=PASS"
+        },
+        {
+          "id": "claimability_autopilot_disjoint_reservation_suggestions",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=claimability_autopilot_disjoint_reservation_suggestions|outcome=PASS"
+        },
+        {
+          "id": "claimability_autopilot_self_reserved_surface",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=claimability_autopilot_self_reserved_surface|outcome=PASS"
         },
         {
           "id": "claimability_autopilot_stale_reclaim_candidate",
@@ -5843,6 +5933,12 @@
           "evidence": "scenario_result \"proof_budget_log_contract\" \"PASS\""
         },
         {
+          "id": "proof_budget_retention_reproducible",
+          "category": "edge",
+          "status": "active",
+          "evidence": "scenario_result \"proof_budget_retention_reproducible\" \"PASS\""
+        },
+        {
           "id": "proof_budget_unit_tests",
           "category": "happy",
           "status": "active",
@@ -5875,6 +5971,12 @@
           "category": "happy",
           "status": "active",
           "evidence": "scenario_result \"workload_corpus_proof_coverage\" \"PASS\""
+        },
+        {
+          "id": "workload_corpus_selected_scenarios_checked",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"workload_corpus_selected_scenarios_checked\" \"PASS\""
         },
         {
           "id": "workload_corpus_invalid_variants_rejected",
