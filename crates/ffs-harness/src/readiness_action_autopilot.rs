@@ -1780,6 +1780,17 @@ fn validate_recommendation(
             recommendation.action_id
         ));
     }
+    if recommendation.safety_class == ReadinessActionSafetyClass::Impossible
+        && !recommendation
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == ReadinessActionDiagnosticSeverity::Error)
+    {
+        errors.push(format!(
+            "{fixture_label}: action {} must include an error diagnostic for Impossible",
+            recommendation.action_id
+        ));
+    }
     if is_smoke_evidence_tier(recommendation.evidence_tier)
         && is_upgrade_eligible(recommendation.public_claim_effect)
     {
@@ -2145,6 +2156,37 @@ mod tests {
                 .errors
                 .iter()
                 .any(|error| { error.contains("cannot require ack for Impossible") })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validation_rejects_impossible_actions_without_error_diagnostics() -> Result<()> {
+        let mut fixture_set = default_readiness_action_autopilot_fixture_set();
+        let recommendation = fixture_set
+            .fixtures
+            .first_mut()
+            .and_then(|fixture| fixture.report.recommendations.first_mut())
+            .context("default fixture set has a first recommendation")?;
+        recommendation.safety_class = ReadinessActionSafetyClass::Impossible;
+        recommendation.ack_required = false;
+        recommendation.diagnostics = vec![diagnostic(
+            "impossible-action-warning",
+            ReadinessActionDiagnosticSeverity::Warning,
+            ReadinessActionInputKind::ReleaseGatePolicy,
+            None,
+            "The action is blocked by unresolved evidence.",
+            "resolve the blocker before continuing",
+        )];
+
+        let report = validate_readiness_action_fixture_set(&fixture_set);
+
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("must include an error diagnostic for Impossible") })
         );
         Ok(())
     }
