@@ -4781,7 +4781,10 @@ fn btrfs_leaf_fixture_conforms() {
     let (header, items) = validate_btrfs_leaf_fixture(&fixture_path("btrfs_leaf_node.json"))
         .expect("btrfs leaf fixture");
     assert_eq!(header.level, 0, "should be a leaf");
-    assert!(items.len() >= 3, "should have at least 3 items");
+    assert_eq!(header.owner, 5, "owner should be FS_TREE (5)");
+    assert_eq!(header.nritems, 3, "header should declare 3 items");
+    assert_eq!(items.len(), 3, "fixture should have 3 btrfs leaf items");
+
     // Items should be sorted by key (objectid then type)
     for pair in items.windows(2) {
         let a = &pair[0].key;
@@ -4791,11 +4794,34 @@ fn btrfs_leaf_fixture_conforms() {
             "items should be sorted by key"
         );
     }
+
+    let expected_slots = [
+        (
+            256_u64,
+            btrfs_item_types::INODE_ITEM,
+            0_u64,
+            16_000_u32,
+            100_u32,
+        ),
+        (256, btrfs_item_types::INODE_REF, 0, 16_100, 50),
+        (257, btrfs_item_types::INODE_ITEM, 0, 16_150, 100),
+    ];
+
+    for (item, (objectid, item_type, offset, data_offset, data_size)) in
+        items.iter().zip(expected_slots)
+    {
+        assert_eq!(item.key.objectid, objectid, "leaf item objectid drift");
+        assert_eq!(item.key.item_type, item_type, "leaf item type drift");
+        assert_eq!(item.key.offset, offset, "leaf item key offset drift");
+        assert_eq!(item.data_offset, data_offset, "leaf item data offset drift");
+        assert_eq!(item.data_size, data_size, "leaf item data size drift");
+    }
 }
 
 /// btrfs item type constants for fixture validation
 mod btrfs_item_types {
     pub const INODE_ITEM: u8 = 1;
+    pub const INODE_REF: u8 = 12;
     pub const DIR_ITEM: u8 = 84;
     pub const DIR_INDEX: u8 = 96;
     pub const EXTENT_DATA: u8 = 108;
