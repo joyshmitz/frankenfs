@@ -1842,7 +1842,9 @@ const fn requires_ack(safety_class: ReadinessActionSafetyClass) -> bool {
 const fn requires_diagnostics(safety_class: ReadinessActionSafetyClass) -> bool {
     matches!(
         safety_class,
-        ReadinessActionSafetyClass::Permissioned | ReadinessActionSafetyClass::Impossible
+        ReadinessActionSafetyClass::Permissioned
+            | ReadinessActionSafetyClass::Destructive
+            | ReadinessActionSafetyClass::Impossible
     )
 }
 
@@ -2080,6 +2082,30 @@ mod tests {
                 .errors
                 .iter()
                 .any(|error| error.contains("missing reproduction_command"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validation_rejects_destructive_actions_without_diagnostics() -> Result<()> {
+        let mut fixture_set = default_readiness_action_autopilot_fixture_set();
+        let recommendation = fixture_set
+            .fixtures
+            .first_mut()
+            .and_then(|fixture| fixture.report.recommendations.first_mut())
+            .context("default fixture set has a first recommendation")?;
+        recommendation.safety_class = ReadinessActionSafetyClass::Destructive;
+        recommendation.ack_required = true;
+        recommendation.diagnostics.clear();
+
+        let report = validate_readiness_action_fixture_set(&fixture_set);
+
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("must include diagnostics for Destructive") })
         );
         Ok(())
     }
