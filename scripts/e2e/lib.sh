@@ -1190,6 +1190,25 @@ e2e_unmount() {
 }
 
 #######################################
+# Count exact field-key occurrences inside a marker line.
+# Arguments:
+#   $1 - Marker line
+#   $2 - Field token including separator, e.g. "|scenario_id="
+#######################################
+e2e_marker_field_count() {
+    local haystack="$1"
+    local needle="$2"
+    local count=0
+
+    while [[ "$haystack" == *"$needle"* ]]; do
+        haystack="${haystack#*"$needle"}"
+        count=$((count + 1))
+    done
+
+    printf '%s\n' "$count"
+}
+
+#######################################
 # Emit a machine-parseable JSON summary alongside run.log
 # Reads SCENARIO_RESULT markers from the log and writes result.json
 # Arguments: (none — uses globals)
@@ -1227,6 +1246,15 @@ e2e_emit_json_summary() {
     while IFS= read -r line; do
         # Parse: SCENARIO_RESULT|scenario_id=X|outcome=Y[|detail=Z]
         local scenario_id outcome detail
+        local scenario_id_count outcome_count detail_count
+        scenario_id_count=$(e2e_marker_field_count "$line" "|scenario_id=")
+        outcome_count=$(e2e_marker_field_count "$line" "|outcome=")
+        detail_count=$(e2e_marker_field_count "$line" "|detail=")
+
+        if [[ "$scenario_id_count" -ne 1 || "$outcome_count" -ne 1 || "$detail_count" -gt 1 ]]; then
+            continue
+        fi
+
         scenario_id=$(echo "$line" | sed -n 's/.*scenario_id=\([^|]*\).*/\1/p')
         outcome=$(echo "$line" | sed -n 's/.*outcome=\([^|]*\).*/\1/p')
         detail=$(echo "$line" | sed -n 's/.*detail=\(.*\)/\1/p')

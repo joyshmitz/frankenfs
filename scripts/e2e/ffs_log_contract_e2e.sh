@@ -32,6 +32,7 @@
 #   log_contract_artifact_manifest_schema_surface - manifest schema API remains exported
 #   log_contract_artifact_manifest_policy_documented - docs state manifest retention/redaction policy
 #   log_contract_operational_readiness_slos_documented - README states mount/write SLOs and proof beads
+#   log_contract_shared_summary_duplicate_marker_rejection - shared result.json skips ambiguous duplicate markers
 #
 # Usage:
 #   scripts/e2e/ffs_log_contract_e2e.sh
@@ -240,6 +241,41 @@ if [ -z "$UNKNOWN_OUTCOMES" ]; then
     log_scenario "log_contract_outcome_vocabulary" "PASS"
 else
     log_scenario "log_contract_outcome_vocabulary" "PASS" "note: extended_outcomes=${UNKNOWN_OUTCOMES}"
+fi
+
+# ── Scenario: log_contract_shared_summary_duplicate_marker_rejection ─
+
+echo "=== Scenario: log_contract_shared_summary_duplicate_marker_rejection ==="
+SUMMARY_PROBE_DIR="$LOG_DIR/shared_summary_marker_probe"
+SUMMARY_PROBE_LOG="$SUMMARY_PROBE_DIR/run.log"
+mkdir -p "$SUMMARY_PROBE_DIR"
+MARKER_PREFIX="SCENARIO_RESULT|scenario_id="
+{
+    printf '%s%s|outcome=PASS|duration_ms=7\n' "$MARKER_PREFIX" "valid_probe_marker"
+    printf '%s%s|scenario_id=%s|outcome=PASS\n' "$MARKER_PREFIX" "first_probe_marker" "second_probe_marker"
+    printf '%s%s|outcome=PASS|outcome=FAIL\n' "$MARKER_PREFIX" "duplicate_outcome_probe"
+    printf '%s%s|outcome=PASS|detail=one|detail=two\n' "$MARKER_PREFIX" "duplicate_detail_probe"
+} >"$SUMMARY_PROBE_LOG"
+
+if (
+    E2E_START_TIME=$(date +%s)
+    E2E_TEST_NAME="shared_summary_marker_probe"
+    E2E_LOG_DIR="$SUMMARY_PROBE_DIR"
+    E2E_LOG_FILE="$SUMMARY_PROBE_LOG"
+    e2e_emit_json_summary 0
+) >"$SUMMARY_PROBE_DIR/emit.log" 2>&1 \
+    && jq -e '
+        .verdict == "PASS"
+        and (.scenarios | length == 1)
+        and (.scenarios[0].scenario_id == "valid_probe_marker")
+        and (.scenarios[0].outcome == "PASS")
+        and (.scenarios[0] | has("detail") | not)
+    ' "$SUMMARY_PROBE_DIR/result.json" >/dev/null; then
+    log_scenario "log_contract_shared_summary_duplicate_marker_rejection" "PASS" "result=${SUMMARY_PROBE_DIR}/result.json"
+else
+    cat "$SUMMARY_PROBE_DIR/emit.log" || true
+    jq . "$SUMMARY_PROBE_DIR/result.json" || true
+    log_scenario "log_contract_shared_summary_duplicate_marker_rejection" "FAIL" "result=${SUMMARY_PROBE_DIR}/result.json"
 fi
 
 # ── Scenario: log_contract_e2e_markers_valid ──────────────────────────

@@ -4579,6 +4579,12 @@
           "evidence": "SCENARIO_RESULT|scenario_id=log_contract_outcome_vocabulary|outcome=PASS"
         },
         {
+          "id": "log_contract_shared_summary_duplicate_marker_rejection",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_shared_summary_duplicate_marker_rejection|outcome=PASS"
+        },
+        {
           "id": "log_contract_e2e_markers_valid",
           "category": "happy",
           "status": "active",
@@ -5452,6 +5458,18 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_default_fixture_golden_self_check|outcome=PASS"
+        },
+        {
+          "id": "tracker_source_hygiene_non_mutating_fallback_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_non_mutating_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "tracker_source_hygiene_permission_gated_blocked_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_permission_gated_blocked_self_check|outcome=PASS"
         },
         {
           "id": "tracker_source_hygiene_strict_mode",
