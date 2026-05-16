@@ -11,6 +11,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::fs;
 use std::path::{Component, Path};
 
 pub const REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION: u32 = 1;
@@ -1439,6 +1440,7 @@ fn validate_row(
     if !row.snapshot_path.is_empty() {
         validate_safe_relative_path(row, "snapshot_path", &row.snapshot_path, &mut errors);
         validate_existing_snapshot_path(row, &row.snapshot_path, &mut errors);
+        validate_snapshot_path_matches_evidence(row, &row.snapshot_path, &mut errors);
     }
 
     validate_coverage_fields(row, &mut missing_evidence, &mut errors);
@@ -1669,6 +1671,114 @@ fn validate_existing_snapshot_path(
             row.report_id
         ));
     }
+}
+
+fn validate_snapshot_path_matches_evidence(
+    row: &ReportSchemaInventoryRow,
+    value: &str,
+    errors: &mut Vec<String>,
+) {
+    if !is_safe_relative_path(value) || row.evidence_test.trim().is_empty() {
+        return;
+    }
+
+    if !snapshot_path_matches_evidence_test(row, value) {
+        errors.push(format!(
+            "row `{}` snapshot_path must match evidence_test `{}` or a snapshot label asserted by that test, got `{value}`",
+            row.report_id, row.evidence_test
+        ));
+    }
+}
+
+fn snapshot_path_matches_evidence_test(
+    row: &ReportSchemaInventoryRow,
+    snapshot_path: &str,
+) -> bool {
+    let Some(file_name) = Path::new(snapshot_path)
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+    else {
+        return false;
+    };
+
+    snapshot_suffixes_for_evidence_test(row)
+        .iter()
+        .any(|expected_suffix| file_name.ends_with(expected_suffix))
+}
+
+fn snapshot_suffixes_for_evidence_test(row: &ReportSchemaInventoryRow) -> BTreeSet<String> {
+    let mut suffixes = BTreeSet::from([format!("__tests__{}.snap", row.evidence_test)]);
+    if !is_safe_relative_path(&row.module_path) {
+        return suffixes;
+    }
+
+    let Ok(source) = fs::read_to_string(workspace_relative_path(&row.module_path)) else {
+        return suffixes;
+    };
+    let Some(test_body) = rust_function_body(&source, &row.evidence_test) else {
+        return suffixes;
+    };
+
+    for label in asserted_snapshot_labels(test_body) {
+        suffixes.insert(format!("__tests__{label}.snap"));
+    }
+    suffixes
+}
+
+fn rust_function_body<'a>(source: &'a str, function_name: &str) -> Option<&'a str> {
+    let needle = format!("fn {function_name}");
+    let function_start = source.find(&needle)?;
+    let body_start = function_start + source[function_start..].find('{')?;
+    let mut depth = 0usize;
+
+    for (offset, byte) in source[body_start..].bytes().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return source.get(body_start + 1..body_start + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn asserted_snapshot_labels(test_body: &str) -> BTreeSet<String> {
+    let mut labels = BTreeSet::new();
+    for macro_name in ["assert_snapshot!(", "assert_json_snapshot!("] {
+        let mut remaining = test_body;
+        while let Some(index) = remaining.find(macro_name) {
+            remaining = &remaining[index + macro_name.len()..];
+            let Some(label) = first_string_argument(remaining) else {
+                continue;
+            };
+            if is_valid_rust_test_name(label) {
+                labels.insert(label.to_owned());
+            }
+        }
+    }
+    labels
+}
+
+fn first_string_argument(arguments: &str) -> Option<&str> {
+    let mut escaped = false;
+    let after_quote = arguments.trim_start().strip_prefix('"')?;
+    for (index, character) in after_quote.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' => escaped = true,
+            '"' => return Some(&after_quote[..index]),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn is_safe_relative_path(value: &str) -> bool {
@@ -2200,6 +2310,25 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_snapshot_evidence_test_fails() {
+        let mut inventory = current_report_schema_inventory();
+        let report_id = inventory.rows[0].report_id.clone();
+        inventory.rows[0].snapshot_path = inventory.rows[1].snapshot_path.clone();
+
+        let report = validate_report_schema_inventory(&inventory);
+        let result = row_result(&report, &report_id);
+
+        assert!(!report.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("snapshot_path must match evidence_test")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
     fn excluded_rows_require_reason() {
         let mut inventory = current_report_schema_inventory();
         let row = inventory
@@ -2288,6 +2417,29 @@ mod tests {
         assert!(
             missing_snapshots.is_empty(),
             "covered report schema rows must name existing snapshot files: {missing_snapshots:?}"
+        );
+    }
+
+    #[test]
+    fn covered_rows_correlate_snapshot_paths_to_evidence_tests() {
+        let inventory = current_report_schema_inventory();
+        let mismatched_snapshots = inventory
+            .rows
+            .iter()
+            .filter(|row| row.coverage_status == ReportSchemaCoverageStatus::Covered)
+            .filter(|row| !snapshot_path_matches_evidence_test(row, &row.snapshot_path))
+            .map(|row| {
+                (
+                    row.report_id.clone(),
+                    row.evidence_test.clone(),
+                    row.snapshot_path.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            mismatched_snapshots.is_empty(),
+            "covered report schema rows must correlate snapshot_path to evidence_test: {mismatched_snapshots:?}"
         );
     }
 
