@@ -3453,6 +3453,9 @@ mod tests {
         let encoded = serde_json::to_string(&inventory)?;
         let decoded: ReportSchemaInventory = serde_json::from_str(&encoded)?;
         assert_eq!(decoded, inventory);
+        let report_json = serde_json::to_string_pretty(&report)?;
+        let decoded_report: ReportSchemaInventoryReport = serde_json::from_str(&report_json)?;
+        assert_eq!(decoded_report, report);
 
         let shape = json!({
             "schema_version": inventory.schema_version,
