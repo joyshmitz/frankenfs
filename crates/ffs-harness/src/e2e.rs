@@ -711,7 +711,7 @@ fn fail_on_skip_in_ci() -> bool {
 }
 
 /// E2E test result summary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct E2eTestResult {
     pub test_name: String,
     pub passed: bool,
@@ -3220,6 +3220,49 @@ mod tests {
         assert_eq!(result.steps_ok, 2);
         assert_eq!(result.steps_skip, 1);
         assert_eq!(result.steps_error, 0);
+    }
+
+    #[test]
+    fn e2e_test_result_json_shape() -> Result<(), serde_json::Error> {
+        let mut log = E2eLog::new();
+        log.push(E2eLogEntry::ok(
+            "mounted_smoke",
+            "create_image",
+            serde_json::json!({"image": "ext4"}),
+            serde_json::json!({"bytes": 4096}),
+            Duration::ZERO,
+        ));
+        log.push(E2eLogEntry::err(
+            "mounted_smoke",
+            "mount_image",
+            serde_json::json!({"mount_mode": "fuse"}),
+            Duration::ZERO,
+            "permission denied",
+        ));
+
+        let result = E2eTestResult::from_log(
+            "mounted_smoke",
+            &log,
+            Duration::from_millis(42),
+            Some(std::path::Path::new("artifacts/e2e/mounted_smoke")),
+        );
+        let json = serde_json::to_string_pretty(&result)?;
+        insta::assert_snapshot!("e2e_test_result_json_shape", json);
+        let parsed: E2eTestResult = serde_json::from_str(&json)?;
+
+        assert_eq!(parsed, result);
+        assert!(!parsed.passed);
+        assert!(!parsed.inconclusive);
+        assert_eq!(parsed.steps_total, 2);
+        assert_eq!(parsed.steps_ok, 1);
+        assert_eq!(parsed.steps_error, 1);
+        assert_eq!(parsed.steps_skip, 0);
+        assert_eq!(parsed.duration_us, 42_000);
+        assert_eq!(
+            parsed.artifacts_dir.as_deref(),
+            Some("artifacts/e2e/mounted_smoke")
+        );
+        Ok(())
     }
 
     #[test]

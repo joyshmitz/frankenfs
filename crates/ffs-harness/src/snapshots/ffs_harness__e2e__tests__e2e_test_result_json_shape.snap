@@ -1,0 +1,15 @@
+---
+source: crates/ffs-harness/src/e2e.rs
+expression: json
+---
+{
+  "test_name": "mounted_smoke",
+  "passed": false,
+  "inconclusive": false,
+  "steps_total": 2,
+  "steps_ok": 1,
+  "steps_error": 1,
+  "steps_skip": 0,
+  "duration_us": 42000,
+  "artifacts_dir": "artifacts/e2e/mounted_smoke"
+}
