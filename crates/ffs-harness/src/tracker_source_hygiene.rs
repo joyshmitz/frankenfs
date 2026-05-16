@@ -1430,7 +1430,10 @@ fn swarm_text_matches(text: &str) -> bool {
 }
 
 fn explicit_non_permissioned_guard_matches(text: &str) -> bool {
-    (text.contains("non-permissioned") || text.contains("read-only"))
+    (text.contains("non-permissioned")
+        || text.contains("read-only")
+        || text.contains("non-mutating")
+        || text.contains("nonmutating"))
         && (text.contains("must not run")
             || text.contains("must not execute")
             || text.contains("does not run")
@@ -2903,6 +2906,64 @@ mod tests {
         assert_eq!(
             report.source_aware_queue_state.claimable_ids,
             vec!["bd-validator"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn non_mutating_fallback_work_stays_claimable_when_it_names_permissioned_lanes()
+    -> Result<(), String> {
+        let issues = [
+            line(&serde_json::json!({
+                "id": "bd-fallback",
+                "title": "Add a non-mutating fallback validator for blocked queues",
+                "description": "This is non-mutating fallback work for blocked_or_permission_gated queue states. It must not run xfstests baseline execution, mounted mutation, or a large-host swarm campaign; it only validates local-safe report text.",
+                "status": "open",
+                "priority": 1,
+                "labels": ["agent-swarm", "tracker-hygiene"]
+            }))?,
+            line(&serde_json::json!({
+                "id": "bd-real-xfstests",
+                "title": "execute xfstests baseline",
+                "description": "requires real xfstests run before publishing pass/fail artifacts",
+                "status": "open",
+                "priority": 1
+            }))?,
+            line(&serde_json::json!({
+                "id": "bd-real-swarm",
+                "title": "permissioned large-host swarm campaign",
+                "description": "requires FFS_SWARM_WORKLOAD_REAL_RUN_ACK before using a large host",
+                "status": "open",
+                "priority": 1
+            }))?,
+        ]
+        .join("\n");
+
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
+
+        assert_eq!(
+            report
+                .source_aware_ready_rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bd-fallback"]
+        );
+        let gated: BTreeMap<&str, &str> = report
+            .permission_gated_rows
+            .iter()
+            .map(|row| (row.id.as_str(), row.permission_gate.gate_kind.as_str()))
+            .collect();
+        assert_eq!(gated.get("bd-real-xfstests"), Some(&"xfstests_real_run"));
+        assert_eq!(
+            gated.get("bd-real-swarm"),
+            Some(&"large_host_swarm_real_run")
+        );
+        assert!(!gated.contains_key("bd-fallback"));
+        assert_eq!(
+            report.source_aware_queue_state.claimable_ids,
+            vec!["bd-fallback"]
         );
         Ok(())
     }

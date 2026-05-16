@@ -79,6 +79,11 @@ from ordinary ready work. Current gates are:
 | real xfstests execution | `XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices` |
 | permissioned large-host swarm execution | `FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1` and `FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host` |
 
+Rows that mention those lanes only to forbid execution can stay claimable when
+they include explicit local-safe scope wording such as `non-permissioned`,
+`read-only`, or `non-mutating fallback work` plus a clear negative action like
+`must not run`, `does not execute`, `without running`, or `no xfstests`.
+
 `source_aware_queue_state` is the one-field queue verdict for agents. It
 includes `claimable_count`, `local_epic_count`, `blocked_local_count`,
 `permission_gated_count`, `local_in_progress_count`,

@@ -203,7 +203,7 @@ if jq -s \
         and ($swarm_ack == "swarm-workload-may-use-permissioned-large-host");
     def explicit_non_permissioned_guard:
         issue_text as $text
-        | (($text | test("non-permissioned|read-only"; "i"))
+        | (($text | test("non-permissioned|read-only|non-mutating|nonmutating"; "i"))
             and ($text | test("must not (run|execute)|does not (run|execute)|without running|no xfstests|no large-host|no large host|no permissioned|not run[^.]*xfstests|not run[^.]*large-host|not run[^.]*large host|not run[^.]*swarm"; "i")));
     def permission_gate:
         issue_text as $text
