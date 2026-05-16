@@ -788,6 +788,12 @@ mod tests {
     fn exposes_full_gap_vocabulary_for_schema_tests() -> Result<()> {
         let json = serde_json::to_string_pretty(&GAP_CLASSES)?;
         insta::assert_snapshot!("gap_classes_json_shape", json);
+        let parsed: Vec<String> = serde_json::from_str(&json)?;
+        let expected = GAP_CLASSES
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(parsed, expected);
 
         assert!(GAP_CLASSES.contains(&"validated"));
         assert!(GAP_CLASSES.contains(&"implemented-unvalidated"));
