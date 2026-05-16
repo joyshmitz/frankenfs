@@ -4885,6 +4885,22 @@ fn btrfs_devitem_fixture_conforms() {
         "start_offset should be 1MiB"
     );
     assert_eq!(devitem.dev_type, 0, "dev_type should be 0 (regular)");
+    assert_eq!(devitem.dev_group, 0, "dev_group should be 0");
+    assert_eq!(devitem.seek_speed, 0, "seek_speed should be 0");
+    assert_eq!(devitem.bandwidth, 0, "bandwidth should be 0");
+    assert_eq!(
+        devitem.uuid,
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        "uuid should match fixture bytes"
+    );
+    assert_eq!(
+        devitem.fsid,
+        [
+            0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE,
+            0xAF, 0xB0,
+        ],
+        "fsid should match fixture bytes"
+    );
 }
 
 #[test]
