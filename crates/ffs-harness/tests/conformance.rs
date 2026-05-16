@@ -4726,6 +4726,45 @@ fn btrfs_chunk_mapping_fixture_conforms() {
         validate_btrfs_chunk_fixture(&fixture_path("btrfs_superblock_with_chunks.json"))
             .expect("btrfs chunk fixture");
     assert!(!chunks.is_empty(), "should have at least one chunk entry");
+    assert_eq!(
+        chunks.len(),
+        1,
+        "fixture should contain one sys_chunk entry"
+    );
+
+    let chunk = &chunks[0];
+    assert_eq!(
+        chunk.key.objectid, 256,
+        "chunk key objectid should be FIRST_CHUNK_TREE_OBJECTID"
+    );
+    assert_eq!(
+        chunk.key.item_type, 228,
+        "chunk key type should be CHUNK_ITEM"
+    );
+    assert_eq!(chunk.key.offset, 0, "chunk key offset should be 0");
+    assert_eq!(chunk.length, 8 * 1024 * 1024, "chunk length should be 8MiB");
+    assert_eq!(chunk.owner, 2, "chunk owner should be EXTENT_TREE");
+    assert_eq!(
+        chunk.stripe_len,
+        64 * 1024,
+        "chunk stripe_len should be 64KiB"
+    );
+    assert_eq!(
+        chunk.chunk_type,
+        ffs_ondisk::chunk_type_flags::BTRFS_BLOCK_GROUP_SYSTEM,
+        "chunk type should be SYSTEM"
+    );
+    assert_eq!(chunk.io_align, 4096, "chunk io_align should be 4096");
+    assert_eq!(chunk.io_width, 4096, "chunk io_width should be 4096");
+    assert_eq!(chunk.sector_size, 4096, "chunk sector_size should be 4096");
+    assert_eq!(chunk.num_stripes, 1, "chunk should have one stripe");
+    assert_eq!(chunk.sub_stripes, 0, "chunk sub_stripes should be 0");
+
+    let stripe = &chunk.stripes[0];
+    assert_eq!(stripe.devid, 1, "stripe devid should be 1");
+    assert_eq!(stripe.offset, 1024 * 1024, "stripe offset should be 1MiB");
+    assert_eq!(stripe.dev_uuid, [0; 16], "stripe dev_uuid should be zeroed");
+
     // root and chunk_root should be mappable
     let root_map = ffs_ondisk::map_logical_to_physical(&chunks, sb.root)
         .expect("mapping ok")
