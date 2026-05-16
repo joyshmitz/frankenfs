@@ -54,6 +54,9 @@ FIXTURE_SELF_CHECK_LOG="${E2E_LOG_DIR}/tracker_source_hygiene_fixture_self_check
 NON_MUTATING_FALLBACK_SELF_CHECK=1
 NON_MUTATING_FALLBACK_FIXTURE="$E2E_TEMP_DIR/tracker_source_hygiene_non_mutating_fallback.jsonl"
 NON_MUTATING_FALLBACK_SELF_CHECK_LOG="${E2E_LOG_DIR}/tracker_source_hygiene_non_mutating_fallback_self_check.log"
+PERMISSION_GATED_BLOCKED_SELF_CHECK=1
+PERMISSION_GATED_BLOCKED_FIXTURE="$E2E_TEMP_DIR/tracker_source_hygiene_permission_gated_blocked.jsonl"
+PERMISSION_GATED_BLOCKED_SELF_CHECK_LOG="${E2E_LOG_DIR}/tracker_source_hygiene_permission_gated_blocked_self_check.log"
 
 case "${TRACKER_SOURCE_HYGIENE_STRICT:-0}" in
     1|true|TRUE|yes|YES)
@@ -74,6 +77,11 @@ esac
 case "${TRACKER_SOURCE_HYGIENE_NON_MUTATING_FALLBACK_SELF_CHECK:-1}" in
     0|false|FALSE|no|NO)
         NON_MUTATING_FALLBACK_SELF_CHECK=0
+        ;;
+esac
+case "${TRACKER_SOURCE_HYGIENE_PERMISSION_GATED_BLOCKED_SELF_CHECK:-1}" in
+    0|false|FALSE|no|NO)
+        PERMISSION_GATED_BLOCKED_SELF_CHECK=0
         ;;
 esac
 
@@ -296,7 +304,7 @@ if jq -s \
         [.[] | select(local_issue and open_issue and ((.issue_type // "") != "epic") and ((permission_gate // null) != null)) | issue_work_row + {permission_gate: permission_gate}]
         | sort_by(.priority, .id);
     def blocked_local_rows_arr:
-        [.[] | select(local_issue and open_issue and ((.issue_type // "") != "epic") and ((permission_gate // null) == null) and ((blocking_dependencies | length) > 0)) | issue_work_row]
+        [.[] | select(local_issue and open_issue and ((.issue_type // "") != "epic") and ((blocking_dependencies | length) > 0)) | issue_work_row]
         | sort_by(.priority, .id);
     def local_epic_rows_arr:
         [.[] | select(local_issue and open_issue and ((.issue_type // "") == "epic")) | issue_sample]
@@ -883,6 +891,54 @@ JSONL
         fi
     else
         scenario_result "tracker_source_hygiene_non_mutating_fallback_self_check" "FAIL" "log=$NON_MUTATING_FALLBACK_SELF_CHECK_LOG"
+    fi
+fi
+
+if [[ "$PERMISSION_GATED_BLOCKED_SELF_CHECK" -eq 1 \
+    && -z "${TRACKER_SOURCE_HYGIENE_ISSUES:-}" \
+    && -z "$EXPECTED_GOLDEN" \
+    && "$STRICT_MODE" -eq 0 ]]; then
+    e2e_step "Permission-gated blocked fixture self-check"
+    cat >"$PERMISSION_GATED_BLOCKED_FIXTURE" <<'JSONL'
+{"id":"bd-real-xfstests","title":"execute xfstests baseline after dependency triage","description":"requires real xfstests run before publishing pass/fail artifacts","status":"open","priority":1,"dependencies":[{"type":"blocks","depends_on_id":"bd-missing-prereq"}]}
+JSONL
+
+    if TRACKER_SOURCE_HYGIENE_DEFAULT_FIXTURE_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_NON_MUTATING_FALLBACK_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_PERMISSION_GATED_BLOCKED_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_ISSUES="$PERMISSION_GATED_BLOCKED_FIXTURE" \
+        TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=1 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=0 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_READY=0 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED=1 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_NONCLAIMABLE=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_tracker_source_hygiene_e2e.sh" \
+        >"$PERMISSION_GATED_BLOCKED_SELF_CHECK_LOG" 2>&1; then
+        PERMISSION_GATED_BLOCKED_REPORT="$(
+            awk -F'detail=report=' \
+                '/scenario_id=tracker_source_hygiene_report_emitted/ && /outcome=PASS/ { print $2; exit }' \
+                "$PERMISSION_GATED_BLOCKED_SELF_CHECK_LOG"
+        )"
+        if [[ -n "$PERMISSION_GATED_BLOCKED_REPORT" ]] \
+            && jq -e '
+                (.source_aware_queue_state.verdict == "blocked_or_permission_gated")
+                and (.source_aware_queue_state.local_open_count == 1)
+                and (.source_aware_queue_state.blocked_local_ids == ["bd-real-xfstests"])
+                and (.source_aware_queue_state.permission_gated_ids == ["bd-real-xfstests"])
+                and (.blocked_local_rows[0].blocked_by == [{"id": "bd-missing-prereq", "status": "missing"}])
+                and (.permission_gated_rows[0].blocked_by == [{"id": "bd-missing-prereq", "status": "missing"}])
+                and (.local_nonclaimable_rows[0].reason == "permission_gated")
+                and (.local_nonclaimable_rows[0].permission_gate.gate_kind == "xfstests_real_run")
+                and ((.source_aware_queue_state.next_safe_actions | index("inspect blocked_local_ids and unblock prerequisites first")) != null)
+                and ((.source_aware_queue_state.next_safe_actions | index("request the exact permission ACK before running permissioned rows")) != null)
+                and ((.source_aware_queue_state.next_safe_actions | index("create or claim only non-mutating fallback work")) != null)
+            ' "$PERMISSION_GATED_BLOCKED_REPORT" >/dev/null; then
+            scenario_result "tracker_source_hygiene_permission_gated_blocked_self_check" "PASS" "log=$PERMISSION_GATED_BLOCKED_SELF_CHECK_LOG report=$PERMISSION_GATED_BLOCKED_REPORT"
+        else
+            scenario_result "tracker_source_hygiene_permission_gated_blocked_self_check" "FAIL" "log=$PERMISSION_GATED_BLOCKED_SELF_CHECK_LOG report=${PERMISSION_GATED_BLOCKED_REPORT:-missing}"
+        fi
+    else
+        scenario_result "tracker_source_hygiene_permission_gated_blocked_self_check" "FAIL" "log=$PERMISSION_GATED_BLOCKED_SELF_CHECK_LOG"
     fi
 fi
 

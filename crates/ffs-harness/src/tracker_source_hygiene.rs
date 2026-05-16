@@ -1024,10 +1024,7 @@ fn build_report(
     let mut blocked_local_rows: Vec<TrackerIssueWorkRow> = wrapped
         .iter()
         .filter(|issue| issue.is_local() && issue.is_open() && !issue.is_epic())
-        .filter(|issue| {
-            permission_gate(issue, config).is_none()
-                && !issue.blocking_dependencies(&statuses).is_empty()
-        })
+        .filter(|issue| !issue.blocking_dependencies(&statuses).is_empty())
         .map(|issue| issue.work_row(&statuses))
         .collect();
     sort_work_rows(&mut blocked_local_rows);
@@ -1070,6 +1067,7 @@ fn build_report(
         .collect();
 
     let queue_state = build_queue_state(
+        local_open_rows.len(),
         &source_aware_ready_rows,
         &local_epic_rows,
         &blocked_local_rows,
@@ -1160,6 +1158,7 @@ fn build_report(
 
 #[allow(clippy::too_many_arguments)]
 fn build_queue_state(
+    local_open_count: usize,
     ready_rows: &[TrackerIssueWorkRow],
     epic_rows: &[TrackerIssueSample],
     blocked_rows: &[TrackerIssueWorkRow],
@@ -1194,10 +1193,7 @@ fn build_queue_state(
         schema_version: 1,
         verdict: verdict.to_owned(),
         claimable_count: ready_rows.len(),
-        local_open_count: ready_rows.len()
-            + epic_rows.len()
-            + blocked_rows.len()
-            + permission_gated_rows.len(),
+        local_open_count,
         local_epic_count: epic_rows.len(),
         blocked_local_count: blocked_rows.len(),
         permission_gated_count: permission_gated_rows.len(),
@@ -3109,6 +3105,67 @@ mod tests {
                 .iter()
                 .any(|action| action.contains("non-mutating fallback")),
             "mixed verdict should preserve fallback guidance: {actions:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn permission_gated_row_with_blocker_is_visible_in_both_views() -> Result<(), String> {
+        let issues = line(&serde_json::json!({
+            "id": "bd-real-xfstests",
+            "title": "execute xfstests baseline after dependency triage",
+            "description": "requires real xfstests run before publishing pass/fail artifacts",
+            "status": "open",
+            "priority": 1,
+            "dependencies": [
+                {"type": "blocks", "depends_on_id": "bd-missing-prereq"}
+            ]
+        }))?;
+
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
+
+        assert_eq!(
+            report.source_aware_queue_state.verdict,
+            "blocked_or_permission_gated"
+        );
+        assert_eq!(report.source_aware_queue_state.local_open_count, 1);
+        assert_eq!(
+            report.source_aware_queue_state.permission_gated_ids,
+            vec!["bd-real-xfstests"]
+        );
+        assert_eq!(
+            report.source_aware_queue_state.blocked_local_ids,
+            vec!["bd-real-xfstests"]
+        );
+        let blocked = first_item(&report.blocked_local_rows, "blocked local rows")?;
+        assert_eq!(blocked.id, "bd-real-xfstests");
+        assert_eq!(
+            blocked.blocked_by,
+            vec![TrackerDependencyStatus {
+                id: "bd-missing-prereq".to_owned(),
+                status: "missing".to_owned(),
+            }]
+        );
+        let gated = first_item(&report.permission_gated_rows, "permission gated rows")?;
+        assert_eq!(gated.id, "bd-real-xfstests");
+        assert_eq!(gated.permission_gate.gate_kind, "xfstests_real_run");
+        assert_eq!(gated.blocked_by, blocked.blocked_by);
+        let nonclaimable = first_item(&report.local_nonclaimable_rows, "local nonclaimable rows")?;
+        assert_eq!(nonclaimable.reason, "permission_gated");
+        assert_eq!(nonclaimable.blocked_by, blocked.blocked_by);
+        let actions = &report.source_aware_queue_state.next_safe_actions;
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.contains("blocked_local_ids")),
+            "permission-gated blocked verdict should mention blockers: {actions:?}"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.contains("permission ACK")),
+            "permission-gated blocked verdict should mention permission ACK: {actions:?}"
         );
         Ok(())
     }
