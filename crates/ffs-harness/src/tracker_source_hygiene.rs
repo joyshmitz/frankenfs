@@ -1654,7 +1654,12 @@ fn next_safe_actions(verdict: &str) -> Vec<String> {
                     .to_owned(),
             ]
         }
-        "blocked_or_permission_gated" | "permission_gated" => vec![
+        "blocked_or_permission_gated" => vec![
+            "inspect blocked_local_ids and unblock prerequisites first".to_owned(),
+            "request the exact permission ACK before running permissioned rows".to_owned(),
+            "create or claim only non-mutating fallback work".to_owned(),
+        ],
+        "permission_gated" => vec![
             "request the exact permission ACK before running permissioned rows".to_owned(),
             "create or claim only non-mutating fallback work".to_owned(),
         ],
@@ -3045,6 +3050,65 @@ mod tests {
                 "next safe actions",
             )?
             .contains("excluded_foreign_stale_in_progress_ids")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_blocked_and_permission_gated_queue_lists_all_safe_actions() -> Result<(), String> {
+        let issues = [
+            line(&serde_json::json!({
+                "id": "bd-gated",
+                "title": "execute real xfstests baseline",
+                "description": "requires real xfstests run before publishing pass/fail artifacts",
+                "status": "open",
+                "priority": 1
+            }))?,
+            line(&serde_json::json!({
+                "id": "bd-blocked",
+                "title": "blocked local follow-up",
+                "status": "open",
+                "priority": 1,
+                "dependencies": [
+                    {"type": "blocks", "depends_on_id": "bd-missing"}
+                ]
+            }))?,
+        ]
+        .join("\n");
+
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
+
+        assert_eq!(
+            report.source_aware_queue_state.verdict,
+            "blocked_or_permission_gated"
+        );
+        assert_eq!(
+            report.source_aware_queue_state.permission_gated_ids,
+            vec!["bd-gated"]
+        );
+        assert_eq!(
+            report.source_aware_queue_state.blocked_local_ids,
+            vec!["bd-blocked"]
+        );
+        let actions = &report.source_aware_queue_state.next_safe_actions;
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.contains("blocked_local_ids")),
+            "mixed verdict should mention blocked_local_ids: {actions:?}"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.contains("permission ACK")),
+            "mixed verdict should mention exact permission ACK: {actions:?}"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.contains("non-mutating fallback")),
+            "mixed verdict should preserve fallback guidance: {actions:?}"
         );
         Ok(())
     }

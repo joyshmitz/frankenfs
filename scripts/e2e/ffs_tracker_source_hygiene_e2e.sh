@@ -487,6 +487,8 @@ if jq -s \
                         ["claim one source_aware_ready row before creating fallback work"]
                     elif ($stale_rows | length) > 0 then
                         ["inspect stale_in_progress_ids and Agent Mail before reopening stalled claims"]
+                    elif (($permission_gated | length) > 0 and ($blocked_rows | length) > 0) then
+                        ["inspect blocked_local_ids and unblock prerequisites first", "request the exact permission ACK before running permissioned rows", "create or claim only non-mutating fallback work"]
                     elif ($permission_gated | length) > 0 then
                         ["request the exact permission ACK before running permissioned rows", "create or claim only non-mutating fallback work"]
                     elif ($blocked_rows | length) > 0 then
@@ -708,6 +710,15 @@ if jq -e '
     and (.source_aware_queue_state.local_nonclaimable_ids == (.local_nonclaimable_rows | map(.id)))
     and (.source_aware_queue_state.local_in_progress_ids == (.local_in_progress_rows | map(.id)))
     and (.source_aware_queue_state.stale_in_progress_ids == (.stale_in_progress_rows | map(.id)))
+    and (
+        if .source_aware_queue_state.verdict == "blocked_or_permission_gated" then
+            ((.source_aware_queue_state.next_safe_actions | index("inspect blocked_local_ids and unblock prerequisites first")) != null)
+            and ((.source_aware_queue_state.next_safe_actions | index("request the exact permission ACK before running permissioned rows")) != null)
+            and ((.source_aware_queue_state.next_safe_actions | index("create or claim only non-mutating fallback work")) != null)
+        else
+            true
+        end
+    )
     and any(.reproduction_commands[]; contains("bd|frankenfs"))
 ' "$REPORT_JSON" >/dev/null; then
     scenario_result "tracker_source_hygiene_source_aware_wrapper" "PASS" "ready_rows=${READY_COUNT} excluded_foreign=${FOREIGN_OPEN_COUNT}"
