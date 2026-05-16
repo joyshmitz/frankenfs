@@ -9365,6 +9365,52 @@ mod tests {
     }
 
     #[test]
+    fn parse_xattr_block_kernel_header_offsets_match_xattr_h() {
+        // fs/ext4/xattr.h struct ext4_xattr_header:
+        //   h_magic:le32 @0, h_refcount:le32 @4, h_blocks:le32 @8,
+        //   h_hash:le32 @12, h_checksum:le32 @16,
+        //   h_reserved[3]:le32 @20..32, entries @32.
+        let mut block = vec![0_u8; 4096];
+        block[0..4].copy_from_slice(&ffs_types::EXT4_XATTR_MAGIC.to_le_bytes());
+        block[4..8].copy_from_slice(&2_u32.to_le_bytes());
+        block[8..12].copy_from_slice(&1_u32.to_le_bytes());
+        block[12..16].copy_from_slice(&0x1122_3344_u32.to_le_bytes());
+        block[16..20].copy_from_slice(&0x5566_7788_u32.to_le_bytes());
+        block[20..24].copy_from_slice(&0x99AA_BBCC_u32.to_le_bytes());
+        block[24..28].copy_from_slice(&0xDDEE_F001_u32.to_le_bytes());
+        block[28..32].copy_from_slice(&0x2345_6789_u32.to_le_bytes());
+
+        let entry_start = 32;
+        let name = b"kernel";
+        let value = b"header";
+        let value_offs = 128_u16;
+        block[entry_start] = u8::try_from(name.len()).expect("fixed name length fits u8");
+        block[entry_start + 1] = ffs_types::EXT4_XATTR_INDEX_SECURITY;
+        block[entry_start + 2..entry_start + 4].copy_from_slice(&value_offs.to_le_bytes());
+        block[entry_start + 4..entry_start + 8].copy_from_slice(&0_u32.to_le_bytes());
+        block[entry_start + 8..entry_start + 12].copy_from_slice(
+            &u32::try_from(value.len())
+                .expect("fixed value length fits u32")
+                .to_le_bytes(),
+        );
+        block[entry_start + 12..entry_start + 16].copy_from_slice(&0xA5A5_5A5A_u32.to_le_bytes());
+        block[entry_start + 16..entry_start + 16 + name.len()].copy_from_slice(name);
+
+        let entry_len = (16 + name.len() + 3) & !3;
+        block[entry_start + entry_len] = 0;
+        block[entry_start + entry_len + 1] = 0;
+        let value_start = usize::from(value_offs);
+        block[value_start..value_start + value.len()].copy_from_slice(value);
+
+        let xattrs = super::parse_xattr_block(&block).expect("parse kernel-layout xattr block");
+        assert_eq!(xattrs.len(), 1);
+        assert_eq!(xattrs[0].name_index, ffs_types::EXT4_XATTR_INDEX_SECURITY);
+        assert_eq!(&xattrs[0].name, name);
+        assert_eq!(&xattrs[0].value, value);
+        assert_eq!(xattrs[0].full_name(), "security.kernel");
+    }
+
+    #[test]
     fn parse_xattr_block_smoke() {
         let mut block = vec![0_u8; 4096];
         // 32-byte header with magic
