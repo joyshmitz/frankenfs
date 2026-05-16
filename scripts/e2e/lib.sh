@@ -1209,6 +1209,23 @@ e2e_marker_field_count() {
 }
 
 #######################################
+# Escape a single-line string for JSON.
+# Arguments:
+#   $1 - Value to escape
+#######################################
+e2e_json_escape() {
+    local value="$1"
+
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\t'/\\t}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\n'/\\n}"
+
+    printf '%s\n' "$value"
+}
+
+#######################################
 # Emit a machine-parseable JSON summary alongside run.log
 # Reads SCENARIO_RESULT markers from the log and writes result.json
 # Arguments: (none — uses globals)
@@ -1242,7 +1259,10 @@ e2e_emit_json_summary() {
 
     # Extract scenario results from log
     local scenarios_json="["
+    local invalid_scenario_markers_json="["
+    local invalid_scenario_marker_count=0
     local first=true
+    local invalid_first=true
     while IFS= read -r line; do
         # Parse: SCENARIO_RESULT|scenario_id=X|outcome=Y[|detail=Z]
         local scenario_id outcome detail
@@ -1252,6 +1272,35 @@ e2e_emit_json_summary() {
         detail_count=$(e2e_marker_field_count "$line" "|detail=")
 
         if [[ "$scenario_id_count" -ne 1 || "$outcome_count" -ne 1 || "$detail_count" -gt 1 ]]; then
+            local invalid_reason marker_preview
+            invalid_reason=""
+            if [[ "$scenario_id_count" -eq 0 ]]; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}missing_scenario_id"
+            elif [[ "$scenario_id_count" -gt 1 ]]; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_scenario_id"
+            fi
+            if [[ "$outcome_count" -eq 0 ]]; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}missing_outcome"
+            elif [[ "$outcome_count" -gt 1 ]]; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_outcome"
+            fi
+            if [[ "$detail_count" -gt 1 ]]; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_detail"
+            fi
+
+            marker_preview="$line"
+            if ((${#marker_preview} > 240)); then
+                marker_preview="${marker_preview:0:240}..."
+            fi
+            marker_preview=$(e2e_json_escape "$marker_preview")
+
+            if [[ "$invalid_first" == "true" ]]; then
+                invalid_first=false
+            else
+                invalid_scenario_markers_json+=","
+            fi
+            invalid_scenario_markers_json+="{\"reason\":\"$invalid_reason\",\"marker\":\"$marker_preview\"}"
+            invalid_scenario_marker_count=$((invalid_scenario_marker_count + 1))
             continue
         fi
 
@@ -1268,7 +1317,7 @@ e2e_emit_json_summary() {
         fi
 
         # Escape JSON special characters in detail
-        detail=$(echo "$detail" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        detail=$(e2e_json_escape "$detail")
 
         if [[ -n "$detail" ]]; then
             scenarios_json+="{\"scenario_id\":\"$scenario_id\",\"outcome\":\"$outcome\",\"detail\":\"$detail\"}"
@@ -1277,6 +1326,7 @@ e2e_emit_json_summary() {
         fi
     done < <(grep "^SCENARIO_RESULT|" "$E2E_LOG_FILE" 2>/dev/null || true)
     scenarios_json+="]"
+    invalid_scenario_markers_json+="]"
 
     # Determine verdict
     local verdict="PASS"
@@ -1310,6 +1360,8 @@ e2e_emit_json_summary() {
     "cargo_version": "$cargo_ver"
   },
   "scenarios": $scenarios_json,
+  "invalid_scenario_marker_count": $invalid_scenario_marker_count,
+  "invalid_scenario_markers": $invalid_scenario_markers_json,
   "verdict": "$verdict",
   "exit_code": $script_exit_code,
   "duration_secs": $duration_secs,

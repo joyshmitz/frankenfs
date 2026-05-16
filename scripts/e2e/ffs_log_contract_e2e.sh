@@ -270,6 +270,9 @@ if (
         and (.scenarios[0].scenario_id == "valid_probe_marker")
         and (.scenarios[0].outcome == "PASS")
         and (.scenarios[0] | has("detail") | not)
+        and (.invalid_scenario_marker_count == 3)
+        and (.invalid_scenario_markers | length == 3)
+        and ([.invalid_scenario_markers[].reason] | sort == ["duplicate_detail", "duplicate_outcome", "duplicate_scenario_id"])
     ' "$SUMMARY_PROBE_DIR/result.json" >/dev/null; then
     log_scenario "log_contract_shared_summary_duplicate_marker_rejection" "PASS" "result=${SUMMARY_PROBE_DIR}/result.json"
 else
