@@ -1271,18 +1271,25 @@ e2e_emit_json_summary() {
         outcome_count=$(e2e_marker_field_count "$line" "|outcome=")
         detail_count=$(e2e_marker_field_count "$line" "|detail=")
 
-        if [[ "$scenario_id_count" -ne 1 || "$outcome_count" -ne 1 || "$detail_count" -gt 1 ]]; then
+        scenario_id=$(echo "$line" | sed -n 's/.*scenario_id=\([^|]*\).*/\1/p')
+        outcome=$(echo "$line" | sed -n 's/.*outcome=\([^|]*\).*/\1/p')
+
+        if [[ "$scenario_id_count" -ne 1 || "$outcome_count" -ne 1 || "$detail_count" -gt 1 || -z "$scenario_id" || -z "$outcome" ]]; then
             local invalid_reason marker_preview
             invalid_reason=""
             if [[ "$scenario_id_count" -eq 0 ]]; then
                 invalid_reason="${invalid_reason}${invalid_reason:+,}missing_scenario_id"
             elif [[ "$scenario_id_count" -gt 1 ]]; then
                 invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_scenario_id"
+            elif [[ -z "$scenario_id" ]]; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}empty_scenario_id"
             fi
             if [[ "$outcome_count" -eq 0 ]]; then
                 invalid_reason="${invalid_reason}${invalid_reason:+,}missing_outcome"
             elif [[ "$outcome_count" -gt 1 ]]; then
                 invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_outcome"
+            elif [[ -z "$outcome" ]]; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}empty_outcome"
             fi
             if [[ "$detail_count" -gt 1 ]]; then
                 invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_detail"
@@ -1304,11 +1311,7 @@ e2e_emit_json_summary() {
             continue
         fi
 
-        scenario_id=$(echo "$line" | sed -n 's/.*scenario_id=\([^|]*\).*/\1/p')
-        outcome=$(echo "$line" | sed -n 's/.*outcome=\([^|]*\).*/\1/p')
         detail=$(echo "$line" | sed -n 's/.*detail=\(.*\)/\1/p')
-
-        [[ -z "$scenario_id" || -z "$outcome" ]] && continue
 
         if [[ "$first" == "true" ]]; then
             first=false

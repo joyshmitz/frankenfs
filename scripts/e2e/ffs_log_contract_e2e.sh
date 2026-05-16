@@ -252,6 +252,10 @@ mkdir -p "$SUMMARY_PROBE_DIR"
 MARKER_PREFIX="SCENARIO_RESULT|scenario_id="
 {
     printf '%s%s|outcome=PASS|duration_ms=7\n' "$MARKER_PREFIX" "valid_probe_marker"
+    printf 'SCENARIO_RESULT|outcome=PASS\n'
+    printf '%s%s\n' "$MARKER_PREFIX" "missing_outcome_probe"
+    printf '%s|outcome=PASS\n' "$MARKER_PREFIX"
+    printf '%s%s|outcome=\n' "$MARKER_PREFIX" "empty_outcome_probe"
     printf '%s%s|scenario_id=%s|outcome=PASS\n' "$MARKER_PREFIX" "first_probe_marker" "second_probe_marker"
     printf '%s%s|outcome=PASS|outcome=FAIL\n' "$MARKER_PREFIX" "duplicate_outcome_probe"
     printf '%s%s|outcome=PASS|detail=one|detail=two\n' "$MARKER_PREFIX" "duplicate_detail_probe"
@@ -270,9 +274,17 @@ if (
         and (.scenarios[0].scenario_id == "valid_probe_marker")
         and (.scenarios[0].outcome == "PASS")
         and (.scenarios[0] | has("detail") | not)
-        and (.invalid_scenario_marker_count == 3)
-        and (.invalid_scenario_markers | length == 3)
-        and ([.invalid_scenario_markers[].reason] | sort == ["duplicate_detail", "duplicate_outcome", "duplicate_scenario_id"])
+        and (.invalid_scenario_marker_count == 7)
+        and (.invalid_scenario_markers | length == 7)
+        and ([.invalid_scenario_markers[].reason] | sort == [
+            "duplicate_detail",
+            "duplicate_outcome",
+            "duplicate_scenario_id",
+            "empty_outcome",
+            "empty_scenario_id",
+            "missing_outcome",
+            "missing_scenario_id"
+        ])
     ' "$SUMMARY_PROBE_DIR/result.json" >/dev/null; then
     log_scenario "log_contract_shared_summary_duplicate_marker_rejection" "PASS" "result=${SUMMARY_PROBE_DIR}/result.json"
 else
