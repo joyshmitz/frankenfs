@@ -252,7 +252,10 @@ mkdir -p "$SUMMARY_PROBE_DIR"
 MARKER_PREFIX="SCENARIO_RESULT|scenario_id="
 {
     printf '%s%s|outcome=PASS|duration_ms=7\n' "$MARKER_PREFIX" "valid_probe_marker"
-    printf 'SCENARIO_RESULT|scenario_id=json_escape_"probe"\\path|outcome=PASS"quoted\\slash\n'
+    printf '%s%s|outcome=PASS|detail=json_escape_"probe"\\path\n' "$MARKER_PREFIX" "valid_detail_escape_probe"
+    printf 'SCENARIO_RESULT|scenario_id=Upper_case_bad|outcome=PASS\n'
+    printf 'SCENARIO_RESULT|scenario_id=too_short|outcome=PASS\n'
+    printf '%s%s|outcome=SKIP\n' "$MARKER_PREFIX" "invalid_outcome_probe"
     printf 'SCENARIO_RESULT|outcome=PASS\n'
     printf '%s%s\n' "$MARKER_PREFIX" "missing_outcome_probe"
     printf '%s|outcome=PASS\n' "$MARKER_PREFIX"
@@ -275,17 +278,20 @@ if (
         and (.scenarios[0].scenario_id == "valid_probe_marker")
         and (.scenarios[0].outcome == "PASS")
         and (.scenarios[0] | has("detail") | not)
-        and (.scenarios[1].scenario_id == "json_escape_\"probe\"\\path")
-        and (.scenarios[1].outcome == "PASS\"quoted\\slash")
-        and (.scenarios[1] | has("detail") | not)
-        and (.invalid_scenario_marker_count == 7)
-        and (.invalid_scenario_markers | length == 7)
+        and (.scenarios[1].scenario_id == "valid_detail_escape_probe")
+        and (.scenarios[1].outcome == "PASS")
+        and (.scenarios[1].detail == "json_escape_\"probe\"\\path")
+        and (.invalid_scenario_marker_count == 10)
+        and (.invalid_scenario_markers | length == 10)
         and ([.invalid_scenario_markers[].reason] | sort == [
             "duplicate_detail",
             "duplicate_outcome",
             "duplicate_scenario_id",
             "empty_outcome",
             "empty_scenario_id",
+            "invalid_outcome",
+            "invalid_scenario_id",
+            "invalid_scenario_id",
             "missing_outcome",
             "missing_scenario_id"
         ])

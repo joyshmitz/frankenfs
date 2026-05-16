@@ -1226,6 +1226,28 @@ e2e_json_escape() {
 }
 
 #######################################
+# Return true when a scenario_id matches the E2E log contract.
+# Arguments:
+#   $1 - scenario_id value
+#######################################
+e2e_marker_scenario_id_is_valid() {
+    local value="$1"
+
+    [[ "$value" =~ ^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$ ]]
+}
+
+#######################################
+# Return true when an outcome matches the E2E log contract.
+# Arguments:
+#   $1 - outcome value
+#######################################
+e2e_marker_outcome_is_valid() {
+    local value="$1"
+
+    [[ "$value" == "PASS" || "$value" == "FAIL" ]]
+}
+
+#######################################
 # Emit a machine-parseable JSON summary alongside run.log
 # Reads SCENARIO_RESULT markers from the log and writes result.json
 # Arguments: (none — uses globals)
@@ -1274,26 +1296,32 @@ e2e_emit_json_summary() {
         scenario_id=$(echo "$line" | sed -n 's/.*scenario_id=\([^|]*\).*/\1/p')
         outcome=$(echo "$line" | sed -n 's/.*outcome=\([^|]*\).*/\1/p')
 
-        if [[ "$scenario_id_count" -ne 1 || "$outcome_count" -ne 1 || "$detail_count" -gt 1 || -z "$scenario_id" || -z "$outcome" ]]; then
-            local invalid_reason marker_preview
-            invalid_reason=""
-            if [[ "$scenario_id_count" -eq 0 ]]; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}missing_scenario_id"
-            elif [[ "$scenario_id_count" -gt 1 ]]; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_scenario_id"
-            elif [[ -z "$scenario_id" ]]; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}empty_scenario_id"
-            fi
-            if [[ "$outcome_count" -eq 0 ]]; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}missing_outcome"
-            elif [[ "$outcome_count" -gt 1 ]]; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_outcome"
-            elif [[ -z "$outcome" ]]; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}empty_outcome"
-            fi
-            if [[ "$detail_count" -gt 1 ]]; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_detail"
-            fi
+        local invalid_reason
+        invalid_reason=""
+        if [[ "$scenario_id_count" -eq 0 ]]; then
+            invalid_reason="${invalid_reason}${invalid_reason:+,}missing_scenario_id"
+        elif [[ "$scenario_id_count" -gt 1 ]]; then
+            invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_scenario_id"
+        elif [[ -z "$scenario_id" ]]; then
+            invalid_reason="${invalid_reason}${invalid_reason:+,}empty_scenario_id"
+        elif ! e2e_marker_scenario_id_is_valid "$scenario_id"; then
+            invalid_reason="${invalid_reason}${invalid_reason:+,}invalid_scenario_id"
+        fi
+        if [[ "$outcome_count" -eq 0 ]]; then
+            invalid_reason="${invalid_reason}${invalid_reason:+,}missing_outcome"
+        elif [[ "$outcome_count" -gt 1 ]]; then
+            invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_outcome"
+        elif [[ -z "$outcome" ]]; then
+            invalid_reason="${invalid_reason}${invalid_reason:+,}empty_outcome"
+        elif ! e2e_marker_outcome_is_valid "$outcome"; then
+            invalid_reason="${invalid_reason}${invalid_reason:+,}invalid_outcome"
+        fi
+        if [[ "$detail_count" -gt 1 ]]; then
+            invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_detail"
+        fi
+
+        if [[ -n "$invalid_reason" ]]; then
+            local marker_preview
 
             marker_preview="$line"
             if ((${#marker_preview} > 240)); then
