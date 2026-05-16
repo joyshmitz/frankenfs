@@ -619,12 +619,57 @@ fn ext4_and_btrfs_fixtures_conform() {
         .expect("btrfs fixture");
 
     assert_eq!(ext4_sparse.block_size, 4096);
+    assert_eq!(ext4_sparse.inodes_count, 1000);
+    assert_eq!(ext4_sparse.blocks_count, 100);
+    assert_eq!(ext4_sparse.reserved_blocks_count, 10);
+    assert_eq!(ext4_sparse.free_blocks_count, 50);
+    assert_eq!(ext4_sparse.free_inodes_count, 700);
+    assert_eq!(ext4_sparse.first_data_block, 0);
+    assert_eq!(ext4_sparse.log_cluster_size, 0);
+    assert_eq!(ext4_sparse.cluster_size, 1024);
+    assert_eq!(ext4_sparse.blocks_per_group, 32768);
+    assert_eq!(ext4_sparse.clusters_per_group, 0);
+    assert_eq!(ext4_sparse.inodes_per_group, 8192);
+    assert_eq!(ext4_sparse.magic, EXT4_SUPER_MAGIC);
+    assert_eq!(ext4_sparse.uuid, [0; 16]);
+    assert_eq!(ext4_sparse.volume_name, "frankenfs");
+    assert_eq!(ext4_sparse.feature_compat.0, 1);
+    assert_eq!(ext4_sparse.feature_incompat.0, 2);
+    assert_eq!(ext4_sparse.feature_ro_compat.0, 4);
+    assert_eq!(ext4_sparse.checksum, 0);
+
     assert_eq!(ext4_mkfs.block_size, 4096);
     assert_eq!(ext4_mkfs.log_cluster_size, 2);
     assert_eq!(ext4_mkfs.cluster_size, 4096);
     assert_eq!(ext4_mkfs.blocks_per_group, ext4_mkfs.clusters_per_group);
     assert_eq!(ext4_mkfs.volume_name, "ffs-mkfs");
+
+    assert_eq!(btrfs.csum, [0; 32]);
+    assert_eq!(btrfs.fsid, [0; 16]);
+    assert_eq!(btrfs.bytenr, 0x1_0000);
+    assert_eq!(btrfs.flags, 0);
+    assert_eq!(btrfs.magic, BTRFS_MAGIC);
+    assert_eq!(btrfs.generation, 10);
+    assert_eq!(btrfs.root, 0x2000);
+    assert_eq!(btrfs.chunk_root, 0x3000);
+    assert_eq!(btrfs.log_root, 0x4000);
+    assert_eq!(btrfs.total_bytes, 1_000_000);
+    assert_eq!(btrfs.bytes_used, 100_000);
+    assert_eq!(btrfs.root_dir_objectid, 6);
+    assert_eq!(btrfs.num_devices, 1);
     assert_eq!(btrfs.sectorsize, 4096);
+    assert_eq!(btrfs.nodesize, 16384);
+    assert_eq!(btrfs.stripesize, 65536);
+    assert_eq!(btrfs.compat_flags, 0);
+    assert_eq!(btrfs.compat_ro_flags, 0);
+    assert_eq!(btrfs.incompat_flags, 0);
+    assert_eq!(btrfs.csum_type, 0);
+    assert_eq!(btrfs.root_level, 0);
+    assert_eq!(btrfs.chunk_root_level, 1);
+    assert_eq!(btrfs.log_root_level, 2);
+    assert_eq!(btrfs.label, "ffs-lab");
+    assert_eq!(btrfs.sys_chunk_array_size, 0);
+    assert!(btrfs.sys_chunk_array.is_empty());
 }
 
 #[test]
