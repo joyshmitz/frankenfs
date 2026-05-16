@@ -97,6 +97,33 @@ fn source_fuzz_targets(repo_root: &Path) -> Vec<String> {
     targets
 }
 
+fn fuzz_target_registration_check(
+    source_targets: &[String],
+    manifest_targets: &[String],
+) -> PipelineCheck {
+    let unregistered_source_targets = source_targets
+        .iter()
+        .filter(|target| !manifest_targets.contains(target))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    PipelineCheck {
+        component: "fuzz_target_registration".to_owned(),
+        passed: unregistered_source_targets.is_empty(),
+        detail: if unregistered_source_targets.is_empty() {
+            format!(
+                "{} source fuzz targets are registered in fuzz/Cargo.toml",
+                source_targets.len()
+            )
+        } else {
+            format!(
+                "unregistered source fuzz targets: {}",
+                unregistered_source_targets.join(", ")
+            )
+        },
+    }
+}
+
 /// A discovered crash artifact from a fuzz campaign.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrashArtifact {
@@ -334,6 +361,12 @@ pub fn validate_pipeline(repo_root: &str) -> Vec<PipelineCheck> {
         },
     });
 
+    // Check source fuzz targets are registered so checked-in fuzzers run in campaigns.
+    checks.push(fuzz_target_registration_check(
+        &source_targets,
+        &manifest_targets,
+    ));
+
     // Check corpus directories exist
     let corpus_count = manifest_targets
         .iter()
@@ -431,6 +464,54 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("harness must be in crates/ffs-harness"))
     }
 
+    fn write_minimal_pipeline_fixture(
+        root: &Path,
+        manifest_targets: &[&str],
+        source_targets: &[&str],
+    ) -> std::io::Result<()> {
+        let fuzz_dir = root.join("fuzz");
+        let source_dir = fuzz_dir.join("fuzz_targets");
+        let corpus_dir = fuzz_dir.join("corpus");
+        let script_dir = fuzz_dir.join("scripts");
+        let dictionary_dir = fuzz_dir.join("dictionaries");
+        let artifact_manifest_dir = root.join("crates/ffs-harness/src");
+
+        std::fs::create_dir_all(&source_dir)?;
+        std::fs::create_dir_all(&corpus_dir)?;
+        std::fs::create_dir_all(&script_dir)?;
+        std::fs::create_dir_all(&dictionary_dir)?;
+        std::fs::create_dir_all(root.join("tests/fuzz_corpus"))?;
+        std::fs::create_dir_all(&artifact_manifest_dir)?;
+
+        let mut manifest = String::new();
+        for target in manifest_targets {
+            manifest.push_str("[[bin]]\nname = \"");
+            manifest.push_str(target);
+            manifest.push_str("\"\npath = \"fuzz_targets/");
+            manifest.push_str(target);
+            manifest.push_str(".rs\"\ntest = false\ndoc = false\nbench = false\n\n");
+        }
+        std::fs::write(fuzz_dir.join("Cargo.toml"), manifest)?;
+
+        for target in manifest_targets {
+            std::fs::create_dir_all(corpus_dir.join(target))?;
+        }
+        for target in source_targets {
+            std::fs::write(source_dir.join(format!("{target}.rs")), "fn main() {}\n")?;
+        }
+
+        std::fs::write(script_dir.join("minimize_corpus.sh"), "#!/bin/sh\n")?;
+        std::fs::write(script_dir.join("nightly_fuzz.sh"), "#!/bin/sh\n")?;
+        std::fs::write(dictionary_dir.join("ext4.dict"), "\"ext4\"\n")?;
+        std::fs::write(dictionary_dir.join("btrfs.dict"), "\"btrfs\"\n")?;
+        std::fs::write(
+            artifact_manifest_dir.join("artifact_manifest.rs"),
+            "enum ArtifactKind { FuzzCrash, FuzzCorpus }\n",
+        )?;
+
+        Ok(())
+    }
+
     #[test]
     fn manifest_targets_match_source_files() -> TestResult {
         let root = repo_root()?;
@@ -446,6 +527,37 @@ mod tests {
                 "fuzz target {target}.rs not found at {path}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn pipeline_validation_rejects_unregistered_source_targets() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        write_minimal_pipeline_fixture(
+            temp.path(),
+            &["fuzz_registered"],
+            &["fuzz_registered", "fuzz_unregistered"],
+        )?;
+
+        let root = temp
+            .path()
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("temp path must be utf-8"))?;
+        let checks = validate_pipeline(root);
+        let registration = checks
+            .iter()
+            .find(|check| check.component == "fuzz_target_registration")
+            .ok_or_else(|| std::io::Error::other("registration check missing"))?;
+
+        assert!(
+            !registration.passed,
+            "source-only fuzz target should fail registration check"
+        );
+        assert!(
+            registration.detail.contains("fuzz_unregistered"),
+            "registration detail should identify the source-only target: {}",
+            registration.detail
+        );
         Ok(())
     }
 
