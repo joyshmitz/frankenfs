@@ -635,13 +635,27 @@ fn ext4_group_desc_fixtures_conform() {
     assert_eq!(gd32.inode_bitmap, 6);
     assert_eq!(gd32.inode_table, 7);
     assert_eq!(gd32.free_blocks_count, 200);
+    assert_eq!(gd32.free_inodes_count, 1000);
+    assert_eq!(gd32.used_dirs_count, 3);
+    assert_eq!(gd32.itable_unused, 500);
+    assert_eq!(gd32.flags, 4);
+    assert_eq!(gd32.checksum, 0xCDAB);
+    assert_eq!(gd32.block_bitmap_csum, 0);
+    assert_eq!(gd32.inode_bitmap_csum, 0);
 
     let gd64 = validate_group_desc_fixture(&fixture_path("ext4_group_desc_64byte.json"), 64)
         .expect("64-byte group desc");
-    assert!(
-        gd64.block_bitmap > u64::from(u32::MAX),
-        "64-bit path should set high bits"
-    );
+    assert_eq!(gd64.block_bitmap, 0x1_0000_0005);
+    assert_eq!(gd64.inode_bitmap, 0x2_0000_0006);
+    assert_eq!(gd64.inode_table, 0x3_0000_0007);
+    assert_eq!(gd64.free_blocks_count, 0x000A_00C8);
+    assert_eq!(gd64.free_inodes_count, 0x0014_03E8);
+    assert_eq!(gd64.used_dirs_count, 0x0005_0003);
+    assert_eq!(gd64.itable_unused, 0x0064_01F4);
+    assert_eq!(gd64.flags, 4);
+    assert_eq!(gd64.checksum, 0x7856);
+    assert_eq!(gd64.block_bitmap_csum, 0);
+    assert_eq!(gd64.inode_bitmap_csum, 0);
 }
 
 /// bd-o6it9 — conformance contract that the encoder produces
