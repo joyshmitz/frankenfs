@@ -1132,8 +1132,22 @@ fn ext4_xattr_block_fixture_conforms() {
 fn ext4_dir_block_fixture_conforms() {
     let entries =
         validate_dir_block_fixture(&fixture_path("ext4_dir_block.json"), 4096).expect("dir block");
-    assert!(entries.len() >= 3, "should have at least 3 entries");
-    assert!(entries.iter().any(|e| e.name_str() == "hello.txt"));
+    assert_eq!(entries.len(), 3, "fixture should contain 3 live entries");
+
+    let expected_entries = [
+        (2_u32, 12_u32, 1_u8, ffs_ondisk::Ext4FileType::Dir, "."),
+        (2, 12, 2, ffs_ondisk::Ext4FileType::Dir, ".."),
+        (11, 4_072, 9, ffs_ondisk::Ext4FileType::RegFile, "hello.txt"),
+    ];
+
+    for (entry, (inode, rec_len, name_len, file_type, name)) in entries.iter().zip(expected_entries)
+    {
+        assert_eq!(entry.inode, inode, "dir entry inode drift");
+        assert_eq!(entry.rec_len, rec_len, "dir entry rec_len drift");
+        assert_eq!(entry.name_len, name_len, "dir entry name_len drift");
+        assert_eq!(entry.file_type, file_type, "dir entry file_type drift");
+        assert_eq!(entry.name_str(), name, "dir entry name drift");
+    }
 }
 
 #[test]
