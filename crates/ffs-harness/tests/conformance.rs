@@ -27,8 +27,8 @@ use ffs_ondisk::{
 };
 use ffs_types::{
     BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, EXT4_CASEFOLD_FL, EXT4_COMPR_FL, EXT4_COMPRBLK_FL,
-    EXT4_EXTENTS_FL, EXT4_INLINE_DATA_FL, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, GroupNumber,
-    InodeNumber, ParseError,
+    EXT4_EXTENTS_FL, EXT4_INLINE_DATA_FL, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET,
+    EXT4_XATTR_INDEX_SECURITY, EXT4_XATTR_INDEX_USER, GroupNumber, InodeNumber, ParseError,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -1114,18 +1114,27 @@ fn ext4_xattr_block_fixture_conforms() {
 
     assert_eq!(xattrs.len(), 2, "should have 2 xattrs");
 
-    // user.mime = "text/plain"
-    let mime = xattrs.iter().find(|x| x.full_name() == "user.mime");
-    assert!(mime.is_some(), "should have user.mime xattr");
-    assert_eq!(mime.unwrap().value, b"text/plain");
+    let expected_xattrs = [
+        (
+            EXT4_XATTR_INDEX_USER,
+            b"mime".as_slice(),
+            "user.mime",
+            b"text/plain".as_slice(),
+        ),
+        (
+            EXT4_XATTR_INDEX_SECURITY,
+            b"selinux".as_slice(),
+            "security.selinux",
+            b"system_u:object_r:user_home_t:s0".as_slice(),
+        ),
+    ];
 
-    // security.selinux = "system_u:object_r:user_home_t:s0"
-    let selinux = xattrs.iter().find(|x| x.full_name() == "security.selinux");
-    assert!(selinux.is_some(), "should have security.selinux xattr");
-    assert_eq!(
-        std::str::from_utf8(&selinux.unwrap().value).unwrap(),
-        "system_u:object_r:user_home_t:s0"
-    );
+    for (xattr, (name_index, name, full_name, value)) in xattrs.iter().zip(expected_xattrs) {
+        assert_eq!(xattr.name_index, name_index, "xattr namespace drift");
+        assert_eq!(xattr.name, name, "xattr raw name drift");
+        assert_eq!(xattr.full_name(), full_name, "xattr full name drift");
+        assert_eq!(xattr.value, value, "xattr value drift");
+    }
 }
 
 #[test]
