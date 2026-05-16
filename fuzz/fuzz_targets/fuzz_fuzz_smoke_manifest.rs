@@ -7,6 +7,7 @@ use ffs_harness::fuzz_smoke::{
 };
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
+use std::path::{Component, Path};
 
 const MAX_INPUT_BYTES: usize = 16 * 1024;
 const REQUIRED_ARTIFACT_FIELDS: [&str; 8] = [
@@ -193,11 +194,19 @@ fn exercise_manifest(manifest: &FuzzSmokeManifest) {
             manifest
                 .seeds
                 .iter()
-                .all(|seed| !std::path::Path::new(&seed.path).is_absolute()
-                    && !seed.path.split('/').any(|component| component == "..")),
-            "valid fuzz-smoke seed paths must stay under the workspace root"
+                .all(|seed| is_workspace_relative_path(&seed.path)
+                    && is_workspace_relative_path(&seed.source)),
+            "valid fuzz-smoke seed paths and source paths must stay under the workspace root"
         );
     }
+}
+
+fn is_workspace_relative_path(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn report_from_manifest(manifest: &FuzzSmokeManifest, errors: Vec<String>) -> FuzzSmokeReport {
@@ -295,7 +304,7 @@ fn seed_from_bytes(
             format!("seed-{index}-{}", cursor.label(""))
         },
         path: path_from_bytes(cursor),
-        source: cursor.label("source-"),
+        source: path_from_bytes(cursor),
         provenance: cursor.label("provenance-"),
         target: cursor.choose(&TARGETS).to_owned(),
         expected_class: cursor.choose(&EXPECTED_CLASSES).to_owned(),
