@@ -1772,6 +1772,14 @@ fn validate_recommendation(
             recommendation.action_id, recommendation.safety_class
         ));
     }
+    if recommendation.safety_class == ReadinessActionSafetyClass::Impossible
+        && recommendation.ack_required
+    {
+        errors.push(format!(
+            "{fixture_label}: action {} cannot require ack for Impossible",
+            recommendation.action_id
+        ));
+    }
     if is_smoke_evidence_tier(recommendation.evidence_tier)
         && is_upgrade_eligible(recommendation.public_claim_effect)
     {
@@ -2106,6 +2114,37 @@ mod tests {
                 .errors
                 .iter()
                 .any(|error| { error.contains("must include diagnostics for Destructive") })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validation_rejects_impossible_actions_that_request_ack() -> Result<()> {
+        let mut fixture_set = default_readiness_action_autopilot_fixture_set();
+        let recommendation = fixture_set
+            .fixtures
+            .first_mut()
+            .and_then(|fixture| fixture.report.recommendations.first_mut())
+            .context("default fixture set has a first recommendation")?;
+        recommendation.safety_class = ReadinessActionSafetyClass::Impossible;
+        recommendation.ack_required = true;
+        recommendation.diagnostics = vec![diagnostic(
+            "impossible-action-diagnostic",
+            ReadinessActionDiagnosticSeverity::Error,
+            ReadinessActionInputKind::ReleaseGatePolicy,
+            None,
+            "The action is impossible until contradictory evidence is resolved.",
+            "resolve the contradiction instead of requesting operator authorization",
+        )];
+
+        let report = validate_readiness_action_fixture_set(&fixture_set);
+
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("cannot require ack for Impossible") })
         );
         Ok(())
     }
