@@ -4861,7 +4861,8 @@ fn btrfs_roottree_leaf_fixture_conforms() {
     // Verify header
     assert_eq!(header.level, 0, "should be a leaf");
     assert_eq!(header.owner, 1, "owner should be ROOT_TREE (1)");
-    assert!(items.len() >= 3, "should have at least 3 ROOT_ITEM entries");
+    assert_eq!(header.nritems, 3, "header should declare 3 items");
+    assert_eq!(items.len(), 3, "fixture should have 3 ROOT_ITEM entries");
 
     // Verify items are sorted
     for pair in items.windows(2) {
@@ -4873,29 +4874,27 @@ fn btrfs_roottree_leaf_fixture_conforms() {
         );
     }
 
-    // All items should be ROOT_ITEM (type 132)
-    for item in &items {
-        assert_eq!(
-            item.key.item_type,
+    let expected_slots = [
+        (
+            2_u64,
             btrfs_item_types::ROOT_ITEM,
-            "root tree should only contain ROOT_ITEM entries"
-        );
-    }
+            0_u64,
+            15_667_u32,
+            239_u32,
+        ),
+        (3, btrfs_item_types::ROOT_ITEM, 0, 15_906, 239),
+        (5, btrfs_item_types::ROOT_ITEM, 0, 16_145, 239),
+    ];
 
-    // Should have entries for standard trees: EXTENT_TREE (2), CHUNK_TREE (3), FS_TREE (5)
-    let tree_ids: Vec<u64> = items.iter().map(|i| i.key.objectid).collect();
-    assert!(
-        tree_ids.contains(&2),
-        "should have ROOT_ITEM for EXTENT_TREE (2)"
-    );
-    assert!(
-        tree_ids.contains(&3),
-        "should have ROOT_ITEM for CHUNK_TREE (3)"
-    );
-    assert!(
-        tree_ids.contains(&5),
-        "should have ROOT_ITEM for FS_TREE (5)"
-    );
+    for (item, (objectid, item_type, offset, data_offset, data_size)) in
+        items.iter().zip(expected_slots)
+    {
+        assert_eq!(item.key.objectid, objectid, "ROOT_ITEM objectid drift");
+        assert_eq!(item.key.item_type, item_type, "ROOT_ITEM type drift");
+        assert_eq!(item.key.offset, offset, "ROOT_ITEM key offset drift");
+        assert_eq!(item.data_offset, data_offset, "ROOT_ITEM data offset drift");
+        assert_eq!(item.data_size, data_size, "ROOT_ITEM data size drift");
+    }
 }
 
 #[test]
