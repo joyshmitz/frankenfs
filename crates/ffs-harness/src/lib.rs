@@ -418,8 +418,12 @@ pub fn validate_btrfs_chunk_fixture(
         .with_context(|| format!("failed btrfs parse for fixture {}", path.display()))?;
     let chunks = parse_sys_chunk_array(&sb.sys_chunk_array)
         .with_context(|| format!("failed chunk parse for fixture {}", path.display()))?;
-    // Verify mapping is functional for root and chunk_root
-    for (name, addr) in [("root", sb.root), ("chunk_root", sb.chunk_root)] {
+    // Verify mapping is functional for bootstrap tree roots.
+    for (name, addr) in [
+        ("root", sb.root),
+        ("chunk_root", sb.chunk_root),
+        ("log_root", sb.log_root),
+    ] {
         if addr != 0 {
             let mapping = map_logical_to_physical(&chunks, addr).with_context(|| {
                 format!(
@@ -693,6 +697,25 @@ mod tests {
         let message = format!("{err:#}");
         assert!(
             message.contains("mapping root (0x800000) is not covered by sys_chunk_array"),
+            "{message}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn btrfs_chunk_fixture_rejects_uncovered_log_root_mapping() -> Result<()> {
+        let path = fixture_path("btrfs_superblock_with_chunks.json");
+        let mut data = load_sparse_fixture(&path).expect("load btrfs chunk fixture");
+        data[0x60..0x68].copy_from_slice(&(8_u64 * 1024 * 1024).to_le_bytes());
+
+        let fixture = SparseFixture::from_bytes(&data);
+        let fixture_file = tempfile::NamedTempFile::new()?;
+        fs::write(fixture_file.path(), serde_json::to_vec(&fixture)?)?;
+
+        let err = validate_btrfs_chunk_fixture(fixture_file.path()).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("mapping log_root (0x800000) is not covered by sys_chunk_array"),
             "{message}"
         );
         Ok(())
