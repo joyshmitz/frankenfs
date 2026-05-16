@@ -1165,19 +1165,28 @@ fn ext4_dir_block_with_tail_fixture_conforms() {
         .expect("load tail fixture");
     let (entries, tail) = parse_dir_block(&data, 4096).expect("parse dir block with tail");
     assert_eq!(entries.len(), 3, "expected 3 directory entries");
-    assert_eq!(
-        entries
-            .last()
-            .map(ffs_ondisk::Ext4DirEntry::name_str)
-            .as_deref(),
-        Some("hello.txt"),
-        "last entry should be hello.txt"
-    );
-    assert_eq!(
-        entries.last().map(|e| e.rec_len),
-        Some(4060),
-        "last entry rec_len should leave room for tail"
-    );
+
+    let expected_entries = [
+        (2_u32, 12_u32, 1_u8, ffs_ondisk::Ext4FileType::Dir, "."),
+        (2, 12, 2, ffs_ondisk::Ext4FileType::Dir, ".."),
+        (11, 4_060, 9, ffs_ondisk::Ext4FileType::RegFile, "hello.txt"),
+    ];
+
+    for (entry, (inode, rec_len, name_len, file_type, name)) in entries.iter().zip(expected_entries)
+    {
+        assert_eq!(entry.inode, inode, "tail fixture entry inode drift");
+        assert_eq!(entry.rec_len, rec_len, "tail fixture entry rec_len drift");
+        assert_eq!(
+            entry.name_len, name_len,
+            "tail fixture entry name_len drift"
+        );
+        assert_eq!(
+            entry.file_type, file_type,
+            "tail fixture entry file_type drift"
+        );
+        assert_eq!(entry.name_str(), name, "tail fixture entry name drift");
+    }
+
     let tail = tail.expect("expected checksum tail");
     assert_eq!(tail.checksum, 0x1234_5678);
 }
