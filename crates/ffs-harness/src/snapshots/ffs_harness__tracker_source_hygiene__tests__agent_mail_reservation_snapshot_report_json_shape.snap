@@ -1,0 +1,38 @@
+---
+source: crates/ffs-harness/src/tracker_source_hygiene.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "snapshot_status": "present",
+  "snapshot_schema_version": 1,
+  "current_agent": "SapphireLotus",
+  "target_paths": [
+    ".beads/issues.jsonl"
+  ],
+  "source": "agent-mail-fixture",
+  "source_freshness": "fresh",
+  "generated_at": "2026-05-14T07:45:00Z",
+  "generated_at_epoch": 1778744700,
+  "age_seconds": 900,
+  "source_max_age_seconds": 3600,
+  "conflict_classification": "active_peer_conflict",
+  "reservations": [
+    {
+      "holder": "OtherAgent",
+      "path_pattern": ".beads/issues.jsonl",
+      "exclusive": true,
+      "reason": "bd-peer",
+      "created_ts": "2026-05-14T07:30:00Z",
+      "expires_ts": "2026-05-14T09:00:00Z",
+      "released_ts": null,
+      "created_epoch": 1778743800,
+      "expires_epoch": 1778749200,
+      "released_epoch": null,
+      "active": true,
+      "overlaps_target": true,
+      "conflict_classification": "active_peer_conflict"
+    }
+  ],
+  "errors": []
+}

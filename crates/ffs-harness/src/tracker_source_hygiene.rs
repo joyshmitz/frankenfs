@@ -2228,6 +2228,30 @@ mod tests {
     }
 
     #[test]
+    fn agent_mail_reservation_snapshot_report_json_shape() -> Result<(), String> {
+        let snapshot = reservation_snapshot(&serde_json::json!([
+            {
+                "holder": "OtherAgent",
+                "path_pattern": ".beads/issues.jsonl",
+                "exclusive": true,
+                "reason": "bd-peer",
+                "created_ts": "2026-05-14T07:30:00Z",
+                "expires_ts": "2026-05-14T09:00:00Z"
+            }
+        ]))?;
+
+        let report =
+            analyze_agent_mail_reservation_snapshot_json(Some(&snapshot), &reservation_config()?)
+                .map_err(|err| err.to_string())?;
+        let json = serde_json::to_string_pretty(&report).map_err(|err| err.to_string())?;
+        insta::assert_snapshot!("agent_mail_reservation_snapshot_report_json_shape", json);
+        let parsed: AgentMailReservationSnapshotReport =
+            serde_json::from_str(&json).map_err(|err| err.to_string())?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
     fn agent_mail_reservation_expired_lease_is_not_active_conflict() -> Result<(), String> {
         let snapshot = reservation_snapshot_with_generated(
             "2026-05-14T05:00:00Z",
