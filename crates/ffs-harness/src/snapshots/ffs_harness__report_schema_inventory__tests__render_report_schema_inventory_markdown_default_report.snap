@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 106 |
+| Total rows | 107 |
 | Required rows | 10 |
-| Advisory-only rows | 94 |
+| Advisory-only rows | 95 |
 | Permissioned-only rows | 1 |
-| Covered rows | 105 |
+| Covered rows | 106 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -32,6 +32,7 @@ None.
 | `adaptive_runtime_evidence_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `adaptive_runtime_runner_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `adversarial_threat_model_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `agent_mail_reservation_snapshot_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `ambition_evidence_matrix_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `artifact_schema_fixture_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `authoritative_environment_decision` | `Required` | `Covered` | none | none |

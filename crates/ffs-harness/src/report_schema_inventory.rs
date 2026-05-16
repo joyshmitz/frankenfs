@@ -219,6 +219,15 @@ fn readiness_foundation_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> 
             "crates/ffs-harness/src/snapshots/ffs_harness__tracker_source_hygiene__tests__tracker_source_hygiene_report_json_shape.snap",
         ),
         covered_advisory_row(
+            "agent_mail_reservation_snapshot_report",
+            "crates/ffs-harness/src/tracker_source_hygiene.rs",
+            "AgentMailReservationSnapshotReport",
+            "analyze_agent_mail_reservation_snapshot_json",
+            "source-aware tracker reservation conflict diagnostics",
+            "agent_mail_reservation_snapshot_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__tracker_source_hygiene__tests__agent_mail_reservation_snapshot_report_json_shape.snap",
+        ),
+        covered_advisory_row(
             "claimability_plan_report",
             "crates/ffs-harness/src/claimability_plan.rs",
             "ClaimabilityPlanReport",
@@ -1863,12 +1872,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 106);
+        assert_eq!(report.total_rows, 107);
         assert_eq!(report.required_rows, 10);
-        assert_eq!(report.advisory_only_rows, 94);
+        assert_eq!(report.advisory_only_rows, 95);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 105);
+        assert_eq!(report.covered_rows, 106);
         assert_eq!(report.missing_rows, 0);
         for report_id in [
             "swarm_operator_report",
@@ -1900,6 +1909,7 @@ mod tests {
             "readiness_action_fixture_validation_report",
             "cross_oracle_arbitration_report",
             "claimability_plan_report",
+            "agent_mail_reservation_snapshot_report",
             "crash_replay_suite_report",
             "fsx_stress_report",
         ] {
