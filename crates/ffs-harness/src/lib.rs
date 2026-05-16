@@ -672,15 +672,16 @@ mod tests {
     }
 
     #[test]
-    fn btrfs_chunk_mapping_covers_root() {
+    fn btrfs_chunk_mapping_covers_bootstrap_roots() {
         let path = fixture_path("btrfs_superblock_with_chunks.json");
         let (sb, chunks) = validate_btrfs_chunk_fixture(&path).expect("btrfs chunk fixture parse");
-        // root=0x4000 is within chunk [0, 8MiB), mapped to physical [1MiB, 9MiB)
-        let mapping = ffs_ondisk::map_logical_to_physical(&chunks, sb.root)
-            .expect("mapping ok")
-            .expect("root should be covered");
-        assert_eq!(mapping.devid, 1);
-        assert_eq!(mapping.physical, 0x10_0000 + sb.root);
+        for (name, addr) in [("root", sb.root), ("chunk_root", sb.chunk_root)] {
+            let mapping = ffs_ondisk::map_logical_to_physical(&chunks, addr)
+                .expect("mapping ok")
+                .unwrap_or_else(|| panic!("{name} should be covered"));
+            assert_eq!(mapping.devid, 1, "{name} devid");
+            assert_eq!(mapping.physical, 0x10_0000 + addr, "{name} physical");
+        }
     }
 
     #[test]
