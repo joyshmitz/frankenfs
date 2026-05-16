@@ -490,6 +490,17 @@ mod tests {
     }
 
     #[test]
+    fn mounted_lane_gate_json_shape() -> Result<(), serde_json::Error> {
+        let gate = happy_gate();
+        let json = serde_json::to_string_pretty(&gate)?;
+
+        insta::assert_snapshot!("mounted_lane_gate_json_shape", json);
+        let decoded: MountedLaneGate = serde_json::from_str(&json)?;
+        assert_eq!(decoded, gate);
+        Ok(())
+    }
+
+    #[test]
     fn mounted_lane_decision_json_shape() -> Result<(), serde_json::Error> {
         let pass_decision = evaluate_mounted_lane_gate(&happy_gate());
         let pass_json = serde_json::to_string_pretty(&pass_decision)?;

@@ -1,0 +1,23 @@
+---
+source: crates/ffs-harness/src/mounted_lane_gate.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "gate_version": "v1",
+  "bead_id": "bd-rchk4.4",
+  "run_kind": "rch_authoritative",
+  "authoritative_lane_required": true,
+  "capability_probe": {
+    "probe_id": "probe-001",
+    "status": "available",
+    "probe_at_unix": 1000,
+    "now_unix": 1300,
+    "fuse_kernel_module_present": true,
+    "helper_binary_present": true,
+    "permissioned": true
+  },
+  "diagnostic_log_path": "artifacts/mounted-lane/diagnostic.log",
+  "remediation_hint": "rerun fuse-capability-probe and retry the mounted matrix",
+  "max_probe_age_seconds": 600
+}
