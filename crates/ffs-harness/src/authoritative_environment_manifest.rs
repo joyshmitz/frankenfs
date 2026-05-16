@@ -743,6 +743,17 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_environment_manifest_json_shape() -> Result<(), serde_json::Error> {
+        let manifest = happy_manifest();
+        let json = serde_json::to_string_pretty(&manifest)?;
+        insta::assert_snapshot!("authoritative_environment_manifest_json_shape", json);
+
+        let decoded: AuthoritativeEnvironmentManifest = serde_json::from_str(&json)?;
+        assert_eq!(decoded, manifest);
+        Ok(())
+    }
+
+    #[test]
     fn authoritative_environment_decision_json_shape() -> Result<(), serde_json::Error> {
         let authoritative_decision =
             evaluate_authoritative_environment(&happy_manifest(), &happy_manifest());

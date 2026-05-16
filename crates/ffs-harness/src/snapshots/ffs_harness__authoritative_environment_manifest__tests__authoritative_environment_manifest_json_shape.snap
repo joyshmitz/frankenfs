@@ -1,0 +1,47 @@
+---
+source: crates/ffs-harness/src/authoritative_environment_manifest.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "manifest_id": "env_001",
+  "bead_id": "bd-7mj5d",
+  "lane_id": "rchk_authoritative_v1",
+  "authoritative": true,
+  "host_id": "worker-vmi1153651",
+  "worker_id": "rch-worker-vmi1153651",
+  "kernel": "linux-6.x.y",
+  "fuse_kernel_version": "fuse-3.16",
+  "fuser_helper_version": "fuser-0.16",
+  "mkfs_versions": [
+    {
+      "flavor": "ext4",
+      "binary": "mkfs.ext4",
+      "version": "1.47.0"
+    },
+    {
+      "flavor": "btrfs",
+      "binary": "mkfs.btrfs",
+      "version": "6.5.1"
+    }
+  ],
+  "cargo_toolchain": "nightly-2024-edition-pinned",
+  "rustc_version": "rustc 1.85.0-nightly",
+  "mount_namespace": "mnt:[4026531840]",
+  "privilege_model": "sudo_capability",
+  "fs_tools": [
+    "e2fsck",
+    "btrfs"
+  ],
+  "resource_limits": {
+    "max_open_files": 65536,
+    "max_address_space_bytes": 8589934592,
+    "max_processes": 4096
+  },
+  "git_sha": "abcdef1234567890",
+  "artifact_schema_version": 1,
+  "probe_at_unix": 1000,
+  "freshness_ttl_seconds": 3600,
+  "now_unix": 1500,
+  "replay_command": "rch exec -- cargo run -p ffs-harness -- record-environment-manifest --out artifacts/env-manifest.json"
+}
