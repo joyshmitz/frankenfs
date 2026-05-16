@@ -507,10 +507,12 @@ const ALLOWED_RISK_CATEGORIES: [&str; 9] = [
 const ALLOWED_SOURCE_STATUSES: [&str; 4] = ["active", "deferred", "sunset", "non_applicable"];
 
 const ALLOWED_FRESHNESS_STATES: [&str; 3] = ["fresh", "stale", "exempt"];
-const NOTE_MATCH_TOKENS: [&str; 12] = [
+const NOTE_MATCH_TOKENS: [&str; 14] = [
     "TODO",
     "FIXME",
     "NOTE",
+    "HACK",
+    "XXX",
     "non-goal",
     "bd-",
     "fake",
@@ -523,10 +525,12 @@ const NOTE_MATCH_TOKENS: [&str; 12] = [
 ];
 pub const OPEN_ENDED_NOTE_SCANNER_VERSION: &str = "bd-mockscan-open-ended-note-scanner-v2";
 
-const OPEN_ENDED_NOTE_PATTERNS: [&str; 15] = [
+const OPEN_ENDED_NOTE_PATTERNS: [&str; 17] = [
     "add more cases",
     "expand corpus",
     "TODO fuzz",
+    "HACK",
+    "XXX",
     "future edge cases",
     "adversarial inputs",
     "more goldens",
@@ -2189,6 +2193,8 @@ fn infer_note_risk_surface(line: &str, matched_phrase: &str) -> &'static str {
     } else if lower.contains("fake")
         || lower.contains("mock")
         || lower.contains("dummy")
+        || lower.contains("hack")
+        || lower.contains("xxx")
         || lower.contains("stub")
         || lower.contains("placeholder")
         || lower.contains("not yet implemented")
@@ -2694,6 +2700,12 @@ mod tests {
         }
         assert!(report.rows.iter().any(|row| {
             row.matched_phrase == "thread::sleep" && row.proof_type == "long-campaign"
+        }));
+        assert!(report.rows.iter().any(|row| {
+            row.matched_phrase == "HACK" && row.risk_surface == "implementation-placeholder"
+        }));
+        assert!(report.rows.iter().any(|row| {
+            row.matched_phrase == "XXX" && row.risk_surface == "implementation-placeholder"
         }));
     }
 

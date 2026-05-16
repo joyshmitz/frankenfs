@@ -188,6 +188,8 @@ required_patterns = {
     "add more cases",
     "expand corpus",
     "TODO fuzz",
+    "HACK",
+    "XXX",
     "future edge cases",
     "adversarial inputs",
     "more goldens",

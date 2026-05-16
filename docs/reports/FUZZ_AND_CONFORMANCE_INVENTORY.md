@@ -10,8 +10,7 @@ Search performed across:
 - `crates/ffs-harness/tests/*.rs` — conformance and end-to-end test files
 - `fuzz/fuzz_targets/*.rs` — libFuzzer harness sources
 - `docs/**/*.md` — design docs, reports, and status files
-- Phrases scanned: "add more", "expand corpus", "adversarial", "future
-  fuzz", "TODO", "FIXME", "XXX"
+- Phrases scanned: "add more", "expand corpus", "adversarial", "future fuzz", "TODO", "FIXME", "XXX"
 
 ---
 

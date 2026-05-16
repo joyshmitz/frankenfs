@@ -8,6 +8,8 @@ classifies each row into a closed lane (no unresolved notes).
 
 - expand corpus is tracked by bd-l7ov7 with artifact tests/open-ended-inventory/expand_corpus.json
 - TODO fuzz is tracked by bd-l7ov7 with artifact tests/open-ended-inventory/todo_fuzz.json
+- HACK marker is tracked by bd-mockscan with artifact tests/open-ended-inventory/hack_marker.json
+- XXX marker is tracked by bd-mockscan with artifact tests/open-ended-inventory/xxx_marker.json
 - more goldens is tracked by bd-l7ov7 with artifact tests/open-ended-inventory/more_goldens.json
 - known gaps is tracked by bd-l7ov7 with artifact tests/open-ended-inventory/known_gaps.json
 - fake delay is tracked by bd-mockscan with artifact tests/open-ended-inventory/fake_delay.json
