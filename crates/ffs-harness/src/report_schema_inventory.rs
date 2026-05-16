@@ -1432,6 +1432,9 @@ fn validate_row(
         &mut errors,
     );
     validate_safe_relative_path(row, "module_path", &row.module_path, &mut errors);
+    if !row.module_path.is_empty() {
+        validate_existing_module_path(row, &row.module_path, &mut errors);
+    }
 
     if !row.snapshot_path.is_empty() {
         validate_safe_relative_path(row, "snapshot_path", &row.snapshot_path, &mut errors);
@@ -1617,6 +1620,29 @@ fn validate_safe_relative_path(
     if !is_safe_relative_path(value) {
         errors.push(format!(
             "row `{}` {field} must be a safe relative path, got `{value}`",
+            row.report_id
+        ));
+    }
+}
+
+fn validate_existing_module_path(
+    row: &ReportSchemaInventoryRow,
+    value: &str,
+    errors: &mut Vec<String>,
+) {
+    if !is_safe_relative_path(value) {
+        return;
+    }
+    if Path::new(value).extension().and_then(|ext| ext.to_str()) != Some("rs") {
+        errors.push(format!(
+            "row `{}` module_path must point at a .rs source file, got `{value}`",
+            row.report_id
+        ));
+        return;
+    }
+    if !workspace_relative_path(value).is_file() {
+        errors.push(format!(
+            "row `{}` module_path must point at an existing .rs source file, got `{value}`",
             row.report_id
         ));
     }
@@ -2097,6 +2123,45 @@ mod tests {
     }
 
     #[test]
+    fn missing_module_path_fails() {
+        let mut inventory = current_report_schema_inventory();
+        let report_id = inventory.rows[0].report_id.clone();
+        inventory.rows[0].module_path =
+            "crates/ffs-harness/src/missing_report_schema_inventory_module.rs".to_owned();
+
+        let report = validate_report_schema_inventory(&inventory);
+        let result = row_result(&report, &report_id);
+
+        assert!(!report.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("existing .rs source file")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn non_rust_module_path_fails() {
+        let mut inventory = current_report_schema_inventory();
+        let report_id = inventory.rows[0].report_id.clone();
+        inventory.rows[0].module_path = "README.md".to_owned();
+
+        let report = validate_report_schema_inventory(&inventory);
+        let result = row_result(&report, &report_id);
+
+        assert!(!report.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains(".rs source file")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
     fn unsafe_snapshot_path_fails() {
         let mut inventory = current_report_schema_inventory();
         inventory.rows[0].snapshot_path = "../outside.snap".to_owned();
@@ -2223,6 +2288,28 @@ mod tests {
         assert!(
             missing_snapshots.is_empty(),
             "covered report schema rows must name existing snapshot files: {missing_snapshots:?}"
+        );
+    }
+
+    #[test]
+    fn inventory_rows_name_checked_in_rust_modules() {
+        let inventory = current_report_schema_inventory();
+        let missing_modules = inventory
+            .rows
+            .iter()
+            .filter(|row| {
+                Path::new(&row.module_path)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    != Some("rs")
+                    || !workspace_relative_path(&row.module_path).is_file()
+            })
+            .map(|row| (row.report_id.clone(), row.module_path.clone()))
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing_modules.is_empty(),
+            "report schema rows must name existing Rust module files: {missing_modules:?}"
         );
     }
 
