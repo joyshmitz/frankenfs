@@ -1221,8 +1221,15 @@ fn ext4_dir_block_truncated_tail_fixture_rejected() {
         .expect("load truncated tail fixture");
     let err = parse_dir_block(&data, 4096).unwrap_err();
     assert!(
-        matches!(err, ParseError::InsufficientData { .. }),
-        "expected InsufficientData error, got {err:?}"
+        matches!(
+            err,
+            ParseError::InsufficientData {
+                needed: 12,
+                offset: 4088,
+                actual: 8
+            }
+        ),
+        "expected exact truncated checksum-tail InsufficientData, got {err:?}"
     );
 }
 
@@ -1269,10 +1276,10 @@ fn ext4_dir_block_rec_len_too_small_fixture_rejected() {
             err,
             ParseError::InvalidField {
                 field: "de_rec_len",
-                ..
+                reason: "directory entry rec_len < 12"
             }
         ),
-        "expected InvalidField(de_rec_len), got {err:?}"
+        "expected InvalidField(de_rec_len, rec_len < 12), got {err:?}"
     );
 }
 
@@ -1286,10 +1293,10 @@ fn ext4_dir_block_name_len_overflow_fixture_rejected() {
             err,
             ParseError::InvalidField {
                 field: "de_name_len",
-                ..
+                reason: "name extends past rec_len"
             }
         ),
-        "expected InvalidField(de_name_len), got {err:?}"
+        "expected InvalidField(de_name_len, name extends past rec_len), got {err:?}"
     );
 }
 
@@ -1303,10 +1310,10 @@ fn ext4_dir_block_rec_len_min12_fixture_rejected() {
             err,
             ParseError::InvalidField {
                 field: "de_rec_len",
-                ..
+                reason: "directory entry rec_len < 12"
             }
         ),
-        "expected InvalidField(de_rec_len), got {err:?}"
+        "expected InvalidField(de_rec_len, rec_len < 12), got {err:?}"
     );
 }
 
@@ -1320,10 +1327,10 @@ fn ext4_dir_block_rec_len_unaligned_fixture_rejected() {
             err,
             ParseError::InvalidField {
                 field: "de_rec_len",
-                ..
+                reason: "directory entry rec_len not 4-byte aligned"
             }
         ),
-        "expected InvalidField(de_rec_len), got {err:?}"
+        "expected InvalidField(de_rec_len, unaligned rec_len), got {err:?}"
     );
 }
 
@@ -1478,10 +1485,10 @@ fn ext4_dir_block_tail_padding_nonzero_fixture_rejected() {
             err,
             ParseError::InvalidField {
                 field: "dir_block_tail",
-                ..
+                reason: "non-zero padding after checksum tail"
             }
         ),
-        "expected InvalidField(dir_block_tail), got {err:?}"
+        "expected InvalidField(dir_block_tail, non-zero padding), got {err:?}"
     );
 }
 
@@ -1495,10 +1502,10 @@ fn ext4_dir_block_tail_bad_header_fixture_rejected() {
             err,
             ParseError::InvalidField {
                 field: "dir_block_tail",
-                ..
+                reason: "missing or malformed checksum tail"
             }
         ),
-        "expected InvalidField(dir_block_tail), got {err:?}"
+        "expected InvalidField(dir_block_tail, malformed tail), got {err:?}"
     );
 }
 
