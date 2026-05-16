@@ -990,6 +990,76 @@ mod tests {
         assert_eq!(fixture.writes[0].hex, "ff".repeat(16));
     }
 
+    #[test]
+    fn sparse_fixture_materialize_rejects_invalid_hex_with_offset() {
+        let fixture = SparseFixture {
+            size: 4,
+            writes: vec![FixtureWrite {
+                offset: 1,
+                hex: "not-hex".to_owned(),
+            }],
+        };
+
+        let err = fixture.materialize().unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("invalid hex at offset 1"),
+            "diagnostic should include the bad write offset: {message}"
+        );
+    }
+
+    #[test]
+    fn sparse_fixture_materialize_rejects_out_of_bounds_write() {
+        let fixture = SparseFixture {
+            size: 3,
+            writes: vec![FixtureWrite {
+                offset: 2,
+                hex: "aabb".to_owned(),
+            }],
+        };
+
+        let err = fixture.materialize().unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("fixture write out of bounds: offset=2 payload=2 size=3"),
+            "diagnostic should identify the overflowing sparse write: {message}"
+        );
+    }
+
+    #[test]
+    fn load_sparse_fixture_rejects_invalid_hex_with_offset() -> Result<()> {
+        let fixture_file = tempfile::NamedTempFile::new()?;
+        fs::write(
+            fixture_file.path(),
+            r#"{"size":4,"writes":[{"offset":2,"hex":"zz"}]}"#,
+        )?;
+
+        let err = load_sparse_fixture(fixture_file.path()).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("invalid hex at offset 2"),
+            "diagnostic should include the bad fixture write offset: {message}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn load_sparse_fixture_rejects_out_of_bounds_write() -> Result<()> {
+        let fixture_file = tempfile::NamedTempFile::new()?;
+        fs::write(
+            fixture_file.path(),
+            r#"{"size":3,"writes":[{"offset":2,"hex":"aabb"}]}"#,
+        )?;
+
+        let err = load_sparse_fixture(fixture_file.path()).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("fixture write out of bounds: offset=2 payload=2 size=3"),
+            "diagnostic should identify the overflowing fixture write: {message}"
+        );
+        Ok(())
+    }
+
     const REPRESENTATIVE_SPARSE_FIXTURE_JSON_GOLDEN: &str = r#"{
   "size": 12,
   "writes": [
