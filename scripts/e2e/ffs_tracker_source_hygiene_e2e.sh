@@ -51,6 +51,9 @@ DEFAULT_FIXTURE_SELF_CHECK=1
 DEFAULT_FIXTURE_ISSUES="$REPO_ROOT/tests/fixtures/tracker_source_hygiene.jsonl"
 DEFAULT_FIXTURE_GOLDEN="$REPO_ROOT/tests/fixtures/tracker_source_hygiene_report.golden.json"
 FIXTURE_SELF_CHECK_LOG="${E2E_LOG_DIR}/tracker_source_hygiene_fixture_self_check.log"
+NON_MUTATING_FALLBACK_SELF_CHECK=1
+NON_MUTATING_FALLBACK_FIXTURE="$E2E_TEMP_DIR/tracker_source_hygiene_non_mutating_fallback.jsonl"
+NON_MUTATING_FALLBACK_SELF_CHECK_LOG="${E2E_LOG_DIR}/tracker_source_hygiene_non_mutating_fallback_self_check.log"
 
 case "${TRACKER_SOURCE_HYGIENE_STRICT:-0}" in
     1|true|TRUE|yes|YES)
@@ -66,6 +69,11 @@ esac
 case "${TRACKER_SOURCE_HYGIENE_DEFAULT_FIXTURE_SELF_CHECK:-1}" in
     0|false|FALSE|no|NO)
         DEFAULT_FIXTURE_SELF_CHECK=0
+        ;;
+esac
+case "${TRACKER_SOURCE_HYGIENE_NON_MUTATING_FALLBACK_SELF_CHECK:-1}" in
+    0|false|FALSE|no|NO)
+        NON_MUTATING_FALLBACK_SELF_CHECK=0
         ;;
 esac
 
@@ -818,6 +826,52 @@ if [[ "$DEFAULT_FIXTURE_SELF_CHECK" -eq 1 \
         scenario_result "tracker_source_hygiene_default_fixture_golden_self_check" "PASS" "log=$FIXTURE_SELF_CHECK_LOG"
     else
         scenario_result "tracker_source_hygiene_default_fixture_golden_self_check" "FAIL" "log=$FIXTURE_SELF_CHECK_LOG"
+    fi
+fi
+
+if [[ "$NON_MUTATING_FALLBACK_SELF_CHECK" -eq 1 \
+    && -z "${TRACKER_SOURCE_HYGIENE_ISSUES:-}" \
+    && -z "$EXPECTED_GOLDEN" \
+    && "$STRICT_MODE" -eq 0 ]]; then
+    e2e_step "Non-mutating fallback fixture self-check"
+    cat >"$NON_MUTATING_FALLBACK_FIXTURE" <<'JSONL'
+{"id":"bd-fallback","title":"Add a non-mutating fallback validator","description":"This is non-mutating fallback work for blocked queues. It must not run xfstests baseline execution, mounted mutation, or a large-host swarm campaign; it only validates local-safe report text.","status":"open","priority":1}
+{"id":"bd-real-xfstests","title":"execute xfstests baseline","description":"requires real xfstests run before publishing pass/fail artifacts","status":"open","priority":1}
+{"id":"bd-real-swarm","title":"permissioned large-host swarm campaign","description":"requires FFS_SWARM_WORKLOAD_REAL_RUN_ACK before using a large host","status":"open","priority":1}
+JSONL
+
+    if TRACKER_SOURCE_HYGIENE_DEFAULT_FIXTURE_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_NON_MUTATING_FALLBACK_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_ISSUES="$NON_MUTATING_FALLBACK_FIXTURE" \
+        TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=3 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=0 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_READY=1 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED=2 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_NONCLAIMABLE=2 \
+        "$REPO_ROOT/scripts/e2e/ffs_tracker_source_hygiene_e2e.sh" \
+        >"$NON_MUTATING_FALLBACK_SELF_CHECK_LOG" 2>&1; then
+        FALLBACK_REPORT="$(
+            awk -F'detail=report=' \
+                '/scenario_id=tracker_source_hygiene_report_emitted/ && /outcome=PASS/ { print $2; exit }' \
+                "$NON_MUTATING_FALLBACK_SELF_CHECK_LOG"
+        )"
+        if [[ -n "$FALLBACK_REPORT" ]] \
+            && jq -e '
+                (.source_aware_queue_state.claimable_ids == ["bd-fallback"])
+                and (
+                    [.permission_gated_rows[] | {id, gate_kind: .permission_gate.gate_kind}]
+                    | sort_by(.id)
+                ) == [
+                    {id: "bd-real-swarm", gate_kind: "large_host_swarm_real_run"},
+                    {id: "bd-real-xfstests", gate_kind: "xfstests_real_run"}
+                ]
+            ' "$FALLBACK_REPORT" >/dev/null; then
+            scenario_result "tracker_source_hygiene_non_mutating_fallback_self_check" "PASS" "log=$NON_MUTATING_FALLBACK_SELF_CHECK_LOG report=$FALLBACK_REPORT"
+        else
+            scenario_result "tracker_source_hygiene_non_mutating_fallback_self_check" "FAIL" "log=$NON_MUTATING_FALLBACK_SELF_CHECK_LOG report=${FALLBACK_REPORT:-missing}"
+        fi
+    else
+        scenario_result "tracker_source_hygiene_non_mutating_fallback_self_check" "FAIL" "log=$NON_MUTATING_FALLBACK_SELF_CHECK_LOG"
     fi
 fi
 
