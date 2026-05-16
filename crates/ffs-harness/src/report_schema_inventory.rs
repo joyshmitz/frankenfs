@@ -1730,6 +1730,8 @@ mod tests {
     use super::*;
     use anyhow::{Result, bail};
     use serde_json::json;
+    use std::collections::BTreeSet;
+    use std::path::Path;
 
     struct ReportInventoryExpectation {
         report_id: &'static str,
@@ -1738,6 +1740,44 @@ mod tests {
         producer: &'static str,
         evidence_test: &'static str,
         snapshot_suffix: &'static str,
+    }
+
+    const EXEMPT_JSON_SHAPE_SNAPSHOT_EVIDENCE: &[(&str, &str)] = &[
+        (
+            "crash_replay_suite_config_json_shape",
+            "CrashReplaySuiteConfig is a repro input config, while the public output contract is crash_replay_suite_report_json_shape",
+        ),
+        (
+            "e2e_test_result_json_shape",
+            "E2eTestResult is the generic harness-internal scenario result carrier, not a durable product report schema",
+        ),
+        (
+            "fsx_stress_config_json_shape",
+            "FsxStressConfig is a repro input config, while the public output contract is fsx_stress_report_json_shape",
+        ),
+    ];
+
+    fn json_shape_snapshot_evidence_tests() -> Result<BTreeSet<String>> {
+        let snapshots_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/snapshots");
+        let mut evidence_tests = BTreeSet::new();
+        for entry in std::fs::read_dir(&snapshots_dir)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                bail!("snapshot path is not valid UTF-8: {:?}", entry.path());
+            };
+            let Some(snapshot_name) = file_name.strip_suffix(".snap") else {
+                continue;
+            };
+            let Some((_module_prefix, evidence_test)) = snapshot_name.split_once("__tests__")
+            else {
+                bail!("snapshot name missing `__tests__` marker: {file_name}");
+            };
+            if evidence_test.ends_with("_json_shape") {
+                evidence_tests.insert(evidence_test.to_owned());
+            }
+        }
+        Ok(evidence_tests)
     }
 
     const MOUNTED_WRITEBACK_REPORT_EXPECTATIONS: &[ReportInventoryExpectation] = &[
@@ -2112,6 +2152,50 @@ mod tests {
 
         assert_eq!(row_ids, sorted_ids);
         assert_eq!(report.report_ids, sorted_ids);
+    }
+
+    #[test]
+    fn json_shape_snapshots_are_inventory_tracked_or_explicitly_exempt() -> Result<()> {
+        let inventory = current_report_schema_inventory();
+        let inventory_evidence = inventory
+            .rows
+            .iter()
+            .filter(|row| row.coverage_status == ReportSchemaCoverageStatus::Covered)
+            .map(|row| row.evidence_test.clone())
+            .collect::<BTreeSet<_>>();
+        let exempt_evidence = EXEMPT_JSON_SHAPE_SNAPSHOT_EVIDENCE
+            .iter()
+            .map(|(evidence_test, _reason)| (*evidence_test).to_owned())
+            .collect::<BTreeSet<_>>();
+
+        for (evidence_test, reason) in EXEMPT_JSON_SHAPE_SNAPSHOT_EVIDENCE {
+            assert!(
+                !reason.trim().is_empty(),
+                "exempt JSON-shape snapshot `{evidence_test}` must document why it is not a report schema row"
+            );
+        }
+
+        let snapshot_evidence = json_shape_snapshot_evidence_tests()?;
+        let missing_inventory = snapshot_evidence
+            .difference(&inventory_evidence)
+            .filter(|evidence_test| !exempt_evidence.contains(*evidence_test))
+            .cloned()
+            .collect::<Vec<_>>();
+        let stale_exemptions = exempt_evidence
+            .difference(&snapshot_evidence)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing_inventory.is_empty(),
+            "JSON-shape snapshots must be represented in report_schema_inventory or named in EXEMPT_JSON_SHAPE_SNAPSHOT_EVIDENCE: {missing_inventory:?}"
+        );
+        assert!(
+            stale_exemptions.is_empty(),
+            "JSON-shape snapshot exemptions should be removed when their snapshots disappear: {stale_exemptions:?}"
+        );
+
+        Ok(())
     }
 
     #[test]
