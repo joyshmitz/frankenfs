@@ -4814,7 +4814,8 @@ fn btrfs_fstree_leaf_fixture_conforms() {
     // Verify header
     assert_eq!(header.level, 0, "should be a leaf");
     assert_eq!(header.owner, 5, "owner should be FS_TREE (5)");
-    assert!(items.len() >= 5, "should have at least 5 items");
+    assert_eq!(header.nritems, 5, "header should declare 5 items");
+    assert_eq!(items.len(), 5, "fixture should have 5 FS_TREE entries");
 
     // Verify items are sorted
     for pair in items.windows(2) {
@@ -4826,27 +4827,32 @@ fn btrfs_fstree_leaf_fixture_conforms() {
         );
     }
 
-    // Verify required item types are present
-    let has_inode = items
-        .iter()
-        .any(|i| i.key.item_type == btrfs_item_types::INODE_ITEM);
-    let has_dir_item = items
-        .iter()
-        .any(|i| i.key.item_type == btrfs_item_types::DIR_ITEM);
-    let has_dir_index = items
-        .iter()
-        .any(|i| i.key.item_type == btrfs_item_types::DIR_INDEX);
-    let has_extent_data = items
-        .iter()
-        .any(|i| i.key.item_type == btrfs_item_types::EXTENT_DATA);
+    let expected_slots = [
+        (
+            256_u64,
+            btrfs_item_types::INODE_ITEM,
+            0_u64,
+            15_936_u32,
+            160_u32,
+        ),
+        (256, btrfs_item_types::DIR_ITEM, 0x12_3456, 16_096, 40),
+        (256, btrfs_item_types::DIR_INDEX, 2, 16_136, 40),
+        (257, btrfs_item_types::INODE_ITEM, 0, 16_176, 160),
+        (257, btrfs_item_types::EXTENT_DATA, 0, 16_336, 48),
+    ];
 
-    assert!(has_inode, "fixture should contain INODE_ITEM (type 1)");
-    assert!(has_dir_item, "fixture should contain DIR_ITEM (type 84)");
-    assert!(has_dir_index, "fixture should contain DIR_INDEX (type 96)");
-    assert!(
-        has_extent_data,
-        "fixture should contain EXTENT_DATA (type 108)"
-    );
+    for (item, (objectid, item_type, offset, data_offset, data_size)) in
+        items.iter().zip(expected_slots)
+    {
+        assert_eq!(item.key.objectid, objectid, "FS_TREE item objectid drift");
+        assert_eq!(item.key.item_type, item_type, "FS_TREE item type drift");
+        assert_eq!(item.key.offset, offset, "FS_TREE item key offset drift");
+        assert_eq!(
+            item.data_offset, data_offset,
+            "FS_TREE item data offset drift"
+        );
+        assert_eq!(item.data_size, data_size, "FS_TREE item data size drift");
+    }
 }
 
 /// Validate the root-tree leaf fixture (bd-2jk.2 deliverable).
