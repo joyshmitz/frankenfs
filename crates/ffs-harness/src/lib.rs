@@ -779,6 +779,74 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_fstree_leaf_fixture_parses() {
+        let path = fixture_path("btrfs_fstree_leaf.json");
+        let (header, items) =
+            validate_btrfs_leaf_fixture(&path).expect("btrfs fs tree leaf fixture parse");
+        assert_eq!(header.level, 0);
+        assert_eq!(header.generation, 10);
+        assert_eq!(header.owner, 5);
+        assert_eq!(header.nritems, 5);
+        assert_eq!(items.len(), 5);
+
+        let observed: Vec<_> = items
+            .iter()
+            .map(|item| {
+                (
+                    item.key.objectid,
+                    item.key.item_type,
+                    item.key.offset,
+                    item.data_offset,
+                    item.data_size,
+                )
+            })
+            .collect();
+        assert_eq!(
+            observed.as_slice(),
+            &[
+                (256, 1, 0, 15_936, 160),
+                (256, 84, 1_193_046, 16_096, 40),
+                (256, 96, 2, 16_136, 40),
+                (257, 1, 0, 16_176, 160),
+                (257, 108, 0, 16_336, 48),
+            ]
+        );
+    }
+
+    #[test]
+    fn btrfs_roottree_leaf_fixture_parses() {
+        let path = fixture_path("btrfs_roottree_leaf.json");
+        let (header, items) =
+            validate_btrfs_leaf_fixture(&path).expect("btrfs root tree leaf fixture parse");
+        assert_eq!(header.level, 0);
+        assert_eq!(header.generation, 10);
+        assert_eq!(header.owner, 1);
+        assert_eq!(header.nritems, 3);
+        assert_eq!(items.len(), 3);
+
+        let observed: Vec<_> = items
+            .iter()
+            .map(|item| {
+                (
+                    item.key.objectid,
+                    item.key.item_type,
+                    item.key.offset,
+                    item.data_offset,
+                    item.data_size,
+                )
+            })
+            .collect();
+        assert_eq!(
+            observed.as_slice(),
+            &[
+                (2, 132, 0, 15_667, 239),
+                (3, 132, 0, 15_906, 239),
+                (5, 132, 0, 16_145, 239),
+            ]
+        );
+    }
+
+    #[test]
     fn parity_report_is_non_zero() {
         let report = ParityReport::current();
         assert!(report.overall_total > 0);
