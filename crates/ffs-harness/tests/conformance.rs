@@ -5333,6 +5333,14 @@ fn checksum_manifest_negative_cases_fail_closed() {
         "digest should be 64 lowercase hex characters",
     );
     assert_panics_with(
+        checksum_manifest_rejects_missing_file_name,
+        "checksum line missing file name",
+    );
+    assert_panics_with(
+        checksum_manifest_rejects_extra_fields,
+        "checksum line should have exactly two fields",
+    );
+    assert_panics_with(
         checksum_manifest_rejects_duplicate_entries,
         "duplicate file entry: listed.json",
     );
@@ -5380,6 +5388,29 @@ fn checksum_manifest_rejects_malformed_digest() {
     let tmp = tempfile::TempDir::new().expect("tmpdir for malformed digest manifest test");
     let manifest = tmp.path().join("checksums.sha256");
     fs::write(&manifest, "not-a-sha256  listed.json\n").expect("write checksum manifest");
+
+    parse_checksum_inventory(&manifest);
+}
+
+#[test]
+#[should_panic(expected = "checksum line missing file name")]
+fn checksum_manifest_rejects_missing_file_name() {
+    let tmp = tempfile::TempDir::new().expect("tmpdir for missing filename manifest test");
+    let manifest = tmp.path().join("checksums.sha256");
+    let digest = sha256_hex(b"{}");
+    fs::write(&manifest, format!("{digest}\n")).expect("write checksum manifest");
+
+    parse_checksum_inventory(&manifest);
+}
+
+#[test]
+#[should_panic(expected = "checksum line should have exactly two fields")]
+fn checksum_manifest_rejects_extra_fields() {
+    let tmp = tempfile::TempDir::new().expect("tmpdir for extra-field manifest test");
+    let manifest = tmp.path().join("checksums.sha256");
+    let digest = sha256_hex(b"{}");
+    fs::write(&manifest, format!("{digest}  listed.json  extra\n"))
+        .expect("write checksum manifest");
 
     parse_checksum_inventory(&manifest);
 }
