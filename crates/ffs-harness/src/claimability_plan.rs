@@ -267,6 +267,17 @@ pub fn validate_claimability_plan_report(
                 row.id
             ));
         }
+        if !row.blocked_by.is_empty()
+            && !row
+                .next_safe_actions
+                .iter()
+                .any(|action| action.contains("complete blockers"))
+        {
+            errors.push(format!(
+                "row {} with blocked_by dependencies must include dependency-first guidance",
+                row.id
+            ));
+        }
         if row.reproduction_commands.is_empty() {
             errors.push(format!(
                 "row {} reproduction_commands must not be empty",
@@ -452,7 +463,45 @@ pub fn render_claimability_plan_markdown(report: &ClaimabilityPlanReport) -> Str
 }
 
 fn insert_row(rows: &mut BTreeMap<String, ClaimabilityPlanRow>, row: ClaimabilityPlanRow) {
-    rows.entry(row.id.clone()).or_insert(row);
+    if let Some(existing) = rows.get_mut(&row.id) {
+        merge_plan_row(existing, row);
+    } else {
+        rows.insert(row.id.clone(), row);
+    }
+}
+
+fn merge_plan_row(existing: &mut ClaimabilityPlanRow, row: ClaimabilityPlanRow) {
+    for dependency in row.blocked_by {
+        if !existing
+            .blocked_by
+            .iter()
+            .any(|existing_dependency| existing_dependency.id == dependency.id)
+        {
+            existing.blocked_by.push(dependency);
+        }
+    }
+    if existing.permission_gate.is_none() {
+        existing.permission_gate = row.permission_gate;
+    }
+    if row.owner_handoff_required {
+        existing.owner_handoff_required = true;
+    }
+    if !row.reason.is_empty() && !existing.reason.contains(&row.reason) {
+        let _ = write!(existing.reason, "; {}", row.reason);
+    }
+    append_unique_actions(&mut existing.next_safe_actions, row.next_safe_actions);
+    append_unique_actions(
+        &mut existing.reproduction_commands,
+        row.reproduction_commands,
+    );
+}
+
+fn append_unique_actions(target: &mut Vec<String>, source: Vec<String>) {
+    for value in source {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
 }
 
 fn plan_row_from_work_row(
@@ -535,6 +584,25 @@ fn claimable_next_actions(
 }
 
 fn plan_row_from_permission_gated_row(row: &TrackerPermissionGatedRow) -> ClaimabilityPlanRow {
+    let blocker_ids = blocked_dependency_ids(&row.blocked_by);
+    let mut reason = format!(
+        "requires explicit permission gate {}={}",
+        row.permission_gate.required_env, row.permission_gate.required_value
+    );
+    let mut next_safe_actions = Vec::new();
+    if !blocker_ids.is_empty() {
+        let blockers = blocker_ids.join(",");
+        let _ = write!(reason, "; blocked_by={blockers}");
+        next_safe_actions.push(format!(
+            "complete blockers {blockers} before requesting or using permission ACK for {}",
+            row.id
+        ));
+    }
+    next_safe_actions.push(format!(
+        "request exact ACK {}={} before running or claiming {}",
+        row.permission_gate.required_env, row.permission_gate.required_value, row.id
+    ));
+
     ClaimabilityPlanRow {
         id: row.id.clone(),
         title: row.title.clone(),
@@ -544,17 +612,11 @@ fn plan_row_from_permission_gated_row(row: &TrackerPermissionGatedRow) -> Claima
         source_repo: row.source_repo.clone(),
         assignee: row.assignee.clone(),
         classification: ClaimabilityClassification::PermissionGated,
-        reason: format!(
-            "requires explicit permission gate {}={}",
-            row.permission_gate.required_env, row.permission_gate.required_value
-        ),
+        reason,
         blocked_by: row.blocked_by.clone(),
         permission_gate: Some(row.permission_gate.clone()),
         owner_handoff_required: false,
-        next_safe_actions: vec![format!(
-            "request exact ACK {}={} before running or claiming {}",
-            row.permission_gate.required_env, row.permission_gate.required_value, row.id
-        )],
+        next_safe_actions,
         reproduction_commands: vec![
             "ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl".to_owned(),
         ],
@@ -562,12 +624,7 @@ fn plan_row_from_permission_gated_row(row: &TrackerPermissionGatedRow) -> Claima
 }
 
 fn plan_row_from_blocked_row(row: &TrackerIssueWorkRow) -> ClaimabilityPlanRow {
-    let blockers = row
-        .blocked_by
-        .iter()
-        .map(|dependency| dependency.id.as_str())
-        .collect::<Vec<_>>()
-        .join(",");
+    let blockers = blocked_dependency_ids(&row.blocked_by).join(",");
     ClaimabilityPlanRow {
         id: row.id.clone(),
         title: row.title.clone(),
@@ -586,6 +643,13 @@ fn plan_row_from_blocked_row(row: &TrackerIssueWorkRow) -> ClaimabilityPlanRow {
             "ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl".to_owned(),
         ],
     }
+}
+
+fn blocked_dependency_ids(blocked_by: &[TrackerDependencyStatus]) -> Vec<&str> {
+    blocked_by
+        .iter()
+        .map(|dependency| dependency.id.as_str())
+        .collect::<Vec<_>>()
 }
 
 fn plan_row_from_epic_row(
@@ -1122,10 +1186,9 @@ fn plan_next_safe_actions(
     {
         actions.push("do not run permission-gated rows without the exact required ACK".to_owned());
     }
-    if rows
-        .iter()
-        .any(|row| row.classification == ClaimabilityClassification::Blocked)
-    {
+    if rows.iter().any(|row| {
+        row.classification == ClaimabilityClassification::Blocked || !row.blocked_by.is_empty()
+    }) {
         actions.push("clear blockers before claiming blocked local rows".to_owned());
     }
     if rows.iter().any(|row| {
@@ -1555,6 +1618,80 @@ mod tests {
         let row = report.rows.iter().find(|row| row.id == "bd-rchk3").unwrap();
         assert!(row.permission_gate.is_some());
         assert!(row.next_safe_actions[0].contains("request exact ACK"));
+    }
+
+    #[test]
+    fn permission_gated_blocked_row_preserves_dependency_first_guidance() {
+        let blocked_by = vec![TrackerDependencyStatus {
+            id: "bd-blocker".to_owned(),
+            status: "open".to_owned(),
+        }];
+        let mut tracker = base_report();
+        tracker.permission_gated_rows = vec![TrackerPermissionGatedRow {
+            id: "bd-overlap".to_owned(),
+            title: "Permissioned row with unmet dependency".to_owned(),
+            status: "open".to_owned(),
+            priority: Some(1),
+            issue_type: Some("task".to_owned()),
+            source_repo: Some(".".to_owned()),
+            assignee: None,
+            blocked_by: blocked_by.clone(),
+            permission_gate: permission_gate(),
+        }];
+        let mut blocked = work_row("bd-overlap", "Permissioned row with unmet dependency");
+        blocked.blocked_by = blocked_by.clone();
+        tracker.blocked_local_rows = vec![blocked];
+        tracker.source_aware_queue_state = queue_state("blocked_or_permission_gated", Vec::new());
+
+        let report = build_claimability_plan_report(&config(), &tracker, None, None);
+
+        assert!(report.validation.valid, "{:#?}", report.validation.errors);
+        assert_eq!(
+            class_ids(&report, ClaimabilityClassification::PermissionGated),
+            vec!["bd-overlap"]
+        );
+        assert_eq!(
+            class_ids(&report, ClaimabilityClassification::Blocked),
+            Vec::<String>::new()
+        );
+        let row = report
+            .rows
+            .iter()
+            .find(|row| row.id == "bd-overlap")
+            .unwrap();
+        assert!(row.permission_gate.is_some());
+        assert_eq!(row.blocked_by, blocked_by);
+        assert!(row.reason.contains("blocked_by=bd-blocker"));
+        assert!(
+            row.next_safe_actions
+                .iter()
+                .any(|action| action.contains("complete blockers bd-blocker")),
+            "{:#?}",
+            row.next_safe_actions
+        );
+        assert!(
+            row.next_safe_actions
+                .iter()
+                .any(|action| action.contains("request exact ACK")),
+            "{:#?}",
+            row.next_safe_actions
+        );
+        assert!(
+            report
+                .next_safe_actions
+                .iter()
+                .any(|action| action.contains("clear blockers before claiming")),
+            "{:#?}",
+            report.next_safe_actions
+        );
+        assert!(
+            report
+                .next_safe_actions
+                .iter()
+                .any(|action| action.contains("do not run permission-gated rows")),
+            "{:#?}",
+            report.next_safe_actions
+        );
     }
 
     #[test]
