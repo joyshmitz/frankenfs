@@ -914,7 +914,7 @@ pub struct CrashReplayScheduleResult {
 }
 
 /// Config for the deterministic crash-replay suite.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrashReplaySuiteConfig {
     /// Number of schedules to generate and execute.
     pub schedule_count: u32,
@@ -1891,7 +1891,7 @@ pub fn run_crash_replay_suite(config: &CrashReplaySuiteConfig) -> Result<CrashRe
 // ── FSX-style deterministic stress harness ──────────────────────────────────
 
 /// Configuration for fsx-style stress testing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FsxStressConfig {
     /// Number of operations to execute.
     pub operation_count: u64,
@@ -3262,6 +3262,35 @@ mod tests {
             parsed.artifacts_dir.as_deref(),
             Some("artifacts/e2e/mounted_smoke")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn e2e_repro_config_json_shapes() -> Result<(), serde_json::Error> {
+        let crash_config = CrashReplaySuiteConfig {
+            schedule_count: 3,
+            min_operations: 8,
+            max_operations: 12,
+            base_seed: 0x00C0_FFEE_0000_0007,
+            output_dir: Some(PathBuf::from("artifacts/e2e/crash-replay")),
+        };
+        let crash_json = serde_json::to_string_pretty(&crash_config)?;
+        insta::assert_snapshot!("crash_replay_suite_config_json_shape", crash_json);
+        let parsed_crash: CrashReplaySuiteConfig = serde_json::from_str(&crash_json)?;
+        assert_eq!(parsed_crash, crash_config);
+
+        let fsx_config = FsxStressConfig {
+            operation_count: 1_000,
+            seed: 0xF5A5_7E55_0000_0001,
+            max_file_size_bytes: 2 * 1024 * 1024,
+            corruption_every_ops: 100,
+            full_verify_every_ops: 200,
+            output_dir: Some(PathBuf::from("artifacts/e2e/fsx")),
+        };
+        let fsx_json = serde_json::to_string_pretty(&fsx_config)?;
+        insta::assert_snapshot!("fsx_stress_config_json_shape", fsx_json);
+        let parsed_fsx: FsxStressConfig = serde_json::from_str(&fsx_json)?;
+        assert_eq!(parsed_fsx, fsx_config);
         Ok(())
     }
 

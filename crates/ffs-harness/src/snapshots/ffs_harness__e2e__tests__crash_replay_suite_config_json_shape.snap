@@ -1,0 +1,11 @@
+---
+source: crates/ffs-harness/src/e2e.rs
+expression: crash_json
+---
+{
+  "schedule_count": 3,
+  "min_operations": 8,
+  "max_operations": 12,
+  "base_seed": 54324593195745287,
+  "output_dir": "artifacts/e2e/crash-replay"
+}

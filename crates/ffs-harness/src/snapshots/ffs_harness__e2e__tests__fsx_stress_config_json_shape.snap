@@ -1,0 +1,12 @@
+---
+source: crates/ffs-harness/src/e2e.rs
+expression: fsx_json
+---
+{
+  "operation_count": 1000,
+  "seed": 17700692813986922497,
+  "max_file_size_bytes": 2097152,
+  "corruption_every_ops": 100,
+  "full_verify_every_ops": 200,
+  "output_dir": "artifacts/e2e/fsx"
+}
