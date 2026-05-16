@@ -1180,8 +1180,21 @@ fn ext4_dir_block_deleted_entry_fixture_conforms() {
     let (entries, tail) = parse_dir_block(&data, 4096).expect("parse dir block");
     assert!(tail.is_none(), "deleted-entry fixture should have no tail");
     assert_eq!(entries.len(), 3, "expected 3 live directory entries");
-    assert!(entries.iter().all(|e| e.inode != 0));
-    assert!(entries.iter().any(|e| e.name_str() == "hello.txt"));
+
+    let expected_entries = [
+        (2_u32, 12_u32, 1_u8, ffs_ondisk::Ext4FileType::Dir, "."),
+        (2, 12, 2, ffs_ondisk::Ext4FileType::Dir, ".."),
+        (11, 4_060, 9, ffs_ondisk::Ext4FileType::RegFile, "hello.txt"),
+    ];
+
+    for (entry, (inode, rec_len, name_len, file_type, name)) in entries.iter().zip(expected_entries)
+    {
+        assert_eq!(entry.inode, inode, "live dir entry inode drift");
+        assert_eq!(entry.rec_len, rec_len, "live dir entry rec_len drift");
+        assert_eq!(entry.name_len, name_len, "live dir entry name_len drift");
+        assert_eq!(entry.file_type, file_type, "live dir entry file_type drift");
+        assert_eq!(entry.name_str(), name, "live dir entry name drift");
+    }
 }
 
 #[test]
