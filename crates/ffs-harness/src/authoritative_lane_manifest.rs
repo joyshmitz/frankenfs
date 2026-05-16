@@ -629,6 +629,17 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_lane_manifest_json_shape() -> Result<(), serde_json::Error> {
+        let manifest = happy_manifest();
+        let json = serde_json::to_string_pretty(&manifest)?;
+        insta::assert_snapshot!("authoritative_lane_manifest_json_shape", json);
+
+        let decoded: AuthoritativeLaneManifest = serde_json::from_str(&json)?;
+        assert_eq!(decoded, manifest);
+        Ok(())
+    }
+
+    #[test]
     fn ci_environment_is_authoritative() {
         let mut manifest = happy_manifest();
         manifest.environment_kind = "ci".to_owned();

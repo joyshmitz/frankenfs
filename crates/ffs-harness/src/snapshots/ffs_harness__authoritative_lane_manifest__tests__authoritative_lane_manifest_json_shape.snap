@@ -1,0 +1,31 @@
+---
+source: crates/ffs-harness/src/authoritative_lane_manifest.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "manifest_id": "lane_001",
+  "bead_id": "bd-9vzzk",
+  "lane_id": "mounted_authoritative_v1",
+  "environment_kind": "rch_authoritative",
+  "probe_version": "fuse-capability-probe-v1",
+  "probe_at_unix": 1000,
+  "now_unix": 1500,
+  "freshness_ttl_seconds": 3600,
+  "kernel": "linux-6.x",
+  "fuse_kernel_version": "fuse-3.16",
+  "helper_binary_version": "fuser-0.16",
+  "expected_mount_options": [
+    "rw",
+    "default_permissions"
+  ],
+  "observed_mount_options": [
+    "rw",
+    "default_permissions"
+  ],
+  "required_matrix_id": "mounted_write_workload_matrix_v3",
+  "required_scenario_count": 10,
+  "observed_scenario_count": 12,
+  "mounted_logs_present": true,
+  "remediation_hint": "rerun fuse-capability-probe and the mounted matrix on a permissioned worker"
+}
