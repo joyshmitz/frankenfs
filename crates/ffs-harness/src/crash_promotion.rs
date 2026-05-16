@@ -639,16 +639,13 @@ mod tests {
     #[test]
     fn minimize_command_format() {
         let cmd = minimize_command("fuzz_ext4_metadata", Path::new("/tmp/crash-abc"));
-        assert!(cmd.contains("cargo fuzz tmin"));
-        assert!(cmd.contains("fuzz_ext4_metadata"));
-        assert!(cmd.contains("/tmp/crash-abc"));
+        insta::assert_snapshot!("minimize_command_format", cmd);
     }
 
     #[test]
     fn minimize_command_shell_quotes_untrusted_tokens() {
         let cmd = minimize_command("fuzz target", Path::new("/tmp/crash; touch injected"));
-        assert!(cmd.contains("'fuzz target'"));
-        assert!(cmd.contains("'/tmp/crash; touch injected'"));
+        insta::assert_snapshot!("minimize_command_shell_quotes_untrusted_tokens", cmd);
     }
 
     #[test]

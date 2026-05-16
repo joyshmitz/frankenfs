@@ -1,0 +1,5 @@
+---
+source: crates/ffs-harness/src/crash_promotion.rs
+expression: cmd
+---
+cargo fuzz tmin fuzz_ext4_metadata --fuzz-dir fuzz -- /tmp/crash-abc
