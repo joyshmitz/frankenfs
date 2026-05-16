@@ -1293,6 +1293,24 @@ fn apply_large_host_swarm_guard(
     recommendation: &mut ReadinessActionRecommendation,
     inputs: &[ReadinessActionInput],
 ) {
+    if !recommendation
+        .reproduction_command
+        .contains("FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host")
+    {
+        if is_upgrade_eligible(recommendation.public_claim_effect) {
+            recommendation.public_claim_effect = PublicClaimEffect::BlockUpgrade;
+        }
+        push_guard_diagnostic(
+            recommendation,
+            "planner-large-host-swarm-ack-token-missing",
+            ReadinessActionDiagnosticSeverity::Error,
+            ReadinessActionInputKind::HostCapabilityArtifact,
+            first_input_path(inputs, ReadinessActionInputKind::HostCapabilityArtifact),
+            "The large-host swarm command is missing the explicit real-run acknowledgement token.",
+            "include the exact large-host swarm acknowledgement before any real run",
+        );
+    }
+
     if !has_present_input_kind(inputs, ReadinessActionInputKind::HostCapabilityArtifact) {
         recommendation.public_claim_effect = PublicClaimEffect::DowngradeRequired;
         push_guard_diagnostic(
@@ -2479,6 +2497,42 @@ mod tests {
         let diagnostic_ids = diagnostic_ids(planned);
         assert!(diagnostic_ids.contains(&"planner-input-host-capability-manifest-missing"));
         assert!(diagnostic_ids.contains(&"planner-large-host-capability-missing"));
+        Ok(())
+    }
+
+    #[test]
+    fn planner_blocks_large_host_swarm_without_ack_token() -> Result<()> {
+        let mut recommendation = recommendation("refresh-large-host-swarm-campaign");
+        recommendation.title = "Refresh large-host swarm responsiveness evidence".to_owned();
+        recommendation.evidence_tier = ReadinessEvidenceTier::Authoritative;
+        recommendation.public_claim_effect = PublicClaimEffect::UpgradeEligible;
+        recommendation.reproduction_command =
+            "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 scripts/e2e/ffs_swarm_workload_harness_e2e.sh"
+                .to_owned();
+
+        let result = plan_readiness_actions(&planning_input(
+            vec![report(
+                vec![input(
+                    "host-capability-manifest",
+                    ReadinessActionInputKind::HostCapabilityArtifact,
+                    "artifacts/hosts/large_host_capability.json",
+                    ReadinessActionInputState::Present,
+                )],
+                vec![recommendation],
+            )],
+            Vec::new(),
+        ));
+        let planned = planned_action(&result, "refresh-large-host-swarm-campaign")?;
+
+        assert!(planned.ack_required);
+        assert_eq!(
+            planned.safety_class,
+            ReadinessActionSafetyClass::Permissioned
+        );
+        assert_eq!(planned.public_claim_effect, PublicClaimEffect::BlockUpgrade);
+        let diagnostic_ids = diagnostic_ids(planned);
+        assert!(diagnostic_ids.contains(&"planner-large-host-swarm-ack-token-missing"));
+        assert!(!diagnostic_ids.contains(&"planner-large-host-capability-missing"));
         Ok(())
     }
 
