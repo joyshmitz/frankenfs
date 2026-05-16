@@ -1,0 +1,14 @@
+---
+source: crates/ffs-harness/src/perf_comparison.rs
+expression: json
+---
+{
+  "operation_id": "metadata_parity_cli",
+  "recent_verdicts": [
+    "pass",
+    "fail",
+    "fail"
+  ],
+  "window_size": 3,
+  "required_count": 2
+}

@@ -664,7 +664,7 @@ impl RegressionComparator {
 ///
 /// Maintains a sliding window of recent verdicts and only confirms a
 /// regression when the threshold count is met within the window.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HysteresisTracker {
     /// Operation this tracker covers.
     pub operation_id: String,
@@ -1212,6 +1212,31 @@ mod tests {
         tracker.reset();
         let verdict = tracker.record(ComparisonVerdict::Fail);
         assert_eq!(verdict, HystereticVerdict::EarlyWarning);
+    }
+
+    #[test]
+    fn hysteresis_tracker_json_round_trip_preserves_window_order() -> Result<(), serde_json::Error>
+    {
+        let mut tracker = HysteresisTracker::new("metadata_parity_cli", 3, 2);
+        tracker.record(ComparisonVerdict::Warn);
+        tracker.record(ComparisonVerdict::Pass);
+        tracker.record(ComparisonVerdict::Fail);
+        tracker.record(ComparisonVerdict::Fail);
+
+        let json = serde_json::to_string_pretty(&tracker)?;
+        insta::assert_snapshot!("hysteresis_tracker_json_shape", json);
+        let parsed: HysteresisTracker = serde_json::from_str(&json)?;
+
+        assert_eq!(parsed, tracker);
+        assert_eq!(
+            parsed.recent_verdicts.into_iter().collect::<Vec<_>>(),
+            vec![
+                ComparisonVerdict::Pass,
+                ComparisonVerdict::Fail,
+                ComparisonVerdict::Fail
+            ]
+        );
+        Ok(())
     }
 
     // ── Report formatting tests ──────────────────────────────────────
