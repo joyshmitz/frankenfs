@@ -48,7 +48,7 @@ FFS_MOUNTED_WRITE_STDOUT_DIR="$STDOUT_DIR" \
 FFS_MOUNTED_WRITE_STDERR_DIR="$STDERR_DIR" \
 FFS_MOUNTED_WRITE_ONLY_MULTIHANDLE="${FFS_MOUNTED_WRITE_ONLY_MULTIHANDLE:-0}" \
 FFS_MOUNTED_WRITE_MULTIHANDLE_FILTER="${FFS_MOUNTED_WRITE_MULTIHANDLE_FILTER:-}" \
-python3 - <<'PY'
+python3 - <<'PY' | tee -a "$E2E_LOG_FILE"
 from __future__ import annotations
 
 import csv
@@ -345,10 +345,15 @@ if not only_multihandle:
     for scenario in matrix["scenarios"]:
         result = run_scenario(dict(scenario))
         results.append(result)
+        actual_outcome = str(result["actual_outcome"])
+        shared_outcome = "FAIL" if actual_outcome == "fail" else "PASS"
+        detail = f"actual_outcome={actual_outcome}"
+        skip_reason = str(result.get("skip_reason") or "")
+        if skip_reason:
+            safe_skip_reason = skip_reason.replace("\r", " ").replace("\n", " ").replace("|", "/")
+            detail = f"{detail} skip_reason={safe_skip_reason}"
         print(
-            "SCENARIO_RESULT|scenario_id={scenario_id}|outcome={actual_outcome}|detail={skip_reason}".format(
-                **result
-            )
+            f"SCENARIO_RESULT|scenario_id={result['scenario_id']}|outcome={shared_outcome}|detail={detail}"
         )
 
 
