@@ -7144,7 +7144,8 @@
       "required_categories": [
         "happy",
         "corruption",
-        "recovery"
+        "recovery",
+        "error"
       ],
       "scenarios": [
         {
@@ -7176,6 +7177,24 @@
           "category": "recovery",
           "status": "active",
           "evidence": "repair_recovery_evidence_ledger_valid"
+        },
+        {
+          "id": "repair_recovery_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_recovery_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "repair_recovery_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_recovery_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "repair_recovery_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_recovery_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },
