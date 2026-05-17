@@ -657,6 +657,20 @@ host-skip rationale visible. Replay commands are recorded as RCH cargo-test
 commands for reproducibility; permissioned mounted mutation remains outside
 this gate until an explicit operator-approved lane produces real artifacts.
 
+When RCH capacity is unavailable, use the no-worker wrapper self-check rather
+than a local cargo fallback:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_CHAOS_REPLAY_LAB_SELF_CHECK=1 \
+./scripts/e2e/ffs_chaos_replay_lab_e2e.sh
+```
+
+The self-check uses a stubbed `rch` binary to prove the wrapper parses valid
+JSON and Markdown validator output, rejects the invalid-lab diagnostic, and
+preserves the shared `RCH_LOCAL_FALLBACK_REJECTED` marker. It does not run
+cargo, mounted lanes, xfstests, crash mutation, or permissioned campaigns.
+
 ## Swarm Workload Harness Contract
 
 The 64-core/256GB swarm workload harness plan lives in:
