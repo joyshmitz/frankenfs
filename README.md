@@ -1418,7 +1418,7 @@ In addition to the structured ledger, FrankenFS uses the `tracing` crate for liv
 RUST_LOG=ffs_core=debug,ffs_repair=trace,ffs_mvcc=info cargo run -p ffs-cli -- mount IMAGE MOUNT
 ```
 
-The `tracing-subscriber` integration supports JSON output for machine-readable logs (`RUST_LOG_STYLE=json`), useful when shipping to centralized observability stacks.
+The `tracing-subscriber` integration supports JSON output for machine-readable logs via the `--log-format json` CLI flag or the `FFS_LOG_FORMAT=json` environment variable (precedence: `--log-format` > `FFS_LOG_FORMAT` > `human`), useful when shipping to centralized observability stacks.
 
 ---
 
@@ -2218,9 +2218,10 @@ fn parse_superblock(image_bytes: &[u8]) -> Result<Ext4Superblock> {
 RUST_LOG=ffs_core=debug,ffs_repair=trace,ffs_mvcc=info \
   cargo run -p ffs-cli -- mount IMAGE MOUNT --rw
 
-# JSON-formatted logs for centralized ingestion
-RUST_LOG=ffs_core=info RUST_LOG_STYLE=json \
-  cargo run -p ffs-cli -- mount IMAGE MOUNT --rw 2> ffs.log.json
+# JSON-formatted logs for centralized ingestion (either flag or env var works;
+# --log-format wins over FFS_LOG_FORMAT, which wins over the default of 'human').
+RUST_LOG=ffs_core=info \
+  cargo run -p ffs-cli -- --log-format json mount IMAGE MOUNT --rw 2> ffs.log.json
 ```
 
 Every async operation creates a `tracing` span carrying:
