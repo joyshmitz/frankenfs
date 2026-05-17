@@ -367,6 +367,20 @@ unsafe-to-repair classifications. Adversarial and unsafe-to-repair rows must
 stay explicit until a permissioned calibration lane records authoritative
 recovery evidence.
 
+When RCH capacity is unavailable, use the no-worker wrapper self-check rather
+than a local cargo fallback:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_FAULT_INJECTION_CORPUS_SELF_CHECK=1 \
+./scripts/e2e/ffs_fault_injection_corpus_e2e.sh
+```
+
+The self-check uses a stubbed `rch` binary to prove the wrapper parses valid
+JSON and Markdown validator output, rejects the invalid-corpus diagnostic, and
+preserves the shared `RCH_LOCAL_FALLBACK_REJECTED` marker. It does not run
+cargo, mounted lanes, xfstests, repair mutation, or permissioned campaigns.
+
 ## Repair Corpus Contract
 
 The repair chain-of-custody corpus lives in:
