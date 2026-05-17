@@ -185,6 +185,10 @@ use ffs_harness::{
         evaluate_proof_overhead_budget, fail_on_proof_overhead_budget_errors,
         load_observed_proof_metrics, load_proof_overhead_budget_config,
     },
+    rch_capacity_preflight::{
+        fail_on_rch_capacity_preflight_errors, load_rch_capacity_preflight_report,
+        render_rch_capacity_preflight_markdown, validate_rch_capacity_preflight_report,
+    },
     readiness_action_autopilot::{
         ReadinessActionDryRunMetadata, ReadinessActionDryRunOutputPath,
         ReadinessActionDryRunReport, ReadinessActionPlanningInput,
@@ -593,6 +597,7 @@ fn run() -> Result<()> {
         Some("validate-tracker-source-hygiene") => validate_tracker_source_hygiene_cmd(&args[1..]),
         Some("claimability-plan") => claimability_plan_cmd(&args[1..]),
         Some("rch-proof-ledger") => rch_proof_ledger_cmd(&args[1..]),
+        Some("validate-rch-capacity-preflight") => validate_rch_capacity_preflight_cmd(&args[1..]),
         Some("validate-fuzz-smoke") => validate_fuzz_smoke_cmd(&args[1..]),
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
         Some("adaptive-runtime-runner") => adaptive_runtime_runner_cmd(&args[1..]),
@@ -3204,6 +3209,78 @@ fn rch_proof_ledger_cmd(args: &[String]) -> Result<()> {
 fn print_rch_proof_ledger_usage() {
     println!(
         "Usage: ffs-harness rch-proof-ledger --transcript FILE [--command-arg ARG ...] [--cwd DIR] [--env NAME ...] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn validate_rch_capacity_preflight_cmd(args: &[String]) -> Result<()> {
+    let mut report_path: Option<String> = None;
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ReadinessReportFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--report" => {
+                i += 1;
+                report_path = Some(args.get(i).context("--report requires a path")?.to_owned());
+            }
+            "--format" => {
+                i += 1;
+                format = parse_readiness_report_format(
+                    args.get(i).context("--format requires json or markdown")?,
+                )?;
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_rch_capacity_preflight_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-rch-capacity-preflight argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let report_path = report_path.context("--report is required")?;
+    let source_report = load_rch_capacity_preflight_report(&report_path)?;
+    let validation = validate_rch_capacity_preflight_report(&source_report, report_path);
+    let markdown = render_rch_capacity_preflight_markdown(&validation);
+    let output = match format {
+        ReadinessReportFormat::Json => serde_json::to_string_pretty(&validation)?,
+        ReadinessReportFormat::Markdown => markdown.clone(),
+    };
+
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "RCH capacity preflight validation written: {path} valid={} verdict={}",
+            validation.valid, validation.capacity_verdict
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = summary_out_path {
+        write_text_file(Path::new(&path), &format!("{markdown}\n"))?;
+    }
+
+    fail_on_rch_capacity_preflight_errors(&validation)
+}
+
+fn print_rch_capacity_preflight_usage() {
+    println!(
+        "Usage: ffs-harness validate-rch-capacity-preflight --report FILE [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
 }
 
@@ -9345,6 +9422,9 @@ fn print_usage_commands() {
     print_report_schema_inventory_usage_summary();
     println!(
         "  ffs-harness rch-proof-ledger --transcript FILE [--command-arg ARG ...] [--cwd DIR] [--env NAME ...] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+    println!(
+        "  ffs-harness validate-rch-capacity-preflight --report FILE [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
         "  ffs-harness validate-remediation-catalog [--catalog FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"

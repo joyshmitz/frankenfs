@@ -53,6 +53,7 @@ pub mod performance_delta_closeout;
 pub mod permissioned_campaign_broker;
 pub mod proof_bundle;
 pub mod proof_overhead_budget;
+pub mod rch_capacity_preflight;
 pub mod readiness_action_autopilot;
 pub mod readiness_dashboard;
 pub mod readiness_lab;
