@@ -57,6 +57,10 @@ NON_MUTATING_FALLBACK_SELF_CHECK_LOG="${E2E_LOG_DIR}/tracker_source_hygiene_non_
 PERMISSION_GATED_BLOCKED_SELF_CHECK=1
 PERMISSION_GATED_BLOCKED_FIXTURE="$E2E_TEMP_DIR/tracker_source_hygiene_permission_gated_blocked.jsonl"
 PERMISSION_GATED_BLOCKED_SELF_CHECK_LOG="${E2E_LOG_DIR}/tracker_source_hygiene_permission_gated_blocked_self_check.log"
+PERMISSION_ACK_SELF_CHECK=1
+PERMISSION_ACK_XFSTESTS_SELF_CHECK_LOG="${E2E_LOG_DIR}/tracker_source_hygiene_permission_ack_xfstests_self_check.log"
+PERMISSION_ACK_SWARM_FIXTURE="$E2E_TEMP_DIR/tracker_source_hygiene_permission_ack_swarm.jsonl"
+PERMISSION_ACK_SWARM_SELF_CHECK_LOG="${E2E_LOG_DIR}/tracker_source_hygiene_permission_ack_swarm_self_check.log"
 
 case "${TRACKER_SOURCE_HYGIENE_STRICT:-0}" in
     1|true|TRUE|yes|YES)
@@ -82,6 +86,11 @@ esac
 case "${TRACKER_SOURCE_HYGIENE_PERMISSION_GATED_BLOCKED_SELF_CHECK:-1}" in
     0|false|FALSE|no|NO)
         PERMISSION_GATED_BLOCKED_SELF_CHECK=0
+        ;;
+esac
+case "${TRACKER_SOURCE_HYGIENE_PERMISSION_ACK_SELF_CHECK:-1}" in
+    0|false|FALSE|no|NO)
+        PERMISSION_ACK_SELF_CHECK=0
         ;;
 esac
 
@@ -845,6 +854,118 @@ if [[ "$DEFAULT_FIXTURE_SELF_CHECK" -eq 1 \
         scenario_result "tracker_source_hygiene_default_fixture_golden_self_check" "PASS" "log=$FIXTURE_SELF_CHECK_LOG"
     else
         scenario_result "tracker_source_hygiene_default_fixture_golden_self_check" "FAIL" "log=$FIXTURE_SELF_CHECK_LOG"
+    fi
+fi
+
+if [[ "$PERMISSION_ACK_SELF_CHECK" -eq 1 \
+    && -z "${TRACKER_SOURCE_HYGIENE_ISSUES:-}" \
+    && -z "$EXPECTED_GOLDEN" \
+    && "$STRICT_MODE" -eq 0 ]]; then
+    e2e_step "Permission ACK fixture self-check"
+    PERMISSION_ACK_CHECK_FAILED=0
+    PERMISSION_ACK_DETAIL=""
+
+    if TRACKER_SOURCE_HYGIENE_DEFAULT_FIXTURE_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_NON_MUTATING_FALLBACK_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_PERMISSION_GATED_BLOCKED_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_PERMISSION_ACK_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_ISSUES="$DEFAULT_FIXTURE_ISSUES" \
+        TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=6 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=27 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_READY=3 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED=0 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_NONCLAIMABLE=3 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_IN_PROGRESS=2 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_STALE_IN_PROGRESS=1 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_IN_PROGRESS=2 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_STALE_IN_PROGRESS=1 \
+        TRACKER_SOURCE_HYGIENE_NOW_EPOCH=2000000000 \
+        TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS=3600 \
+        XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices \
+        "$REPO_ROOT/scripts/e2e/ffs_tracker_source_hygiene_e2e.sh" \
+        >"$PERMISSION_ACK_XFSTESTS_SELF_CHECK_LOG" 2>&1; then
+        PERMISSION_ACK_XFSTESTS_REPORT="$(
+            awk -F'detail=report=' \
+                '/scenario_id=tracker_source_hygiene_report_emitted/ && /outcome=PASS/ { print $2; exit }' \
+                "$PERMISSION_ACK_XFSTESTS_SELF_CHECK_LOG"
+        )"
+        if [[ -n "$PERMISSION_ACK_XFSTESTS_REPORT" ]] \
+            && jq -e '
+                (.source_aware_queue_state.claimable_ids == [
+                    "bd-fixture-permissioned",
+                    "bd-fixture-ready",
+                    "bd-fixture-blocker"
+                ])
+                and (.source_aware_queue_state.permission_gated_ids == [])
+                and (.source_aware_queue_state.blocked_local_ids == [
+                    "bd-fixture-permissioned-blocked",
+                    "bd-fixture-blocked"
+                ])
+                and (.source_aware_queue_state.local_nonclaimable_ids == [
+                    "bd-fixture-epic",
+                    "bd-fixture-permissioned-blocked",
+                    "bd-fixture-blocked"
+                ])
+                and ([
+                    .local_nonclaimable_rows[]
+                    | select(.id == "bd-fixture-permissioned-blocked")
+                    | .reason
+                ] == ["blocked"])
+            ' "$PERMISSION_ACK_XFSTESTS_REPORT" >/dev/null; then
+            PERMISSION_ACK_DETAIL="${PERMISSION_ACK_DETAIL}xfstests_report=$PERMISSION_ACK_XFSTESTS_REPORT "
+        else
+            PERMISSION_ACK_CHECK_FAILED=1
+            PERMISSION_ACK_DETAIL="${PERMISSION_ACK_DETAIL}xfstests_report=${PERMISSION_ACK_XFSTESTS_REPORT:-missing} "
+        fi
+    else
+        PERMISSION_ACK_CHECK_FAILED=1
+        PERMISSION_ACK_DETAIL="${PERMISSION_ACK_DETAIL}xfstests_log=$PERMISSION_ACK_XFSTESTS_SELF_CHECK_LOG "
+    fi
+
+    cat >"$PERMISSION_ACK_SWARM_FIXTURE" <<'JSONL'
+{"id":"bd-swarm","title":"permissioned large-host swarm campaign","description":"requires FFS_SWARM_WORKLOAD_REAL_RUN_ACK before using a large host","status":"open","priority":1}
+JSONL
+
+    if TRACKER_SOURCE_HYGIENE_DEFAULT_FIXTURE_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_NON_MUTATING_FALLBACK_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_PERMISSION_GATED_BLOCKED_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_PERMISSION_ACK_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_ISSUES="$PERMISSION_ACK_SWARM_FIXTURE" \
+        TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=1 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=0 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_READY=1 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED=0 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_NONCLAIMABLE=0 \
+        FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 \
+        FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host \
+        "$REPO_ROOT/scripts/e2e/ffs_tracker_source_hygiene_e2e.sh" \
+        >"$PERMISSION_ACK_SWARM_SELF_CHECK_LOG" 2>&1; then
+        PERMISSION_ACK_SWARM_REPORT="$(
+            awk -F'detail=report=' \
+                '/scenario_id=tracker_source_hygiene_report_emitted/ && /outcome=PASS/ { print $2; exit }' \
+                "$PERMISSION_ACK_SWARM_SELF_CHECK_LOG"
+        )"
+        if [[ -n "$PERMISSION_ACK_SWARM_REPORT" ]] \
+            && jq -e '
+                (.source_aware_queue_state.claimable_ids == ["bd-swarm"])
+                and (.source_aware_queue_state.permission_gated_ids == [])
+                and (.permission_gated_rows == [])
+                and (.source_aware_queue_state.verdict == "ready")
+            ' "$PERMISSION_ACK_SWARM_REPORT" >/dev/null; then
+            PERMISSION_ACK_DETAIL="${PERMISSION_ACK_DETAIL}swarm_report=$PERMISSION_ACK_SWARM_REPORT"
+        else
+            PERMISSION_ACK_CHECK_FAILED=1
+            PERMISSION_ACK_DETAIL="${PERMISSION_ACK_DETAIL}swarm_report=${PERMISSION_ACK_SWARM_REPORT:-missing}"
+        fi
+    else
+        PERMISSION_ACK_CHECK_FAILED=1
+        PERMISSION_ACK_DETAIL="${PERMISSION_ACK_DETAIL}swarm_log=$PERMISSION_ACK_SWARM_SELF_CHECK_LOG"
+    fi
+
+    if [[ "$PERMISSION_ACK_CHECK_FAILED" -eq 0 ]]; then
+        scenario_result "tracker_source_hygiene_permission_ack_self_check" "PASS" "${PERMISSION_ACK_DETAIL% }"
+    else
+        scenario_result "tracker_source_hygiene_permission_ack_self_check" "FAIL" "${PERMISSION_ACK_DETAIL% }"
     fi
 fi
 
