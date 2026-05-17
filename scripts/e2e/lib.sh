@@ -1257,6 +1257,44 @@ e2e_marker_outcome_is_valid() {
 }
 
 #######################################
+# Return invalid reason for malformed marker extension fields, if any.
+# Arguments:
+#   $1 - full SCENARIO_RESULT marker line
+#######################################
+e2e_marker_extension_invalid_reason() {
+    local line="$1"
+    local -a fields
+    local idx field key
+
+    IFS='|' read -r -a fields <<<"$line"
+    for ((idx = 1; idx < ${#fields[@]}; idx++)); do
+        field="${fields[$idx]}"
+        case "$field" in
+            scenario_id=*|outcome=*)
+                ;;
+            detail=*)
+                # Detail finality and embedded separators are validated by the
+                # detail_count/detail_contains_separator checks.
+                break
+                ;;
+            *=*)
+                key="${field%%=*}"
+                if [[ -z "$key" ]]; then
+                    printf '%s\n' "malformed_extension"
+                    return 0
+                fi
+                ;;
+            *)
+                printf '%s\n' "malformed_extension"
+                return 0
+                ;;
+        esac
+    done
+
+    printf '\n'
+}
+
+#######################################
 # Emit a machine-parseable JSON summary alongside run.log
 # Reads SCENARIO_RESULT markers from the log and writes result.json
 # Arguments: (none — uses globals)
@@ -1308,7 +1346,7 @@ e2e_emit_json_summary() {
         scenario_id=$(echo "$line" | sed -n 's/.*scenario_id=\([^|]*\).*/\1/p')
         outcome=$(echo "$line" | sed -n 's/.*outcome=\([^|]*\).*/\1/p')
 
-        local invalid_reason
+        local invalid_reason extension_invalid_reason
         invalid_reason=""
         if [[ "$scenario_id_count" -eq 0 ]]; then
             invalid_reason="${invalid_reason}${invalid_reason:+,}missing_scenario_id"
@@ -1335,6 +1373,10 @@ e2e_emit_json_summary() {
             if [[ "$detail" == *"|"* ]]; then
                 invalid_reason="${invalid_reason}${invalid_reason:+,}detail_contains_separator"
             fi
+        fi
+        extension_invalid_reason=$(e2e_marker_extension_invalid_reason "$line")
+        if [[ -n "$extension_invalid_reason" ]]; then
+            invalid_reason="${invalid_reason}${invalid_reason:+,}${extension_invalid_reason}"
         fi
 
         if [[ -n "$invalid_reason" ]]; then

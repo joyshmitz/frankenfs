@@ -264,6 +264,8 @@ MARKER_PREFIX="SCENARIO_RESULT|scenario_id="
     printf '%s%s|outcome=PASS|outcome=FAIL\n' "$MARKER_PREFIX" "duplicate_outcome_probe"
     printf '%s%s|outcome=PASS|detail=one|detail=two\n' "$MARKER_PREFIX" "duplicate_detail_probe"
     printf '%s%s|outcome=PASS|detail=one|two\n' "$MARKER_PREFIX" "detail_separator_probe"
+    printf '%s%s|outcome=PASS|bad_field\n' "$MARKER_PREFIX" "malformed_extension_probe"
+    printf '%s%s|outcome=PASS|=bad\n' "$MARKER_PREFIX" "empty_extension_key_probe"
     printf 'RCH_LOCAL_FALLBACK_REJECTED|log=/tmp/rch-local.log|command=cargo test\n'
 } >"$SUMMARY_PROBE_LOG"
 
@@ -283,8 +285,8 @@ if (
         and (.scenarios[1].scenario_id == "valid_detail_escape_probe")
         and (.scenarios[1].outcome == "PASS")
         and (.scenarios[1].detail == "json_escape_\"probe\"\\path")
-        and (.invalid_scenario_marker_count == 11)
-        and (.invalid_scenario_markers | length == 11)
+        and (.invalid_scenario_marker_count == 13)
+        and (.invalid_scenario_markers | length == 13)
         and (.rch_local_fallback_rejected_count == 1)
         and (.rch_local_fallback_rejections | length == 1)
         and (.rch_local_fallback_rejections[0].marker == "RCH_LOCAL_FALLBACK_REJECTED|log=/tmp/rch-local.log|command=cargo test")
@@ -298,6 +300,8 @@ if (
             "invalid_outcome",
             "invalid_scenario_id",
             "invalid_scenario_id",
+            "malformed_extension",
+            "malformed_extension",
             "missing_outcome",
             "missing_scenario_id"
         ])

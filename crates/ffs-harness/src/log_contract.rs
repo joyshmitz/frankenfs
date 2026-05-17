@@ -310,6 +310,11 @@ pub mod e2e_marker {
                     return None;
                 }
                 detail = Some(val);
+            } else {
+                let (key, _) = part.split_once('=')?;
+                if key.is_empty() {
+                    return None;
+                }
             }
         }
 
@@ -616,6 +621,22 @@ mod tests {
                 "SCENARIO_RESULT|scenario_id=valid_test_marker|outcome=PASS|detail=one|two"
             )
             .is_none()
+        );
+        assert!(
+            e2e_marker::parse_marker(
+                "SCENARIO_RESULT|scenario_id=valid_test_marker|outcome=PASS|bad_field"
+            )
+            .is_none()
+        );
+        assert!(
+            e2e_marker::parse_marker(
+                "SCENARIO_RESULT|scenario_id=valid_test_marker|outcome=PASS|=bad"
+            )
+            .is_none()
+        );
+        assert!(
+            e2e_marker::parse_marker("SCENARIO_RESULT|scenario_id=valid_test_marker|outcome=PASS|")
+                .is_none()
         );
     }
 
