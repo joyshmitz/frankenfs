@@ -993,7 +993,7 @@ fn is_valid_source_hash(value: &str) -> bool {
 
 fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<String>) {
     let excluded = entry.excluded_globs.join("\n");
-    let missing_target_paths = !excluded.contains("target") && !excluded.contains(".rch-target");
+    let missing_target_paths = !has_build_target_exclusions(&excluded);
     match entry.source_family.as_str() {
         "readme_status_docs"
             if !excluded.contains("_generated") || !excluded.contains("_drafts") =>
@@ -1039,6 +1039,12 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
     }
 }
 
+fn has_build_target_exclusions(excluded: &str) -> bool {
+    excluded.contains("target")
+        && excluded.contains(".rch-target/**")
+        && excluded.contains(".rch-target-*")
+}
+
 fn validate_crate_manifest_and_benchmark_sources(
     entry: &SourceScopeEntry,
     excluded: &str,
@@ -1056,7 +1062,7 @@ fn validate_crate_manifest_and_benchmark_sources(
             ));
         }
     }
-    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+    if !has_build_target_exclusions(excluded) {
         errors.push(format!(
             "source `{}` must exclude build target paths from crate manifests and benchmark sources",
             entry.id
@@ -1087,7 +1093,7 @@ fn validate_checked_in_evidence_artifacts(
             ));
         }
     }
-    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+    if !has_build_target_exclusions(excluded) {
         errors.push(format!(
             "source `{}` must exclude build target paths from checked-in evidence artifacts",
             entry.id
@@ -1118,7 +1124,7 @@ fn validate_fuzz_campaign_artifacts(
             ));
         }
     }
-    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+    if !has_build_target_exclusions(excluded) {
         errors.push(format!(
             "source `{}` must exclude build target paths from fuzz campaign artifacts",
             entry.id
@@ -1145,7 +1151,7 @@ fn validate_agent_workflow_docs(
             ));
         }
     }
-    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+    if !has_build_target_exclusions(excluded) {
         errors.push(format!(
             "source `{}` must exclude build target paths from agent workflow docs",
             entry.id
@@ -1170,7 +1176,7 @@ fn validate_architecture_design_docs(
             ));
         }
     }
-    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+    if !has_build_target_exclusions(excluded) {
         errors.push(format!(
             "source `{}` must exclude build target paths from architecture design docs",
             entry.id
@@ -1201,7 +1207,7 @@ fn validate_operational_evidence_artifacts(
             ));
         }
     }
-    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+    if !has_build_target_exclusions(excluded) {
         errors.push(format!(
             "source `{}` must exclude build target paths from operational evidence artifacts",
             entry.id
@@ -1232,7 +1238,7 @@ fn validate_test_control_artifacts(
             ));
         }
     }
-    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+    if !has_build_target_exclusions(excluded) {
         errors.push(format!(
             "source `{}` must exclude build target paths from test control artifacts",
             entry.id
@@ -1263,7 +1269,7 @@ fn validate_operator_runbook_docs(
             ));
         }
     }
-    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+    if !has_build_target_exclusions(excluded) {
         errors.push(format!(
             "source `{}` must exclude build target paths from operator runbook docs",
             entry.id
@@ -1288,7 +1294,7 @@ fn validate_conformance_fixture_artifacts(
             ));
         }
     }
-    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+    if !has_build_target_exclusions(excluded) {
         errors.push(format!(
             "source `{}` must exclude build target paths from conformance fixture artifacts",
             entry.id
@@ -1324,7 +1330,7 @@ fn validate_performance_control_artifacts(
             ));
         }
     }
-    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+    if !has_build_target_exclusions(excluded) {
         errors.push(format!(
             "source `{}` must exclude build target paths from performance control artifacts",
             entry.id
@@ -1349,7 +1355,7 @@ fn validate_operational_scripts_exclusions(
     excluded: &str,
     errors: &mut Vec<String>,
 ) {
-    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+    if !has_build_target_exclusions(excluded) {
         errors.push(format!(
             "source `{}` must exclude build target paths from operational script source scope",
             entry.id
@@ -1395,7 +1401,7 @@ fn validate_fuzz_orchestration_exclusions(
     excluded: &str,
     errors: &mut Vec<String>,
 ) {
-    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+    if !has_build_target_exclusions(excluded) {
         errors.push(format!(
             "source `{}` must exclude build target paths from fuzz orchestration source scope",
             entry.id
@@ -1414,7 +1420,7 @@ fn validate_fuzz_targets_exclusions(
     excluded: &str,
     errors: &mut Vec<String>,
 ) {
-    if !excluded.contains("target") || !excluded.contains(".rch-target") {
+    if !has_build_target_exclusions(excluded) {
         errors.push(format!(
             "source `{}` must exclude build target paths from fuzz target source scope",
             entry.id
@@ -3855,6 +3861,52 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .errors
                 .iter()
                 .any(|err| err.contains("dedicated harness script source scope"))
+        );
+    }
+
+    #[test]
+    fn rch_worker_target_glob_exclusion_is_validated() {
+        let mut manifest = fixture_manifest();
+        let tests = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "tests")
+            .expect("tests source exists");
+        tests
+            .excluded_globs
+            .retain(|glob| !glob.contains(".rch-target-*"));
+
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("build target paths from test source scope")),
+            "missing worker-suffixed RCH target glob should be rejected: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn rch_exact_target_glob_exclusion_is_validated() {
+        let mut manifest = fixture_manifest();
+        let tests = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "tests")
+            .expect("tests source exists");
+        tests
+            .excluded_globs
+            .retain(|glob| !glob.contains(".rch-target/**"));
+
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("build target paths from test source scope")),
+            "missing exact RCH target glob should be rejected: {:?}",
+            report.errors
         );
     }
 
