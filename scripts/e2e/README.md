@@ -621,9 +621,11 @@ claim, use a permissioned large-host runner and preserve a validated
 `swarm_workload_harness` proof-bundle lane with `host_class`,
 `manifest_hash`, `freshness`, `release_claim`, `validator_report`, raw logs,
 and artifact paths. `release_claim=authoritative_large_host` is the only
-workload-harness release-claim state that may upgrade public wording; stale,
-missing, unsupported, `small_host_smoke`, or `capability_downgraded_smoke`
-evidence remains downgrade/blocker evidence.
+workload-harness release-claim state that may upgrade public wording;
+`release_claim=small_host_smoke` and
+`release_claim=capability_downgraded_smoke` cannot upgrade `swarm.responsiveness`.
+Stale, missing, unsupported, or small-host-only swarm evidence remains
+downgrade/blocker evidence.
 
 ## Swarm Operator Report Contract
 
