@@ -1417,6 +1417,24 @@
           "category": "recovery",
           "status": "active",
           "evidence": "minimization_status"
+        },
+        {
+          "id": "fuzz_smoke_fixture_valid_report_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuzz_smoke_fixture_valid_report_self_check|outcome=PASS"
+        },
+        {
+          "id": "fuzz_smoke_fixture_unowned_failure_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuzz_smoke_fixture_unowned_failure_self_check|outcome=PASS"
+        },
+        {
+          "id": "fuzz_smoke_fixture_local_fallback_marker_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuzz_smoke_fixture_local_fallback_marker_self_check|outcome=PASS"
         }
       ]
     },

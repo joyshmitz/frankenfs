@@ -133,6 +133,23 @@ Read source-scope reports with this split in mind:
   readiness gaps from untracked-only evidence, and do not mutate foreign tracker
   rows while handling source-scope cleanup.
 
+## Fuzz Smoke QA Artifact Wrapper
+
+`./scripts/e2e/ffs_fuzz_smoke_e2e.sh` runs the deterministic fuzz-smoke harness
+through `rch` and wraps the harness JSON into a shared QA artifact. When RCH
+capacity is unavailable, use the local wrapper self-check instead of local
+cargo:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_FUZZ_SMOKE_SELF_CHECK=1 \
+./scripts/e2e/ffs_fuzz_smoke_e2e.sh
+```
+
+The self-check uses a stubbed `rch` binary to prove valid harness JSON produces
+a valid QA artifact, unowned failing seeds are rejected, and local fallback
+emits the shared `RCH_LOCAL_FALLBACK_REJECTED` marker. It does not run cargo.
+
 ## xfstests Failure Triage Artifacts
 
 `./scripts/e2e/ffs_xfstests_e2e.sh` emits a baseline manifest plus derived

@@ -9,9 +9,18 @@ export REPO_ROOT
 
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
+scenario_result() {
+    local scenario_id="$1"
+    local outcome="$2"
+    local detail="$3"
+    e2e_log "SCENARIO_RESULT|scenario_id=${scenario_id}|outcome=${outcome}|detail=${detail}"
+}
+
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_fuzz_smoke}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_CAPTURE_VISIBILITY="${FFS_FUZZ_SMOKE_RCH_VISIBILITY:-summary}"
+SELF_CHECK="${FFS_FUZZ_SMOKE_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_FUZZ_SMOKE_SKIP_SELF_CHECK:-0}"
 
 e2e_init "ffs_fuzz_smoke"
 
@@ -20,6 +29,203 @@ REPORT_JSON="$E2E_LOG_DIR/fuzz_smoke_report.json"
 QA_ARTIFACT_JSON="$E2E_LOG_DIR/fuzz_smoke_qa_artifact.json"
 STDOUT_PATH="$E2E_LOG_DIR/fuzz_smoke.stdout"
 STDERR_PATH="$E2E_LOG_DIR/fuzz_smoke.stderr"
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case_name="${FFS_FUZZ_SMOKE_FIXTURE_CASE:-valid}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+
+emit_valid_report() {
+    cat <<'JSON'
+{
+  "valid": true,
+  "schema_version": 1,
+  "corpus_id": "frankenfs_deterministic_fuzz_smoke_v1",
+  "bead_id": "bd-u8hx5",
+  "corpus_version": "fixture",
+  "seed_ids": ["fixture_valid_seed"],
+  "corpus_checksum": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "target_summary": {"ext4_superblock": 1},
+  "outcome_summary": {"accepted": 1},
+  "errors": [],
+  "seed_results": [
+    {
+      "seed_id": "fixture_valid_seed",
+      "sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "source": "tests/fuzz_corpus/README.md",
+      "provenance": "fixture valid seed",
+      "byte_len": 4,
+      "duration_ms": 1,
+      "resource_budget": {"max_input_bytes": 16, "max_duration_ms": 10, "max_artifact_bytes": 128},
+      "minimization_status": "minimized",
+      "replay_command": "fixture replay",
+      "quarantine_status": "none",
+      "class_matched": true,
+      "error_detail_matched": true,
+      "corpus_checksum_matched": true,
+      "timed_out": false,
+      "actual_class": "accepted"
+    }
+  ]
+}
+JSON
+}
+
+emit_unowned_failure_report() {
+    cat <<'JSON'
+{
+  "valid": true,
+  "schema_version": 1,
+  "corpus_id": "frankenfs_deterministic_fuzz_smoke_v1",
+  "bead_id": "bd-u8hx5",
+  "corpus_version": "fixture",
+  "seed_ids": ["fixture_unowned_failure"],
+  "corpus_checksum": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  "target_summary": {"ext4_superblock": 1},
+  "outcome_summary": {"panic": 1},
+  "errors": [],
+  "seed_results": [
+    {
+      "seed_id": "fixture_unowned_failure",
+      "sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "source": "tests/fuzz_corpus/README.md",
+      "provenance": "fixture unowned failure seed",
+      "byte_len": 4,
+      "duration_ms": 1,
+      "resource_budget": {"max_input_bytes": 16, "max_duration_ms": 10, "max_artifact_bytes": 128},
+      "minimization_status": "",
+      "replay_command": "",
+      "follow_up_bead": null,
+      "quarantine_status": "none",
+      "quarantine_owning_bead": null,
+      "class_matched": false,
+      "error_detail_matched": true,
+      "corpus_checksum_matched": true,
+      "timed_out": false,
+      "actual_class": "panic"
+    }
+  ]
+}
+JSON
+}
+
+case "$case_name" in
+    valid)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        emit_valid_report
+        exit 0
+        ;;
+    unowned_failure)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        emit_unowned_failure_report
+        exit 0
+        ;;
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        emit_valid_report
+        exit 1
+        ;;
+    *)
+        echo "unknown fixture case: $case_name" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_path() {
+    local log_path="$1"
+    local key="$2"
+    sed -n "s/.*${key}=//p" "$log_path" | tail -n 1
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/fuzz_smoke_fixture_${fixture_case}.log"
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_FUZZ_SMOKE_SELF_CHECK=0 \
+        FFS_FUZZ_SMOKE_SKIP_SELF_CHECK=1 \
+        FFS_FUZZ_SMOKE_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        "$REPO_ROOT/scripts/e2e/ffs_fuzz_smoke_e2e.sh" >"$child_log" 2>&1
+    local child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic fuzz-smoke wrapper self-check"
+    local stub_path child_info child_status child_log artifact_path result_path
+    stub_path="$E2E_LOG_DIR/rch-fuzz-smoke-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "valid")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    artifact_path="$(extract_child_path "$child_log" "artifact")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$artifact_path" ]] \
+        && jq -e '.valid == true and .seed_ids == ["fixture_valid_seed"] and (.errors | length == 0)' "$artifact_path" >/dev/null; then
+        scenario_result "fuzz_smoke_fixture_valid_report_self_check" "PASS" "artifact=${artifact_path}"
+    else
+        scenario_result "fuzz_smoke_fixture_valid_report_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "fuzz-smoke valid fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "unowned_failure")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    artifact_path="$(extract_child_path "$child_log" "artifact")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$artifact_path" ]] \
+        && jq -e '.valid == false and (.errors[] | contains("unowned fuzz-smoke failures: fixture_unowned_failure"))' "$artifact_path" >/dev/null; then
+        scenario_result "fuzz_smoke_fixture_unowned_failure_self_check" "PASS" "artifact=${artifact_path}"
+    else
+        scenario_result "fuzz_smoke_fixture_unowned_failure_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "fuzz-smoke unowned failure fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.rch_local_fallback_rejected_count == 1 and .verdict == "FAIL"' "$result_path" >/dev/null; then
+        scenario_result "fuzz_smoke_fixture_local_fallback_marker_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "fuzz_smoke_fixture_local_fallback_marker_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "fuzz-smoke local fallback fixture self-check failed"
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass "fuzz-smoke wrapper self-check"
+    exit 0
+fi
 
 COMMAND=(
     "${RCH_BIN:-rch}"
