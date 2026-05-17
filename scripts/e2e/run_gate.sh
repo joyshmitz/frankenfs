@@ -102,8 +102,8 @@ if [[ "$USE_CATALOG" == "true" ]] || [[ ${#SCRIPTS[@]} -eq 0 ]]; then
 fi
 
 if [[ ${#SCRIPTS[@]} -eq 0 ]]; then
-    echo "No scripts to run."
-    exit 0
+    echo "ERROR: no scripts resolved for gate" >&2
+    exit 1
 fi
 
 # Gate-level output directory
