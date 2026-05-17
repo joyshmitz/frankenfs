@@ -483,6 +483,22 @@ cargo run -p ffs-harness -- validate-mounted-checkpoint-survivor \
   --summary-out artifacts/mounted-checkpoint-survivor/summary.md
 ```
 
+When RCH capacity is unavailable, use the no-worker wrapper self-check rather
+than a local cargo fallback:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_MOUNTED_CHECKPOINT_SURVIVOR_SELF_CHECK=1 \
+./scripts/e2e/ffs_mounted_checkpoint_survivor_e2e.sh
+```
+
+The self-check uses a stubbed `rch` binary to prove the wrapper extracts JSON
+validator output, preserves lifecycle and partial-artifact coverage checks,
+rejects invalid matrix input, verifies Markdown/docs and focused unit-test
+output, and preserves the shared `RCH_LOCAL_FALLBACK_REJECTED` marker. It does
+not run cargo, mounted lanes, process termination, xfstests, fuzz/performance
+campaigns, or permissioned campaigns.
+
 This matrix is a support-envelope contract for mounted lifecycle evidence, not
 permission to kill mounted writers or claim crash-recovery parity. It must keep
 clean unmount, pre-fsync termination, post-fsync termination, fsyncdir
