@@ -942,7 +942,7 @@ Each inode includes a CRC32C checksum (`i_checksum_lo` + `i_checksum_hi`) comput
 1. **Block scan.** Read every block in the group; compute CRC32C (compat) or BLAKE3 (native).
 2. **Mismatch detection.** Compare against stored checksum; any difference is flagged.
 3. **Severity classification.** Single-bit flips vs multi-byte vs unreadable.
-4. **Evidence logging.** Emit `CorruptionDetected` with block ID, expected/actual checksums, severity.
+4. **Evidence logging.** Emit `CorruptionDetected` with `corruption_kind` (e.g., `"checksum_mismatch"`), `severity` (`"error"`, `"critical"`), `blocks_affected`, and a human-readable `detail`.
 
 ### Recovery orchestration
 
@@ -1360,28 +1360,37 @@ A small illustrative sample (formatting wrapped for readability; the file itself
 
 ```jsonl
 {"timestamp_ns":1717023401123456000,"event_type":"corruption_detected","block_group":1247,
- "corruption":{"block":981234,"expected_crc":"0x9F3A1C00","actual_crc":"0xD714BB02","severity":"single_bit"}}
+ "corruption":{"blocks_affected":1,"corruption_kind":"checksum_mismatch","severity":"error",
+               "detail":"single-bit flip at block 981234"}}
 
 {"timestamp_ns":1717023401129880000,"event_type":"repair_attempted","block_group":1247,
- "repair":{"block":981234,"source_count":256,"repair_symbol_count":13,"policy":"adaptive_hybrid"}}
+ "repair":{"generation":42,"corrupt_count":1,"symbols_used":256,"symbols_available":269,
+           "decoder_stats":{"peeled":253,"inactivated":3,"gauss_ops":12,"pivots_selected":3},
+           "verify_pass":false}}
 
 {"timestamp_ns":1717023401141204000,"event_type":"repair_succeeded","block_group":1247,
- "repair":{"block":981234,"decoder_iterations":2,"symbols_consumed":256,"writeback_route":"mvcc_serializer"}}
+ "repair":{"generation":42,"corrupt_count":1,"symbols_used":256,"symbols_available":269,
+           "decoder_stats":{"peeled":253,"inactivated":3,"gauss_ops":12,"pivots_selected":3},
+           "verify_pass":true}}
 
 {"timestamp_ns":1717023420009122000,"event_type":"scrub_cycle_complete","block_group":1247,
- "scrub_cycle":{"blocks_scanned":32768,"mismatches":1,"refreshes":1,"duration_ms":18886}}
+ "scrub_cycle":{"blocks_scanned":32768,"blocks_corrupt":1,"blocks_io_error":0,"findings_count":1}}
 
 {"timestamp_ns":1717023420301772000,"event_type":"policy_decision","block_group":1247,
- "policy":{"chosen_overhead":0.054,"expected_loss":1.2e-7,"posterior_mode":1.7e-3}}
+ "policy":{"overhead_ratio":0.054,"expected_loss":1.2e-7,"corruption_posterior":1.7e-3,
+           "posterior_alpha":1.0,"posterior_beta":100.0,"risk_bound":1.0e-6,
+           "symbols_selected":3686,"metadata_group":false,
+           "decision":"increase overhead from 0.05 to 0.054"}}
 
 {"timestamp_ns":1717023421118554000,"event_type":"policy_switched","block_group":0,
- "policy_switched":{"from":"safe_merge","to":"strict","conflict_rate_ema":0.012}}
+ "policy_switched":{"from_policy":"safe_merge","to_policy":"strict",
+                    "expected_loss_delta":2.4e-3,"trigger_reason":"contention_rate_change"}}
 
 {"timestamp_ns":1717023421804119000,"event_type":"backpressure_activated","block_group":2048,
- "backpressure_activated":{"trigger":"dirty_high_watermark","dirty_ratio":0.812}}
+ "backpressure_activated":{"dirty_ratio":0.812,"threshold":0.80}}
 
 {"timestamp_ns":1717023421999000000,"event_type":"txn_aborted","block_group":0,
- "txn_aborted":{"tx":482,"reason":"fcw_conflict"}}
+ "txn_aborted":{"txn_id":482,"reason":"fcw_conflict","read_set_size":4,"write_set_size":2}}
 ```
 
 The exact field set in each detail struct (`CorruptionDetail`, `RepairDetail`, `ScrubCycleDetail`, …) is defined in `crates/ffs-repair/src/evidence.rs` and snapshot-pinned via `insta`. The ledger is line-oriented and append-only, so `jq`, `awk`, or any log-shipping pipeline (Vector, Fluent Bit, Promtail) can consume it without changes. The CLI's `--preset` flags wrap common `jq` filters for operator use.
@@ -1393,17 +1402,20 @@ The exact field set in each detail struct (`CorruptionDetail`, `RepairDetail`, `
 jq -r 'select(.event_type=="corruption_detected") | .block_group' repair.jsonl \
   | sort | uniq -c | sort -rn | head -10
 
-# Distribution of repair decoder iterations
-jq -r 'select(.event_type=="repair_succeeded") | .repair.decoder_iterations' repair.jsonl \
+# Distribution of repair symbol-consumption counts
+jq -r 'select(.event_type=="repair_succeeded") | .repair.symbols_used' repair.jsonl \
   | sort -n | uniq -c
 
 # Adaptive policy switch timeline (tab-separated)
 jq -r 'select(.event_type=="policy_switched")
-       | [.timestamp_ns, .policy_switched.from, .policy_switched.to, .policy_switched.conflict_rate_ema]
+       | [.timestamp_ns, .policy_switched.from_policy, .policy_switched.to_policy, .policy_switched.expected_loss_delta]
        | @tsv' repair.jsonl
 
-# All events touching a specific block
-jq -r 'select((.corruption.block // .repair.block) == 981234)' repair.jsonl
+# All events in a specific block group
+jq -r 'select(.block_group == 1247)' repair.jsonl
+
+# All corruption-detected events whose detail string mentions a given block
+jq -r 'select(.event_type=="corruption_detected" and (.corruption.detail|test("981234")))' repair.jsonl
 
 # Abort reasons breakdown
 jq -r 'select(.event_type=="txn_aborted") | .txn_aborted.reason' repair.jsonl \
@@ -1604,7 +1616,7 @@ prior     :  p ~ Beta(α₀, β₀)         # uninformative default α₀=β₀=
 posterior :  p ~ Beta(α₀ + c, β₀ + n − c)
 ```
 
-where `n` is the number of blocks scanned in the latest cycle and `c` is the number of corrupt blocks. The posterior mean is `(α₀ + c) / (α₀ + β₀ + n)`; the posterior mode (used by the autopilot) is `(α₀ + c − 1) / (α₀ + β₀ + n − 2)` for `α + c > 1`.
+where `n` is the number of blocks scanned in the latest cycle and `c` is the number of corrupt blocks. The posterior mean is `(α₀ + c) / (α₀ + β₀ + n)`, and that is the point estimate the autopilot uses (`DurabilityAutopilot::posterior_mean()`). The posterior mode `(α₀ + c − 1) / (α₀ + β₀ + n − 2)` for `α + c > 1` is the maximum-a-posteriori alternative; FrankenFS chooses the mean because it is well-defined for all `α, β > 0` and matches the integrated expected-loss calculation.
 
 **Beta-Binomial tail.** The probability of seeing more than `k` corruptions in a future group of `m` blocks, integrating over the posterior, is the Beta-Binomial tail:
 
@@ -1620,7 +1632,7 @@ where `B(·,·)` is the Beta function. The autopilot computes this for each cand
 E[loss(o)] = P(unrecoverable | o, posterior) · data_loss_cost  +  o · storage_cost
 ```
 
-The autopilot evaluates this for `o ∈ [min_overhead, max_overhead]` on a 15-point grid (default 3–10%) and picks the minimizer. Metadata-critical groups apply a 2× multiplier to `data_loss_cost`, biasing toward higher overhead.
+The autopilot evaluates this for `o ∈ [min_overhead, max_overhead]` on a fine candidate grid stepping by `CANDIDATE_STEP = 0.001` (about 70 candidates over the default 3–10% range) and picks the minimizer. Metadata-critical groups apply a 2× multiplier to `data_loss_cost`, biasing toward higher overhead.
 
 **Convergence properties.** Because Beta is conjugate to Bernoulli, the posterior updates are O(1) per observation. The posterior concentrates at rate `1/√n` (standard for Beta-Binomial models), and the autopilot's overhead choice becomes monotone in observed corruption density once `n` exceeds the first-update threshold.
 
@@ -1966,7 +1978,8 @@ jq -r '
   select(.event_type == "repair_attempted"
       or .event_type == "repair_succeeded"
       or .event_type == "repair_failed")
-  | [.timestamp_ns, .event_type, .block_group, .repair.block] | @tsv' \
+  | [.timestamp_ns, .event_type, .block_group, .repair.generation,
+     .repair.corrupt_count, .repair.symbols_used, .repair.verify_pass] | @tsv' \
     /var/log/ffs-home.scrub.jsonl
 ```
 
@@ -2019,7 +2032,8 @@ MOUNT_PID=$!
 
 # 8. If you see any CorruptionDetected events, classify them by severity.
 jq -r 'select(.event_type=="corruption_detected")
-       | [.block_group, .corruption.block, .corruption.severity] | @tsv' \
+       | [.block_group, .corruption.blocks_affected,
+          .corruption.corruption_kind, .corruption.severity] | @tsv' \
     /reports/disk.scrub.jsonl \
   | sort | uniq -c | sort -rn
 ```
@@ -2152,7 +2166,9 @@ fn count_corruptions(path: &Path) -> Result<usize> {
         if rec.event_type == EvidenceEventType::CorruptionDetected {
             // detail lives at rec.corruption (Option<CorruptionDetail>)
             if let Some(c) = &rec.corruption {
-                eprintln!("  block {} severity {:?}", c.block, c.severity);
+                eprintln!("  group {} blocks_affected={} severity={} kind={} detail={}",
+                          rec.block_group, c.blocks_affected, c.severity,
+                          c.corruption_kind, c.detail);
             }
             count += 1;
         }
@@ -2308,7 +2324,7 @@ jq -r 'select(.block_group==1247)' repair.jsonl
 
 # Adaptive policy decisions over time
 jq -r 'select(.event_type=="policy_decision")
-       | [.timestamp_ns, .policy.chosen_overhead, .policy.expected_loss] | @tsv' repair.jsonl \
+       | [.timestamp_ns, .policy.overhead_ratio, .policy.expected_loss] | @tsv' repair.jsonl \
    | column -t
 
 # Filter for "Replay anomalies" preset
@@ -2721,7 +2737,7 @@ Filesystems fail in many ways; here is a structured map of what FrankenFS does w
 | Failure class | Trigger | What FrankenFS does | Operator-visible signal |
 |---|---|---|---|
 | **Single bit-flip in data block** | Cosmic ray / flaky storage | Scrub detects on next pass; if `--background-repair` enabled, RaptorQ decoder reconstructs and writes back | `CorruptionDetected` → `RepairSucceeded` in ledger |
-| **Multi-byte corruption in data block** | Hardware fault | Same as above, classified `severity: multi_byte` | Same plus elevated severity field |
+| **Multi-byte corruption in data block** | Hardware fault | Same as above, classified `severity: "critical"` (vs `"error"` for single-bit) | Elevated severity field on the `CorruptionDetected` record |
 | **Block group fully corrupt beyond repair overhead** | Mass corruption exceeding RaptorQ tolerance | Decode fails; `RepairFailed` event recorded; affected block returns EIO on read | `RepairFailed` plus `EIO` on read |
 | **Single bit-flip in inode** | As above on an inode block | CRC32C mismatch on inode read → `FfsError::Corruption { block }`; auto-repair if enabled | Inode op returns `EIO` |
 | **Journal needs recovery on mount** | Unclean shutdown of ext4 image | JBD2 replay on mount; fast-commit replay if applicable | `WalRecovery` event; mount succeeds |
@@ -2738,7 +2754,7 @@ Filesystems fail in many ways; here is a structured map of what FrankenFS does w
 | **WAL write failure mid-commit** | Backing image I/O error | Commit aborts; WAL writer logs error; no partial commit visible | `TxnAborted { reason: durability_failure }` |
 | **Kill -9 of the mount process** | Sudden process death | Kernel sees daemon disappear; mount becomes "transport endpoint not connected"; image is consistent (writes that completed `fsync` persist) | Caller must `fusermount3 -u` and remount |
 | **OOM kill of the mount process** | Memory pressure on host | Same as kill -9 | Same |
-| **Backing image truncated externally** | Operator did something they shouldn't | Subsequent block reads beyond `block_count` return `EIO`; mount may fail to unmount cleanly | `EIO` on affected reads; ledger records `CorruptionDetected` with severity field |
+| **Backing image truncated externally** | Operator did something they shouldn't | Subsequent block reads beyond `block_count` return `EIO`; mount may fail to unmount cleanly | `EIO` on affected reads; ledger records `CorruptionDetected` with `severity: "critical"` |
 | **Backing image deleted while mounted** | Same as above | Open file descriptor keeps the inode alive on Unix; behavior is "the mount continues until process exit" | None until unmount |
 | **Hostile image (resource exhaustion)** | Malicious fixture | Resource caps enforced; quarantine record in ledger | Threat-model scenario classification |
 | **Writeback-cache opt-in with stale gate artifact** | `--writeback-cache-gate` JSON is stale | Validator refuses; mount aborts | Specific scenario id mismatch error |
