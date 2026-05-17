@@ -5,6 +5,7 @@
 #   scripts/verify_golden.sh           # verify all
 #   scripts/verify_golden.sh --update  # regenerate checksums after intentional changes
 #   scripts/verify_golden.sh --checksums-only
+#   scripts/verify_golden.sh --self-check
 #
 # Exit codes:
 #   0 — all golden outputs intact
@@ -30,6 +31,7 @@ warn() { echo -e "${YELLOW}WARN${NC} $1"; }
 
 FAILED=0
 CHECKSUMS_ONLY=0
+SELF_CHECK=0
 
 cargo_exec() {
     rch exec -- cargo "$@"
@@ -41,11 +43,14 @@ Usage:
   scripts/verify_golden.sh
   scripts/verify_golden.sh --update
   scripts/verify_golden.sh --checksums-only
+  scripts/verify_golden.sh --self-check
 
 Options:
   --update          Regenerate checksum manifests after intentional changes.
   --checksums-only  Verify checksum manifests, git-tracked entries, and
                     tracked artifact coverage only.
+  --self-check      Run local fail-closed checks for --checksums-only using
+                    temporary copied fixtures. Does not run cargo.
 EOF
 }
 
@@ -181,11 +186,107 @@ verify_tracked_artifacts_listed() {
     fi
 }
 
+copy_self_check_workspace() {
+    local case_name="$1"
+    local root
+
+    root="$(mktemp -d -t "ffs_verify_golden_${case_name}_XXXXXX")"
+    mkdir -p "$root/scripts" "$root/conformance" "$root/tests/fixtures"
+
+    cp scripts/verify_golden.sh "$root/scripts/verify_golden.sh"
+    cp -a conformance/fixtures "$root/conformance/fixtures"
+    cp -a conformance/golden "$root/conformance/golden"
+    cp -a tests/fixtures/golden "$root/tests/fixtures/golden"
+
+    git -C "$root" init -q
+    git -C "$root" add \
+        scripts/verify_golden.sh \
+        conformance/fixtures \
+        conformance/golden \
+        tests/fixtures/golden
+
+    printf '%s\n' "$root"
+}
+
+run_self_check_clean_copy() {
+    local root log
+
+    root="$(copy_self_check_workspace clean)"
+    log="$root/verify_golden_clean.log"
+
+    if (cd "$root" && bash scripts/verify_golden.sh --checksums-only >"$log" 2>&1); then
+        pass "self-check clean copied checksum workspace passes"
+    else
+        fail "self-check clean copied checksum workspace failed; log=$log"
+    fi
+    echo "  preserved: $root"
+}
+
+run_self_check_corrupted_artifact() {
+    local root log
+
+    root="$(copy_self_check_workspace corrupt)"
+    log="$root/verify_golden_corrupt.log"
+    printf '\n# self-check checksum corruption\n' >>"$root/conformance/fixtures/ext4_superblock_sparse.json"
+
+    if (cd "$root" && bash scripts/verify_golden.sh --checksums-only >"$log" 2>&1); then
+        fail "self-check corrupted listed artifact was accepted; log=$log"
+    elif grep -q "MISMATCH" "$log"; then
+        pass "self-check corrupted listed artifact fails checksum gate"
+    else
+        fail "self-check corrupted listed artifact failed without mismatch diagnostic; log=$log"
+    fi
+    echo "  preserved: $root"
+}
+
+run_self_check_untracked_manifest_entry() {
+    local root log
+
+    root="$(copy_self_check_workspace untracked)"
+    log="$root/verify_golden_untracked.log"
+    (
+        cd "$root/conformance/fixtures"
+        printf '{"self_check":"untracked"}\n' > untracked_self_check.json
+        sha256sum untracked_self_check.json >> checksums.sha256
+    )
+
+    if (cd "$root" && bash scripts/verify_golden.sh --checksums-only >"$log" 2>&1); then
+        fail "self-check untracked manifest entry was accepted; log=$log"
+    elif grep -q "untracked or ignored file" "$log"; then
+        pass "self-check untracked manifest entry fails tracked-entry gate"
+    else
+        fail "self-check untracked manifest entry failed without tracked-entry diagnostic; log=$log"
+    fi
+    echo "  preserved: $root"
+}
+
+run_self_check() {
+    echo "=== Golden Checksum Gate Self-Check ==="
+    echo ""
+    echo "Temporary workspaces are preserved for inspection."
+    echo ""
+
+    run_self_check_clean_copy
+    run_self_check_corrupted_artifact
+    run_self_check_untracked_manifest_entry
+
+    echo ""
+    if [ "$FAILED" -eq 0 ]; then
+        echo -e "${GREEN}Golden checksum gate self-check passed.${NC}"
+        exit 0
+    fi
+    echo -e "${RED}Golden checksum gate self-check FAILED.${NC}"
+    exit 1
+}
+
 case "${1:-}" in
     "")
         ;;
     "--checksums-only")
         CHECKSUMS_ONLY=1
+        ;;
+    "--self-check")
+        SELF_CHECK=1
         ;;
     "--update")
         echo "Updating checksums..."
@@ -200,6 +301,10 @@ case "${1:-}" in
         exit 2
         ;;
 esac
+
+if [ "$SELF_CHECK" -eq 1 ]; then
+    run_self_check
+fi
 
 echo "=== Golden Output Verification ==="
 echo ""
