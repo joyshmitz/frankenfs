@@ -1611,6 +1611,9 @@ fn collect_untracked_matched_paths(
     let mut matched_paths = Vec::new();
     for relative_path in untracked_files {
         let relative = normalize_path(relative_path);
+        if source_scope_path_is_pruned(&relative) {
+            continue;
+        }
         let Some(included_glob) = entry
             .included_globs
             .iter()
@@ -1826,11 +1829,15 @@ fn collect_workspace_files_from(
 fn should_skip_walk_dir(root: &Path, path: &Path) -> bool {
     let relative = path.strip_prefix(root).unwrap_or(path);
     let relative = normalize_path(relative);
-    matches!(
-        relative.as_str(),
-        ".git" | "target" | ".rch-target" | "data/tmp" | "vendor"
-    ) || relative.starts_with("data/tmp/")
-        || relative.starts_with("vendor/")
+    source_scope_path_is_pruned(&relative)
+}
+
+fn source_scope_path_is_pruned(relative: &str) -> bool {
+    let first_segment = relative.split('/').next().unwrap_or(relative);
+    matches!(first_segment, ".git" | "target" | ".rch-target" | "vendor")
+        || first_segment.starts_with(".rch-target-")
+        || relative == "data/tmp"
+        || relative.starts_with("data/tmp/")
 }
 
 fn normalize_path(path: &Path) -> String {
@@ -4479,6 +4486,98 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
                 .iter()
                 .all(|path| !path.source_path.starts_with("vendor/")),
             "vendor tree should be pruned before source matching"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn source_scope_scan_skips_rch_worker_target_tree_before_matching() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        populate_source_scope_workspace(temp.path())?;
+        write_sample_file(
+            temp.path(),
+            ".rch-target-ts2-job-123/crates/ffs-harness/src/lib.rs",
+            "// TODO generated RCH target should not enter project source scope\n",
+        )?;
+
+        let mut manifest = fixture_manifest();
+        let tests = manifest
+            .sources
+            .iter_mut()
+            .find(|source| source.source_family == "tests")
+            .expect("tests source exists");
+        tests.included_globs = vec!["**/*.rs".to_owned()];
+
+        let report = scan_source_scope_manifest(
+            &manifest,
+            temp.path(),
+            None,
+            "cargo run -p ffs-harness -- validate-source-scope-manifest",
+        );
+        assert!(report.valid, "scan should validate: {:?}", report.errors);
+        assert_eq!(report.workspace_file_source, "filesystem_fallback");
+        let tests = report
+            .scanned_sources
+            .iter()
+            .find(|source| source.source_family == "tests")
+            .expect("tests source scanned");
+        assert!(
+            tests
+                .matched_paths
+                .iter()
+                .all(|path| !path.source_path.starts_with(".rch-target-")),
+            "RCH worker target tree should be pruned before source matching"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn source_scope_scan_excludes_untracked_rch_worker_target_tree() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        populate_source_scope_workspace(temp.path())?;
+        index_source_scope_workspace(temp.path())?;
+        write_sample_file(
+            temp.path(),
+            ".rch-target-ts2-job-123/crates/ffs-harness/src/lib.rs",
+            "// TODO generated RCH target should not enter project source scope\n",
+        )?;
+
+        let mut manifest = fixture_manifest();
+        let tests = manifest
+            .sources
+            .iter_mut()
+            .find(|source| source.source_family == "tests")
+            .expect("tests source exists");
+        tests.included_globs = vec!["**/*.rs".to_owned()];
+
+        let report = scan_source_scope_manifest(
+            &manifest,
+            temp.path(),
+            None,
+            "cargo run -p ffs-harness -- validate-source-scope-manifest",
+        );
+        assert!(report.valid, "scan should validate: {:?}", report.errors);
+        assert_eq!(report.workspace_file_source, "git_ls_files");
+        let tests = report
+            .scanned_sources
+            .iter()
+            .find(|source| source.source_family == "tests")
+            .expect("tests source scanned");
+        assert!(
+            tests
+                .untracked_matched_paths
+                .iter()
+                .all(|path| !path.source_path.starts_with(".rch-target-")),
+            "RCH worker target tree should be pruned before untracked source diagnostics"
+        );
+        assert!(
+            report.scanned_sources.iter().all(|source| {
+                source
+                    .untracked_matched_paths
+                    .iter()
+                    .all(|path| !path.source_path.starts_with(".rch-target-"))
+            }),
+            "no source family should report untracked RCH target files"
         );
         Ok(())
     }
