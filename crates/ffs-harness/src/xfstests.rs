@@ -4000,6 +4000,71 @@ generic/001  2s ... pass\n";
         );
     }
 
+    /// bd-rchk0.349 - exact-output snapshot for mixed xfstests baseline
+    /// dispositions. The not-run snapshot above pins resume/interruption
+    /// wording; this fixture pins disposition ordering and row formatting when
+    /// pass, fail, skip, not-run, interrupted, and resumed rows are present in
+    /// one baseline report.
+    #[test]
+    fn render_xfstests_baseline_markdown_mixed_dispositions_snapshot() {
+        const CANONICAL_RAW_LOG_HASH: &str =
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        let tmp = tempdir().expect("tempdir");
+        let raw = tmp.path().join("check.log");
+        fs::write(
+            &raw,
+            "generic/001 pass\n\
+generic/002 failed\n\
+generic/003 skipped\n\
+generic/004 not run\n\
+generic/005 interrupted\n\
+generic/006 resumed\n",
+        )
+        .expect("write raw log");
+
+        let mut passed = baseline_case("generic/001", XfstestsBaselineRowStatus::Passed);
+        passed.classification = "expected_pass".to_owned();
+        let mut failed = baseline_case("generic/002", XfstestsBaselineRowStatus::Failed);
+        failed.classification = "product_actionable".to_owned();
+        let mut skipped = baseline_case("generic/003", XfstestsBaselineRowStatus::Skipped);
+        skipped.classification = "environment_blocked".to_owned();
+        let mut not_run = baseline_case("generic/004", XfstestsBaselineRowStatus::NotRun);
+        not_run.classification = "harness_blocked".to_owned();
+        let mut interrupted = baseline_case("generic/005", XfstestsBaselineRowStatus::Interrupted);
+        interrupted.classification = "harness_blocked".to_owned();
+        let mut resumed = baseline_case("generic/006", XfstestsBaselineRowStatus::Resumed);
+        resumed.classification = "expected_pass".to_owned();
+
+        let manifest = manifest_with_cases(
+            &raw,
+            vec![passed, failed, skipped, not_run, interrupted, resumed],
+        );
+
+        let validation_errors = validate_xfstests_baseline_manifest(&manifest);
+        assert!(
+            validation_errors.is_empty(),
+            "unexpected baseline manifest errors: {validation_errors:?}"
+        );
+
+        let rendered_raw_hash = manifest
+            .cases
+            .first()
+            .expect("fixture has cases")
+            .raw_log_hash
+            .clone();
+        let markdown = render_xfstests_baseline_markdown(&manifest)
+            .replace(&rendered_raw_hash, CANONICAL_RAW_LOG_HASH);
+
+        assert!(markdown.contains("- failed: 1"));
+        assert!(markdown.contains("- resumed: 1"));
+        assert!(markdown.contains("generic/006"));
+        insta::assert_snapshot!(
+            "render_xfstests_baseline_markdown_mixed_dispositions",
+            markdown
+        );
+    }
+
     #[test]
     fn xfstests_baseline_manifest_json_shape() -> Result<()> {
         let tmp = tempdir()?;

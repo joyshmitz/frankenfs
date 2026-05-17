@@ -1,0 +1,31 @@
+---
+source: crates/ffs-harness/src/xfstests.rs
+expression: markdown
+---
+# xfstests baseline manifest `xfstests-baseline-test`
+
+- subset version: `xfstests-curated-v1`
+- environment manifest: `sha256:env` (fresh)
+- checkpoint: `checkpoint:001`
+- resume command: `XFSTESTS_MODE=run ./scripts/e2e/ffs_xfstests_e2e.sh`
+- cleanup status: `artifacts_preserved`
+
+## Dispositions
+
+- failed: 1
+- interrupted: 1
+- not_run: 1
+- passed: 1
+- resumed: 1
+- skipped: 1
+
+## Cases
+
+| Test | Status | Classification | Raw hash | Resume |
+|---|---|---|---|---|
+| generic/001 | passed | expected_pass | `sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` | `XFSTESTS_MODE=run ./scripts/e2e/ffs_xfstests_e2e.sh` |
+| generic/002 | failed | product_actionable | `sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` | `XFSTESTS_MODE=run ./scripts/e2e/ffs_xfstests_e2e.sh` |
+| generic/003 | skipped | environment_blocked | `sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` | `XFSTESTS_MODE=run ./scripts/e2e/ffs_xfstests_e2e.sh` |
+| generic/004 | not_run | harness_blocked | `sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` | `XFSTESTS_MODE=run ./scripts/e2e/ffs_xfstests_e2e.sh` |
+| generic/005 | interrupted | harness_blocked | `sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` | `XFSTESTS_MODE=run ./scripts/e2e/ffs_xfstests_e2e.sh` |
+| generic/006 | resumed | expected_pass | `sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` | `XFSTESTS_MODE=run ./scripts/e2e/ffs_xfstests_e2e.sh` |
