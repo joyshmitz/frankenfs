@@ -261,6 +261,21 @@ cargo run -p ffs-harness -- validate-workload-corpus \
   --summary-out artifacts/workload_corpus/summary.md
 ```
 
+When RCH capacity is unavailable, use the no-worker wrapper self-check rather
+than a local cargo fallback:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_WORKLOAD_CORPUS_SELF_CHECK=1 \
+./scripts/e2e/ffs_workload_corpus_e2e.sh
+```
+
+The self-check uses a stubbed `rch` binary to prove the wrapper extracts JSON
+validator output, preserves selected-scenario and proof-coverage checks,
+verifies invalid-variant unit output and docs, and preserves the shared
+`RCH_LOCAL_FALLBACK_REJECTED` marker. It does not run cargo, mounted lanes,
+xfstests, fuzz/performance campaigns, or permissioned campaigns.
+
 Every new corpus scenario must include:
 
 - `scenario_id`: stable lowercase snake-case with at least three segments.

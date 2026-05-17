@@ -6292,6 +6292,7 @@
       "script": "scripts/e2e/ffs_workload_corpus_e2e.sh",
       "required_categories": [
         "happy",
+        "edge",
         "error"
       ],
       "scenarios": [
@@ -6336,6 +6337,18 @@
           "category": "happy",
           "status": "active",
           "evidence": "scenario_result \"workload_corpus_unit_tests\" \"PASS\""
+        },
+        {
+          "id": "workload_corpus_fixture_complete_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "scenario_result \"workload_corpus_fixture_complete_self_check\" \"PASS\""
+        },
+        {
+          "id": "workload_corpus_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"workload_corpus_fixture_local_fallback_self_check\" \"PASS\""
         }
       ]
     },

@@ -17,6 +17,8 @@ RCH_BIN="${RCH_BIN:-rch}"
 RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_WORKLOAD_CORPUS_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_WORKLOAD_CORPUS_SKIP_SELF_CHECK:-0}"
 
 case ",${RCH_ENV_ALLOWLIST:-}," in
     *",CARGO_TARGET_DIR,"*) ;;
@@ -170,6 +172,201 @@ REPORT_JSON="$E2E_LOG_DIR/workload_corpus_report.json"
 VALIDATE_RAW="$E2E_LOG_DIR/workload_corpus_validate.raw"
 UNIT_LOG="$E2E_LOG_DIR/workload_corpus_unit_tests.log"
 UNIT_TESTS_OK=0
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_WORKLOAD_CORPUS_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+emit_valid_report() {
+    python3 - <<'PY'
+import json
+
+risks = ["data_loss", "tail_latency", "host_capability_ambiguity", "permission_boundary"]
+filesystems = ["ext4", "btrfs", "mixed"]
+consumers = ["invariant_oracle", "mounted_differential_oracle", "proof_bundle", "release_gate"]
+matrix = []
+for index in range(11):
+    scenario_id = f"workload_fixture_{index:02d}"
+    matrix.append({
+        "claim_id": f"claim_fixture_{index:02d}",
+        "scenario_id": scenario_id,
+        "user_risk": risks[index % len(risks)],
+        "risk_tier": "p1",
+        "filesystem_scope": filesystems[index % len(filesystems)],
+        "operation_class": "write_path",
+        "required_capabilities": ["rch_remote"],
+        "proof_consumers": [consumers[index % len(consumers)]],
+        "unit_test_obligations": ["workload_corpus"],
+        "e2e_obligations": ["ffs_workload_corpus_e2e"],
+        "expected_log_fields": ["scenario_id", "claim_id"],
+        "expected_artifact_fields": ["required", "result_json"],
+    })
+
+report = {
+    "valid": True,
+    "corpus_id": "frankenfs_p1_workload_corpus_v1",
+    "scenario_count": len(matrix),
+    "status_counts": {
+        "positive": 5,
+        "negative": 2,
+        "unsupported": 2,
+        "host_skip": 2,
+    },
+    "by_user_risk": {risk: 1 for risk in risks},
+    "by_filesystem_flavor": {filesystem: 1 for filesystem in filesystems},
+    "by_proof_consumer": {consumer: 1 for consumer in consumers},
+    "proof_bundle_coverage": {"ready": True},
+    "coverage_matrix": matrix,
+    "host_skip_scenarios": ["workload_fixture_03"],
+    "btrfs_default_permissions_scenarios": ["workload_fixture_04"],
+    "scenario_logs": [
+        {
+            "scenario_id": f"workload_fixture_{index:02d}",
+            "reproduction_command": "cargo run -p ffs-harness -- validate-workload-corpus",
+            "log_line": f"WORKLOAD_CORPUS_SCENARIO|scenario_id=workload_fixture_{index:02d}",
+        }
+        for index in range(3)
+    ],
+    "errors": [],
+}
+print(json.dumps(report, indent=2, sort_keys=True))
+PY
+}
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        ;;
+    *)
+        echo "unknown workload corpus fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+echo "[RCH] remote worker=fixture exit=0" >&2
+case "$command_text" in
+    *"cargo test -p ffs-harness --lib workload_corpus"*)
+        printf '%s\n' \
+            "test rejects_duplicate_scenario_ids ... ok" \
+            "test rejects_unknown_capability_tags ... ok" \
+            "test rejects_orphaned_high_risk_categories ... ok" \
+            "test rejects_user_visible_rows_without_e2e_lane ... ok" \
+            "test coverage_matrix_contains_user_risk_and_consumer_axes ... ok" \
+            "test rejects_missing_required_artifact_declarations ... ok" \
+            "test rejects_unsupported_without_classification ... ok" \
+            "test rejects_host_skip_without_host_capability ... ok"
+        exit 0
+        ;;
+    *"--select workload_editor_save_atomic_ext4"*)
+        echo "selected workload_editor_save_atomic_ext4 accepted"
+        exit 0
+        ;;
+    *)
+        emit_valid_report
+        exit 0
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/workload_corpus_fixture_${fixture_case}.log"
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_WORKLOAD_CORPUS_SELF_CHECK=0 \
+        FFS_WORKLOAD_CORPUS_SKIP_SELF_CHECK=1 \
+        FFS_WORKLOAD_CORPUS_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        "$REPO_ROOT/scripts/e2e/ffs_workload_corpus_e2e.sh" >"$child_log" 2>&1
+    local child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic workload corpus wrapper self-check"
+    local stub_path child_info child_status child_log result_path report_path
+    stub_path="$E2E_LOG_DIR/rch-workload-corpus-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    report_path="$(dirname "$result_path")/workload_corpus_report.json"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && [[ -f "$report_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and ([.scenarios[] | select(.scenario_id == "workload_corpus_validates" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "workload_corpus_selected_scenarios_checked" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "workload_corpus_proof_coverage" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "workload_corpus_invalid_variants_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "workload_corpus_docs_contract" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "workload_corpus_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null \
+        && jq -e '
+            .valid == true
+            and .scenario_count >= 11
+            and .proof_bundle_coverage.ready == true
+            and (.coverage_matrix | length) == .scenario_count
+            and (.host_skip_scenarios | length) > 0
+            and (.btrfs_default_permissions_scenarios | length) > 0
+        ' "$report_path" >/dev/null; then
+        scenario_result "workload_corpus_fixture_complete_self_check" "PASS" "result=${result_path} report=${report_path}"
+    else
+        scenario_result "workload_corpus_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "workload corpus complete fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "workload_corpus_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "workload_corpus_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "workload corpus local fallback fixture self-check failed"
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass "workload corpus wrapper self-check"
+    exit 0
+fi
 
 e2e_step "Scenario 1: workload corpus module and CLI are wired"
 if grep -q "pub mod workload_corpus" crates/ffs-harness/src/lib.rs \
