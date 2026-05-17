@@ -154,6 +154,20 @@ pub struct CoreMetricsSnapshot {
     pub stolen_to: u64,
 }
 
+/// Advisory work-stealing plan for one receiving core.
+///
+/// The dispatcher does not own caller request queues, so applying this plan is
+/// the caller's responsibility. `record_steal` records only metrics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StealPlan {
+    pub receiver_core: u32,
+    pub donor_core: u32,
+    pub receiver_pending: i64,
+    pub donor_pending: i64,
+    pub average_pending: f64,
+    pub transfer_count: u64,
+}
+
 impl CoreMetricsSnapshot {
     /// Cache hit rate as a fraction [0.0, 1.0].
     #[must_use]
@@ -274,6 +288,19 @@ pub struct PerCoreDispatcher {
 }
 
 impl PerCoreDispatcher {
+    fn pending_depth(&self, core_idx: usize) -> i64 {
+        self.core_metrics[core_idx]
+            .pending_requests
+            .load(Ordering::Relaxed)
+            .max(0)
+    }
+
+    fn pending_depths(&self) -> Vec<i64> {
+        (0..self.core_metrics.len())
+            .map(|idx| self.pending_depth(idx))
+            .collect()
+    }
+
     /// Create a new dispatcher with the given configuration.
     #[must_use]
     pub fn new(config: PerCoreConfig) -> Self {
@@ -311,42 +338,93 @@ impl PerCoreDispatcher {
 
     /// Check if work-stealing should be triggered for `core`.
     ///
-    /// Returns `true` if the core's queue depth (approximated by
-    /// request count) is below the average by more than the steal threshold.
+    /// Returns `true` when `steal_plan_for(core)` can name a deterministic
+    /// donor and bounded transfer count.
     #[must_use]
     pub fn should_steal(&self, core: u32) -> bool {
+        self.steal_plan_for(core).is_some()
+    }
+
+    /// Build an advisory plan for `receiver_core` to steal pending work.
+    ///
+    /// Donor selection is deterministic: choose the core with the highest
+    /// pending depth, breaking ties by the lowest core index. The transfer
+    /// count is half the pending-depth gap, rounded down and bounded to at
+    /// least one when stealing is justified. Pending depths are snapshots, so
+    /// callers should treat the plan as advisory and re-check their queues
+    /// before moving work.
+    #[must_use]
+    pub fn steal_plan_for(&self, receiver_core: u32) -> Option<StealPlan> {
         let n = self.core_metrics.len();
         if n < 2 {
-            return false;
+            return None;
         }
-        let core_idx = core as usize;
-        if core_idx >= n {
-            return false;
+        let receiver_idx = receiver_core as usize;
+        if receiver_idx >= n {
+            return None;
         }
 
-        let total: i64 = self
-            .core_metrics
-            .iter()
-            .map(|m| m.pending_requests.load(Ordering::Relaxed))
-            .fold(0, i64::saturating_add);
+        let pending = self.pending_depths();
+        let total: i64 = pending.iter().copied().fold(0, i64::saturating_add);
 
         // Do not steal if the system is essentially idle.
         // We need at least an average of 1 request per core to justify the
         // cross-core synchronization overhead of stealing.
         let Ok(core_count) = i64::try_from(n) else {
-            return false;
+            return None;
         };
         if total < core_count {
-            return false;
+            return None;
         }
 
         let avg = total as f64 / n as f64;
-        let mine = self.core_metrics[core_idx]
-            .pending_requests
-            .load(Ordering::Relaxed) as f64;
+        let receiver_pending = pending[receiver_idx];
+        let mine = receiver_pending as f64;
 
         // This core is idle relative to average queue depth — try to steal work.
-        mine < avg / self.config.normalized_steal_threshold()
+        if mine >= avg / self.config.normalized_steal_threshold() {
+            return None;
+        }
+
+        let (donor_idx, &donor_pending) = pending
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx != receiver_idx)
+            .max_by_key(|(idx, depth)| (**depth, std::cmp::Reverse(*idx)))?;
+
+        if donor_pending <= receiver_pending {
+            return None;
+        }
+
+        let pending_gap = donor_pending.saturating_sub(receiver_pending);
+        let transfer_count = u64::try_from((pending_gap / 2).max(1)).ok()?;
+        let donor_core = u32::try_from(donor_idx).ok()?;
+
+        Some(StealPlan {
+            receiver_core,
+            donor_core,
+            receiver_pending,
+            donor_pending,
+            average_pending: avg,
+            transfer_count,
+        })
+    }
+
+    /// Record that a caller applied a previously computed steal plan.
+    ///
+    /// This only updates observability counters. It deliberately leaves
+    /// pending-request depths unchanged because request queues are owned by the
+    /// caller, not by this advisory dispatcher.
+    pub fn record_steal(&self, plan: &StealPlan) {
+        let Some(donor) = self.core_metrics(plan.donor_core) else {
+            return;
+        };
+        let Some(receiver) = self.core_metrics(plan.receiver_core) else {
+            return;
+        };
+
+        CoreMetrics::saturating_add_u64(&donor.stolen_from, plan.transfer_count);
+        CoreMetrics::saturating_add_u64(&receiver.stolen_to, plan.transfer_count);
     }
 
     /// Aggregate metrics across all cores.
@@ -677,6 +755,143 @@ mod tests {
         assert!(disp.should_steal(1));
         // Core 0 is busy → should not steal.
         assert!(!disp.should_steal(0));
+    }
+
+    #[test]
+    fn steal_plan_selects_busiest_donor_with_stable_tie_break() {
+        let cfg = PerCoreConfig {
+            num_cores: 4,
+            steal_threshold: 2.0,
+            ..Default::default()
+        };
+        let disp = PerCoreDispatcher::new(cfg);
+
+        for (core, pending) in [(0, 0), (1, 9), (2, 4), (3, 9)] {
+            disp.core_metrics(core)
+                .unwrap()
+                .pending_requests
+                .store(pending, Ordering::Relaxed);
+        }
+
+        let plan = disp.steal_plan_for(0).expect("idle core can steal");
+        assert_eq!(plan.receiver_core, 0);
+        assert_eq!(plan.donor_core, 1);
+        assert_eq!(plan.receiver_pending, 0);
+        assert_eq!(plan.donor_pending, 9);
+        assert_eq!(plan.transfer_count, 4);
+        assert!((plan.average_pending - 5.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn record_steal_updates_counters_without_pending_mutation() {
+        let cfg = PerCoreConfig {
+            num_cores: 2,
+            steal_threshold: 2.0,
+            ..Default::default()
+        };
+        let disp = PerCoreDispatcher::new(cfg);
+        disp.core_metrics(0)
+            .unwrap()
+            .pending_requests
+            .store(0, Ordering::Relaxed);
+        disp.core_metrics(1)
+            .unwrap()
+            .pending_requests
+            .store(8, Ordering::Relaxed);
+
+        let plan = disp.steal_plan_for(0).expect("receiver can steal");
+        assert_eq!(plan.transfer_count, 4);
+        disp.record_steal(&plan);
+
+        let receiver = disp.core_metrics(0).unwrap().snapshot();
+        let donor = disp.core_metrics(1).unwrap().snapshot();
+        assert_eq!(receiver.stolen_to, 4);
+        assert_eq!(donor.stolen_from, 4);
+        assert_eq!(receiver.pending_requests, 0);
+        assert_eq!(donor.pending_requests, 8);
+    }
+
+    #[test]
+    fn steal_plan_rejects_balanced_and_low_total_queues() {
+        let balanced = PerCoreDispatcher::new(PerCoreConfig {
+            num_cores: 4,
+            steal_threshold: 2.0,
+            ..Default::default()
+        });
+        for core in 0..4 {
+            balanced
+                .core_metrics(core)
+                .unwrap()
+                .pending_requests
+                .store(4, Ordering::Relaxed);
+        }
+        assert!(balanced.steal_plan_for(0).is_none());
+
+        let low_total = PerCoreDispatcher::new(PerCoreConfig {
+            num_cores: 4,
+            steal_threshold: 2.0,
+            ..Default::default()
+        });
+        low_total
+            .core_metrics(1)
+            .unwrap()
+            .pending_requests
+            .store(1, Ordering::Relaxed);
+        assert!(low_total.steal_plan_for(0).is_none());
+    }
+
+    #[test]
+    fn steal_plan_rejects_out_of_range_and_single_core_receivers() {
+        let multi_core = PerCoreDispatcher::new(PerCoreConfig {
+            num_cores: 2,
+            steal_threshold: 2.0,
+            ..Default::default()
+        });
+        assert!(multi_core.steal_plan_for(9).is_none());
+
+        let single_core = PerCoreDispatcher::new(PerCoreConfig {
+            num_cores: 1,
+            steal_threshold: 2.0,
+            ..Default::default()
+        });
+        assert!(single_core.steal_plan_for(0).is_none());
+    }
+
+    #[test]
+    fn steal_plan_uses_sanitized_thresholds_and_saturating_totals() {
+        let invalid_threshold = PerCoreDispatcher::new(PerCoreConfig {
+            num_cores: 2,
+            cache_blocks_per_core: 1,
+            steal_threshold: f64::NAN,
+            advisory_affinity: false,
+        });
+        invalid_threshold.core_metrics[0]
+            .pending_requests
+            .store(1, Ordering::Relaxed);
+        invalid_threshold.core_metrics[1]
+            .pending_requests
+            .store(9, Ordering::Relaxed);
+        assert_eq!(
+            invalid_threshold
+                .steal_plan_for(0)
+                .expect("sanitized threshold permits stealing")
+                .transfer_count,
+            4
+        );
+
+        let saturated = PerCoreDispatcher::new(PerCoreConfig {
+            num_cores: 2,
+            steal_threshold: 2.0,
+            ..Default::default()
+        });
+        saturated.core_metrics[0]
+            .pending_requests
+            .store(i64::MAX, Ordering::Relaxed);
+        saturated.core_metrics[1]
+            .pending_requests
+            .store(i64::MAX, Ordering::Relaxed);
+        assert!(saturated.steal_plan_for(0).is_none());
+        assert!(saturated.steal_plan_for(1).is_none());
     }
 
     #[test]
