@@ -2206,6 +2206,12 @@
           "evidence": "SCENARIO_RESULT|scenario_id=lib_json_summary_preserves_suite_fields|outcome=PASS"
         },
         {
+          "id": "lib_json_escape_all_controls",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=lib_json_escape_all_controls|outcome=PASS"
+        },
+        {
           "id": "lib_git_context_clean_dirty_states",
           "category": "edge",
           "status": "active",

@@ -18,6 +18,7 @@
 # 14. Scenario catalog id_pattern sample validation fails closed
 # 15. Verification gate scenario_catalog_valid uses the full catalog validator
 # 16. Scenario catalog rejects uncataloged static scenario_result IDs
+# 17. Shared JSON string escaping covers quote/backslash and ASCII controls
 #
 # Usage: ./scripts/e2e/ffs_verification_runner_e2e.sh
 #
@@ -187,6 +188,28 @@ JSON
     PATH="$saved_path"
 
     return "$status"
+}
+
+verify_lib_json_escape_all_controls() {
+    if ! command -v jq >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local expected escaped decoded json_payload
+    local control_code control_char
+    expected=$'prefix_"quote\\slash'
+
+    for control_code in {1..31}; do
+        printf -v control_char '%b' "\\$(printf '%03o' "$control_code")"
+        expected+="$control_char"
+    done
+    expected+=$'_suffix'
+
+    escaped=$(e2e_json_escape "$expected")
+    json_payload="{\"value\":\"$escaped\"}"
+    decoded=$(jq -r '.value' <<<"$json_payload") || return 1
+
+    [[ "$decoded" == "$expected" ]]
 }
 
 verify_run_gate_marker_contract() {
@@ -1077,6 +1100,17 @@ if verify_lib_summary_preserves_suite_fields; then
     scenario_result "lib_json_summary_preserves_suite_fields" "PASS" "Suite-specific result fields preserved"
 else
     scenario_result "lib_json_summary_preserves_suite_fields" "FAIL" "Suite-specific result fields were not preserved"
+fi
+
+#######################################
+# Scenario 4b2: lib.sh JSON string escaping covers ASCII controls
+#######################################
+e2e_step "Scenario 4b2: lib.sh JSON string escaping covers ASCII controls"
+
+if verify_lib_json_escape_all_controls; then
+    scenario_result "lib_json_escape_all_controls" "PASS" "Quote, backslash, and ASCII controls round-trip through JSON"
+else
+    scenario_result "lib_json_escape_all_controls" "FAIL" "Shared JSON escaping failed exhaustive control-byte round-trip"
 fi
 
 #######################################
