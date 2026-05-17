@@ -348,17 +348,17 @@ if [[ "${FFS_READINESS_LAB_MARKER_PARSER_SELF_CHECK_ONLY:-0}" == "1" ]]; then
     SELF_CHECK_MANIFEST_JSON="$REPORT_DIR/marker_parser_self_check_manifest.json"
     SELF_CHECK_MANIFEST_MD="$REPORT_DIR/marker_parser_self_check_manifest.md"
     : >"$SELF_CHECK_CHILD_RESULTS"
-    cat >"$SELF_CHECK_LOG" <<'EOF'
-SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|duration_ms=7|detail=ok
-noise SCENARIO_RESULT|scenario_id=readiness_lab_ignored_marker|outcome=PASS
-SCENARIO_RESULT|scenario_id=too_short|outcome=PASS
-SCENARIO_RESULT|scenario_id=first_valid_marker|scenario_id=second_valid_marker|outcome=PASS
-SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=SKIP
-SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|bad_field
-SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|=bad
-SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|
-SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|detail=one|two
-EOF
+    {
+        printf '%s\n' "SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|duration_ms=7|detail=ok"
+        printf '%s\n' "noise SCENARIO_RESULT|scenario_id=readiness_lab_ignored_marker|outcome=PASS"
+        printf '%s\n' "SCENARIO_RESULT|scenario_id=too_short|outcome=PASS"
+        printf '%s\n' "SCENARIO_RESULT|scenario_id=first_valid_marker|scenario_id=second_valid_marker|outcome=PASS"
+        printf '%s\n' "SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=SKIP"
+        printf '%s\n' "SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|bad_field"
+        printf '%s\n' "SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|=bad"
+        printf '%s\n' "SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|"
+        printf '%s\n' "SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|detail=one|two"
+    } >"$SELF_CHECK_LOG"
     write_orchestrator_manifest \
         "$SELF_CHECK_LOG" \
         "$SELF_CHECK_CHILD_RESULTS" \

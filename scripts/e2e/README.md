@@ -669,6 +669,22 @@ The E2E wrapper is:
 ./scripts/e2e/ffs_report_schema_inventory_e2e.sh
 ```
 
+When RCH capacity is unavailable, use the no-worker wrapper self-check rather
+than a local cargo fallback:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_REPORT_SCHEMA_INVENTORY_SELF_CHECK=1 \
+./scripts/e2e/ffs_report_schema_inventory_e2e.sh
+```
+
+The self-check uses a stubbed `rch` binary to prove the wrapper extracts JSON
+and Markdown validator output, preserves row-level product-claim semantics,
+resolves evidence-test references, and preserves the shared
+`RCH_LOCAL_FALLBACK_REJECTED` marker. It does not run cargo, mounted lanes,
+xfstests, large-host campaigns, proof-bundle passes, or permissioned
+campaigns.
+
 This gate is a read-only coverage inventory for durable `ffs-harness` JSON
 report contracts, not proof that any mounted mutation, xfstests, large-host
 swarm campaign, or proof-bundle pass has executed. The JSON report and Markdown

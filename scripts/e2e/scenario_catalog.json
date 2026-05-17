@@ -1109,6 +1109,18 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=report_schema_inventory_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "report_schema_inventory_fixture_complete_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=report_schema_inventory_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "report_schema_inventory_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=report_schema_inventory_fixture_local_fallback_self_check|outcome=PASS"
         }
       ]
     },
@@ -2623,6 +2635,12 @@
           "category": "error",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=wal_group_commit_missing_reference_claim|outcome=PASS"
+        },
+        {
+          "id": "wal_group_commit_summary_merge",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_group_commit_summary_merge|outcome=PASS"
         }
       ]
     },
@@ -2970,6 +2988,12 @@
           "category": "error",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=scrub_repair_scheduler_p99_fail_closed|outcome=PASS"
+        },
+        {
+          "id": "scrub_repair_scheduler_summary_merge",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=scrub_repair_scheduler_summary_merge|outcome=PASS"
         }
       ]
     },
@@ -3111,6 +3135,12 @@
           "category": "error",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=swarm_cache_small_host_fail_closed|outcome=PASS"
+        },
+        {
+          "id": "swarm_cache_controller_summary_merge",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_cache_controller_summary_merge|outcome=PASS"
         }
       ]
     },
@@ -5767,6 +5797,12 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=readiness_lab_orchestrator_manifest|outcome=PASS"
+        },
+        {
+          "id": "readiness_lab_marker_parser_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_lab_marker_parser_self_check|outcome=PASS"
         }
       ]
     },
@@ -6320,6 +6356,12 @@
           "category": "error",
           "status": "active",
           "evidence": "scenario_result \"swarm_tail_nonmonotonic_bucket_fail_closed\" \"PASS\""
+        },
+        {
+          "id": "swarm_tail_latency_summary_merge",
+          "category": "edge",
+          "status": "active",
+          "evidence": "scenario_result \"swarm_tail_latency_summary_merge\" \"PASS\""
         }
       ]
     },
@@ -6396,6 +6438,12 @@
           "category": "error",
           "status": "active",
           "evidence": "scenario_result \"swarm_workload_runbook_wording_guard\" \"PASS\""
+        },
+        {
+          "id": "swarm_workload_summary_merge",
+          "category": "edge",
+          "status": "active",
+          "evidence": "scenario_result \"swarm_workload_summary_merge\" \"PASS\""
         }
       ]
     },
