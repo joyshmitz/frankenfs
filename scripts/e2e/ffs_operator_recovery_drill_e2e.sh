@@ -13,6 +13,8 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_oper
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_OPERATOR_RECOVERY_DRILL_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_OPERATOR_RECOVERY_DRILL_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -158,6 +160,205 @@ BAD_MUTATE_PREFLIGHT="$RCH_OUTPUT_DIR/bad_mutate_preflight.json"
 BAD_NO_PROOF_BUNDLE="$RCH_OUTPUT_DIR/bad_no_proof_bundle.json"
 BAD_NO_ROLLBACK="$RCH_OUTPUT_DIR/bad_no_rollback.json"
 UNIT_LOG="$E2E_LOG_DIR/operator_recovery_drill_unit_tests.log"
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_OPERATOR_RECOVERY_DRILL_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+emit_valid_report() {
+    cat <<'JSON'
+{
+  "valid": true,
+  "bead_id": "bd-rchk0.5.8",
+  "proof_bundle_lane": "operator_recovery_drill",
+  "by_outcome": {
+    "detection_only": 1,
+    "dry_run_success": 1,
+    "mutating_repair_verified": 1,
+    "unsafe_refused": 1
+  },
+  "mutation_allowed_count": 1,
+  "mutation_refused_count": 1,
+  "scenario_reports": [
+    {
+      "scenario_id": "operator_detect_only_metadata_mismatch",
+      "drill_decision": "detection_only",
+      "mutation_allowed": false,
+      "proof_bundle_lane": "operator_recovery_drill",
+      "log_line": "OPERATOR_RECOVERY_DRILL|exact_commands=ffs scrub|image_hashes=original=sha256:00|corruption_manifest=detect.json|confidence_threshold=detection_only_gate|repair_plan=detect|operator_warnings=1|post_repair_verification=not_run|rollback_or_refusal_outcome=detect_only_not_mutated|cleanup_status=not_required|reproduction_command=cargo run -p ffs-harness -- validate-operator-recovery-drill"
+    },
+    {
+      "scenario_id": "operator_dry_run_single_block_recoverable",
+      "drill_decision": "dry_run_ready",
+      "mutation_allowed": false,
+      "proof_bundle_lane": "operator_recovery_drill",
+      "log_line": "OPERATOR_RECOVERY_DRILL|exact_commands=ffs repair --dry-run|image_hashes=original=sha256:11|corruption_manifest=dry-run.json|confidence_threshold=dry_run_gate|repair_plan=dry-run|operator_warnings=1|post_repair_verification=dry_run_verified|rollback_or_refusal_outcome=dry_run_not_mutated|cleanup_status=complete|reproduction_command=cargo run -p ffs-harness -- validate-operator-recovery-drill"
+    },
+    {
+      "scenario_id": "operator_mutate_verified_single_block",
+      "drill_decision": "mutate_allowed",
+      "mutation_allowed": true,
+      "proof_bundle_lane": "operator_recovery_drill",
+      "log_line": "OPERATOR_RECOVERY_DRILL|exact_commands=ffs repair --apply|image_hashes=original=sha256:22|corruption_manifest=mutate.json|confidence_threshold=mutation_safety_gate|repair_plan=mutate|operator_warnings=1|post_repair_verification=passed|rollback_or_refusal_outcome=rollback_checkpoint_retained_after_verified_mutation|cleanup_status=complete|reproduction_command=cargo run -p ffs-harness -- validate-operator-recovery-drill"
+    },
+    {
+      "scenario_id": "operator_refuse_low_confidence_multi_block",
+      "drill_decision": "preflight_failed_refused",
+      "mutation_allowed": false,
+      "proof_bundle_lane": "operator_recovery_drill",
+      "log_line": "OPERATOR_RECOVERY_DRILL|exact_commands=ffs repair --apply|image_hashes=original=sha256:33|corruption_manifest=refuse.json|confidence_threshold=mutation_safety_gate|repair_plan=refuse|operator_warnings=1|post_repair_verification=refused|rollback_or_refusal_outcome=refused_before_mutation|cleanup_status=refused_before_mutation|reproduction_command=cargo run -p ffs-harness -- validate-operator-recovery-drill"
+    }
+  ],
+  "errors": []
+}
+JSON
+}
+
+emit_markdown_summary() {
+    cat <<'MD'
+# Operator Recovery Drill Summary
+
+- Drill: `operator_recovery_drill_v1`
+- Proof bundle lane: `operator_recovery_drill`
+- Refusal decision: `preflight_failed_refused`
+MD
+}
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        ;;
+    *)
+        echo "unknown operator recovery drill fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+echo "[RCH] remote worker=fixture exit=0" >&2
+case "$command_text" in
+    *"cargo test -p ffs-harness --lib operator_recovery_drill"*)
+        printf '%s\n' \
+            "test render_operator_recovery_drill_markdown_default_sample ... ok" \
+            "test operator_recovery_drill_report_json_shape ... ok"
+        exit 0
+        ;;
+    *"bad_missing_log.json"*|*"bad_mutate_preflight.json"*|*"bad_no_proof_bundle.json"*|*"bad_no_rollback.json"*)
+        echo "operator recovery drill validation failed: fixture invalid drill" >&2
+        exit 1
+        ;;
+    *"--format markdown"*)
+        emit_markdown_summary
+        exit 0
+        ;;
+    *)
+        emit_valid_report
+        exit 0
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/operator_recovery_drill_fixture_${fixture_case}.log"
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_OPERATOR_RECOVERY_DRILL_SELF_CHECK=0 \
+        FFS_OPERATOR_RECOVERY_DRILL_SKIP_SELF_CHECK=1 \
+        FFS_OPERATOR_RECOVERY_DRILL_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        "$REPO_ROOT/scripts/e2e/ffs_operator_recovery_drill_e2e.sh" >"$child_log" 2>&1
+    local child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic operator recovery drill wrapper self-check"
+    local stub_path child_info child_status child_log result_path report_path summary_path
+    stub_path="$E2E_LOG_DIR/rch-operator-recovery-drill-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    report_path="$(dirname "$result_path")/operator_recovery_drill_report.json"
+    summary_path="$(dirname "$result_path")/operator_recovery_drill_summary.md"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && [[ -f "$report_path" ]] \
+        && [[ -f "$summary_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and ([.scenarios[] | select(.scenario_id == "operator_recovery_drill_validates" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "operator_recovery_drill_decision_coverage" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "operator_recovery_drill_invalid_variants_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "operator_recovery_drill_docs_contract" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "operator_recovery_drill_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null \
+        && jq -e '
+            .valid == true
+            and .bead_id == "bd-rchk0.5.8"
+            and .proof_bundle_lane == "operator_recovery_drill"
+            and (.by_outcome | keys_unsorted | length) == 4
+            and .mutation_allowed_count == 1
+            and .mutation_refused_count >= 1
+        ' "$report_path" >/dev/null \
+        && grep -q "# Operator Recovery Drill Summary" "$summary_path" \
+        && grep -q "preflight_failed_refused" "$summary_path"; then
+        scenario_result "operator_recovery_drill_fixture_complete_self_check" "PASS" "result=${result_path} report=${report_path} summary=${summary_path}"
+    else
+        scenario_result "operator_recovery_drill_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "operator recovery drill complete fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "operator_recovery_drill_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "operator_recovery_drill_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "operator recovery drill local fallback fixture self-check failed"
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass "operator recovery drill wrapper self-check"
+    exit 0
+fi
 
 e2e_step "Scenario 1: operator recovery drill module and CLI are wired"
 if grep -q "pub mod operator_recovery_drill" crates/ffs-harness/src/lib.rs \

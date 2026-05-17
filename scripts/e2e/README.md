@@ -944,6 +944,22 @@ cargo run -p ffs-harness -- validate-operator-recovery-drill \
   --summary-out artifacts/operator-recovery/drill_summary.md
 ```
 
+When RCH capacity is unavailable, use the no-worker wrapper self-check rather
+than a local cargo fallback:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_OPERATOR_RECOVERY_DRILL_SELF_CHECK=1 \
+./scripts/e2e/ffs_operator_recovery_drill_e2e.sh
+```
+
+The self-check uses a stubbed `rch` binary to prove the wrapper extracts JSON
+and Markdown validator output, preserves drill decision/outcome coverage
+checks, rejects invalid drill variants, verifies docs and focused unit-test
+output, and preserves the shared `RCH_LOCAL_FALLBACK_REJECTED` marker. It does
+not run cargo, mounted lanes, xfstests, fuzz/performance campaigns, or
+permissioned campaigns.
+
 Every drill scenario must preserve exact commands, image hashes, corruption
 manifest, confidence threshold, repair plan, operator warnings, post-repair
 verification, rollback or refusal outcome, cleanup status, proof-bundle lane,
