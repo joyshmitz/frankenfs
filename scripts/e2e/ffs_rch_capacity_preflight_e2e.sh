@@ -66,12 +66,240 @@ e2e_print_env
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_CAPTURE_VISIBILITY="${FFS_RCH_CAPACITY_PREFLIGHT_RCH_VISIBILITY:-summary}"
 RUN_PROBE="${FFS_RCH_CAPACITY_PREFLIGHT_RUN_PROBE:-0}"
+SKIP_FIXTURE_SELF_CHECK="${FFS_RCH_CAPACITY_PREFLIGHT_SKIP_FIXTURE_SELF_CHECK:-0}"
 
 STATUS_JSON="$E2E_LOG_DIR/rch_status.json"
 STATUS_STDERR="$E2E_LOG_DIR/rch_status.stderr"
 PROBE_RAW="$E2E_LOG_DIR/rch_capacity_probe.raw"
 REPORT_JSON="$E2E_LOG_DIR/rch_capacity_preflight_report.json"
 REPORT_MD="$E2E_LOG_DIR/rch_capacity_preflight_summary.md"
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case_name="${FFS_RCH_CAPACITY_PREFLIGHT_FIXTURE_CASE:-remote_success}"
+
+if [[ "${1:-}" == "status" && "${2:-}" == "--json" ]]; then
+    case "$case_name" in
+        remote_success)
+            cat <<'JSON'
+{
+  "api_version": "1.0",
+  "timestamp": 1,
+  "command": "status",
+  "success": true,
+  "data": {
+    "posture": "ready",
+    "posture_description": "fixture remote capacity available",
+    "daemon": {
+      "daemon": {
+        "workers_total": 1,
+        "workers_healthy": 1,
+        "slots_total": 4,
+        "slots_available": 4,
+        "version": "fixture",
+        "socket_path": "/tmp/rch-fixture.sock"
+      },
+      "workers": [
+        {
+          "id": "fixture-remote",
+          "status": "healthy",
+          "circuit_state": "closed",
+          "pressure_state": "normal",
+          "pressure_confidence": "high",
+          "pressure_reason_code": "ok",
+          "pressure_policy_rule": "fixture",
+          "pressure_disk_free_gb": 100.0,
+          "pressure_disk_free_ratio": 0.5,
+          "pressure_telemetry_fresh": true,
+          "pressure_telemetry_age_secs": 1,
+          "last_error": null
+        }
+      ],
+      "alerts": [],
+      "issues": []
+    },
+    "remediation_hints": []
+  }
+}
+JSON
+            ;;
+        local_fallback)
+            cat <<'JSON'
+{
+  "api_version": "1.0",
+  "timestamp": 2,
+  "command": "status",
+  "success": true,
+  "data": {
+    "posture": "degraded",
+    "posture_description": "fixture workers blocked by pressure",
+    "daemon": {
+      "daemon": {
+        "workers_total": 2,
+        "workers_healthy": 2,
+        "slots_total": 8,
+        "slots_available": 8,
+        "version": "fixture",
+        "socket_path": "/tmp/rch-fixture.sock"
+      },
+      "workers": [
+        {
+          "id": "fixture-critical-a",
+          "status": "healthy",
+          "circuit_state": "closed",
+          "pressure_state": "critical",
+          "pressure_confidence": "high",
+          "pressure_reason_code": "disk_ratio_below_critical",
+          "pressure_policy_rule": "disk_free_ratio<=critical_free_ratio",
+          "pressure_disk_free_gb": 1.0,
+          "pressure_disk_free_ratio": 0.01,
+          "pressure_telemetry_fresh": true,
+          "pressure_telemetry_age_secs": 1,
+          "last_error": null
+        },
+        {
+          "id": "fixture-critical-b",
+          "status": "healthy",
+          "circuit_state": "closed",
+          "pressure_state": "critical",
+          "pressure_confidence": "high",
+          "pressure_reason_code": "disk_free_below_critical_gb",
+          "pressure_policy_rule": "disk_free_gb<=critical_free_gb",
+          "pressure_disk_free_gb": 2.0,
+          "pressure_disk_free_ratio": 0.02,
+          "pressure_telemetry_fresh": true,
+          "pressure_telemetry_age_secs": 1,
+          "last_error": null
+        }
+      ],
+      "alerts": [],
+      "issues": [
+        {
+          "severity": "error",
+          "summary": "fixture workers in critical pressure state",
+          "remediation": "rch workers capabilities --refresh"
+        }
+      ]
+    },
+    "remediation_hints": [
+      {
+        "reason_code": "pressure_critical",
+        "severity": "critical",
+        "message": "fixture worker under critical storage pressure",
+        "suggested_action": "inspect fixture worker disk pressure"
+      }
+    ]
+  }
+}
+JSON
+            ;;
+        *)
+            echo "unknown fixture case: $case_name" >&2
+            exit 64
+            ;;
+    esac
+    exit 0
+fi
+
+if [[ "${1:-}" == "exec" && "${2:-}" == "--" ]]; then
+    case "$case_name" in
+        remote_success)
+            echo "[RCH] remote worker=fixture-remote exit=0"
+            exit 0
+            ;;
+        local_fallback)
+            echo "[RCH] local (no admissible workers: critical_pressure=2)"
+            echo "remote required; refusing local fallback"
+            exit 1
+            ;;
+        *)
+            echo "unknown fixture case: $case_name" >&2
+            exit 64
+            ;;
+    esac
+fi
+
+echo "unexpected fixture rch invocation: $*" >&2
+exit 64
+SH
+    chmod +x "$stub_path"
+}
+
+run_fixture_case() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local scenario_id="$3"
+    local expected_capacity="$4"
+    local expected_probe="$5"
+    local expected_fallback_count="$6"
+    local child_log child_result
+
+    child_log="$E2E_LOG_DIR/rch_capacity_fixture_${fixture_case}.log"
+    if FFS_RCH_CAPACITY_PREFLIGHT_SKIP_FIXTURE_SELF_CHECK=1 \
+        FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_RCH_CAPACITY_PREFLIGHT_RUN_PROBE=1 \
+        FFS_RCH_CAPACITY_PREFLIGHT_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        "$REPO_ROOT/scripts/e2e/ffs_rch_capacity_preflight_e2e.sh" >"$child_log" 2>&1; then
+        child_result="$(sed -n 's/^JSON summary written: //p' "$child_log" | tail -n 1)"
+        if [[ -n "$child_result" ]] \
+            && jq -e \
+                --arg capacity "$expected_capacity" \
+                --arg probe "$expected_probe" \
+                --argjson fallback_count "$expected_fallback_count" \
+                '
+                    .verdict == "PASS"
+                    and .capacity_verdict == $capacity
+                    and .probe_verdict == $probe
+                    and .invalid_scenario_marker_count == 0
+                    and .rch_local_fallback_rejected_count == $fallback_count
+                    and (.capacity_report_path | type == "string" and length > 0)
+                ' "$child_result" >/dev/null; then
+            scenario_result "$scenario_id" "PASS" "fixture=${fixture_case} result=${child_result}"
+        else
+            scenario_result "$scenario_id" "FAIL" "fixture=${fixture_case} unexpected result"
+            e2e_log "Fixture child log: $child_log"
+            [[ -n "${child_result:-}" ]] && e2e_log "Fixture child result: $child_result"
+            return 1
+        fi
+    else
+        scenario_result "$scenario_id" "FAIL" "fixture=${fixture_case} child failed"
+        e2e_log "Fixture child log: $child_log"
+        return 1
+    fi
+}
+
+run_fixture_self_check() {
+    if [[ "$SKIP_FIXTURE_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    # Catalog evidence hooks for the variable-driven fixture helper:
+    # scenario_result "rch_capacity_fixture_remote_success_self_check" "PASS"
+    # scenario_result "rch_capacity_fixture_local_fallback_self_check" "PASS"
+    e2e_step "Deterministic fixture self-check"
+    local stub_path
+    stub_path="$E2E_TEMP_DIR/rch-fixture"
+    write_fixture_rch_stub "$stub_path"
+    run_fixture_case \
+        "$stub_path" \
+        "remote_success" \
+        "rch_capacity_fixture_remote_success_self_check" \
+        "admissible_capacity_available" \
+        "remote_success" \
+        0
+    run_fixture_case \
+        "$stub_path" \
+        "local_fallback" \
+        "rch_capacity_fixture_local_fallback_self_check" \
+        "no_admissible_workers" \
+        "local_fallback_rejected" \
+        1
+}
 
 e2e_step "Capture live RCH status"
 
@@ -433,6 +661,8 @@ required_ids = {
     "rch_capacity_probe_remote_success",
     "rch_capacity_probe_fail_closed",
     "rch_capacity_probe_optional_boundary",
+    "rch_capacity_fixture_remote_success_self_check",
+    "rch_capacity_fixture_local_fallback_self_check",
     "rch_capacity_catalog_valid",
 }
 required_categories = {"happy", "degradation", "error"}
@@ -476,6 +706,8 @@ else
     scenario_result "rch_capacity_catalog_valid" "FAIL" "catalog validation failed"
     e2e_fail "Scenario catalog validation failed"
 fi
+
+run_fixture_self_check
 
 python3 - "$REPORT_JSON" "$E2E_LOG_DIR/result.json" <<'PY'
 import json

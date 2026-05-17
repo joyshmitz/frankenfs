@@ -2114,6 +2114,11 @@ run before expensive remote-only proof lanes when RCH appears degraded. It
 captures `rch status --json`, classifies admissible workers, critical pressure,
 telemetry gaps, unreachable workers, and operator actions, then writes
 `rch_capacity_preflight_report.json` plus a short Markdown summary.
+Each default run also executes deterministic fixture self-checks with a stubbed
+`rch` binary so the report contract is proven for both an admissible
+remote-success case and a fail-closed local-fallback case without depending on
+live worker health. Set `FFS_RCH_CAPACITY_PREFLIGHT_SKIP_FIXTURE_SELF_CHECK=1`
+only when reproducing a live-only transcript.
 
 The default run does not invoke workers:
 
