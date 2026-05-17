@@ -233,7 +233,8 @@
       "script": "scripts/e2e/ffs_btrfs_capability_drift_e2e.sh",
       "required_categories": [
         "happy",
-        "edge"
+        "edge",
+        "error"
       ],
       "scenarios": [
         {
@@ -289,6 +290,24 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=btrfs_drift_unit_tests_pass|outcome=PASS"
+        },
+        {
+          "id": "btrfs_drift_fixture_complete_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_drift_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "btrfs_drift_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_drift_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "btrfs_drift_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_drift_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },
