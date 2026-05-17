@@ -144,6 +144,10 @@ verify_run_gate_marker_contract() {
     local fail_marker_gate_status
     local bad_catalog_repo bad_catalog_log bad_catalog_status
     local empty_catalog_repo empty_catalog_log empty_catalog_status
+    local path_escape_script path_escape_relative_script path_escape_log path_escape_manifest_path
+    local path_escape_gate_status path_escape_executed
+    local absolute_script absolute_script_log absolute_script_manifest_path absolute_script_gate_status
+    local absolute_script_executed
     local conformance_probe_script conformance_relative_script conformance_log conformance_manifest_path
     local conformance_gate_status
     local expected_git_clean
@@ -362,6 +366,91 @@ PROBE
     [[ "$empty_catalog_status" -eq 1 ]] || return 1
     grep -Fq "ERROR: no scripts resolved for gate" "$empty_catalog_log" || return 1
     ! grep -Eq "^No scripts to run\\.|^Output: |^Manifest: " "$empty_catalog_log" || return 1
+
+    path_escape_script="$probe_dir/../run_gate_path_escape_probe.sh"
+    path_escape_relative_script="${path_escape_script#$REPO_ROOT/}"
+    path_escape_log="$probe_dir/run_gate_path_escape.log"
+    path_escape_executed="$probe_dir/path_escape_probe.executed"
+
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'set -euo pipefail'
+        printf 'printf executed >%q\n' "$path_escape_executed"
+        printf '%s\n' "printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_path_escape_probe|outcome=PASS'"
+    } >"$path_escape_script"
+
+    if [[ -z "$(git -C "$REPO_ROOT" status --porcelain=v1 2>/dev/null)" ]]; then
+        expected_git_clean="true"
+    else
+        expected_git_clean="false"
+    fi
+    path_escape_gate_status=0
+    scripts/e2e/run_gate.sh --gate-id run_gate_path_escape_contract "$path_escape_relative_script" \
+        >"$path_escape_log" 2>&1 || path_escape_gate_status=$?
+    [[ "$path_escape_gate_status" -eq 1 ]] || return 1
+    [[ ! -e "$path_escape_executed" ]] || return 1
+
+    path_escape_manifest_path=$(sed -n 's/^Manifest: //p' "$path_escape_log" | tail -n 1)
+    [[ -n "$path_escape_manifest_path" && -f "$path_escape_manifest_path" ]] || return 1
+
+    jq -e --arg path_escape_script "$path_escape_relative_script" --argjson expected_git_clean "$expected_git_clean" '
+        .gate_id == "run_gate_path_escape_contract"
+        and .git_context.clean == $expected_git_clean
+        and .verdict == "FAIL"
+        and .scripts_total == 1
+        and .scripts_passed == 0
+        and .scripts_failed == 1
+        and (.script_results | length == 1)
+        and .script_results[0].script == $path_escape_script
+        and .script_results[0].verdict == "FAIL"
+        and .script_results[0].attempts == 0
+        and .script_results[0].scenarios == []
+        and .script_results[0].rch_local_fallback_rejected_count == 0
+        and .script_results[0].rch_local_fallback_rejections == []
+        and (.script_results[0].error | contains("invalid script path"))
+    ' "$path_escape_manifest_path" >/dev/null
+
+    absolute_script="$probe_dir/run_gate_absolute_path_probe.sh"
+    absolute_script_log="$probe_dir/run_gate_absolute_path.log"
+    absolute_script_executed="$probe_dir/absolute_path_probe.executed"
+
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'set -euo pipefail'
+        printf 'printf executed >%q\n' "$absolute_script_executed"
+        printf '%s\n' "printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_absolute_path_probe|outcome=PASS'"
+    } >"$absolute_script"
+
+    if [[ -z "$(git -C "$REPO_ROOT" status --porcelain=v1 2>/dev/null)" ]]; then
+        expected_git_clean="true"
+    else
+        expected_git_clean="false"
+    fi
+    absolute_script_gate_status=0
+    scripts/e2e/run_gate.sh --gate-id run_gate_absolute_path_contract "$absolute_script" \
+        >"$absolute_script_log" 2>&1 || absolute_script_gate_status=$?
+    [[ "$absolute_script_gate_status" -eq 1 ]] || return 1
+    [[ ! -e "$absolute_script_executed" ]] || return 1
+
+    absolute_script_manifest_path=$(sed -n 's/^Manifest: //p' "$absolute_script_log" | tail -n 1)
+    [[ -n "$absolute_script_manifest_path" && -f "$absolute_script_manifest_path" ]] || return 1
+
+    jq -e --arg absolute_script "$absolute_script" --argjson expected_git_clean "$expected_git_clean" '
+        .gate_id == "run_gate_absolute_path_contract"
+        and .git_context.clean == $expected_git_clean
+        and .verdict == "FAIL"
+        and .scripts_total == 1
+        and .scripts_passed == 0
+        and .scripts_failed == 1
+        and (.script_results | length == 1)
+        and .script_results[0].script == $absolute_script
+        and .script_results[0].verdict == "FAIL"
+        and .script_results[0].attempts == 0
+        and .script_results[0].scenarios == []
+        and .script_results[0].rch_local_fallback_rejected_count == 0
+        and .script_results[0].rch_local_fallback_rejections == []
+        and (.script_results[0].error | contains("invalid script path"))
+    ' "$absolute_script_manifest_path" >/dev/null
 
     missing_relative_script="artifacts/e2e/run_gate_marker_contract_missing_script.sh"
     missing_log="$probe_dir/run_gate_missing_script.log"

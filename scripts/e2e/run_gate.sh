@@ -165,6 +165,17 @@ gate_outcome_is_valid() {
     [[ "$value" == "PASS" || "$value" == "FAIL" ]]
 }
 
+gate_script_path_is_safe() {
+    local value="$1"
+
+    [[ -n "$value" ]] || return 1
+    [[ "$value" != /* ]] || return 1
+    [[ "$value" != ".." ]] || return 1
+    [[ "$value" != ../* ]] || return 1
+    [[ "$value" != */.. ]] || return 1
+    [[ "$value" != */../* ]]
+}
+
 check_direct_cargo_conformance() {
     local script_path="$1"
     awk '
@@ -240,6 +251,23 @@ else
 fi
 
 for script in "${SCRIPTS[@]}"; do
+    if ! gate_script_path_is_safe "$script"; then
+        echo "WARNING: Invalid script path: $script"
+        TOTAL=$((TOTAL + 1))
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+
+        if [[ "$FIRST_RESULT" == "true" ]]; then
+            FIRST_RESULT=false
+        else
+            SCRIPT_RESULTS_JSON+=","
+        fi
+
+        script_json=$(gate_json_escape "$script")
+        invalid_script_error=$(gate_json_escape "invalid script path: absolute paths and parent-directory components are not allowed")
+        SCRIPT_RESULTS_JSON+="{\"script\":\"$script_json\",\"verdict\":\"FAIL\",\"attempts\":0,\"scenarios\":[],\"rch_local_fallback_rejected_count\":0,\"rch_local_fallback_rejections\":[],\"error\":\"$invalid_script_error\"}"
+        continue
+    fi
+
     script_path="$REPO_ROOT/$script"
     if [[ ! -f "$script_path" ]]; then
         echo "WARNING: Script not found: $script_path"
