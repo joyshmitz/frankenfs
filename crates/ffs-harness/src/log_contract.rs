@@ -277,10 +277,10 @@ pub mod e2e_marker {
 
     /// Parse a SCENARIO_RESULT marker line into (scenario_id, outcome, detail).
     ///
-    /// Returns `None` if the line is not a valid marker.
+    /// Returns `None` if the line is not a valid marker. The prefix must start
+    /// at byte 0 to match the shell E2E summary and gate parsers.
     #[must_use]
     pub fn parse_marker(line: &str) -> Option<(&str, &str, Option<&str>)> {
-        let line = line.trim();
         let mut parts = line.split(SEP);
         if parts.next()? != PREFIX {
             return None;
@@ -541,6 +541,18 @@ mod tests {
     }
 
     #[test]
+    fn e2e_marker_parse_preserves_detail_whitespace() -> Result<(), &'static str> {
+        let line =
+            "SCENARIO_RESULT|scenario_id=thresholds_toml_valid|outcome=FAIL|detail=missing key  ";
+        let (id, outcome_val, detail) =
+            e2e_marker::parse_marker(line).ok_or("expected detailed e2e marker")?;
+        assert_eq!(id, "thresholds_toml_valid");
+        assert_eq!(outcome_val, "FAIL");
+        assert_eq!(detail, Some("missing key  "));
+        Ok(())
+    }
+
+    #[test]
     fn e2e_marker_parse_allows_extension_fields() -> Result<(), &'static str> {
         let line = "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_case|outcome=PASS|duration_ms=7";
         let (id, outcome_val, detail) =
@@ -565,6 +577,10 @@ mod tests {
     #[test]
     fn e2e_marker_parse_invalid() {
         assert!(e2e_marker::parse_marker("not a marker").is_none());
+        assert!(
+            e2e_marker::parse_marker(" SCENARIO_RESULT|scenario_id=valid_test_marker|outcome=PASS")
+                .is_none()
+        );
         assert!(e2e_marker::parse_marker("SCENARIO_RESULT|outcome=PASS").is_none());
         assert!(e2e_marker::parse_marker("SCENARIO_RESULT|scenario_id=x").is_none());
     }
