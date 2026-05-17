@@ -34,6 +34,7 @@ export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_benchmark_governance}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_CAPTURE_VISIBILITY="${FFS_BENCHMARK_GOVERNANCE_RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-420}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
@@ -70,7 +71,7 @@ run_rch_capture() {
 
     : >"$output_path"
     set +e
-    RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
+    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
     pid=$!
     if [[ "$had_errexit" -eq 1 ]]; then
         set -e
