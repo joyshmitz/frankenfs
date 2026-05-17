@@ -743,7 +743,7 @@ Replay is idempotent. V2/V3 checksums (CRC32C with optional UUID-seed) are verif
 
 ### External-journal pairing
 
-Data filesystems referencing an external journal device support paired-open replay via `--external-journal <path>`, with UUID and block-size validation and fail-fast errors when required recovery cannot be performed safely. Standalone `JOURNAL_DEV` images are detected and reported with operator guidance.
+Data filesystems referencing an external journal device support paired-open replay via the library-level `OpenOptions::external_journal_path` field, with UUID and block-size validation and fail-fast errors when required recovery cannot be performed safely. Standalone `JOURNAL_DEV` images are detected and reported with operator guidance. The current `ffs-cli mount` does not surface this as a flag; the harness opens it directly through the library API (see `crates/ffs-harness/tests/ext4_journal_recovery.rs`).
 
 ### MVCC WAL (native mode)
 
@@ -2703,7 +2703,7 @@ Filesystems fail in many ways; here is a structured map of what FrankenFS does w
 | **Block group fully corrupt beyond repair overhead** | Mass corruption exceeding RaptorQ tolerance | Decode fails; `RepairFailed` event recorded; affected block returns EIO on read | `RepairFailed` plus `EIO` on read |
 | **Single bit-flip in inode** | As above on an inode block | CRC32C mismatch on inode read → `FfsError::Corruption { block }`; auto-repair if enabled | Inode op returns `EIO` |
 | **Journal needs recovery on mount** | Unclean shutdown of ext4 image | JBD2 replay on mount; fast-commit replay if applicable | `WalRecovery` event; mount succeeds |
-| **External journal missing / mismatched UUID** | Operator passed wrong `--external-journal` | Fail-fast on mount with `FfsError::Format` | Mount aborts with diagnostic |
+| **External journal missing / mismatched UUID** | Library caller passed wrong `OpenOptions::external_journal_path` | Fail-fast on open with `FfsError::Format` | Open aborts with diagnostic |
 | **Unknown incompat feature bit** | Image declares feature this build doesn't accept | `FfsError::IncompatibleFeature` | Mount aborts with feature name |
 | **MMP active-writer state** | Image is currently mounted elsewhere | `FfsError::UnsupportedFeature` (conservative reject) | Mount aborts |
 | **MVCC commit conflict (FCW)** | Concurrent writer beat us | Under `Strict`: abort with `EAGAIN`; under `SafeMerge`: attempt merge; under `Adaptive`: expected-loss vote | `TxnAborted { reason: fcw_conflict }`; caller sees `EAGAIN` |
@@ -3153,9 +3153,6 @@ cargo run -p ffs-cli -- mount <image-path> <mountpoint> --rw \
 cargo run -p ffs-cli -- mount <image-path> <mountpoint> --subvol home
 cargo run -p ffs-cli -- mount <image-path> <mountpoint> --snapshot 2026-05-01
 
-# Mount with ext4 external journal
-cargo run -p ffs-cli -- mount <image-path> <mountpoint> --external-journal <journal-img>
-
 # Mount with explicit kernel writeback-cache (fully evidence-gated)
 cargo run -p ffs-cli -- mount <image-path> <mountpoint> --rw --writeback-cache \
     --writeback-cache-gate            artifacts/writeback-cache/audit_gate.json \
@@ -3351,7 +3348,7 @@ See [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the full capability matrix and 
 
 ## V1 Filesystem Scope
 
-**ext4.** Single-device images with block sizes 1K/2K/4K. Requires `FILETYPE`; `EXTENTS` is optional (indirect-block addressing is supported). FUSE mount defaults to read-only; `--rw` is available but experimental. All known incompat feature flags are accepted at mount time. `COMPRESSION` covers ext4 e2compr read/write for the implemented gzip/LZO/"none" method-table paths; rare legacy codecs (`lzv1`, `bzip2`, `lzrw3a`) reject deterministically with `EOPNOTSUPP`. `JOURNAL_DEV` images are detected; data filesystems referencing an external journal support paired-open replay via `--external-journal` with UUID/block-size validation. `ENCRYPT` shows filenames as raw bytes (nokey mode). `CASEFOLD` provides case-insensitive directory lookup. `INLINE_DATA` reads from inode block area + `system.data` xattr. MMP unsafe states are rejected with `EOPNOTSUPP`.
+**ext4.** Single-device images with block sizes 1K/2K/4K. Requires `FILETYPE`; `EXTENTS` is optional (indirect-block addressing is supported). FUSE mount defaults to read-only; `--rw` is available but experimental. All known incompat feature flags are accepted at mount time. `COMPRESSION` covers ext4 e2compr read/write for the implemented gzip/LZO/"none" method-table paths; rare legacy codecs (`lzv1`, `bzip2`, `lzrw3a`) reject deterministically with `EOPNOTSUPP`. `JOURNAL_DEV` images are detected; data filesystems referencing an external journal support paired-open replay through `OpenOptions::external_journal_path` (library API) with UUID/block-size validation. `ENCRYPT` shows filenames as raw bytes (nokey mode). `CASEFOLD` provides case-insensitive directory lookup. `INLINE_DATA` reads from inode block area + `system.data` xattr. MMP unsafe states are rejected with `EOPNOTSUPP`.
 
 **btrfs.** Single- and multi-device images with single / DUP / RAID 0/1/5/6/10 support. Metadata parsing + validation (superblock, leaf items, sys_chunk_array, chunk tree walking, device tree walking). FUSE mount/runtime contract fully tracked; the operator-facing mount path is experimental (default RO, optional `--rw`). Transparent ZLIB/LZO/ZSTD decompression, named subvolume/snapshot selection (`--subvol`, `--snapshot`), tree-log replay, and send/receive stream parsing all implemented.
 
