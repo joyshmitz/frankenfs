@@ -3154,6 +3154,18 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=swarm_operator_report_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "swarm_operator_report_fixture_complete_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_operator_report_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "swarm_operator_report_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=swarm_operator_report_fixture_local_fallback_self_check|outcome=PASS"
         }
       ]
     },
