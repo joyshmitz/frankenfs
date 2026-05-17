@@ -185,6 +185,8 @@ SUMMARY_RAW="$E2E_LOG_DIR/metamorphic_workload_seed_catalog_summary.raw"
 UNIT_LOG="$E2E_LOG_DIR/metamorphic_workload_seed_catalog_unit_tests.log"
 BAD_PERMISSIONED_JSON="$RCH_INPUT_DIR/metamorphic_bad_permissioned_ack.json"
 BAD_PERMISSIONED_RAW="$E2E_LOG_DIR/metamorphic_bad_permissioned_ack.raw"
+BAD_NON_PERMISSIONED_LEAK_JSON="$RCH_INPUT_DIR/metamorphic_bad_non_permissioned_permission_leak.json"
+BAD_NON_PERMISSIONED_LEAK_RAW="$E2E_LOG_DIR/metamorphic_bad_non_permissioned_permission_leak.raw"
 BAD_SOURCE_JSON="$RCH_INPUT_DIR/metamorphic_bad_source_artifact.json"
 BAD_SOURCE_RAW="$E2E_LOG_DIR/metamorphic_bad_source_artifact.raw"
 BAD_NON_JSON_SOURCE="$RCH_INPUT_DIR/metamorphic_bad_source_artifact.txt"
@@ -298,7 +300,7 @@ else
 fi
 
 e2e_step "Scenario 5: invalid catalog variants fail closed"
-python3 - "$REPO_ROOT" "$CATALOG_JSON" "$BAD_PERMISSIONED_JSON" "$BAD_SOURCE_JSON" "$BAD_NON_JSON_SOURCE" "$BAD_NON_JSON_JSON" "$BAD_POINTER_JSON" "$BAD_VALUE_JSON" "$BAD_INVARIANT_JSON" <<'PY'
+python3 - "$REPO_ROOT" "$CATALOG_JSON" "$BAD_PERMISSIONED_JSON" "$BAD_NON_PERMISSIONED_LEAK_JSON" "$BAD_SOURCE_JSON" "$BAD_NON_JSON_SOURCE" "$BAD_NON_JSON_JSON" "$BAD_POINTER_JSON" "$BAD_VALUE_JSON" "$BAD_INVARIANT_JSON" <<'PY'
 import json
 import pathlib
 import sys
@@ -307,6 +309,7 @@ import sys
     repo_root,
     catalog_path,
     bad_permissioned_path,
+    bad_non_permissioned_leak_path,
     bad_source_path,
     bad_non_json_source_path,
     bad_non_json_path,
@@ -322,6 +325,14 @@ for row in bad_permissioned["seeds"]:
         row.pop("ack_requirement", None)
         break
 bad_permissioned_path.write_text(json.dumps(bad_permissioned, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+bad_non_permissioned_leak = json.loads(json.dumps(catalog))
+bad_non_permissioned_leak["seeds"][0]["ack_requirement"] = "FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host"
+bad_non_permissioned_leak["seeds"][0]["reproduction_command"] = (
+    "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 "
+    + bad_non_permissioned_leak["seeds"][0]["reproduction_command"]
+)
+bad_non_permissioned_leak_path.write_text(json.dumps(bad_non_permissioned_leak, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 bad_source = json.loads(json.dumps(catalog))
 bad_source["seeds"][0]["source_artifact"] = "tests/metamorphic-workload-seeds/missing_source_artifact.json"
@@ -349,6 +360,7 @@ PY
 invalid_failures=0
 for invalid_case in \
     "$BAD_PERMISSIONED_JSON:$BAD_PERMISSIONED_RAW" \
+    "$BAD_NON_PERMISSIONED_LEAK_JSON:$BAD_NON_PERMISSIONED_LEAK_RAW" \
     "$BAD_SOURCE_JSON:$BAD_SOURCE_RAW" \
     "$BAD_NON_JSON_JSON:$BAD_NON_JSON_RAW" \
     "$BAD_POINTER_JSON:$BAD_POINTER_RAW" \
@@ -390,8 +402,8 @@ PY
     fi
 fi
 
-if ((invalid_failures == 6 && coverage_preserved == 1)); then
-    scenario_result "metamorphic_seed_catalog_invalid_variants_rejected" "PASS" "permissioned ack, missing/non-JSON source artifact, source pointer, source value, and invariant variants rejected"
+if ((invalid_failures == 7 && coverage_preserved == 1)); then
+    scenario_result "metamorphic_seed_catalog_invalid_variants_rejected" "PASS" "permissioned ack, non-permissioned permission leak, missing/non-JSON source artifact, source pointer, source value, and invariant variants rejected"
 else
     scenario_result "metamorphic_seed_catalog_invalid_variants_rejected" "FAIL" "invalid_failures=${invalid_failures} coverage_preserved=${coverage_preserved}"
 fi
@@ -409,6 +421,10 @@ if run_cargo_capture "$UNIT_LOG" test -p ffs-harness --lib metamorphic_workload_
         "rejects_mismatched_numeric_source_value" \
         "accepts_seed_contained_in_source_command_string" \
         "rejects_permissioned_seed_without_ack_requirement" \
+        "rejects_non_permissioned_seed_with_ack_requirement" \
+        "rejects_non_permissioned_seed_with_permissioned_reproduction_token" \
+        "rejects_permissioned_seed_with_malformed_ack_requirement" \
+        "rejects_permissioned_seed_command_missing_declared_ack" \
         "rejects_unknown_relation_type" \
         "rejects_seed_without_invariant" \
         "rejects_seed_without_existing_proof_consumer" \

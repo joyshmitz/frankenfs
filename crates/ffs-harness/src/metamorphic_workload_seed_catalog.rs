@@ -20,6 +20,14 @@ pub const DEFAULT_METAMORPHIC_WORKLOAD_SEED_CATALOG_PATH: &str =
 
 const MIN_SOURCE_KIND_COUNT: usize = 5;
 
+const PERMISSIONED_REPRODUCTION_COMMAND_TOKENS: &[&str] = &[
+    "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD",
+    "FFS_SWARM_WORKLOAD_REAL_RUN_ACK",
+    "swarm-workload-may-use-permissioned-large-host",
+    "XFSTESTS_REAL_RUN_ACK",
+    "xfstests-may-mutate-test-and-scratch-devices",
+];
+
 const KNOWN_PROOF_CONSUMERS: &[&str] = &[
     "workload_corpus",
     "soak_canary_campaigns",
@@ -426,20 +434,76 @@ fn validate_seed(
             seed.seed_id, seed.execution_mode
         ));
     }
-    if seed.execution_mode.eq("permissioned")
-        && seed
-            .ack_requirement
-            .as_deref()
-            .is_none_or(|ack| ack.trim().is_empty())
+    validate_execution_safety(seed, errors);
+    let source_value_verified = validate_source_artifact_and_value(seed, repo_root, errors);
+    validate_expected_artifacts(seed, errors);
+    source_value_verified
+}
+
+fn validate_execution_safety(seed: &MetamorphicWorkloadSeed, errors: &mut Vec<String>) {
+    if seed.execution_mode.eq("permissioned") {
+        validate_permissioned_seed_ack(seed, errors);
+        return;
+    }
+
+    if seed
+        .ack_requirement
+        .as_deref()
+        .is_some_and(|ack| !ack.trim().is_empty())
     {
+        errors.push(format!(
+            "non-permissioned seed {} must not declare ack_requirement",
+            seed.seed_id
+        ));
+    }
+    for token in PERMISSIONED_REPRODUCTION_COMMAND_TOKENS {
+        if seed.reproduction_command.contains(token) {
+            errors.push(format!(
+                "non-permissioned seed {} reproduction_command must not mention permissioned token {token}",
+                seed.seed_id
+            ));
+        }
+    }
+}
+
+fn validate_permissioned_seed_ack(seed: &MetamorphicWorkloadSeed, errors: &mut Vec<String>) {
+    let Some(ack) = seed
+        .ack_requirement
+        .as_deref()
+        .filter(|ack| !ack.trim().is_empty())
+    else {
         errors.push(format!(
             "permissioned seed {} must declare ack_requirement",
             seed.seed_id
         ));
+        return;
+    };
+
+    if !is_exact_env_assignment_token(ack) {
+        errors.push(format!(
+            "permissioned seed {} ack_requirement must be an exact KEY=value env assignment token",
+            seed.seed_id
+        ));
     }
-    let source_value_verified = validate_source_artifact_and_value(seed, repo_root, errors);
-    validate_expected_artifacts(seed, errors);
-    source_value_verified
+    if !seed.reproduction_command.contains(ack) {
+        errors.push(format!(
+            "permissioned seed {} reproduction_command must include ack_requirement {ack}",
+            seed.seed_id
+        ));
+    }
+}
+
+fn is_exact_env_assignment_token(raw: &str) -> bool {
+    let Some((key, value)) = raw.split_once('=') else {
+        return false;
+    };
+    !key.is_empty()
+        && !value.is_empty()
+        && !raw.chars().any(char::is_whitespace)
+        && !value.contains('*')
+        && key
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 fn validate_source_artifact_and_value(
@@ -916,6 +980,76 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("must declare ack_requirement"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_non_permissioned_seed_with_ack_requirement() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let seed = seed_by_execution_mode_mut(&mut catalog, "dry_run")?;
+        seed.ack_requirement = Some(
+            "FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host"
+                .to_owned(),
+        );
+
+        let report = validate_fixture(&catalog);
+
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("must not declare ack_requirement")
+                && error.contains("seed_workload_append_truncate_64001")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_non_permissioned_seed_with_permissioned_reproduction_token() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let seed = seed_by_execution_mode_mut(&mut catalog, "analysis_only")?;
+        seed.reproduction_command =
+            "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 cargo run -p ffs-harness -- validate-repair-confidence-lab"
+                .to_owned();
+
+        let report = validate_fixture(&catalog);
+
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("reproduction_command must not mention permissioned token")
+                && error.contains("seed_fault_injection_case_1001")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_permissioned_seed_with_malformed_ack_requirement() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let seed = seed_by_execution_mode_mut(&mut catalog, "permissioned")?;
+        seed.ack_requirement = Some("please run the permissioned swarm workload".to_owned());
+
+        let report = validate_fixture(&catalog);
+
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("ack_requirement must be an exact KEY=value env assignment token")
+                && error.contains("seed_swarm_tail_latency_7310001")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_permissioned_seed_command_missing_declared_ack() -> Result<()> {
+        let mut catalog = fixture_catalog()?;
+        let seed = seed_by_execution_mode_mut(&mut catalog, "permissioned")?;
+        seed.ack_requirement =
+            Some("FFS_SWARM_WORKLOAD_REAL_RUN_ACK=alternate-permission-token".to_owned());
+
+        let report = validate_fixture(&catalog);
+
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("reproduction_command must include ack_requirement")
+                && error.contains("seed_swarm_tail_latency_7310001")
+        }));
         Ok(())
     }
 
