@@ -29,6 +29,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 # Run write-back durability scenarios
 ./scripts/e2e/ffs_writeback_e2e.sh
 
+# Verify the write-back wrapper RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_WRITEBACK_SELF_CHECK=1 ./scripts/e2e/ffs_writeback_e2e.sh
+
 # Run graceful degradation stress suite
 ./scripts/e2e/ffs_degradation_stress.sh
 

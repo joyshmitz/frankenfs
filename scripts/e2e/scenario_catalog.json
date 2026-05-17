@@ -2865,7 +2865,9 @@
       "suite_id": "ffs_writeback",
       "script": "scripts/e2e/ffs_writeback_e2e.sh",
       "required_categories": [
-        "happy"
+        "happy",
+        "edge",
+        "error"
       ],
       "scenarios": [
         {
@@ -2873,6 +2875,24 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=writeback_durability_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "writeback_fixture_complete_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "writeback_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "writeback_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=writeback_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },
