@@ -11,6 +11,8 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_repa
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-300}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-2}"
 RCH_CAPTURE_VISIBILITY="${FFS_REPAIR_5PCT_RCH_VISIBILITY:-summary}"
+SELF_CHECK="${FFS_REPAIR_5PCT_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_REPAIR_5PCT_SKIP_SELF_CHECK:-0}"
 
 for rch_env_var in CARGO_TARGET_DIR FFS_REPAIR_E2E_ARTIFACT_DIR FFS_REPAIR_E2E_ARTIFACT_STDOUT; do
     case ",${RCH_ENV_ALLOWLIST:-}," in
@@ -137,6 +139,147 @@ run_rch_capture() {
     return "$status"
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_REPAIR_5PCT_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        ;;
+    missing_remote_evidence)
+        ;;
+    *)
+        echo "unknown repair 5pct fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+case "$command_text" in
+    *"cargo test -p ffs-repair e2e_survive_five_percent_random_block_corruption_with_daemon -- --nocapture"*)
+        printf '%s\n' \
+            "test e2e_survive_five_percent_random_block_corruption_with_daemon ... ok" \
+            'FFS_REPAIR_E2E_ARTIFACT|name=before_checksums.txt|json="sha256-a  file-a\nsha256-b  file-b\n"' \
+            'FFS_REPAIR_E2E_ARTIFACT|name=after_checksums.txt|json="sha256-a  file-a\nsha256-b  file-b\n"' \
+            'FFS_REPAIR_E2E_ARTIFACT|name=corruption_plan.json|json="{\"corruption_percent\":5,\"total_corrupted_blocks\":3}\n"' \
+            'FFS_REPAIR_E2E_ARTIFACT|name=recovery_evidence.jsonl|json="{\"event\":\"repair_complete\",\"repaired_blocks\":3}\n"'
+        ;;
+    *)
+        echo "unexpected fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/repair_5pct_fixture_${fixture_case}.log"
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_REPAIR_5PCT_SELF_CHECK=0 \
+        FFS_REPAIR_5PCT_SKIP_SELF_CHECK=1 \
+        FFS_REPAIR_5PCT_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=8 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_repair_5pct_e2e.sh" >"$child_log" 2>&1
+    local child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic repair 5pct wrapper self-check"
+    local stub_path child_info child_status child_log result_path result_dir artifact_dir test_log
+    stub_path="$E2E_LOG_DIR/rch-repair-5pct-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    result_dir="$(dirname "$result_path")"
+    artifact_dir="$result_dir/repair_5pct"
+    test_log="$result_dir/repair_5pct_cargo_test.log"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && [[ -f "$test_log" ]] \
+        && have_repair_artifacts "$artifact_dir" \
+        && cmp "$artifact_dir/before_checksums.txt" "$artifact_dir/after_checksums.txt" >/dev/null \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "repair_5pct_remote_cargo_test" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "repair_5pct_artifacts_present" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "repair_5pct_checksum_equality" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "repair_5pct_corruption_plan" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "repair_5pct_recovery_evidence" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null \
+        && grep -q "e2e_survive_five_percent_random_block_corruption_with_daemon" "$test_log" \
+        && grep -q "repair_5pct_artifacts_reconstructed_from_rch_stdout" "$child_log"; then
+        scenario_result "repair_5pct_fixture_complete_self_check" "PASS" "result=${result_path} artifact_dir=${artifact_dir}"
+    else
+        scenario_result "repair_5pct_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "Repair 5pct complete fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "repair_5pct_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "repair_5pct_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "Repair 5pct local fallback fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "repair_5pct_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "repair_5pct_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "Repair 5pct missing remote evidence fixture self-check failed"
+    fi
+}
+
 have_repair_artifacts() {
     local artifact_dir="$1"
     local name
@@ -189,6 +332,12 @@ PY
 
 e2e_init "ffs_repair_5pct_e2e"
 e2e_print_env
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 e2e_step "Run 5% corruption auto-repair scenario"
 ARTIFACT_DIR="$E2E_LOG_DIR/repair_5pct"
