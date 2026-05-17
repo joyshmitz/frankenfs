@@ -15,8 +15,10 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${FFS_SWARM_CACHE_CARGO_TARGET_DIR:-${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_swarm_cache_controller}}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_REMOTE_TMPDIR="${FFS_SWARM_CACHE_RCH_TMPDIR:-/var/tmp}"
+RCH_REMOTE_CARGO_HOME="${FFS_SWARM_CACHE_RCH_CARGO_HOME:-/var/tmp/rch_cargo_home_frankenfs_swarm_cache_controller}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-300}"
-RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-2}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-30}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -93,16 +95,23 @@ run_rch_capture() {
     local remote_exit=""
     local wait_status
     local had_errexit=0
+    local command_display
+    local -a rch_args=("$@")
 
     case $- in
         *e*) had_errexit=1 ;;
     esac
 
+    if [[ ${#rch_args[@]} -gt 0 && "${rch_args[0]}" == "cargo" ]]; then
+        rch_args=(env "TMPDIR=${RCH_REMOTE_TMPDIR}" "CARGO_HOME=${RCH_REMOTE_CARGO_HOME}" "${rch_args[@]}")
+    fi
+    command_display="${rch_args[*]}"
+
     : >"$output_path"
     set +e
     RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
         RCH_VISIBILITY=none \
-        "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
+        "${RCH_BIN:-rch}" exec -- "${rch_args[@]}" >"$output_path" 2>&1 &
     pid=$!
     if [[ "$had_errexit" -eq 1 ]]; then
         set -e
@@ -114,16 +123,16 @@ run_rch_capture() {
         if [[ -n "$remote_exit" ]]; then
             sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
             if kill -0 "$pid" >/dev/null 2>&1; then
-                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=$*"
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=${command_display}"
                 kill -TERM "$pid" >/dev/null 2>&1 || true
-                e2e_rch_cancel_matching_queue_entry "$@"
+                e2e_rch_cancel_matching_queue_entry "${rch_args[@]}"
             fi
             break
         fi
         if ((SECONDS >= deadline)); then
-            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=$*"
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=${command_display}"
             kill -TERM "$pid" >/dev/null 2>&1 || true
-            e2e_rch_cancel_matching_queue_entry "$@"
+            e2e_rch_cancel_matching_queue_entry "${rch_args[@]}"
             status=124
             break
         fi
@@ -143,20 +152,20 @@ run_rch_capture() {
     fi
 
     if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
-        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}|command=$*"
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}|command=${command_display}"
         printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
         return 99
     fi
     if [[ $status -eq 0 ]]; then
         if ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
-            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}|command=$*"
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}|command=${command_display}"
             printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
             return 99
         fi
         return 0
     fi
     if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$output_path"; then
-        e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|output=${output_path}|command=$*"
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|output=${output_path}|command=${command_display}"
         return 0
     fi
     return "$status"
