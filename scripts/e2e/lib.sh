@@ -1282,9 +1282,12 @@ e2e_emit_json_summary() {
     # Extract scenario results from log
     local scenarios_json="["
     local invalid_scenario_markers_json="["
+    local rch_local_fallback_rejections_json="["
     local invalid_scenario_marker_count=0
+    local rch_local_fallback_rejected_count=0
     local first=true
     local invalid_first=true
+    local rch_first=true
     while IFS= read -r line; do
         # Parse: SCENARIO_RESULT|scenario_id=X|outcome=Y[|detail=Z]
         local scenario_id outcome detail
@@ -1361,6 +1364,25 @@ e2e_emit_json_summary() {
     scenarios_json+="]"
     invalid_scenario_markers_json+="]"
 
+    while IFS= read -r line; do
+        local marker_preview
+
+        marker_preview="$line"
+        if ((${#marker_preview} > 240)); then
+            marker_preview="${marker_preview:0:240}..."
+        fi
+        marker_preview=$(e2e_json_escape "$marker_preview")
+
+        if [[ "$rch_first" == "true" ]]; then
+            rch_first=false
+        else
+            rch_local_fallback_rejections_json+=","
+        fi
+        rch_local_fallback_rejections_json+="{\"marker\":\"$marker_preview\"}"
+        rch_local_fallback_rejected_count=$((rch_local_fallback_rejected_count + 1))
+    done < <(grep "^RCH_LOCAL_FALLBACK_REJECTED|" "$E2E_LOG_FILE" 2>/dev/null || true)
+    rch_local_fallback_rejections_json+="]"
+
     # Determine verdict
     local verdict="PASS"
     if echo "$scenarios_json" | grep -q '"outcome":"FAIL"'; then
@@ -1395,6 +1417,8 @@ e2e_emit_json_summary() {
   "scenarios": $scenarios_json,
   "invalid_scenario_marker_count": $invalid_scenario_marker_count,
   "invalid_scenario_markers": $invalid_scenario_markers_json,
+  "rch_local_fallback_rejected_count": $rch_local_fallback_rejected_count,
+  "rch_local_fallback_rejections": $rch_local_fallback_rejections_json,
   "verdict": "$verdict",
   "exit_code": $script_exit_code,
   "duration_secs": $duration_secs,
