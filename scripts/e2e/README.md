@@ -120,6 +120,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_EVIDENCE_PRESETS_SELF_CHECK=1 ./scripts/e2e/f
 # Verify the evidence metrics presets RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_EVIDENCE_METRICS_PRESETS_SELF_CHECK=1 ./scripts/e2e/ffs_evidence_metrics_presets_e2e.sh
 
+# Verify the operator tooling gate RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_OPERATOR_TOOLING_GATE_SELF_CHECK=1 ./scripts/e2e/ffs_operator_tooling_gate_e2e.sh
+
 # Verify the error taxonomy RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_ERROR_TAXONOMY_SELF_CHECK=1 ./scripts/e2e/ffs_error_taxonomy_e2e.sh
 

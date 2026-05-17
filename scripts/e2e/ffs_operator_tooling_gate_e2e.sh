@@ -14,6 +14,9 @@
 # 7. Error taxonomy E2E passes (bd-h6nz.7.6)
 # 8. Cross-cutting: all operator unit tests pass
 # 9. Cross-cutting: structured log markers auditable across surfaces
+# 10. Fixture mode proves cataloged markers without cargo
+# 11. Fixture mode proves local fallback rejection
+# 12. Fixture mode proves missing remote evidence rejection
 #
 # Usage: ./scripts/e2e/ffs_operator_tooling_gate_e2e.sh
 #
@@ -39,6 +42,8 @@ case ",${RCH_ENV_ALLOWLIST:-}," in
 esac
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_OPERATOR_TOOLING_GATE_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_OPERATOR_TOOLING_GATE_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -136,7 +141,190 @@ log_test_tail() {
     fi
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_OPERATOR_TOOLING_GATE_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        echo "Remote command finished: exit=0" >&2
+        ;;
+    missing_remote_evidence)
+        ;;
+    *)
+        echo "unknown operator tooling gate fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+case "$command_text" in
+    *"cargo test -p ffs-harness --lib -- error_taxonomy"*)
+        printf '%s\n' \
+            "running 12 tests" \
+            "test error_taxonomy::tests::taxonomy_has_seven_classes ... ok" \
+            "test error_taxonomy::tests::taxonomy_codes_are_unique ... ok" \
+            "test error_taxonomy::tests::taxonomy_codes_have_known_prefixes ... ok" \
+            "test error_taxonomy::tests::taxonomy_has_remediation_hints ... ok" \
+            "test error_taxonomy::tests::taxonomy_runbooks_resolve ... ok" \
+            "test error_taxonomy::tests::taxonomy_error_variants_resolve ... ok" \
+            "test error_taxonomy::tests::taxonomy_presets_align ... ok" \
+            "test error_taxonomy::tests::taxonomy_serializes_to_json ... ok" \
+            "test error_taxonomy::tests::taxonomy_cli_surface_is_stable ... ok" \
+            "test error_taxonomy::tests::taxonomy_tui_surface_is_stable ... ok" \
+            "test error_taxonomy::tests::taxonomy_evidence_surface_is_stable ... ok" \
+            "test error_taxonomy::tests::taxonomy_operator_hints_are_nonempty ... ok"
+        ;;
+    *"cargo test -p ffs-harness --lib -- health_consistency"*)
+        printf '%s\n' \
+            "running 10 tests" \
+            "test health_consistency::tests::canonical_dimensions_are_defined ... ok" \
+            "test health_consistency::tests::degradation_variants_are_complete ... ok" \
+            "test health_consistency::tests::tui_degradation_mapping_is_complete ... ok" \
+            "test health_consistency::tests::pressure_counters_are_exposed ... ok" \
+            "test health_consistency::tests::runtime_modes_match_cli_surface ... ok" \
+            "test health_consistency::tests::wal_replay_markers_are_present ... ok" \
+            "test health_consistency::tests::source_of_truth_docs_cover_dimensions ... ok" \
+            "test health_consistency::tests::health_report_serializes ... ok" \
+            "test health_consistency::tests::health_surface_names_are_stable ... ok" \
+            "test health_consistency::tests::health_summary_rejects_missing_dimensions ... ok"
+        ;;
+    *"cargo test -p ffs-harness --lib -- tabletop_drill"*)
+        printf '%s\n' \
+            "running 10 tests" \
+            "test tabletop_drill::tests::catalog_contains_three_drills ... ok" \
+            "test tabletop_drill::tests::drill_ids_are_stable ... ok" \
+            "test tabletop_drill::tests::drill_steps_have_commands ... ok" \
+            "test tabletop_drill::tests::drill_expected_markers_are_nonempty ... ok" \
+            "test tabletop_drill::tests::drill_error_codes_resolve ... ok" \
+            "test tabletop_drill::tests::drill_runbooks_resolve ... ok" \
+            "test tabletop_drill::tests::drill_serializes_to_json ... ok" \
+            "test tabletop_drill::tests::drill_evidence_sections_are_ordered ... ok" \
+            "test tabletop_drill::tests::drill_remediation_links_are_stable ... ok" \
+            "test tabletop_drill::tests::drill_operator_surface_is_complete ... ok"
+        ;;
+    *)
+        echo "unexpected fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/operator_tooling_gate_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_OPERATOR_TOOLING_GATE_SELF_CHECK=0 \
+        FFS_OPERATOR_TOOLING_GATE_SKIP_SELF_CHECK=1 \
+        FFS_OPERATOR_TOOLING_GATE_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_operator_tooling_gate_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic operator tooling gate wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-operator-tooling-gate-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "gate_subgate_scripts" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "gate_modules_exported" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "gate_runbooks_complete" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "gate_evidence_presets" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "gate_health_consistency" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "gate_tabletop_drills" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "gate_error_taxonomy" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "gate_unit_tests" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "gate_log_audit" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "operator_tooling_gate_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "operator_tooling_gate_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "operator_tooling_gate_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "operator_tooling_gate_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "operator_tooling_gate_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "operator_tooling_gate_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
 e2e_init "ffs_operator_tooling_gate"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
+
 e2e_print_env
 
 #######################################
