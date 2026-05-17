@@ -22,6 +22,8 @@ RCH_BIN="${RCH_BIN:-rch}"
 RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_REPAIR_WRITEBACK_ROUTE_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_REPAIR_WRITEBACK_ROUTE_SKIP_SELF_CHECK:-0}"
 
 case ",${RCH_ENV_ALLOWLIST:-}," in
     *",CARGO_TARGET_DIR,"*) ;;
@@ -165,6 +167,178 @@ CLI_LOG="$E2E_LOG_DIR/cli_rw_background_repair.log"
 FUSE_LOG="$E2E_LOG_DIR/fuse_writeback_cache_guard.log"
 ARTIFACT_JSON="$E2E_LOG_DIR/repair_writeback_route_artifact.json"
 SUMMARY_MD="$E2E_LOG_DIR/repair_writeback_route_summary.md"
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_REPAIR_WRITEBACK_ROUTE_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        ;;
+    *)
+        echo "unknown repair/writeback route fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+echo "[RCH] remote worker=fixture exit=0" >&2
+case "$command_text" in
+    *"cargo test -p ffs-core repair_writeback_"*)
+        printf '%s\n' \
+            "test repair_writeback_uses_mounted_request_scope_and_flushes_to_device ... ok" \
+            "test repair_writeback_rejects_short_block_without_mutating_device ... ok" \
+            "test repair_writeback_rejects_duplicate_block_without_mutation_or_refresh ... ok" \
+            "test repair_writeback_repair_before_client_write_preserves_later_client_commit ... ok" \
+            "test repair_writeback_write_before_repair_rejects_stale_snapshot ... ok" \
+            "test repair_writeback_disjoint_client_write_and_repair_both_persist ... ok" \
+            "test repair_writeback_cancellation_before_stage_leaves_device_unchanged ... ok" \
+            "test repair_writeback_stale_rejection_does_not_notify_refresh_lifecycle ... ok" \
+            "test repair_writeback_flush_survives_reopen_after_boundary ... ok"
+        exit 0
+        ;;
+    *"cargo test -p ffs-repair recovery_"*)
+        printf '%s\n' \
+            "test recovery_uses_configured_writeback_authority ... ok" \
+            "test recovery_writeback_rejection_fails_closed_without_symbol_refresh ... ok"
+        exit 0
+        ;;
+    *"cargo test -p ffs-cli mount_background_repair"*)
+        printf '%s\n' \
+            "test mount_background_repair_implies_scrub_for_read_write_mount ... ok" \
+            "test mount_background_repair_rejects_read_write_missing_ledger ... ok" \
+            "test cli_parses_read_write_mount_background_repair_flag ... ok"
+        exit 0
+        ;;
+    *"cargo test -p ffs-fuse build_mount_options_excludes_kernel_writeback_cache_mode"*)
+        printf '%s\n' \
+            "test build_mount_options_excludes_kernel_writeback_cache_mode ... ok"
+        exit 0
+        ;;
+    *)
+        echo "unexpected fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/repair_writeback_route_fixture_${fixture_case}.log"
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_REPAIR_WRITEBACK_ROUTE_SELF_CHECK=0 \
+        FFS_REPAIR_WRITEBACK_ROUTE_SKIP_SELF_CHECK=1 \
+        FFS_REPAIR_WRITEBACK_ROUTE_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=8 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_repair_writeback_route_e2e.sh" >"$child_log" 2>&1
+    local child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic repair/writeback route wrapper self-check"
+    local stub_path child_info child_status child_log result_path artifact_path summary_path core_log repair_log cli_log fuse_log
+    stub_path="$E2E_LOG_DIR/rch-repair-writeback-route-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    artifact_path="$(dirname "$result_path")/repair_writeback_route_artifact.json"
+    summary_path="$(dirname "$result_path")/repair_writeback_route_summary.md"
+    core_log="$(dirname "$result_path")/core_repair_writeback_route.log"
+    repair_log="$(dirname "$result_path")/repair_writeback_authority.log"
+    cli_log="$(dirname "$result_path")/cli_rw_background_repair.log"
+    fuse_log="$(dirname "$result_path")/fuse_writeback_cache_guard.log"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && [[ -f "$artifact_path" ]] \
+        && [[ -f "$summary_path" ]] \
+        && [[ -f "$core_log" ]] \
+        && [[ -f "$repair_log" ]] \
+        && [[ -f "$cli_log" ]] \
+        && [[ -f "$fuse_log" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and ([.scenarios[] | select(.scenario_id == "repair_writeback_mounted_request_scope" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "repair_race_write_before_repair_stale_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "repair_race_duplicate_block_no_mutation" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "repair_writeback_authority_injected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "rw_background_repair_cli_enabled" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "rw_background_repair_writeback_cache_disabled" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "repair_writeback_route_artifact" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null \
+        && jq -e '
+            .scenario_id == "repair_writeback_route_smoke"
+            and .writeback_authority == "mounted_mvcc_request_scope"
+            and .rw_background_repair_cli.writeback_cache_state == "kernel_writeback_cache_disabled"
+            and (.interleaving_schedule_ids | length) >= 7
+            and (.operation_trace | index("reject_duplicate_repair_targets_before_stage") != null)
+            and .observed_state == "repair_writeback_interleavings_and_duplicate_target_rejection_verified"
+        ' "$artifact_path" >/dev/null \
+        && grep -q "malformed repair plans" "$summary_path" \
+        && grep -q "repair_writeback_rejects_duplicate_block_without_mutation_or_refresh" "$core_log" \
+        && grep -q "recovery_writeback_rejection_fails_closed_without_symbol_refresh" "$repair_log" \
+        && grep -q "mount_background_repair_rejects_read_write_missing_ledger" "$cli_log" \
+        && grep -q "build_mount_options_excludes_kernel_writeback_cache_mode" "$fuse_log"; then
+        scenario_result "repair_writeback_route_fixture_complete_self_check" "PASS" "result=${result_path} artifact=${artifact_path}"
+    else
+        scenario_result "repair_writeback_route_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "repair/writeback route complete fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "repair_writeback_route_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "repair_writeback_route_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "repair/writeback route local fallback fixture self-check failed"
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 e2e_step "Scenario 1: mounted mutation path stages, commits, flushes, and verifies"
 if run_rch_capture "$CORE_LOG" cargo test -p ffs-core repair_writeback_ -- --nocapture; then

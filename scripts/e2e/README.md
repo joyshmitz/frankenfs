@@ -1310,6 +1310,16 @@ before mount, and kernel FUSE writeback-cache mode stays disabled.
 ./scripts/e2e/ffs_repair_writeback_route_e2e.sh
 ```
 
+When remote RCH capacity is unavailable, the deterministic wrapper self-check
+proves captured focused-test output, route artifact generation, and
+local-fallback rejection without running cargo:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_REPAIR_WRITEBACK_ROUTE_SELF_CHECK=1 \
+./scripts/e2e/ffs_repair_writeback_route_e2e.sh
+```
+
 The generated artifact records operation and scenario IDs, expected and
 observed states, interleaving schedule IDs, operation traces, ledger event
 classes, visible data before/after repair, stdout/stderr log paths, cleanup
