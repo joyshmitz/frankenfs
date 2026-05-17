@@ -27,6 +27,57 @@ ffs-harness rch-proof-ledger \
 The JSON ledger is the contract. The Markdown summary is the operator handoff
 surface. Preserve the raw transcript beside both outputs.
 
+## Capacity Preflight
+
+Use the capacity preflight before starting expensive remote-only proof lanes
+when `rch status --json` reports degraded posture, no admissible workers,
+critical pressure, stale telemetry, or repeated local fallback refusals. The
+preflight is not validation proof. It is an infrastructure-blocker artifact
+that explains why proof cannot be collected yet.
+
+Default status-only capture:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 ./scripts/e2e/ffs_rch_capacity_preflight_e2e.sh
+```
+
+Remote-required probe capture:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_RCH_CAPACITY_PREFLIGHT_RUN_PROBE=1 \
+./scripts/e2e/ffs_rch_capacity_preflight_e2e.sh
+```
+
+The probe runs:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- cargo check -p ffs-error --lib
+```
+
+If RCH refuses local fallback, the run still passes as a capacity diagnostic
+and records `RCH_LOCAL_FALLBACK_REJECTED` in `result.json`. If the probe
+produces neither an RCH remote summary nor a local-fallback refusal, the
+preflight fails because the result is ambiguous.
+
+Preserve these artifacts in handoffs:
+
+- `run.log`
+- `result.json`
+- `rch_status.json`
+- `rch_capacity_preflight_report.json`
+- `rch_capacity_preflight_summary.md`
+- `rch_capacity_probe.raw` when the probe is enabled
+
+Use this wording when RCH capacity blocks validation:
+
+```text
+Remote proof is unavailable because the RCH capacity preflight reported
+`no_admissible_workers`. This is not product validation proof; rerun the
+remote cargo gate after RCH capacity recovers. See
+artifacts/e2e/<run>/rch_capacity_preflight_report.json and result.json.
+```
+
 ## Decision Rules
 
 | Transcript state | Ledger verdict | Operator action |
@@ -36,6 +87,7 @@ surface. Preserve the raw transcript beside both outputs.
 | `[RCH] local (remote execution failed)` | `invalid_local_fallback` | Local fallback is not remote validation proof. Rerun on RCH or report the remote-execution blocker. |
 | Remote exit is nonzero | `remote_failure` | Treat as a failed validation or product/tooling failure according to the command. |
 | Worker or exit evidence is missing | `missing_remote_evidence` | Do not claim validation; capture a complete transcript first. |
+| Capacity preflight reports `no_admissible_workers` or local-fallback refusal | not a proof-ledger verdict | Report an infrastructure blocker and rerun after RCH capacity recovers. |
 
 Worker-side exit=0 is sufficient evidence only when the command, cwd, worker,
 and transcript match the claimed gate. A local shell exit code is not enough if
