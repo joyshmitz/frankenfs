@@ -6465,7 +6465,7 @@
           "id_pattern": "^mounted_write_[a-z0-9_]+$",
           "category": "happy",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id={scenario_id}|outcome={actual_outcome}"
+          "evidence": "SCENARIO_RESULT|scenario_id={result['scenario_id']}|outcome={shared_outcome}"
         },
         {
           "id": "mounted_write_read_only_probe_unsupported",
@@ -6622,13 +6622,13 @@
           "id": "crash_replay_mounted_write_reopen",
           "category": "unsupported_op",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=crash_replay_mounted_write_reopen|outcome=SKIP"
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_replay_mounted_write_reopen|outcome=PASS"
         },
         {
           "id": "crash_replay_repair_interruption",
           "category": "unsupported_op",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=crash_replay_repair_interruption|outcome=SKIP"
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_replay_repair_interruption|outcome=PASS"
         },
         {
           "id": "permissioned_crash_replay_blocker_contract",

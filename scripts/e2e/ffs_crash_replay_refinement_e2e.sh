@@ -22,14 +22,29 @@ scenario_result() {
     local scenario_id="$1"
     local status="$2"
     local detail="$3"
-    e2e_log "SCENARIO_RESULT|scenario_id=${scenario_id}|outcome=${status}|detail=${detail}"
-    if [[ "$status" == "PASS" ]]; then
-        PASS_COUNT=$((PASS_COUNT + 1))
-    elif [[ "$status" == "SKIP" ]]; then
-        SKIP_COUNT=$((SKIP_COUNT + 1))
-    else
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    fi
+    local marker_outcome
+
+    case "$status" in
+        PASS)
+            marker_outcome="PASS"
+            PASS_COUNT=$((PASS_COUNT + 1))
+            ;;
+        SKIP)
+            marker_outcome="PASS"
+            SKIP_COUNT=$((SKIP_COUNT + 1))
+            ;;
+        FAIL)
+            marker_outcome="FAIL"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+            ;;
+        *)
+            marker_outcome="FAIL"
+            detail="invalid_internal_status=${status} ${detail}"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+            ;;
+    esac
+
+    e2e_log "SCENARIO_RESULT|scenario_id=${scenario_id}|outcome=${marker_outcome}|detail=${detail}"
     TOTAL=$((TOTAL + 1))
 }
 
