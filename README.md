@@ -768,7 +768,7 @@ FrankenFS uses [`asupersync`](https://github.com/Dicklesworthstone/asupersync) 0
 
 | Requirement | asupersync | tokio |
 |---|---|---|
-| Structured concurrency (no orphan tasks) | `Scope` + `region()` | Manual `JoinSet` management |
+| Structured concurrency (no orphan tasks) | `create_root_region` + `create_task` | Manual `JoinSet` management |
 | Cooperative cancellation via capability context | `&Cx` threaded through all calls | `CancellationToken` (opt-in, not universal) |
 | Cancel-correct channels (no data loss on cancel) | Two-phase `reserve()` / `send()` | `send()` can lose data on cancel |
 | Deterministic testing | `LabRuntime` with virtual time + DPOR | Non-deterministic executor |
@@ -1145,7 +1145,7 @@ Three metric types, all lock-free atomic:
 
 Almost every Rust async ecosystem uses ambient authority somewhere: a global executor, an implicit current task, a built-in clock. `asupersync`, and therefore FrankenFS, eliminates ambient authority by passing an explicit `Cx` capability into every call that might block or time out.
 
-**Important:** FrankenFS itself is **synchronous Rust**. The `Cx` is a capability handle, not a future-driven runtime. Functions take `&Cx` and return `Result<T, FfsError>` directly; the cooperative yield point is the explicit `cx.checkpoint()` call. The async runtime primitives (`Scope`, `region()`, two-phase channels, `LabRuntime`) live in the upstream `asupersync` crate; FrankenFS uses them only at the outermost runtime boundary (mainly in the `ffs-fuse` session loop and in tests).
+**Important:** FrankenFS itself is **synchronous Rust**. The `Cx` is a capability handle, not a future-driven runtime. Functions take `&Cx` and return `Result<T, FfsError>` directly; the cooperative yield point is the explicit `cx.checkpoint()` call. The async runtime primitives (region scoping via `runtime.state.create_root_region` / `create_task`, two-phase `reserve()`/`send()` channels, `LabRuntime`) live in the upstream `asupersync` crate; FrankenFS uses them only at the outermost runtime boundary (mainly in the `ffs-fuse` session loop and in tests).
 
 ### What's inside a `Cx` (conceptual model)
 
@@ -1195,7 +1195,7 @@ fn cx_with_short_deadline() -> Cx {
 }
 ```
 
-The classic asupersync async primitives (`region()` for structured concurrency and two-phase `reserve()/send()` for cancel-correct channels) exist in the runtime and are used by the async parts of `ffs-fuse` (the FUSE session loop) and `asupersync` itself, but FrankenFS application code is synchronous.
+The asupersync async primitives (region scoping via `create_root_region` + `create_task`, two-phase `sender.reserve(cx).await` then `.send(value)` for cancel-correct channels) exist in the runtime and are used by the async parts of `ffs-fuse` (the FUSE session loop) and `asupersync` itself, but FrankenFS application code is synchronous.
 
 ### How `Cx` interacts with FUSE
 
@@ -2169,7 +2169,7 @@ fn with_test_deadline_cx() -> Cx {
 }
 ```
 
-The full asupersync runtime surface (structured-concurrency `region()`, two-phase `reserve()/send()` channels, the `LabRuntime` with virtual time + DPOR) lives in the upstream crate. FrankenFS itself is synchronous code that *uses* `Cx` for cancellation and budget but does not spawn async tasks from filesystem code paths. Async primitives are only invoked at the runtime root (e.g., the `ffs-fuse` session loop and `LabRuntime`-based stress tests).
+The full asupersync runtime surface (region scoping via `runtime.state.create_root_region` + `create_task`, two-phase `sender.reserve(cx).await` then `.send(value)` channels, the `LabRuntime` with virtual time + DPOR) lives in the upstream crate. FrankenFS itself is synchronous code that *uses* `Cx` for cancellation and budget but does not spawn async tasks from filesystem code paths. Async primitives are only invoked at the runtime root (e.g., the `ffs-fuse` session loop and `LabRuntime`-based stress tests).
 
 ### 7. Direct on-disk parsing (no I/O)
 
@@ -2873,81 +2873,110 @@ Crash recovery for a committing transaction depends on which side of the WAL `fs
 
 The 113 E2E gate scripts in `scripts/e2e/` are organized by capability area. Selected highlights, grouped by category:
 
-### Conformance and baseline (about 12 scripts)
+### Conformance and baseline
 - `ffs_baseline_validation_e2e.sh`: initial conformance gate
-- `ffs_conformance_matrix_e2e.sh`: fixture-vs-golden matrix run
 - `ffs_verification_gate_e2e.sh`: top-level verification suite
-- `ffs_kernel_reference_audit_e2e.sh`: `debugfs` differential audit
-- `ffs_mounted_metadata_oracle_e2e.sh`: mounted vs offline metadata comparison
+- `ffs_verification_runner_e2e.sh`: long-form verification runner
+- `ffs_health_consistency_e2e.sh`: cross-subsystem health consistency
+- `ffs_smoke.sh`: minimal smoke gate
 
-### MVCC and conflict resolution (about 10 scripts)
+### MVCC and conflict resolution
 - `ffs_mvcc_lifecycle_e2e.sh`: full transaction lifecycle
 - `ffs_mvcc_replay_gate_e2e.sh`: WAL replay invariants
 - `ffs_mounted_differential_oracle_e2e.sh`: mounted differential oracle
 - `ffs_cross_oracle_arbitration_e2e.sh`: disagreement classification
-- `ffs_safe_merge_120writer_e2e.sh`: the headline 120-writer stress
+- `ffs_invariant_oracle_e2e.sh`: invariant oracle consumer
+- `ffs_wal_replay_e2e.sh` / `ffs_wal_writer_e2e.sh` / `ffs_wal_group_commit_gate_e2e.sh`
 
-### Repair and self-healing (about 12 scripts)
+### Repair and self-healing
 - `ffs_repair_confidence_lab_e2e.sh`: repair-confidence harness
 - `ffs_repair_writeback_serialization_e2e.sh`: MVCC repair-writeback serializer
 - `ffs_repair_writeback_route_e2e.sh`: RW mount repair routing
 - `ffs_repair_5pct_e2e.sh`: 5% overhead canonical scenario
-- `ffs_scrub_repair_status_e2e.sh`: scrub + repair status gate
+- `ffs_scrub_repair_scheduler_e2e.sh`: scrub + repair scheduling
+- `ffs_repair_recovery_smoke.sh`: end-to-end recovery smoke
+- `ffs_repair_exchange_loopback_e2e.sh`: multi-host symbol exchange
+- `ffs_repair_corpus_e2e.sh`: synthesized repair corpus
+- `ffs_self_healing_demo.sh`: self-healing adoption demo
 
-### Crash and recovery (about 8 scripts)
+### Crash and recovery
 - `ffs_crash_matrix_e2e.sh`: the 12-point crash matrix
 - `ffs_crash_replay_refinement_e2e.sh`: replay-refinement gate
-- `ffs_mounted_recovery_matrix_e2e.sh`: mounted recovery
-- `ffs_native_mode_recovery_e2e.sh`: native COW recovery
+- `ffs_mounted_recovery_matrix_e2e.sh`: mounted recovery scenarios
+- `ffs_crash_promotion_e2e.sh`: crash-finding promotion path
+- `ffs_chaos_replay_lab_e2e.sh`: chaos replay lab
+- `ffs_fault_injection_corpus_e2e.sh`: fault-injection corpus
 
-### Writeback-cache (about 8 scripts)
-- `ffs_writeback_cache_audit_e2e.sh`: the canonical audit gate (89 KB)
-- `ffs_writeback_cache_ordering_oracle_e2e.sh`: dirty-page ordering
-- `ffs_writeback_cache_crash_replay_oracle_e2e.sh`: crash/replay matrix
-- `ffs_writeback_cache_kill_switch_e2e.sh`: runtime kill-switch refusal
+### Writeback-cache
+- `ffs_writeback_cache_audit_e2e.sh`: the canonical audit gate (89 KB) — covers default-off, opt-in, kill-switch, ordering-oracle, and crash-replay-oracle scenarios in one script
+- `ffs_writeback_e2e.sh`: smaller writeback smoke
 
-### Ext4 / btrfs format-specific (about 18 scripts)
-- `ffs_ext4_ro_roundtrip.sh`, `ffs_ext4_rw_smoke.sh`
-- `ffs_btrfs_ro_smoke.sh`, `ffs_btrfs_rw_smoke.sh`
-- `ffs_btrfs_rw_hardening_gate_e2e.sh`
-- `ffs_ext4_e2compr_e2e.sh`: e2compr R/W
-- `ffs_ext4_external_journal_e2e.sh`: paired-open replay
-- `ffs_btrfs_subvol_snapshot_select_e2e.sh`: `--subvol` / `--snapshot`
-- `ffs_btrfs_send_receive_e2e.sh`: send-stream parsing differential
+### Ext4 / btrfs format-specific
+- `ffs_ext4_ro_roundtrip.sh`: ext4 read-only roundtrip
+- `ffs_ext4_rw_smoke.sh`: ext4 read-write smoke
+- `ffs_btrfs_ro_smoke.sh`: btrfs read-only smoke
+- `ffs_btrfs_rw_smoke.sh`: btrfs read-write smoke (33 KB)
+- `ffs_btrfs_rw_hardening_gate_e2e.sh`: RW hardening gate
+- `ffs_btrfs_capability_drift_e2e.sh`: capability-drift detection
+- `ffs_btrfs_write_churn_e2e.sh`: write-churn workload
+- `ffs_btrfs_multidevice_corpus_e2e.sh`: multi-device RAID corpus
+- `ffs_btrfs_send_receive_corpus_e2e.sh`: send-stream corpus
+- `ffs_casefold_corpus_e2e.sh`: casefold corpus
 
-### Performance and scalability (about 10 scripts)
-- `ffs_swarm_workload_harness_e2e.sh`: NUMA-aware workload harness
+### Performance and scalability
+- `ffs_swarm_workload_harness_e2e.sh`: NUMA-aware workload harness (33 KB)
 - `ffs_swarm_tail_latency_e2e.sh`: p99 attribution
-- `ffs_performance_manifest_e2e.sh`: manifest schema + freshness
-- `ffs_permissioned_campaign_broker_e2e.sh`: broker dry-run safety
-- `ffs_adaptive_runtime_runner_e2e.sh`: adaptive runtime evidence
+- `ffs_swarm_cache_controller_e2e.sh`: swarm cache controller
+- `ffs_swarm_operator_report_e2e.sh`: swarm operator report
+- `ffs_performance_manifest_e2e.sh`: manifest schema + freshness (28 KB)
+- `ffs_performance_delta_closeout_e2e.sh`: perf delta closeout
+- `ffs_permissioned_campaign_broker_e2e.sh`: broker dry-run safety (60 KB)
+- `ffs_adaptive_runtime_runner_e2e.sh`: adaptive runtime runner
+- `ffs_adaptive_runtime_manifest_e2e.sh`: adaptive runtime evidence manifest
+- `ffs_topology_runtime_advisor_e2e.sh`: topology runtime advisor
+- `ffs_benchmark_taxonomy_e2e.sh` / `ffs_benchmark_governance_e2e.sh` / `ffs_benchmark_expansion_e2e.sh`
+- `ffs_perf_comparison_e2e.sh`: cross-baseline perf comparison
 
-### Fuzzing (about 6 scripts)
+### Fuzzing
 - `ffs_fuzz_targets_e2e.sh`: target registration drift
 - `ffs_fuzzing_gate_e2e.sh`: fuzz dashboard schema
 - `ffs_fuzz_smoke_e2e.sh`: smoke gate with fixed seeds
+- `ffs_fuzz_dashboard_e2e.sh`: fuzz dashboard JSON
+- `ffs_metamorphic_workload_seed_catalog_e2e.sh`: metamorphic seed catalog
 
-### xfstests integration (about 4 scripts)
+### xfstests integration
 - `ffs_xfstests_e2e.sh`: main runner (gated by ACK)
-- `ffs_xfstests_preflight_e2e.sh`: precondition validation (90 KB)
-- `ffs_xfstests_handoff_packet_e2e.sh`: broker packet generator
+- `ffs_xfstests_preflight_e2e.sh`: precondition validation (43 KB)
+- `ffs_xfstests_regression_gate.sh`: regression guard
 
-### Readiness and gates (about 12 scripts)
+### Readiness and gates
 - `ffs_readiness_lab_e2e.sh`: non-permissioned advisory lab
-- `ffs_release_gate_e2e.sh`: release-gate validator
+- `ffs_readiness_lab_contracts_e2e.sh`: lab contract validation
+- `ffs_readiness_dashboard_e2e.sh`: dashboard renderer
+- `ffs_readiness_action_autopilot_e2e.sh`: readiness-action autopilot
+- `ffs_release_gate_e2e.sh`: release-gate validator (34 KB)
 - `ffs_proof_bundle_e2e.sh`: proof-bundle E2E generator (34 KB)
+- `ffs_proof_overhead_budget_e2e.sh`: proof-overhead budget
 - `ffs_ambition_evidence_matrix_e2e.sh`: ambition row gate
-- `ffs_tracker_source_hygiene_e2e.sh`: source-aware tracker queue state
+- `ffs_tracker_source_hygiene_e2e.sh`: source-aware tracker queue state (50 KB)
+- `ffs_operational_readiness_report_e2e.sh`: operational readiness report
+- `ffs_inventory_closeout_gate_e2e.sh`: inventory closeout
+- `ffs_report_schema_inventory_e2e.sh`: report-schema inventory
 
-### Security and hostile-image (about 4 scripts)
-- `ffs_adversarial_threat_model_e2e.sh`: threat-model gate
-- `ffs_hostile_image_containment_e2e.sh`: containment scenarios
+### Security and hostile-image
+- `ffs_adversarial_threat_model_e2e.sh`: threat-model gate (17 KB)
 
-### Operational (about 9 scripts)
+### Operational
 - `ffs_operator_recovery_drill_e2e.sh`: runbook scenarios
+- `ffs_operator_tooling_gate_e2e.sh`: operator-tooling gate
 - `ffs_soak_canary_campaign_e2e.sh`: campaign profile validation
-- `ffs_mounted_write_workload_matrix.sh`: production mounted-write matrix
-- `ffs_mounted_lane_decision_e2e.sh`: mounted-lane decision report
+- `ffs_mounted_write_workload_matrix.sh`: production mounted-write matrix (39 KB)
+- `ffs_mounted_write_error_classes_e2e.sh`: mounted-write error classes
+- `ffs_mounted_checkpoint_survivor_e2e.sh`: mounted checkpoint survivor
+- `ffs_mounted_repair_mutation_boundary_e2e.sh`: mounted-repair mutation boundary
+- `ffs_runbooks_e2e.sh` / `ffs_tabletop_drill_e2e.sh`
+- `ffs_log_contract_e2e.sh`: structured-log contract
+- `ffs_error_taxonomy_e2e.sh`: error-taxonomy coverage
 
 Every script writes a `junit.xml` + `run.log` + per-scenario manifest to `artifacts/e2e/<timestamp>_<script>/`, and is consumed by `validate-proof-bundle` when wired into a proof-bundle lane.
 
