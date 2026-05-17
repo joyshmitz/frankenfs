@@ -159,25 +159,130 @@ validate_json_artifact() {
 }
 
 write_orchestrator_manifest() {
-    python3 - "$E2E_LOG_FILE" "$CHILD_RESULTS_JSONL" "$MANIFEST_JSON" "$MANIFEST_MD" <<'PY'
+    local log_path="${1:-$E2E_LOG_FILE}"
+    local child_path="${2:-$CHILD_RESULTS_JSONL}"
+    local manifest_path="${3:-$MANIFEST_JSON}"
+    local markdown_path="${4:-$MANIFEST_MD}"
+
+    python3 - "$log_path" "$child_path" "$manifest_path" "$markdown_path" <<'PY'
 import json
 import pathlib
 import re
 import sys
 
 log_path, child_path, manifest_path, markdown_path = map(pathlib.Path, sys.argv[1:])
-scenario_re = re.compile(r"SCENARIO_RESULT\|scenario_id=([^|]+)\|outcome=([^|]+)(?:\|detail=(.*))?")
+scenario_id_re = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$")
+
+
+def marker_preview(line: str) -> str:
+    return line if len(line) <= 240 else f"{line[:240]}..."
+
+
+def append_reason(reasons: list[str], reason: str) -> None:
+    if reason not in reasons:
+        reasons.append(reason)
+
+
+def parse_marker(line: str):
+    if not line.startswith("SCENARIO_RESULT|"):
+        return None
+
+    fields = line.split("|")
+    if fields[0] != "SCENARIO_RESULT":
+        return None
+
+    scenario_id = None
+    outcome = None
+    detail = None
+    reasons: list[str] = []
+
+    for idx, field in enumerate(fields[1:], start=1):
+        is_final = idx == len(fields) - 1
+        if field.startswith("scenario_id="):
+            if scenario_id is not None:
+                append_reason(reasons, "duplicate_scenario_id")
+            else:
+                scenario_id = field.removeprefix("scenario_id=")
+        elif field.startswith("outcome="):
+            if outcome is not None:
+                append_reason(reasons, "duplicate_outcome")
+            else:
+                outcome = field.removeprefix("outcome=")
+        elif field.startswith("detail="):
+            if detail is not None:
+                append_reason(reasons, "duplicate_detail")
+            if not is_final:
+                append_reason(reasons, "detail_contains_separator")
+            if detail is None:
+                detail = field.removeprefix("detail=")
+        else:
+            if detail is not None:
+                continue
+            if "=" not in field or not field.split("=", 1)[0]:
+                append_reason(reasons, "malformed_extension")
+
+    if scenario_id is None:
+        append_reason(reasons, "missing_scenario_id")
+    elif not scenario_id:
+        append_reason(reasons, "empty_scenario_id")
+    elif not scenario_id_re.fullmatch(scenario_id):
+        append_reason(reasons, "invalid_scenario_id")
+
+    if outcome is None:
+        append_reason(reasons, "missing_outcome")
+    elif not outcome:
+        append_reason(reasons, "empty_outcome")
+    elif outcome not in {"PASS", "FAIL"}:
+        append_reason(reasons, "invalid_outcome")
+
+    if reasons:
+        return None, {"reason": ",".join(reasons), "marker": marker_preview(line)}
+
+    row = {"scenario_id": scenario_id, "outcome": outcome}
+    if detail:
+        row["detail"] = detail
+    return row, None
+
+
+def assert_parser_self_check() -> None:
+    valid = parse_marker(
+        "SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|duration_ms=7|detail=ok"
+    )
+    assert valid is not None and valid[0] is not None and valid[1] is None
+    assert parse_marker(
+        "noise SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS"
+    ) is None
+
+    invalid_cases = {
+        "SCENARIO_RESULT|scenario_id=too_short|outcome=PASS": "invalid_scenario_id",
+        (
+            "SCENARIO_RESULT|scenario_id=first_valid_marker|scenario_id=second_valid_marker|outcome=PASS"
+        ): "duplicate_scenario_id",
+        "SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=SKIP": "invalid_outcome",
+        "SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|bad_field": "malformed_extension",
+        "SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|=bad": "malformed_extension",
+        "SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|": "malformed_extension",
+        "SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|detail=one|two": "detail_contains_separator",
+    }
+    for line, expected_reason in invalid_cases.items():
+        parsed = parse_marker(line)
+        assert parsed is not None and parsed[0] is None and parsed[1] is not None
+        assert expected_reason in parsed[1]["reason"]
+
+
+assert_parser_self_check()
+
 scenarios = []
+invalid_scenario_markers = []
 for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-    match = scenario_re.search(line)
-    if match:
-        scenarios.append(
-            {
-                "scenario_id": match.group(1),
-                "outcome": match.group(2),
-                "detail": match.group(3) or "",
-            }
-        )
+    parsed = parse_marker(line)
+    if parsed is None:
+        continue
+    scenario, invalid = parsed
+    if invalid is not None:
+        invalid_scenario_markers.append(invalid)
+    else:
+        scenarios.append(scenario)
 
 child_runs = []
 if child_path.exists():
@@ -187,17 +292,20 @@ if child_path.exists():
 
 scenario_pass_count = sum(1 for row in scenarios if row["outcome"] == "PASS")
 scenario_fail_count = sum(1 for row in scenarios if row["outcome"] != "PASS")
+invalid_scenario_marker_count = len(invalid_scenario_markers)
 manifest = {
     "schema_version": 1,
     "orchestrator_id": "frankenfs-readiness-lab:e2e:v1",
     "source_bead": "bd-wt1rq",
-    "valid": scenario_fail_count == 0,
+    "valid": scenario_fail_count == 0 and invalid_scenario_marker_count == 0,
     "product_evidence_claim": "none",
     "permissioned_ack_consumed": False,
     "release_gate_effect": "advisory_only_no_public_readiness_change",
     "scenario_count": len(scenarios),
     "scenario_pass_count": scenario_pass_count,
     "scenario_fail_count": scenario_fail_count,
+    "invalid_scenario_marker_count": invalid_scenario_marker_count,
+    "invalid_scenario_markers": invalid_scenario_markers,
     "child_runs": child_runs,
     "scenarios": scenarios,
 }
@@ -211,6 +319,7 @@ lines = [
     "- Permissioned ACK consumed: `false`",
     "- Release gate effect: `advisory_only_no_public_readiness_change`",
     f"- Scenarios: `{scenario_pass_count}/{len(scenarios)}` passed",
+    f"- Invalid scenario markers: `{invalid_scenario_marker_count}`",
     "",
     "## Child Gates",
 ]
@@ -231,6 +340,56 @@ MANIFEST_JSON="$REPORT_DIR/readiness_lab_orchestrator_manifest.json"
 MANIFEST_MD="$REPORT_DIR/readiness_lab_orchestrator_manifest.md"
 mkdir -p "$REPORT_DIR"
 : >"$CHILD_RESULTS_JSONL"
+
+if [[ "${FFS_READINESS_LAB_MARKER_PARSER_SELF_CHECK_ONLY:-0}" == "1" ]]; then
+    e2e_step "Readiness-lab marker parser self-check"
+    SELF_CHECK_LOG="$REPORT_DIR/marker_parser_self_check.log"
+    SELF_CHECK_CHILD_RESULTS="$REPORT_DIR/marker_parser_self_check_children.jsonl"
+    SELF_CHECK_MANIFEST_JSON="$REPORT_DIR/marker_parser_self_check_manifest.json"
+    SELF_CHECK_MANIFEST_MD="$REPORT_DIR/marker_parser_self_check_manifest.md"
+    : >"$SELF_CHECK_CHILD_RESULTS"
+    cat >"$SELF_CHECK_LOG" <<'EOF'
+SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|duration_ms=7|detail=ok
+noise SCENARIO_RESULT|scenario_id=readiness_lab_ignored_marker|outcome=PASS
+SCENARIO_RESULT|scenario_id=too_short|outcome=PASS
+SCENARIO_RESULT|scenario_id=first_valid_marker|scenario_id=second_valid_marker|outcome=PASS
+SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=SKIP
+SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|bad_field
+SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|=bad
+SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|
+SCENARIO_RESULT|scenario_id=readiness_lab_valid_marker|outcome=PASS|detail=one|two
+EOF
+    write_orchestrator_manifest \
+        "$SELF_CHECK_LOG" \
+        "$SELF_CHECK_CHILD_RESULTS" \
+        "$SELF_CHECK_MANIFEST_JSON" \
+        "$SELF_CHECK_MANIFEST_MD"
+    if jq -e '
+        .valid == false
+        and .scenario_count == 1
+        and .scenario_pass_count == 1
+        and .scenario_fail_count == 0
+        and .invalid_scenario_marker_count == 7
+        and (.invalid_scenario_markers | length == 7)
+        and ([.invalid_scenario_markers[].reason] | sort == [
+            "detail_contains_separator",
+            "duplicate_scenario_id",
+            "invalid_outcome",
+            "invalid_scenario_id",
+            "malformed_extension",
+            "malformed_extension",
+            "malformed_extension"
+        ])
+    ' "$SELF_CHECK_MANIFEST_JSON" >/dev/null; then
+        scenario_result "readiness_lab_marker_parser_self_check" "PASS" "manifest=${SELF_CHECK_MANIFEST_JSON}"
+        e2e_pass "ffs_readiness_lab marker parser self-check completed"
+        exit 0
+    else
+        scenario_result "readiness_lab_marker_parser_self_check" "FAIL" "manifest=${SELF_CHECK_MANIFEST_JSON}"
+        e2e_fail "ffs_readiness_lab marker parser self-check failed"
+        exit 1
+    fi
+fi
 
 e2e_step "Scenario 1: permissioned ACK boundary is absent"
 if assert_no_permissioned_ack "start"; then
@@ -302,7 +461,7 @@ validate_json_artifact "readiness_lab_advisory_release_gate" \
 
 e2e_step "Scenario 10: orchestrator manifest is written"
 write_orchestrator_manifest
-if jq -e '.valid == true and .product_evidence_claim == "none" and .permissioned_ack_consumed == false and .scenario_fail_count == 0' "$MANIFEST_JSON" >/dev/null \
+if jq -e '.valid == true and .product_evidence_claim == "none" and .permissioned_ack_consumed == false and .scenario_fail_count == 0 and .invalid_scenario_marker_count == 0' "$MANIFEST_JSON" >/dev/null \
     && grep -q "Product evidence claim: \`none\`" "$MANIFEST_MD"; then
     scenario_result "readiness_lab_orchestrator_manifest" "PASS" "combined JSON and Markdown manifest written"
 else
