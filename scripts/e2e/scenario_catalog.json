@@ -5491,6 +5491,7 @@
       "script": "scripts/e2e/ffs_docs_status_drift_e2e.sh",
       "required_categories": [
         "happy",
+        "edge",
         "error"
       ],
       "scenarios": [
@@ -5541,6 +5542,18 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=docs_status_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "docs_status_fixture_complete_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=docs_status_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "docs_status_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=docs_status_fixture_local_fallback_self_check|outcome=PASS"
         }
       ]
     },

@@ -1602,6 +1602,22 @@ The E2E smoke is:
 ./scripts/e2e/ffs_docs_status_drift_e2e.sh
 ```
 
+When RCH capacity is unavailable, use the no-worker wrapper self-check rather
+than a local cargo fallback:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_DOCS_STATUS_DRIFT_SELF_CHECK=1 \
+./scripts/e2e/ffs_docs_status_drift_e2e.sh
+```
+
+The self-check uses a stubbed `rch` binary to prove the wrapper extracts JSON
+and Markdown validator output, preserves status/surface accounting and
+structured drift tokens, rejects overclaim snippets, verifies focused unit-test
+output, and preserves the shared `RCH_LOCAL_FALLBACK_REJECTED` marker. It does
+not run cargo, mounted lanes, xfstests, fuzz/performance campaigns, or
+permissioned campaigns.
+
 It checks default generated snippets across all required public surfaces,
 injects a hand-upgraded read-write repair claim, injects stale flat parity
 wording, injects a release-gate overclaim for xfstests readiness, verifies
