@@ -1329,13 +1329,17 @@ Abort *reasons* (FCW conflict, SSI cycle, timeout, durability failure, user abor
 
 ### Query presets
 
-The CLI provides operator presets for common queries:
+The CLI provides eight operator presets for common queries (`--preset`):
 
 ```bash
 ffs evidence <ledger> --preset replay-anomalies     # WAL recovery + aborts + SSI conflicts
 ffs evidence <ledger> --preset repair-failures      # Corruption + repair outcomes + scrub cycles
 ffs evidence <ledger> --preset pressure-transitions # Backpressure + flush + policy changes
 ffs evidence <ledger> --preset contention           # Merge proofs + policy switches + contention samples
+ffs evidence <ledger> --preset metrics              # Metrics-only view
+ffs evidence <ledger> --preset cache                # Cache-layer events
+ffs evidence <ledger> --preset mvcc                 # MVCC-only event subset
+ffs evidence <ledger> --preset repair-live          # Live repair activity tail
 ```
 
 ### Contention metrics
@@ -1839,8 +1843,11 @@ All operations are pure-parse, no `sudo`, no FUSE module load. The pure `ffs-ond
 You have a years-old btrfs backup image; one block group has silent corruption that `btrfs check` reports but `btrfs scrub` cannot repair (insufficient mirrors). If the image was previously sealed by `ffs repair` with repair symbols, you can recover offline:
 
 ```bash
-ffs scrub backup.img --full --evidence-ledger scrub.jsonl
-ffs repair backup.img --rebuild-symbols --max-threads 8 --json
+# Inspect-only scrub (writes JSON report to stdout)
+ffs scrub backup.img --json
+# Repair pass — full-scrub option triggers exhaustive group sweep
+ffs repair backup.img --full-scrub --rebuild-symbols --max-threads 8 --json
+# Offline fsck with optional repair attempts
 ffs fsck backup.img --repair --force --json
 ```
 
@@ -1892,12 +1899,13 @@ Recovered blocks are written back to the backing image (which must be writable o
 Periodic verification that backup images are still recoverable, without mounting. Use the scrub-only path with the evidence ledger:
 
 ```bash
+# Per-image JSON scrub report (the CLI prints to stdout).
 for img in /backups/2026-*.img; do
-  ffs scrub "$img" --full --evidence-ledger "$img.scrub.jsonl" --json > "$img.summary.json"
+  ffs scrub "$img" --json > "$img.summary.json"
 done
 ```
 
-Aggregate the JSONL files to a single dashboard; alert on any `CorruptionDetected` event.
+For a durable JSONL audit trail with `CorruptionDetected` records (and not just a summary), mount the image read-only with `--background-scrub --background-scrub-ledger <path>` instead — the ledger is the operator's source of truth for alerting.
 
 ### Cross-format conversion
 
@@ -1995,12 +2003,21 @@ done
 sudo debugfs -R "dump <2> /tmp/ref-root-dump" /evidence/disk.img
 # Compare your dump_dir output against the debugfs reference (structural fields only).
 
-# 6. Run a checksum scrub WITHOUT any write authority.
-cargo run -p ffs-cli -- scrub /evidence/disk.img --full \
-    --evidence-ledger /reports/disk.scrub.jsonl --json \
+# 6. Run a checksum scrub WITHOUT any write authority. The scrub subcommand
+#    emits a JSON summary on stdout; the ledger-producing flow (with
+#    CorruptionDetected JSONL records) is the read-only `ffs mount` path
+#    with --background-scrub --background-scrub-ledger.
+cargo run -p ffs-cli -- scrub /evidence/disk.img --json \
   > /reports/disk.scrub.summary.json
 
-# 7. If you see any CorruptionDetected events, classify them by severity.
+# 7. For a forensic chain-of-custody mount, capture the per-event JSONL ledger
+#    via a read-only mount that is detection-only by default:
+sudo cargo run -p ffs-cli -- mount /evidence/disk.img /mnt/evidence-ro \
+    --background-scrub --background-scrub-ledger /reports/disk.scrub.jsonl &
+MOUNT_PID=$!
+# ... wait for some scrub cycles to run, then unmount ...
+
+# 8. If you see any CorruptionDetected events, classify them by severity.
 jq -r 'select(.event_type=="corruption_detected")
        | [.block_group, .corruption.block, .corruption.severity] | @tsv' \
     /reports/disk.scrub.jsonl \
@@ -2110,8 +2127,12 @@ For a non-blocking variant, use `ffs_fuse::mount_background`, which returns a `B
 There is no `OpenFs::scrub` method; scrubbing is the job of `ffs-repair`. The simplest pattern is to drive it through the CLI:
 
 ```bash
-ffs scrub /path/to/image.img --full --evidence-ledger repair.jsonl --json
-ffs repair /path/to/image.img --json
+# Inspection-only scrub: writes a JSON summary to stdout.
+ffs scrub /path/to/image.img --json
+# Repair pass (full-group sweep). The Repair subcommand drives the
+# ScrubWithRecovery pipeline; for a durable JSONL ledger, use the
+# read-only `ffs mount` with --background-scrub-ledger.
+ffs repair /path/to/image.img --full-scrub --json
 ```
 
 Programmatic usage means assembling a `ScrubWithRecovery<'a, W>` pipeline (with the source-block layout, the symbol store, the block device, the autopilot, and an `EvidenceLedger<W>` writer), then passing it plus a `ScrubDaemonConfig` to `ScrubDaemon::new(pipeline, config)`. The real fields on `ScrubDaemonConfig` cover scheduling and backpressure tuning (`interval: Duration`, `budget_poll_quota_threshold: u32`, `backpressure_headroom_threshold: f32`, etc.); the `repair_enabled` and `ledger` choices are made when constructing the `ScrubWithRecovery` pipeline itself. Read `crates/ffs-repair/src/pipeline.rs` for the canonical construction site, or copy the call graph from `crates/ffs-cli/src/cmd_repair.rs`.
@@ -3159,9 +3180,8 @@ cargo run -p ffs-cli -- mount <image-path> <mountpoint> --rw --writeback-cache \
     --writeback-cache-ordering-oracle artifacts/writeback-cache/ordering_oracle.json \
     --writeback-cache-crash-replay-oracle artifacts/writeback-cache/crash_replay_oracle.json
 
-# Read-only scrub
+# Read-only scrub (JSON summary on stdout)
 cargo run -p ffs-cli -- scrub <image-path> --json
-cargo run -p ffs-cli -- scrub <image-path> --full --repair --evidence-ledger repair.jsonl
 
 # Offline filesystem checks + optional repair
 cargo run -p ffs-cli -- fsck <image-path> --repair --json --force
@@ -3324,7 +3344,7 @@ Rows in the btrfs experimental RW contract can still be `partially supported` or
 - **MVCC.** Snapshot visibility, commit sequencing, FCW conflict detection, six merge-proof variants, three conflict policies with adaptive expected-loss selection, EMA contention tracking, sharded concurrent store, Zstd/Brotli version compression, WAL persistence + crash recovery, SSI rw-antidependency detection.
 - **Self-healing.** Bayesian durability autopilot, RaptorQ symbol generation/recovery, four refresh policies (Eager/Lazy/Adaptive/Hybrid), stale-window SLO with percentile-based breach detection, multi-host repair-ownership coordination, expected-loss policy comparison, mounted automatic repair contract (read-only + read-write via MVCC repair-writeback serializer).
 - **Writeback-cache.** Epoch-based commit barriers with per-inode staged/visible/durable tracking, deferred visibility for MVCC isolation, dirty-page ordering oracle, 12-point crash/replay matrix artifact gate, runtime guard, and host/lane manifest checks. Kernel option default-off; explicit opt-in is evidence-gated.
-- **Observability.** Evidence ledger with 23 event types and 4 operator presets, contention metrics, policy-switch detection, structured logging across all subsystems, JSONL audit trail.
+- **Observability.** Evidence ledger with 23 event types and 8 operator presets (`replay-anomalies`, `repair-failures`, `pressure-transitions`, `contention`, `metrics`, `cache`, `mvcc`, `repair-live`), contention metrics, policy-switch detection, structured logging across all subsystems, JSONL audit trail.
 - **CLI.** `inspect`, `mvcc-stats`, `info`, `dump`, `fsck`, `repair`, `mount` (22 flags), `scrub`, `parity`, `evidence`, `mkfs`.
 - **Testing.** 7,407 `#[test]` / `proptest!` entries across 21 crates as of 2026-05-16 (7,368 `#[test]` + 39 `proptest!`), 60 fuzz targets, 11 criterion benchmarks, 113 end-to-end gate scripts, metamorphic-relation proptests across the checksum/parser surface, and 167+ insta snapshots covering every emitted report shape.
 
