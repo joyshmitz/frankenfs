@@ -278,7 +278,10 @@ for script in "${SCRIPTS[@]}"; do
 
     # Extract scenario results from the output
     scenarios_json="["
+    rch_local_fallback_rejections_json="["
     scenarios_first=true
+    rch_first=true
+    rch_local_fallback_rejected_count=0
     if [[ -n "$script_output" && -f "$script_output" ]]; then
         while IFS= read -r line; do
             sid_count=$(gate_marker_field_count "$line" "|scenario_id=")
@@ -309,8 +312,28 @@ for script in "${SCRIPTS[@]}"; do
                 scenarios_json+="{\"scenario_id\":\"$sid\",\"outcome\":\"$outcome\"}"
             fi
         done < <(grep "^SCENARIO_RESULT|" "$script_output" 2>/dev/null || true)
+        while IFS= read -r line; do
+            marker="$line"
+            if ((${#marker} > 240)); then
+                marker="${marker:0:240}..."
+            fi
+            marker=$(gate_json_escape "$marker")
+
+            if [[ "$rch_first" == "true" ]]; then
+                rch_first=false
+            else
+                rch_local_fallback_rejections_json+=","
+            fi
+            rch_local_fallback_rejections_json+="{\"marker\":\"$marker\"}"
+            rch_local_fallback_rejected_count=$((rch_local_fallback_rejected_count + 1))
+        done < <(grep "^RCH_LOCAL_FALLBACK_REJECTED|" "$script_output" 2>/dev/null || true)
     fi
     scenarios_json+="]"
+    rch_local_fallback_rejections_json+="]"
+
+    if [[ "$rch_local_fallback_rejected_count" -gt 0 ]]; then
+        script_passed=false
+    fi
 
     if [[ "$script_passed" == "true" ]]; then
         echo "  PASS ($attempts attempt(s))"
@@ -329,7 +352,7 @@ for script in "${SCRIPTS[@]}"; do
     fi
     script_json=$(gate_json_escape "$script")
     result_verdict_json=$(gate_json_escape "$result_verdict")
-    SCRIPT_RESULTS_JSON+="{\"script\":\"$script_json\",\"verdict\":\"$result_verdict_json\",\"attempts\":$attempts,\"scenarios\":$scenarios_json}"
+    SCRIPT_RESULTS_JSON+="{\"script\":\"$script_json\",\"verdict\":\"$result_verdict_json\",\"attempts\":$attempts,\"scenarios\":$scenarios_json,\"rch_local_fallback_rejected_count\":$rch_local_fallback_rejected_count,\"rch_local_fallback_rejections\":$rch_local_fallback_rejections_json}"
 done
 
 SCRIPT_RESULTS_JSON+="]"
