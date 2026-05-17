@@ -950,6 +950,22 @@ decomposition ledger. The release gate for `swarm.responsiveness` stays hidden
 or disabled when the p99 ledger is stale, missing, unsupported, small-host-only,
 or disconnected from the proof bundle.
 
+When RCH capacity is unavailable, use the no-worker wrapper self-check rather
+than a local cargo fallback:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_SWARM_TAIL_LATENCY_SELF_CHECK=1 \
+./scripts/e2e/ffs_swarm_tail_latency_e2e.sh
+```
+
+The self-check uses a stubbed `rch` binary to prove the wrapper extracts JSON
+and Markdown validator output, preserves classification and dominance
+accounting, rejects mutated ledger variants, verifies focused unit-test output,
+and preserves the shared `RCH_LOCAL_FALLBACK_REJECTED` marker. It does not run
+cargo, mounted lanes, xfstests, fuzz/performance campaigns, or permissioned
+campaigns.
+
 ## Repair Confidence Lab Contract
 
 The repair confidence mutation-safety contract lives in:
