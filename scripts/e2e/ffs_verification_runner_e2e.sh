@@ -140,6 +140,8 @@ verify_run_gate_marker_contract() {
     local missing_relative_script missing_log missing_manifest_path missing_gate_status
     local missing_gate_id_log missing_gate_id_status missing_retries_log missing_retries_status
     local bad_retries_log bad_retries_status
+    local fail_marker_script fail_marker_relative_script fail_marker_log fail_marker_manifest_path
+    local fail_marker_gate_status
     local conformance_probe_script conformance_relative_script conformance_log conformance_manifest_path
     local conformance_gate_status
     local expected_git_clean
@@ -270,6 +272,48 @@ PROBE
         and (.script_results | length == 1)
         and .script_results[0].scenarios[0].scenario_id == "gate_json_escape_probe"
     ' "$json_manifest_path" >/dev/null
+
+    fail_marker_script="$probe_dir/fail_marker_exit_zero_script.sh"
+    fail_marker_log="$probe_dir/run_gate_fail_marker_exit_zero.log"
+
+    cat >"$fail_marker_script" <<'PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_fail_marker_exit_zero|outcome=FAIL|detail=marker says fail'
+PROBE
+
+    fail_marker_relative_script="${fail_marker_script#$REPO_ROOT/}"
+    if [[ -z "$(git -C "$REPO_ROOT" status --porcelain=v1 2>/dev/null)" ]]; then
+        expected_git_clean="true"
+    else
+        expected_git_clean="false"
+    fi
+    fail_marker_gate_status=0
+    scripts/e2e/run_gate.sh --gate-id run_gate_fail_marker_exit_zero_contract "$fail_marker_relative_script" \
+        >"$fail_marker_log" 2>&1 || fail_marker_gate_status=$?
+    [[ "$fail_marker_gate_status" -eq 1 ]] || return 1
+
+    fail_marker_manifest_path=$(sed -n 's/^Manifest: //p' "$fail_marker_log" | tail -n 1)
+    [[ -n "$fail_marker_manifest_path" && -f "$fail_marker_manifest_path" ]] || return 1
+
+    jq -e --arg fail_marker_script "$fail_marker_relative_script" --argjson expected_git_clean "$expected_git_clean" '
+        .gate_id == "run_gate_fail_marker_exit_zero_contract"
+        and .git_context.clean == $expected_git_clean
+        and .verdict == "FAIL"
+        and .scripts_total == 1
+        and .scripts_passed == 0
+        and .scripts_failed == 1
+        and (.script_results | length == 1)
+        and .script_results[0].script == $fail_marker_script
+        and .script_results[0].verdict == "FAIL"
+        and .script_results[0].attempts == 1
+        and (.script_results[0].scenarios | length == 1)
+        and .script_results[0].scenarios[0].scenario_id == "gate_fail_marker_exit_zero"
+        and .script_results[0].scenarios[0].outcome == "FAIL"
+        and .script_results[0].scenarios[0].detail == "marker says fail"
+        and .script_results[0].rch_local_fallback_rejected_count == 0
+        and .script_results[0].rch_local_fallback_rejections == []
+    ' "$fail_marker_manifest_path" >/dev/null
 
     missing_gate_id_log="$probe_dir/run_gate_missing_gate_id_arg.log"
     missing_gate_id_status=0

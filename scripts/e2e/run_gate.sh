@@ -334,6 +334,7 @@ for script in "${SCRIPTS[@]}"; do
     rch_local_fallback_rejections_json="["
     scenarios_first=true
     rch_first=true
+    scenario_fail_count=0
     rch_local_fallback_rejected_count=0
     if [[ -n "$script_output" && -f "$script_output" ]]; then
         while IFS= read -r line; do
@@ -349,6 +350,7 @@ for script in "${SCRIPTS[@]}"; do
             [[ "$detail_count" -le 1 ]] || continue
             gate_scenario_id_is_valid "$sid" || continue
             gate_outcome_is_valid "$outcome" || continue
+            [[ "$outcome" == "FAIL" ]] && scenario_fail_count=$((scenario_fail_count + 1))
 
             sid=$(gate_json_escape "$sid")
             outcome=$(gate_json_escape "$outcome")
@@ -388,6 +390,9 @@ for script in "${SCRIPTS[@]}"; do
     rch_local_fallback_rejections_json+="]"
 
     if [[ "$rch_local_fallback_rejected_count" -gt 0 ]]; then
+        script_passed=false
+    fi
+    if [[ "$scenario_fail_count" -gt 0 ]]; then
         script_passed=false
     fi
 
