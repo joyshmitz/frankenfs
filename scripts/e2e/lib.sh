@@ -1266,6 +1266,11 @@ e2e_marker_extension_invalid_reason() {
     local -a fields
     local idx field key
 
+    if [[ "$line" == *"|" ]]; then
+        printf '%s\n' "malformed_extension"
+        return 0
+    fi
+
     IFS='|' read -r -a fields <<<"$line"
     for ((idx = 1; idx < ${#fields[@]}; idx++)); do
         field="${fields[$idx]}"
