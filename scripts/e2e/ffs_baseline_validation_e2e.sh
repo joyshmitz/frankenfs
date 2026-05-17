@@ -43,6 +43,18 @@ pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 skip() { echo "  SKIP: $1"; SKIP=$((SKIP + 1)); }
 
+scenario_result() {
+    local scenario_id="$1"
+    local outcome="$2"
+    local detail="${3:-}"
+
+    if [[ -n "$detail" ]]; then
+        echo "SCENARIO_RESULT|scenario_id=${scenario_id}|outcome=${outcome}|detail=${detail}"
+    else
+        echo "SCENARIO_RESULT|scenario_id=${scenario_id}|outcome=${outcome}"
+    fi
+}
+
 run_rch_capture() {
     local log_path="$1"
     shift
@@ -140,16 +152,16 @@ if run_rch_capture "$BENCH_COMPILE_LOG" cargo "${BENCH_CARGO_ARGS[@]}"; then
         crate="${target%%:*}"
         bench="${target##*:}"
         pass "bench compile: ${crate}/${bench}"
-        echo "SCENARIO_RESULT bench_compile_${bench}=pass"
     done
+    scenario_result "baseline_validation_bench_compile" "PASS" "bench_targets=${#BENCH_TARGETS[@]}"
 else
     log_failure_tail "$BENCH_COMPILE_LOG"
     for target in "${BENCH_TARGETS[@]}"; do
         crate="${target%%:*}"
         bench="${target##*:}"
         fail "bench compile: ${crate}/${bench}"
-        echo "SCENARIO_RESULT bench_compile_${bench}=fail"
     done
+    scenario_result "baseline_validation_bench_compile" "FAIL" "bench_targets=${#BENCH_TARGETS[@]}"
 fi
 
 echo ""
@@ -158,6 +170,10 @@ echo ""
 echo "--- Scenario 2: Baseline JSON structure validation ---"
 
 BASELINE_JSON="artifacts/baselines/perf_baseline.json"
+json_contract_ok=true
+MEASURED_COUNT=0
+VALID_MEASUREMENTS=0
+TOTAL_MEASUREMENTS=0
 if [[ -f "$BASELINE_JSON" ]]; then
     pass "baseline JSON exists: ${BASELINE_JSON}"
 
@@ -167,6 +183,7 @@ if [[ -f "$BASELINE_JSON" ]]; then
             pass "baseline key present: ${key}"
         else
             fail "baseline key missing: ${key}"
+            json_contract_ok=false
         fi
     done
 
@@ -174,10 +191,9 @@ if [[ -f "$BASELINE_JSON" ]]; then
     MEASURED_COUNT=$(jq '[.measurements[] | select(.status == "measured")] | length' "$BASELINE_JSON" 2>/dev/null || echo 0)
     if [[ "$MEASURED_COUNT" -gt 0 ]]; then
         pass "baseline has ${MEASURED_COUNT} measured operations"
-        echo "SCENARIO_RESULT baseline_measured_count=${MEASURED_COUNT}"
     else
         fail "baseline has no measured operations"
-        echo "SCENARIO_RESULT baseline_measured_count=0"
+        json_contract_ok=false
     fi
 
     # Validate each measurement has required fields
@@ -187,12 +203,21 @@ if [[ -f "$BASELINE_JSON" ]]; then
         pass "all ${TOTAL_MEASUREMENTS} measurements have required fields"
     else
         fail "${VALID_MEASUREMENTS}/${TOTAL_MEASUREMENTS} measurements have required fields"
+        json_contract_ok=false
     fi
 
-    echo "SCENARIO_RESULT baseline_json_valid=pass"
 else
     fail "baseline JSON not found: ${BASELINE_JSON}"
-    echo "SCENARIO_RESULT baseline_json_valid=fail"
+    json_contract_ok=false
+fi
+
+if [[ "$json_contract_ok" == "true" ]]; then
+    scenario_result "baseline_validation_json_contract" "PASS" "measured_count=${MEASURED_COUNT}"
+else
+    scenario_result \
+        "baseline_validation_json_contract" \
+        "FAIL" \
+        "measured_count=${MEASURED_COUNT} valid_measurements=${VALID_MEASUREMENTS} total_measurements=${TOTAL_MEASUREMENTS}"
 fi
 
 echo ""
@@ -201,6 +226,7 @@ echo ""
 echo "--- Scenario 3: Benchmark taxonomy validation ---"
 
 TAXONOMY_SRC="crates/ffs-harness/src/benchmark_taxonomy.rs"
+taxonomy_tests_ok=true
 if [[ -f "$TAXONOMY_SRC" ]]; then
     pass "taxonomy source exists"
 
@@ -210,6 +236,7 @@ if [[ -f "$TAXONOMY_SRC" ]]; then
             pass "taxonomy contains: ${op}"
         else
             fail "taxonomy missing: ${op}"
+            taxonomy_tests_ok=false
         fi
     done
 
@@ -217,14 +244,20 @@ if [[ -f "$TAXONOMY_SRC" ]]; then
     TAXONOMY_TEST_LOG="$LOG_DIR/benchmark_taxonomy_unit_tests.log"
     if run_rch_capture "$TAXONOMY_TEST_LOG" cargo test -p ffs-harness --lib -- benchmark_taxonomy; then
         pass "taxonomy unit tests pass"
-        echo "SCENARIO_RESULT taxonomy_tests=pass"
     else
         log_failure_tail "$TAXONOMY_TEST_LOG"
         fail "taxonomy unit tests fail"
-        echo "SCENARIO_RESULT taxonomy_tests=fail"
+        taxonomy_tests_ok=false
     fi
 else
     fail "taxonomy source not found"
+    taxonomy_tests_ok=false
+fi
+
+if [[ "$taxonomy_tests_ok" == "true" ]]; then
+    scenario_result "baseline_validation_taxonomy_tests" "PASS"
+else
+    scenario_result "baseline_validation_taxonomy_tests" "FAIL"
 fi
 
 echo ""
@@ -233,6 +266,7 @@ echo ""
 echo "--- Scenario 4: Thresholds configuration ---"
 
 THRESHOLDS="benchmarks/thresholds.toml"
+thresholds_ok=true
 if [[ -f "$THRESHOLDS" ]]; then
     pass "thresholds.toml exists"
 
@@ -255,13 +289,18 @@ except Exception as e:
             pass "thresholds.toml is non-empty (TOML validation skipped)"
         else
             fail "thresholds.toml is empty"
+            thresholds_ok=false
         fi
     fi
-
-    echo "SCENARIO_RESULT thresholds_valid=pass"
 else
     fail "thresholds.toml not found"
-    echo "SCENARIO_RESULT thresholds_valid=fail"
+    thresholds_ok=false
+fi
+
+if [[ "$thresholds_ok" == "true" ]]; then
+    scenario_result "baseline_validation_thresholds_parse" "PASS"
+else
+    scenario_result "baseline_validation_thresholds_parse" "FAIL"
 fi
 
 echo ""
@@ -270,17 +309,24 @@ echo ""
 echo "--- Scenario 5: Flamegraph infrastructure ---"
 
 FG_SCRIPT="scripts/flamegraph_generate.sh"
+flamegraph_script_ok=true
 if [[ -f "$FG_SCRIPT" ]]; then
     pass "flamegraph script exists"
     if [[ -x "$FG_SCRIPT" ]]; then
         pass "flamegraph script is executable"
     else
         fail "flamegraph script is not executable"
+        flamegraph_script_ok=false
     fi
-    echo "SCENARIO_RESULT flamegraph_script=pass"
 else
     fail "flamegraph script not found"
-    echo "SCENARIO_RESULT flamegraph_script=fail"
+    flamegraph_script_ok=false
+fi
+
+if [[ "$flamegraph_script_ok" == "true" ]]; then
+    scenario_result "baseline_validation_flamegraph_script" "PASS"
+else
+    scenario_result "baseline_validation_flamegraph_script" "FAIL"
 fi
 
 # Check if flamegraph artifacts directory exists or can be created
@@ -297,6 +343,7 @@ echo ""
 echo "--- Scenario 6: Extent resolve benchmark validation ---"
 
 EXTENT_BENCH="crates/ffs-extent/benches/extent_resolve.rs"
+extent_bench_ok=true
 if [[ -f "$EXTENT_BENCH" ]]; then
     pass "extent resolve benchmark source exists"
 
@@ -306,6 +353,7 @@ if [[ -f "$EXTENT_BENCH" ]]; then
             pass "benchmark function: ${fn_name}"
         else
             fail "missing benchmark function: ${fn_name}"
+            extent_bench_ok=false
         fi
     done
 
@@ -314,12 +362,17 @@ if [[ -f "$EXTENT_BENCH" ]]; then
         pass "bench target registered in Cargo.toml"
     else
         fail "bench target not in Cargo.toml"
+        extent_bench_ok=false
     fi
-
-    echo "SCENARIO_RESULT extent_bench=pass"
 else
     fail "extent resolve benchmark not found"
-    echo "SCENARIO_RESULT extent_bench=fail"
+    extent_bench_ok=false
+fi
+
+if [[ "$extent_bench_ok" == "true" ]]; then
+    scenario_result "baseline_validation_extent_bench" "PASS"
+else
+    scenario_result "baseline_validation_extent_bench" "FAIL"
 fi
 
 echo ""
@@ -330,10 +383,10 @@ echo "--- Scenario 7: Benchmark recording infrastructure ---"
 RECORD_SCRIPT="scripts/benchmark_record.sh"
 if [[ -f "$RECORD_SCRIPT" && -x "$RECORD_SCRIPT" ]]; then
     pass "benchmark_record.sh exists and is executable"
-    echo "SCENARIO_RESULT record_script=pass"
+    scenario_result "baseline_validation_record_script" "PASS"
 else
     fail "benchmark_record.sh missing or not executable"
-    echo "SCENARIO_RESULT record_script=fail"
+    scenario_result "baseline_validation_record_script" "FAIL"
 fi
 
 QUICK_SCRIPT="scripts/benchmark.sh"

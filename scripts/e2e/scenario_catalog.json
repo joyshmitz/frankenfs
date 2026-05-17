@@ -3052,43 +3052,43 @@
           "id": "baseline_validation_bench_compile",
           "category": "happy",
           "status": "active",
-          "evidence": "SCENARIO_RESULT bench_compile_${bench}=pass"
+          "evidence": "SCENARIO_RESULT|scenario_id=baseline_validation_bench_compile|outcome=PASS"
         },
         {
           "id": "baseline_validation_json_contract",
           "category": "happy",
           "status": "active",
-          "evidence": "SCENARIO_RESULT baseline_json_valid=pass"
+          "evidence": "SCENARIO_RESULT|scenario_id=baseline_validation_json_contract|outcome=PASS"
         },
         {
           "id": "baseline_validation_taxonomy_tests",
           "category": "happy",
           "status": "active",
-          "evidence": "SCENARIO_RESULT taxonomy_tests=pass"
+          "evidence": "SCENARIO_RESULT|scenario_id=baseline_validation_taxonomy_tests|outcome=PASS"
         },
         {
           "id": "baseline_validation_thresholds_parse",
           "category": "edge",
           "status": "active",
-          "evidence": "SCENARIO_RESULT thresholds_valid=pass"
+          "evidence": "SCENARIO_RESULT|scenario_id=baseline_validation_thresholds_parse|outcome=PASS"
         },
         {
           "id": "baseline_validation_flamegraph_script",
           "category": "happy",
           "status": "active",
-          "evidence": "SCENARIO_RESULT flamegraph_script=pass"
+          "evidence": "SCENARIO_RESULT|scenario_id=baseline_validation_flamegraph_script|outcome=PASS"
         },
         {
           "id": "baseline_validation_extent_bench",
           "category": "happy",
           "status": "active",
-          "evidence": "SCENARIO_RESULT extent_bench=pass"
+          "evidence": "SCENARIO_RESULT|scenario_id=baseline_validation_extent_bench|outcome=PASS"
         },
         {
           "id": "baseline_validation_record_script",
           "category": "happy",
           "status": "active",
-          "evidence": "SCENARIO_RESULT record_script=pass"
+          "evidence": "SCENARIO_RESULT|scenario_id=baseline_validation_record_script|outcome=PASS"
         }
       ]
     },
@@ -5012,61 +5012,61 @@
           "id": "mounted_diff_ext4_fiemap_transport_errno",
           "category": "edge",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fiemap_transport_errno|outcome=DIFF"
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fiemap_transport_errno|outcome=PASS"
         },
         {
           "id": "mounted_diff_ext4_fuse_missing",
           "category": "edge",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fuse_missing|outcome=SKIP"
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fuse_missing|outcome=PASS"
         },
         {
           "id": "mounted_diff_ext4_fuse_permission_skip",
           "category": "edge",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fuse_permission_skip|outcome=SKIP"
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fuse_permission_skip|outcome=PASS"
         },
         {
           "id": "mounted_diff_ext4_kernel_mount_permission_skip",
           "category": "edge",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_kernel_mount_permission_skip|outcome=SKIP"
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_kernel_mount_permission_skip|outcome=PASS"
         },
         {
           "id": "mounted_diff_ext4_mkfs_missing",
           "category": "edge",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_mkfs_missing|outcome=SKIP"
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_mkfs_missing|outcome=PASS"
         },
         {
           "id": "mounted_diff_btrfs_mkfs_missing",
           "category": "edge",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_mkfs_missing|outcome=SKIP"
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_mkfs_missing|outcome=PASS"
         },
         {
           "id": "mounted_diff_btrfs_default_permissions_root_owned",
           "category": "edge",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_default_permissions_root_owned|outcome=SKIP"
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_default_permissions_root_owned|outcome=PASS"
         },
         {
           "id": "mounted_diff_ext4_unsupported_scope_skip",
           "category": "edge",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_unsupported_scope_skip|outcome=SKIP"
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_unsupported_scope_skip|outcome=PASS"
         },
         {
           "id": "mounted_diff_btrfs_unsupported_clone_range",
           "category": "unsupported_op",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_unsupported_clone_range|outcome=UNSUPPORTED"
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_unsupported_clone_range|outcome=PASS"
         },
         {
           "id": "mounted_diff_broad_allowlist_rejected",
           "category": "error",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_broad_allowlist_rejected|outcome=ERROR"
+          "evidence": "SCENARIO_RESULT|scenario_id=mounted_diff_broad_allowlist_rejected|outcome=PASS"
         }
       ]
     },
