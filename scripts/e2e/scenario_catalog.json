@@ -3798,7 +3798,8 @@
       "script": "scripts/e2e/ffs_evidence_metrics_presets_e2e.sh",
       "required_categories": [
         "happy",
-        "edge"
+        "edge",
+        "error"
       ],
       "scenarios": [
         {
@@ -3824,6 +3825,24 @@
           "category": "edge",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=evidence_metrics_repair_live|outcome=PASS"
+        },
+        {
+          "id": "evidence_metrics_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_metrics_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "evidence_metrics_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_metrics_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "evidence_metrics_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_metrics_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },

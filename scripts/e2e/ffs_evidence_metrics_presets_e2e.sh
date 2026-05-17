@@ -18,6 +18,8 @@ RCH_BIN="${RCH_BIN:-rch}"
 RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_EVIDENCE_METRICS_PRESETS_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_EVIDENCE_METRICS_PRESETS_SKIP_SELF_CHECK:-0}"
 
 for rch_env_var in CARGO_TARGET_DIR RUST_LOG RUST_BACKTRACE; do
     case ",${RCH_ENV_ALLOWLIST:-}," in
@@ -126,6 +128,151 @@ run_rch_capture() {
     return "$status"
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_EVIDENCE_METRICS_PRESETS_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        ;;
+    missing_remote_evidence)
+        ;;
+    *)
+        echo "unknown evidence metrics presets fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+case "$command_text" in
+    *"--preset metrics "*)
+        printf '%s\n' '{"preset": "metrics", "repair_freshness": "fresh", "mvcc_contention_level": "high"}'
+        ;;
+    *"--preset cache "*)
+        printf '%s\n' '{"preset": "cache", "dirty_pressure": "high", "writeback_pressure": "queued"}'
+        ;;
+    *"--preset mvcc "*)
+        printf '%s\n' '{"preset": "mvcc", "commit_success_rate": 0.9, "contention_level": "elevated"}'
+        ;;
+    *"--preset repair-live "*)
+        printf '%s\n' '{"preset": "repair-live", "decode_success_rate": 0.75, "freshness": "aging"}'
+        ;;
+    *)
+        echo "unexpected fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/evidence_metrics_presets_fixture_${fixture_case}.log"
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_EVIDENCE_METRICS_PRESETS_SELF_CHECK=0 \
+        FFS_EVIDENCE_METRICS_PRESETS_SKIP_SELF_CHECK=1 \
+        FFS_EVIDENCE_METRICS_PRESETS_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=8 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_evidence_metrics_presets_e2e.sh" >"$child_log" 2>&1
+    local child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic evidence metrics presets wrapper self-check"
+    local stub_path child_info child_status child_log result_path result_dir
+    stub_path="$E2E_LOG_DIR/rch-evidence-metrics-presets-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    result_dir="$(dirname "$result_path")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && [[ -f "$result_dir/metrics.out" ]] \
+        && [[ -f "$result_dir/cache.out" ]] \
+        && [[ -f "$result_dir/mvcc.out" ]] \
+        && [[ -f "$result_dir/repair_live.out" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "evidence_metrics_bundle" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "evidence_metrics_cache" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "evidence_metrics_mvcc" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "evidence_metrics_repair_live" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null \
+        && grep -q '"mvcc_contention_level": "high"' "$result_dir/metrics.out" \
+        && grep -q '"dirty_pressure": "high"' "$result_dir/cache.out" \
+        && grep -q '"contention_level": "elevated"' "$result_dir/mvcc.out" \
+        && grep -q '"freshness": "aging"' "$result_dir/repair_live.out"; then
+        scenario_result "evidence_metrics_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "evidence_metrics_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "Evidence metrics presets complete fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "evidence_metrics_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "evidence_metrics_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "Evidence metrics presets local fallback fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "evidence_metrics_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "evidence_metrics_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "Evidence metrics presets missing remote evidence fixture self-check failed"
+    fi
+}
+
 print_rch_output() {
     local output_path="$1"
     if [[ -s "$output_path" ]]; then
@@ -147,6 +294,13 @@ scenario_result() {
 }
 
 e2e_init "ffs_evidence_metrics_presets"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
+
 RCH_INPUT_DIR="$REPO_ROOT/artifacts/rch_input/$(basename "$E2E_LOG_DIR")/evidence_metrics_presets"
 mkdir -p "$RCH_INPUT_DIR"
 
