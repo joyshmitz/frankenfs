@@ -233,7 +233,7 @@ PROBE
 
     json_probe_script="$probe_dir/json_escape_script.sh"
     json_log="$probe_dir/run_gate_json_escape.log"
-    json_gate_id='run_gate_json_"quote_contract'
+    json_gate_id='run_gate_json_"/slash_contract'
 
     cat >"$json_probe_script" <<'PROBE'
 #!/usr/bin/env bash
@@ -257,7 +257,8 @@ PROBE
 
     jq -e --arg gate_id "$json_gate_id" --argjson expected_git_clean "$expected_git_clean" '
         .gate_id == $gate_id
-        and (.run_id | contains($gate_id))
+        and (.run_id | type == "string")
+        and (.run_id | length > 0)
         and .git_context.clean == $expected_git_clean
         and .verdict == "PASS"
         and .scripts_failed == 0

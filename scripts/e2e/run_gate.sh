@@ -92,7 +92,9 @@ fi
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 GATE_ROOT="$REPO_ROOT/artifacts/gates"
 mkdir -p "$GATE_ROOT"
-GATE_DIR=$(mktemp -d "$GATE_ROOT/${TIMESTAMP}_${GATE_ID}_XXXXXX")
+GATE_ID_PATH=$(printf '%s' "$GATE_ID" | tr -c 'A-Za-z0-9._-' '_')
+GATE_ID_PATH="${GATE_ID_PATH:-gate}"
+GATE_DIR=$(mktemp -d "$GATE_ROOT/${TIMESTAMP}_${GATE_ID_PATH}_XXXXXX")
 
 echo "=== Verification Gate: $GATE_ID ==="
 echo "Scripts: ${#SCRIPTS[@]}"
