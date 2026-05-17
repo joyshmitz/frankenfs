@@ -7093,7 +7093,8 @@
       "required_categories": [
         "happy",
         "corruption",
-        "recovery"
+        "recovery",
+        "error"
       ],
       "scenarios": [
         {
@@ -7119,6 +7120,24 @@
           "category": "recovery",
           "status": "active",
           "evidence": "self_healing_demo_basic_integration"
+        },
+        {
+          "id": "self_healing_demo_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=self_healing_demo_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "self_healing_demo_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=self_healing_demo_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "self_healing_demo_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=self_healing_demo_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },

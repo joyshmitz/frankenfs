@@ -27,6 +27,8 @@ RCH_BIN="${RCH_BIN:-rch}"
 RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_SELF_HEALING_DEMO_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_SELF_HEALING_DEMO_SKIP_SELF_CHECK:-0}"
 
 for arg in "$@"; do
     case "$arg" in
@@ -155,6 +157,169 @@ run_rch_capture() {
     return "$status"
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_SELF_HEALING_DEMO_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        ;;
+    missing_remote_evidence)
+        ;;
+    *)
+        echo "unknown self-healing demo fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+case "$command_text" in
+    *"cargo test -p ffs-repair --test self_healing_demo_e2e -- --nocapture"*)
+        printf '%s\n' \
+            "test demo_binary_runs_via_self_healing_command ... ok" \
+            "test demo_output_has_six_structured_lines ... ok" \
+            "test demo_zero_data_loss_default_config ... ok" \
+            "test demo_zero_data_loss_five_percent_corruption ... ok" \
+            "test demo_completes_within_30_seconds ... ok" \
+            "test demo_deterministic_with_fixed_seed ... ok" \
+            "test demo_evidence_ledger_captures_repair_lifecycle ... ok" \
+            "test demo_output_lines_contain_expected_metrics ... ok"
+        ;;
+    *"cargo run -p ffs-repair --bin ffs-demo -- self-healing"*)
+        printf '%s\n' \
+            "demo start: image_size=1048576B file_count=8 corruption_pct=2 seed=0x00000000f5f5f5f5" \
+            "image created: wrote 8 payload files across 16 source blocks" \
+            "corruption injected: blocks_corrupted=2 pct=2" \
+            "repair complete: blocks_repaired=2 duration_ms=12" \
+            "verification: files_verified=8 all_ok=true" \
+            "demo result: PASS"
+        ;;
+    *"cargo test -p ffs-repair demo::tests::demo_output_has_expected_shape -- --nocapture"*)
+        printf '%s\n' "test demo::tests::demo_output_has_expected_shape ... ok"
+        ;;
+    *"cargo test -p ffs-repair --test self_heal_demo -- --nocapture"*)
+        printf '%s\n' "test self_heal_demo_repairs_and_verifies_all_payloads ... ok"
+        ;;
+    *)
+        echo "unexpected fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/self_healing_demo_fixture_${fixture_case}.log"
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_SELF_HEALING_DEMO_SELF_CHECK=0 \
+        FFS_SELF_HEALING_DEMO_SKIP_SELF_CHECK=1 \
+        FFS_SELF_HEALING_DEMO_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=8 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_self_healing_demo.sh" >"$child_log" 2>&1
+    local child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic self-healing demo wrapper self-check"
+    local stub_path child_info child_status child_log result_path result_dir e2e_log_path binary_log unit_log integration_log
+    stub_path="$E2E_LOG_DIR/rch-self-healing-demo-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    result_dir="$(dirname "$result_path")"
+    e2e_log_path="$result_dir/self_healing_demo_e2e.log"
+    binary_log="$result_dir/ffs_demo_binary.log"
+    unit_log="$result_dir/demo_unit_shape.log"
+    integration_log="$result_dir/self_heal_demo_integration.log"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && [[ -f "$e2e_log_path" ]] \
+        && [[ -f "$binary_log" ]] \
+        && [[ -f "$unit_log" ]] \
+        && [[ -f "$integration_log" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "self_healing_demo_e2e_suite" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "self_healing_demo_binary_command" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "self_healing_demo_unit_shape" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "self_healing_demo_basic_integration" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null \
+        && grep -q "demo_evidence_ledger_captures_repair_lifecycle" "$e2e_log_path" \
+        && grep -q "demo result: PASS" "$binary_log" \
+        && grep -q "demo_output_has_expected_shape" "$unit_log" \
+        && grep -q "self_heal_demo_repairs_and_verifies_all_payloads" "$integration_log"; then
+        scenario_result "self_healing_demo_fixture_complete_self_check" "PASS" "result=${result_path} e2e_log=${e2e_log_path}"
+    else
+        scenario_result "self_healing_demo_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "Self-healing demo complete fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "self_healing_demo_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "self_healing_demo_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "Self-healing demo local fallback fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "self_healing_demo_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "self_healing_demo_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "Self-healing demo missing remote evidence fixture self-check failed"
+    fi
+}
+
 print_rch_log() {
     local output_path="$1"
     if [[ -s "$output_path" ]]; then
@@ -179,6 +344,12 @@ run_demo_lane() {
 
 e2e_init "ffs_self_healing_demo"
 e2e_print_env
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 # ── Phase 1: prerequisites ───────────────────────────────────────────────────
 

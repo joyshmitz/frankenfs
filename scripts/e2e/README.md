@@ -84,6 +84,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_OQ_DECISION_INTEGRATION_SELF_CHECK=1 ./script
 # Verify the MVCC lifecycle RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_MVCC_LIFECYCLE_SELF_CHECK=1 ./scripts/e2e/ffs_mvcc_lifecycle_e2e.sh
 
+# Verify the self-healing demo RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_SELF_HEALING_DEMO_SELF_CHECK=1 ./scripts/e2e/ffs_self_healing_demo.sh
+
 # Run performance baseline manifest dry-run validation
 ./scripts/e2e/ffs_performance_manifest_e2e.sh
 
