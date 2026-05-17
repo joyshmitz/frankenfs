@@ -1236,6 +1236,16 @@ The E2E smoke is bounded and safe for local CI:
 ./scripts/e2e/ffs_soak_canary_campaign_e2e.sh
 ```
 
+When remote RCH capacity is unavailable, the deterministic wrapper self-check
+proves report/artifact/Markdown parsing and local-fallback rejection without
+running cargo:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_SOAK_CANARY_CAMPAIGN_SELF_CHECK=1 \
+./scripts/e2e/ffs_soak_canary_campaign_e2e.sh
+```
+
 Long profiles are intended for RCH, CI, or manual permissioned hosts. They must
 record kernel, FUSE capability, toolchain, git SHA, workload IDs, seeds,
 duration, resource usage, cleanup status, and reproduction command. Recurring

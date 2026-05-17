@@ -16,6 +16,8 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_soak
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_SOAK_CANARY_CAMPAIGN_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_SOAK_CANARY_CAMPAIGN_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -203,6 +205,304 @@ BAD_POLICY_JSON="$RCH_OUTPUT_DIR/soak_canary_bad_policy.json"
 BAD_QUARANTINE_JSON="$RCH_OUTPUT_DIR/soak_canary_bad_quarantine.json"
 BAD_RAW="$E2E_LOG_DIR/soak_canary_bad.raw"
 UNIT_LOG="$E2E_LOG_DIR/soak_canary_unit_tests.log"
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_SOAK_CANARY_CAMPAIGN_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+emit_valid_report() {
+    python3 - <<'PY'
+import json
+
+root_classes = [
+    ("product_regression", "bd-t21em", ""),
+    ("host_capability_skip", "bd-rchk3", ""),
+    ("infrastructure_error", "bd-rchk0.385", ""),
+    ("timeout", "bd-timeout-fixture", ""),
+    ("resource_exhaustion", "bd-resource-fixture", ""),
+    ("known_quarantined_flake", "bd-flake-fixture", "soak_known_fuse_mount_retry_jitter"),
+    ("new_recurring_flake", "bd-new-flake-fixture", ""),
+    ("inconclusive", "bd-inconclusive-fixture", ""),
+]
+root_cause_samples = [
+    {
+        "sample_id": f"root_cause_fixture_{index}",
+        "classification": classification,
+        "follow_up_bead": bead,
+        "quarantine_id": quarantine_id,
+        "repro_artifacts": [f"artifacts/soak/dry-run/root-cause-{index}.json"],
+    }
+    for index, (classification, bead, quarantine_id) in enumerate(root_classes)
+]
+failure_evaluations = [
+    {"outcome": "pass", "repro_artifacts_required": False, "follow_up_bead": ""},
+    {"outcome": "fail", "repro_artifacts_required": True, "follow_up_bead": "bd-t21em"},
+    {"outcome": "skip", "repro_artifacts_required": False, "follow_up_bead": ""},
+    {"outcome": "error", "repro_artifacts_required": True, "follow_up_bead": "bd-rchk0.385"},
+    {"outcome": "flake", "repro_artifacts_required": True, "follow_up_bead": "bd-flake-fixture"},
+]
+report = {
+    "valid": True,
+    "errors": [],
+    "profile_count": 4,
+    "workload_count": 7,
+    "long_profile_ids": ["canary", "nightly", "stress"],
+    "stop_condition_precedence": [
+        "resource_budget_exceeded",
+        "timeout",
+        "infrastructure_error",
+        "failure_threshold_exceeded",
+        "flake_threshold_exceeded",
+        "host_capability_skip",
+        "stale_baseline",
+        "inconclusive",
+        "completed",
+    ],
+    "root_cause_samples": root_cause_samples,
+    "required_environment_fields": [
+        "kernel",
+        "fuse_capability",
+        "toolchain",
+        "git_sha",
+    ],
+    "required_log_fields": [
+        "resource_usage",
+        "cleanup_status",
+        "reproduction_command",
+    ],
+    "artifact_consumers": [
+        "operator_proof_bundle",
+        "release_gate_evaluator",
+        "operational_readiness_report",
+    ],
+    "sample_outcome_counts": {
+        "pass": 1,
+        "fail": 1,
+        "skip": 1,
+        "error": 1,
+        "flake": 1,
+    },
+    "command_expansions": [
+        {
+            "profile_id": "smoke",
+            "workload_id": "smoke_fixture",
+            "command": "FFS_CAMPAIGN_SEED=7001 scripts/e2e/ffs_smoke.sh --campaign-profile smoke --artifact-root artifacts/soak/dry-run",
+        },
+        {
+            "profile_id": "canary",
+            "workload_id": "canary_fixture",
+            "command": "FFS_CAMPAIGN_SEED=7001 scripts/e2e/ffs_readiness_lab_contracts_e2e.sh --profile canary",
+        },
+    ],
+    "failure_evaluations": failure_evaluations,
+}
+print(json.dumps(report, indent=2, sort_keys=True))
+PY
+}
+
+emit_sample_artifact_manifest() {
+    cat <<'JSON'
+{
+  "schema_version": 1,
+  "gate_id": "soak_canary_campaigns",
+  "bead_id": "bd-rchk0.5.9",
+  "artifacts": [
+    {
+      "category": "campaign_report",
+      "path": "artifacts/soak/dry-run/report.json",
+      "metadata": {
+        "proof_bundle_lane": "soak_canary_campaigns"
+      }
+    },
+    {
+      "category": "release_gate_summary",
+      "path": "artifacts/soak/dry-run/release-gate.json",
+      "metadata": {
+        "release_gate_feature": "operational.soak_canary"
+      }
+    },
+    {
+      "category": "root_cause_sample",
+      "path": "artifacts/soak/dry-run/root-cause-resource.json",
+      "metadata": {
+        "classification": "resource_exhaustion"
+      }
+    }
+  ]
+}
+JSON
+}
+
+emit_markdown_summary() {
+    cat <<'MD'
+# Soak/Canary Campaign Report
+
+HEARTBEAT|profile=smoke|seed=7001|outcome=pass
+
+- follow-up: bd-t21em
+- root causes: product_regression, resource_exhaustion, known_quarantined_flake
+MD
+}
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        ;;
+    *)
+        echo "unknown soak/canary fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+echo "[RCH] remote worker=fixture exit=0" >&2
+case "$command_text" in
+    *"cargo test -p ffs-harness --lib soak_canary_campaign"*)
+        printf '%s\n' \
+            "test soak_canary_campaign::tests::checked_in_manifest_validates ... ok" \
+            "test soak_canary_campaign::tests::artifact_manifest_shape ... ok" \
+            "test soak_canary_campaign::tests::invalid_campaign_variants_fail_closed ... ok"
+        exit 0
+        ;;
+    *"soak_canary_bad_"*)
+        echo "error: soak/canary campaign manifest validation failed: fixture invalid campaign" >&2
+        exit 1
+        ;;
+    *"--artifact-out"*)
+        emit_valid_report
+        emit_sample_artifact_manifest
+        exit 0
+        ;;
+    *"--summary-out"*)
+        emit_markdown_summary
+        exit 0
+        ;;
+    *)
+        emit_valid_report
+        exit 0
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/soak_canary_fixture_${fixture_case}.log"
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_SOAK_CANARY_CAMPAIGN_SELF_CHECK=0 \
+        FFS_SOAK_CANARY_CAMPAIGN_SKIP_SELF_CHECK=1 \
+        FFS_SOAK_CANARY_CAMPAIGN_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=8 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_soak_canary_campaign_e2e.sh" >"$child_log" 2>&1
+    local child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic soak/canary wrapper self-check"
+    local stub_path child_info child_status child_log result_path report_path artifact_path summary_path unit_log
+    stub_path="$E2E_LOG_DIR/rch-soak-canary-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    report_path="$(dirname "$result_path")/soak_canary_campaign_report.json"
+    artifact_path="$(dirname "$result_path")/soak_canary_sample_artifact_manifest.json"
+    summary_path="$(dirname "$result_path")/soak_canary_campaign_summary.md"
+    unit_log="$(dirname "$result_path")/soak_canary_unit_tests.log"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && [[ -f "$report_path" ]] \
+        && [[ -f "$artifact_path" ]] \
+        && [[ -f "$summary_path" ]] \
+        && [[ -f "$unit_log" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and ([.scenarios[] | select(.scenario_id == "soak_canary_manifest_validates" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "soak_canary_dry_run_artifacts" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "soak_canary_invalid_variants_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "soak_canary_thresholds_preserve_repro" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "soak_canary_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null \
+        && jq -e '
+            .valid == true
+            and .profile_count == 4
+            and .workload_count >= 7
+            and ([.root_cause_samples[].classification] | unique | length) >= 8
+            and .sample_outcome_counts.pass == 1
+            and .sample_outcome_counts.fail == 1
+            and .sample_outcome_counts.skip == 1
+            and .sample_outcome_counts.error == 1
+            and .sample_outcome_counts.flake == 1
+            and ([.failure_evaluations[] | select((.outcome == "fail" or .outcome == "error" or .outcome == "flake") and .repro_artifacts_required and (.follow_up_bead | startswith("bd-")))] | length) == 3
+        ' "$report_path" >/dev/null \
+        && jq -e '
+            .gate_id == "soak_canary_campaigns"
+            and .bead_id == "bd-rchk0.5.9"
+            and ([.artifacts[].metadata.proof_bundle_lane] | index("soak_canary_campaigns") != null)
+            and ([.artifacts[].metadata.release_gate_feature] | index("operational.soak_canary") != null)
+            and ([.artifacts[].metadata.classification] | index("resource_exhaustion") != null)
+        ' "$artifact_path" >/dev/null \
+        && grep -q "HEARTBEAT|" "$summary_path" \
+        && grep -q "bd-t21em" "$summary_path" \
+        && grep -q "soak_canary_campaign::tests::checked_in_manifest_validates" "$unit_log"; then
+        scenario_result "soak_canary_fixture_complete_self_check" "PASS" "result=${result_path} report=${report_path} artifact=${artifact_path}"
+    else
+        scenario_result "soak_canary_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "soak/canary complete fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "soak_canary_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "soak_canary_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "soak/canary local fallback fixture self-check failed"
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 e2e_step "Scenario 1: soak/canary campaign module and CLI are wired"
 if grep -q "pub mod soak_canary_campaign" crates/ffs-harness/src/lib.rs \
