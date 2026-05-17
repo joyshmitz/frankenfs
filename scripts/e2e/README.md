@@ -90,6 +90,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_SELF_HEALING_DEMO_SELF_CHECK=1 ./scripts/e2e/
 # Verify the repair 5pct RCH capture and artifact contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_REPAIR_5PCT_SELF_CHECK=1 ./scripts/e2e/ffs_repair_5pct_e2e.sh
 
+# Verify the readiness action autopilot RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_READINESS_ACTION_AUTOPILOT_SELF_CHECK=1 ./scripts/e2e/ffs_readiness_action_autopilot_e2e.sh
+
 # Run performance baseline manifest dry-run validation
 ./scripts/e2e/ffs_performance_manifest_e2e.sh
 
