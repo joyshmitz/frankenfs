@@ -3889,6 +3889,24 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=evidence_logging_correlation_fields|outcome=PASS"
+        },
+        {
+          "id": "evidence_presets_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_presets_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "evidence_presets_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_presets_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "evidence_presets_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=evidence_presets_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },

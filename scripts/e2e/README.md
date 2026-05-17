@@ -111,6 +111,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_PERF_COMPARISON_SELF_CHECK=1 ./scripts/e2e/ff
 # Verify the artifact schema fixture RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_ARTIFACT_SCHEMA_FIXTURES_SELF_CHECK=1 ./scripts/e2e/ffs_artifact_schema_fixtures_e2e.sh
 
+# Verify the evidence presets RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_EVIDENCE_PRESETS_SELF_CHECK=1 ./scripts/e2e/ffs_evidence_presets_e2e.sh
+
 # Run performance baseline manifest dry-run validation
 ./scripts/e2e/ffs_performance_manifest_e2e.sh
 
