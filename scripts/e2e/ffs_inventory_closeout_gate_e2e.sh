@@ -13,6 +13,8 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_inve
 e2e_rch_add_env_allowlist CARGO_TARGET_DIR
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-4}"
+SELF_CHECK="${FFS_INVENTORY_CLOSEOUT_GATE_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_INVENTORY_CLOSEOUT_GATE_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -74,6 +76,166 @@ INVALID_RAW="$E2E_LOG_DIR/inventory_closeout_gate_invalid.raw"
 UNIT_LOG="$E2E_LOG_DIR/inventory_closeout_gate_unit_tests.log"
 UNIT_TESTS_OK=0
 mkdir -p "$RCH_INPUT_DIR"
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_INVENTORY_CLOSEOUT_GATE_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+emit_valid_report() {
+    cat <<'JSON'
+{
+  "valid": true,
+  "gate_id": "frankenfs_inventory_closeout_gate_v1",
+  "total_rows": 8,
+  "completed_rows": 5,
+  "high_risk_surfaces_seen": [
+    "parser",
+    "mounted_path",
+    "repair",
+    "fuzz",
+    "golden",
+    "xfstests",
+    "performance",
+    "readme_feature_parity"
+  ],
+  "errors": []
+}
+JSON
+}
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        ;;
+    *)
+        echo "unknown inventory closeout gate fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+echo "[RCH] remote worker=fixture exit=0" >&2
+case "$command_text" in
+    *"cargo test -p ffs-harness --lib inventory_closeout_gate"*)
+        printf '%s\n' \
+            "test default_gate_validates_high_risk_coverage ... ok" \
+            "test render_inventory_closeout_gate_markdown_default_gate ... ok" \
+            "test fail_on_errors_rejects_invalid_report ... ok"
+        exit 0
+        ;;
+    *"--format markdown"*)
+        printf '%s\n' \
+            "# Inventory Closeout Gate" \
+            "" \
+            "High-Risk Surfaces: parser, xfstests, performance"
+        exit 0
+        ;;
+    *"inventory_closeout_gate_invalid.json"*)
+        echo "unsupported risk_surface: telepathy"
+        exit 2
+        ;;
+    *)
+        emit_valid_report
+        exit 0
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/inventory_closeout_gate_fixture_${fixture_case}.log"
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_INVENTORY_CLOSEOUT_GATE_SELF_CHECK=0 \
+        FFS_INVENTORY_CLOSEOUT_GATE_SKIP_SELF_CHECK=1 \
+        FFS_INVENTORY_CLOSEOUT_GATE_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        "$REPO_ROOT/scripts/e2e/ffs_inventory_closeout_gate_e2e.sh" >"$child_log" 2>&1
+    local child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic inventory closeout gate wrapper self-check"
+    local stub_path child_info child_status child_log result_path report_path
+    stub_path="$E2E_LOG_DIR/rch-inventory-closeout-gate-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    report_path="$(dirname "$result_path")/inventory_closeout_gate_report.json"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && [[ -f "$report_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and ([.scenarios[] | select(.scenario_id == "inventory_closeout_gate_validates" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "inventory_closeout_gate_invalid_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "inventory_closeout_gate_markdown_docs" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "inventory_closeout_gate_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null \
+        && jq -e '
+            .valid == true
+            and .total_rows == 8
+            and .completed_rows == 5
+            and (.high_risk_surfaces_seen | index("xfstests"))
+            and (.high_risk_surfaces_seen | index("readme_feature_parity"))
+        ' "$report_path" >/dev/null; then
+        scenario_result "inventory_closeout_gate_fixture_complete_self_check" "PASS" "result=${result_path} report=${report_path}"
+    else
+        scenario_result "inventory_closeout_gate_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "inventory closeout gate complete fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "inventory_closeout_gate_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "inventory_closeout_gate_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "inventory closeout gate local fallback fixture self-check failed"
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass "inventory closeout gate wrapper self-check"
+    exit 0
+fi
 
 e2e_step "Scenario 1: inventory closeout gate CLI is wired"
 if grep -q "pub mod inventory_closeout_gate" crates/ffs-harness/src/lib.rs \

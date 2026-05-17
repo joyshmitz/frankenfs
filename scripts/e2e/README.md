@@ -607,6 +607,21 @@ evidence needed to prevent vague high-risk notes from being silently treated as
 done. Stale-allowed rows require a future expiry, owner, user-risk rationale,
 and linked bead or non-goal artifact; duplicates must point at another row.
 
+When RCH capacity is unavailable, use the no-worker wrapper self-check rather
+than a local cargo fallback:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_INVENTORY_CLOSEOUT_GATE_SELF_CHECK=1 \
+./scripts/e2e/ffs_inventory_closeout_gate_e2e.sh
+```
+
+The self-check uses a stubbed `rch` binary to prove the wrapper parses valid
+JSON and Markdown validator output, rejects the invalid-gate diagnostic, and
+preserves the shared `RCH_LOCAL_FALLBACK_REJECTED` marker. It does not run
+cargo, mounted lanes, xfstests, fuzz/performance campaigns, or permissioned
+campaigns.
+
 ## Report Schema Inventory Gate
 
 The report schema inventory gate is built from the in-code
