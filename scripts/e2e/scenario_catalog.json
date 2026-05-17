@@ -5496,6 +5496,12 @@
           "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_permission_gated_blocked_self_check|outcome=PASS"
         },
         {
+          "id": "tracker_source_hygiene_permission_ack_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tracker_source_hygiene_permission_ack_self_check|outcome=PASS"
+        },
+        {
           "id": "tracker_source_hygiene_strict_mode",
           "category": "happy",
           "status": "active",

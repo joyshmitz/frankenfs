@@ -1578,6 +1578,12 @@ Each lane's `status` is one of `pass | fail | skip | error`; the release-gate po
 - Kernel FUSE `writeback_cache` remains off by default and release-gated; the only enabled mount path is the explicit `--writeback-cache` request with all the gates above.
 - These gates do not authorize production use of irreplaceable data. They define the evidence required before this README can reduce experimental caveats.
 
+### Operational Readiness SLOs
+
+Operational readiness SLOs are evaluated from the mounted evidence lane, especially `mounted_scenario_matrix.json`, before any README wording can move beyond experimental. The mounted lane must include `fuse_prod_fuse_lane_ext4_mount_unmount_probe` and `fuse_prod_btrfs_ro_mount_start`, and the release notes must tie those results back to `bd-rchk0.3.2`, `bd-rchk0.1.1`, `bd-rchk0.1.2`, `bd-rchk0.3.4`, `bd-rchk4.4`, and `bd-rchk5`.
+
+The read-write repair gate remains blocked until `writeback_cache`, `repair.rw.writeback`, and the mounted repair matrix show that repair writeback can safely coexist with client writes. Missing, stale, or permission-gated evidence keeps the relevant public claim hidden or experimental.
+
 ---
 
 ## Algorithms and Mathematical Foundations
