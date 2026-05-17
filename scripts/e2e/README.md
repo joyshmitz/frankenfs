@@ -105,6 +105,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_VERSION_STORE_FORMAT_SELF_CHECK=1 ./scripts/e
 # Verify the fuzz dashboard RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_FUZZ_DASHBOARD_SELF_CHECK=1 ./scripts/e2e/ffs_fuzz_dashboard_e2e.sh
 
+# Verify the perf comparison RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_PERF_COMPARISON_SELF_CHECK=1 ./scripts/e2e/ffs_perf_comparison_e2e.sh
+
 # Run performance baseline manifest dry-run validation
 ./scripts/e2e/ffs_performance_manifest_e2e.sh
 

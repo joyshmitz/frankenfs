@@ -33,6 +33,8 @@ RCH_BIN="${RCH_BIN:-rch}"
 RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_PERF_COMPARISON_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_PERF_COMPARISON_SKIP_SELF_CHECK:-0}"
 
 for rch_env_var in CARGO_TARGET_DIR RUST_LOG RUST_BACKTRACE; do
     case ",${RCH_ENV_ALLOWLIST:-}," in
@@ -140,6 +142,160 @@ run_rch_capture() {
     return "$status"
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_PERF_COMPARISON_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        ;;
+    missing_remote_evidence)
+        ;;
+    *)
+        echo "unknown perf comparison fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+case "$command_text" in
+    *"cargo test -p ffs-harness --lib perf_comparison -- --nocapture"*)
+        printf '%s\n' \
+            "running 18 tests" \
+            "test perf_comparison::tests::stats_known_values ... ok" \
+            "test perf_comparison::tests::stats_single_value ... ok" \
+            "test perf_comparison::tests::stats_even_count_median ... ok" \
+            "test perf_comparison::tests::stats_cv_percent_is_correct ... ok" \
+            "test perf_comparison::tests::t_test_identical_samples_high_p ... ok" \
+            "test perf_comparison::tests::t_test_clearly_different_samples_low_p ... ok" \
+            "test perf_comparison::tests::t_test_symmetry ... ok" \
+            "test perf_comparison::tests::t_test_too_small_samples ... ok" \
+            "test perf_comparison::tests::hysteresis_single_fail_is_early_warning ... ok" \
+            "test perf_comparison::tests::hysteresis_two_fails_in_window_confirmed ... ok" \
+            "test perf_comparison::tests::hysteresis_pass_clears_signal ... ok" \
+            "test perf_comparison::tests::hysteresis_reset_clears_history ... ok" \
+            "test perf_comparison::tests::hysteresis_window_evicts_old ... ok" \
+            "test perf_comparison::tests::comparator_noise_floor_passes ... ok" \
+            "test perf_comparison::tests::comparator_significant_large_regression_fails ... ok" \
+            "test perf_comparison::tests::comparator_not_significant_passes_despite_delta ... ok" \
+            "test perf_comparison::tests::comparator_warn_zone_with_significance ... ok" \
+            "test perf_comparison::tests::improvement_is_not_regression ... ok"
+        ;;
+    *)
+        echo "unexpected fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/perf_comparison_fixture_${fixture_case}.log"
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_PERF_COMPARISON_SELF_CHECK=0 \
+        FFS_PERF_COMPARISON_SKIP_SELF_CHECK=1 \
+        FFS_PERF_COMPARISON_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=8 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_perf_comparison_e2e.sh" >"$child_log" 2>&1
+    local child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic perf comparison wrapper self-check"
+    local stub_path child_info child_status child_log result_path result_dir test_log
+    stub_path="$E2E_LOG_DIR/rch-perf-comparison-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    result_dir="$(dirname "$result_path")"
+    test_log="$result_dir/perf_comparison_tests.log"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && [[ -f "$test_log" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "perf_comparison_builds_clean" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "perf_comparison_stats_accuracy" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "perf_comparison_ttest_accuracy" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "perf_comparison_hysteresis_gates" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "perf_comparison_envelope_integration" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null \
+        && grep -q "stats_known_values" "$test_log" \
+        && grep -q "t_test_clearly_different_samples_low_p" "$test_log" \
+        && grep -q "hysteresis_two_fails_in_window_confirmed" "$test_log" \
+        && grep -q "comparator_significant_large_regression_fails" "$test_log"; then
+        log_scenario "perf_comparison_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        log_scenario "perf_comparison_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "Perf comparison complete fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        log_scenario "perf_comparison_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        log_scenario "perf_comparison_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "Perf comparison local fallback fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        log_scenario "perf_comparison_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        log_scenario "perf_comparison_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "Perf comparison missing remote evidence fixture self-check failed"
+    fi
+}
+
 print_rch_log() {
     local output_path="$1"
     if [[ -s "$output_path" ]]; then
@@ -188,6 +344,12 @@ require_tests_in_log() {
 
 e2e_init "ffs_perf_comparison"
 PERF_LOG="$E2E_LOG_DIR/perf_comparison_tests.log"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 # ── Scenario: perf_comparison_builds_clean ────────────────────────────
 
