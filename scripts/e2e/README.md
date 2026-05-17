@@ -123,6 +123,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_EVIDENCE_METRICS_PRESETS_SELF_CHECK=1 ./scrip
 # Verify the error taxonomy RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_ERROR_TAXONOMY_SELF_CHECK=1 ./scripts/e2e/ffs_error_taxonomy_e2e.sh
 
+# Verify the health consistency RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_HEALTH_CONSISTENCY_SELF_CHECK=1 ./scripts/e2e/ffs_health_consistency_e2e.sh
+
 # Verify the log contract RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_LOG_CONTRACT_SELF_CHECK=1 ./scripts/e2e/ffs_log_contract_e2e.sh
 
