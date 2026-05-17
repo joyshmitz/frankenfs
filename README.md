@@ -1668,7 +1668,7 @@ EMAs are sampled to the evidence ledger every 100 commits as `ContentionSample` 
 
 The split between T1 and T2 (parameter `p`) is tuned online: a hit in B1 grows T1 at the expense of T2, a hit in B2 does the opposite. This auto-tunes the recency-vs-frequency trade-off based on observed miss patterns, with no manual configuration. Worst-case cost is `O(1)` per access.
 
-For comparison, FrankenFS also includes an **S3-FIFO** implementation (Yang, Liu et al, SOSP '23, "FIFO Queues are All You Need for Cache Eviction"), which approximates ARC's hit rate with three simple FIFO queues. This is useful when ARC's hash-table overhead is undesirable on very large caches. The two are benchmarked head-to-head in `crates/ffs-block/benches/arc_cache.rs`.
+For comparison, FrankenFS also includes an **S3-FIFO** implementation (Yang et al, SOSP '23, "FIFO Queues are All You Need for Cache Eviction"), which approximates ARC's hit rate with three simple FIFO queues. This is useful when ARC's hash-table overhead is undesirable on very large caches. The two are benchmarked head-to-head in `crates/ffs-block/benches/arc_cache.rs`.
 
 ### Dynamic Partial Order Reduction (DPOR)
 
@@ -1716,7 +1716,7 @@ CRC32C is preserved for compat-mode (so an ext4 image written by FrankenFS still
 
 ### Half-MD4 and TEA (ext4 htree hashes)
 
-ext4 directories use hash trees indexed by either Half-MD4 (the lower 32 bits of MD4, mixed with a 4-word seed) or TEA (Tiny Encryption Algorithm in hash mode). Both are non-cryptographic; they only need uniform distribution and 4-word collision separation. FrankenFS implements both in `ffs-dir::htree::hash` with kernel-bit-exact output, verified by golden fixtures and proptest equivalence MRs (`bd-ldp92`).
+ext4 directories use hash trees indexed by either Half-MD4 (the lower 32 bits of MD4, mixed with a 4-word seed) or TEA (Tiny Encryption Algorithm in hash mode). Both are non-cryptographic; they only need uniform distribution and 4-word collision separation. FrankenFS dispatches both through `dx_hash(hash_version, name, seed)` in `ffs-ondisk::ext4`, with kernel-bit-exact output verified by golden fixtures and proptest equivalence MRs (`bd-ldp92`).
 
 ### Crossbeam epoch-based reclamation (EBR)
 
@@ -1751,7 +1751,7 @@ The trade-off vs raw bitmaps is the cost of rebuilding the index when bits flip.
 
 Snapshot isolation alone (`snapshot_read`, `optimistic_commit`) prevents most anomalies but admits *write skew*: two transactions read overlapping data and write disjoint data, where the combined effect violates a constraint. SSI (Cahill, Röhm, Fekete, SIGMOD '08, "Serializable Isolation for Snapshot Databases") adds rw-antidependency tracking: whenever transaction `T1`'s write is dependent on `T2`'s prior read of the same item, an edge is recorded. If a cycle of rw-edges forms, one transaction is aborted.
 
-FrankenFS tracks these edges lazily in `ffs-mvcc::ssi` and aborts the committing transaction when an inbound rw-cycle is detected. SSI-related aborts surface as the `SerializationConflict` evidence event.
+FrankenFS tracks these edges lazily inside the commit path in `ffs-mvcc` and aborts the committing transaction when an inbound rw-cycle is detected. SSI-related aborts surface as the `SerializationConflict` evidence event with reason `TxnAbortReason::SsiCycle`.
 
 ---
 
@@ -2114,7 +2114,7 @@ ffs scrub /path/to/image.img --full --evidence-ledger repair.jsonl --json
 ffs repair /path/to/image.img --json
 ```
 
-Programmatic usage means assembling a `ScrubWithRecovery<'a, W>` pipeline (with the source-block layout, the symbol store, the block device, the autopilot, and an `EvidenceLedger<W>` writer), then passing it plus a `ScrubDaemonConfig` to `ScrubDaemon::new(pipeline, config)`. The real fields on `ScrubDaemonConfig` cover scheduling and backpressure tuning (`interval: Duration`, `budget_poll_quota_threshold: u32`, `backpressure_headroom_threshold: f32`, etc.), not the `repair_enabled` / `ledger` flags — those are decided when constructing the `ScrubWithRecovery` pipeline itself. Read `crates/ffs-repair/src/pipeline.rs` for the canonical construction site, or copy the call graph from `crates/ffs-cli/src/cmd_repair.rs`.
+Programmatic usage means assembling a `ScrubWithRecovery<'a, W>` pipeline (with the source-block layout, the symbol store, the block device, the autopilot, and an `EvidenceLedger<W>` writer), then passing it plus a `ScrubDaemonConfig` to `ScrubDaemon::new(pipeline, config)`. The real fields on `ScrubDaemonConfig` cover scheduling and backpressure tuning (`interval: Duration`, `budget_poll_quota_threshold: u32`, `backpressure_headroom_threshold: f32`, etc.); the `repair_enabled` and `ledger` choices are made when constructing the `ScrubWithRecovery` pipeline itself. Read `crates/ffs-repair/src/pipeline.rs` for the canonical construction site, or copy the call graph from `crates/ffs-cli/src/cmd_repair.rs`.
 
 ### 5. Iterate the evidence ledger
 
@@ -2908,7 +2908,7 @@ The 113 E2E gate scripts in `scripts/e2e/` are organized by capability area. Sel
 - `ffs_fault_injection_corpus_e2e.sh`: fault-injection corpus
 
 ### Writeback-cache
-- `ffs_writeback_cache_audit_e2e.sh`: the canonical audit gate (89 KB) — covers default-off, opt-in, kill-switch, ordering-oracle, and crash-replay-oracle scenarios in one script
+- `ffs_writeback_cache_audit_e2e.sh`: the canonical audit gate (89 KB); covers default-off, opt-in, kill-switch, ordering-oracle, and crash-replay-oracle scenarios in one script
 - `ffs_writeback_e2e.sh`: smaller writeback smoke
 
 ### Ext4 / btrfs format-specific
@@ -3483,9 +3483,9 @@ A: Same on-disk format. Same observable behavior for V1 features. Different *int
 
 ### Papers underpinning the design
 
-- Megiddo and Modha, *ARC: A Self-Tuning, Low Overhead Replacement Cache*, USENIX FAST 2003. The adaptive cache algorithm in `ffs-block::arc`.
-- Yang, Liu, Saxena, Sundararaman, Smith, Yu, Twigg, *FIFO Queues are All You Need for Cache Eviction*, ACM SOSP 2023. The S3-FIFO alternative.
-- Cahill, Röhm, Fekete, *Serializable Isolation for Snapshot Databases*, ACM SIGMOD 2008. The SSI rw-antidependency detection used in `ffs-mvcc::ssi`.
+- Megiddo and Modha, *ARC: A Self-Tuning, Low Overhead Replacement Cache*, USENIX FAST 2003. The adaptive cache algorithm behind `ArcCache<D>` in `ffs-block`.
+- Yang et al, *FIFO Queues are All You Need for Cache Eviction*, ACM SOSP 2023. The S3-FIFO alternative.
+- Cahill, Röhm, Fekete, *Serializable Isolation for Snapshot Databases*, ACM SIGMOD 2008. The SSI rw-antidependency detection used in `ffs-mvcc`'s commit path.
 - Flanagan and Godefroid, *Dynamic Partial-Order Reduction for Model Checking Software*, ACM POPL 2005. The DPOR algorithm used by `LabRuntime`.
 - Abdulla, Aronis, Jonsson, Sagonas, *Optimal Dynamic Partial Order Reduction*, ACM POPL 2014. The optimal variant.
 - Bernstein, Hadzilacos, Goodman, *Concurrency Control and Recovery in Database Systems*, 1987. Foundational MVCC theory.
