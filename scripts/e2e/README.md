@@ -117,6 +117,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_EVIDENCE_PRESETS_SELF_CHECK=1 ./scripts/e2e/f
 # Verify the evidence metrics presets RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_EVIDENCE_METRICS_PRESETS_SELF_CHECK=1 ./scripts/e2e/ffs_evidence_metrics_presets_e2e.sh
 
+# Verify the log contract RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_LOG_CONTRACT_SELF_CHECK=1 ./scripts/e2e/ffs_log_contract_e2e.sh
+
 # Run performance baseline manifest dry-run validation
 ./scripts/e2e/ffs_performance_manifest_e2e.sh
 

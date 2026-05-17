@@ -33,6 +33,9 @@
 #   log_contract_artifact_manifest_policy_documented - docs state manifest retention/redaction policy
 #   log_contract_operational_readiness_slos_documented - README states mount/write SLOs and proof beads
 #   log_contract_shared_summary_duplicate_marker_rejection - shared result.json skips ambiguous duplicate markers
+#   log_contract_fixture_complete_self_check - fixture mode proves cataloged markers without cargo
+#   log_contract_fixture_local_fallback_self_check - fixture mode proves local fallback rejection
+#   log_contract_fixture_missing_remote_evidence_self_check - fixture mode proves missing remote evidence rejection
 #
 # Usage:
 #   scripts/e2e/ffs_log_contract_e2e.sh
@@ -52,6 +55,8 @@ case ",${RCH_ENV_ALLOWLIST:-}," in
 esac
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_LOG_CONTRACT_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_LOG_CONTRACT_SKIP_SELF_CHECK:-0}"
 LOG_ROOT="${REPO_ROOT}/artifacts/e2e"
 mkdir -p "$LOG_ROOT"
 LOG_DIR="$(mktemp -d "$LOG_ROOT/$(date +%Y%m%d_%H%M%S)_ffs_log_contract_XXXXXX")"
@@ -168,6 +173,178 @@ log_scenario() {
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
 }
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_LOG_CONTRACT_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        ;;
+    missing_remote_evidence)
+        ;;
+    *)
+        echo "unknown log contract fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+case "$command_text" in
+    *"cargo test -p ffs-harness --lib log_contract"*)
+        printf '%s\n' \
+            "running 6 tests" \
+            "test log_contract::tests::canonical_fields_are_documented ... ok" \
+            "test log_contract::tests::duration_fields_use_us_suffix ... ok" \
+            "test log_contract::tests::outcome_vocabulary_is_closed ... ok" \
+            "test log_contract::tests::e2e_marker_schema_is_valid ... ok" \
+            "test log_contract::tests::scenario_catalog_rejects_duplicate_markers ... ok" \
+            "test log_contract::tests::log_contract_fields_cover_runtime_paths ... ok"
+        ;;
+    *"cargo test -p ffs-fuse build_mount_options_excludes_kernel_writeback_cache_mode"*)
+        printf '%s\n' \
+            "running 1 test" \
+            "test tests::build_mount_options_excludes_kernel_writeback_cache_mode ... ok"
+        ;;
+    *"cargo test -p ffs-harness artifact_manifest"*)
+        printf '%s\n' \
+            "running 5 tests" \
+            "test artifact_manifest::tests::manifest_schema_roundtrip ... ok" \
+            "test artifact_manifest::tests::retention_policy_rejects_expired_artifacts ... ok" \
+            "test artifact_manifest::tests::redaction_policy_covers_sensitive_fields ... ok" \
+            "test artifact_manifest::tests::operational_manifest_validates_scenarios ... ok" \
+            "test artifact_manifest::tests::fuse_capability_probe_report_is_serializable ... ok"
+        ;;
+    *)
+        echo "unexpected fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$LOG_DIR/log_contract_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_LOG_CONTRACT_SELF_CHECK=0 \
+        FFS_LOG_CONTRACT_SKIP_SELF_CHECK=1 \
+        FFS_LOG_CONTRACT_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=8 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_log_contract_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+require_child_marker() {
+    local child_log="$1"
+    local scenario_id="$2"
+
+    grep -Fq "SCENARIO_RESULT|scenario_id=${scenario_id}|outcome=PASS" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    local stub_path child_info child_status child_log scenario_id
+    local expected_scenarios=(
+        log_contract_builds_clean
+        log_contract_field_coverage
+        log_contract_outcome_vocabulary
+        log_contract_shared_summary_duplicate_marker_rejection
+        log_contract_e2e_markers_valid
+        log_contract_duration_convention
+        log_contract_writeback_cache_disabled
+        log_contract_sync_flush_fields
+        log_contract_repair_coordination_fields
+        log_contract_artifact_manifest_validation_tests
+        log_contract_artifact_manifest_schema_surface
+        log_contract_writeback_policy_documented
+        log_contract_repair_policy_documented
+        log_contract_artifact_manifest_policy_documented
+        log_contract_operational_readiness_slos_documented
+    )
+
+    stub_path="$LOG_DIR/rch-log-contract-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    echo "=== Scenario: log_contract_fixture_complete_self_check ==="
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    if [[ "$child_status" == "0" ]] && ! grep -Fq "|outcome=FAIL" "$child_log"; then
+        for scenario_id in "${expected_scenarios[@]}"; do
+            if ! require_child_marker "$child_log" "$scenario_id"; then
+                log_scenario "log_contract_fixture_complete_self_check" "FAIL" "missing=${scenario_id}|log=${child_log}"
+                return 1
+            fi
+        done
+        log_scenario "log_contract_fixture_complete_self_check" "PASS" "log=${child_log}"
+    else
+        log_scenario "log_contract_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    echo "=== Scenario: log_contract_fixture_local_fallback_self_check ==="
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    if [[ "$child_status" != "0" ]] && grep -Fq "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        log_scenario "log_contract_fixture_local_fallback_self_check" "PASS" "log=${child_log}"
+    else
+        log_scenario "log_contract_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    echo "=== Scenario: log_contract_fixture_missing_remote_evidence_self_check ==="
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    if [[ "$child_status" != "0" ]] && grep -Fq "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        log_scenario "log_contract_fixture_missing_remote_evidence_self_check" "PASS" "log=${child_log}"
+    else
+        log_scenario "log_contract_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    if run_self_check; then
+        echo ""
+        echo "LOG_CONTRACT_SELF_CHECK: PASSED"
+        exit 0
+    fi
+    echo ""
+    echo "LOG_CONTRACT_SELF_CHECK: FAILED"
+    exit 1
+fi
 
 # ── Scenario: log_contract_builds_clean ───────────────────────────────
 

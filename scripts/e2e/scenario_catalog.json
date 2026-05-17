@@ -5158,7 +5158,8 @@
       "script": "scripts/e2e/ffs_log_contract_e2e.sh",
       "required_categories": [
         "happy",
-        "edge"
+        "edge",
+        "error"
       ],
       "scenarios": [
         {
@@ -5250,6 +5251,24 @@
           "category": "happy",
           "status": "active",
           "evidence": "log_contract_operational_readiness_slos_documented"
+        },
+        {
+          "id": "log_contract_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "log_contract_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "log_contract_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },
