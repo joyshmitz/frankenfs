@@ -15,6 +15,7 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_proof_overhead_budget}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_CAPTURE_VISIBILITY="${FFS_PROOF_OVERHEAD_BUDGET_RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-300}"
 
 PASS_COUNT=0
@@ -37,7 +38,7 @@ scenario_result() {
 run_rch_capture() {
     local output_path="$1"
     shift
-    RCH_VISIBILITY=none e2e_rch_capture "$output_path" "$@"
+    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" e2e_rch_capture "$output_path" "$@"
 }
 
 e2e_init "ffs_proof_overhead_budget"

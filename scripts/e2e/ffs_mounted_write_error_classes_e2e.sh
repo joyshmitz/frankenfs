@@ -11,6 +11,7 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_mounted_write_error_classes_e2e}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_CAPTURE_VISIBILITY="${FFS_MOUNTED_WRITE_ERROR_CLASSES_RCH_VISIBILITY:-summary}"
 
 e2e_init "ffs_mounted_write_error_classes"
 # This lane writes all durable evidence under E2E_LOG_DIR and does not need the
@@ -49,7 +50,7 @@ COMMAND_LINE="${COMMAND_LINE% }"
 e2e_step "Validate mounted write error class catalog"
 START_NS="$(date +%s%N)"
 : >"$STDERR_PATH"
-if RCH_VISIBILITY=none e2e_rch_capture "$STDOUT_PATH" "${COMMAND[@]}"; then
+if RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" e2e_rch_capture "$STDOUT_PATH" "${COMMAND[@]}"; then
     COMMAND_STATUS="pass"
     COMMAND_EXIT_CODE=0
 else
@@ -92,7 +93,7 @@ printf -v BAD_COMMAND_LINE '%q ' "${BAD_COMMAND_DISPLAY[@]}"
 BAD_COMMAND_LINE="${BAD_COMMAND_LINE% }"
 
 : >"$BAD_STDERR_PATH"
-if RCH_VISIBILITY=none e2e_rch_capture "$BAD_STDOUT_PATH" "${BAD_COMMAND[@]}"; then
+if RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" e2e_rch_capture "$BAD_STDOUT_PATH" "${BAD_COMMAND[@]}"; then
     BAD_COMMAND_STATUS="pass"
     BAD_COMMAND_EXIT_CODE=0
 else
