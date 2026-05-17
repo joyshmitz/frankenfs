@@ -38,6 +38,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_WRITEBACK_SELF_CHECK=1 ./scripts/e2e/ffs_writ
 # Run deterministic corruption-injection + recovery smoke
 ./scripts/e2e/ffs_repair_recovery_smoke.sh
 
+# Verify the repair exchange loopback RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_REPAIR_EXCHANGE_LOOPBACK_SELF_CHECK=1 ./scripts/e2e/ffs_repair_exchange_loopback_e2e.sh
+
 # Plan/run curated xfstests generic+ext4 subsets
 ./scripts/e2e/ffs_xfstests_e2e.sh
 

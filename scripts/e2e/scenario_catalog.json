@@ -3007,7 +3007,9 @@
       "script": "scripts/e2e/ffs_repair_exchange_loopback_e2e.sh",
       "required_categories": [
         "happy",
-        "recovery"
+        "recovery",
+        "edge",
+        "error"
       ],
       "scenarios": [
         {
@@ -3021,6 +3023,24 @@
           "category": "recovery",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=repair_exchange_loopback|outcome=PASS"
+        },
+        {
+          "id": "repair_exchange_loopback_fixture_complete_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_exchange_loopback_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "repair_exchange_loopback_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_exchange_loopback_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "repair_exchange_loopback_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_exchange_loopback_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },
