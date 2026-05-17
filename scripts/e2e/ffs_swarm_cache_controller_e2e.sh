@@ -17,6 +17,7 @@ export CARGO_TARGET_DIR="${FFS_SWARM_CACHE_CARGO_TARGET_DIR:-${CARGO_TARGET_DIR:
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_REMOTE_TMPDIR="${FFS_SWARM_CACHE_RCH_TMPDIR:-/var/tmp}"
 RCH_REMOTE_CARGO_HOME="${FFS_SWARM_CACHE_RCH_CARGO_HOME:-/var/tmp/rch_cargo_home_frankenfs_swarm_cache_controller}"
+RCH_CAPTURE_VISIBILITY="${FFS_SWARM_CACHE_RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-300}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-30}"
 
@@ -110,7 +111,7 @@ run_rch_capture() {
     : >"$output_path"
     set +e
     RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
-        RCH_VISIBILITY=none \
+        RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" \
         "${RCH_BIN:-rch}" exec -- "${rch_args[@]}" >"$output_path" 2>&1 &
     pid=$!
     if [[ "$had_errexit" -eq 1 ]]; then
