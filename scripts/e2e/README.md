@@ -465,6 +465,20 @@ reproduction commands, cleanup status, and explicit host-skip reasons. The
 checked-in manifest command line must point at `validate-low-privilege-demo`
 so the artifact can be reproduced directly from its own metadata.
 
+When RCH capacity is unavailable, use the no-worker wrapper self-check rather
+than a local cargo fallback:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_LOW_PRIVILEGE_DEMO_SELF_CHECK=1 \
+./scripts/e2e/ffs_low_privilege_demo_e2e.sh
+```
+
+The self-check uses a stubbed `rch` binary to prove the wrapper parses valid
+JSON and Markdown validator output, rejects the invalid-manifest diagnostic,
+and preserves the shared `RCH_LOCAL_FALLBACK_REJECTED` marker. It does not run
+cargo, mounted lanes, xfstests, or permissioned campaigns.
+
 ## Low-Privilege Demo Sandbox Contract
 
 The low-privilege demo sandbox manifest lives in:
