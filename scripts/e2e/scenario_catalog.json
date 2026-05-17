@@ -4005,6 +4005,18 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_manifest_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "adaptive_runtime_manifest_fixture_complete_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_manifest_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "adaptive_runtime_manifest_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=adaptive_runtime_manifest_fixture_local_fallback_self_check|outcome=PASS"
         }
       ]
     },

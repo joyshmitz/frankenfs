@@ -2140,6 +2140,16 @@ mismatch and a malformed manifest with a missing `run_id` must both reject with
 actionable diagnostics. It is a non-permissioned contract gate only; it does not
 upgrade `swarm.responsiveness` or replace the permissioned large-host campaign.
 
+When remote RCH capacity is unavailable, the deterministic wrapper self-check
+proves JSON report extraction, Markdown/docs wording, fail-closed diagnostics,
+focused unit-output checks, and local-fallback rejection without running cargo:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_ADAPTIVE_RUNTIME_MANIFEST_SELF_CHECK=1 \
+./scripts/e2e/ffs_adaptive_runtime_manifest_e2e.sh
+```
+
 ### Operator Readiness Dashboard
 
 The readiness dashboard is a read-only display layer over strict validator
