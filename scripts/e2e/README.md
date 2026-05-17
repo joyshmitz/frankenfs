@@ -289,6 +289,22 @@ cargo run -p ffs-harness -- validate-btrfs-send-receive-corpus \
   --summary-out artifacts/btrfs-send-receive/summary.md
 ```
 
+When RCH capacity is unavailable, use the no-worker wrapper self-check rather
+than a local cargo fallback:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_BTRFS_SEND_RECEIVE_CORPUS_SELF_CHECK=1 \
+./scripts/e2e/ffs_btrfs_send_receive_corpus_e2e.sh
+```
+
+The self-check uses a stubbed `rch` binary to prove the wrapper extracts JSON
+validator output, preserves support-state and refusal coverage checks, rejects
+invalid corpus input, verifies Markdown/docs and focused unit-test output, and
+preserves the shared `RCH_LOCAL_FALLBACK_REJECTED` marker. It does not run
+cargo, mounted lanes, xfstests, fuzz/performance campaigns, or permissioned
+campaigns.
+
 This corpus is a support-envelope contract, not permission to claim full
 send/receive parity. It must keep `parse_only`, `export_only`,
 `receive_only`, `roundtrip_supported`, and `unsupported` rows visible, and it

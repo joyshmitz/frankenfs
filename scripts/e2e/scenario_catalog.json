@@ -468,6 +468,18 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=btrfs_send_receive_corpus_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "btrfs_send_receive_corpus_fixture_complete_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_send_receive_corpus_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "btrfs_send_receive_corpus_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=btrfs_send_receive_corpus_fixture_local_fallback_self_check|outcome=PASS"
         }
       ]
     },
