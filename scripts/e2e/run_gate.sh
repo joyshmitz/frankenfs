@@ -254,25 +254,51 @@ for script in "${SCRIPTS[@]}"; do
     # Optional conformance check
     if [[ "$CHECK_CONFORMANCE" == "true" ]]; then
         CONFORMANCE_OK=true
+        conformance_errors=()
         if ! grep -q 'set -euo pipefail' "$script_path"; then
-            echo "  CONFORMANCE: missing 'set -euo pipefail'"
+            conformance_error_msg="missing 'set -euo pipefail'"
+            conformance_errors+=("$conformance_error_msg")
+            echo "  CONFORMANCE: $conformance_error_msg"
             CONFORMANCE_OK=false
         fi
         if ! grep -q 'e2e_init' "$script_path"; then
-            echo "  CONFORMANCE: missing e2e_init call"
+            conformance_error_msg="missing e2e_init call"
+            conformance_errors+=("$conformance_error_msg")
+            echo "  CONFORMANCE: $conformance_error_msg"
             CONFORMANCE_OK=false
         fi
         if ! grep -q 'SCENARIO_RESULT\|scenario_result' "$script_path"; then
-            echo "  CONFORMANCE: no SCENARIO_RESULT markers"
+            conformance_error_msg="no SCENARIO_RESULT markers"
+            conformance_errors+=("$conformance_error_msg")
+            echo "  CONFORMANCE: $conformance_error_msg"
             CONFORMANCE_OK=false
         fi
         if ! cargo_conformance_output="$(check_direct_cargo_conformance "$script_path")"; then
+            while IFS= read -r conformance_line; do
+                [[ -n "$conformance_line" ]] && conformance_errors+=("$conformance_line")
+            done <<< "$cargo_conformance_output"
             echo "$cargo_conformance_output" | sed 's/^/  CONFORMANCE: /'
             CONFORMANCE_OK=false
         fi
         if [[ "$CONFORMANCE_OK" == "false" ]]; then
             echo "  CONFORMANCE FAIL: $script has convention violations"
-            exit 1
+            TOTAL=$((TOTAL + 1))
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+
+            if [[ "$FIRST_RESULT" == "true" ]]; then
+                FIRST_RESULT=false
+            else
+                SCRIPT_RESULTS_JSON+=","
+            fi
+
+            conformance_error="conformance violations"
+            for conformance_line in "${conformance_errors[@]}"; do
+                conformance_error+="; $conformance_line"
+            done
+            script_json=$(gate_json_escape "$script")
+            conformance_error_json=$(gate_json_escape "$conformance_error")
+            SCRIPT_RESULTS_JSON+="{\"script\":\"$script_json\",\"verdict\":\"FAIL\",\"attempts\":0,\"scenarios\":[],\"rch_local_fallback_rejected_count\":0,\"rch_local_fallback_rejections\":[],\"error\":\"$conformance_error_json\"}"
+            continue
         fi
     fi
 

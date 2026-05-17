@@ -140,6 +140,8 @@ verify_run_gate_marker_contract() {
     local missing_relative_script missing_log missing_manifest_path missing_gate_status
     local missing_gate_id_log missing_gate_id_status missing_retries_log missing_retries_status
     local bad_retries_log bad_retries_status
+    local conformance_probe_script conformance_relative_script conformance_log conformance_manifest_path
+    local conformance_gate_status
     local expected_git_clean
     probe_dir="$E2E_LOG_DIR/run_gate_marker_contract_probe"
     probe_script="$probe_dir/probe_marker_script.sh"
@@ -317,6 +319,47 @@ PROBE
         and .script_results[0].rch_local_fallback_rejections == []
         and (.script_results[0].error | contains("script not found:"))
     ' "$missing_manifest_path" >/dev/null
+
+    conformance_probe_script="$probe_dir/bad_conformance_script.sh"
+    conformance_log="$probe_dir/run_gate_conformance_failure.log"
+
+    cat >"$conformance_probe_script" <<'PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_conformance_probe|outcome=PASS'
+PROBE
+
+    conformance_relative_script="${conformance_probe_script#$REPO_ROOT/}"
+    if [[ -z "$(git -C "$REPO_ROOT" status --porcelain=v1 2>/dev/null)" ]]; then
+        expected_git_clean="true"
+    else
+        expected_git_clean="false"
+    fi
+    conformance_gate_status=0
+    scripts/e2e/run_gate.sh --gate-id run_gate_conformance_failure_contract --conformance "$conformance_relative_script" \
+        >"$conformance_log" 2>&1 || conformance_gate_status=$?
+    [[ "$conformance_gate_status" -eq 1 ]] || return 1
+
+    conformance_manifest_path=$(sed -n 's/^Manifest: //p' "$conformance_log" | tail -n 1)
+    [[ -n "$conformance_manifest_path" && -f "$conformance_manifest_path" ]] || return 1
+
+    jq -e --arg conformance_script "$conformance_relative_script" --argjson expected_git_clean "$expected_git_clean" '
+        .gate_id == "run_gate_conformance_failure_contract"
+        and .git_context.clean == $expected_git_clean
+        and .verdict == "FAIL"
+        and .scripts_total == 1
+        and .scripts_passed == 0
+        and .scripts_failed == 1
+        and (.script_results | length == 1)
+        and .script_results[0].script == $conformance_script
+        and .script_results[0].verdict == "FAIL"
+        and .script_results[0].attempts == 0
+        and .script_results[0].scenarios == []
+        and .script_results[0].rch_local_fallback_rejected_count == 0
+        and .script_results[0].rch_local_fallback_rejections == []
+        and (.script_results[0].error | contains("conformance violations"))
+        and (.script_results[0].error | contains("missing e2e_init call"))
+    ' "$conformance_manifest_path" >/dev/null
 }
 
 init_git_clean_probe_repo() {
