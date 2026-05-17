@@ -500,7 +500,7 @@ E[loss_strict]      = conflict_rate · abort_cost
 E[loss_safe_merge]  = P(corruption) · severity + conflict_rate · (1 − merge_success_rate) · abort_cost
 ```
 
-Three EMA-smoothed metrics drive the decision: `conflict_rate`, `merge_success_rate`, `abort_rate`. During a configurable warmup (default 20 commits) the system defaults to SafeMerge; afterwards the Adaptive policy selects whichever strategy has the lower expected loss. Under a 120-writer stress test, SafeMerge achieves **9.5× lower expected loss than Strict with zero data corruption**.
+Three EMA-smoothed metrics drive the decision: `conflict_rate`, `merge_success_rate`, `abort_rate`. During a configurable warmup (default 50 commits) the system defaults to SafeMerge; afterwards the Adaptive policy selects whichever strategy has the lower expected loss. Under a 120-writer stress test, SafeMerge achieves **9.5× lower expected loss than Strict with zero data corruption**.
 
 ### Sharded store for high concurrency
 
@@ -2813,7 +2813,7 @@ Step-by-step:
 
 6. **Backing-image flush.** The MVCC layer pins the block via `FlushPinToken` so the ARC cache cannot flush it before the transaction is fully visible. After visibility, the dirty page is unpinned and the flush daemon writes it (according to the configured watermarks).
 
-7. **Compression.** Once the chain depth exceeds the `CompressionPolicy.compress_after_depth` threshold, older `Full(Vec<u8>)` entries become `Zstd(Vec<u8>)` (or `Brotli`) entries lazily. Identical-version deduplication collapses unchanged "touched" entries to a one-byte marker.
+7. **Compression.** New versions written under a `CompressionPolicy { algo: CompressionAlgo::Zstd { level } }` (the default) land as `Zstd(Vec<u8>)` rather than `Full(Vec<u8>)`. Identical-version deduplication collapses unchanged "touched" entries to a one-byte marker.
 
 8. **Repair-symbol refresh.** The block's group has a `RefreshPolicy`; on the relevant trigger (Eager / Lazy timeout / Adaptive risk threshold / Hybrid age-or-count), the group's RaptorQ repair symbols are regenerated. A `SymbolRefresh` event is logged.
 
@@ -3232,8 +3232,8 @@ All knobs are struct fields. No magic environment variables, except the ones exp
 |---|---|---|
 | `ConflictPolicy` | `SafeMerge` | `Strict` for max safety, `Adaptive` for auto-tuning |
 | `AdaptivePolicyConfig.ema_alpha` | 0.1 | Higher = more responsive to contention changes |
-| `AdaptivePolicyConfig.warmup_commits` | 20 | Commits before adaptive policy activates |
-| `CompressionPolicy.max_chain_length` | unset | Version-chain cap (enables GC when set) |
+| `AdaptivePolicyConfig.warmup_commits` | 50 | Commits before adaptive policy activates |
+| `CompressionPolicy.max_chain_length` | `Some(64)` | Version-chain cap; `None` disables the cap |
 | `CompressionPolicy.dedup_identical` | true | Identical-version deduplication |
 | `GcBackpressureConfig.min_poll_quota` | 256 | Budget threshold for GC batch throttling |
 
