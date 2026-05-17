@@ -455,8 +455,13 @@ else
     sed -n '1,200p' "$SOURCE_SCOPE_DIRTY_UNIT_LOG" | while IFS= read -r line; do
         e2e_log "  $line"
     done
-    scenario_result "source_scope_dirty_workspace_stability" "FAIL" "dirty workspace source-scope unit proof failed"
-    e2e_fail "source-scope dirty workspace unit proof failed"
+    if grep -Fq "RCH_LOCAL_FALLBACK_REJECTED" "$SOURCE_SCOPE_DIRTY_UNIT_LOG"; then
+        scenario_result "source_scope_dirty_workspace_stability_rch_blocked" "FAIL" "RCH local fallback rejected before dirty workspace verdict"
+        e2e_fail "source-scope dirty workspace proof blocked by RCH local fallback"
+    else
+        scenario_result "source_scope_dirty_workspace_stability" "FAIL" "dirty workspace source-scope unit proof failed"
+        e2e_fail "source-scope dirty workspace unit proof failed"
+    fi
 fi
 
 e2e_pass

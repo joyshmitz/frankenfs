@@ -5306,6 +5306,12 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=source_scope_dirty_workspace_stability|outcome=PASS"
+        },
+        {
+          "id": "source_scope_dirty_workspace_stability_rch_blocked",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=source_scope_dirty_workspace_stability_rch_blocked|outcome=FAIL"
         }
       ]
     },
