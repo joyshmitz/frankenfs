@@ -167,6 +167,49 @@ gate_outcome_is_valid() {
     [[ "$value" == "PASS" || "$value" == "FAIL" ]]
 }
 
+gate_marker_invalid_reason() {
+    local line="$1"
+    local sid_count outcome_count detail_count sid outcome detail invalid_reason
+
+    sid_count=$(gate_marker_field_count "$line" "|scenario_id=")
+    outcome_count=$(gate_marker_field_count "$line" "|outcome=")
+    detail_count=$(gate_marker_field_count "$line" "|detail=")
+    sid=$(echo "$line" | sed -n 's/.*scenario_id=\([^|]*\).*/\1/p')
+    outcome=$(echo "$line" | sed -n 's/.*outcome=\([^|]*\).*/\1/p')
+    invalid_reason=""
+
+    if [[ "$sid_count" -eq 0 ]]; then
+        invalid_reason="${invalid_reason}${invalid_reason:+,}missing_scenario_id"
+    elif [[ "$sid_count" -gt 1 ]]; then
+        invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_scenario_id"
+    elif [[ -z "$sid" ]]; then
+        invalid_reason="${invalid_reason}${invalid_reason:+,}empty_scenario_id"
+    elif ! gate_scenario_id_is_valid "$sid"; then
+        invalid_reason="${invalid_reason}${invalid_reason:+,}invalid_scenario_id"
+    fi
+
+    if [[ "$outcome_count" -eq 0 ]]; then
+        invalid_reason="${invalid_reason}${invalid_reason:+,}missing_outcome"
+    elif [[ "$outcome_count" -gt 1 ]]; then
+        invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_outcome"
+    elif [[ -z "$outcome" ]]; then
+        invalid_reason="${invalid_reason}${invalid_reason:+,}empty_outcome"
+    elif ! gate_outcome_is_valid "$outcome"; then
+        invalid_reason="${invalid_reason}${invalid_reason:+,}invalid_outcome"
+    fi
+
+    if [[ "$detail_count" -gt 1 ]]; then
+        invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_detail"
+    elif [[ "$detail_count" -eq 1 ]]; then
+        detail="${line#*|detail=}"
+        if [[ "$detail" == *"|"* ]]; then
+            invalid_reason="${invalid_reason}${invalid_reason:+,}detail_contains_separator"
+        fi
+    fi
+
+    printf '%s\n' "$invalid_reason"
+}
+
 gate_script_path_is_safe() {
     local value="$1"
 
@@ -376,7 +419,7 @@ for script in "${SCRIPTS[@]}"; do
             done
             script_json=$(gate_json_escape "$script")
             conformance_error_json=$(gate_json_escape "$conformance_error")
-            SCRIPT_RESULTS_JSON+="{\"script\":\"$script_json\",\"verdict\":\"FAIL\",\"attempts\":0,\"scenarios\":[],\"rch_local_fallback_rejected_count\":0,\"rch_local_fallback_rejections\":[],\"error\":\"$conformance_error_json\"}"
+            SCRIPT_RESULTS_JSON+="{\"script\":\"$script_json\",\"verdict\":\"FAIL\",\"attempts\":0,\"scenarios\":[],\"invalid_scenario_marker_count\":0,\"invalid_scenario_markers\":[],\"rch_local_fallback_rejected_count\":0,\"rch_local_fallback_rejections\":[],\"error\":\"$conformance_error_json\"}"
             continue
         fi
     fi
@@ -427,52 +470,12 @@ for script in "${SCRIPTS[@]}"; do
             detail_count=$(gate_marker_field_count "$line" "|detail=")
             sid=$(echo "$line" | sed -n 's/.*scenario_id=\([^|]*\).*/\1/p')
             outcome=$(echo "$line" | sed -n 's/.*outcome=\([^|]*\).*/\1/p')
-            invalid_reason=""
-            if [[ "$sid_count" -eq 0 ]]; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}missing_scenario_id"
-            elif [[ "$sid_count" -gt 1 ]]; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_scenario_id"
-            elif [[ -z "$sid" ]]; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}empty_scenario_id"
-            elif ! gate_scenario_id_is_valid "$sid"; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}invalid_scenario_id"
-            fi
-            if [[ "$outcome_count" -eq 0 ]]; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}missing_outcome"
-            elif [[ "$outcome_count" -gt 1 ]]; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_outcome"
-            elif [[ -z "$outcome" ]]; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}empty_outcome"
-            elif ! gate_outcome_is_valid "$outcome"; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}invalid_outcome"
-            fi
-            if [[ "$detail_count" -gt 1 ]]; then
-                invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_detail"
-            fi
+            invalid_reason=$(gate_marker_invalid_reason "$line")
+            [[ -n "$invalid_reason" ]] && continue
             if [[ "$detail_count" -eq 1 ]]; then
                 detail="${line#*|detail=}"
-                if [[ "$detail" == *"|"* ]]; then
-                    invalid_reason="${invalid_reason}${invalid_reason:+,}detail_contains_separator"
-                fi
             else
                 detail=""
-            fi
-            if [[ -n "$invalid_reason" ]]; then
-                marker="$line"
-                if ((${#marker} > 240)); then
-                    marker="${marker:0:240}..."
-                fi
-                marker=$(gate_json_escape "$marker")
-                invalid_reason=$(gate_json_escape "$invalid_reason")
-
-                if [[ "$invalid_first" == "true" ]]; then
-                    invalid_first=false
-                else
-                    invalid_scenario_markers_json+=","
-                fi
-                invalid_scenario_markers_json+="{\"reason\":\"$invalid_reason\",\"marker\":\"$marker\"}"
-                invalid_scenario_marker_count=$((invalid_scenario_marker_count + 1))
-                continue
             fi
             [[ "$outcome" == "FAIL" ]] && scenario_fail_count=$((scenario_fail_count + 1))
 
@@ -492,6 +495,28 @@ for script in "${SCRIPTS[@]}"; do
             fi
         done < <(grep "^SCENARIO_RESULT|" "$script_output" 2>/dev/null || true)
     fi
+    for marker_log in "${script_outputs[@]}"; do
+        [[ -f "$marker_log" ]] || continue
+        while IFS= read -r line; do
+            invalid_reason=$(gate_marker_invalid_reason "$line")
+            if [[ -n "$invalid_reason" ]]; then
+                marker="$line"
+                if ((${#marker} > 240)); then
+                    marker="${marker:0:240}..."
+                fi
+                marker=$(gate_json_escape "$marker")
+                invalid_reason=$(gate_json_escape "$invalid_reason")
+
+                if [[ "$invalid_first" == "true" ]]; then
+                    invalid_first=false
+                else
+                    invalid_scenario_markers_json+=","
+                fi
+                invalid_scenario_markers_json+="{\"reason\":\"$invalid_reason\",\"marker\":\"$marker\"}"
+                invalid_scenario_marker_count=$((invalid_scenario_marker_count + 1))
+            fi
+        done < <(grep "^SCENARIO_RESULT|" "$marker_log" 2>/dev/null || true)
+    done
     for marker_log in "${script_outputs[@]}"; do
         [[ -f "$marker_log" ]] || continue
         while IFS= read -r line; do

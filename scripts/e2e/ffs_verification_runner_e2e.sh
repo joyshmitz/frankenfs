@@ -363,6 +363,7 @@ set -euo pipefail
 state_file="${RUN_GATE_RETRY_PROBE_STATE:?state file required}"
 if [[ ! -f "$state_file" ]]; then
     printf 'seen\n' >"$state_file"
+    printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_retry_bad_first_attempt|outcome=SKIP'
     printf '%s\n' 'RCH_LOCAL_FALLBACK_REJECTED|log=/tmp/rch-first.log|command=cargo test'
     exit 1
 fi
@@ -395,8 +396,10 @@ PROBE
         and (.script_results[0].scenarios | length == 1)
         and .script_results[0].scenarios[0].scenario_id == "gate_retry_clean_second_attempt"
         and .script_results[0].scenarios[0].outcome == "PASS"
-        and .script_results[0].invalid_scenario_marker_count == 0
-        and (.script_results[0].invalid_scenario_markers | length == 0)
+        and .script_results[0].invalid_scenario_marker_count == 1
+        and (.script_results[0].invalid_scenario_markers | length == 1)
+        and .script_results[0].invalid_scenario_markers[0].reason == "invalid_outcome"
+        and (.script_results[0].invalid_scenario_markers[0].marker | contains("gate_retry_bad_first_attempt"))
         and .script_results[0].rch_local_fallback_rejected_count == 1
         and .script_results[0].rch_local_fallback_rejections[0].marker == "RCH_LOCAL_FALLBACK_REJECTED|log=/tmp/rch-first.log|command=cargo test"
     ' "$retry_manifest_path" >/dev/null
