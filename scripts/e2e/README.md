@@ -2106,3 +2106,33 @@ ffs-harness rch-proof-ledger --transcript artifacts/e2e/run/cargo_check.raw \
   --out artifacts/e2e/run/rch_proof_ledger.json \
   --summary-out artifacts/e2e/run/rch_proof_ledger.md
 ```
+
+## RCH Capacity Preflight Gate
+
+`ffs_rch_capacity_preflight_e2e.sh` is the live, non-mutating capacity check to
+run before expensive remote-only proof lanes when RCH appears degraded. It
+captures `rch status --json`, classifies admissible workers, critical pressure,
+telemetry gaps, unreachable workers, and operator actions, then writes
+`rch_capacity_preflight_report.json` plus a short Markdown summary.
+
+The default run does not invoke workers:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 ./scripts/e2e/ffs_rch_capacity_preflight_e2e.sh
+```
+
+Set `FFS_RCH_CAPACITY_PREFLIGHT_RUN_PROBE=1` to add a small
+`RCH_REQUIRE_REMOTE=1 rch exec -- cargo check -p ffs-error --lib` probe. Any
+local fallback is recorded as `RCH_LOCAL_FALLBACK_REJECTED` and remains a
+capacity blocker, not validation proof. A probe without an RCH remote/local
+summary is rejected as ambiguous:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_RCH_CAPACITY_PREFLIGHT_RUN_PROBE=1 \
+./scripts/e2e/ffs_rch_capacity_preflight_e2e.sh
+```
+
+Use the resulting capacity artifact to explain why remote proof is unavailable.
+Do not close compiler, clippy, conformance, or mounted-write beads with only a
+`no_admissible_workers` or local-fallback preflight result.
