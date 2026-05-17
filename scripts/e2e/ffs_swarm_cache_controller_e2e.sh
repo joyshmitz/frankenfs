@@ -39,6 +39,7 @@ e2e_finish() {
     local verdict="$1"
     local summary="$2"
     local duration
+    local exit_code=0
     duration=$(($(date +%s) - E2E_START_TIME))
 
     cat >"${E2E_LOG_DIR}/result.json" <<JSON
@@ -56,6 +57,11 @@ e2e_finish() {
   "log_file": "${E2E_LOG_FILE}"
 }
 JSON
+
+    if [[ "$verdict" != "PASS" ]]; then
+        exit_code=1
+    fi
+    e2e_emit_json_summary "$exit_code" >/dev/null 2>&1 || true
 
     e2e_log ""
     e2e_log "=============================================="
@@ -268,6 +274,39 @@ REPORT_MD_RAW="${E2E_LOG_DIR}/swarm_cache_controller_report_md.raw"
 MUTATED_JSON="${E2E_LOG_DIR}/swarm_cache_controller_bad_small_host.json"
 MUTATED_RAW="${E2E_LOG_DIR}/swarm_cache_controller_bad_small_host.raw"
 UNIT_LOG="${E2E_LOG_DIR}/unit_tests.log"
+
+if [[ "${FFS_SWARM_CACHE_CONTROLLER_RESULT_SELF_CHECK_ONLY:-0}" == "1" ]]; then
+    e2e_step "Result summary merge self-check"
+    scenario_result "swarm_cache_controller_summary_merge" "PASS" "custom and shared result fields merge"
+    e2e_log "SCENARIO_RESULT|scenario_id=too_short|outcome=PASS"
+    e2e_log "SCENARIO_RESULT|scenario_id=swarm_cache_controller_summary_merge|outcome=PASS|bad_field"
+    e2e_log "SCENARIO_RESULT|scenario_id=swarm_cache_controller_summary_merge|outcome=PASS|"
+    e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=/tmp/rch-local.log|command=cargo test"
+    e2e_finish "PASS" "self-check custom summary merge"
+    if jq -e '
+        .gate_id == "ffs_swarm_cache_controller"
+        and .verdict == "PASS"
+        and .summary == "self-check custom summary merge"
+        and .pass_count == 1
+        and .fail_count == 0
+        and .total == 1
+        and .invalid_scenario_marker_count == 3
+        and (.invalid_scenario_markers | length == 3)
+        and ([.invalid_scenario_markers[].reason] | sort == [
+            "invalid_scenario_id",
+            "malformed_extension",
+            "malformed_extension"
+        ])
+        and .rch_local_fallback_rejected_count == 1
+        and (.rch_local_fallback_rejections[0].marker | contains("RCH_LOCAL_FALLBACK_REJECTED"))
+    ' "$E2E_LOG_DIR/result.json" >/dev/null; then
+        e2e_log "Swarm cache controller result summary merge self-check passed"
+        exit 0
+    fi
+    jq . "$E2E_LOG_DIR/result.json" || true
+    e2e_log "Swarm cache controller result summary merge self-check failed"
+    exit 1
+fi
 
 e2e_step "Scenario 1: module and CLI are wired"
 if grep -q "pub mod swarm_cache_controller" crates/ffs-harness/src/lib.rs \
