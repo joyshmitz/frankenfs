@@ -4060,6 +4060,7 @@
       "script": "scripts/e2e/ffs_performance_manifest_e2e.sh",
       "required_categories": [
         "happy",
+        "edge",
         "error",
         "recovery"
       ],
@@ -4117,6 +4118,18 @@
           "category": "recovery",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=performance_mount_measured_artifact_preserves_probe|outcome=PASS"
+        },
+        {
+          "id": "performance_manifest_fixture_complete_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_manifest_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "performance_manifest_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_manifest_fixture_local_fallback_self_check|outcome=PASS"
         }
       ]
     },

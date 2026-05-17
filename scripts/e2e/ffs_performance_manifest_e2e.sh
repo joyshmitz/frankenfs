@@ -16,6 +16,8 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_perf
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_PERFORMANCE_MANIFEST_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_PERFORMANCE_MANIFEST_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -183,6 +185,287 @@ MOUNT_PENDING_PROBE_JSON="$REPO_ROOT/baselines/hyperfine/20260503-bd-rchk5-3-mou
 MOUNT_MEASURED_BASELINE_JSON="$REPO_ROOT/benchmarks/baselines/history/20260503-bd-rchk5-3-mount-warm-sudo-measured.json"
 MOUNT_MEASURED_HYPERFINE_JSON="$REPO_ROOT/baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/ffs_cli_mount_warm_probe.json"
 MOUNT_MEASURED_PROBE_JSON="$REPO_ROOT/baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/ffs_cli_mount_warm_probe_report.json"
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_PERFORMANCE_MANIFEST_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+emit_valid_report() {
+    python3 - <<'PY'
+import json
+
+classes = [
+    "pass",
+    "warn",
+    "fail",
+    "noisy",
+    "stale",
+    "missing",
+    "missing_baseline",
+    "environment_mismatch",
+    "budget_exceeded",
+    "instrumentation_overhead_exceeded",
+    "degraded_but_accepted",
+    "blocked",
+]
+
+def row(index, verdict, claim_tier, authority, public_state, fixture_id=None):
+    return {
+        "fixture_id": fixture_id or f"fixture_{verdict}_{index}",
+        "workload_id": f"fixture_workload_{index}",
+        "claim_tier_before": "experimental",
+        "claim_tier_after": claim_tier,
+        "evidence_authority": authority,
+        "baseline_id": f"baseline-{index}",
+        "baseline_artifact_hash": "sha256:" + f"{index:064d}"[-64:],
+        "current_artifact_id": f"artifact-{index}",
+        "current_artifact_hash": "sha256:" + f"{index + 1:064d}"[-64:],
+        "environment_fingerprint": f"fixture-host-{index}",
+        "environment_matches_claim_lane": authority == "authoritative",
+        "metric_unit": "micros",
+        "observed_value": float(index + 1),
+        "threshold": float(index + 10),
+        "freshness_window_days": 30,
+        "overhead_budget": 0.05,
+        "runtime_seconds": 0.1,
+        "memory_mib": 8,
+        "instrumentation_overhead_percent": 0.01,
+        "statistical_summary": {"sample_count": 10, "p50": float(index + 1), "p99": float(index + 2)},
+        "noise_decision": "stable",
+        "stale_decision": "fresh",
+        "budget_decision": "budget_within_limit",
+        "overhead_decision": "instrumentation_overhead_within_limit",
+        "comparison_verdict": verdict,
+        "public_claim_state": public_state,
+        "release_claim_effect": "no_public_promotion" if public_state != "validated" else "release_claim_allowed",
+        "docs_wording_id": f"performance.fixture.{index}",
+        "output_path": f"artifacts/performance/fixture-{index}.json",
+        "raw_stdout_path": f"artifacts/performance/fixture-{index}.stdout",
+        "raw_stderr_path": f"artifacts/performance/fixture-{index}.stderr",
+        "reproduction_command": "cargo run -p ffs-harness -- validate-performance-baseline-manifest",
+        "follow_up_bead": f"bd-fixture-{index}",
+    }
+
+reports = [
+    row(0, "pass", "regression_free", "authoritative", "validated", "fixture_pass_core"),
+    row(1, "warn", "experimental", "local", "experimental"),
+    row(2, "fail", "blocked", "local", "unknown"),
+    row(3, "noisy", "experimental", "local", "experimental"),
+    row(4, "stale", "experimental", "local", "unknown"),
+    row(5, "missing", "blocked", "local", "unknown"),
+    row(6, "missing_baseline", "experimental", "local", "unknown"),
+    row(7, "environment_mismatch", "experimental", "local", "experimental"),
+    row(8, "budget_exceeded", "experimental", "local", "unknown"),
+    row(9, "instrumentation_overhead_exceeded", "experimental", "local", "experimental"),
+    row(10, "degraded_but_accepted", "degraded_but_accepted", "authoritative", "validated"),
+    row(11, "blocked", "blocked", "local", "unknown"),
+]
+
+report = {
+    "valid": True,
+    "workload_count": 8,
+    "missing_required_workload_kinds": [],
+    "fixture_classification_counts": {name: 1 for name in classes},
+    "command_expansions": [
+        {
+            "workload_id": "btree_insert_bench",
+            "command": "cargo bench -p ffs-harness btree_insert -- --profile release-perf",
+            "target_dir": "/data/tmp/rch_target_frankenfs_performance_manifest",
+            "workload_kind": "micro_benchmark",
+            "skip_semantics": "runs_on_rch",
+        },
+        {
+            "workload_id": "fuse_mount_warm",
+            "command": "sudo -n scripts/mount_benchmark_probe.sh --mode warm --out-json artifacts/performance/mount.json",
+            "target_dir": "/data/tmp/rch_target_frankenfs_performance_manifest",
+            "workload_kind": "mounted_probe",
+            "skip_semantics": "permissioned_required",
+        },
+        {
+            "workload_id": "swarm_tail_latency_campaign",
+            "command": "scripts/e2e/ffs_swarm_tail_latency_e2e.sh",
+            "target_dir": "/data/tmp/rch_target_frankenfs_performance_manifest",
+            "workload_kind": "long_campaign_observation",
+            "skip_semantics": "long_campaign_deferred",
+        },
+    ],
+    "fixture_evidence_reports": reports,
+}
+print(json.dumps(report, indent=2, sort_keys=True))
+PY
+}
+
+emit_sample_artifact_manifest() {
+    cat <<'JSON'
+{
+  "schema_version": 1,
+  "gate_id": "performance_baseline_manifest",
+  "bead_id": "bd-rchk5.1",
+  "artifacts": [
+    {
+      "category": "benchmark_baseline",
+      "path": "artifacts/performance/dry-run/baseline.json"
+    },
+    {
+      "category": "benchmark_report",
+      "path": "artifacts/performance/dry-run/report.json"
+    }
+  ]
+}
+JSON
+}
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        ;;
+    *)
+        echo "unknown performance manifest fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+echo "[RCH] remote worker=fixture exit=0" >&2
+case "$command_text" in
+    *"cargo test -p ffs-harness --lib performance_baseline_manifest"*)
+        printf '%s\n' \
+            "test performance_baseline_manifest::tests::checked_in_manifest_validates ... ok" \
+            "test performance_baseline_manifest::tests::artifact_manifest_shape ... ok" \
+            "test performance_baseline_manifest::tests::invalid_manifest_variants_fail_closed ... ok"
+        exit 0
+        ;;
+    *"--manifest-json-env PERFORMANCE_BASELINE_MANIFEST_JSON"*)
+        echo "error: performance baseline manifest validation failed: fixture invalid manifest" >&2
+        exit 1
+        ;;
+    *"--artifact-out"*)
+        emit_sample_artifact_manifest
+        exit 0
+        ;;
+    *)
+        emit_valid_report
+        exit 0
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/performance_manifest_fixture_${fixture_case}.log"
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_PERFORMANCE_MANIFEST_SELF_CHECK=0 \
+        FFS_PERFORMANCE_MANIFEST_SKIP_SELF_CHECK=1 \
+        FFS_PERFORMANCE_MANIFEST_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=8 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_performance_manifest_e2e.sh" >"$child_log" 2>&1
+    local child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic performance manifest wrapper self-check"
+    local stub_path child_info child_status child_log result_path report_path artifact_path unit_log
+    stub_path="$E2E_LOG_DIR/rch-performance-manifest-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    report_path="$(dirname "$result_path")/performance_manifest_report.json"
+    artifact_path="$(dirname "$result_path")/performance_sample_artifact_manifest.json"
+    unit_log="$(dirname "$result_path")/performance_manifest_unit_tests.log"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && [[ -f "$report_path" ]] \
+        && [[ -f "$artifact_path" ]] \
+        && [[ -f "$unit_log" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and ([.scenarios[] | select(.scenario_id == "performance_manifest_validates" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "performance_manifest_dry_run_expands" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "performance_manifest_invalid_variants_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "performance_manifest_unit_tests" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "performance_mount_probe_structured_failure" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "performance_mount_probe_disables_background_scrub" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null \
+        && jq -e '
+            .valid == true
+            and .workload_count >= 8
+            and (.missing_required_workload_kinds | length) == 0
+            and (.fixture_classification_counts.pass == 1)
+            and (.fixture_classification_counts.blocked == 1)
+            and ([.command_expansions[] | select(.command | contains("cargo bench"))] | length) >= 1
+            and ([.command_expansions[] | select(.command | contains("mount_benchmark_probe.sh"))] | length) >= 1
+            and ([.command_expansions[] | select(.workload_kind == "long_campaign_observation" and .skip_semantics == "long_campaign_deferred")] | length) >= 1
+            and ([.fixture_evidence_reports[] | select(.fixture_id == "fixture_pass_core" and .claim_tier_after == "regression_free")] | length) == 1
+            and ([.fixture_evidence_reports[] | select(.comparison_verdict == "degraded_but_accepted" and .claim_tier_after == "degraded_but_accepted")] | length) == 1
+            and ([.fixture_evidence_reports[] | select(.comparison_verdict == "blocked" and .claim_tier_after == "blocked")] | length) == 1
+        ' "$report_path" >/dev/null \
+        && jq -e '
+            .gate_id == "performance_baseline_manifest"
+            and .bead_id == "bd-rchk5.1"
+            and ([.artifacts[].category] | index("benchmark_baseline") != null)
+            and ([.artifacts[].category] | index("benchmark_report") != null)
+        ' "$artifact_path" >/dev/null \
+        && grep -q "performance_baseline_manifest::tests::checked_in_manifest_validates" "$unit_log"; then
+        scenario_result "performance_manifest_fixture_complete_self_check" "PASS" "result=${result_path} report=${report_path} artifact=${artifact_path}"
+    else
+        scenario_result "performance_manifest_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "performance manifest complete fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "performance_manifest_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "performance_manifest_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "performance manifest local fallback fixture self-check failed"
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 e2e_step "Scenario 1: performance manifest module and CLI are wired"
 if grep -q "pub mod performance_baseline_manifest" crates/ffs-harness/src/lib.rs \

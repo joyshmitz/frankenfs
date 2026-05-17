@@ -1530,6 +1530,15 @@ The E2E smoke is:
 
 It validates the checked-in manifest, checks dry-run command and artifact
 expansion, rejects malformed manifest variants, and runs the module unit tests.
+When remote RCH capacity is unavailable, the deterministic wrapper self-check
+proves the JSON/artifact parsing path and local-fallback rejection without
+running cargo:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_PERFORMANCE_MANIFEST_SELF_CHECK=1 \
+./scripts/e2e/ffs_performance_manifest_e2e.sh
+```
 
 ## Support-State Accounting
 
