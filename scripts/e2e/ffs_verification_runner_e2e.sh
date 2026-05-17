@@ -136,6 +136,7 @@ verify_run_gate_marker_contract() {
 
     local probe_dir probe_script relative_script probe_log manifest_path gate_status
     local retry_probe_script retry_relative_script retry_log retry_state retry_manifest_path retry_gate_status
+    local json_probe_script json_relative_script json_log json_manifest_path json_gate_status json_gate_id
     local expected_git_clean
     probe_dir="$E2E_LOG_DIR/run_gate_marker_contract_probe"
     probe_script="$probe_dir/probe_marker_script.sh"
@@ -229,6 +230,40 @@ PROBE
         and .script_results[0].rch_local_fallback_rejected_count == 1
         and .script_results[0].rch_local_fallback_rejections[0].marker == "RCH_LOCAL_FALLBACK_REJECTED|log=/tmp/rch-first.log|command=cargo test"
     ' "$retry_manifest_path" >/dev/null
+
+    json_probe_script="$probe_dir/json_escape_script.sh"
+    json_log="$probe_dir/run_gate_json_escape.log"
+    json_gate_id='run_gate_json_"quote_contract'
+
+    cat >"$json_probe_script" <<'PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_json_escape_probe|outcome=PASS'
+PROBE
+
+    json_relative_script="${json_probe_script#$REPO_ROOT/}"
+    if [[ -z "$(git -C "$REPO_ROOT" status --porcelain=v1 2>/dev/null)" ]]; then
+        expected_git_clean="true"
+    else
+        expected_git_clean="false"
+    fi
+    json_gate_status=0
+    scripts/e2e/run_gate.sh --gate-id "$json_gate_id" "$json_relative_script" \
+        >"$json_log" 2>&1 || json_gate_status=$?
+    [[ "$json_gate_status" -eq 0 ]] || return 1
+
+    json_manifest_path=$(sed -n 's/^Manifest: //p' "$json_log" | tail -n 1)
+    [[ -n "$json_manifest_path" && -f "$json_manifest_path" ]] || return 1
+
+    jq -e --arg gate_id "$json_gate_id" --argjson expected_git_clean "$expected_git_clean" '
+        .gate_id == $gate_id
+        and (.run_id | contains($gate_id))
+        and .git_context.clean == $expected_git_clean
+        and .verdict == "PASS"
+        and .scripts_failed == 0
+        and (.script_results | length == 1)
+        and .script_results[0].scenarios[0].scenario_id == "gate_json_escape_probe"
+    ' "$json_manifest_path" >/dev/null
 }
 
 init_git_clean_probe_repo() {

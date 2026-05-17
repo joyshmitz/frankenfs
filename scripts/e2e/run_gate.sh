@@ -374,18 +374,23 @@ fi
 
 # Write gate manifest
 MANIFEST_PATH="$GATE_DIR/gate_manifest.json"
+GATE_ID_JSON=$(gate_json_escape "$GATE_ID")
+RUN_ID_JSON=$(gate_json_escape "$(basename "$GATE_DIR")")
+CREATED_AT_JSON=$(gate_json_escape "$(date -Iseconds)")
+GIT_COMMIT_JSON=$(gate_json_escape "$GIT_COMMIT")
+GIT_BRANCH_JSON=$(gate_json_escape "$GIT_BRANCH")
 cat > "$MANIFEST_PATH" <<ENDJSON
 {
   "schema_version": 1,
   "runner_contract_version": 1,
-  "gate_id": "$GATE_ID",
-  "run_id": "$(basename "$GATE_DIR")",
-  "created_at": "$(date -Iseconds)",
+  "gate_id": "$GATE_ID_JSON",
+  "run_id": "$RUN_ID_JSON",
+  "created_at": "$CREATED_AT_JSON",
   "ci_mode": $CI_MODE,
   "max_retries": $MAX_RETRIES,
   "git_context": {
-    "commit": "$GIT_COMMIT",
-    "branch": "$GIT_BRANCH",
+    "commit": "$GIT_COMMIT_JSON",
+    "branch": "$GIT_BRANCH_JSON",
     "clean": $GIT_CLEAN
   },
   "scripts_total": $TOTAL,
