@@ -289,6 +289,37 @@ Every new corpus scenario must include:
 
 Unsupported behavior must use `status: "unsupported"` with `unsupported_reason` plus either `follow_up_bead` or `non_goal_reason`. Host-only blockers must use `status: "host_skip"` with `host_skip_reason`; the required capabilities must include a host or FUSE capability so the skip cannot be mistaken for product success. The initial corpus intentionally includes the btrfs DefaultPermissions root-owned image-ownership diagnostic and a generic missing-FUSE host skip so mounted proof consumers keep host limitations separate from FrankenFS failures.
 
+## Metamorphic Workload Seed Catalog Contract
+
+The metamorphic workload seed catalog lives in:
+
+- `tests/metamorphic-workload-seeds/metamorphic_workload_seed_catalog.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-metamorphic-workload-seeds \
+  --catalog tests/metamorphic-workload-seeds/metamorphic_workload_seed_catalog.json \
+  --out artifacts/metamorphic-workload-seeds/report.json \
+  --summary-out artifacts/metamorphic-workload-seeds/summary.md
+```
+
+When RCH capacity is unavailable, use the no-worker wrapper self-check rather
+than a local cargo fallback:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_METAMORPHIC_WORKLOAD_SEED_CATALOG_SELF_CHECK=1 \
+./scripts/e2e/ffs_metamorphic_workload_seed_catalog_e2e.sh
+```
+
+The self-check uses a stubbed `rch` binary to prove the wrapper extracts JSON
+and Markdown validator output, preserves relation/source coverage and
+permissioned ACK metadata, rejects invalid variants, verifies focused unit-test
+output, and preserves the shared `RCH_LOCAL_FALLBACK_REJECTED` marker. It does
+not run cargo, mounted lanes, xfstests, fuzz/performance campaigns, or
+permissioned campaigns.
+
 ## Btrfs Send/Receive Corpus Contract
 
 The btrfs send/receive parity corpus lives in:

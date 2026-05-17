@@ -17,6 +17,8 @@ export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGE
 RCH_CAPTURE_VISIBILITY="${FFS_METAMORPHIC_WORKLOAD_SEED_CATALOG_RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-420}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_METAMORPHIC_WORKLOAD_SEED_CATALOG_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_METAMORPHIC_WORKLOAD_SEED_CATALOG_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -202,6 +204,237 @@ BAD_INVARIANT_RAW="$E2E_LOG_DIR/metamorphic_bad_invariant.raw"
 BAD_INVARIANT_REPORT="$E2E_LOG_DIR/metamorphic_bad_invariant_report.json"
 BAD_INVARIANT_REPORT_RAW="$E2E_LOG_DIR/metamorphic_bad_invariant_report.raw"
 UNIT_TESTS_OK=0
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_METAMORPHIC_WORKLOAD_SEED_CATALOG_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+emit_valid_report() {
+    python3 - <<'PY'
+import json
+
+relations = [
+    "replay_deterministic",
+    "repair_monotonic",
+    "failure_classification_stable",
+    "tail_latency_order_invariant",
+]
+modes = ["analysis_only", "dry_run", "permissioned"]
+consumers = ["proof_bundle", "release_gate", "swarm_workload_harness", "repair_lab"]
+matrix = []
+for index in range(7):
+    mode = modes[index % len(modes)]
+    ack = "FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host" if mode == "permissioned" else ""
+    command = "cargo run -p ffs-harness -- validate-metamorphic-workload-seeds"
+    if ack:
+        command = f"{ack} {command}"
+    matrix.append({
+        "seed_id": f"metamorphic_fixture_seed_{index:02d}",
+        "relation": relations[index % len(relations)],
+        "execution_mode": mode,
+        "ack_requirement": ack,
+        "proof_consumers": [consumers[index % len(consumers)]],
+        "invariant": "deterministic replay preserves classified outcome",
+        "reproduction_command": command,
+        "source_value_pointer": f"/seeds/{index}/seed_value",
+        "expected_artifact_fields": ["required", "report_json"],
+    })
+
+report = {
+    "valid": True,
+    "catalog_id": "frankenfs_metamorphic_workload_seed_catalog",
+    "seed_count": len(matrix),
+    "source_kind_count": 5,
+    "source_value_verified_count": len(matrix),
+    "relation_counts": {relation: 1 for relation in relations},
+    "execution_mode_counts": {mode: 1 for mode in modes},
+    "by_proof_consumer": {consumer: 1 for consumer in consumers},
+    "coverage_matrix": matrix,
+    "errors": [],
+}
+print(json.dumps(report, indent=2, sort_keys=True))
+PY
+}
+
+emit_invalid_invariant_report() {
+    python3 - <<'PY'
+import json
+
+report = {
+    "valid": False,
+    "catalog_id": "frankenfs_metamorphic_workload_seed_catalog",
+    "seed_count": 7,
+    "source_value_verified_count": 7,
+    "errors": ["seed invariant must not be empty"],
+}
+print(json.dumps(report, indent=2, sort_keys=True))
+PY
+}
+
+emit_markdown_report() {
+    cat <<'MD'
+# Metamorphic Workload Seed Catalog
+
+- catalog: `frankenfs_metamorphic_workload_seed_catalog`
+- relation: `replay_deterministic`
+- execution mode: `permissioned`
+MD
+}
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        ;;
+    *)
+        echo "unknown metamorphic workload seed catalog fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+echo "[RCH] remote worker=fixture exit=0" >&2
+case "$command_text" in
+    *"test -p ffs-harness --lib metamorphic_workload_seed_catalog"*)
+        printf '%s\n' \
+            "test rejects_duplicate_seed_ids ... ok" \
+            "test rejects_missing_source_artifact ... ok" \
+            "test rejects_existing_non_json_source_artifact ... ok" \
+            "test source_value_coverage_counts_valid_sources_independent_of_row_errors ... ok" \
+            "test rejects_missing_source_value_pointer_target ... ok" \
+            "test rejects_mismatched_numeric_source_value ... ok" \
+            "test accepts_seed_contained_in_source_command_string ... ok" \
+            "test rejects_permissioned_seed_without_ack_requirement ... ok" \
+            "test rejects_non_permissioned_seed_with_ack_requirement ... ok" \
+            "test rejects_non_permissioned_seed_with_permissioned_reproduction_token ... ok" \
+            "test rejects_permissioned_seed_with_malformed_ack_requirement ... ok" \
+            "test rejects_permissioned_seed_command_missing_declared_ack ... ok" \
+            "test rejects_unknown_relation_type ... ok" \
+            "test rejects_seed_without_invariant ... ok" \
+            "test rejects_seed_without_existing_proof_consumer ... ok" \
+            "test rejects_catalog_with_too_few_source_kinds ... ok"
+        exit 0
+        ;;
+    *"metamorphic_bad_invariant.json"*)
+        echo "error: metamorphic workload seed catalog validation failed: invariant must not be empty" >&2
+        emit_invalid_invariant_report
+        exit 1
+        ;;
+    *"metamorphic_bad_"*)
+        echo "error: metamorphic workload seed catalog validation failed: fixture invalid catalog" >&2
+        exit 1
+        ;;
+    *"--format markdown"*)
+        emit_markdown_report
+        exit 0
+        ;;
+    *)
+        emit_valid_report
+        exit 0
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/metamorphic_seed_catalog_fixture_${fixture_case}.log"
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_METAMORPHIC_WORKLOAD_SEED_CATALOG_SELF_CHECK=0 \
+        FFS_METAMORPHIC_WORKLOAD_SEED_CATALOG_SKIP_SELF_CHECK=1 \
+        FFS_METAMORPHIC_WORKLOAD_SEED_CATALOG_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        "$REPO_ROOT/scripts/e2e/ffs_metamorphic_workload_seed_catalog_e2e.sh" >"$child_log" 2>&1
+    local child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic metamorphic workload seed catalog wrapper self-check"
+    local stub_path child_info child_status child_log result_path report_path summary_path
+    stub_path="$E2E_LOG_DIR/rch-metamorphic-seed-catalog-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    report_path="$(dirname "$result_path")/metamorphic_workload_seed_catalog_report.json"
+    summary_path="$(dirname "$result_path")/metamorphic_workload_seed_catalog_summary.md"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && [[ -f "$report_path" ]] \
+        && [[ -f "$summary_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and ([.scenarios[] | select(.scenario_id == "metamorphic_seed_catalog_validates" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "metamorphic_seed_catalog_coverage" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "metamorphic_seed_catalog_permissioned_ack" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "metamorphic_seed_catalog_invalid_variants_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "metamorphic_seed_catalog_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null \
+        && jq -e '
+            .valid == true
+            and .seed_count >= 7
+            and .source_kind_count >= 5
+            and .source_value_verified_count == .seed_count
+            and (.coverage_matrix | length) == .seed_count
+            and (.execution_mode_counts.permissioned // 0) > 0
+        ' "$report_path" >/dev/null \
+        && grep -q "# Metamorphic Workload Seed Catalog" "$summary_path" \
+        && grep -q "permissioned" "$summary_path"; then
+        scenario_result "metamorphic_seed_catalog_fixture_complete_self_check" "PASS" "result=${result_path} report=${report_path} summary=${summary_path}"
+    else
+        scenario_result "metamorphic_seed_catalog_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "metamorphic workload seed catalog complete fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "metamorphic_seed_catalog_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "metamorphic_seed_catalog_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "metamorphic workload seed catalog local fallback fixture self-check failed"
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass "metamorphic workload seed catalog wrapper self-check"
+    exit 0
+fi
 
 e2e_step "Scenario 1: metamorphic workload seed catalog module and CLI are wired"
 if grep -q "pub mod metamorphic_workload_seed_catalog" crates/ffs-harness/src/lib.rs \
