@@ -547,6 +547,20 @@ cargo run -p ffs-harness -- validate-remediation-catalog \
   --summary-out artifacts/remediation/catalog_summary.md
 ```
 
+When RCH capacity is unavailable, use the no-worker wrapper self-check rather
+than a local cargo fallback:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_REMEDIATION_CATALOG_SELF_CHECK=1 \
+./scripts/e2e/ffs_remediation_catalog_e2e.sh
+```
+
+The self-check uses a stubbed `rch` binary to prove the wrapper parses valid
+JSON and Markdown validator output, rejects the invalid-catalog diagnostic, and
+preserves the shared `RCH_LOCAL_FALLBACK_REJECTED` marker. It does not run
+cargo, mounted lanes, xfstests, recovery, mutation, or permissioned campaigns.
+
 This catalog is an operator action contract for proof failures and readiness
 blockers, not evidence that any repair, rollback, or host remediation command
 has been executed. It must keep product failures, host-capability skips,
