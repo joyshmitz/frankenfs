@@ -1959,7 +1959,8 @@
       "required_categories": [
         "happy",
         "edge",
-        "recovery"
+        "recovery",
+        "error"
       ],
       "scenarios": [
         {
@@ -1996,13 +1997,31 @@
           "id": "mvcc_lifecycle_logging",
           "category": "edge",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=lifecycle_logging|outcome=PASS"
+          "evidence": "SCENARIO_RESULT|scenario_id=mvcc_lifecycle_logging|outcome=PASS"
         },
         {
           "id": "mvcc_lifecycle_persist_tests",
           "category": "recovery",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=persist_tests|outcome=PASS"
+          "evidence": "SCENARIO_RESULT|scenario_id=mvcc_lifecycle_persist_tests|outcome=PASS"
+        },
+        {
+          "id": "mvcc_lifecycle_fixture_complete_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mvcc_lifecycle_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "mvcc_lifecycle_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mvcc_lifecycle_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "mvcc_lifecycle_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=mvcc_lifecycle_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },
