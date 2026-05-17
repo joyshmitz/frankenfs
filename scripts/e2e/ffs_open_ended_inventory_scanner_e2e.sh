@@ -319,6 +319,28 @@ required_families = {
     "performance_control_artifacts",
     "performance_xfstests_notes",
 }
+build_output_sensitive_families = {
+    "agent_workflow_docs",
+    "architecture_design_docs",
+    "conformance_docs",
+    "conformance_fixture_artifacts",
+    "test_control_artifacts",
+    "tests",
+    "checked_in_evidence_artifacts",
+    "crate_manifest_and_benchmark_sources",
+    "fuzz_campaign_artifacts",
+    "fuzz_targets",
+    "fuzz_orchestration",
+    "operational_scripts",
+    "operator_runbook_docs",
+    "operational_evidence_artifacts",
+    "performance_control_artifacts",
+}
+required_build_exclusions = {
+    "target/**",
+    "**/.rch-target/**",
+    "**/.rch-target-*/**",
+}
 if not report["valid"]:
     raise SystemExit(report["errors"])
 if report["schema_version"] != 1 or report["source_manifest_version"] != 1:
@@ -353,6 +375,13 @@ for source in report["scanned_sources"]:
         raise SystemExit(f"source {source['id']} missing aggregate hash")
     if not source["included_globs"]:
         raise SystemExit(f"source {source['id']} missing included globs")
+    if source["source_family"] in build_output_sensitive_families:
+        missing_build_exclusions = required_build_exclusions - set(source["excluded_globs"])
+        if missing_build_exclusions:
+            raise SystemExit(
+                f"source {source['id']} missing build-output exclusions: "
+                f"{sorted(missing_build_exclusions)}"
+            )
 tests_source = next(source for source in report["scanned_sources"] if source["source_family"] == "tests")
 if any(path["source_path"].startswith("vendor/") for path in tests_source["matched_paths"]):
     raise SystemExit("source-scope tests scan should not include vendored paths")
