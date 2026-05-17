@@ -134,7 +134,7 @@ verify_run_gate_marker_contract() {
         return 1
     fi
 
-    local probe_dir probe_script relative_script probe_log manifest_path
+    local probe_dir probe_script relative_script probe_log manifest_path gate_status
     probe_dir="$E2E_LOG_DIR/run_gate_marker_contract_probe"
     probe_script="$probe_dir/probe_marker_script.sh"
     probe_log="$probe_dir/run_gate.log"
@@ -150,25 +150,30 @@ printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_invalid_outcome|outcome=SKIP'
 printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_status_only|status=PASS'
 printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_duplicate_outcome|outcome=PASS|outcome=FAIL'
 printf '%s\n' 'SCENARIO_RESULT_EXTRA|scenario_id=gate_extra_prefix|outcome=PASS'
+printf '%s\n' 'RCH_LOCAL_FALLBACK_REJECTED|log=/tmp/rch-local.log|command=cargo test'
 PROBE
 
     relative_script="${probe_script#$REPO_ROOT/}"
-    if ! scripts/e2e/run_gate.sh --gate-id run_gate_marker_contract "$relative_script" \
-        >"$probe_log" 2>&1; then
-        return 1
-    fi
+    gate_status=0
+    scripts/e2e/run_gate.sh --gate-id run_gate_marker_contract "$relative_script" \
+        >"$probe_log" 2>&1 || gate_status=$?
+    [[ "$gate_status" -eq 1 ]] || return 1
 
     manifest_path=$(sed -n 's/^Manifest: //p' "$probe_log" | tail -n 1)
     [[ -n "$manifest_path" && -f "$manifest_path" ]] || return 1
 
     jq -e '
         .gate_id == "run_gate_marker_contract"
-        and .verdict == "PASS"
+        and .verdict == "FAIL"
+        and .scripts_failed == 1
         and (.script_results | length == 1)
+        and .script_results[0].verdict == "FAIL"
         and (.script_results[0].scenarios | length == 1)
         and .script_results[0].scenarios[0].scenario_id == "gate_valid_marker"
         and .script_results[0].scenarios[0].outcome == "PASS"
         and .script_results[0].scenarios[0].detail == "quote_\"probe\"\\path"
+        and .script_results[0].rch_local_fallback_rejected_count == 1
+        and .script_results[0].rch_local_fallback_rejections[0].marker == "RCH_LOCAL_FALLBACK_REJECTED|log=/tmp/rch-local.log|command=cargo test"
     ' "$manifest_path" >/dev/null
 }
 
