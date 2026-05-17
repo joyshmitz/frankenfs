@@ -2062,32 +2062,33 @@ use ffs::{OpenFs, FfsError};
 use ffs_types::InodeNumber;
 use std::path::Path;
 
-// ext4 root inode is always 2 by convention.
-// InodeNumber is a tuple newtype around u64; the field is pub so the
-// tuple constructor works in const context.
+// ext4 root inode is always 2 by convention; btrfs root also resolves
+// to inode 2 through the convenience layer. InodeNumber is a tuple
+// newtype around u64; the field is pub so the tuple constructor works
+// in const context.
 const ROOT_INO: InodeNumber = InodeNumber(2);
 
 fn list_root(image: &Path) -> Result<()> {
     let cx = Cx::for_request();
     let fs = OpenFs::open(&cx, image)?;
 
-    // Convenience methods on OpenFs (use RequestScope::empty internally)
-    let root_attr  = fs.getattr(&cx, ROOT_INO)?;
-    let root_inode = fs.read_inode(&cx, ROOT_INO)?;
+    // Convenience methods on OpenFs dispatch by flavor (ext4 + btrfs)
+    // and open a fresh RequestScope::empty() internally.
+    let root_attr = fs.getattr(&cx, ROOT_INO)?;
     println!("root: perm={:o}  size={}", root_attr.perm, root_attr.size);
 
-    for entry in fs.read_dir(&cx, &root_inode)? {
-        // entry: Ext4DirEntry { inode, rec_len, name_len, file_type, name: Vec<u8> }
+    // readdir returns the format-agnostic DirEntry { ino, offset, kind, name }
+    for entry in fs.readdir(&cx, ROOT_INO, 0)? {
         println!("{:>10}  {:?}  {}",
-            entry.inode,
-            entry.file_type,
+            entry.ino,
+            entry.kind,
             String::from_utf8_lossy(&entry.name));
     }
     Ok(())
 }
 ```
 
-The `getattr` and `read_inode` calls are the convenience layer (`pub fn getattr(&self, cx, ino) -> InodeAttr`, `pub fn read_inode(&self, cx, ino) -> Ext4Inode`); both open a fresh `RequestScope::empty()` internally. For scoped operation that participates in a larger MVCC request, use the `*_with_scope` variants (`read_inode_attr_with_scope`, `read_dir_with_scope`).
+The convenience layer (`getattr`, `readdir`, `lookup`, `read`, etc.) flavor-dispatches inside `OpenFs`'s `FsOps` trait implementation, so the same code works on ext4 and btrfs images. The ext4-specific low-level layer (`read_inode` returning `Ext4Inode`, `read_dir(&Ext4Inode)` returning `Vec<Ext4DirEntry>`) is also available for callers that need on-disk-format detail; that surface is gated on `ext4_superblock()` and will return `FfsError::Format("not an ext4 filesystem")` on a btrfs image. For scoped operation inside a longer-lived MVCC request, use the `*_with_scope` variants (`read_inode_attr_with_scope`, `read_dir_with_scope`).
 
 ### 2. Read a specific file by path
 
