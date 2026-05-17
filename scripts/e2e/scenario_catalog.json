@@ -856,6 +856,18 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=low_privilege_demo_sandbox_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "low_privilege_demo_sandbox_fixture_complete_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=low_privilege_demo_sandbox_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "low_privilege_demo_sandbox_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=low_privilege_demo_sandbox_fixture_local_fallback_self_check|outcome=PASS"
         }
       ]
     },
