@@ -19,6 +19,7 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_perm
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+RCH_CAPTURE_VISIBILITY="${FFS_PERMISSIONED_CAMPAIGN_BROKER_RCH_VISIBILITY:-summary}"
 
 REFERENCE_TIMESTAMP="${FFS_PERMISSIONED_BROKER_REFERENCE_TIMESTAMP:-2026-05-07T00:00:00Z}"
 GIT_SHA="$(git rev-parse HEAD)"
@@ -102,7 +103,7 @@ run_rch_capture() {
     : >"$output_path"
     set +e
     RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
-        RCH_VISIBILITY=none \
+        RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" \
         "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
     pid=$!
     if [[ "$had_errexit" -eq 1 ]]; then

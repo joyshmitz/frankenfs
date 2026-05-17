@@ -28,6 +28,7 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_fuzz
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-420}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+RCH_CAPTURE_VISIBILITY="${FFS_FUZZ_TARGETS_RCH_VISIBILITY:-summary}"
 FFS_FUZZ_SMOKE_RUNS="${FFS_FUZZ_SMOKE_RUNS:-100}"
 FFS_FUZZ_SMOKE_MAX_TOTAL_TIME="${FFS_FUZZ_SMOKE_MAX_TOTAL_TIME:-10}"
 FFS_FUZZ_DICT_RUNS="${FFS_FUZZ_DICT_RUNS:-200}"
@@ -109,7 +110,7 @@ run_rch_capture() {
     : >"$output_path"
     set +e
     RCH_LOG_LEVEL="${FFS_FUZZ_RCH_LOG_LEVEL:-info}" \
-        RCH_VISIBILITY=none \
+        RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" \
         "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
     pid=$!
     if [[ "$had_errexit" -eq 1 ]]; then
@@ -221,9 +222,9 @@ fi
 e2e_step "Scenario 2: Build all fuzz targets"
 
 if run_rch_capture "$BUILD_LOG" cargo build --manifest-path fuzz/Cargo.toml --bins; then
-    scenario_result "fuzz_build" "PASS" "All fuzz targets compiled successfully; log=${BUILD_LOG}"
+    scenario_result "fuzz_targets_build" "PASS" "All fuzz targets compiled successfully; log=${BUILD_LOG}"
 else
-    scenario_result "fuzz_build" "FAIL" "Fuzz target build failed; see $BUILD_LOG"
+    scenario_result "fuzz_targets_build" "FAIL" "Fuzz target build failed; see $BUILD_LOG"
     # If build fails, remaining scenarios will fail too; report and exit
     e2e_log "Build log tail:"
     log_tail "$BUILD_LOG"
