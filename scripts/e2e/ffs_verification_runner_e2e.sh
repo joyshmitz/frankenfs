@@ -142,6 +142,7 @@ verify_run_gate_marker_contract() {
     local bad_retries_log bad_retries_status
     local fail_marker_script fail_marker_relative_script fail_marker_log fail_marker_manifest_path
     local fail_marker_gate_status
+    local bad_catalog_repo bad_catalog_log bad_catalog_status
     local conformance_probe_script conformance_relative_script conformance_log conformance_manifest_path
     local conformance_gate_status
     local expected_git_clean
@@ -336,6 +337,18 @@ PROBE
     [[ "$bad_retries_status" -eq 1 ]] || return 1
     grep -Fq "ERROR: --retries requires a non-negative integer" "$bad_retries_log" || return 1
     ! grep -Eq "unbound variable|syntax error|^Output: |^Manifest: " "$bad_retries_log" || return 1
+
+    bad_catalog_repo="$probe_dir/bad_catalog_repo"
+    bad_catalog_log="$probe_dir/run_gate_bad_catalog.log"
+    mkdir -p "$bad_catalog_repo/scripts/e2e"
+    cp scripts/e2e/run_gate.sh "$bad_catalog_repo/scripts/e2e/run_gate.sh"
+    printf '{ bad catalog\n' >"$bad_catalog_repo/scripts/e2e/scenario_catalog.json"
+    bad_catalog_status=0
+    "$bad_catalog_repo/scripts/e2e/run_gate.sh" --gate-id run_gate_bad_catalog_contract --catalog \
+        >"$bad_catalog_log" 2>&1 || bad_catalog_status=$?
+    [[ "$bad_catalog_status" -eq 1 ]] || return 1
+    grep -Fq "ERROR: failed to parse scenario catalog at " "$bad_catalog_log" || return 1
+    ! grep -Eq "^No scripts to run\\.|^Output: |^Manifest: " "$bad_catalog_log" || return 1
 
     missing_relative_script="artifacts/e2e/run_gate_marker_contract_missing_script.sh"
     missing_log="$probe_dir/run_gate_missing_script.log"

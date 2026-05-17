@@ -83,6 +83,7 @@ done
 # If --catalog or no scripts specified, discover from catalog
 if [[ "$USE_CATALOG" == "true" ]] || [[ ${#SCRIPTS[@]} -eq 0 ]]; then
     CATALOG="$REPO_ROOT/scripts/e2e/scenario_catalog.json"
+    CATALOG_SCRIPTS=""
     if [[ ! -f "$CATALOG" ]]; then
         echo "ERROR: scenario_catalog.json not found at $CATALOG" >&2
         exit 1
@@ -91,7 +92,13 @@ if [[ "$USE_CATALOG" == "true" ]] || [[ ${#SCRIPTS[@]} -eq 0 ]]; then
         echo "ERROR: jq is required for catalog mode" >&2
         exit 1
     fi
-    mapfile -t SCRIPTS < <(jq -r '.suites[].script' "$CATALOG")
+    if ! CATALOG_SCRIPTS=$(jq -r '.suites[].script' "$CATALOG"); then
+        echo "ERROR: failed to parse scenario catalog at $CATALOG" >&2
+        exit 1
+    fi
+    if [[ -n "$CATALOG_SCRIPTS" ]]; then
+        mapfile -t SCRIPTS <<<"$CATALOG_SCRIPTS"
+    fi
 fi
 
 if [[ ${#SCRIPTS[@]} -eq 0 ]]; then
