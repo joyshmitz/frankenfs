@@ -14,6 +14,9 @@
 #   thresholds_toml_valid       - thresholds.toml parses with no errors
 #   envelope_ordering_sane      - noise < warn < fail for all operations
 #   taxonomy_json_export        - canonical taxonomy exports to valid JSON
+#   taxonomy_fixture_complete_self_check - fixture mode proves cataloged markers without cargo
+#   taxonomy_fixture_local_fallback_self_check - fixture mode proves local fallback rejection
+#   taxonomy_fixture_missing_remote_evidence_self_check - fixture mode proves missing remote evidence rejection
 #
 # Usage:
 #   scripts/e2e/ffs_benchmark_taxonomy_e2e.sh
@@ -31,6 +34,8 @@ RCH_BIN="${RCH_BIN:-rch}"
 RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_BENCHMARK_TAXONOMY_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_BENCHMARK_TAXONOMY_SKIP_SELF_CHECK:-0}"
 
 case ",${RCH_ENV_ALLOWLIST:-}," in
     *",CARGO_TARGET_DIR,"*) ;;
@@ -163,7 +168,163 @@ log_scenario() {
     fi
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_BENCHMARK_TAXONOMY_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        echo "Remote command finished: exit=0" >&2
+        ;;
+    missing_remote_evidence)
+        ;;
+    *)
+        echo "unknown benchmark taxonomy fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+case "$command_text" in
+    *"cargo test -p ffs-harness --lib benchmark_taxonomy::tests::envelope_warn_less_than_fail"*)
+        printf '%s\n' \
+            "running 1 test" \
+            "test benchmark_taxonomy::tests::envelope_warn_less_than_fail ... ok"
+        ;;
+    *"cargo test -p ffs-harness --lib benchmark_taxonomy::tests::taxonomy_json_round_trip"*)
+        printf '%s\n' \
+            "running 1 test" \
+            "test benchmark_taxonomy::tests::taxonomy_json_round_trip ... ok"
+        ;;
+    *"cargo test -p ffs-harness --lib benchmark_taxonomy"*)
+        printf '%s\n' \
+            "running 8 tests" \
+            "test benchmark_taxonomy::tests::baseline_operations_are_classified ... ok" \
+            "test benchmark_taxonomy::tests::thresholds_reference_known_operations ... ok" \
+            "test benchmark_taxonomy::tests::host_profiles_adjust_thresholds ... ok" \
+            "test benchmark_taxonomy::tests::envelope_warn_less_than_fail ... ok" \
+            "test benchmark_taxonomy::tests::taxonomy_json_round_trip ... ok" \
+            "test benchmark_taxonomy::tests::taxonomy_contains_fsync_and_mvcc_ops ... ok" \
+            "test benchmark_taxonomy::tests::operation_groups_are_stable ... ok" \
+            "test benchmark_taxonomy::tests::default_thresholds_are_ordered ... ok"
+        ;;
+    *)
+        echo "unexpected fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/benchmark_taxonomy_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_BENCHMARK_TAXONOMY_SELF_CHECK=0 \
+        FFS_BENCHMARK_TAXONOMY_SKIP_SELF_CHECK=1 \
+        FFS_BENCHMARK_TAXONOMY_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_benchmark_taxonomy_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic benchmark taxonomy wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-benchmark-taxonomy-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "taxonomy_builds_clean" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "taxonomy_covers_baseline" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "thresholds_toml_valid" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "envelope_ordering_sane" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "taxonomy_json_export" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        log_scenario "taxonomy_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        log_scenario "taxonomy_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        log_scenario "taxonomy_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        log_scenario "taxonomy_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        log_scenario "taxonomy_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        log_scenario "taxonomy_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
 e2e_init "ffs_benchmark_taxonomy"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 # ── Scenario: taxonomy_builds_clean ─────────────────────────────────────
 
