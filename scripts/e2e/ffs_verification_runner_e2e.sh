@@ -136,6 +136,7 @@ verify_run_gate_marker_contract() {
 
     local probe_dir probe_script relative_script probe_log manifest_path gate_status
     local retry_probe_script retry_relative_script retry_log retry_state retry_manifest_path retry_gate_status
+    local expected_git_clean
     probe_dir="$E2E_LOG_DIR/run_gate_marker_contract_probe"
     probe_script="$probe_dir/probe_marker_script.sh"
     probe_log="$probe_dir/run_gate.log"
@@ -155,6 +156,11 @@ printf '%s\n' 'RCH_LOCAL_FALLBACK_REJECTED|log=/tmp/rch-local.log|command=cargo 
 PROBE
 
     relative_script="${probe_script#$REPO_ROOT/}"
+    if [[ -z "$(git -C "$REPO_ROOT" status --porcelain=v1 2>/dev/null)" ]]; then
+        expected_git_clean="true"
+    else
+        expected_git_clean="false"
+    fi
     gate_status=0
     scripts/e2e/run_gate.sh --gate-id run_gate_marker_contract "$relative_script" \
         >"$probe_log" 2>&1 || gate_status=$?
@@ -163,8 +169,9 @@ PROBE
     manifest_path=$(sed -n 's/^Manifest: //p' "$probe_log" | tail -n 1)
     [[ -n "$manifest_path" && -f "$manifest_path" ]] || return 1
 
-    jq -e '
+    jq -e --argjson expected_git_clean "$expected_git_clean" '
         .gate_id == "run_gate_marker_contract"
+        and .git_context.clean == $expected_git_clean
         and .verdict == "FAIL"
         and .scripts_failed == 1
         and (.script_results | length == 1)
@@ -194,6 +201,11 @@ printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_retry_clean_second_attempt|outco
 PROBE
 
     retry_relative_script="${retry_probe_script#$REPO_ROOT/}"
+    if [[ -z "$(git -C "$REPO_ROOT" status --porcelain=v1 2>/dev/null)" ]]; then
+        expected_git_clean="true"
+    else
+        expected_git_clean="false"
+    fi
     retry_gate_status=0
     RUN_GATE_RETRY_PROBE_STATE="$retry_state" \
         scripts/e2e/run_gate.sh --gate-id run_gate_retry_marker_contract --retries 1 "$retry_relative_script" \
@@ -203,8 +215,9 @@ PROBE
     retry_manifest_path=$(sed -n 's/^Manifest: //p' "$retry_log" | tail -n 1)
     [[ -n "$retry_manifest_path" && -f "$retry_manifest_path" ]] || return 1
 
-    jq -e '
+    jq -e --argjson expected_git_clean "$expected_git_clean" '
         .gate_id == "run_gate_retry_marker_contract"
+        and .git_context.clean == $expected_git_clean
         and .verdict == "FAIL"
         and .scripts_failed == 1
         and (.script_results | length == 1)

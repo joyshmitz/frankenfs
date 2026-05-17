@@ -213,7 +213,7 @@ check_direct_cargo_conformance() {
 # Capture git context
 GIT_COMMIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GIT_BRANCH=$(git -C "$REPO_ROOT" branch --show-current 2>/dev/null || echo "unknown")
-if git -C "$REPO_ROOT" diff --quiet 2>/dev/null; then
+if [[ -z "$(git -C "$REPO_ROOT" status --porcelain=v1 2>/dev/null)" ]]; then
     GIT_CLEAN="true"
 else
     GIT_CLEAN="false"
