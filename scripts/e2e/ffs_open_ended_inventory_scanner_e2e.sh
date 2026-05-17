@@ -418,6 +418,12 @@ if [[ "$SOURCE_SCOPE_NEGATIVE_STATUS" -ne 0 ]] \
     && grep -Fq "Remote command finished: exit=1" "$SOURCE_SCOPE_NEGATIVE_LOG" \
     && grep -Fq 'source scope manifest missing required family `tests`' "$SOURCE_SCOPE_NEGATIVE_LOG"; then
     scenario_result "source_scope_manifest_missing_family" "PASS" "required source family omission rejected"
+elif grep -Fq "RCH_LOCAL_FALLBACK_REJECTED" "$SOURCE_SCOPE_NEGATIVE_LOG"; then
+    sed -n '1,160p' "$SOURCE_SCOPE_NEGATIVE_LOG" | while IFS= read -r line; do
+        e2e_log "  $line"
+    done
+    scenario_result "source_scope_manifest_missing_family_rch_blocked" "FAIL" "RCH local fallback rejected before missing-family verdict"
+    e2e_fail "source-scope manifest missing-family proof blocked by RCH local fallback"
 else
     sed -n '1,160p' "$SOURCE_SCOPE_NEGATIVE_LOG" | while IFS= read -r line; do
         e2e_log "  $line"
