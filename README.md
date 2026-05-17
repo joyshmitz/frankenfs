@@ -1817,7 +1817,7 @@ cargo bench -p ffs-mvcc --bench wal_throughput
 cargo build --workspace --profile release-perf
 
 # Flamegraph workflow
-./scripts/flamegraph_generate.sh --bench wal_throughput
+./scripts/flamegraph_generate.sh --target all --samples 4000 --duration 120
 ```
 
 ### Methodology
@@ -2094,14 +2094,20 @@ The convenience layer (`getattr`, `readdir`, `lookup`, `read`, etc.) flavor-disp
 
 ```rust
 use ffs::vfs::RequestScope;
+use std::ffi::OsStr;
+use ffs_types::InodeNumber;
 
+// Format-agnostic version: walk path components via FsOps::lookup,
+// which dispatches by flavor inside OpenFs. Works for both ext4 and btrfs.
 fn cat_file(image: &Path, path: &str) -> Result<Vec<u8>> {
     let cx = Cx::for_request();
     let fs = OpenFs::open(&cx, image)?;
 
-    // resolve_path takes &RequestScope (the typical pattern for stateless calls)
-    let scope = RequestScope::empty();
-    let (ino, _inode) = fs.resolve_path(&cx, &scope, path)?;
+    let mut ino = InodeNumber(2);  // both flavors expose root as inode 2
+    for component in path.trim_start_matches('/').split('/').filter(|s| !s.is_empty()) {
+        let attr = fs.lookup(&cx, ino, OsStr::new(component))?;
+        ino = attr.ino;
+    }
 
     let attr  = fs.getattr(&cx, ino)?;
     let bytes = fs.read(&cx, ino, 0, attr.size as u32)?;
@@ -2109,7 +2115,7 @@ fn cat_file(image: &Path, path: &str) -> Result<Vec<u8>> {
 }
 ```
 
-The `read(cx, ino, offset, size)` form is the convenience entry; the underlying `FsOps::read(cx, &mut RequestScope, ino, offset, size)` takes an explicit scope when you're inside a longer-lived request.
+`getattr`, `lookup`, and `read` all dispatch on `FsFlavor` inside `OpenFs`'s `FsOps` impl, so the same code works for ext4 and btrfs. If you have an ext4 image and want the on-disk inode struct back at the same time, `fs.resolve_path(&cx, &scope, path)` returns `(InodeNumber, Ext4Inode)` in one call — but that method requires an ext4 superblock and will return `FfsError::Format("not an ext4 filesystem")` on a btrfs image.
 
 ### 3. Mount via the library API (blocking)
 
@@ -2251,8 +2257,8 @@ Every async operation creates a `tracing` span carrying:
 ### Flamegraph workflow
 
 ```bash
-# Generate a flamegraph for a single benchmark
-./scripts/flamegraph_generate.sh --bench scrub_codec
+# Generate the canonical set of flamegraphs (cli_inspect, fuse_read, baseline diff)
+./scripts/flamegraph_generate.sh --target cli --samples 4000 --duration 60
 
 # Smoke-test flamegraph generation
 ./scripts/flamegraph_smoke.sh
