@@ -424,11 +424,16 @@ for script in "${SCRIPTS[@]}"; do
             detail_count=$(gate_marker_field_count "$line" "|detail=")
             sid=$(echo "$line" | sed -n 's/.*scenario_id=\([^|]*\).*/\1/p')
             outcome=$(echo "$line" | sed -n 's/.*outcome=\([^|]*\).*/\1/p')
-            detail=$(echo "$line" | sed -n 's/.*detail=\(.*\)/\1/p')
             [[ -z "$sid" || -z "$outcome" ]] && continue
             [[ "$sid_count" -eq 1 ]] || continue
             [[ "$outcome_count" -eq 1 ]] || continue
             [[ "$detail_count" -le 1 ]] || continue
+            if [[ "$detail_count" -eq 1 ]]; then
+                detail="${line#*|detail=}"
+                [[ "$detail" != *"|"* ]] || continue
+            else
+                detail=""
+            fi
             gate_scenario_id_is_valid "$sid" || continue
             gate_outcome_is_valid "$outcome" || continue
             [[ "$outcome" == "FAIL" ]] && scenario_fail_count=$((scenario_fail_count + 1))

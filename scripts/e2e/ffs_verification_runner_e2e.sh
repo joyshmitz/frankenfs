@@ -212,6 +212,53 @@ verify_lib_json_escape_all_controls() {
     [[ "$decoded" == "$expected" ]]
 }
 
+verify_lib_summary_rejects_detail_delimiter() {
+    if ! command -v jq >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local saved_log_dir="$E2E_LOG_DIR"
+    local saved_log_file="$E2E_LOG_FILE"
+    local saved_start_time="$E2E_START_TIME"
+    local saved_test_name="$E2E_TEST_NAME"
+    local probe_dir status
+
+    probe_dir="$E2E_TEMP_DIR/detail_delimiter_probe"
+    status=1
+    mkdir -p "$probe_dir"
+
+    E2E_LOG_DIR="$probe_dir"
+    E2E_LOG_FILE="$probe_dir/run.log"
+    E2E_START_TIME="$(date +%s)"
+    E2E_TEST_NAME="detail_delimiter_probe"
+
+    {
+        printf '%s\n' 'SCENARIO_RESULT|scenario_id=detail_delimiter_safe|outcome=PASS|detail=safe detail'
+        printf '%s\n' 'SCENARIO_RESULT|scenario_id=detail_delimiter_bad|outcome=PASS|detail=before|after'
+    } >"$E2E_LOG_FILE"
+
+    if e2e_emit_json_summary 0 >/dev/null 2>&1 \
+        && jq -e '
+            .verdict == "PASS"
+            and (.scenarios | length == 1)
+            and .scenarios[0].scenario_id == "detail_delimiter_safe"
+            and .scenarios[0].detail == "safe detail"
+            and .invalid_scenario_marker_count == 1
+            and (.invalid_scenario_markers | length == 1)
+            and .invalid_scenario_markers[0].reason == "detail_contains_separator"
+            and (.invalid_scenario_markers[0].marker | contains("detail_delimiter_bad"))
+        ' "$probe_dir/result.json" >/dev/null; then
+        status=0
+    fi
+
+    E2E_LOG_DIR="$saved_log_dir"
+    E2E_LOG_FILE="$saved_log_file"
+    E2E_START_TIME="$saved_start_time"
+    E2E_TEST_NAME="$saved_test_name"
+
+    return "$status"
+}
+
 verify_run_gate_marker_contract() {
     if ! command -v jq >/dev/null 2>&1; then
         return 1
@@ -249,6 +296,7 @@ verify_run_gate_marker_contract() {
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_valid_marker|outcome=PASS|detail=quote_"probe"\path'
+printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_ambiguous_detail|outcome=PASS|detail=before|after'
 printf '%s\n' 'SCENARIO_RESULT|scenario_id=Upper_case_bad|outcome=PASS'
 printf '%s\n' 'SCENARIO_RESULT|scenario_id=too_short|outcome=PASS'
 printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_invalid_outcome|outcome=SKIP'
@@ -281,6 +329,7 @@ PROBE
         and .script_results[0].verdict == "FAIL"
         and (.script_results[0].scenarios | length == 1)
         and .script_results[0].scenarios[0].scenario_id == "gate_valid_marker"
+        and all(.script_results[0].scenarios[]; .scenario_id != "gate_ambiguous_detail")
         and .script_results[0].scenarios[0].outcome == "PASS"
         and .script_results[0].scenarios[0].detail == "quote_\"probe\"\\path"
         and .script_results[0].rch_local_fallback_rejected_count == 1
@@ -1111,6 +1160,17 @@ if verify_lib_json_escape_all_controls; then
     scenario_result "lib_json_escape_all_controls" "PASS" "Quote, backslash, and ASCII controls round-trip through JSON"
 else
     scenario_result "lib_json_escape_all_controls" "FAIL" "Shared JSON escaping failed exhaustive control-byte round-trip"
+fi
+
+#######################################
+# Scenario 4b3: lib.sh rejects ambiguous detail delimiters
+#######################################
+e2e_step "Scenario 4b3: lib.sh rejects ambiguous detail delimiters"
+
+if verify_lib_summary_rejects_detail_delimiter; then
+    scenario_result "lib_marker_detail_delimiter_rejected" "PASS" "Ambiguous detail delimiter markers are recorded as invalid"
+else
+    scenario_result "lib_marker_detail_delimiter_rejected" "FAIL" "Ambiguous detail delimiter marker was accepted"
 fi
 
 #######################################

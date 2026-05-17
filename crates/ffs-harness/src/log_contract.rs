@@ -225,6 +225,8 @@ impl ErrorCategory {
 ///
 /// The `scenario_id` MUST match the regex `^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$`
 /// (at least 3 underscore-separated segments, all lowercase alphanumeric).
+/// Optional extension fields may appear before `detail`; `detail` is the final
+/// field and cannot contain the pipe separator.
 pub mod e2e_marker {
     /// Marker prefix for all E2E scenario results.
     pub const PREFIX: &str = "SCENARIO_RESULT";
@@ -288,7 +290,8 @@ pub mod e2e_marker {
         let mut outcome_val = None;
         let mut detail = None;
 
-        for part in parts {
+        let mut parts = parts.peekable();
+        while let Some(part) = parts.next() {
             if let Some(val) = part.strip_prefix("scenario_id=") {
                 if scenario_id.is_some() {
                     return None;
@@ -301,6 +304,9 @@ pub mod e2e_marker {
                 outcome_val = Some(val);
             } else if let Some(val) = part.strip_prefix("detail=") {
                 if detail.is_some() {
+                    return None;
+                }
+                if parts.peek().is_some() {
                     return None;
                 }
                 detail = Some(val);
@@ -546,6 +552,17 @@ mod tests {
     }
 
     #[test]
+    fn e2e_marker_parse_allows_extension_fields_before_detail() -> Result<(), &'static str> {
+        let line = "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_case|outcome=PASS|duration_ms=7|detail=done";
+        let (id, outcome_val, detail) =
+            e2e_marker::parse_marker(line).ok_or("expected extension e2e marker")?;
+        assert_eq!(id, "mounted_diff_ext4_case");
+        assert_eq!(outcome_val, "PASS");
+        assert_eq!(detail, Some("done"));
+        Ok(())
+    }
+
+    #[test]
     fn e2e_marker_parse_invalid() {
         assert!(e2e_marker::parse_marker("not a marker").is_none());
         assert!(e2e_marker::parse_marker("SCENARIO_RESULT|outcome=PASS").is_none());
@@ -569,6 +586,18 @@ mod tests {
         assert!(
             e2e_marker::parse_marker(
                 "SCENARIO_RESULT|scenario_id=valid_test_marker|outcome=FAIL|detail=one|detail=two"
+            )
+            .is_none()
+        );
+        assert!(
+            e2e_marker::parse_marker(
+                "SCENARIO_RESULT|scenario_id=valid_test_marker|outcome=PASS|detail=one|extra=two"
+            )
+            .is_none()
+        );
+        assert!(
+            e2e_marker::parse_marker(
+                "SCENARIO_RESULT|scenario_id=valid_test_marker|outcome=PASS|detail=one|two"
             )
             .is_none()
         );

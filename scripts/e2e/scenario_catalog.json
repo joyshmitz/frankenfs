@@ -2212,6 +2212,12 @@
           "evidence": "SCENARIO_RESULT|scenario_id=lib_json_escape_all_controls|outcome=PASS"
         },
         {
+          "id": "lib_marker_detail_delimiter_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=lib_marker_detail_delimiter_rejected|outcome=PASS"
+        },
+        {
           "id": "lib_git_context_clean_dirty_states",
           "category": "edge",
           "status": "active",

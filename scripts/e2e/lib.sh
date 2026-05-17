@@ -1330,6 +1330,11 @@ e2e_emit_json_summary() {
         fi
         if [[ "$detail_count" -gt 1 ]]; then
             invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_detail"
+        elif [[ "$detail_count" -eq 1 ]]; then
+            detail="${line#*|detail=}"
+            if [[ "$detail" == *"|"* ]]; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}detail_contains_separator"
+            fi
         fi
 
         if [[ -n "$invalid_reason" ]]; then
@@ -1351,7 +1356,11 @@ e2e_emit_json_summary() {
             continue
         fi
 
-        detail=$(echo "$line" | sed -n 's/.*detail=\(.*\)/\1/p')
+        if [[ "$detail_count" -eq 1 ]]; then
+            detail="${line#*|detail=}"
+        else
+            detail=""
+        fi
 
         if [[ "$first" == "true" ]]; then
             first=false
