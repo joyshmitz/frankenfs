@@ -17,6 +17,7 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_read
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-4}"
+RCH_CAPTURE_VISIBILITY="${FFS_READINESS_DASHBOARD_RCH_VISIBILITY:-summary}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -52,7 +53,7 @@ run_rch_capture() {
     : >"$output_path"
     set +e
     RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
-        RCH_VISIBILITY=none \
+        RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" \
         "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
     pid=$!
     if [[ "$had_errexit" -eq 1 ]]; then
@@ -93,6 +94,11 @@ run_rch_capture() {
         status="$wait_status"
     fi
 
+    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}|command=$*"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
+        return 99
+    fi
     if [[ $status -eq 0 ]] && ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
         e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}|command=$*"
         return 99
@@ -573,8 +579,11 @@ fi
 e2e_step "Scenario 5: unit tests pass"
 RCH_TEST_RC=0
 run_rch_capture "$UNIT_LOG" cargo test -p ffs-harness --lib readiness_dashboard -- --nocapture || RCH_TEST_RC=$?
-if [[ "$RCH_TEST_RC" -eq 0 || "$(grep -c "test result: ok" "$UNIT_LOG" 2>/dev/null || echo "0")" -ge 1 ]]; then
-    TESTS_RUN=$(grep -c "test readiness_dashboard::tests::" "$UNIT_LOG" 2>/dev/null || echo "0")
+TEST_OK_COUNT=$(grep -c "test result: ok" "$UNIT_LOG" 2>/dev/null || true)
+TEST_OK_COUNT="${TEST_OK_COUNT:-0}"
+if [[ "$RCH_TEST_RC" -eq 0 || "$TEST_OK_COUNT" -ge 1 ]]; then
+    TESTS_RUN=$(grep -c "test readiness_dashboard::tests::" "$UNIT_LOG" 2>/dev/null || true)
+    TESTS_RUN="${TESTS_RUN:-0}"
     if [[ $TESTS_RUN -ge 5 ]]; then
         scenario_result "readiness_dashboard_unit_tests" "PASS" "unit tests passed (${TESTS_RUN} tests)"
     else
