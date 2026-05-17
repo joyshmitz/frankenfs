@@ -137,6 +137,7 @@ verify_run_gate_marker_contract() {
     local probe_dir probe_script relative_script probe_log manifest_path gate_status
     local retry_probe_script retry_relative_script retry_log retry_state retry_manifest_path retry_gate_status
     local json_probe_script json_relative_script json_log json_manifest_path json_gate_status json_gate_id
+    local missing_relative_script missing_log missing_manifest_path missing_gate_status
     local expected_git_clean
     probe_dir="$E2E_LOG_DIR/run_gate_marker_contract_probe"
     probe_script="$probe_dir/probe_marker_script.sh"
@@ -265,6 +266,33 @@ PROBE
         and (.script_results | length == 1)
         and .script_results[0].scenarios[0].scenario_id == "gate_json_escape_probe"
     ' "$json_manifest_path" >/dev/null
+
+    missing_relative_script="artifacts/e2e/run_gate_marker_contract_missing_script.sh"
+    missing_log="$probe_dir/run_gate_missing_script.log"
+    missing_gate_status=0
+    scripts/e2e/run_gate.sh --gate-id run_gate_missing_script_contract "$missing_relative_script" \
+        >"$missing_log" 2>&1 || missing_gate_status=$?
+    [[ "$missing_gate_status" -eq 1 ]] || return 1
+
+    missing_manifest_path=$(sed -n 's/^Manifest: //p' "$missing_log" | tail -n 1)
+    [[ -n "$missing_manifest_path" && -f "$missing_manifest_path" ]] || return 1
+
+    jq -e --arg missing_script "$missing_relative_script" --argjson expected_git_clean "$expected_git_clean" '
+        .gate_id == "run_gate_missing_script_contract"
+        and .git_context.clean == $expected_git_clean
+        and .verdict == "FAIL"
+        and .scripts_total == 1
+        and .scripts_passed == 0
+        and .scripts_failed == 1
+        and (.script_results | length == 1)
+        and .script_results[0].script == $missing_script
+        and .script_results[0].verdict == "FAIL"
+        and .script_results[0].attempts == 0
+        and .script_results[0].scenarios == []
+        and .script_results[0].rch_local_fallback_rejected_count == 0
+        and .script_results[0].rch_local_fallback_rejections == []
+        and (.script_results[0].error | contains("script not found:"))
+    ' "$missing_manifest_path" >/dev/null
 }
 
 init_git_clean_probe_repo() {

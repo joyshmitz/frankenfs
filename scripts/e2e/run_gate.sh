@@ -225,6 +225,18 @@ for script in "${SCRIPTS[@]}"; do
     script_path="$REPO_ROOT/$script"
     if [[ ! -f "$script_path" ]]; then
         echo "WARNING: Script not found: $script_path"
+        TOTAL=$((TOTAL + 1))
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+
+        if [[ "$FIRST_RESULT" == "true" ]]; then
+            FIRST_RESULT=false
+        else
+            SCRIPT_RESULTS_JSON+=","
+        fi
+
+        script_json=$(gate_json_escape "$script")
+        missing_script_error=$(gate_json_escape "script not found: $script_path")
+        SCRIPT_RESULTS_JSON+="{\"script\":\"$script_json\",\"verdict\":\"FAIL\",\"attempts\":0,\"scenarios\":[],\"rch_local_fallback_rejected_count\":0,\"rch_local_fallback_rejections\":[],\"error\":\"$missing_script_error\"}"
         continue
     fi
 
