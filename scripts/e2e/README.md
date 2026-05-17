@@ -586,6 +586,20 @@ cargo run -p ffs-harness -- validate-remediation-severity-gate \
   --summary-out artifacts/remediation/severity_gate_summary.md
 ```
 
+When RCH capacity is unavailable, use the no-worker wrapper self-check rather
+than a local cargo fallback:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_REMEDIATION_SEVERITY_GATE_SELF_CHECK=1 \
+./scripts/e2e/ffs_remediation_severity_gate_e2e.sh
+```
+
+The self-check uses a stubbed `rch` binary to prove the wrapper parses valid
+JSON and Markdown validator output, rejects the invalid-gate diagnostic, and
+preserves the shared `RCH_LOCAL_FALLBACK_REJECTED` marker. It does not run
+cargo, mounted lanes, xfstests, recovery, mutation, or permissioned campaigns.
+
 This gate is a release-blocking remediation outcome contract, not evidence that
 any repair, rollback, or host remediation command has been executed. It must
 keep product failures, host-capability skips, unsafe repair refusals,
