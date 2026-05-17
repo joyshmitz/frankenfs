@@ -34,10 +34,18 @@ USE_CATALOG=false
 CHECK_CONFORMANCE=false
 SCRIPTS=()
 
+usage_error() {
+    echo "ERROR: $1" >&2
+    exit 1
+}
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --gate-id)
+            if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
+                usage_error "--gate-id requires a non-empty value"
+            fi
             GATE_ID="$2"
             shift 2
             ;;
@@ -47,6 +55,9 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --retries)
+            if [[ $# -lt 2 || ! "${2:-}" =~ ^[0-9]+$ ]]; then
+                usage_error "--retries requires a non-negative integer"
+            fi
             MAX_RETRIES="$2"
             shift 2
             ;;

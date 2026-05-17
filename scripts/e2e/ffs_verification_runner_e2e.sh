@@ -138,6 +138,8 @@ verify_run_gate_marker_contract() {
     local retry_probe_script retry_relative_script retry_log retry_state retry_manifest_path retry_gate_status
     local json_probe_script json_relative_script json_log json_manifest_path json_gate_status json_gate_id
     local missing_relative_script missing_log missing_manifest_path missing_gate_status
+    local missing_gate_id_log missing_gate_id_status missing_retries_log missing_retries_status
+    local bad_retries_log bad_retries_status
     local expected_git_clean
     probe_dir="$E2E_LOG_DIR/run_gate_marker_contract_probe"
     probe_script="$probe_dir/probe_marker_script.sh"
@@ -266,6 +268,28 @@ PROBE
         and (.script_results | length == 1)
         and .script_results[0].scenarios[0].scenario_id == "gate_json_escape_probe"
     ' "$json_manifest_path" >/dev/null
+
+    missing_gate_id_log="$probe_dir/run_gate_missing_gate_id_arg.log"
+    missing_gate_id_status=0
+    scripts/e2e/run_gate.sh --gate-id >"$missing_gate_id_log" 2>&1 || missing_gate_id_status=$?
+    [[ "$missing_gate_id_status" -eq 1 ]] || return 1
+    grep -Fq "ERROR: --gate-id requires a non-empty value" "$missing_gate_id_log" || return 1
+    ! grep -Eq "unbound variable|syntax error|^Output: |^Manifest: " "$missing_gate_id_log" || return 1
+
+    missing_retries_log="$probe_dir/run_gate_missing_retries_arg.log"
+    missing_retries_status=0
+    scripts/e2e/run_gate.sh --retries >"$missing_retries_log" 2>&1 || missing_retries_status=$?
+    [[ "$missing_retries_status" -eq 1 ]] || return 1
+    grep -Fq "ERROR: --retries requires a non-negative integer" "$missing_retries_log" || return 1
+    ! grep -Eq "unbound variable|syntax error|^Output: |^Manifest: " "$missing_retries_log" || return 1
+
+    bad_retries_log="$probe_dir/run_gate_bad_retries_arg.log"
+    bad_retries_status=0
+    scripts/e2e/run_gate.sh --gate-id run_gate_bad_retries_contract --retries nope "$json_relative_script" \
+        >"$bad_retries_log" 2>&1 || bad_retries_status=$?
+    [[ "$bad_retries_status" -eq 1 ]] || return 1
+    grep -Fq "ERROR: --retries requires a non-negative integer" "$bad_retries_log" || return 1
+    ! grep -Eq "unbound variable|syntax error|^Output: |^Manifest: " "$bad_retries_log" || return 1
 
     missing_relative_script="artifacts/e2e/run_gate_marker_contract_missing_script.sh"
     missing_log="$probe_dir/run_gate_missing_script.log"
