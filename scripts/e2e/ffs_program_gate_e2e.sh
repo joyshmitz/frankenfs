@@ -32,6 +32,7 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+RCH_CAPTURE_VISIBILITY="${FFS_PROGRAM_GATE_RCH_VISIBILITY:-summary}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -48,6 +49,18 @@ scenario_result() {
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
     TOTAL=$((TOTAL + 1))
+}
+
+log_rch_refusal_if_present() {
+    local log_path="$1"
+    shift
+
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${log_path}|command=$*"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$log_path" >>"$log_path"
+        return 0
+    fi
+    return 1
 }
 
 e2e_init "ffs_program_gate"
@@ -82,9 +95,10 @@ fi
 e2e_step "Scenario 2: Workspace builds clean (clippy)"
 
 CLIPPY_LOG=$(mktemp)
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo clippy --workspace -- -D warnings > "$CLIPPY_LOG" 2>&1; then
+if RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" "${RCH_BIN:-rch}" exec -- cargo clippy --workspace -- -D warnings > "$CLIPPY_LOG" 2>&1; then
     scenario_result "pgat_workspace_clippy" "PASS" "Workspace clippy clean (0 warnings, 0 errors)"
 else
+    log_rch_refusal_if_present "$CLIPPY_LOG" cargo clippy --workspace -- -D warnings || true
     scenario_result "pgat_workspace_clippy" "FAIL" "Workspace clippy has warnings or errors"
 fi
 e2e_cleanup_tmp_file "$CLIPPY_LOG"
@@ -95,11 +109,12 @@ e2e_cleanup_tmp_file "$CLIPPY_LOG"
 e2e_step "Scenario 3: Workspace tests pass"
 
 TEST_LOG=$(mktemp)
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo test --workspace > "$TEST_LOG" 2>&1; then
+if RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" "${RCH_BIN:-rch}" exec -- cargo test --workspace > "$TEST_LOG" 2>&1; then
     TOTAL_PASS=$(grep -c " ok$" "$TEST_LOG" 2>/dev/null || true)
     TOTAL_PASS="${TOTAL_PASS:-0}"
     scenario_result "pgat_workspace_tests" "PASS" "All workspace tests pass (${TOTAL_PASS}+ tests)"
 else
+    log_rch_refusal_if_present "$TEST_LOG" cargo test --workspace || true
     scenario_result "pgat_workspace_tests" "FAIL" "Workspace tests have failures"
 fi
 e2e_cleanup_tmp_file "$TEST_LOG"
@@ -181,9 +196,9 @@ done
 grep -q "pub mod fuzz_dashboard" "crates/ffs-harness/src/lib.rs" && FUZZ_CHECKS=$((FUZZ_CHECKS + 1))
 
 if [[ $FUZZ_CHECKS -eq 4 ]]; then
-    scenario_result "pgat_fuzzing" "PASS" "${TARGETS} targets, nightly runner, promotion, dashboard"
+    scenario_result "pgat_fuzzing_infrastructure" "PASS" "${TARGETS} targets, nightly runner, promotion, dashboard"
 else
-    scenario_result "pgat_fuzzing" "FAIL" "Only ${FUZZ_CHECKS}/4 fuzzing checks pass"
+    scenario_result "pgat_fuzzing_infrastructure" "FAIL" "Only ${FUZZ_CHECKS}/4 fuzzing checks pass"
 fi
 
 #######################################
@@ -202,9 +217,9 @@ grep -q "pub mod perf_regression" "crates/ffs-harness/src/lib.rs" && BENCH_CHECK
 grep -q "pub mod perf_triage" "crates/ffs-harness/src/lib.rs" && BENCH_CHECKS=$((BENCH_CHECKS + 1))
 
 if [[ $BENCH_CHECKS -eq 4 ]]; then
-    scenario_result "pgat_benchmarks" "PASS" "Taxonomy, comparison, regression, triage modules"
+    scenario_result "pgat_benchmark_governance" "PASS" "Taxonomy, comparison, regression, triage modules"
 else
-    scenario_result "pgat_benchmarks" "FAIL" "Only ${BENCH_CHECKS}/4 benchmark modules found"
+    scenario_result "pgat_benchmark_governance" "FAIL" "Only ${BENCH_CHECKS}/4 benchmark modules found"
 fi
 
 #######################################

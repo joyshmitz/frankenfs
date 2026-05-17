@@ -11,6 +11,7 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_fuzz_smoke}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_CAPTURE_VISIBILITY="${FFS_FUZZ_SMOKE_RCH_VISIBILITY:-summary}"
 
 e2e_init "ffs_fuzz_smoke"
 
@@ -41,13 +42,19 @@ COMMAND_LINE="${COMMAND_LINE% }"
 
 e2e_step "Run deterministic fuzz-smoke manifest"
 START_NS="$(date +%s%N)"
-if RCH_VISIBILITY=none "${COMMAND[@]}" >"$STDOUT_PATH" 2>"$STDERR_PATH"; then
+if RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" "${COMMAND[@]}" >"$STDOUT_PATH" 2>"$STDERR_PATH"; then
     COMMAND_STATUS="pass"
 else
     COMMAND_STATUS="fail"
 fi
 END_NS="$(date +%s%N)"
 DURATION_MS="$(((END_NS - START_NS) / 1000000))"
+
+if grep -Fq "[RCH] local" "$STDOUT_PATH" "$STDERR_PATH" \
+    || grep -Fq "exec called with non-compilation command" "$STDOUT_PATH" "$STDERR_PATH"; then
+    e2e_log "RCH_LOCAL_FALLBACK_REJECTED|stdout=${STDOUT_PATH}|stderr=${STDERR_PATH}|command=${COMMAND_LINE}"
+    printf 'RCH_LOCAL_FALLBACK_REJECTED|stderr=%s\n' "$STDERR_PATH" >>"$STDERR_PATH"
+fi
 
 e2e_step "Emit shared QA artifact"
 python3 - \
