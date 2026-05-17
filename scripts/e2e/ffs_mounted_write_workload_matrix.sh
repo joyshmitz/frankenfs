@@ -347,7 +347,7 @@ if not only_multihandle:
         results.append(result)
         actual_outcome = str(result["actual_outcome"])
         shared_outcome = "FAIL" if actual_outcome == "fail" else "PASS"
-        detail = f"actual_outcome={actual_outcome}"
+        detail = f"matrix_actual={actual_outcome}"
         skip_reason = str(result.get("skip_reason") or "")
         if skip_reason:
             safe_skip_reason = skip_reason.replace("\r", " ").replace("\n", " ").replace("|", "/")
