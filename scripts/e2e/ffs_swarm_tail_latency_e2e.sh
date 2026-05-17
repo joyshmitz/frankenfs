@@ -16,13 +16,16 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${FFS_SWARM_TAIL_CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_swarm_tail_latency}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_REMOTE_TMPDIR="${FFS_SWARM_TAIL_RCH_TMPDIR:-/var/tmp}"
+RCH_REMOTE_CARGO_HOME="${FFS_SWARM_TAIL_RCH_CARGO_HOME:-/var/tmp/rch_cargo_home_frankenfs_swarm_tail_latency}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-300}"
-RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-30}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
 TOTAL=0
 E2E_START_TIME="$(date +%s)"
+E2E_TEST_NAME="ffs_swarm_tail_latency"
 E2E_LOG_ROOT="${REPO_ROOT}/artifacts/e2e"
 mkdir -p "$E2E_LOG_ROOT"
 E2E_LOG_DIR="$(mktemp -d "$E2E_LOG_ROOT/$(date +%Y%m%d_%H%M%S)_ffs_swarm_tail_latency_XXXXXX")"
@@ -45,6 +48,7 @@ e2e_finish() {
     local verdict="$1"
     local summary="$2"
     local duration
+    local exit_code=0
     duration=$(($(date +%s) - E2E_START_TIME))
 
     cat >"${E2E_LOG_DIR}/result.json" <<JSON
@@ -62,6 +66,11 @@ e2e_finish() {
   "log_file": "${E2E_LOG_FILE}"
 }
 JSON
+
+    if [[ "$verdict" != "PASS" ]]; then
+        exit_code=1
+    fi
+    e2e_emit_json_summary "$exit_code" >/dev/null 2>&1 || true
 
     e2e_log ""
     e2e_log "=============================================="
@@ -93,14 +102,23 @@ run_rch_capture() {
     local remote_exit=""
     local wait_status
     local had_errexit=0
+    local command_display
+    local -a rch_args=("$@")
 
     case $- in
         *e*) had_errexit=1 ;;
     esac
 
+    if [[ ${#rch_args[@]} -gt 0 && "${rch_args[0]}" == "cargo" ]]; then
+        rch_args=(env "TMPDIR=${RCH_REMOTE_TMPDIR}" "CARGO_HOME=${RCH_REMOTE_CARGO_HOME}" "${rch_args[@]}")
+    fi
+    command_display="${rch_args[*]}"
+
     : >"$output_path"
     set +e
-    RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
+    RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
+        RCH_VISIBILITY=none \
+        "${RCH_BIN:-rch}" exec -- "${rch_args[@]}" >"$output_path" 2>&1 &
     pid=$!
     if [[ "$had_errexit" -eq 1 ]]; then
         set -e
@@ -112,16 +130,16 @@ run_rch_capture() {
         if [[ -n "$remote_exit" ]]; then
             sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
             if kill -0 "$pid" >/dev/null 2>&1; then
-                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=$*"
+                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=${command_display}"
                 kill -TERM "$pid" >/dev/null 2>&1 || true
-                e2e_rch_cancel_matching_queue_entry "$@"
+                e2e_rch_cancel_matching_queue_entry "${rch_args[@]}"
             fi
             break
         fi
         if ((SECONDS >= deadline)); then
-            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=$*"
+            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=${command_display}"
             kill -TERM "$pid" >/dev/null 2>&1 || true
-            e2e_rch_cancel_matching_queue_entry "$@"
+            e2e_rch_cancel_matching_queue_entry "${rch_args[@]}"
             status=124
             break
         fi
@@ -141,20 +159,20 @@ run_rch_capture() {
     fi
 
     if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
-        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}|command=$*"
+        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}|command=${command_display}"
         printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
         return 99
     fi
     if [[ $status -eq 0 ]]; then
         if ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
-            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}|command=$*"
+            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}|command=${command_display}"
             printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
             return 99
         fi
         return 0
     fi
     if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$output_path"; then
-        e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|output=${output_path}|command=$*"
+        e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|output=${output_path}|command=${command_display}"
         return 0
     fi
     return "$status"
@@ -250,6 +268,39 @@ MUTATED_HOST_RAW="${E2E_LOG_DIR}/swarm_tail_bad_host.raw"
 MUTATED_BUCKET_JSON="${RCH_INPUT_DIR}/swarm_tail_bad_bucket.json"
 MUTATED_BUCKET_RAW="${E2E_LOG_DIR}/swarm_tail_bad_bucket.raw"
 UNIT_LOG="${E2E_LOG_DIR}/unit_tests.log"
+
+if [[ "${FFS_SWARM_TAIL_LATENCY_RESULT_SELF_CHECK_ONLY:-0}" == "1" ]]; then
+    e2e_step "Result summary merge self-check"
+    scenario_result "swarm_tail_latency_summary_merge" "PASS" "custom and shared result fields merge"
+    e2e_log "SCENARIO_RESULT|scenario_id=too_short|outcome=PASS"
+    e2e_log "SCENARIO_RESULT|scenario_id=swarm_tail_latency_summary_merge|outcome=PASS|bad_field"
+    e2e_log "SCENARIO_RESULT|scenario_id=swarm_tail_latency_summary_merge|outcome=PASS|"
+    e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=/tmp/rch-local.log|command=cargo test"
+    e2e_finish "PASS" "self-check custom summary merge"
+    if jq -e '
+        .gate_id == "ffs_swarm_tail_latency"
+        and .verdict == "PASS"
+        and .summary == "self-check custom summary merge"
+        and .pass_count == 1
+        and .fail_count == 0
+        and .total == 1
+        and .invalid_scenario_marker_count == 3
+        and (.invalid_scenario_markers | length == 3)
+        and ([.invalid_scenario_markers[].reason] | sort == [
+            "invalid_scenario_id",
+            "malformed_extension",
+            "malformed_extension"
+        ])
+        and .rch_local_fallback_rejected_count == 1
+        and (.rch_local_fallback_rejections[0].marker | contains("RCH_LOCAL_FALLBACK_REJECTED"))
+    ' "$E2E_LOG_DIR/result.json" >/dev/null; then
+        e2e_log "Swarm tail-latency result summary merge self-check passed"
+        exit 0
+    fi
+    jq . "$E2E_LOG_DIR/result.json" || true
+    e2e_log "Swarm tail-latency result summary merge self-check failed"
+    exit 1
+fi
 
 e2e_step "Scenario 1: module and CLI are wired"
 if grep -q "pub mod swarm_tail_latency" crates/ffs-harness/src/lib.rs \
