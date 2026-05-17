@@ -1218,9 +1218,18 @@ e2e_json_escape() {
 
     value="${value//\\/\\\\}"
     value="${value//\"/\\\"}"
+    value="${value//$'\b'/\\b}"
+    value="${value//$'\f'/\\f}"
     value="${value//$'\t'/\\t}"
     value="${value//$'\r'/\\r}"
     value="${value//$'\n'/\\n}"
+
+    local control_code control_char control_escape
+    for control_code in {1..31}; do
+        printf -v control_char '%b' "\\$(printf '%03o' "$control_code")"
+        printf -v control_escape '\\u%04x' "$control_code"
+        value="${value//$control_char/$control_escape}"
+    done
 
     printf '%s\n' "$value"
 }
@@ -1392,6 +1401,20 @@ e2e_emit_json_summary() {
         verdict="FAIL"
     fi
 
+    local gate_id_json run_id_json created_at_json git_commit_json git_branch_json
+    local hostname_json kernel_json rustc_json cargo_json verdict_json log_file_json
+    gate_id_json=$(e2e_json_escape "${E2E_TEST_NAME:-unknown}")
+    run_id_json=$(e2e_json_escape "$(basename "$E2E_LOG_DIR")")
+    created_at_json=$(e2e_json_escape "$(date -Iseconds)")
+    git_commit_json=$(e2e_json_escape "$git_commit")
+    git_branch_json=$(e2e_json_escape "$git_branch")
+    hostname_json=$(e2e_json_escape "$hostname_val")
+    kernel_json=$(e2e_json_escape "$kernel_ver")
+    rustc_json=$(e2e_json_escape "$rustc_ver")
+    cargo_json=$(e2e_json_escape "$cargo_ver")
+    verdict_json=$(e2e_json_escape "$verdict")
+    log_file_json=$(e2e_json_escape "$E2E_LOG_FILE")
+
     # Write the generic summary to a temporary file first. Some E2E scripts emit
     # suite-specific fields to result.json before exit; preserve those fields
     # while keeping this generic summary authoritative for shared keys.
@@ -1399,30 +1422,30 @@ e2e_emit_json_summary() {
 {
   "schema_version": 1,
   "runner_contract_version": 1,
-  "gate_id": "${E2E_TEST_NAME:-unknown}",
-  "run_id": "$(basename "$E2E_LOG_DIR")",
-  "created_at": "$(date -Iseconds)",
+  "gate_id": "$gate_id_json",
+  "run_id": "$run_id_json",
+  "created_at": "$created_at_json",
   "git_context": {
-    "commit": "$git_commit",
-    "branch": "$git_branch",
+    "commit": "$git_commit_json",
+    "branch": "$git_branch_json",
     "clean": $git_clean
   },
   "environment": {
-    "hostname": "$hostname_val",
+    "hostname": "$hostname_json",
     "cpu_count": $cpu_count,
-    "kernel": "$kernel_ver",
-    "rustc_version": "$rustc_ver",
-    "cargo_version": "$cargo_ver"
+    "kernel": "$kernel_json",
+    "rustc_version": "$rustc_json",
+    "cargo_version": "$cargo_json"
   },
   "scenarios": $scenarios_json,
   "invalid_scenario_marker_count": $invalid_scenario_marker_count,
   "invalid_scenario_markers": $invalid_scenario_markers_json,
   "rch_local_fallback_rejected_count": $rch_local_fallback_rejected_count,
   "rch_local_fallback_rejections": $rch_local_fallback_rejections_json,
-  "verdict": "$verdict",
+  "verdict": "$verdict_json",
   "exit_code": $script_exit_code,
   "duration_secs": $duration_secs,
-  "log_file": "$E2E_LOG_FILE"
+  "log_file": "$log_file_json"
 }
 ENDJSON
 

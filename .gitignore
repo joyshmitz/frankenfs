@@ -38,6 +38,7 @@ profiles/smoke-*/
 # Codex build artifacts
 target-codex*/
 target_rch*/
+.rch-target-*/
 
 # Compiler crash reports
 rustc-ice-*.txt

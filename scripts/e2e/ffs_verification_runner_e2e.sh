@@ -72,17 +72,59 @@ verify_lib_summary_preserves_suite_fields() {
     local saved_start_time="$E2E_START_TIME"
     local saved_test_name="$E2E_TEST_NAME"
 
-    local probe_dir expected_command expected_artifact status
-    probe_dir="$E2E_TEMP_DIR/result_summary_merge_probe"
-    expected_command="$probe_dir/command_transcript.tsv"
-    expected_artifact="$probe_dir/artifact.json"
+    local probe_dir probe_bin probe_log expected_command expected_artifact gate_id status
+    local expected_run_id expected_git_commit expected_git_branch expected_hostname
+    local expected_kernel expected_rustc expected_cargo saved_path
+    probe_dir="$E2E_TEMP_DIR/result_summary_\"merge\\probe"
+    probe_bin="$probe_dir/bin"
+    probe_log="$probe_dir/run_\"probe.log"
+    expected_command="$E2E_TEMP_DIR/command_transcript.tsv"
+    expected_artifact="$E2E_TEMP_DIR/artifact.json"
+    expected_run_id='result_summary_"merge\probe'
+    expected_git_commit='commit_"probe\sha'
+    expected_git_branch='branch_"probe\name'
+    expected_hostname=$'host_"probe\\node\bx\001y'
+    expected_kernel=$'kernel_"probe\\rel\fy\vz'
+    expected_rustc='rustc 1.97.0-nightly ("probe\tool")'
+    expected_cargo='cargo 1.97.0-nightly ("probe\tool")'
+    gate_id=$'summary_merge_"probe\\id\bx\fy\001z'
+    saved_path="$PATH"
     status=1
 
-    mkdir -p "$probe_dir"
+    mkdir -p "$probe_bin"
+    cat >"$probe_bin/git" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+    *"rev-parse --short HEAD"*) printf '%s\n' 'commit_"probe\sha' ;;
+    *"branch --show-current"*) printf '%s\n' 'branch_"probe\name' ;;
+    *"status --porcelain"*) ;;
+    *) exit 1 ;;
+esac
+SH
+    cat >"$probe_bin/hostname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' $'host_"probe\\node\bx\001y'
+SH
+    cat >"$probe_bin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' $'kernel_"probe\\rel\fy\vz'
+SH
+    cat >"$probe_bin/rustc" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'rustc 1.97.0-nightly ("probe\tool")'
+SH
+    cat >"$probe_bin/cargo" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'cargo 1.97.0-nightly ("probe\tool")'
+SH
+    chmod +x "$probe_bin/git" "$probe_bin/hostname" "$probe_bin/uname" \
+        "$probe_bin/rustc" "$probe_bin/cargo"
+
     E2E_LOG_DIR="$probe_dir"
-    E2E_LOG_FILE="$probe_dir/run.log"
+    E2E_LOG_FILE="$probe_log"
     E2E_START_TIME="$(date +%s)"
-    E2E_TEST_NAME="summary_merge_probe"
+    E2E_TEST_NAME="$gate_id"
+    PATH="$probe_bin:$PATH"
 
     printf 'SCENARIO_RESULT|scenario_id=summary_merge_probe|outcome=PASS|detail=merge ok\n' \
         >"$E2E_LOG_FILE"
@@ -106,10 +148,27 @@ JSON
     if e2e_emit_json_summary 0 >/dev/null 2>&1 \
         && jq -e \
             --arg command_transcript "$expected_command" \
-            --arg artifact_path "$expected_artifact" '
+            --arg artifact_path "$expected_artifact" \
+            --arg gate_id "$gate_id" \
+            --arg log_file "$probe_log" \
+            --arg run_id "$expected_run_id" \
+            --arg git_commit "$expected_git_commit" \
+            --arg git_branch "$expected_git_branch" \
+            --arg hostname "$expected_hostname" \
+            --arg kernel "$expected_kernel" \
+            --arg rustc "$expected_rustc" \
+            --arg cargo "$expected_cargo" '
                 .verdict == "PASS"
                 and .exit_code == 0
-                and .gate_id == "summary_merge_probe"
+                and .gate_id == $gate_id
+                and .run_id == $run_id
+                and .log_file == $log_file
+                and .git_context.commit == $git_commit
+                and .git_context.branch == $git_branch
+                and .environment.hostname == $hostname
+                and .environment.kernel == $kernel
+                and .environment.rustc_version == $rustc
+                and .environment.cargo_version == $cargo
                 and .command_transcript == $command_transcript
                 and .worker_identity == "summary-worker"
                 and .cleanup_status == "partial_artifacts_preserved"
@@ -125,6 +184,7 @@ JSON
     E2E_LOG_FILE="$saved_log_file"
     E2E_START_TIME="$saved_start_time"
     E2E_TEST_NAME="$saved_test_name"
+    PATH="$saved_path"
 
     return "$status"
 }
