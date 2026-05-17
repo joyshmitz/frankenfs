@@ -576,6 +576,17 @@ cargo run -p ffs-harness -- validate-mounted-repair-mutation-boundary \
   --summary-out artifacts/mounted-repair-mutation-boundary/summary.md
 ```
 
+When remote RCH capacity is unavailable, the deterministic wrapper self-check
+proves JSON report extraction, coverage assertions, invalid matrix diagnostics,
+Markdown/docs wording, focused unit-output checks, and RCH fallback guardrails
+without running cargo:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_MOUNTED_REPAIR_MUTATION_BOUNDARY_SELF_CHECK=1 \
+./scripts/e2e/ffs_mounted_repair_mutation_boundary_e2e.sh
+```
+
 This matrix is a support-envelope contract for repair mutation scope, not
 permission to repair mounted images or claim writeback repair readiness. It
 must keep default read-only detection, read-only repair-with-ledger,
