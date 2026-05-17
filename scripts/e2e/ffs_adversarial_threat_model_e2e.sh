@@ -16,6 +16,8 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_adve
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_ADVERSARIAL_THREAT_MODEL_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_ADVERSARIAL_THREAT_MODEL_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -195,6 +197,269 @@ BAD_COUNTER_JSON="$E2E_LOG_DIR/adversarial_threat_model_bad_counter.json"
 BAD_CLEANUP_JSON="$E2E_LOG_DIR/adversarial_threat_model_bad_cleanup.json"
 BAD_RAW="$E2E_LOG_DIR/adversarial_threat_model_bad.raw"
 UNIT_LOG="$E2E_LOG_DIR/adversarial_threat_model_unit_tests.log"
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_ADVERSARIAL_THREAT_MODEL_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+emit_valid_report() {
+    python3 - <<'PY'
+import json
+
+required_log_fields = [
+    "threat_scenario_id",
+    "input_hash",
+    "parser_capability",
+    "mount_capability",
+    "repair_capability",
+    "resource_controls",
+    "expected_safe_behavior",
+    "expected_classification",
+    "observed_classification",
+    "resource_limits",
+    "observed_input_bytes",
+    "observed_cpu_ms",
+    "observed_wall_ms",
+    "observed_memory_mib",
+    "observed_disk_bytes",
+    "enforcement_point",
+    "cleanup_status",
+    "artifact_paths",
+    "remediation_id",
+    "reproduction_command",
+]
+required_scenarios = [
+    ("oversized_metadata_seed_capped", "malformed_image", "capped"),
+    ("cyclic_metadata_reference_quarantined", "malformed_image", "quarantined"),
+    ("deeply_nested_directory_capped", "resource_exhaustion", "capped"),
+    ("huge_xattr_payload_capped", "resource_exhaustion", "capped"),
+    ("truncated_repair_ledger_quarantined", "repair_ledger_tamper", "quarantined"),
+    ("corrupt_repair_ledger_quarantined", "repair_ledger_tamper", "quarantined"),
+    ("hostile_proof_bundle_traversal_refused", "hostile_artifact_path", "host_path_refused"),
+    ("hostile_proof_bundle_symlink_refused", "hostile_artifact_path", "host_path_refused"),
+    ("excessive_log_output_capped", "missing_host_capability", "capped"),
+    ("excessive_artifact_count_capped", "missing_host_capability", "capped"),
+    ("timeout_capped", "unsupported_mount_option", "unsupported"),
+    ("file_descriptor_exhaustion_capped", "unsafe_operator_command", "mutation_refused"),
+]
+
+rows = []
+for index, (scenario_id, threat_class, classification) in enumerate(required_scenarios):
+    rows.append({
+        "scenario_id": scenario_id,
+        "threat_class": threat_class,
+        "observed_classification": classification,
+        "resource_controls": [
+            {"resource_class": "wall_time", "limit": 1000 + index},
+            {"resource_class": "memory", "limit": 64},
+        ],
+        "artifact_paths": [
+            f"artifacts/security/dry-run/{scenario_id}.json",
+            f"artifacts/security/dry-run/{scenario_id}.stderr",
+        ],
+        "observed_resource_counters": {
+            "input_bytes": 128 + index,
+            "wall_ms": 10 + index,
+            "cpu_ms": 5 + index,
+            "memory_mib": 8,
+            "disk_bytes": 0,
+        },
+        "primary_enforcement_point": "adversarial_threat_model_fixture",
+        "cleanup_status": "clean",
+        "remediation_id": "bd-0qx9b",
+        "reproduction_command": "cargo run -p ffs-harness -- validate-adversarial-threat-model",
+    })
+
+report = {
+    "valid": True,
+    "required_log_fields": required_log_fields,
+    "evaluated_scenarios": rows,
+}
+print(json.dumps(report, indent=2, sort_keys=True))
+PY
+}
+
+emit_sample_artifact_manifest() {
+    cat <<'JSON'
+{
+  "schema_version": 1,
+  "gate_id": "adversarial_threat_model",
+  "bead_id": "bd-0qx9b",
+  "artifacts": [
+    {
+      "category": "raw_log",
+      "path": "artifacts/security/dry-run/raw.log"
+    },
+    {
+      "category": "repro_pack",
+      "path": "artifacts/security/dry-run/repro-pack.json"
+    },
+    {
+      "category": "summary_report",
+      "path": "artifacts/security/dry-run/threat-model-report.json"
+    }
+  ]
+}
+JSON
+}
+
+emit_wording_tsv() {
+    printf 'security.adversarial_image\tREADME.md\tdocs alone cannot promote hostile-image readiness without artifact-backed security evidence\n'
+}
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        ;;
+    *)
+        echo "unknown adversarial threat model fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+echo "[RCH] remote worker=fixture exit=0" >&2
+case "$command_text" in
+    *"cargo test -p ffs-harness --lib adversarial_threat_model"*)
+        printf '%s\n' \
+            "test adversarial_threat_model::tests::checked_in_model_validates ... ok" \
+            "test adversarial_threat_model::tests::artifact_manifest_shape ... ok" \
+            "test adversarial_threat_model::tests::invalid_model_variants_fail_closed ... ok"
+        exit 0
+        ;;
+    *"--model-json-env ADVERSARIAL_THREAT_MODEL_JSON"*)
+        echo "error: adversarial threat model validation failed: fixture invalid model" >&2
+        exit 1
+        ;;
+    *"--artifact-out"*)
+        emit_sample_artifact_manifest
+        exit 0
+        ;;
+    *"--wording-out"*)
+        emit_wording_tsv
+        exit 0
+        ;;
+    *)
+        emit_valid_report
+        exit 0
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/adversarial_threat_model_fixture_${fixture_case}.log"
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_ADVERSARIAL_THREAT_MODEL_SELF_CHECK=0 \
+        FFS_ADVERSARIAL_THREAT_MODEL_SKIP_SELF_CHECK=1 \
+        FFS_ADVERSARIAL_THREAT_MODEL_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=8 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_adversarial_threat_model_e2e.sh" >"$child_log" 2>&1
+    local child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic adversarial threat model wrapper self-check"
+    local stub_path child_info child_status child_log result_path report_path artifact_path wording_path unit_log
+    stub_path="$E2E_LOG_DIR/rch-adversarial-threat-model-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    report_path="$(dirname "$result_path")/adversarial_threat_model_report.json"
+    artifact_path="$(dirname "$result_path")/adversarial_threat_model_artifact_manifest.json"
+    wording_path="$(dirname "$result_path")/adversarial_threat_model_wording.tsv"
+    unit_log="$(dirname "$result_path")/adversarial_threat_model_unit_tests.log"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && [[ -f "$report_path" ]] \
+        && [[ -f "$artifact_path" ]] \
+        && [[ -f "$wording_path" ]] \
+        && [[ -f "$unit_log" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and ([.scenarios[] | select(.scenario_id == "adversarial_threat_model_validates" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "adversarial_threat_model_dry_run_expands" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "adversarial_threat_model_invalid_variants_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "adversarial_threat_model_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null \
+        && jq -e '
+            .valid == true
+            and ([.evaluated_scenarios[].threat_class] | unique | length) >= 7
+            and ([.evaluated_scenarios[].scenario_id] | length) >= 12
+            and ([.required_log_fields[]] | index("input_hash") != null)
+            and ([.required_log_fields[]] | index("cleanup_status") != null)
+            and ([.evaluated_scenarios[] | select((.resource_controls | length) > 0 and (.artifact_paths | length) > 0)] | length) == 12
+            and ([.evaluated_scenarios[] | select(.observed_resource_counters.input_bytes and .observed_resource_counters.wall_ms)] | length) == 12
+        ' "$report_path" >/dev/null \
+        && jq -e '
+            .gate_id == "adversarial_threat_model"
+            and .bead_id == "bd-0qx9b"
+            and ([.artifacts[].category] | index("raw_log") != null)
+            and ([.artifacts[].category] | index("repro_pack") != null)
+            and ([.artifacts[].category] | index("summary_report") != null)
+        ' "$artifact_path" >/dev/null \
+        && grep -q "docs alone cannot promote" "$wording_path" \
+        && grep -q "adversarial_threat_model::tests::checked_in_model_validates" "$unit_log"; then
+        scenario_result "adversarial_threat_model_fixture_complete_self_check" "PASS" "result=${result_path} report=${report_path} artifact=${artifact_path}"
+    else
+        scenario_result "adversarial_threat_model_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "adversarial threat model complete fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "adversarial_threat_model_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "adversarial_threat_model_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "adversarial threat model local fallback fixture self-check failed"
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 e2e_step "Scenario 1: adversarial threat model module and CLI are wired"
 if grep -q "pub mod adversarial_threat_model" crates/ffs-harness/src/lib.rs \

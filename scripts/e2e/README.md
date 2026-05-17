@@ -1499,6 +1499,16 @@ The E2E smoke is:
 ./scripts/e2e/ffs_adversarial_threat_model_e2e.sh
 ```
 
+When remote RCH capacity is unavailable, the deterministic wrapper self-check
+proves the JSON/artifact/wording parsing path and local-fallback rejection
+without running cargo:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_ADVERSARIAL_THREAT_MODEL_SELF_CHECK=1 \
+./scripts/e2e/ffs_adversarial_threat_model_e2e.sh
+```
+
 ## Performance Baseline Manifest
 
 The performance baseline manifest is the executable contract for benchmark
