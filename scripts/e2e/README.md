@@ -1277,6 +1277,16 @@ The E2E smoke is bounded and does not require a permissioned FUSE host:
 ./scripts/e2e/ffs_repair_writeback_serialization_e2e.sh
 ```
 
+When remote RCH capacity is unavailable, the deterministic wrapper self-check
+proves report/artifact/Markdown/proof-summary parsing and local-fallback
+rejection without running cargo:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+FFS_REPAIR_WRITEBACK_SERIALIZATION_SELF_CHECK=1 \
+./scripts/e2e/ffs_repair_writeback_serialization_e2e.sh
+```
+
 The fail-closed artifact must include `operation_id`, `scenario_id`,
 `snapshot_epoch`, `lease_id`, `repair_symbol_version`, `expected_state`,
 `observed_state`, `error_class`, `artifact_paths`, `cleanup_status`,
