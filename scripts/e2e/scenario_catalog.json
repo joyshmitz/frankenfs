@@ -2722,6 +2722,24 @@
           "category": "error",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=vs_format_sync_required|outcome=PASS"
+        },
+        {
+          "id": "vs_format_fixture_complete_self_check",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=vs_format_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "vs_format_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=vs_format_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "vs_format_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=vs_format_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },

@@ -96,6 +96,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_READINESS_ACTION_AUTOPILOT_SELF_CHECK=1 ./scr
 # Verify the btrfs capability drift RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_BTRFS_CAPABILITY_DRIFT_SELF_CHECK=1 ./scripts/e2e/ffs_btrfs_capability_drift_e2e.sh
 
+# Verify the version-store format RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_VERSION_STORE_FORMAT_SELF_CHECK=1 ./scripts/e2e/ffs_version_store_format_e2e.sh
+
 # Run performance baseline manifest dry-run validation
 ./scripts/e2e/ffs_performance_manifest_e2e.sh
 
