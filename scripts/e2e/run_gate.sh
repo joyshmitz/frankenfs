@@ -257,6 +257,7 @@ for script in "${SCRIPTS[@]}"; do
     attempts=0
     script_passed=false
     script_output=""
+    script_outputs=()
 
     while (( attempts <= MAX_RETRIES )); do
         attempts=$((attempts + 1))
@@ -267,6 +268,7 @@ for script in "${SCRIPTS[@]}"; do
         script_log="$GATE_DIR/$(basename "$script" .sh)_attempt${attempts}.log"
         script_exit=0
         bash "$script_path" > "$script_log" 2>&1 || script_exit=$?
+        script_outputs+=("$script_log")
 
         if [[ $script_exit -eq 0 ]]; then
             script_passed=true
@@ -312,6 +314,9 @@ for script in "${SCRIPTS[@]}"; do
                 scenarios_json+="{\"scenario_id\":\"$sid\",\"outcome\":\"$outcome\"}"
             fi
         done < <(grep "^SCENARIO_RESULT|" "$script_output" 2>/dev/null || true)
+    fi
+    for marker_log in "${script_outputs[@]}"; do
+        [[ -f "$marker_log" ]] || continue
         while IFS= read -r line; do
             marker="$line"
             if ((${#marker} > 240)); then
@@ -326,8 +331,8 @@ for script in "${SCRIPTS[@]}"; do
             fi
             rch_local_fallback_rejections_json+="{\"marker\":\"$marker\"}"
             rch_local_fallback_rejected_count=$((rch_local_fallback_rejected_count + 1))
-        done < <(grep "^RCH_LOCAL_FALLBACK_REJECTED|" "$script_output" 2>/dev/null || true)
-    fi
+        done < <(grep "^RCH_LOCAL_FALLBACK_REJECTED|" "$marker_log" 2>/dev/null || true)
+    done
     scenarios_json+="]"
     rch_local_fallback_rejections_json+="]"
 

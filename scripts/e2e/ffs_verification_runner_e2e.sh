@@ -135,6 +135,7 @@ verify_run_gate_marker_contract() {
     fi
 
     local probe_dir probe_script relative_script probe_log manifest_path gate_status
+    local retry_probe_script retry_relative_script retry_log retry_state retry_manifest_path retry_gate_status
     probe_dir="$E2E_LOG_DIR/run_gate_marker_contract_probe"
     probe_script="$probe_dir/probe_marker_script.sh"
     probe_log="$probe_dir/run_gate.log"
@@ -175,6 +176,46 @@ PROBE
         and .script_results[0].rch_local_fallback_rejected_count == 1
         and .script_results[0].rch_local_fallback_rejections[0].marker == "RCH_LOCAL_FALLBACK_REJECTED|log=/tmp/rch-local.log|command=cargo test"
     ' "$manifest_path" >/dev/null
+
+    retry_probe_script="$probe_dir/retry_marker_script.sh"
+    retry_log="$probe_dir/run_gate_retry.log"
+    retry_state="$probe_dir/retry_state"
+
+    cat >"$retry_probe_script" <<'PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+state_file="${RUN_GATE_RETRY_PROBE_STATE:?state file required}"
+if [[ ! -f "$state_file" ]]; then
+    printf 'seen\n' >"$state_file"
+    printf '%s\n' 'RCH_LOCAL_FALLBACK_REJECTED|log=/tmp/rch-first.log|command=cargo test'
+    exit 1
+fi
+printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_retry_clean_second_attempt|outcome=PASS'
+PROBE
+
+    retry_relative_script="${retry_probe_script#$REPO_ROOT/}"
+    retry_gate_status=0
+    RUN_GATE_RETRY_PROBE_STATE="$retry_state" \
+        scripts/e2e/run_gate.sh --gate-id run_gate_retry_marker_contract --retries 1 "$retry_relative_script" \
+        >"$retry_log" 2>&1 || retry_gate_status=$?
+    [[ "$retry_gate_status" -eq 1 ]] || return 1
+
+    retry_manifest_path=$(sed -n 's/^Manifest: //p' "$retry_log" | tail -n 1)
+    [[ -n "$retry_manifest_path" && -f "$retry_manifest_path" ]] || return 1
+
+    jq -e '
+        .gate_id == "run_gate_retry_marker_contract"
+        and .verdict == "FAIL"
+        and .scripts_failed == 1
+        and (.script_results | length == 1)
+        and .script_results[0].verdict == "FAIL"
+        and .script_results[0].attempts == 2
+        and (.script_results[0].scenarios | length == 1)
+        and .script_results[0].scenarios[0].scenario_id == "gate_retry_clean_second_attempt"
+        and .script_results[0].scenarios[0].outcome == "PASS"
+        and .script_results[0].rch_local_fallback_rejected_count == 1
+        and .script_results[0].rch_local_fallback_rejections[0].marker == "RCH_LOCAL_FALLBACK_REJECTED|log=/tmp/rch-first.log|command=cargo test"
+    ' "$retry_manifest_path" >/dev/null
 }
 
 init_git_clean_probe_repo() {
