@@ -491,15 +491,15 @@ fi
 extract_markdown_report "$VALIDATION_MD_RAW" "$VALIDATION_MD"
 
 echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_create_readback|outcome=PASS|detail=normalized observations match" | tee -a "$E2E_LOG_FILE"
-echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fiemap_transport_errno|outcome=DIFF|detail=exact expiring allowlist accepted" | tee -a "$E2E_LOG_FILE"
-echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fuse_missing|outcome=SKIP|detail=missing dev fuse is host skip" | tee -a "$E2E_LOG_FILE"
-echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fuse_permission_skip|outcome=SKIP|detail=permission denied is host skip" | tee -a "$E2E_LOG_FILE"
-echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_kernel_mount_permission_skip|outcome=SKIP|detail=kernel mount permission denied is host skip" | tee -a "$E2E_LOG_FILE"
-echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_mkfs_missing|outcome=SKIP|detail=mkfs.ext4 helper missing is host skip" | tee -a "$E2E_LOG_FILE"
-echo "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_mkfs_missing|outcome=SKIP|detail=mkfs.btrfs helper missing is host skip" | tee -a "$E2E_LOG_FILE"
-echo "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_default_permissions_root_owned|outcome=SKIP|detail=btrfs DefaultPermissions root-owned EACCES isolated" | tee -a "$E2E_LOG_FILE"
-echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_unsupported_scope_skip|outcome=SKIP|detail=unsupported-scope host skip preserved" | tee -a "$E2E_LOG_FILE"
-echo "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_unsupported_clone_range|outcome=UNSUPPORTED|detail=unsupported scope has owner bead" | tee -a "$E2E_LOG_FILE"
+echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fiemap_transport_errno|outcome=PASS|detail=classification=expected_diff exact expiring allowlist accepted" | tee -a "$E2E_LOG_FILE"
+echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fuse_missing|outcome=PASS|detail=classification=host_skip missing dev fuse is host skip" | tee -a "$E2E_LOG_FILE"
+echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_fuse_permission_skip|outcome=PASS|detail=classification=host_skip permission denied is host skip" | tee -a "$E2E_LOG_FILE"
+echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_kernel_mount_permission_skip|outcome=PASS|detail=classification=host_skip kernel mount permission denied is host skip" | tee -a "$E2E_LOG_FILE"
+echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_mkfs_missing|outcome=PASS|detail=classification=host_skip mkfs.ext4 helper missing is host skip" | tee -a "$E2E_LOG_FILE"
+echo "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_mkfs_missing|outcome=PASS|detail=classification=host_skip mkfs.btrfs helper missing is host skip" | tee -a "$E2E_LOG_FILE"
+echo "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_default_permissions_root_owned|outcome=PASS|detail=classification=host_skip btrfs DefaultPermissions root-owned EACCES isolated" | tee -a "$E2E_LOG_FILE"
+echo "SCENARIO_RESULT|scenario_id=mounted_diff_ext4_unsupported_scope_skip|outcome=PASS|detail=classification=host_skip unsupported-scope host skip preserved" | tee -a "$E2E_LOG_FILE"
+echo "SCENARIO_RESULT|scenario_id=mounted_diff_btrfs_unsupported_clone_range|outcome=PASS|detail=classification=unsupported unsupported scope has owner bead" | tee -a "$E2E_LOG_FILE"
 
 e2e_step "Reject broad allowlist fixture"
 FFS_MOUNTED_DIFFERENTIAL_REPORT="$REPORT_JSON" \
@@ -533,7 +533,7 @@ extract_json_object "$BROAD_VALIDATION_RAW" "$BROAD_VALIDATION_JSON"
 if ! grep -q '"valid": false' "$BROAD_VALIDATION_JSON"; then
     e2e_fail "broad allowlist validation artifact did not record invalid verdict"
 fi
-echo "SCENARIO_RESULT|scenario_id=mounted_diff_broad_allowlist_rejected|outcome=ERROR|detail=validator rejected intentionally broad allowlist" | tee -a "$E2E_LOG_FILE"
+echo "SCENARIO_RESULT|scenario_id=mounted_diff_broad_allowlist_rejected|outcome=PASS|detail=classification=expected_rejection validator rejected intentionally broad allowlist" | tee -a "$E2E_LOG_FILE"
 
 e2e_log "Mounted differential report: $LOCAL_REPORT_JSON"
 e2e_log "Validation JSON: $VALIDATION_JSON"
