@@ -69,6 +69,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_REPAIR_EXCHANGE_LOOPBACK_SELF_CHECK=1 ./scrip
 # Run cross-oracle disagreement arbitration validation smoke
 ./scripts/e2e/ffs_cross_oracle_arbitration_e2e.sh
 
+# Verify the OQ decision integration RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_OQ_DECISION_INTEGRATION_SELF_CHECK=1 ./scripts/e2e/ffs_oq_decision_integration_e2e.sh
+
 # Run P1 workload corpus schema and proof-consumer coverage smoke
 ./scripts/e2e/ffs_workload_corpus_e2e.sh
 
