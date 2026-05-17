@@ -128,6 +128,7 @@ FAIL_COUNT=0
 TOTAL=0
 SCRIPT_RESULTS_JSON="["
 FIRST_RESULT=true
+SCRIPT_INDEX=0
 
 gate_json_escape() {
     local value="$1"
@@ -258,6 +259,8 @@ else
 fi
 
 for script in "${SCRIPTS[@]}"; do
+    SCRIPT_INDEX=$((SCRIPT_INDEX + 1))
+
     if ! gate_script_path_is_safe "$script"; then
         echo "WARNING: Invalid script path: $script"
         TOTAL=$((TOTAL + 1))
@@ -385,6 +388,8 @@ for script in "${SCRIPTS[@]}"; do
     script_passed=false
     script_output=""
     script_outputs=()
+    script_log_stem=$(printf '%s' "$(basename "$script" .sh)" | tr -c 'A-Za-z0-9._-' '_')
+    script_log_stem="${script_log_stem:-script}"
 
     while (( attempts <= MAX_RETRIES )); do
         attempts=$((attempts + 1))
@@ -392,7 +397,7 @@ for script in "${SCRIPTS[@]}"; do
             echo "  Retry attempt $attempts/$((MAX_RETRIES + 1))..."
         fi
 
-        script_log="$GATE_DIR/$(basename "$script" .sh)_attempt${attempts}.log"
+        script_log="$GATE_DIR/${SCRIPT_INDEX}_${script_log_stem}_attempt${attempts}.log"
         script_exit=0
         bash "$canonical_script_path" > "$script_log" 2>&1 || script_exit=$?
         script_outputs+=("$script_log")

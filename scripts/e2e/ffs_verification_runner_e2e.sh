@@ -137,6 +137,10 @@ verify_run_gate_marker_contract() {
     local probe_dir probe_script relative_script probe_log manifest_path gate_status
     local retry_probe_script retry_relative_script retry_log retry_state retry_manifest_path retry_gate_status
     local json_probe_script json_relative_script json_log json_manifest_path json_gate_status json_gate_id
+    local duplicate_log_dir duplicate_log_first_script duplicate_log_second_script
+    local duplicate_log_first_relative_script duplicate_log_second_relative_script
+    local duplicate_log_log duplicate_log_manifest_path duplicate_log_gate_dir duplicate_log_gate_status
+    local duplicate_log_first_payload_log duplicate_log_second_payload_log
     local missing_relative_script missing_log missing_manifest_path missing_gate_status
     local missing_gate_id_log missing_gate_id_status missing_retries_log missing_retries_status
     local bad_retries_log bad_retries_status
@@ -280,6 +284,66 @@ PROBE
         and (.script_results | length == 1)
         and .script_results[0].scenarios[0].scenario_id == "gate_json_escape_probe"
     ' "$json_manifest_path" >/dev/null
+
+    duplicate_log_dir="$probe_dir/duplicate_basename_logs"
+    duplicate_log_first_script="$duplicate_log_dir/a/same.sh"
+    duplicate_log_second_script="$duplicate_log_dir/b/same.sh"
+    duplicate_log_log="$probe_dir/run_gate_duplicate_basename_logs.log"
+    mkdir -p "$duplicate_log_dir/a" "$duplicate_log_dir/b"
+
+    cat >"$duplicate_log_first_script" <<'PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_duplicate_log_first|outcome=PASS'
+printf '%s\n' 'FIRST_SCRIPT_UNIQUE_PAYLOAD'
+PROBE
+
+    cat >"$duplicate_log_second_script" <<'PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_duplicate_log_second|outcome=PASS'
+printf '%s\n' 'SECOND_SCRIPT_UNIQUE_PAYLOAD'
+PROBE
+
+    duplicate_log_first_relative_script="${duplicate_log_first_script#$REPO_ROOT/}"
+    duplicate_log_second_relative_script="${duplicate_log_second_script#$REPO_ROOT/}"
+    if [[ -z "$(git -C "$REPO_ROOT" status --porcelain=v1 2>/dev/null)" ]]; then
+        expected_git_clean="true"
+    else
+        expected_git_clean="false"
+    fi
+    duplicate_log_gate_status=0
+    scripts/e2e/run_gate.sh --gate-id run_gate_duplicate_log_contract \
+        "$duplicate_log_first_relative_script" "$duplicate_log_second_relative_script" \
+        >"$duplicate_log_log" 2>&1 || duplicate_log_gate_status=$?
+    [[ "$duplicate_log_gate_status" -eq 0 ]] || return 1
+
+    duplicate_log_manifest_path=$(sed -n 's/^Manifest: //p' "$duplicate_log_log" | tail -n 1)
+    [[ -n "$duplicate_log_manifest_path" && -f "$duplicate_log_manifest_path" ]] || return 1
+    duplicate_log_gate_dir=$(dirname "$duplicate_log_manifest_path")
+
+    duplicate_log_first_payload_log=$(grep -R -l 'FIRST_SCRIPT_UNIQUE_PAYLOAD' "$duplicate_log_gate_dir" | sed -n '1p')
+    duplicate_log_second_payload_log=$(grep -R -l 'SECOND_SCRIPT_UNIQUE_PAYLOAD' "$duplicate_log_gate_dir" | sed -n '1p')
+    [[ -n "$duplicate_log_first_payload_log" && -f "$duplicate_log_first_payload_log" ]] || return 1
+    [[ -n "$duplicate_log_second_payload_log" && -f "$duplicate_log_second_payload_log" ]] || return 1
+    [[ "$duplicate_log_first_payload_log" != "$duplicate_log_second_payload_log" ]] || return 1
+
+    jq -e \
+        --arg first_script "$duplicate_log_first_relative_script" \
+        --arg second_script "$duplicate_log_second_relative_script" \
+        --argjson expected_git_clean "$expected_git_clean" '
+        .gate_id == "run_gate_duplicate_log_contract"
+        and .git_context.clean == $expected_git_clean
+        and .verdict == "PASS"
+        and .scripts_total == 2
+        and .scripts_passed == 2
+        and .scripts_failed == 0
+        and (.script_results | length == 2)
+        and .script_results[0].script == $first_script
+        and .script_results[1].script == $second_script
+        and .script_results[0].scenarios[0].scenario_id == "gate_duplicate_log_first"
+        and .script_results[1].scenarios[0].scenario_id == "gate_duplicate_log_second"
+    ' "$duplicate_log_manifest_path" >/dev/null
 
     fail_marker_script="$probe_dir/fail_marker_exit_zero_script.sh"
     fail_marker_log="$probe_dir/run_gate_fail_marker_exit_zero.log"
