@@ -301,7 +301,9 @@ printf '%s\n' 'SCENARIO_RESULT|scenario_id=Upper_case_bad|outcome=PASS'
 printf '%s\n' 'SCENARIO_RESULT|scenario_id=too_short|outcome=PASS'
 printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_invalid_outcome|outcome=SKIP'
 printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_status_only|status=PASS'
+printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_duplicate_scenario_first|scenario_id=gate_duplicate_scenario_second|outcome=PASS'
 printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_duplicate_outcome|outcome=PASS|outcome=FAIL'
+printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_duplicate_detail|outcome=PASS|detail=one|detail=two'
 printf '%s\n' 'SCENARIO_RESULT_EXTRA|scenario_id=gate_extra_prefix|outcome=PASS'
 printf '%s\n' 'RCH_LOCAL_FALLBACK_REJECTED|log=/tmp/rch-local.log|command=cargo test'
 PROBE
@@ -332,6 +334,21 @@ PROBE
         and all(.script_results[0].scenarios[]; .scenario_id != "gate_ambiguous_detail")
         and .script_results[0].scenarios[0].outcome == "PASS"
         and .script_results[0].scenarios[0].detail == "quote_\"probe\"\\path"
+        and .script_results[0].invalid_scenario_marker_count == 8
+        and (.script_results[0].invalid_scenario_markers | length == 8)
+        and ([.script_results[0].invalid_scenario_markers[].reason] | sort == [
+            "detail_contains_separator",
+            "duplicate_detail",
+            "duplicate_outcome",
+            "duplicate_scenario_id",
+            "invalid_outcome",
+            "invalid_scenario_id",
+            "invalid_scenario_id",
+            "missing_outcome"
+        ])
+        and any(.script_results[0].invalid_scenario_markers[]; .marker | contains("gate_ambiguous_detail"))
+        and any(.script_results[0].invalid_scenario_markers[]; .marker | contains("gate_duplicate_scenario_first"))
+        and any(.script_results[0].invalid_scenario_markers[]; .marker | contains("gate_duplicate_detail"))
         and .script_results[0].rch_local_fallback_rejected_count == 1
         and .script_results[0].rch_local_fallback_rejections[0].marker == "RCH_LOCAL_FALLBACK_REJECTED|log=/tmp/rch-local.log|command=cargo test"
     ' "$manifest_path" >/dev/null
@@ -378,6 +395,8 @@ PROBE
         and (.script_results[0].scenarios | length == 1)
         and .script_results[0].scenarios[0].scenario_id == "gate_retry_clean_second_attempt"
         and .script_results[0].scenarios[0].outcome == "PASS"
+        and .script_results[0].invalid_scenario_marker_count == 0
+        and (.script_results[0].invalid_scenario_markers | length == 0)
         and .script_results[0].rch_local_fallback_rejected_count == 1
         and .script_results[0].rch_local_fallback_rejections[0].marker == "RCH_LOCAL_FALLBACK_REJECTED|log=/tmp/rch-first.log|command=cargo test"
     ' "$retry_manifest_path" >/dev/null

@@ -412,10 +412,13 @@ for script in "${SCRIPTS[@]}"; do
 
     # Extract scenario results from the output
     scenarios_json="["
+    invalid_scenario_markers_json="["
     rch_local_fallback_rejections_json="["
     scenarios_first=true
+    invalid_first=true
     rch_first=true
     scenario_fail_count=0
+    invalid_scenario_marker_count=0
     rch_local_fallback_rejected_count=0
     if [[ -n "$script_output" && -f "$script_output" ]]; then
         while IFS= read -r line; do
@@ -424,18 +427,53 @@ for script in "${SCRIPTS[@]}"; do
             detail_count=$(gate_marker_field_count "$line" "|detail=")
             sid=$(echo "$line" | sed -n 's/.*scenario_id=\([^|]*\).*/\1/p')
             outcome=$(echo "$line" | sed -n 's/.*outcome=\([^|]*\).*/\1/p')
-            [[ -z "$sid" || -z "$outcome" ]] && continue
-            [[ "$sid_count" -eq 1 ]] || continue
-            [[ "$outcome_count" -eq 1 ]] || continue
-            [[ "$detail_count" -le 1 ]] || continue
+            invalid_reason=""
+            if [[ "$sid_count" -eq 0 ]]; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}missing_scenario_id"
+            elif [[ "$sid_count" -gt 1 ]]; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_scenario_id"
+            elif [[ -z "$sid" ]]; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}empty_scenario_id"
+            elif ! gate_scenario_id_is_valid "$sid"; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}invalid_scenario_id"
+            fi
+            if [[ "$outcome_count" -eq 0 ]]; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}missing_outcome"
+            elif [[ "$outcome_count" -gt 1 ]]; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_outcome"
+            elif [[ -z "$outcome" ]]; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}empty_outcome"
+            elif ! gate_outcome_is_valid "$outcome"; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}invalid_outcome"
+            fi
+            if [[ "$detail_count" -gt 1 ]]; then
+                invalid_reason="${invalid_reason}${invalid_reason:+,}duplicate_detail"
+            fi
             if [[ "$detail_count" -eq 1 ]]; then
                 detail="${line#*|detail=}"
-                [[ "$detail" != *"|"* ]] || continue
+                if [[ "$detail" == *"|"* ]]; then
+                    invalid_reason="${invalid_reason}${invalid_reason:+,}detail_contains_separator"
+                fi
             else
                 detail=""
             fi
-            gate_scenario_id_is_valid "$sid" || continue
-            gate_outcome_is_valid "$outcome" || continue
+            if [[ -n "$invalid_reason" ]]; then
+                marker="$line"
+                if ((${#marker} > 240)); then
+                    marker="${marker:0:240}..."
+                fi
+                marker=$(gate_json_escape "$marker")
+                invalid_reason=$(gate_json_escape "$invalid_reason")
+
+                if [[ "$invalid_first" == "true" ]]; then
+                    invalid_first=false
+                else
+                    invalid_scenario_markers_json+=","
+                fi
+                invalid_scenario_markers_json+="{\"reason\":\"$invalid_reason\",\"marker\":\"$marker\"}"
+                invalid_scenario_marker_count=$((invalid_scenario_marker_count + 1))
+                continue
+            fi
             [[ "$outcome" == "FAIL" ]] && scenario_fail_count=$((scenario_fail_count + 1))
 
             sid=$(gate_json_escape "$sid")
@@ -473,6 +511,7 @@ for script in "${SCRIPTS[@]}"; do
         done < <(grep "^RCH_LOCAL_FALLBACK_REJECTED|" "$marker_log" 2>/dev/null || true)
     done
     scenarios_json+="]"
+    invalid_scenario_markers_json+="]"
     rch_local_fallback_rejections_json+="]"
 
     if [[ "$rch_local_fallback_rejected_count" -gt 0 ]]; then
@@ -499,7 +538,7 @@ for script in "${SCRIPTS[@]}"; do
     fi
     script_json=$(gate_json_escape "$script")
     result_verdict_json=$(gate_json_escape "$result_verdict")
-    SCRIPT_RESULTS_JSON+="{\"script\":\"$script_json\",\"verdict\":\"$result_verdict_json\",\"attempts\":$attempts,\"scenarios\":$scenarios_json,\"rch_local_fallback_rejected_count\":$rch_local_fallback_rejected_count,\"rch_local_fallback_rejections\":$rch_local_fallback_rejections_json}"
+    SCRIPT_RESULTS_JSON+="{\"script\":\"$script_json\",\"verdict\":\"$result_verdict_json\",\"attempts\":$attempts,\"scenarios\":$scenarios_json,\"invalid_scenario_marker_count\":$invalid_scenario_marker_count,\"invalid_scenario_markers\":$invalid_scenario_markers_json,\"rch_local_fallback_rejected_count\":$rch_local_fallback_rejected_count,\"rch_local_fallback_rejections\":$rch_local_fallback_rejections_json}"
 done
 
 SCRIPT_RESULTS_JSON+="]"
