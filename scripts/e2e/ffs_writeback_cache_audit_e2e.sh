@@ -13,6 +13,7 @@ export REPO_ROOT
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_writeback_cache_audit}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR,FFS_WRITEBACK_CACHE_KILL_SWITCH"
+RCH_CAPTURE_VISIBILITY="${FFS_WRITEBACK_CACHE_AUDIT_RCH_VISIBILITY:-summary}"
 
 if [[ -n "${FFS_E2E_LOG_DIR:-}" ]]; then
     LOG_DIR="$FFS_E2E_LOG_DIR"
@@ -138,10 +139,10 @@ run_rch_capture() {
     : >"$log_path"
 
     if command -v setsid >/dev/null 2>&1; then
-        RCH_VISIBILITY=none setsid "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
+        RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" setsid "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
         use_process_group=1
     else
-        RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
+        RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
     fi
     pid=$!
 
@@ -186,8 +187,18 @@ run_rch_capture() {
         wait "$pid" 2>/dev/null || status=$?
     fi
 
+    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
+        log "RCH_LOCAL_FALLBACK_REJECTED|output=${log_path}|command=$*"
+        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$log_path" >>"$log_path"
+        return 99
+    fi
     if grep -Fq "Remote command finished: exit=0" "$log_path"; then
         return 0
+    fi
+    if [[ $status -eq 0 ]]; then
+        log "RCH_REMOTE_EVIDENCE_MISSING|output=${log_path}|command=$*"
+        printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$log_path" >>"$log_path"
+        return 99
     fi
     return "$status"
 }
