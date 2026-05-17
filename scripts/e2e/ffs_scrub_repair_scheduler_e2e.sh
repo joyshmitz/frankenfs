@@ -15,6 +15,7 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${FFS_SCRUB_REPAIR_SCHEDULER_CARGO_TARGET_DIR:-${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_scrub_repair_scheduler}}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_CAPTURE_VISIBILITY="${FFS_SCRUB_REPAIR_SCHEDULER_RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-300}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-2}"
 
@@ -101,7 +102,7 @@ run_rch_capture() {
     : >"$output_path"
     set +e
     RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
-        RCH_VISIBILITY=none \
+        RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" \
         "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
     pid=$!
     if [[ "$had_errexit" -eq 1 ]]; then
