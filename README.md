@@ -1155,7 +1155,7 @@ The exact field layout lives in the `asupersync` crate and is private; what call
 |---|---|---|
 | **Cancellation** | `cx.checkpoint()` | Returns `Err` if cancelled or the deadline expired; call regularly inside loops. |
 | **Budget** | `cx.budget()` → `Budget { poll_quota, … }` | Tells the caller how many cooperative "poll units" remain before yielding is preferred. |
-| **Deadline** | `cx.budget().deadline()` | When set, `checkpoint` returns `Err` once `Time::now() >= deadline`. |
+| **Deadline** | `cx.budget().is_past_deadline(cx.now())` | `checkpoint` returns `Err` once the budget's deadline is past. |
 | **Clock** | `cx.now()` | Virtualizable time source: real wall-clock in production, virtual time under `LabRuntime`. |
 | **Waker** | `cx.waker()` | The underlying task waker; rarely used by application code. |
 | **Pressure** | `SystemPressure` observer | Backpressure feedback for adaptive batch sizing. |
@@ -2031,8 +2031,10 @@ use ffs::{OpenFs, FfsError};
 use ffs_types::InodeNumber;
 use std::path::Path;
 
-// ext4 root inode is always 2 by convention
-const ROOT_INO: InodeNumber = InodeNumber::new(2);
+// ext4 root inode is always 2 by convention.
+// InodeNumber is a tuple newtype around u64; the field is pub so the
+// tuple constructor works in const context.
+const ROOT_INO: InodeNumber = InodeNumber(2);
 
 fn list_root(image: &Path) -> Result<()> {
     let cx = Cx::for_request();
@@ -2112,29 +2114,7 @@ ffs scrub /path/to/image.img --full --evidence-ledger repair.jsonl --json
 ffs repair /path/to/image.img --json
 ```
 
-Programmatic equivalent (via `ffs-repair::ScrubDaemon` and `ScrubWithRecovery`):
-
-```rust
-use ffs_repair::{
-    ScrubDaemon, ScrubDaemonConfig, GroupConfig, EvidenceLedger, EvidenceRecord,
-};
-use std::path::PathBuf;
-
-fn scrub_with_recovery(cx: &Cx, image: &Path) -> Result<()> {
-    let ledger = EvidenceLedger::open(PathBuf::from("repair.jsonl"))?;
-    let config = ScrubDaemonConfig {
-        repair_enabled:   true,        // permit writeback of recovered blocks
-        interval_secs:    Some(5),
-        ledger:           Some(ledger),
-        ..ScrubDaemonConfig::default()
-    };
-    let daemon = ScrubDaemon::new(cx, image, config)?;
-    daemon.run_one_cycle(cx)?;          // single-shot; or daemon.run_forever()
-    Ok(())
-}
-```
-
-(Exact module paths in `ffs-repair` may evolve; the canonical surface is what `ffs-cli scrub` invokes.)
+Programmatic usage means assembling a `ScrubWithRecovery<'a, W>` pipeline (with the source-block layout, the symbol store, the block device, the autopilot, and an `EvidenceLedger<W>` writer), then passing it plus a `ScrubDaemonConfig` to `ScrubDaemon::new(pipeline, config)`. The real fields on `ScrubDaemonConfig` cover scheduling and backpressure tuning (`interval: Duration`, `budget_poll_quota_threshold: u32`, `backpressure_headroom_threshold: f32`, etc.), not the `repair_enabled` / `ledger` flags — those are decided when constructing the `ScrubWithRecovery` pipeline itself. Read `crates/ffs-repair/src/pipeline.rs` for the canonical construction site, or copy the call graph from `crates/ffs-cli/src/cmd_repair.rs`.
 
 ### 5. Iterate the evidence ledger
 
@@ -2197,8 +2177,11 @@ The full asupersync runtime surface (structured-concurrency `region()`, two-phas
 use ffs::ondisk::ext4::Ext4Superblock;
 
 fn parse_superblock(image_bytes: &[u8]) -> Result<Ext4Superblock> {
-    // ext4 superblock lives at offset 1024
-    Ext4Superblock::parse_from_bytes(&image_bytes[1024..2048]).map_err(Into::into)
+    // ext4 superblock lives at offset 1024 and is 1024 bytes wide.
+    // `parse_from_bytes` also takes the group-descriptor size hint
+    // (default 32 for classic ext4, 64 with the 64-bit feature).
+    let desc_size: u16 = 32;
+    Ext4Superblock::parse_from_bytes(&image_bytes[1024..2048], desc_size).map_err(Into::into)
 }
 ```
 
@@ -2617,7 +2600,7 @@ These items are surfaced via the proof-bundle release-gate policy (`tests/releas
 | **DPOR (Dynamic Partial Order Reduction)** | The algorithm `LabRuntime` uses to deterministically explore concurrent schedules, pruning by commutativity. |
 | **EBR (Epoch-Based Reclamation)** | The memory-reclamation strategy from `crossbeam-epoch` used to free retired MVCC versions safely. |
 | **EMA (Exponentially-Weighted Moving Average)** | `ema_t = α·x_t + (1−α)·ema_{t−1}`; used to smooth contention metrics. |
-| **e2compr** | ext4's experimental compression scheme using `EXT4_COMPRBLW_FL` and 16-byte cluster headers; supported R/W for gzip/LZO/none. |
+| **e2compr** | ext4's experimental compression scheme using `EXT4_COMPRBLK_FL` and 16-byte cluster headers; supported R/W for gzip/LZO/none. |
 | **Evidence ledger** | The append-only JSONL audit trail emitted by `ffs-repair`; 23 event types. |
 | **FCW (First-Committer-Wins)** | The default MVCC conflict resolution rule: when two transactions touch the same block, the later committer aborts unless a merge proof applies. |
 | **FFS / `ffs-*`** | Crate prefix used across the workspace; the user-facing binary is `ffs-cli`. |
