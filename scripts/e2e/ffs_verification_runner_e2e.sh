@@ -148,6 +148,8 @@ verify_run_gate_marker_contract() {
     local path_escape_gate_status path_escape_executed
     local absolute_script absolute_script_log absolute_script_manifest_path absolute_script_gate_status
     local absolute_script_executed
+    local symlink_script symlink_target_script symlink_relative_script symlink_log
+    local symlink_manifest_path symlink_gate_status symlink_executed
     local conformance_probe_script conformance_relative_script conformance_log conformance_manifest_path
     local conformance_gate_status
     local expected_git_clean
@@ -451,6 +453,51 @@ PROBE
         and .script_results[0].rch_local_fallback_rejections == []
         and (.script_results[0].error | contains("invalid script path"))
     ' "$absolute_script_manifest_path" >/dev/null
+
+    symlink_script="$probe_dir/run_gate_symlink_escape_probe.sh"
+    symlink_target_script="$E2E_TEMP_DIR/run_gate_symlink_escape_target.sh"
+    symlink_relative_script="${symlink_script#$REPO_ROOT/}"
+    symlink_log="$probe_dir/run_gate_symlink_escape.log"
+    symlink_executed="$probe_dir/symlink_escape_probe.executed"
+
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'set -euo pipefail'
+        printf 'printf executed >%q\n' "$symlink_executed"
+        printf '%s\n' "printf '%s\n' 'SCENARIO_RESULT|scenario_id=gate_symlink_escape_probe|outcome=PASS'"
+    } >"$symlink_target_script"
+    ln -s "$(realpath "$symlink_target_script")" "$symlink_script"
+
+    if [[ -z "$(git -C "$REPO_ROOT" status --porcelain=v1 2>/dev/null)" ]]; then
+        expected_git_clean="true"
+    else
+        expected_git_clean="false"
+    fi
+    symlink_gate_status=0
+    scripts/e2e/run_gate.sh --gate-id run_gate_symlink_escape_contract "$symlink_relative_script" \
+        >"$symlink_log" 2>&1 || symlink_gate_status=$?
+    [[ "$symlink_gate_status" -eq 1 ]] || return 1
+    [[ ! -e "$symlink_executed" ]] || return 1
+
+    symlink_manifest_path=$(sed -n 's/^Manifest: //p' "$symlink_log" | tail -n 1)
+    [[ -n "$symlink_manifest_path" && -f "$symlink_manifest_path" ]] || return 1
+
+    jq -e --arg symlink_script "$symlink_relative_script" --argjson expected_git_clean "$expected_git_clean" '
+        .gate_id == "run_gate_symlink_escape_contract"
+        and .git_context.clean == $expected_git_clean
+        and .verdict == "FAIL"
+        and .scripts_total == 1
+        and .scripts_passed == 0
+        and .scripts_failed == 1
+        and (.script_results | length == 1)
+        and .script_results[0].script == $symlink_script
+        and .script_results[0].verdict == "FAIL"
+        and .script_results[0].attempts == 0
+        and .script_results[0].scenarios == []
+        and .script_results[0].rch_local_fallback_rejected_count == 0
+        and .script_results[0].rch_local_fallback_rejections == []
+        and (.script_results[0].error | contains("escapes repository"))
+    ' "$symlink_manifest_path" >/dev/null
 
     missing_relative_script="artifacts/e2e/run_gate_marker_contract_missing_script.sh"
     missing_log="$probe_dir/run_gate_missing_script.log"

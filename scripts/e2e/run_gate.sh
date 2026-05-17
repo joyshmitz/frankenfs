@@ -24,6 +24,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 REPO_ROOT="$(pwd)"
+REPO_ROOT_CANONICAL="$(realpath -e -- "$REPO_ROOT")"
 export REPO_ROOT
 
 # Defaults
@@ -176,6 +177,12 @@ gate_script_path_is_safe() {
     [[ "$value" != */../* ]]
 }
 
+gate_canonical_script_path_is_safe() {
+    local value="$1"
+
+    [[ "$value" == "$REPO_ROOT_CANONICAL"/* ]]
+}
+
 check_direct_cargo_conformance() {
     local script_path="$1"
     awk '
@@ -286,6 +293,40 @@ for script in "${SCRIPTS[@]}"; do
         continue
     fi
 
+    canonical_script_path=""
+    if ! canonical_script_path=$(realpath -e -- "$script_path"); then
+        echo "WARNING: Script path could not be canonicalized: $script_path"
+        TOTAL=$((TOTAL + 1))
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+
+        if [[ "$FIRST_RESULT" == "true" ]]; then
+            FIRST_RESULT=false
+        else
+            SCRIPT_RESULTS_JSON+=","
+        fi
+
+        script_json=$(gate_json_escape "$script")
+        canonical_script_error=$(gate_json_escape "script path could not be canonicalized: $script_path")
+        SCRIPT_RESULTS_JSON+="{\"script\":\"$script_json\",\"verdict\":\"FAIL\",\"attempts\":0,\"scenarios\":[],\"rch_local_fallback_rejected_count\":0,\"rch_local_fallback_rejections\":[],\"error\":\"$canonical_script_error\"}"
+        continue
+    fi
+    if ! gate_canonical_script_path_is_safe "$canonical_script_path"; then
+        echo "WARNING: Script path escapes repository after symlink resolution: $script"
+        TOTAL=$((TOTAL + 1))
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+
+        if [[ "$FIRST_RESULT" == "true" ]]; then
+            FIRST_RESULT=false
+        else
+            SCRIPT_RESULTS_JSON+=","
+        fi
+
+        script_json=$(gate_json_escape "$script")
+        escaped_script_error=$(gate_json_escape "script path escapes repository after symlink resolution: $script")
+        SCRIPT_RESULTS_JSON+="{\"script\":\"$script_json\",\"verdict\":\"FAIL\",\"attempts\":0,\"scenarios\":[],\"rch_local_fallback_rejected_count\":0,\"rch_local_fallback_rejections\":[],\"error\":\"$escaped_script_error\"}"
+        continue
+    fi
+
     # Optional conformance check
     if [[ "$CHECK_CONFORMANCE" == "true" ]]; then
         CONFORMANCE_OK=true
@@ -353,7 +394,7 @@ for script in "${SCRIPTS[@]}"; do
 
         script_log="$GATE_DIR/$(basename "$script" .sh)_attempt${attempts}.log"
         script_exit=0
-        bash "$script_path" > "$script_log" 2>&1 || script_exit=$?
+        bash "$canonical_script_path" > "$script_log" 2>&1 || script_exit=$?
         script_outputs+=("$script_log")
 
         if [[ $script_exit -eq 0 ]]; then
