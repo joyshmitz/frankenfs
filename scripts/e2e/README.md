@@ -75,6 +75,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_REPAIR_EXCHANGE_LOOPBACK_SELF_CHECK=1 ./scrip
 # Run cross-oracle disagreement arbitration validation smoke
 ./scripts/e2e/ffs_cross_oracle_arbitration_e2e.sh
 
+# Verify the cross-oracle arbitration RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_CROSS_ORACLE_ARBITRATION_SELF_CHECK=1 ./scripts/e2e/ffs_cross_oracle_arbitration_e2e.sh
+
 # Verify the OQ decision integration RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_OQ_DECISION_INTEGRATION_SELF_CHECK=1 ./scripts/e2e/ffs_oq_decision_integration_e2e.sh
 
@@ -1290,6 +1293,14 @@ Cross-oracle arbitration artifacts are validated with:
 cargo run -p ffs-harness -- validate-cross-oracle-arbitration \
   --report artifacts/e2e/cross_oracle_arbitration/report.json \
   --out artifacts/e2e/cross_oracle_arbitration/validation.json
+```
+
+The wrapper self-check exercises the JSON, Markdown, unsafe downgrade, stale
+evidence, local fallback, and missing remote evidence paths without invoking
+cargo:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_CROSS_ORACLE_ARBITRATION_SELF_CHECK=1 ./scripts/e2e/ffs_cross_oracle_arbitration_e2e.sh
 ```
 
 The validator rejects stale or missing oracle evidence under product-bug

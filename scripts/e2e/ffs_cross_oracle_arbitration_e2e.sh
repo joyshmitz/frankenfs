@@ -17,6 +17,8 @@ RCH_BIN="${RCH_BIN:-rch}"
 RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_CROSS_ORACLE_ARBITRATION_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_CROSS_ORACLE_ARBITRATION_SKIP_SELF_CHECK:-0}"
 
 case ",${RCH_ENV_ALLOWLIST:-}," in
     *",CARGO_TARGET_DIR,"*) ;;
@@ -135,6 +137,214 @@ scenario_result() {
 }
 
 e2e_init "ffs_cross_oracle_arbitration"
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_CROSS_ORACLE_ARBITRATION_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected cross-oracle fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)"
+        exit 1
+        ;;
+    missing_remote_evidence)
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0"
+        ;;
+    *)
+        echo "unknown cross-oracle fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+finish_success() {
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=0"
+    fi
+    exit 0
+}
+
+finish_failure() {
+    local status="$1"
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=${status}"
+    fi
+    exit "$status"
+}
+
+emit_validation_json() {
+    cat <<'JSON'
+{
+  "arbitration_count": 5,
+  "valid": true,
+  "blocked_public_claims": [
+    "background_scrub_mutation",
+    "data_integrity",
+    "mounted_writes"
+  ],
+  "summaries": [
+    {
+      "arbitration_id": "cross_oracle_product_bug_fail_closed",
+      "classification": "frankenfs_product_bug",
+      "blocked_public_claims": [
+        "mounted_writes",
+        "data_integrity"
+      ],
+      "controlling_artifacts": [
+        "artifacts/fixture/cross_oracle_product_bug_fail_closed.json"
+      ],
+      "remediation_id": "remediate_cross_oracle_conflict",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-cross-oracle-arbitration --report artifacts/e2e/cross_oracle_arbitration/report.json"
+    }
+  ]
+}
+JSON
+}
+
+case "$command_text" in
+    *"cross_oracle_bad_high_risk.json"*)
+        echo "unresolved high-risk public claim must fail closed"
+        finish_failure 1
+        ;;
+    *"cross_oracle_bad_stale.json"*)
+        echo "cannot absorb evidence gaps"
+        finish_failure 1
+        ;;
+    *"cargo test"*cross_oracle_arbitration*)
+        echo "test cross_oracle_arbitration::tests::fixture_cross_oracle_arbitration ... ok"
+        echo "test result: ok. fixture passed"
+        finish_success
+        ;;
+    *"--format markdown"*)
+        cat <<'MD'
+# Cross-Oracle Arbitration
+
+## cross_oracle_product_bug_fail_closed
+
+- blocked claim: data_integrity
+MD
+        finish_success
+        ;;
+    *"validate-cross-oracle-arbitration"*)
+        emit_validation_json
+        finish_success
+        ;;
+    *)
+        echo "unexpected cross-oracle fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/cross_oracle_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_CROSS_ORACLE_ARBITRATION_SELF_CHECK=0 \
+        FFS_CROSS_ORACLE_ARBITRATION_SKIP_SELF_CHECK=1 \
+        FFS_CROSS_ORACLE_ARBITRATION_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_cross_oracle_arbitration_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic cross-oracle arbitration wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-cross-oracle-arbitration-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .invalid_scenario_marker_count == 0
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "cross_oracle_cli_wired" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "cross_oracle_fixture_conflicts_generated" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "cross_oracle_fixture_conflicts_classified" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "cross_oracle_output_preserves_claims" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "cross_oracle_unresolved_claim_fails_closed" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "cross_oracle_stale_missing_evidence_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "cross_oracle_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "cross_oracle_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "cross_oracle_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null \
+        && grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        scenario_result "cross_oracle_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "cross_oracle_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "cross_oracle_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "cross_oracle_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 RCH_INPUT_DIR="$REPO_ROOT/artifacts/rch_input/$(basename "$E2E_LOG_DIR")/cross_oracle_arbitration"
 mkdir -p "$RCH_INPUT_DIR"
