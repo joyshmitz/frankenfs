@@ -732,6 +732,63 @@ e2e_rch_cancel_matching_queue_entry() {
 }
 
 #######################################
+# Find the latest preserved RCH capacity preflight report.
+# The helper is intentionally read-only: it does not run rch and does not
+# create capacity artifacts. Callers should run ffs_rch_capacity_preflight_e2e.sh
+# explicitly when they need a fresh report.
+#######################################
+e2e_rch_capacity_preflight_latest_report() {
+    local explicit_report="${FFS_RCH_CAPACITY_PREFLIGHT_REPORT:-}"
+    local artifacts_root="${REPO_ROOT:-.}/artifacts/e2e"
+
+    if [[ -n "$explicit_report" && -f "$explicit_report" ]]; then
+        printf '%s\n' "$explicit_report"
+        return 0
+    fi
+
+    if [[ ! -d "$artifacts_root" ]]; then
+        return 0
+    fi
+
+    find "$artifacts_root" -maxdepth 2 -type f -name rch_capacity_preflight_report.json \
+        -printf '%T@ %p\n' 2>/dev/null \
+        | sort -nr \
+        | awk 'NR == 1 {print $2}'
+}
+
+#######################################
+# Emit a closeout-friendly pointer to the latest capacity preflight artifact.
+# Arguments:
+#   $1 - reason token, e.g. local_fallback or missing_remote_evidence
+#   $2 - RCH command log path to append the marker to
+#######################################
+e2e_rch_capacity_preflight_reference() {
+    local reason="$1"
+    local log_path="$2"
+    local report_path result_path capacity_verdict probe_verdict admissible_workers
+    local marker
+
+    report_path="$(e2e_rch_capacity_preflight_latest_report || true)"
+    if [[ -n "$report_path" && -f "$report_path" ]]; then
+        result_path="$(dirname "$report_path")/result.json"
+        capacity_verdict="$(jq -r '.capacity_verdict // "unknown"' "$report_path" 2>/dev/null || printf 'unknown\n')"
+        probe_verdict="$(jq -r '.probe.verdict // "not_recorded"' "$report_path" 2>/dev/null || printf 'unknown\n')"
+        admissible_workers="$(jq -r '.worker_counts.admissible // "unknown"' "$report_path" 2>/dev/null || printf 'unknown\n')"
+        if [[ ! -f "$result_path" ]]; then
+            result_path="missing"
+        fi
+        marker="RCH_CAPACITY_PREFLIGHT_REFERENCE|reason=${reason}|report=${report_path}|result=${result_path}|capacity_verdict=${capacity_verdict}|probe_verdict=${probe_verdict}|admissible_workers=${admissible_workers}"
+    else
+        marker="RCH_CAPACITY_PREFLIGHT_REFERENCE_MISSING|reason=${reason}|run=FFS_E2E_DISABLE_TEMP_CLEANUP=1 ./scripts/e2e/ffs_rch_capacity_preflight_e2e.sh"
+    fi
+
+    e2e_log "$marker"
+    if [[ -n "$log_path" ]]; then
+        printf '%s\n' "$marker" >>"$log_path"
+    fi
+}
+
+#######################################
 # Run a command through RCH and fail closed on non-authoritative evidence.
 # Arguments:
 #   $1 - Log path
@@ -761,7 +818,11 @@ e2e_rch_capture() {
     local rch_bin="${RCH_BIN:-rch}"
     local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-900}"
     local grace_secs="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+    local capacity_reference_marker="RCH_CAPACITY_PREFLIGHT_REFERENCE"
+    local capacity_missing_marker="RCH_CAPACITY_PREFLIGHT_REFERENCE_MISSING"
     shift
+
+    : "$capacity_reference_marker" "$capacity_missing_marker"
 
     e2e_log "RCH command: $*"
     case $- in
@@ -834,11 +895,15 @@ e2e_rch_capture() {
     if grep -Fq "[RCH] local (" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
         e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}|command=$*"
         printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
+        # Emits RCH_CAPACITY_PREFLIGHT_REFERENCE or RCH_CAPACITY_PREFLIGHT_REFERENCE_MISSING.
+        e2e_rch_capacity_preflight_reference "local_fallback" "$log_path"
         return 99
     fi
     if [[ $status -eq 0 ]] && ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
         e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}|command=$*"
         printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
+        # Emits RCH_CAPACITY_PREFLIGHT_REFERENCE or RCH_CAPACITY_PREFLIGHT_REFERENCE_MISSING.
+        e2e_rch_capacity_preflight_reference "missing_remote_evidence" "$log_path"
         return 99
     fi
     return "$status"
@@ -854,6 +919,8 @@ RCH_REMOTE_EVIDENCE_MISSING
 RCH_TIMEOUT
 RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT
 RCH_REQUIRED_ARTIFACT_MISSING
+RCH_CAPACITY_PREFLIGHT_REFERENCE
+RCH_CAPACITY_PREFLIGHT_REFERENCE_MISSING
 Remote command finished: exit=
 exec called with non-compilation command
 [RCH] local
@@ -1335,11 +1402,14 @@ e2e_emit_json_summary() {
     local scenarios_json="["
     local invalid_scenario_markers_json="["
     local rch_local_fallback_rejections_json="["
+    local rch_capacity_preflight_references_json="["
     local invalid_scenario_marker_count=0
     local rch_local_fallback_rejected_count=0
+    local rch_capacity_preflight_reference_count=0
     local first=true
     local invalid_first=true
     local rch_first=true
+    local rch_capacity_first=true
     while IFS= read -r line; do
         # Parse: SCENARIO_RESULT|scenario_id=X|outcome=Y[|detail=Z]
         local scenario_id outcome detail
@@ -1448,6 +1518,25 @@ e2e_emit_json_summary() {
     done < <(grep "^RCH_LOCAL_FALLBACK_REJECTED|" "$E2E_LOG_FILE" 2>/dev/null || true)
     rch_local_fallback_rejections_json+="]"
 
+    while IFS= read -r line; do
+        local marker_preview
+
+        marker_preview="$line"
+        if ((${#marker_preview} > 360)); then
+            marker_preview="${marker_preview:0:360}..."
+        fi
+        marker_preview=$(e2e_json_escape "$marker_preview")
+
+        if [[ "$rch_capacity_first" == "true" ]]; then
+            rch_capacity_first=false
+        else
+            rch_capacity_preflight_references_json+=","
+        fi
+        rch_capacity_preflight_references_json+="{\"marker\":\"$marker_preview\"}"
+        rch_capacity_preflight_reference_count=$((rch_capacity_preflight_reference_count + 1))
+    done < <(grep "^RCH_CAPACITY_PREFLIGHT_REFERENCE" "$E2E_LOG_FILE" 2>/dev/null || true)
+    rch_capacity_preflight_references_json+="]"
+
     # Determine verdict
     local verdict="PASS"
     if echo "$scenarios_json" | grep -q '"outcome":"FAIL"'; then
@@ -1498,6 +1587,8 @@ e2e_emit_json_summary() {
   "invalid_scenario_markers": $invalid_scenario_markers_json,
   "rch_local_fallback_rejected_count": $rch_local_fallback_rejected_count,
   "rch_local_fallback_rejections": $rch_local_fallback_rejections_json,
+  "rch_capacity_preflight_reference_count": $rch_capacity_preflight_reference_count,
+  "rch_capacity_preflight_references": $rch_capacity_preflight_references_json,
   "verdict": "$verdict_json",
   "exit_code": $script_exit_code,
   "duration_secs": $duration_secs,

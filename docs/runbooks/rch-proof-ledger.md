@@ -78,6 +78,19 @@ remote cargo gate after RCH capacity recovers. See
 artifacts/e2e/<run>/rch_capacity_preflight_report.json and result.json.
 ```
 
+Shared E2E wrappers that call `e2e_rch_capture` also emit a non-mutating
+reference marker when RCH falls back locally or when remote evidence is missing:
+
+```text
+RCH_CAPACITY_PREFLIGHT_REFERENCE|reason=local_fallback|report=artifacts/e2e/<run>/rch_capacity_preflight_report.json|result=artifacts/e2e/<run>/result.json|capacity_verdict=no_admissible_workers|probe_verdict=local_fallback_rejected|admissible_workers=0
+```
+
+If no preserved preflight report is available, the marker is
+`RCH_CAPACITY_PREFLIGHT_REFERENCE_MISSING` and names the command to run. Treat
+both markers as handoff context only. They explain why proof is unavailable;
+they do not close compiler, clippy, conformance, mounted-write, or release
+beads without a later positive remote proof.
+
 ## Decision Rules
 
 | Transcript state | Ledger verdict | Operator action |
@@ -87,7 +100,7 @@ artifacts/e2e/<run>/rch_capacity_preflight_report.json and result.json.
 | `[RCH] local (remote execution failed)` | `invalid_local_fallback` | Local fallback is not remote validation proof. Rerun on RCH or report the remote-execution blocker. |
 | Remote exit is nonzero | `remote_failure` | Treat as a failed validation or product/tooling failure according to the command. |
 | Worker or exit evidence is missing | `missing_remote_evidence` | Do not claim validation; capture a complete transcript first. |
-| Capacity preflight reports `no_admissible_workers` or local-fallback refusal | not a proof-ledger verdict | Report an infrastructure blocker and rerun after RCH capacity recovers. |
+| Capacity preflight reports `no_admissible_workers`, telemetry gaps, critical pressure, or local-fallback refusal | not a proof-ledger verdict | Report an infrastructure blocker, cite the latest `RCH_CAPACITY_PREFLIGHT_REFERENCE` artifact path when present, and rerun after RCH capacity recovers. |
 
 Worker-side exit=0 is sufficient evidence only when the command, cwd, worker,
 and transcript match the claimed gate. A local shell exit code is not enough if

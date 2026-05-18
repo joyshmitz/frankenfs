@@ -2631,3 +2631,11 @@ FFS_RCH_CAPACITY_PREFLIGHT_RUN_PROBE=1 \
 Use the resulting capacity artifact to explain why remote proof is unavailable.
 Do not close compiler, clippy, conformance, or mounted-write beads with only a
 `no_admissible_workers` or local-fallback preflight result.
+
+Shared E2E wrappers that use `e2e_rch_capture` cite the latest preserved
+capacity report when remote evidence is unavailable by emitting
+`RCH_CAPACITY_PREFLIGHT_REFERENCE|report=...|result=...`. If the reference is
+missing, run the status-only preflight command above first and preserve its
+artifact directory in the closeout handoff. These reference markers are
+explanatory only; they never upgrade an infrastructure blocker into validation
+proof.
