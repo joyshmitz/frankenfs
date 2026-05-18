@@ -111,6 +111,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_PERF_COMPARISON_SELF_CHECK=1 ./scripts/e2e/ff
 # Verify the benchmark taxonomy RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_BENCHMARK_TAXONOMY_SELF_CHECK=1 ./scripts/e2e/ffs_benchmark_taxonomy_e2e.sh
 
+# Verify the benchmark governance RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_BENCHMARK_GOVERNANCE_SELF_CHECK=1 ./scripts/e2e/ffs_benchmark_governance_e2e.sh
+
 # Verify the artifact schema fixture RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_ARTIFACT_SCHEMA_FIXTURES_SELF_CHECK=1 ./scripts/e2e/ffs_artifact_schema_fixtures_e2e.sh
 
