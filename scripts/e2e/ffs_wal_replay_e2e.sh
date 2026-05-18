@@ -34,6 +34,8 @@ case ",${RCH_ENV_ALLOWLIST:-}," in
 esac
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_WAL_REPLAY_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_WAL_REPLAY_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -123,7 +125,172 @@ run_rch_capture() {
     return "$status"
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_WAL_REPLAY_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected WAL replay fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)"
+        exit 1
+        ;;
+    missing_remote_evidence)
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0"
+        ;;
+    *)
+        echo "unknown WAL replay fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+case "$command_text" in
+    *"wal_replay::tests::replay_truncated"*)
+        echo "test wal_replay::tests::replay_truncated_fixture ... ok"
+        ;;
+    *"wal_replay::tests::replay_corrupt_crc_fail_fast"*)
+        echo "test wal_replay::tests::replay_corrupt_crc_fail_fast_fixture ... ok"
+        ;;
+    *"wal_replay::tests::replay_rejects"*)
+        echo "test wal_replay::tests::replay_rejects_monotonicity_fixture ... ok"
+        ;;
+    *"wal_replay::tests::replay_is_idempotent"*)
+        echo "test wal_replay::tests::replay_is_idempotent_fixture ... ok"
+        ;;
+    *"wal_replay::tests"*)
+        for i in $(seq 1 15); do
+            echo "test wal_replay::tests::fixture_replay_case_${i} ... ok"
+        done
+        ;;
+    *"persist::tests"*)
+        for i in $(seq 1 6); do
+            echo "test persist::tests::fixture_persist_case_${i} ... ok"
+        done
+        ;;
+    *)
+        echo "unexpected WAL replay fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+
+echo "test result: ok. fixture passed"
+if [[ "$fixture_case" == "complete" ]]; then
+    echo "Remote command finished: exit=0"
+fi
+exit 0
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/wal_replay_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_WAL_REPLAY_SELF_CHECK=0 \
+        FFS_WAL_REPLAY_SKIP_SELF_CHECK=1 \
+        FFS_WAL_REPLAY_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_wal_replay_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic WAL replay wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-wal-replay-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .invalid_scenario_marker_count == 0
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "replay_engine_types" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "replay_engine_unit" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "wal_replay_monotonicity" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "wal_replay_idempotent" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "replay_persist_integration" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "wal_replay_logging_markers" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "replay_outcome_in_report" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "wal_replay_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "wal_replay_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null \
+        && grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        scenario_result "wal_replay_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "wal_replay_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "wal_replay_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "wal_replay_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
 e2e_init "ffs_wal_replay"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 #######################################
 # Scenario 1: Replay engine types exist and are public
@@ -227,9 +394,9 @@ e2e_step "Scenario 7: Monotonicity enforcement"
 
 TEST_LOG="$E2E_LOG_DIR/wal_replay_monotonicity.log"
 if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_replay::tests::replay_rejects; then
-    scenario_result "replay_monotonicity" "PASS" "Monotonicity enforcement tests passed"
+    scenario_result "wal_replay_monotonicity" "PASS" "Monotonicity enforcement tests passed"
 else
-    scenario_result "replay_monotonicity" "FAIL" "Monotonicity enforcement tests failed"
+    scenario_result "wal_replay_monotonicity" "FAIL" "Monotonicity enforcement tests failed"
 fi
 
 #######################################
@@ -239,9 +406,9 @@ e2e_step "Scenario 8: Idempotent replay"
 
 TEST_LOG="$E2E_LOG_DIR/wal_replay_idempotent.log"
 if run_rch_capture "$TEST_LOG" cargo test -p ffs-mvcc --lib -- wal_replay::tests::replay_is_idempotent; then
-    scenario_result "replay_idempotent" "PASS" "Idempotent replay test passed"
+    scenario_result "wal_replay_idempotent" "PASS" "Idempotent replay test passed"
 else
-    scenario_result "replay_idempotent" "FAIL" "Idempotent replay test failed"
+    scenario_result "wal_replay_idempotent" "FAIL" "Idempotent replay test failed"
 fi
 
 #######################################
@@ -270,9 +437,9 @@ for marker in "wal_replay_start" "wal_replay_done" "wal_replay_apply" "wal_repla
 done
 
 if [[ $LOG_MARKERS_FOUND -ge 7 ]]; then
-    scenario_result "replay_logging" "PASS" "Structured logging: ${LOG_MARKERS_FOUND}/9 markers present"
+    scenario_result "wal_replay_logging_markers" "PASS" "Structured logging: ${LOG_MARKERS_FOUND}/9 markers present"
 else
-    scenario_result "replay_logging" "FAIL" "Only ${LOG_MARKERS_FOUND}/9 structured log markers found"
+    scenario_result "wal_replay_logging_markers" "FAIL" "Only ${LOG_MARKERS_FOUND}/9 structured log markers found"
 fi
 
 #######################################

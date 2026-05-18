@@ -2995,13 +2995,13 @@
           "id": "wal_replay_monotonicity",
           "category": "edge",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=replay_monotonicity|outcome=PASS"
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_replay_monotonicity|outcome=PASS"
         },
         {
           "id": "wal_replay_idempotent",
           "category": "happy",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=replay_idempotent|outcome=PASS"
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_replay_idempotent|outcome=PASS"
         },
         {
           "id": "wal_replay_persist_integration",
@@ -3013,13 +3013,31 @@
           "id": "wal_replay_logging_markers",
           "category": "edge",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=replay_logging|outcome=PASS"
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_replay_logging_markers|outcome=PASS"
         },
         {
           "id": "wal_replay_outcome_report",
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=replay_outcome_in_report|outcome=PASS"
+        },
+        {
+          "id": "wal_replay_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_replay_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "wal_replay_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_replay_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "wal_replay_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_replay_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },

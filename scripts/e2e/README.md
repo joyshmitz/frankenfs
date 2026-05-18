@@ -141,6 +141,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_ADAPTIVE_RUNTIME_RUNNER_SELF_CHECK=1 ./script
 # Verify the btrfs write-churn RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_BTRFS_WRITE_CHURN_SELF_CHECK=1 ./scripts/e2e/ffs_btrfs_write_churn_e2e.sh
 
+# Verify the WAL replay RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_WAL_REPLAY_SELF_CHECK=1 ./scripts/e2e/ffs_wal_replay_e2e.sh
+
 # Verify the perf comparison RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_PERF_COMPARISON_SELF_CHECK=1 ./scripts/e2e/ffs_perf_comparison_e2e.sh
 
