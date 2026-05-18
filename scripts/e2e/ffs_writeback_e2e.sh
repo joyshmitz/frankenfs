@@ -12,12 +12,10 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_writeback}"
-case ",${RCH_ENV_ALLOWLIST:-}," in
-    *",CARGO_TARGET_DIR,"*) ;;
-    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
-esac
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+RCH_CAPTURE_VISIBILITY="${FFS_WRITEBACK_RCH_VISIBILITY:-${RCH_VISIBILITY:-summary}}"
 SELF_CHECK="${FFS_WRITEBACK_SELF_CHECK:-0}"
 SKIP_SELF_CHECK="${FFS_WRITEBACK_SKIP_SELF_CHECK:-0}"
 
@@ -55,7 +53,7 @@ run_rch_capture() {
 
     : >"$log_path"
     set +e
-    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
+    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
         "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
     pid=$!
     if [[ "$had_errexit" -eq 1 ]]; then
