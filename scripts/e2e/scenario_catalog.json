@@ -6019,6 +6019,24 @@
           "category": "happy",
           "status": "active",
           "evidence": "scenario_result \"invariant_oracle_unit_tests\" \"PASS\""
+        },
+        {
+          "id": "invariant_oracle_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=invariant_oracle_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "invariant_oracle_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=invariant_oracle_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "invariant_oracle_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=invariant_oracle_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },

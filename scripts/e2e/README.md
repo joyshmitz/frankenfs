@@ -75,6 +75,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_RELEASE_GATE_SELF_CHECK=1 ./scripts/e2e/ffs_r
 # Run invariant-oracle replay/minimization and consumer-validation smoke
 ./scripts/e2e/ffs_invariant_oracle_e2e.sh
 
+# Verify the invariant-oracle RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_INVARIANT_ORACLE_SELF_CHECK=1 ./scripts/e2e/ffs_invariant_oracle_e2e.sh
+
 # Run mounted differential oracle allowlist/host-skip validation smoke
 ./scripts/e2e/ffs_mounted_differential_oracle_e2e.sh
 
