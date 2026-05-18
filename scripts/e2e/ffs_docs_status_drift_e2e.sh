@@ -15,7 +15,7 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_docs_status_drift}"
 RCH_BIN="${RCH_BIN:-rch}"
-RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_CAPTURE_VISIBILITY="${FFS_DOCS_STATUS_DRIFT_RCH_VISIBILITY:-${RCH_VISIBILITY:-summary}}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 SELF_CHECK="${FFS_DOCS_STATUS_DRIFT_SELF_CHECK:-0}"
@@ -27,7 +27,7 @@ FAIL_COUNT=0
 TOTAL=0
 
 run_rch_capture() {
-    e2e_rch_capture "$@"
+    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" e2e_rch_capture "$@"
 }
 
 scenario_result() {
