@@ -2427,7 +2427,7 @@ frankenfs/
 ├── Cargo.toml                  Workspace root (21 members, [patch.crates-io] for vendored fuser)
 ├── Cargo.lock
 ├── README.md                   This file
-├── CHANGELOG.md                Capability-area changelog (3,261 commits, 2026-02-09 → 2026-05-17)
+├── CHANGELOG.md                Capability-area changelog (3,448 commits, 2026-02-09 → 2026-05-18)
 ├── AGENTS.md                   Operating doctrine for AI coding agents working here
 ├── LICENSE                     MIT (with OpenAI/Anthropic rider)
 ├── rust-toolchain.toml         Pinned nightly channel for edition 2024
@@ -2490,7 +2490,7 @@ frankenfs/
 ├── docs/                       Design docs, manifests, runbooks, reports
 ├── security/                   adversarial_image_threat_model.json
 ├── vendor/                     vendor/fuser pinned to ABI 7.40 via [patch.crates-io]
-├── .beads/                     issues.jsonl (2,703 closed + 34 open as of cutoff)
+├── .beads/                     issues.jsonl (raw rows: 2,859 closed + 45 open + 1 deferred)
 ├── beads_compliance_audit/     Cross-pass bead-completion audit artifacts
 └── ci-artifacts/               CI run outputs
 ```

@@ -3,11 +3,11 @@
 All notable changes to FrankenFS are documented in this file, organized by capability area rather than chronological diff order. This project has no formal releases or tags; development has been continuous since inception. Commit links point to the canonical GitHub repository.
 
 > **Repository:** <https://github.com/Dicklesworthstone/frankenfs>
-> **Period covered:** 2026-02-09 through 2026-05-17
-> **Total commits:** 3,261
-> **Tracker:** [`.beads/issues.jsonl`](https://github.com/Dicklesworthstone/frankenfs/blob/main/.beads/issues.jsonl) (2,714 closed, 34 open as of cutoff)
+> **Period covered:** 2026-02-09 through 2026-05-18
+> **Total commits:** 3,448
+> **Tracker:** [`.beads/issues.jsonl`](https://github.com/Dicklesworthstone/frankenfs/blob/main/.beads/issues.jsonl) (raw rows as of 2026-05-18: 2,859 closed, 45 open, 1 deferred; source-aware queue excludes 28 foreign-looking open rows)
 
-> **What's new since the 2026-04-07 cutoff (2,543 additional commits):** the
+> **What's new since the 2026-04-07 cutoff (2,765 additional commits):** the
 > tracked V1 parity matrix is complete at 97/97, and most engineering attention
 > has shifted from filling gaps to *gating public claims with structured
 > evidence*. The dominant new themes are: a checked-in release-gate policy with
