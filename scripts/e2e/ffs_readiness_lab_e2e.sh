@@ -17,7 +17,7 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 AGENT_NAME_FOR_TARGET="${AGENT_NAME:-CobaltPike}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/projects/.cargo-target-frankenfs-${AGENT_NAME_FOR_TARGET}-bd-wt1rq}"
-export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR
 
 PASS_COUNT=0
 FAIL_COUNT=0
