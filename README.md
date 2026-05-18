@@ -1298,7 +1298,7 @@ The project uses `.beads/issues.jsonl` as the canonical task store. Reasons:
 - Git-versioned: every issue change is a diff in `issues.jsonl`, reviewable in PR diffs.
 - Multi-project hygiene: cross-project pollution is detectable via the source-aware queue-state check.
 
-### Decision 10: 113 E2E gate scripts
+### Decision 10: 114 E2E gate scripts
 
 Each E2E script is a single scenario class: writeback-cache audit, repair writeback route, mounted differential oracle, etc. They could be a single mega-test. They are separate scripts because:
 
@@ -2480,7 +2480,7 @@ frankenfs/
 │   ├── flamegraph_generate.sh  Flamegraph workflow
 │   ├── run_e2e.sh              E2E suite orchestrator
 │   ├── update-goldens.sh       Regenerate golden outputs (use with care)
-│   └── e2e/                    113 E2E gate scripts (one per scenario)
+│   └── e2e/                    114 E2E gate scripts (one per scenario)
 │
 ├── benchmarks/                 Saved baseline JSON manifests
 ├── baselines/                  Historical baseline archive
@@ -2922,7 +2922,7 @@ Crash recovery for a committing transaction depends on which side of the WAL `fs
 
 ## E2E Test Categories
 
-The 113 E2E gate scripts in `scripts/e2e/` are organized by capability area. Selected highlights, grouped by category:
+The 114 E2E gate scripts in `scripts/e2e/` are organized by capability area. Selected highlights, grouped by category:
 
 ### Conformance and baseline
 - `ffs_baseline_validation_e2e.sh`: initial conformance gate
