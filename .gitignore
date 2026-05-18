@@ -181,3 +181,10 @@ unwraps*.txt
 
 # beads compliance audit (separate .git/, hand-built due to swarm DB churn)
 /beads_compliance_audit/
+
+# Per-migration backup snapshots of issues.jsonl written by `br migrate`
+# (e.g. .beads/issues.jsonl.pre_cvyt0_migration.<ISO8601>.bak). The canonical
+# tracked file is .beads/issues.jsonl with no suffix; these timestamped
+# .bak siblings are recovery-only and never re-committed.
+.beads/issues.jsonl.pre_*.bak
+.beads/issues.jsonl.*.bak
