@@ -1,6 +1,6 @@
 # PROPOSED_ARCHITECTURE.md — FrankenFS (ffs)
 
-> 21-crate Cargo workspace architecture (19 core crates + 2 legacy/reference wrappers) for a memory-safe, FUSE-based Rust reimplementation of ext4 and btrfs with block-level MVCC and RaptorQ self-healing.
+> 21-crate Cargo workspace architecture (20 implementation/tooling crates + 1 legacy/reference wrapper) for a memory-safe, FUSE-based Rust reimplementation of ext4 and btrfs with block-level MVCC and RaptorQ self-healing.
 
 > **Status note (2026-05-01):** The architecture map describes the implemented
 > crate topology and target boundaries. Current reality-check bridge work outside
@@ -36,7 +36,7 @@
 | 18 | `ffs-tui` | TUI monitoring: live cache stats, MVCC version counts, repair status, I/O throughput | `ffs`, `ftui` | 9 |
 | 19 | `ffs-harness` | Conformance testing harness: parity reports, sparse JSON fixtures, compare FrankenFS behavior against real ext4/btrfs images | `ffs-core`, `ffs-ondisk`, `ffs-types`, `anyhow`, `hex`, `serde`, `serde_json`; dev: `criterion` | 9 |
 | 20 | `ffs-ext4` | Legacy/reference wrapper for ext4 parsing APIs (re-exports `ffs-ondisk::ext4::*`) | `ffs-ondisk` | 1 |
-| 21 | `ffs-btrfs` | Legacy/reference wrapper for btrfs parsing APIs (re-exports `ffs-ondisk::btrfs::*`) | `ffs-ondisk` | 1 |
+| 21 | `ffs-btrfs` | Btrfs tree walking and mutation layer: root/inode/dir/extent-data helpers, chunk/device tree discovery, COW tree updates, delayed refs, snapshot/subvolume metadata, and MVCC-backed transaction manifests; re-exports low-level `ffs-ondisk::btrfs::*` primitives | `ffs-ondisk`, `ffs-types`, `ffs-mvcc`, `asupersync`, `thiserror`, `tracing` | 4-7 |
 
 ---
 
