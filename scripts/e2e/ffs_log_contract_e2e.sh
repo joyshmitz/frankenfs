@@ -49,12 +49,10 @@ cd "$REPO_ROOT"
 source "$(dirname "$0")/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_log_contract}"
-case ",${RCH_ENV_ALLOWLIST:-}," in
-    *",CARGO_TARGET_DIR,"*) ;;
-    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
-esac
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+RCH_CAPTURE_VISIBILITY="${FFS_LOG_CONTRACT_RCH_VISIBILITY:-${RCH_VISIBILITY:-summary}}"
 SELF_CHECK="${FFS_LOG_CONTRACT_SELF_CHECK:-0}"
 SKIP_SELF_CHECK="${FFS_LOG_CONTRACT_SKIP_SELF_CHECK:-0}"
 LOG_ROOT="${REPO_ROOT}/artifacts/e2e"
@@ -65,94 +63,11 @@ SCENARIO_RESULTS=()
 PASS_COUNT=0
 FAIL_COUNT=0
 
-cancel_matching_rch_queue_entry() {
-    local command_text="$*"
-    local queue_json
-    local ids
-    if ! command -v jq >/dev/null 2>&1; then
-        return 0
-    fi
-    queue_json="$("${RCH_BIN:-rch}" queue --json 2>/dev/null || true)"
-    if [[ -z "$queue_json" ]]; then
-        return 0
-    fi
-    ids="$(jq -r --arg cmd "$command_text" '
-        .data.active_builds[]?
-        | select(.project_id | startswith("frankenfs-"))
-        | select(.command == $cmd)
-        | .id
-    ' <<<"$queue_json" || true)"
-    for id in $ids; do
-        if "${RCH_BIN:-rch}" cancel "$id" >/dev/null 2>&1; then
-            echo "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
-        fi
-    done
-}
-
 run_rch_capture() {
     local log_path="$1"
-    local status=0
-    local pid
-    local deadline
-    local remote_exit=""
-    local wait_status
     shift
 
-    : >"$log_path"
-    set +e
-    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
-    pid=$!
-    set -e
-    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
-    while kill -0 "$pid" >/dev/null 2>&1; do
-        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
-        if [[ -n "$remote_exit" ]]; then
-            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
-            if kill -0 "$pid" >/dev/null 2>&1; then
-                echo "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
-                kill -TERM "$pid" >/dev/null 2>&1 || true
-                cancel_matching_rch_queue_entry "$@"
-            fi
-            break
-        fi
-        if ((SECONDS >= deadline)); then
-            echo "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|log=${log_path}"
-            kill -TERM "$pid" >/dev/null 2>&1 || true
-            cancel_matching_rch_queue_entry "$@"
-            status=124
-            break
-        fi
-        sleep 2
-    done
-
-    set +e
-    wait "$pid" >/dev/null 2>&1
-    wait_status=$?
-    set -e
-    if [[ -n "$remote_exit" ]]; then
-        status="$remote_exit"
-    elif [[ $status -eq 0 ]]; then
-        status="$wait_status"
-    fi
-
-    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
-        echo "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
-        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
-        return 99
-    fi
-    if [[ $status -eq 0 ]]; then
-        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
-            echo "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
-            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
-            return 99
-        fi
-        return 0
-    fi
-    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
-        echo "RCH artifact retrieval failed after worker-side success; accepting remote exit=0 evidence from $log_path"
-        return 0
-    fi
-    return "$status"
+    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" e2e_rch_capture "$log_path" "$@"
 }
 
 log_scenario() {
