@@ -44,6 +44,49 @@ jobs:
           df -h .
           echo "::endgroup::"
 
+      - name: Forbidden dependency scan
+        run: |
+          python3 - <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          forbidden = {
+              "tokio",
+              "tokio-stream",
+              "tokio-util",
+              "hyper",
+              "hyper-rustls",
+              "hyper-util",
+              "reqwest",
+              "axum",
+              "tower",
+              "tower-http",
+              "tower-layer",
+              "tower-service",
+              "async-std",
+              "smol",
+          }
+
+          lockfile = Path("Cargo.lock")
+          if not lockfile.exists():
+              print("::error file=Cargo.lock::Cargo.lock is required for dependency scanning")
+              sys.exit(1)
+
+          package_names = set(
+              re.findall(r'^name = "([^"]+)"$', lockfile.read_text(encoding="utf-8"), re.MULTILINE)
+          )
+          found = sorted(package_names & forbidden)
+          if found:
+              print(
+                  "::error title=Forbidden dependency detected::Cargo.lock contains "
+                  f"forbidden async/runtime dependency package(s): {', '.join(found)}"
+              )
+              sys.exit(1)
+
+          print("Forbidden dependency scan passed")
+          PY
+
       - name: Format check
         run: cargo fmt --check
 
