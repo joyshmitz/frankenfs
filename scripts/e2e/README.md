@@ -99,6 +99,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_REPAIR_5PCT_SELF_CHECK=1 ./scripts/e2e/ffs_re
 # Verify the readiness action autopilot RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_READINESS_ACTION_AUTOPILOT_SELF_CHECK=1 ./scripts/e2e/ffs_readiness_action_autopilot_e2e.sh
 
+# Verify the readiness dashboard RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_READINESS_DASHBOARD_SELF_CHECK=1 ./scripts/e2e/ffs_readiness_dashboard_e2e.sh
+
 # Verify the operational readiness report RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_OPERATIONAL_READINESS_REPORT_SELF_CHECK=1 ./scripts/e2e/ffs_operational_readiness_report_e2e.sh
 

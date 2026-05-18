@@ -18,6 +18,8 @@ export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGE
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-4}"
 RCH_CAPTURE_VISIBILITY="${FFS_READINESS_DASHBOARD_RCH_VISIBILITY:-summary}"
+SELF_CHECK="${FFS_READINESS_DASHBOARD_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_READINESS_DASHBOARD_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -106,6 +108,270 @@ run_rch_capture() {
     return "$status"
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_READINESS_DASHBOARD_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        echo "Remote command finished: exit=0" >&2
+        ;;
+    missing_remote_evidence)
+        ;;
+    *)
+        echo "unknown readiness dashboard fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+case "$command_text" in
+    *"cargo run --quiet -p ffs-harness -- readiness-dashboard"*"--format markdown"*)
+        cat <<'MD'
+# FrankenFS Operator Readiness Dashboard
+
+- release_gate:xfstests.baseline hidden validator=release_gate_report.json bead=bd-rchk3.3
+- permissioned:swarm-large-host handoff_only validator=permissioned_campaign_report.json
+- readiness_lab:readiness_lab_host_simulation:dashboard-host-simulation advisory_only validator=readiness_lab_host_simulation.json
+- Tracker Follow-Up Beads: bd-rchk3.3 bd-4v16z.10
+MD
+        ;;
+    *"cargo run --quiet -p ffs-harness -- readiness-dashboard"*)
+        cat <<'JSON'
+{
+  "claims": [
+    {
+      "claim_id": "release_gate:mount.rw.ext4",
+      "claim_state": "validated",
+      "evidence_basis": [
+        "release_gate"
+      ],
+      "remediation_bead": "bd-4v16z.10",
+      "validator_report": "release_gate_report.json"
+    },
+    {
+      "claim_id": "release_gate:xfstests.baseline",
+      "claim_state": "hidden",
+      "controlling_lane": "xfstests",
+      "evidence_basis": [
+        "release_gate"
+      ],
+      "next_safe_command": "br show bd-rchk3.3 --no-db --json",
+      "remediation_bead": "bd-rchk3.3",
+      "validator_report": "release_gate_report.json"
+    },
+    {
+      "claim_id": "permissioned:swarm-large-host",
+      "claim_state": "handoff_only",
+      "evidence_basis": [
+        "permissioned_campaign"
+      ],
+      "remediation_bead": "bd-4v16z.10",
+      "validator_report": "permissioned_campaign_report.json"
+    },
+    {
+      "claim_id": "proof_bundle:dashboard-proof-bundle:missing:xfstests",
+      "claim_state": "blocked",
+      "evidence_basis": [
+        "proof_bundle"
+      ],
+      "remediation_bead": "bd-4v16z.10",
+      "validator_report": "proof_bundle_report.json"
+    },
+    {
+      "claim_id": "operational_evidence:swarm_tail_latency:tail_latency",
+      "claim_state": "validated",
+      "evidence_basis": [
+        "operational_evidence"
+      ],
+      "remediation_bead": "bd-4v16z.10",
+      "validator_report": "operational_evidence_index.json"
+    },
+    {
+      "claim_id": "readiness_lab:readiness_lab_host_simulation:dashboard-host-simulation",
+      "claim_state": "advisory_only",
+      "evidence_basis": [
+        "product_evidence_claim:none"
+      ],
+      "remediation_bead": "bd-919xg",
+      "validator_report": "readiness_lab_host_simulation.json"
+    },
+    {
+      "claim_id": "readiness_lab:readiness_lab_rch_schedule:dashboard-rch-plan",
+      "claim_state": "advisory_only",
+      "evidence_basis": [
+        "product_evidence_claim:none"
+      ],
+      "remediation_bead": "bd-919xg",
+      "validator_report": "readiness_lab_rch_schedule.json"
+    },
+    {
+      "claim_id": "readiness_lab:readiness_lab_truth_graph:dashboard-truth-graph",
+      "claim_state": "advisory_only",
+      "evidence_basis": [
+        "product_evidence_claim:none"
+      ],
+      "remediation_bead": "bd-919xg",
+      "validator_report": "readiness_lab_truth_graph.json"
+    },
+    {
+      "claim_id": "readiness_lab:readiness_lab_replay:dashboard-numa-p99",
+      "claim_state": "advisory_only",
+      "evidence_basis": [
+        "product_evidence_claim:none"
+      ],
+      "remediation_bead": "bd-919xg",
+      "validator_report": "readiness_lab_numa_p99_replay.json"
+    }
+  ],
+  "dashboard_id": "frankenfs-readiness-dashboard:v1",
+  "recommendations": [
+    {
+      "claim_id": "release_gate:xfstests.baseline",
+      "validator_report": "release_gate_report.json"
+    },
+    {
+      "claim_id": "readiness_lab:readiness_lab_host_simulation:dashboard-host-simulation",
+      "validator_report": "readiness_lab_host_simulation.json"
+    },
+    {
+      "bead_id": "bd-4v16z.10",
+      "claim_id": "proof_bundle:dashboard-proof-bundle:missing:xfstests"
+    }
+  ],
+  "release_ready": false,
+  "source_report_count": 8,
+  "tracker_follow_up_beads": [
+    {
+      "issue_id": "bd-4v16z.10"
+    },
+    {
+      "issue_id": "bd-rchk3.3"
+    }
+  ]
+}
+JSON
+        ;;
+    *"cargo test -p ffs-harness --lib readiness_dashboard"*)
+        printf '%s\n' \
+            "running 5 tests" \
+            "test readiness_dashboard::tests::fixture_claim_states ... ok" \
+            "test readiness_dashboard::tests::fixture_advisory_links ... ok" \
+            "test readiness_dashboard::tests::fixture_tracker_followups ... ok" \
+            "test readiness_dashboard::tests::fixture_markdown_markers ... ok" \
+            "test readiness_dashboard::tests::fixture_release_not_ready ... ok" \
+            "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        ;;
+    *)
+        echo "unexpected fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/readiness_dashboard_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_READINESS_DASHBOARD_SELF_CHECK=0 \
+        FFS_READINESS_DASHBOARD_SKIP_SELF_CHECK=1 \
+        FFS_READINESS_DASHBOARD_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_readiness_dashboard_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic readiness dashboard wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-readiness-dashboard-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "readiness_dashboard_cli_wired" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "readiness_dashboard_fixtures_written" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "readiness_dashboard_json" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "readiness_dashboard_markdown" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "readiness_dashboard_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "readiness_dashboard_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "readiness_dashboard_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "readiness_dashboard_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "readiness_dashboard_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "readiness_dashboard_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "readiness_dashboard_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
 extract_dashboard_json() {
     local raw_path="$1"
     local report_path="$2"
@@ -171,6 +437,12 @@ PY
 }
 
 e2e_init "ffs_readiness_dashboard"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 FIXTURE_DIR="$REPO_ROOT/artifacts/rch_e2e/$(basename "$E2E_LOG_DIR")/readiness_dashboard_fixture"
 REPORT_DIR="$E2E_LOG_DIR/readiness_dashboard_reports"
