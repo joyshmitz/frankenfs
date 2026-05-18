@@ -11,6 +11,9 @@
 # 7. Pipeline refresh tests pass
 # 8. Evidence SymbolRefreshDetail alignment
 # 9. Churn/staleness budget tests pass
+# 10. Fixture mode proves cataloged markers without cargo
+# 11. Fixture mode proves local fallback rejection
+# 12. Fixture mode proves missing remote evidence rejection
 #
 # Usage: ./scripts/e2e/ffs_refresh_policy_e2e.sh
 #
@@ -36,6 +39,8 @@ case ",${RCH_ENV_ALLOWLIST:-}," in
 esac
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_REFRESH_POLICY_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_REFRESH_POLICY_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -125,7 +130,160 @@ run_rch_capture() {
     return "$status"
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_REFRESH_POLICY_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        echo "Remote command finished: exit=0" >&2
+        ;;
+    missing_remote_evidence)
+        ;;
+    *)
+        echo "unknown refresh policy fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+case "$command_text" in
+    *"cargo test -p ffs-repair --lib -- pipeline::tests"*)
+        echo "running 45 tests"
+        for i in $(seq -w 1 45); do
+            echo "test pipeline::tests::refresh_policy_fixture_case_${i} ... ok"
+        done
+        ;;
+    *"cargo test -p ffs-repair --lib -- churn_writes eager_policy lazy_policy staleness_timeout"*)
+        printf '%s\n' \
+            "running 4 tests" \
+            "test pipeline::tests::churn_writes_refresh_budget ... ok" \
+            "test pipeline::tests::eager_policy_refreshes_immediately ... ok" \
+            "test pipeline::tests::lazy_policy_defers_refresh ... ok" \
+            "test pipeline::tests::staleness_timeout_triggers_refresh ... ok"
+        ;;
+    *)
+        echo "unexpected fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/refresh_policy_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_REFRESH_POLICY_SELF_CHECK=0 \
+        FFS_REFRESH_POLICY_SKIP_SELF_CHECK=1 \
+        FFS_REFRESH_POLICY_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_refresh_policy_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic refresh policy wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-refresh-policy-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "refresh_policy_variants" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "refresh_policy_modes" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "refresh_policy_group_state" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "refresh_policy_telemetry_types" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "refresh_policy_staleness_timeout" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "refresh_policy_structured_logging" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "refresh_policy_pipeline_tests" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "refresh_policy_evidence_alignment" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "refresh_policy_churn_policy_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "refresh_policy_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "refresh_policy_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "refresh_policy_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "refresh_policy_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "refresh_policy_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "refresh_policy_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
 e2e_init "ffs_refresh_policy"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
+
 e2e_print_env
 
 PIPELINE_SRC="crates/ffs-repair/src/pipeline.rs"
@@ -161,9 +319,9 @@ for mode in "Recovery" "EagerWrite" "LazyScrub" "AdaptiveEagerWrite" "AdaptiveLa
 done
 
 if [[ $MODES_FOUND -eq 6 ]]; then
-    scenario_result "refresh_modes" "PASS" "All 6 RefreshMode trigger modes present"
+    scenario_result "refresh_policy_modes" "PASS" "All 6 RefreshMode trigger modes present"
 else
-    scenario_result "refresh_modes" "FAIL" "Only ${MODES_FOUND}/6 modes found"
+    scenario_result "refresh_policy_modes" "FAIL" "Only ${MODES_FOUND}/6 modes found"
 fi
 
 #######################################
@@ -179,9 +337,9 @@ for field in "dirty: bool" "dirty_since: Option<Instant>" "policy: RefreshPolicy
 done
 
 if [[ $STATE_FIELDS -eq 4 ]]; then
-    scenario_result "group_refresh_state" "PASS" "All 4 state machine fields present"
+    scenario_result "refresh_policy_group_state" "PASS" "All 4 state machine fields present"
 else
-    scenario_result "group_refresh_state" "FAIL" "Only ${STATE_FIELDS}/4 state fields found"
+    scenario_result "refresh_policy_group_state" "FAIL" "Only ${STATE_FIELDS}/4 state fields found"
 fi
 
 #######################################
@@ -197,9 +355,9 @@ for pattern in "pub struct RefreshTelemetry" "pub struct GroupRefreshSummary" "p
 done
 
 if [[ $TELEMETRY_FOUND -eq 3 ]]; then
-    scenario_result "telemetry_types" "PASS" "RefreshTelemetry, GroupRefreshSummary, and accessor present"
+    scenario_result "refresh_policy_telemetry_types" "PASS" "RefreshTelemetry, GroupRefreshSummary, and accessor present"
 else
-    scenario_result "telemetry_types" "FAIL" "Only ${TELEMETRY_FOUND}/3 telemetry components found"
+    scenario_result "refresh_policy_telemetry_types" "FAIL" "Only ${TELEMETRY_FOUND}/3 telemetry components found"
 fi
 
 #######################################
@@ -215,9 +373,9 @@ for pattern in "dirty_age >= max_staleness" "StalenessTimeout" "refresh_stalenes
 done
 
 if [[ $TIMEOUT_FOUND -ge 3 ]]; then
-    scenario_result "staleness_timeout" "PASS" "Staleness timeout detection logic present"
+    scenario_result "refresh_policy_staleness_timeout" "PASS" "Staleness timeout detection logic present"
 else
-    scenario_result "staleness_timeout" "FAIL" "Only ${TIMEOUT_FOUND}/3 timeout patterns found"
+    scenario_result "refresh_policy_staleness_timeout" "FAIL" "Only ${TIMEOUT_FOUND}/3 timeout patterns found"
 fi
 
 #######################################
@@ -233,9 +391,9 @@ for marker in "refresh_policy_evaluated" "refresh_staleness_timeout_triggered" "
 done
 
 if [[ $LOG_MARKERS_FOUND -ge 6 ]]; then
-    scenario_result "structured_logging" "PASS" "Structured logging: ${LOG_MARKERS_FOUND}/7 markers present"
+    scenario_result "refresh_policy_structured_logging" "PASS" "Structured logging: ${LOG_MARKERS_FOUND}/7 markers present"
 else
-    scenario_result "structured_logging" "FAIL" "Only ${LOG_MARKERS_FOUND}/7 structured log markers found"
+    scenario_result "refresh_policy_structured_logging" "FAIL" "Only ${LOG_MARKERS_FOUND}/7 structured log markers found"
 fi
 
 #######################################
@@ -247,12 +405,12 @@ TEST_LOG="$E2E_LOG_DIR/pipeline_refresh_unit_tests.log"
 if run_rch_capture "$TEST_LOG" cargo test -p ffs-repair --lib -- pipeline::tests; then
     TESTS_RUN=$(grep -c "test pipeline::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 45 ]]; then
-        scenario_result "pipeline_tests" "PASS" "Pipeline tests passed (${TESTS_RUN} tests)"
+        scenario_result "refresh_policy_pipeline_tests" "PASS" "Pipeline tests passed (${TESTS_RUN} tests)"
     else
-        scenario_result "pipeline_tests" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 45)"
+        scenario_result "refresh_policy_pipeline_tests" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 45)"
     fi
 else
-    scenario_result "pipeline_tests" "FAIL" "Pipeline tests failed"
+    scenario_result "refresh_policy_pipeline_tests" "FAIL" "Pipeline tests failed"
     tail -40 "$TEST_LOG" | while IFS= read -r line; do e2e_log "  $line"; done
 fi
 
@@ -270,9 +428,9 @@ for field in "previous_generation" "new_generation" "symbols_generated"; do
 done
 
 if [[ $ALIGNED -eq 3 ]]; then
-    scenario_result "evidence_alignment" "PASS" "All 3 SymbolRefreshDetail fields present"
+    scenario_result "refresh_policy_evidence_alignment" "PASS" "All 3 SymbolRefreshDetail fields present"
 else
-    scenario_result "evidence_alignment" "FAIL" "Only ${ALIGNED}/3 fields found"
+    scenario_result "refresh_policy_evidence_alignment" "FAIL" "Only ${ALIGNED}/3 fields found"
 fi
 
 #######################################
@@ -284,12 +442,12 @@ TEST_LOG="$E2E_LOG_DIR/churn_policy_unit_tests.log"
 if run_rch_capture "$TEST_LOG" cargo test -p ffs-repair --lib -- churn_writes eager_policy lazy_policy staleness_timeout; then
     TESTS_RUN=$(grep -c "test pipeline::tests::" "$TEST_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 4 ]]; then
-        scenario_result "churn_policy_tests" "PASS" "Churn/policy tests passed (${TESTS_RUN} tests)"
+        scenario_result "refresh_policy_churn_policy_tests" "PASS" "Churn/policy tests passed (${TESTS_RUN} tests)"
     else
-        scenario_result "churn_policy_tests" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 4)"
+        scenario_result "refresh_policy_churn_policy_tests" "FAIL" "Too few tests: ${TESTS_RUN} (expected >= 4)"
     fi
 else
-    scenario_result "churn_policy_tests" "FAIL" "Churn/policy tests failed"
+    scenario_result "refresh_policy_churn_policy_tests" "FAIL" "Churn/policy tests failed"
     tail -40 "$TEST_LOG" | while IFS= read -r line; do e2e_log "  $line"; done
 fi
 
