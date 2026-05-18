@@ -390,7 +390,8 @@ fi
 e2e_print_env
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_open_ended_scanner}"
-export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR
+RCH_CAPTURE_VISIBILITY="${FFS_OPEN_ENDED_INVENTORY_SCANNER_RCH_VISIBILITY:-${RCH_VISIBILITY:-summary}}"
 
 FIXTURE_DIR="$REPO_ROOT/tests/open-ended-inventory"
 POSITIVE_FIXTURE="$FIXTURE_DIR/scanner_fixture_positive.md"
@@ -417,7 +418,7 @@ HARNESS_CMD=(env "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" cargo run --quiet -p ffs-h
 run_harness() {
     local log_path="$1"
     shift
-    RCH_VISIBILITY=summary \
+    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" \
         RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-2}" \
         e2e_rch_capture "$log_path" "${HARNESS_CMD[@]}" "$@"
 }
@@ -808,7 +809,7 @@ else
 fi
 
 e2e_step "Scenario 8: source-scope dirty workspace proof runs through RCH"
-if RCH_VISIBILITY=summary \
+if RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" \
     RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-2}" \
     e2e_rch_capture "$SOURCE_SCOPE_DIRTY_UNIT_LOG" \
     env "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" \
