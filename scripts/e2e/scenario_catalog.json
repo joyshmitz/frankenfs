@@ -6823,7 +6823,8 @@
       "script": "scripts/e2e/ffs_operational_readiness_report_e2e.sh",
       "required_categories": [
         "happy",
-        "edge"
+        "edge",
+        "error"
       ],
       "scenarios": [
         {
@@ -6855,6 +6856,24 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=readiness_report_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "readiness_report_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_report_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "readiness_report_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_report_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "readiness_report_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=readiness_report_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },

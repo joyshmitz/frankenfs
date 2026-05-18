@@ -18,6 +18,8 @@ export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGE
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-420}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 RCH_CAPTURE_VISIBILITY="${FFS_OPERATIONAL_READINESS_REPORT_RCH_VISIBILITY:-summary}"
+SELF_CHECK="${FFS_OPERATIONAL_READINESS_REPORT_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_OPERATIONAL_READINESS_REPORT_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -119,6 +121,236 @@ run_rch_capture() {
     return "$status"
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_OPERATIONAL_READINESS_REPORT_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        echo "Remote command finished: exit=0" >&2
+        ;;
+    missing_remote_evidence)
+        ;;
+    *)
+        echo "unknown operational readiness report fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+case "$command_text" in
+    *"cargo run --quiet -p ffs-harness -- operational-readiness-report"*"--format markdown"*)
+        cat <<'MD'
+output_path=<stdout>
+# FrankenFS Operational Readiness
+
+- artifact `mounted/ext4_rw.json`
+- event `event_mounted_ext4_rw`
+- Readiness event envelope: version=1
+- Correlation graph: event_nodes=9 parent_edges=9 orphan_parent_edges=0 aggregate_events=0
+- Diagnostics: duplicate_scenarios=1 stale_git_shas=1 stale_artifacts=0 invalid_timestamps=0 missing_logs=0
+- Contract: failed=true missing_workstreams=0 violations=0
+MD
+        ;;
+    *"cargo run --quiet -p ffs-harness -- operational-readiness-report"*)
+        cat <<'JSON'
+envelope_version=1
+event_count=9
+lane_ids=xfstests,fuse_lane,mounted_scenario_matrix,repair_policy,writeback_cache,fuzz_smoke,performance,proof_bundle,release_gate
+rejected_event_diagnostics=0
+correlation_graph=event_nodes:9 parent_edges:9 orphan_parent_edges:0 aggregate_events:0
+reproduction_commands=10
+output_path=<stdout>
+{
+  "contract_failed": true,
+  "correlation_graph_summary": {
+    "event_nodes": 9,
+    "orphan_parent_edges": 0,
+    "parent_edges": 9
+  },
+  "duplicate_scenario_ids": [
+    "fuse_capability_probe"
+  ],
+  "missing_log_paths": [],
+  "readiness_event_count": 9,
+  "readiness_event_envelope_version": 1,
+  "readiness_event_lane_ids": [
+    "mounted_scenario_matrix"
+  ],
+  "required_workstreams_missing": [],
+  "scenarios": [
+    {
+      "parent_correlation_ids": [
+        "report_fixture_operational"
+      ],
+      "readiness_event_ids": [
+        "event_mounted_ext4_rw"
+      ],
+      "reproduction_command": "ffs mounted ext4 rw",
+      "scenario_id": "mounted_ext4_rw",
+      "taxonomy_class": "product_success"
+    },
+    {
+      "reproduction_command": "ffs repair policy refusal",
+      "scenario_id": "repair_policy_refusal",
+      "taxonomy_class": "product_failure"
+    },
+    {
+      "reproduction_command": "ffs fuse capability probe",
+      "scenario_id": "fuse_capability_probe",
+      "taxonomy_class": "host_capability_skip"
+    },
+    {
+      "reproduction_command": "ffs proof bundle stale",
+      "scenario_id": "proof_bundle_stale",
+      "taxonomy_class": "stale_artifact"
+    },
+    {
+      "reproduction_command": "ffs release gate unsupported",
+      "scenario_id": "release_gate_unsupported",
+      "taxonomy_class": "unsupported_by_scope"
+    }
+  ],
+  "stale_git_shas": [
+    "legacy-old"
+  ],
+  "totals": {
+    "environment_blockers": 3,
+    "product_failures": 2
+  },
+  "workstreams": {
+    "fuse_lane": {},
+    "fuzz_smoke": {},
+    "mounted_scenario_matrix": {},
+    "performance": {},
+    "proof_bundle": {},
+    "release_gate": {},
+    "repair_policy": {},
+    "writeback_cache": {},
+    "xfstests": {}
+  }
+}
+JSON
+        ;;
+    *"cargo test -p ffs-harness --lib operational_readiness_report"*)
+        printf '%s\n' \
+            "running 4 tests" \
+            "test operational_readiness_report::tests::fixture_json_contract ... ok" \
+            "test operational_readiness_report::tests::fixture_markdown_contract ... ok" \
+            "test operational_readiness_report::tests::fixture_taxonomy_contract ... ok" \
+            "test operational_readiness_report::tests::fixture_correlation_contract ... ok" \
+            "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        ;;
+    *)
+        echo "unexpected fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/readiness_report_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_OPERATIONAL_READINESS_REPORT_SELF_CHECK=0 \
+        FFS_OPERATIONAL_READINESS_REPORT_SKIP_SELF_CHECK=1 \
+        FFS_OPERATIONAL_READINESS_REPORT_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_operational_readiness_report_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic operational readiness report wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-operational-readiness-report-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "readiness_report_wired" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "readiness_report_fixture" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "readiness_report_json" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "readiness_report_markdown" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "readiness_report_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "readiness_report_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "readiness_report_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "readiness_report_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "readiness_report_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "readiness_report_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "readiness_report_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
 extract_report_json() {
     local raw_path="$1"
     local report_path="$2"
@@ -181,6 +413,13 @@ PY
 }
 
 e2e_init "ffs_operational_readiness_report"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
+
 E2E_CLEANUP_ITEMS=()
 
 RCH_SYNC_DIR="$REPO_ROOT/artifacts/rch_e2e/$(basename "$E2E_LOG_DIR")"
