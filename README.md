@@ -2490,7 +2490,7 @@ frankenfs/
 ├── docs/                       Design docs, manifests, runbooks, reports
 ├── security/                   adversarial_image_threat_model.json
 ├── vendor/                     vendor/fuser pinned to ABI 7.40 via [patch.crates-io]
-├── .beads/                     issues.jsonl (raw rows: 2,915 closed + 75 open + 1 deferred)
+├── .beads/                     issues.jsonl (source-aware tracker state; counts move with each close)
 ├── beads_compliance_audit/     Cross-pass bead-completion audit artifacts
 └── ci-artifacts/               CI run outputs
 ```
