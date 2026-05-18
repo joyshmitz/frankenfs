@@ -19,6 +19,9 @@ case ",${RCH_ENV_ALLOWLIST:-}," in
     *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
 esac
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_PERFORMANCE_DELTA_CLOSEOUT_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_PERFORMANCE_DELTA_CLOSEOUT_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -40,7 +43,7 @@ scenario_result() {
 run_rch_capture() {
     local log_path="$1"
     shift
-    e2e_rch_capture "$log_path" "$@"
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" e2e_rch_capture "$log_path" "$@"
 }
 
 log_failure_tail() {
@@ -74,8 +77,413 @@ run_closeout_unit_tests_capture() {
     run_rch_capture "$log_path" cargo test -p ffs-harness performance_delta_closeout -- --nocapture
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_PERFORMANCE_DELTA_CLOSEOUT_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected performance-delta fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)"
+        exit 1
+        ;;
+    missing_remote_evidence)
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0"
+        ;;
+    *)
+        echo "unknown performance-delta fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+finish_success() {
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=0"
+    fi
+    exit 0
+}
+
+finish_expected_failure() {
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "[RCH] remote worker=fixture exit=1"
+        echo "Remote command finished: exit=1"
+    fi
+    exit 1
+}
+
+emit_report_json() {
+    cat <<'JSON'
+{
+  "schema_version": 1,
+  "closeout_id": "fixture-performance-delta-closeout",
+  "valid": true,
+  "errors": [],
+  "row_count": 11,
+  "rows_requiring_follow_up": 8,
+  "rows": [
+    {
+      "operation": "mount_cold",
+      "classification": "regression",
+      "follow_up_bead": "bd-rchk5.5",
+      "follow_up_present": true
+    },
+    {
+      "operation": "mount_warm",
+      "classification": "regression",
+      "follow_up_bead": "bd-rchk5.6",
+      "follow_up_present": true
+    },
+    {
+      "operation": "mount_recovery",
+      "classification": "regression",
+      "follow_up_bead": "bd-rchk5.7",
+      "follow_up_present": true
+    },
+    {
+      "operation": "block_cache_sharded_arc_concurrent_hot_read_64threads",
+      "classification": "missing_reference",
+      "follow_up_bead": "bd-rchk5.8",
+      "release_claim_state": "reference_limited_experimental",
+      "raw_logs": "artifacts/rch/fixture/arc.log",
+      "comparison_target_rationale": "reference artifact absent in fixture",
+      "release_wording": "experimental reference-limited claim only",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout"
+    },
+    {
+      "operation": "block_cache_sharded_s3fifo_concurrent_hot_read_64threads",
+      "classification": "missing_reference",
+      "follow_up_bead": "bd-rchk5.8",
+      "release_claim_state": "reference_limited_experimental",
+      "raw_logs": "artifacts/rch/fixture/s3fifo.log",
+      "comparison_target_rationale": "reference artifact absent in fixture",
+      "release_wording": "experimental reference-limited claim only",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout"
+    },
+    {
+      "operation": "cli_metadata_parse_conformance",
+      "classification": "missing_reference",
+      "follow_up_bead": "bd-rchk5.8",
+      "release_claim_state": "reference_limited_experimental",
+      "raw_logs": "artifacts/rch/fixture/cli.log",
+      "comparison_target_rationale": "reference artifact absent in fixture",
+      "release_wording": "experimental reference-limited claim only",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout"
+    },
+    {
+      "operation": "repair_symbol_refresh_staleness_latency",
+      "classification": "missing_reference",
+      "follow_up_bead": "bd-rchk5.8",
+      "release_claim_state": "reference_limited_experimental",
+      "raw_logs": "artifacts/rch/fixture/repair.log",
+      "comparison_target_rationale": "reference artifact absent in fixture",
+      "release_wording": "experimental reference-limited claim only",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout"
+    },
+    {
+      "operation": "wal_commit_4k_sync",
+      "classification": "missing_reference",
+      "follow_up_bead": "bd-rchk5.8",
+      "release_claim_state": "reference_limited_experimental",
+      "raw_logs": "artifacts/rch/fixture/wal.log",
+      "comparison_target_rationale": "reference artifact absent in fixture",
+      "release_wording": "experimental reference-limited claim only",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout"
+    },
+    {
+      "operation": "capability_large_host_swarm",
+      "classification": "pending_capability",
+      "follow_up_bead": "bd-9vzzk",
+      "follow_up_present": true
+    },
+    {
+      "operation": "long_campaign_writeback_cache_smoke",
+      "classification": "unmeasured",
+      "follow_up_bead": "bd-t21em",
+      "follow_up_present": true
+    },
+    {
+      "operation": "extent_lookup_hot_path",
+      "classification": "improved",
+      "follow_up_present": false
+    }
+  ],
+  "follow_up_payloads": [
+    {
+      "follow_up_bead": "bd-rchk5.5",
+      "classification": "regression",
+      "workload_id": "mount_cold",
+      "command_template": "cargo bench -p ffs-harness mount_cold",
+      "profile": "release-perf",
+      "environment_manifest_id": "fixture-env",
+      "baseline_artifact_hash": "fixture-baseline-mount-cold",
+      "current_artifact_hash": "fixture-current-mount-cold",
+      "observed_value": 12.0,
+      "threshold_value": 5.0,
+      "unit": "p99_delta_percent",
+      "suspected_subsystem": "mount",
+      "raw_logs": "artifacts/rch/fixture/mount_cold.log",
+      "validation_command": "cargo bench -p ffs-harness mount_cold"
+    },
+    {
+      "follow_up_bead": "bd-rchk5.6",
+      "classification": "regression",
+      "workload_id": "mount_warm",
+      "command_template": "cargo bench -p ffs-harness mount_warm",
+      "profile": "release-perf",
+      "environment_manifest_id": "fixture-env",
+      "baseline_artifact_hash": "fixture-baseline-mount-warm",
+      "current_artifact_hash": "fixture-current-mount-warm",
+      "observed_value": 10.0,
+      "threshold_value": 5.0,
+      "unit": "p99_delta_percent",
+      "suspected_subsystem": "mount",
+      "raw_logs": "artifacts/rch/fixture/mount_warm.log",
+      "validation_command": "cargo bench -p ffs-harness mount_warm"
+    },
+    {
+      "follow_up_bead": "bd-rchk5.7",
+      "classification": "regression",
+      "workload_id": "mount_recovery",
+      "command_template": "cargo bench -p ffs-harness mount_recovery",
+      "profile": "release-perf",
+      "environment_manifest_id": "fixture-env",
+      "baseline_artifact_hash": "fixture-baseline-mount-recovery",
+      "current_artifact_hash": "fixture-current-mount-recovery",
+      "observed_value": 9.0,
+      "threshold_value": 5.0,
+      "unit": "p99_delta_percent",
+      "suspected_subsystem": "mount",
+      "raw_logs": "artifacts/rch/fixture/mount_recovery.log",
+      "validation_command": "cargo bench -p ffs-harness mount_recovery"
+    },
+    {
+      "follow_up_bead": "bd-rchk5.8",
+      "classification": "missing_reference",
+      "workload_id": "block_cache_sharded_arc_concurrent_hot_read_64threads",
+      "command_template": "cargo bench -p ffs-harness block_cache_arc",
+      "profile": "release-perf",
+      "environment_manifest_id": "fixture-env",
+      "baseline_artifact_hash": "fixture-missing-reference-arc",
+      "current_artifact_hash": "fixture-current-arc",
+      "observed_value": 0.0,
+      "threshold_value": 0.0,
+      "unit": "reference_required",
+      "suspected_subsystem": "block_cache",
+      "raw_logs": "artifacts/rch/fixture/arc.log",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout"
+    },
+    {
+      "follow_up_bead": "bd-rchk5.8",
+      "classification": "missing_reference",
+      "workload_id": "block_cache_sharded_s3fifo_concurrent_hot_read_64threads",
+      "command_template": "cargo bench -p ffs-harness block_cache_s3fifo",
+      "profile": "release-perf",
+      "environment_manifest_id": "fixture-env",
+      "baseline_artifact_hash": "fixture-missing-reference-s3fifo",
+      "current_artifact_hash": "fixture-current-s3fifo",
+      "observed_value": 0.0,
+      "threshold_value": 0.0,
+      "unit": "reference_required",
+      "suspected_subsystem": "block_cache",
+      "raw_logs": "artifacts/rch/fixture/s3fifo.log",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout"
+    },
+    {
+      "follow_up_bead": "bd-rchk5.8",
+      "classification": "missing_reference",
+      "workload_id": "cli_metadata_parse_conformance",
+      "command_template": "cargo bench -p ffs-harness cli_metadata",
+      "profile": "release-perf",
+      "environment_manifest_id": "fixture-env",
+      "baseline_artifact_hash": "fixture-missing-reference-cli",
+      "current_artifact_hash": "fixture-current-cli",
+      "observed_value": 0.0,
+      "threshold_value": 0.0,
+      "unit": "reference_required",
+      "suspected_subsystem": "cli",
+      "raw_logs": "artifacts/rch/fixture/cli.log",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout"
+    },
+    {
+      "follow_up_bead": "bd-rchk5.8",
+      "classification": "missing_reference",
+      "workload_id": "repair_symbol_refresh_staleness_latency",
+      "command_template": "cargo bench -p ffs-harness repair_symbol_refresh",
+      "profile": "release-perf",
+      "environment_manifest_id": "fixture-env",
+      "baseline_artifact_hash": "fixture-missing-reference-repair",
+      "current_artifact_hash": "fixture-current-repair",
+      "observed_value": 0.0,
+      "threshold_value": 0.0,
+      "unit": "reference_required",
+      "suspected_subsystem": "repair",
+      "raw_logs": "artifacts/rch/fixture/repair.log",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout"
+    },
+    {
+      "follow_up_bead": "bd-rchk5.8",
+      "classification": "missing_reference",
+      "workload_id": "wal_commit_4k_sync",
+      "command_template": "cargo bench -p ffs-harness wal_commit_4k_sync",
+      "profile": "release-perf",
+      "environment_manifest_id": "fixture-env",
+      "baseline_artifact_hash": "fixture-missing-reference-wal",
+      "current_artifact_hash": "fixture-current-wal",
+      "observed_value": 0.0,
+      "threshold_value": 0.0,
+      "unit": "reference_required",
+      "suspected_subsystem": "wal",
+      "raw_logs": "artifacts/rch/fixture/wal.log",
+      "validation_command": "cargo run -p ffs-harness -- performance-delta-closeout"
+    }
+  ]
+}
+JSON
+}
+
+emit_report_markdown() {
+    cat <<'MD'
+# Performance Delta Closeout
+
+Fixture summary with follow-up beads bd-rchk5.5, bd-rchk5.6, bd-rchk5.7, bd-rchk5.8, bd-9vzzk, and bd-t21em.
+MD
+}
+
+case "$command_text" in
+    *"performance-delta-closeout"*issues_missing_mount_cold_followup*)
+        echo "performance delta closeout validation failed: missing follow-up bead"
+        finish_expected_failure
+        ;;
+    *"performance-delta-closeout"*--format*markdown*)
+        emit_report_markdown
+        finish_success
+        ;;
+    *"performance-delta-closeout"*)
+        emit_report_json
+        finish_success
+        ;;
+    "cargo test -p ffs-harness performance_delta_closeout -- --nocapture")
+        echo "test performance_delta_closeout::tests::fixture_contract ... ok"
+        echo "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        finish_success
+        ;;
+    *)
+        echo "unexpected performance-delta fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/performance_delta_closeout_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_PERFORMANCE_DELTA_CLOSEOUT_SELF_CHECK=0 \
+        FFS_PERFORMANCE_DELTA_CLOSEOUT_SKIP_SELF_CHECK=1 \
+        FFS_PERFORMANCE_DELTA_CLOSEOUT_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_performance_delta_closeout_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic performance-delta closeout wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-performance-delta-closeout-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .invalid_scenario_marker_count == 0
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "performance_delta_closeout_cli_wired" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "performance_delta_closeout_validates" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "performance_delta_closeout_followups" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "performance_delta_closeout_missing_followup_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "performance_delta_closeout_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "performance_delta_closeout_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "performance_delta_closeout_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null \
+        && grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        scenario_result "performance_delta_closeout_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "performance_delta_closeout_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "performance_delta_closeout_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "performance_delta_closeout_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
 e2e_init "ffs_performance_delta_closeout"
 e2e_print_env
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 CONFIG_JSON="$REPO_ROOT/benchmarks/performance_delta_closeout.json"
 REPORT_JSON="$E2E_LOG_DIR/performance_delta_closeout.json"

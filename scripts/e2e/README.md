@@ -174,6 +174,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_WAL_WRITER_SELF_CHECK=1 ./scripts/e2e/ffs_wal
 # Verify the perf comparison RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_PERF_COMPARISON_SELF_CHECK=1 ./scripts/e2e/ffs_perf_comparison_e2e.sh
 
+# Verify the performance delta closeout RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_PERFORMANCE_DELTA_CLOSEOUT_SELF_CHECK=1 ./scripts/e2e/ffs_performance_delta_closeout_e2e.sh
+
 # Verify the benchmark taxonomy RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_BENCHMARK_TAXONOMY_SELF_CHECK=1 ./scripts/e2e/ffs_benchmark_taxonomy_e2e.sh
 
