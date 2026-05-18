@@ -137,7 +137,9 @@ Golden files in `conformance/golden/` are generated from real filesystem images:
 
 Binary `.ext4` images produced by capture scripts are regenerated locally and
 ignored by `conformance/golden/.gitignore`; committed checksum manifests cover
-only committed JSON and text golden artifacts.
+only committed JSON and text golden artifacts. Source-scope accounting tracks
+those images under `conformance_generated_image_artifacts` as regenerated-local
+evidence, not as checksum-covered `conformance_fixture_artifacts`.
 
 ## Checksum Verification
 

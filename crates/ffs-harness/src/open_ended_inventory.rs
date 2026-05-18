@@ -364,7 +364,7 @@ pub const DEFAULT_SOURCE_SCOPE_MANIFEST_PATH: &str =
 const DEFAULT_SOURCE_SCOPE_MANIFEST_JSON: &str =
     include_str!("../../../tests/source-scope-manifest/source_scope_manifest.json");
 
-const REQUIRED_SOURCE_FAMILIES: [&str; 24] = [
+const REQUIRED_SOURCE_FAMILIES: [&str; 25] = [
     "readme_status_docs",
     "agent_workflow_docs",
     "feature_parity_doc",
@@ -372,6 +372,7 @@ const REQUIRED_SOURCE_FAMILIES: [&str; 24] = [
     "architecture_design_docs",
     "conformance_docs",
     "conformance_fixture_artifacts",
+    "conformance_generated_image_artifacts",
     "fixture_manifests",
     "test_control_artifacts",
     "tests",
@@ -404,7 +405,7 @@ const AGENT_WORKFLOW_DOCS: [&str; 1] = ["AGENTS.md"];
 const ARCHITECTURE_DESIGN_DOC_GLOBS: [&str; 3] =
     ["docs/design-*.md", "docs/oq*.md", "docs/perf/README.md"];
 
-const CONFORMANCE_FIXTURE_ARTIFACT_GLOBS: [&str; 9] = [
+const CONFORMANCE_FIXTURE_ARTIFACT_GLOBS: [&str; 8] = [
     "conformance/COVERAGE.md",
     "conformance/DISCREPANCIES.md",
     "conformance/PROVENANCE.md",
@@ -412,9 +413,10 @@ const CONFORMANCE_FIXTURE_ARTIFACT_GLOBS: [&str; 9] = [
     "conformance/fixtures/checksums.sha256",
     "conformance/golden/*.json",
     "conformance/golden/*.txt",
-    "conformance/golden/*.ext4",
     "conformance/golden/checksums.sha256",
 ];
+
+const CONFORMANCE_GENERATED_IMAGE_ARTIFACT_GLOBS: [&str; 1] = ["conformance/golden/*.ext4"];
 
 const OPERATOR_RUNBOOK_DOC_GLOBS: [&str; 5] = [
     "docs/runbooks/*.md",
@@ -1016,6 +1018,9 @@ fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<S
         "conformance_fixture_artifacts" => {
             validate_conformance_fixture_artifacts(entry, &excluded, errors);
         }
+        "conformance_generated_image_artifacts" => {
+            validate_conformance_generated_image_artifacts(entry, &excluded, errors);
+        }
         "test_control_artifacts" => validate_test_control_artifacts(entry, &excluded, errors),
         "crate_manifest_and_benchmark_sources" => {
             validate_crate_manifest_and_benchmark_sources(entry, &excluded, errors);
@@ -1294,11 +1299,73 @@ fn validate_conformance_fixture_artifacts(
             ));
         }
     }
+    if entry
+        .included_globs
+        .iter()
+        .any(|glob| glob == "conformance/golden/*.ext4")
+    {
+        errors.push(format!(
+            "source `{}` must not include generated ext4 image glob `conformance/golden/*.ext4` as a tracked checksum artifact; use `conformance_generated_image_artifacts`",
+            entry.id
+        ));
+    }
     if !has_build_target_exclusions(excluded) {
         errors.push(format!(
             "source `{}` must exclude build target paths from conformance fixture artifacts",
             entry.id
         ));
+    }
+}
+
+fn validate_conformance_generated_image_artifacts(
+    entry: &SourceScopeEntry,
+    excluded: &str,
+    errors: &mut Vec<String>,
+) {
+    for required_glob in CONFORMANCE_GENERATED_IMAGE_ARTIFACT_GLOBS {
+        if !entry
+            .included_globs
+            .iter()
+            .any(|glob| glob == required_glob)
+        {
+            errors.push(format!(
+                "source `{}` must include generated conformance image artifact glob `{required_glob}`",
+                entry.id
+            ));
+        }
+    }
+    if !has_build_target_exclusions(excluded) {
+        errors.push(format!(
+            "source `{}` must exclude build target paths from generated conformance image artifacts",
+            entry.id
+        ));
+    }
+    if entry.status != "non_applicable" {
+        errors.push(format!(
+            "source `{}` must mark generated ext4 images as non_applicable to committed checksum coverage",
+            entry.id
+        ));
+    }
+    if entry.freshness_state != "exempt" || entry.freshness_ttl_days != 0 {
+        errors.push(format!(
+            "source `{}` generated ext4 images must use freshness_state=exempt and ttl_days=0",
+            entry.id
+        ));
+    }
+    if !entry.expected_proof_types.is_empty() {
+        errors.push(format!(
+            "source `{}` generated ext4 images must not declare checksum proof types",
+            entry.id
+        ));
+    }
+    let rationale = entry.non_applicability_rationale.to_ascii_lowercase();
+    for required_term in ["regenerated", "gitignored", "checksum"] {
+        if !rationale.contains(required_term) {
+            errors.push(format!(
+                "source `{}` generated ext4 image rationale must mention `{required_term}`",
+                entry.id
+            ));
+        }
     }
 }
 
@@ -3983,15 +4050,87 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
             .expect("conformance fixture source exists");
         conformance
             .included_globs
-            .retain(|glob| glob != "conformance/golden/*.ext4");
+            .retain(|glob| glob != "conformance/golden/*.json");
         conformance
             .excluded_globs
             .retain(|glob| !glob.contains(".rch-target"));
         let report = validate_source_scope_manifest(&manifest);
         assert!(report.errors.iter().any(|err| {
-            err.contains("conformance/golden/*.ext4")
+            err.contains("conformance/golden/*.json")
                 || err.contains("build target paths from conformance fixture artifacts")
         }));
+    }
+
+    #[test]
+    fn generated_ext4_images_are_not_checksum_covered_tracked_artifacts() {
+        let mut manifest = fixture_manifest();
+        let conformance = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "conformance_fixture_artifacts")
+            .expect("conformance fixture source exists");
+        conformance
+            .included_globs
+            .push("conformance/golden/*.ext4".to_owned());
+
+        let generated = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "conformance_generated_image_artifacts")
+            .expect("generated image source exists");
+        generated.status = "active".to_owned();
+        generated.expected_proof_types = vec!["golden-fixture".to_owned()];
+        generated.freshness_ttl_days = 30;
+        generated.freshness_state = "fresh".to_owned();
+        generated.non_applicability_rationale.clear();
+
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report.errors.iter().any(|err| {
+                err.contains("must not include generated ext4 image glob")
+                    && err.contains("tracked checksum artifact")
+            }),
+            "tracked conformance source must reject generated ext4 images: {:?}",
+            report.errors
+        );
+        assert!(
+            report.errors.iter().any(|err| {
+                err.contains("must mark generated ext4 images as non_applicable")
+                    || err.contains("generated ext4 images must use freshness_state=exempt")
+                    || err.contains("generated ext4 images must not declare checksum proof types")
+                    || err.contains("status non_applicable requires non_applicability_rationale")
+            }),
+            "generated ext4 image source must require regenerated-local non-applicability semantics: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn generated_ext4_image_source_requires_regeneration_contract() {
+        let mut manifest = fixture_manifest();
+        let generated = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "conformance_generated_image_artifacts")
+            .expect("generated image source exists");
+        generated
+            .included_globs
+            .retain(|glob| glob != "conformance/golden/*.ext4");
+        generated.non_applicability_rationale =
+            "generated locally and intentionally excluded".to_owned();
+
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report.errors.iter().any(|err| {
+                err.contains(
+                    "generated conformance image artifact glob `conformance/golden/*.ext4`",
+                ) || err.contains("generated ext4 image rationale must mention `regenerated`")
+                    || err.contains("generated ext4 image rationale must mention `gitignored`")
+                    || err.contains("generated ext4 image rationale must mention `checksum`")
+            }),
+            "generated ext4 image source must preserve ext4 glob and regeneration rationale: {:?}",
+            report.errors
+        );
     }
 
     #[test]
@@ -4184,6 +4323,24 @@ The known gaps are already linked to bd-l7ov7 and artifact reports/open-ended.js
         );
         assert_eq!(report.output_path, "artifacts/source_scope_scan.json");
         for source in &report.scanned_sources {
+            if source.source_family == "conformance_generated_image_artifacts" {
+                assert_eq!(source.inclusion_decision, "non_applicable");
+                assert!(
+                    source.exclusion_reason.contains("regenerated")
+                        && source.exclusion_reason.contains("checksum"),
+                    "generated image source should explain regeneration and checksum exclusion"
+                );
+                assert_eq!(source.file_or_directory_hash, "");
+                assert_eq!(source.matched_note_count, 0);
+                assert_eq!(source.linked_bead_or_artifact_count, 0);
+                assert!(source.output_path.ends_with("source_scope_scan.json"));
+                assert!(
+                    source
+                        .reproduction_command
+                        .contains("validate-source-scope")
+                );
+                continue;
+            }
             assert_eq!(source.inclusion_decision, "included");
             assert!(
                 source.file_or_directory_hash.starts_with("sha256:"),

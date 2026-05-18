@@ -122,7 +122,6 @@
         "conformance/fixtures/checksums.sha256",
         "conformance/golden/*.json",
         "conformance/golden/*.txt",
-        "conformance/golden/*.ext4",
         "conformance/golden/checksums.sha256"
       ],
       "excluded_globs": [
@@ -138,6 +137,26 @@
       "freshness_state": "fresh",
       "source_hash": "",
       "non_applicability_rationale": ""
+    },
+    {
+      "id": "conformance_generated_ext4_images",
+      "source_family": "conformance_generated_image_artifacts",
+      "included_globs": [
+        "conformance/golden/*.ext4"
+      ],
+      "excluded_globs": [
+        "target/**",
+        "**/.rch-target/**",
+        "**/.rch-target-*/**"
+      ],
+      "risk_category": "conformance",
+      "owner": "harness",
+      "status": "non_applicable",
+      "expected_proof_types": [],
+      "freshness_ttl_days": 0,
+      "freshness_state": "exempt",
+      "source_hash": "",
+      "non_applicability_rationale": "Generated binary ext4 images are regenerated locally by capture scripts, gitignored by conformance/golden/.gitignore, and intentionally excluded from committed JSON/TXT checksum manifests."
     },
     {
       "id": "fixture_manifests",
