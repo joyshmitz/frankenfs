@@ -145,10 +145,15 @@ All fixtures have SHA-256 checksums recorded in `fixtures/checksums.sha256`.
 Golden JSON and text payload reports have SHA-256 checksums recorded in
 `golden/checksums.sha256`.
 
-Regenerate with:
-- `sha256sum conformance/fixtures/*.json > conformance/fixtures/checksums.sha256`
+Regenerate all checksum manifests with the canonical updater:
+
 - `scripts/verify_golden.sh --update`
+
+The checksum manifests intentionally store top-level artifact basenames only.
+For a fixture-only manual refresh, run from inside the artifact directory:
+
+- `(cd conformance/fixtures && sha256sum *.json > checksums.sha256)`
 
 ---
 
-*Last updated: 2026-05-10*
+*Last updated: 2026-05-18*
