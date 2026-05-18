@@ -1736,6 +1736,12 @@ The E2E smoke is:
 ./scripts/e2e/ffs_support_state_accounting_e2e.sh
 ```
 
+Verify the support-state accounting RCH capture contract without running cargo:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_SUPPORT_STATE_ACCOUNTING_SELF_CHECK=1 ./scripts/e2e/ffs_support_state_accounting_e2e.sh
+```
+
 It writes JSON and Markdown reports, checks historical 86/86, 90/90, and 100
 percent migration classifications, injects unsafe flat parity wording, injects
 missing owner beads, and runs the module unit tests.
