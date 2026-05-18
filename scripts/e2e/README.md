@@ -289,6 +289,16 @@ because `bd-fwlfb` owned that surface during the shared-capture migration.
 Those scripts now use script-specific wrapper names and no longer define a
 local `write_fixture_rch_stub`; the remaining local-definition count is 79.
 
+`bd-gijqv.4` pins that phased state with a duplicate guard:
+
+```bash
+bash -c 'source scripts/e2e/lib.sh; e2e_fixture_rch_stub_duplicate_guard'
+```
+
+The guard fails if the count rises above the current baseline (`79`). When a
+future migration removes more local definitions, update the baseline in
+`e2e_fixture_rch_stub_duplicate_guard` and this README in the same change.
+
 Exhaustive inventory buckets:
 
 - Shared capture, three-mode, stderr fallback: `scripts/e2e/ffs_benchmark_expansion_e2e.sh`,

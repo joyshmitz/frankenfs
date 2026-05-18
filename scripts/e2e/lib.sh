@@ -1203,6 +1203,55 @@ SH
 }
 
 #######################################
+# Guard the phased migration away from local write_fixture_rch_stub definitions.
+# The baseline is intentionally updated downward after migration batches.
+# Arguments:
+#   $1 - Repository root (default: $REPO_ROOT or current directory)
+# Environment:
+#   E2E_FIXTURE_RCH_STUB_BASELINE - allowed local definition count, default 79
+#######################################
+e2e_fixture_rch_stub_duplicate_guard() {
+    local repo_root="${1:-${REPO_ROOT:-$(pwd)}}"
+    local baseline="${E2E_FIXTURE_RCH_STUB_BASELINE:-79}"
+    local scripts_dir="$repo_root/scripts/e2e"
+    local matches=()
+    local count
+    local path
+    local baseline_update_recommended=false
+
+    if [[ ! "$baseline" =~ ^[0-9]+$ ]]; then
+        printf 'E2E_FIXTURE_RCH_STUB_DUPLICATE_GUARD|outcome=FAIL|reason=invalid_baseline|baseline=%s\n' "$baseline"
+        return 2
+    fi
+    if [[ ! -d "$scripts_dir" ]]; then
+        printf 'E2E_FIXTURE_RCH_STUB_DUPLICATE_GUARD|outcome=FAIL|reason=missing_scripts_dir|path=%s\n' "$scripts_dir"
+        return 2
+    fi
+
+    if command -v rg >/dev/null 2>&1; then
+        mapfile -t matches < <(rg -l '^write_fixture_rch_stub\(\)' "$scripts_dir"/*.sh 2>/dev/null | sort || true)
+    else
+        mapfile -t matches < <(grep -lE '^write_fixture_rch_stub\(\)' "$scripts_dir"/*.sh 2>/dev/null | sort || true)
+    fi
+    count="${#matches[@]}"
+
+    if ((count < baseline)); then
+        baseline_update_recommended=true
+    fi
+
+    if ((count > baseline)); then
+        printf 'E2E_FIXTURE_RCH_STUB_DUPLICATE_GUARD|outcome=FAIL|count=%s|baseline=%s|reason=count_increased\n' "$count" "$baseline"
+        for path in "${matches[@]}"; do
+            printf 'E2E_FIXTURE_RCH_STUB_DUPLICATE_GUARD_ENTRY|path=%s\n' "$path"
+        done
+        return 1
+    fi
+
+    printf 'E2E_FIXTURE_RCH_STUB_DUPLICATE_GUARD|outcome=PASS|count=%s|baseline=%s|baseline_update_recommended=%s\n' \
+        "$count" "$baseline" "$baseline_update_recommended"
+}
+
+#######################################
 # List canonical RCH guardrail markers used by fixture-matrix tests.
 #######################################
 e2e_rch_capture_fixture_matrix_markers() {
