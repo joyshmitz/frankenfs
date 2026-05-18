@@ -10,9 +10,10 @@ export REPO_ROOT
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_operator_recovery_drill}"
-export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+RCH_CAPTURE_VISIBILITY="${FFS_OPERATOR_RECOVERY_DRILL_RCH_VISIBILITY:-${RCH_VISIBILITY:-summary}}"
 SELF_CHECK="${FFS_OPERATOR_RECOVERY_DRILL_SELF_CHECK:-0}"
 SKIP_SELF_CHECK="${FFS_OPERATOR_RECOVERY_DRILL_SKIP_SELF_CHECK:-0}"
 
@@ -44,7 +45,7 @@ run_rch_capture() {
     local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-600}"
     : >"$log_path"
     set +e
-    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
+    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
     pid=$!
     set -e
     deadline=$((SECONDS + timeout_secs))
