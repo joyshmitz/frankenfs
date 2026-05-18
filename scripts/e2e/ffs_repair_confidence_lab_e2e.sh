@@ -13,6 +13,8 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_repa
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_REPAIR_CONFIDENCE_LAB_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_REPAIR_CONFIDENCE_LAB_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -119,6 +121,265 @@ run_rch_capture() {
     return "$status"
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_REPAIR_CONFIDENCE_LAB_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        ;;
+    missing_remote_evidence)
+        ;;
+    *)
+        echo "unknown repair confidence lab fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+case "$command_text" in
+    *"cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab"*"--spec-json-env"*)
+        echo "repair confidence lab validation failed: fixture invalid lab rejected"
+        exit 1
+        ;;
+    *"cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab"*"--format markdown"*)
+        cat <<'MD'
+# Repair Confidence Lab Summary
+
+- mutating_repair_verified
+- unsafe_to_repair
+- dry_run_success
+- detect_only
+- failed_verification
+- verification_failed_refused
+MD
+        ;;
+    *"cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab"*"--format json"*)
+        cat <<'JSON'
+{
+  "bead_id": "bd-rchk0.5.3.1",
+  "by_outcome": {
+    "detect_only": 1,
+    "dry_run_success": 1,
+    "failed_verification": 1,
+    "mutating_repair_verified": 1,
+    "unsafe_to_repair": 1
+  },
+  "calibration_case_count": 9,
+  "calibration_reports": [
+    {
+      "corpus_id": "cal_recoverable_single_block",
+      "corruption_class": "recoverable_single_block",
+      "log_line": "REPAIR_CONFIDENCE_CALIBRATION corpus_id=cal_recoverable_single_block ledger_row_ids=1"
+    },
+    {
+      "corpus_id": "cal_recoverable_multi_block",
+      "corruption_class": "recoverable_multi_block_within_budget",
+      "log_line": "REPAIR_CONFIDENCE_CALIBRATION corpus_id=cal_recoverable_multi_block ledger_row_ids=2",
+      "observed_outcome": "mutating_repair_verified"
+    },
+    {
+      "corpus_id": "cal_unrecoverable_beyond_budget",
+      "corruption_class": "unrecoverable_beyond_budget",
+      "log_line": "REPAIR_CONFIDENCE_CALIBRATION corpus_id=cal_unrecoverable_beyond_budget ledger_row_ids=3",
+      "refusal_reason": "beyond_symbol_budget"
+    },
+    {
+      "corpus_id": "cal_stale_symbols",
+      "corruption_class": "stale_symbols",
+      "log_line": "REPAIR_CONFIDENCE_CALIBRATION corpus_id=cal_stale_symbols ledger_row_ids=4",
+      "refusal_reason": "stale_symbols"
+    },
+    {
+      "corpus_id": "cal_insufficient_symbols",
+      "corruption_class": "insufficient_symbols",
+      "log_line": "REPAIR_CONFIDENCE_CALIBRATION corpus_id=cal_insufficient_symbols ledger_row_ids=5",
+      "refusal_reason": "insufficient_symbols"
+    },
+    {
+      "corpus_id": "cal_ledger_tamper",
+      "corruption_class": "ledger_tamper",
+      "log_line": "REPAIR_CONFIDENCE_CALIBRATION corpus_id=cal_ledger_tamper ledger_row_ids=6",
+      "refusal_reason": "ledger_tamper"
+    },
+    {
+      "corpus_id": "cal_wrong_image_ledger",
+      "corruption_class": "wrong_image_ledger",
+      "log_line": "REPAIR_CONFIDENCE_CALIBRATION corpus_id=cal_wrong_image_ledger ledger_row_ids=7",
+      "refusal_reason": "wrong_image_ledger"
+    },
+    {
+      "corpus_id": "cal_hostile_path",
+      "corruption_class": "hostile_path",
+      "log_line": "REPAIR_CONFIDENCE_CALIBRATION corpus_id=cal_hostile_path ledger_row_ids=8",
+      "refusal_reason": "hostile_path"
+    },
+    {
+      "corpus_id": "cal_verification_failure",
+      "corruption_class": "verification_failure",
+      "log_line": "REPAIR_CONFIDENCE_CALIBRATION corpus_id=cal_verification_failure ledger_row_ids=9"
+    }
+  ],
+  "errors": [],
+  "mutation_allowed_count": 1,
+  "mutation_refused_count": 4,
+  "scenario_reports": [
+    {
+      "log_line": "REPAIR_CONFIDENCE_DECISION scenario_id=repair_mutate_verified_single_block reproduction_command=repair --mutate",
+      "mutation_allowed": true,
+      "scenario_id": "repair_mutate_verified_single_block",
+      "threshold_decision": "mutate_allowed"
+    },
+    {
+      "log_line": "REPAIR_CONFIDENCE_DECISION scenario_id=repair_refuse_low_confidence_multi_block reproduction_command=repair --refuse",
+      "mutation_allowed": false,
+      "scenario_id": "repair_refuse_low_confidence_multi_block",
+      "threshold_decision": "unsafe_refused"
+    },
+    {
+      "log_line": "REPAIR_CONFIDENCE_DECISION scenario_id=repair_failed_verification_hash_mismatch reproduction_command=repair --verify",
+      "mutation_allowed": false,
+      "scenario_id": "repair_failed_verification_hash_mismatch",
+      "threshold_decision": "verification_failed_refused"
+    },
+    {
+      "log_line": "REPAIR_CONFIDENCE_DECISION scenario_id=repair_dry_run_single_block_recoverable reproduction_command=repair --dry-run",
+      "mutation_allowed": false,
+      "scenario_id": "repair_dry_run_single_block_recoverable",
+      "threshold_decision": "dry_run_ready"
+    },
+    {
+      "log_line": "REPAIR_CONFIDENCE_DECISION scenario_id=repair_detect_only_metadata_mismatch reproduction_command=repair --detect-only",
+      "mutation_allowed": false,
+      "scenario_id": "repair_detect_only_metadata_mismatch",
+      "threshold_decision": "detection_only"
+    }
+  ],
+  "valid": true
+}
+JSON
+        ;;
+    *"cargo test -p ffs-harness --lib repair_confidence_lab"*)
+        printf '%s\n' \
+            "running 5 tests" \
+            "test repair_confidence_lab::tests::fixture_report_contract ... ok" \
+            "test repair_confidence_lab::tests::fixture_refusal_reasons ... ok" \
+            "test repair_confidence_lab::tests::fixture_calibration_classes ... ok" \
+            "test repair_confidence_lab::tests::fixture_markdown_summary ... ok" \
+            "test repair_confidence_lab::tests::fixture_invalid_variants ... ok" \
+            "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        ;;
+    *)
+        echo "unexpected fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/repair_confidence_lab_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_REPAIR_CONFIDENCE_LAB_SELF_CHECK=0 \
+        FFS_REPAIR_CONFIDENCE_LAB_SKIP_SELF_CHECK=1 \
+        FFS_REPAIR_CONFIDENCE_LAB_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_repair_confidence_lab_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic repair confidence lab wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-repair-confidence-lab-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "repair_confidence_cli_wired" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "repair_confidence_lab_validates" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "repair_confidence_decision_coverage" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "repair_confidence_invalid_variants_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "repair_confidence_docs_contract" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "repair_confidence_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "repair_confidence_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "repair_confidence_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "repair_confidence_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "repair_confidence_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "repair_confidence_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "repair_confidence_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
 extract_json_report() {
     local input_path="$1"
     local output_path="$2"
@@ -206,6 +467,12 @@ validate_bad_lab_remote() {
 }
 
 e2e_init "ffs_repair_confidence_lab"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 SPEC_JSON="$REPO_ROOT/docs/repair-confidence-mutation-safety.json"
 REPORT_JSON="$E2E_LOG_DIR/repair_confidence_lab_report.json"

@@ -186,6 +186,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_LOG_CONTRACT_SELF_CHECK=1 ./scripts/e2e/ffs_l
 # Run repair confidence mutation-safety threshold validation
 ./scripts/e2e/ffs_repair_confidence_lab_e2e.sh
 
+# Verify the repair confidence lab RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_REPAIR_CONFIDENCE_LAB_SELF_CHECK=1 ./scripts/e2e/ffs_repair_confidence_lab_e2e.sh
+
 # Run repair/writeback serialization contract dry-run validation
 ./scripts/e2e/ffs_repair_writeback_serialization_e2e.sh
 
