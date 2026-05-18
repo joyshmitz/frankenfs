@@ -7336,7 +7336,8 @@
       "script": "scripts/e2e/ffs_degradation_stress.sh",
       "required_categories": [
         "happy",
-        "degradation"
+        "degradation",
+        "error"
       ],
       "scenarios": [
         {
@@ -7386,6 +7387,24 @@
           "category": "degradation",
           "status": "active",
           "evidence": "degradation_stress_optional_mount_probe"
+        },
+        {
+          "id": "degradation_stress_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=degradation_stress_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "degradation_stress_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=degradation_stress_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "degradation_stress_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=degradation_stress_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },

@@ -35,6 +35,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_WRITEBACK_SELF_CHECK=1 ./scripts/e2e/ffs_writ
 # Run graceful degradation stress suite
 ./scripts/e2e/ffs_degradation_stress.sh
 
+# Verify the degradation stress RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_DEGRADATION_STRESS_SELF_CHECK=1 ./scripts/e2e/ffs_degradation_stress.sh
+
 # Run deterministic corruption-injection + recovery smoke
 ./scripts/e2e/ffs_repair_recovery_smoke.sh
 
