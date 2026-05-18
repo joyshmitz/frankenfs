@@ -34,6 +34,8 @@ FFS_FUZZ_SMOKE_MAX_TOTAL_TIME="${FFS_FUZZ_SMOKE_MAX_TOTAL_TIME:-10}"
 FFS_FUZZ_DICT_RUNS="${FFS_FUZZ_DICT_RUNS:-200}"
 FFS_FUZZ_DICT_MAX_TOTAL_TIME="${FFS_FUZZ_DICT_MAX_TOTAL_TIME:-10}"
 FFS_FUZZ_NIGHTLY_DURATION="${FFS_FUZZ_NIGHTLY_DURATION:-3}"
+SELF_CHECK="${FFS_FUZZ_TARGETS_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_FUZZ_TARGETS_SKIP_SELF_CHECK:-0}"
 
 mapfile -t EXPECTED_TARGETS < <(
     find fuzz/fuzz_targets -maxdepth 1 -name '*.rs' -printf '%f\n' \
@@ -188,7 +190,151 @@ validate_nightly_rch_logs() {
     [[ $failures -eq 0 ]]
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_FUZZ_TARGETS_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fuzz-target fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    complete)
+        echo "[RCH] remote worker=fixture exit=0"
+        echo "Remote command finished: exit=0"
+        case "$command_text" in
+            *"fuzz_ext4_metadata"*)
+                echo "#1 cov: 12 ft: 24 corp: 1/1b ManualDict"
+                ;;
+            *"cargo run"*|*"cargo build"*)
+                echo "#1 cov: 8 ft: 16 corp: 1/1b"
+                ;;
+        esac
+        ;;
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)"
+        exit 1
+        ;;
+    missing_remote_evidence)
+        echo "fixture command completed without an RCH remote summary"
+        ;;
+    *)
+        echo "unknown fuzz-target fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/fuzz_targets_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_FUZZ_TARGETS_SELF_CHECK=0 \
+        FFS_FUZZ_TARGETS_SKIP_SELF_CHECK=1 \
+        FFS_FUZZ_TARGETS_FIXTURE_CASE="$fixture_case" \
+        FFS_FUZZ_TARGET_LIMIT=1 \
+        FFS_FUZZ_SMOKE_RUNS=1 \
+        FFS_FUZZ_SMOKE_MAX_TOTAL_TIME=1 \
+        FFS_FUZZ_DICT_RUNS=1 \
+        FFS_FUZZ_DICT_MAX_TOTAL_TIME=1 \
+        FFS_FUZZ_NIGHTLY_DURATION=1 \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_fuzz_targets_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic fuzz-target wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-fuzz-targets-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "fuzz_targets_build" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id | startswith("fuzz_smoke_")) | select(.outcome == "PASS")] | length >= 1)
+            and ([.scenarios[] | select(.scenario_id == "fuzz_seed_pipeline" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "fuzz_dict_coverage" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "fuzz_nightly_campaign" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "fuzz_targets_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "fuzz_targets_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null \
+        && grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        scenario_result "fuzz_targets_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "fuzz_targets_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "fuzz_targets_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "fuzz_targets_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
 e2e_init "ffs_fuzz_targets"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
+
 e2e_log "FUZZ_RUNTIME_TARGETS|selected=${#RUNTIME_TARGETS[@]}|total=${#EXPECTED_TARGETS[@]}|limit=${FFS_FUZZ_TARGET_LIMIT:-none}"
 BUILD_LOG="$E2E_LOG_DIR/fuzz_targets_build.log"
 SEED_GENERATION_LOG="$E2E_LOG_DIR/fuzz_seed_generation.log"

@@ -1768,6 +1768,24 @@
           "category": "error",
           "status": "active",
           "evidence": "RCH_REMOTE_EVIDENCE_MISSING"
+        },
+        {
+          "id": "fuzz_targets_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuzz_targets_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "fuzz_targets_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuzz_targets_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "fuzz_targets_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuzz_targets_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },
