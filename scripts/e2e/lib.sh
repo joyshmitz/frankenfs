@@ -910,6 +910,296 @@ e2e_rch_capture() {
 }
 
 #######################################
+# Write a deterministic fixture rch binary for wrapper self-checks.
+# This helper is only for local fixture lanes; live proof still goes through
+# e2e_rch_capture and the real rch binary.
+# Arguments:
+#   $1 - Stub path to write
+# Options:
+#   --mode-env NAME                      Environment variable controlling mode
+#   --default-mode MODE                  Default mode, default complete
+#   --unexpected-invocation-message TEXT Prefix for bad rch argv
+#   --unknown-case-message TEXT          Prefix for unknown fixture case
+#   --local-fallback-stream stdout|stderr
+#   --remote-evidence-stream stdout|stderr
+#   --local-fallback-message TEXT
+#   --remote-evidence-message TEXT
+#   --complete-body-stdin                Append complete-mode body from stdin
+#######################################
+e2e_write_fixture_rch_stub() {
+    if [[ $# -lt 1 ]]; then
+        e2e_log "E2E_FIXTURE_RCH_STUB_USAGE_ERROR|expected=stub_path"
+        return 2
+    fi
+
+    local stub_path="$1"
+    local mode_env="E2E_RCH_FIXTURE_CASE"
+    local default_mode="complete"
+    local unexpected_invocation_message="unexpected fixture rch invocation"
+    local unknown_case_message="unknown fixture case"
+    local local_fallback_stream="stderr"
+    local remote_evidence_stream="stderr"
+    local local_fallback_message="[RCH] local (fixture forced local fallback)"
+    local remote_evidence_message="[RCH] remote worker=fixture exit=0"
+    local complete_body="exit 0"
+    local read_complete_body=0
+    local arg
+
+    shift
+    while [[ $# -gt 0 ]]; do
+        arg="$1"
+        shift
+        case "$arg" in
+            --mode-env)
+                [[ $# -gt 0 ]] || {
+                    e2e_log "E2E_FIXTURE_RCH_STUB_USAGE_ERROR|missing=mode_env"
+                    return 2
+                }
+                mode_env="$1"
+                shift
+                ;;
+            --default-mode)
+                [[ $# -gt 0 ]] || {
+                    e2e_log "E2E_FIXTURE_RCH_STUB_USAGE_ERROR|missing=default_mode"
+                    return 2
+                }
+                default_mode="$1"
+                shift
+                ;;
+            --unexpected-invocation-message)
+                [[ $# -gt 0 ]] || {
+                    e2e_log "E2E_FIXTURE_RCH_STUB_USAGE_ERROR|missing=unexpected_invocation_message"
+                    return 2
+                }
+                unexpected_invocation_message="$1"
+                shift
+                ;;
+            --unknown-case-message)
+                [[ $# -gt 0 ]] || {
+                    e2e_log "E2E_FIXTURE_RCH_STUB_USAGE_ERROR|missing=unknown_case_message"
+                    return 2
+                }
+                unknown_case_message="$1"
+                shift
+                ;;
+            --local-fallback-stream)
+                [[ $# -gt 0 ]] || {
+                    e2e_log "E2E_FIXTURE_RCH_STUB_USAGE_ERROR|missing=local_fallback_stream"
+                    return 2
+                }
+                local_fallback_stream="$1"
+                shift
+                ;;
+            --remote-evidence-stream)
+                [[ $# -gt 0 ]] || {
+                    e2e_log "E2E_FIXTURE_RCH_STUB_USAGE_ERROR|missing=remote_evidence_stream"
+                    return 2
+                }
+                remote_evidence_stream="$1"
+                shift
+                ;;
+            --local-fallback-message)
+                [[ $# -gt 0 ]] || {
+                    e2e_log "E2E_FIXTURE_RCH_STUB_USAGE_ERROR|missing=local_fallback_message"
+                    return 2
+                }
+                local_fallback_message="$1"
+                shift
+                ;;
+            --remote-evidence-message)
+                [[ $# -gt 0 ]] || {
+                    e2e_log "E2E_FIXTURE_RCH_STUB_USAGE_ERROR|missing=remote_evidence_message"
+                    return 2
+                }
+                remote_evidence_message="$1"
+                shift
+                ;;
+            --complete-body-stdin)
+                read_complete_body=1
+                ;;
+            *)
+                e2e_log "E2E_FIXTURE_RCH_STUB_USAGE_ERROR|unknown_option=${arg}"
+                return 2
+                ;;
+        esac
+    done
+
+    if [[ ! "$mode_env" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        e2e_log "E2E_FIXTURE_RCH_STUB_USAGE_ERROR|invalid_mode_env=${mode_env}"
+        return 2
+    fi
+    if [[ ! "$default_mode" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        e2e_log "E2E_FIXTURE_RCH_STUB_USAGE_ERROR|invalid_default_mode=${default_mode}"
+        return 2
+    fi
+    case "$local_fallback_stream" in
+        stdout | stderr) ;;
+        *)
+            e2e_log "E2E_FIXTURE_RCH_STUB_USAGE_ERROR|invalid_local_fallback_stream=${local_fallback_stream}"
+            return 2
+            ;;
+    esac
+    case "$remote_evidence_stream" in
+        stdout | stderr) ;;
+        *)
+            e2e_log "E2E_FIXTURE_RCH_STUB_USAGE_ERROR|invalid_remote_evidence_stream=${remote_evidence_stream}"
+            return 2
+            ;;
+    esac
+
+    if [[ "$read_complete_body" -eq 1 ]]; then
+        complete_body="$(cat)"
+    fi
+
+    local unexpected_q unknown_q local_stream_q remote_stream_q local_message_q remote_message_q
+    printf -v unexpected_q '%q' "$unexpected_invocation_message"
+    printf -v unknown_q '%q' "$unknown_case_message"
+    printf -v local_stream_q '%q' "$local_fallback_stream"
+    printf -v remote_stream_q '%q' "$remote_evidence_stream"
+    printf -v local_message_q '%q' "$local_fallback_message"
+    printf -v remote_message_q '%q' "$remote_evidence_message"
+
+    cat >"$stub_path" <<SH
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="\${${mode_env}:-${default_mode}}"
+unexpected_invocation_message=${unexpected_q}
+unknown_case_message=${unknown_q}
+local_fallback_stream=${local_stream_q}
+remote_evidence_stream=${remote_stream_q}
+local_fallback_message=${local_message_q}
+remote_evidence_message=${remote_message_q}
+
+emit_fixture_rch_line() {
+    local stream="\$1"
+    shift
+    if [[ "\$stream" == "stdout" ]]; then
+        printf '%s\n' "\$*"
+    else
+        printf '%s\n' "\$*" >&2
+    fi
+}
+
+if [[ "\${1:-}" != "exec" || "\${2:-}" != "--" ]]; then
+    emit_fixture_rch_line stderr "\${unexpected_invocation_message}: \$*"
+    exit 64
+fi
+shift 2
+command_text="\$*"
+
+case "\$fixture_case" in
+    local_fallback)
+        emit_fixture_rch_line "\$local_fallback_stream" "\$local_fallback_message"
+        exit 1
+        ;;
+    missing_remote_evidence)
+        exit 0
+        ;;
+    complete)
+        ;;
+    *)
+        emit_fixture_rch_line stderr "\${unknown_case_message}: \$fixture_case"
+        exit 64
+        ;;
+esac
+
+emit_fixture_rch_line "\$remote_evidence_stream" "\$remote_evidence_message"
+${complete_body}
+SH
+    chmod +x "$stub_path"
+}
+
+#######################################
+# Hermetic self-test for e2e_write_fixture_rch_stub.
+# Does not run cargo or live rch.
+#######################################
+e2e_write_fixture_rch_stub_self_test() {
+    local work_dir stub_path out_path err_path status
+    local failures=0
+    local had_errexit=0
+
+    case $- in
+        *e*) had_errexit=1 ;;
+    esac
+
+    work_dir="$(mktemp -d -t ffs_fixture_rch_stub_self_test_XXXXXX)"
+    stub_path="$work_dir/rch-fixture"
+
+    e2e_write_fixture_rch_stub "$stub_path" \
+        --mode-env FFS_FIXTURE_RCH_STUB_SELF_TEST_MODE \
+        --unexpected-invocation-message "unexpected self-test fixture rch invocation" \
+        --unknown-case-message "unknown self-test fixture case" \
+        --local-fallback-stream stdout \
+        --remote-evidence-stream stderr \
+        --complete-body-stdin <<'SH'
+case "$command_text" in
+    *"cargo test -p fake-fixture"*)
+        printf '%s\n' "fixture complete body stdout"
+        exit 0
+        ;;
+    *)
+        echo "unexpected self-test fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+
+    out_path="$work_dir/complete.out"
+    err_path="$work_dir/complete.err"
+    if ! "$stub_path" exec -- cargo test -p fake-fixture >"$out_path" 2>"$err_path"; then
+        printf 'E2E_FIXTURE_RCH_STUB_SELF_TEST|case=complete|outcome=FAIL|work_dir=%s\n' "$work_dir"
+        failures=1
+    elif ! grep -Fq "fixture complete body stdout" "$out_path" \
+        || ! grep -Fq "[RCH] remote worker=fixture exit=0" "$err_path"; then
+        printf 'E2E_FIXTURE_RCH_STUB_SELF_TEST|case=complete_markers|outcome=FAIL|work_dir=%s\n' "$work_dir"
+        failures=1
+    fi
+
+    out_path="$work_dir/local_fallback.out"
+    err_path="$work_dir/local_fallback.err"
+    set +e
+    FFS_FIXTURE_RCH_STUB_SELF_TEST_MODE=local_fallback "$stub_path" exec -- cargo test -p fake-fixture >"$out_path" 2>"$err_path"
+    status=$?
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+    if [[ "$status" -ne 1 ]] || ! grep -Fq "[RCH] local (fixture forced local fallback)" "$out_path"; then
+        printf 'E2E_FIXTURE_RCH_STUB_SELF_TEST|case=local_fallback|outcome=FAIL|status=%s|work_dir=%s\n' "$status" "$work_dir"
+        failures=1
+    fi
+
+    out_path="$work_dir/missing_remote.out"
+    err_path="$work_dir/missing_remote.err"
+    if ! FFS_FIXTURE_RCH_STUB_SELF_TEST_MODE=missing_remote_evidence "$stub_path" exec -- cargo test -p fake-fixture >"$out_path" 2>"$err_path"; then
+        printf 'E2E_FIXTURE_RCH_STUB_SELF_TEST|case=missing_remote_evidence|outcome=FAIL|work_dir=%s\n' "$work_dir"
+        failures=1
+    elif grep -Fq "[RCH] remote" "$out_path" || grep -Fq "[RCH] remote" "$err_path"; then
+        printf 'E2E_FIXTURE_RCH_STUB_SELF_TEST|case=missing_remote_evidence_marker|outcome=FAIL|work_dir=%s\n' "$work_dir"
+        failures=1
+    fi
+
+    out_path="$work_dir/unexpected_invocation.out"
+    err_path="$work_dir/unexpected_invocation.err"
+    set +e
+    "$stub_path" bad -- cargo test -p fake-fixture >"$out_path" 2>"$err_path"
+    status=$?
+    if [[ "$had_errexit" -eq 1 ]]; then
+        set -e
+    fi
+    if [[ "$status" -ne 64 ]] || ! grep -Fq "unexpected self-test fixture rch invocation" "$err_path"; then
+        printf 'E2E_FIXTURE_RCH_STUB_SELF_TEST|case=unexpected_invocation|outcome=FAIL|status=%s|work_dir=%s\n' "$status" "$work_dir"
+        failures=1
+    fi
+
+    if [[ "$failures" -ne 0 ]]; then
+        return 1
+    fi
+
+    printf 'E2E_FIXTURE_RCH_STUB_SELF_TEST|outcome=PASS|work_dir=%s\n' "$work_dir"
+}
+
+#######################################
 # List canonical RCH guardrail markers used by fixture-matrix tests.
 #######################################
 e2e_rch_capture_fixture_matrix_markers() {
