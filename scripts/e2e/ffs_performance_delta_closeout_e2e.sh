@@ -14,10 +14,8 @@ export REPO_ROOT
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_performance_delta_closeout}"
-case ",${RCH_ENV_ALLOWLIST:-}," in
-    *",CARGO_TARGET_DIR,"*) ;;
-    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
-esac
+RCH_CAPTURE_VISIBILITY="${FFS_PERFORMANCE_DELTA_CLOSEOUT_RCH_VISIBILITY:-${RCH_VISIBILITY:-summary}}"
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 SELF_CHECK="${FFS_PERFORMANCE_DELTA_CLOSEOUT_SELF_CHECK:-0}"
@@ -43,7 +41,7 @@ scenario_result() {
 run_rch_capture() {
     local log_path="$1"
     shift
-    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" e2e_rch_capture "$log_path" "$@"
+    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" e2e_rch_capture "$log_path" "$@"
 }
 
 log_failure_tail() {
