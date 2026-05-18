@@ -13,9 +13,10 @@ export REPO_ROOT
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_adversarial_threat_model}"
-export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+RCH_CAPTURE_VISIBILITY="${FFS_ADVERSARIAL_THREAT_MODEL_RCH_VISIBILITY:-${RCH_VISIBILITY:-summary}}"
 SELF_CHECK="${FFS_ADVERSARIAL_THREAT_MODEL_SELF_CHECK:-0}"
 SKIP_SELF_CHECK="${FFS_ADVERSARIAL_THREAT_MODEL_SKIP_SELF_CHECK:-0}"
 
@@ -36,92 +37,11 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
-cancel_matching_rch_queue_entry() {
-    local command_text="$*"
-    local queue_json
-    local ids
-    if ! command -v jq >/dev/null 2>&1; then
-        return 0
-    fi
-    queue_json="$("${RCH_BIN:-rch}" queue --json 2>/dev/null || true)"
-    if [[ -z "$queue_json" ]]; then
-        return 0
-    fi
-    ids="$(jq -r --arg cmd "$command_text" '
-        .data.active_builds[]?
-        | select(.project_id | startswith("frankenfs-"))
-        | select(.command == $cmd)
-        | .id
-    ' <<<"$queue_json" || true)"
-    for id in $ids; do
-        if "${RCH_BIN:-rch}" cancel "$id" >/dev/null 2>&1; then
-            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
-        fi
-    done
-}
-
 run_rch_capture() {
     local log_path="$1"
-    local status=0
-    local pid
-    local deadline
-    local remote_exit=""
-    local wait_status
     shift
-    local timeout_secs="${RCH_COMMAND_TIMEOUT_SECS:-600}"
-    : >"$log_path"
-    set +e
-    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
-    pid=$!
-    set -e
-    deadline=$((SECONDS + timeout_secs))
-    while kill -0 "$pid" >/dev/null 2>&1; do
-        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
-        if [[ -n "$remote_exit" ]]; then
-            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
-            if kill -0 "$pid" >/dev/null 2>&1; then
-                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|log=${log_path}"
-                kill -TERM "$pid" >/dev/null 2>&1 || true
-                cancel_matching_rch_queue_entry "$@"
-            fi
-            break
-        fi
-        if ((SECONDS >= deadline)); then
-            e2e_log "RCH_TIMEOUT|seconds=${timeout_secs}|log=${log_path}"
-            kill -TERM "$pid" >/dev/null 2>&1 || true
-            cancel_matching_rch_queue_entry "$@"
-            status=124
-            break
-        fi
-        sleep 2
-    done
-    set +e
-    wait "$pid" >/dev/null 2>&1
-    wait_status=$?
-    set -e
-    if [[ -n "$remote_exit" ]]; then
-        status="$remote_exit"
-    elif [[ $status -eq 0 ]]; then
-        status="$wait_status"
-    fi
-    if grep -Fq "[RCH] local" "$log_path" || grep -Fq "exec called with non-compilation command" "$log_path"; then
-        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|log=${log_path}"
-        printf 'RCH_LOCAL_FALLBACK_REJECTED|log=%s\n' "$log_path" >>"$log_path"
-        return 99
-    fi
-    if [[ $status -eq 0 ]]; then
-        if ! grep -Fq "[RCH] remote" "$log_path" && ! grep -Fq "Remote command finished: exit=0" "$log_path"; then
-            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|log=${log_path}"
-            printf 'RCH_REMOTE_EVIDENCE_MISSING|log=%s\n' "$log_path" >>"$log_path"
-            return 99
-        fi
-        return 0
-    fi
-    if grep -Fq "Remote command finished: exit=0" "$log_path"; then
-        e2e_log "RCH artifact retrieval failed after worker-side success; accepting remote exit=0 evidence from $log_path"
-        return 0
-    fi
-    return "$status"
+
+    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" e2e_rch_capture "$log_path" "$@"
 }
 
 extract_json_object() {
@@ -332,6 +252,7 @@ case "$fixture_case" in
 esac
 
 echo "[RCH] remote worker=fixture exit=0" >&2
+echo "Remote command finished: exit=0" >&2
 case "$command_text" in
     *"cargo test -p ffs-harness --lib adversarial_threat_model"*)
         printf '%s\n' \
@@ -644,7 +565,7 @@ for bad in "$BAD_TRAVERSAL_JSON" "$BAD_REVIEW_JSON" "$BAD_LOG_JSON" "$BAD_LIMIT_
     bad_payload="$(tr -d '\n' <"$bad")"
     if (
         export ADVERSARIAL_THREAT_MODEL_JSON="$bad_payload"
-        export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}ADVERSARIAL_THREAT_MODEL_JSON"
+        e2e_rch_add_env_allowlist ADVERSARIAL_THREAT_MODEL_JSON
         run_rch_capture "$BAD_RAW" cargo run --quiet -p ffs-harness -- validate-adversarial-threat-model \
             --model-json-env ADVERSARIAL_THREAT_MODEL_JSON \
             --out /dev/stdout
