@@ -41,16 +41,19 @@ or a bead/artifact owner.
 
 ## A. Fuzz target corpora — saturation status
 
-44 fuzz targets exist under `fuzz/fuzz_targets/`. Recent corpus
+As of 2026-05-18, 60 fuzz targets exist under `fuzz/fuzz_targets/`.
+Each source file has a matching `fuzz/Cargo.toml` bin path and a
+`fuzz/corpus/<target>` directory in the local tree. Recent corpus
 expansion this session (commits `f27cebb` through `0fed288`) raised
-the floor for previously under-corpused targets. As of this writing:
+the floor for previously under-corpused targets. Source-derived corpus
+file counts are:
 
 | Status                   | Count | Notes |
 |--------------------------|-------|-------|
-| Well-corpused (>= 100)   | ~18   | btrfs_send_stream (93+), btrfs_tree_items (98+), cli_btrfs_parsers (111+), ext4_htree_mmp (113+), and all targets routinely run |
-| Mid-coverage (30–99)     | ~14   | all extended this session with structured seeds |
-| Newly-expanded (20–35)   | ~8    | native-cow, btrfs-tree-log, alloc-succinct, alloc-bitmap, block-aligned-vec, block-mem-io-engine, btree-bw-tree, btrfs-devitem, dir-operations, repair-codec-roundtrip, repair-evidence-ledger, verify-ext4-integrity, extent-tree |
-| Stateful-complex (15–22) | 4     | fuse_splice_mount, ioctl_dispatch, openfs_mvcc_wal_recovery, path_encoding_mount — complex cursor consumption, lower marginal value of synthetic seeds |
+| Well-corpused (>= 100)   | 40    | includes cli_btrfs_parsers (111), btrfs_send_stream (114), btrfs_tree_items (114), ext4_htree_mmp (113), and repair_evidence_ledger (4794) |
+| Mid-coverage (30-99)     | 3     | btrfs_devitem (37), wal_replay (67), ext4_image_reader (90) |
+| Low-corpus (10-29)       | 3     | ext4_chksum (13), ext4_casefold (20), repair_symbols (28) |
+| Minimal smoke/admin (1-9) | 14    | manifest, dashboard, smoke, round-trip, and narrow parser targets with intentional seed-only corpora |
 
 **Open items in this category:**
 - None in the `bd-rchk7.1` registry. Reopen this section only for new
