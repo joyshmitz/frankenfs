@@ -256,6 +256,121 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_REPAIR_CONFIDENCE_LAB_SELF_CHECK=1 ./scripts/
 ./scripts/e2e/ffs_repair_writeback_route_e2e.sh
 ```
 
+## Fixture RCH Stub Migration Inventory
+
+`bd-gijqv.1` inventories the local `write_fixture_rch_stub` functions before
+moving any fixture writer into `lib.sh`. As of 2026-05-18, this tree has 82
+E2E scripts with local fixture RCH stubs:
+
+- 81 write fixture child logs under `E2E_LOG_DIR`; the nonstandard case is
+  `scripts/e2e/ffs_log_contract_e2e.sh`, which uses `LOG_DIR`.
+- 56 self-check lanes exercise `complete`, `local_fallback`, and
+  `missing_remote_evidence`.
+- 24 self-check lanes exercise only `complete` and `local_fallback`.
+- `scripts/e2e/ffs_fuzz_smoke_e2e.sh` is custom: `valid`,
+  `unowned_failure`, and `local_fallback`.
+- 62 fixture stubs emit the local fallback marker on stderr; 20 emit it on
+  stdout.
+- 14 scripts still carry a bespoke `rch exec` wrapper and are intentionally
+  excluded from the first fixture-writer migration batch.
+
+Recommended first batch for `bd-gijqv`:
+
+| Script | Why first |
+|--------|-----------|
+| `scripts/e2e/ffs_artifact_schema_fixtures_e2e.sh` | `E2E_LOG_DIR`, shared `e2e_rch_capture`, stderr local fallback, full three-mode self-check. |
+| `scripts/e2e/ffs_log_contract_e2e.sh` | Nonstandard `LOG_DIR`, shared `e2e_rch_capture`, stderr local fallback, full three-mode self-check. |
+| `scripts/e2e/ffs_program_gate_e2e.sh` | `E2E_LOG_DIR`, shared `e2e_rch_capture`, stdout local fallback, suite-specific unexpected-invocation wording, full three-mode self-check. |
+
+This batch deliberately avoids `scripts/e2e/ffs_evidence_metrics_presets_e2e.sh`
+because `bd-fwlfb` owned that surface during the shared-capture migration.
+
+Exhaustive inventory buckets:
+
+- Shared capture, three-mode, stderr fallback: `scripts/e2e/ffs_benchmark_expansion_e2e.sh`,
+  `scripts/e2e/ffs_benchmark_governance_e2e.sh`,
+  `scripts/e2e/ffs_benchmark_taxonomy_e2e.sh`,
+  `scripts/e2e/ffs_cli_wal_telemetry_e2e.sh`,
+  `scripts/e2e/ffs_crash_matrix_e2e.sh`,
+  `scripts/e2e/ffs_crash_promotion_e2e.sh`,
+  `scripts/e2e/ffs_degradation_stress.sh`,
+  `scripts/e2e/ffs_error_taxonomy_e2e.sh`,
+  `scripts/e2e/ffs_evidence_metrics_presets_e2e.sh`,
+  `scripts/e2e/ffs_evidence_presets_e2e.sh`,
+  `scripts/e2e/ffs_fuzz_dashboard_e2e.sh`,
+  `scripts/e2e/ffs_fuzzing_gate_e2e.sh`,
+  `scripts/e2e/ffs_health_consistency_e2e.sh`,
+  `scripts/e2e/ffs_metamorphic_workload_seed_catalog_e2e.sh`,
+  `scripts/e2e/ffs_mounted_repair_mutation_boundary_e2e.sh`,
+  `scripts/e2e/ffs_mvcc_lifecycle_e2e.sh`,
+  `scripts/e2e/ffs_operator_tooling_gate_e2e.sh`,
+  `scripts/e2e/ffs_oq_decision_integration_e2e.sh`,
+  `scripts/e2e/ffs_perf_comparison_e2e.sh`,
+  `scripts/e2e/ffs_proof_bundle_e2e.sh`,
+  `scripts/e2e/ffs_readiness_action_autopilot_e2e.sh`,
+  `scripts/e2e/ffs_release_gate_e2e.sh`,
+  `scripts/e2e/ffs_repair_5pct_e2e.sh`,
+  `scripts/e2e/ffs_repair_confidence_lab_e2e.sh`,
+  `scripts/e2e/ffs_repair_exchange_loopback_e2e.sh`,
+  `scripts/e2e/ffs_repair_recovery_smoke.sh`,
+  `scripts/e2e/ffs_self_healing_demo.sh`,
+  `scripts/e2e/ffs_tabletop_drill_e2e.sh`, and
+  `scripts/e2e/ffs_version_store_format_e2e.sh`.
+- Shared capture, three-mode, stdout fallback or suite-specific wording:
+  `scripts/e2e/ffs_baseline_validation_e2e.sh`,
+  `scripts/e2e/ffs_claimability_autopilot_e2e.sh`,
+  `scripts/e2e/ffs_cross_oracle_arbitration_e2e.sh`,
+  `scripts/e2e/ffs_invariant_oracle_e2e.sh`,
+  `scripts/e2e/ffs_open_ended_inventory_scanner_e2e.sh`,
+  `scripts/e2e/ffs_operational_evidence_index_e2e.sh`,
+  `scripts/e2e/ffs_performance_delta_closeout_e2e.sh`,
+  `scripts/e2e/ffs_proof_overhead_budget_e2e.sh`,
+  `scripts/e2e/ffs_readiness_lab_contracts_e2e.sh`,
+  `scripts/e2e/ffs_support_state_accounting_e2e.sh`,
+  `scripts/e2e/ffs_topology_runtime_advisor_e2e.sh`,
+  `scripts/e2e/ffs_wal_replay_e2e.sh`, and
+  `scripts/e2e/ffs_wal_writer_e2e.sh`.
+- Shared capture, two-mode fixture: `scripts/e2e/ffs_adaptive_runtime_manifest_e2e.sh`,
+  `scripts/e2e/ffs_adversarial_threat_model_e2e.sh`,
+  `scripts/e2e/ffs_btrfs_multidevice_corpus_e2e.sh`,
+  `scripts/e2e/ffs_btrfs_send_receive_corpus_e2e.sh`,
+  `scripts/e2e/ffs_casefold_corpus_e2e.sh`,
+  `scripts/e2e/ffs_chaos_replay_lab_e2e.sh`,
+  `scripts/e2e/ffs_docs_status_drift_e2e.sh`,
+  `scripts/e2e/ffs_fault_injection_corpus_e2e.sh`,
+  `scripts/e2e/ffs_inventory_closeout_gate_e2e.sh`,
+  `scripts/e2e/ffs_low_privilege_demo_e2e.sh`,
+  `scripts/e2e/ffs_low_privilege_demo_sandbox_e2e.sh`,
+  `scripts/e2e/ffs_mounted_checkpoint_survivor_e2e.sh`,
+  `scripts/e2e/ffs_performance_manifest_e2e.sh`,
+  `scripts/e2e/ffs_remediation_catalog_e2e.sh`,
+  `scripts/e2e/ffs_remediation_severity_gate_e2e.sh`,
+  `scripts/e2e/ffs_repair_corpus_e2e.sh`,
+  `scripts/e2e/ffs_repair_writeback_route_e2e.sh`,
+  `scripts/e2e/ffs_repair_writeback_serialization_e2e.sh`,
+  `scripts/e2e/ffs_report_schema_inventory_e2e.sh`,
+  `scripts/e2e/ffs_soak_canary_campaign_e2e.sh`,
+  `scripts/e2e/ffs_swarm_operator_report_e2e.sh`, and
+  `scripts/e2e/ffs_workload_corpus_e2e.sh`.
+- Custom fixture cases, not first batch:
+  `scripts/e2e/ffs_fuzz_smoke_e2e.sh` uses fuzz-smoke QA artifact cases
+  instead of the standard complete/missing-remote matrix.
+- Excluded until their capture wrappers are centralized or audited separately:
+  `scripts/e2e/ffs_adaptive_runtime_runner_e2e.sh`,
+  `scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh`,
+  `scripts/e2e/ffs_btrfs_capability_drift_e2e.sh`,
+  `scripts/e2e/ffs_btrfs_write_churn_e2e.sh`,
+  `scripts/e2e/ffs_fuzz_targets_e2e.sh`,
+  `scripts/e2e/ffs_mvcc_replay_gate_e2e.sh`,
+  `scripts/e2e/ffs_operational_readiness_report_e2e.sh`,
+  `scripts/e2e/ffs_operator_recovery_drill_e2e.sh`,
+  `scripts/e2e/ffs_rch_capacity_preflight_e2e.sh`,
+  `scripts/e2e/ffs_readiness_dashboard_e2e.sh`,
+  `scripts/e2e/ffs_refresh_policy_e2e.sh`,
+  `scripts/e2e/ffs_swarm_tail_latency_e2e.sh`,
+  `scripts/e2e/ffs_verification_gate_e2e.sh`, and
+  `scripts/e2e/ffs_writeback_e2e.sh`.
+
 ## Preserving Temp Artifacts
 
 Scripts that source `scripts/e2e/lib.sh` remove their registered temp
