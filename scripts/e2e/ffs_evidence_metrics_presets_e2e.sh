@@ -15,18 +15,13 @@ export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_evidence_metrics_presets}"
 RCH_BIN="${RCH_BIN:-rch}"
-RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_CAPTURE_VISIBILITY="${FFS_EVIDENCE_METRICS_PRESETS_RCH_VISIBILITY:-${RCH_VISIBILITY:-summary}}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 SELF_CHECK="${FFS_EVIDENCE_METRICS_PRESETS_SELF_CHECK:-0}"
 SKIP_SELF_CHECK="${FFS_EVIDENCE_METRICS_PRESETS_SKIP_SELF_CHECK:-0}"
 
-for rch_env_var in CARGO_TARGET_DIR RUST_LOG RUST_BACKTRACE; do
-    case ",${RCH_ENV_ALLOWLIST:-}," in
-        *",${rch_env_var},"*) ;;
-        *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}${rch_env_var}" ;;
-    esac
-done
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR RUST_LOG RUST_BACKTRACE
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -72,7 +67,7 @@ run_rch_capture() {
 
     : >"$output_path"
     set +e
-    RCH_VISIBILITY="$RCH_VISIBILITY" RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" "$RCH_BIN" exec -- "$@" >"$output_path" 2>&1 &
+    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" "$RCH_BIN" exec -- "$@" >"$output_path" 2>&1 &
     pid=$!
     if [[ "$had_errexit" -eq 1 ]]; then
         set -e
