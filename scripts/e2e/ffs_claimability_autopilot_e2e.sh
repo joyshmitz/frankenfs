@@ -39,7 +39,7 @@ FIXTURE_NOW_EPOCH="${CLAIMABILITY_AUTOPILOT_NOW_EPOCH:-2000000000}"
 STALE_IN_PROGRESS_SECONDS="${CLAIMABILITY_AUTOPILOT_STALE_IN_PROGRESS_SECONDS:-3600}"
 GENERATED_AT="${CLAIMABILITY_AUTOPILOT_GENERATED_AT:-2033-05-18T03:33:20Z}"
 RCH_BIN="${RCH_BIN:-rch}"
-RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_CAPTURE_VISIBILITY="${FFS_CLAIMABILITY_AUTOPILOT_RCH_VISIBILITY:-${RCH_VISIBILITY:-summary}}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 SELF_CHECK="${FFS_CLAIMABILITY_AUTOPILOT_SELF_CHECK:-0}"
@@ -117,13 +117,13 @@ run_remote_harness() {
 
     local -a command=(cargo run -q -p ffs-harness -- "$@")
     {
-        printf 'COMMAND: RCH_VISIBILITY=%q' "$RCH_VISIBILITY"
+        printf 'COMMAND: RCH_VISIBILITY=%q' "$RCH_CAPTURE_VISIBILITY"
         printf ' %q' "$RCH_BIN" "exec" "--" "${command[@]}"
         printf '\n'
     } >"$transcript"
 
     local status=0
-    RCH_VISIBILITY="$RCH_VISIBILITY" e2e_rch_capture "$stdout_path" "${command[@]}" || status=$?
+    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" e2e_rch_capture "$stdout_path" "${command[@]}" || status=$?
     {
         e2e_log "STDOUT: $stdout_path"
         cat "$stdout_path"
