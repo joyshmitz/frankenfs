@@ -66,6 +66,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_PROOF_BUNDLE_SELF_CHECK=1 ./scripts/e2e/ffs_p
 # Run release-gate policy evaluator smoke
 ./scripts/e2e/ffs_release_gate_e2e.sh
 
+# Verify the release-gate RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_RELEASE_GATE_SELF_CHECK=1 ./scripts/e2e/ffs_release_gate_e2e.sh
+
 # Run the V1.2 program gate rollup and emit the release recommendation manifest
 ./scripts/e2e/ffs_v12_program_gate_e2e.sh
 
@@ -2027,6 +2030,14 @@ The E2E smoke is:
 
 ```bash
 ./scripts/e2e/ffs_release_gate_e2e.sh
+```
+
+The wrapper self-check exercises the release-gate happy path, JSON/TSV/Markdown
+extraction, fail-closed diagnostics, unit-test accounting, local fallback
+rejection, and missing remote evidence without invoking cargo:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_RELEASE_GATE_SELF_CHECK=1 ./scripts/e2e/ffs_release_gate_e2e.sh
 ```
 
 It builds a passing proof bundle and policy, verifies generated wording, then

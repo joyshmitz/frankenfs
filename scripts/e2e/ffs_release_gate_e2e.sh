@@ -17,6 +17,8 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_rele
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_RELEASE_GATE_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_RELEASE_GATE_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -236,6 +238,317 @@ PY
 }
 
 e2e_init "ffs_release_gate"
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_RELEASE_GATE_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected release-gate fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    missing_remote_evidence)
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        ;;
+    *)
+        echo "unknown release-gate fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+finish_success() {
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=0" >&2
+    fi
+    exit 0
+}
+
+finish_failure() {
+    local status="$1"
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=${status}" >&2
+    fi
+    exit "$status"
+}
+
+emit_report() {
+    local mode="$1"
+    python3 - "$mode" <<'PY'
+import json
+import sys
+
+mode = sys.argv[1]
+
+def base_report(valid=True, release_ready=True):
+    return {
+        "valid": valid,
+        "release_ready": release_ready,
+        "required_log_fields": [
+            "feature_id",
+            "previous_state",
+            "proposed_state",
+            "final_state",
+            "transition_reason",
+            "controlling_artifact_hash",
+            "threshold_value",
+            "observed_value",
+            "remediation_id",
+            "docs_wording_id",
+            "output_path",
+            "reproduction_command",
+        ],
+        "feature_reports": [
+            {"feature_id": "mount.rw.ext4", "final_state": "validated"},
+            {"feature_id": "repair.rw.writeback", "final_state": "opt_in_mutating"},
+            {"feature_id": "writeback_cache", "final_state": "opt_in_mutating"},
+            {"feature_id": "swarm.responsiveness", "final_state": "validated"},
+            {"feature_id": "background_scrub_mutation", "final_state": "detection_only"},
+        ],
+        "findings": [],
+    }
+
+report = base_report()
+
+if mode == "missing":
+    report = base_report(valid=False, release_ready=False)
+    report["findings"] = [{"finding_id": "missing_required_lane.release_gates"}]
+elif mode == "stale":
+    report = base_report(valid=False, release_ready=False)
+    report["findings"] = [{"finding_id": "stale_evidence.git_sha"}]
+elif mode == "threshold":
+    report = base_report(valid=False, release_ready=False)
+    report["findings"] = [{"finding_id": "threshold_failure.pass_lanes"}]
+elif mode == "hostile":
+    report = base_report(valid=False, release_ready=False)
+    report["feature_reports"][0]["final_state"] = "disabled"
+    report["findings"] = [
+        {"finding_id": "security_refused.conformance", "remediation_id": "bd-rchk0.5.6.1"}
+    ]
+elif mode == "unsafe_repair":
+    report = base_report(valid=False, release_ready=False)
+    report["feature_reports"][1]["final_state"] = "detection_only"
+    report["findings"] = [
+        {"finding_id": "unsafe_repair_refused.repair_lab", "remediation_id": "bd-rchk0.5.6.1"}
+    ]
+elif mode == "noisy":
+    report = base_report(valid=False, release_ready=False)
+    report["feature_reports"][2]["final_state"] = "experimental"
+    report["findings"] = [
+        {"finding_id": "noisy_performance.performance", "remediation_id": "bd-rchk0.5.6.1"}
+    ]
+elif mode == "capability":
+    report = base_report(valid=True, release_ready=False)
+    report["feature_reports"][0]["final_state"] = "experimental"
+    report["findings"] = [
+        {
+            "finding_id": "host_capability_skip.fuse",
+            "severity": "warn",
+            "remediation_id": "bd-rchk0.5.6.1",
+        }
+    ]
+
+print(json.dumps(report, indent=2, sort_keys=True))
+PY
+}
+
+emit_wording_tsv() {
+    printf '%s\n' \
+        $'readme.mount.rw.ext4\tmount.rw.ext4\texperimental\tvalidated\tvalidated read-write mount support' \
+        $'readme.repair.rw.writeback\trepair.rw.writeback\tdisabled\topt_in_mutating\trepair writeback is opt-in mutating' \
+        $'readme.writeback_cache\twriteback_cache\tdisabled\topt_in_mutating\twriteback cache remains opt-in mutating' \
+        $'feature_parity.swarm_responsiveness\tswarm.responsiveness\tdisabled\tvalidated\tswarm responsiveness validated'
+}
+
+emit_markdown_report() {
+    cat <<'MD'
+# FrankenFS Release Gate
+
+Fresh release-gate evidence is valid.
+
+## Feature States
+
+- mount.rw.ext4: validated
+- repair.rw.writeback: opt_in_mutating
+- writeback_cache: opt_in_mutating
+- swarm.responsiveness: validated
+- background_scrub_mutation: detection_only
+MD
+}
+
+case "$command_text" in
+    *"cargo test -p ffs-harness --lib release_gate"*)
+        printf '%s\n' \
+            "running 33 tests" \
+            "test release_gate::tests::sample_policy_passes ... ok" \
+            "test release_gate::tests::missing_required_lane_fails_closed ... ok" \
+            "test release_gate::tests::host_capability_skip_downgrades ... ok" \
+            "test result: ok. 33 passed; 0 failed; 0 ignored"
+        finish_success
+        ;;
+    *"release_gate_missing_lane.json"*)
+        echo "release gate evaluation failed"
+        emit_report "missing"
+        finish_failure 1
+        ;;
+    *"stale-sha-for-release-gate"*)
+        echo "release gate evaluation failed"
+        emit_report "stale"
+        finish_failure 1
+        ;;
+    *"release_gate_threshold_fail_policy.json"*)
+        echo "release gate evaluation failed"
+        emit_report "threshold"
+        finish_failure 1
+        ;;
+    *"release_gate_hostile_image.json"*)
+        emit_report "hostile"
+        finish_failure 1
+        ;;
+    *"release_gate_unsafe_repair.json"*)
+        emit_report "unsafe_repair"
+        finish_failure 1
+        ;;
+    *"release_gate_noisy_performance.json"*)
+        emit_report "noisy"
+        finish_failure 1
+        ;;
+    *"release_gate_host_capability_skip.json"*)
+        emit_report "capability"
+        finish_success
+        ;;
+    *"evaluate-release-gates"*"--wording-out /dev/stdout"*)
+        emit_wording_tsv
+        finish_success
+        ;;
+    *"evaluate-release-gates"*"--format markdown"*)
+        emit_markdown_report
+        finish_success
+        ;;
+    *"evaluate-release-gates"*)
+        emit_report "valid"
+        finish_success
+        ;;
+    *)
+        echo "unexpected release-gate fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/release_gate_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_RELEASE_GATE_SELF_CHECK=0 \
+        FFS_RELEASE_GATE_SKIP_SELF_CHECK=1 \
+        FFS_RELEASE_GATE_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_release_gate_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic release gate wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-release-gate-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "release_gate_cli_wired" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "release_gate_sample_passes" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "release_gate_generated_wording" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "release_gate_missing_evidence_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "release_gate_stale_evidence_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "release_gate_threshold_failure_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "release_gate_hostile_image_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "release_gate_unsafe_repair_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "release_gate_noisy_performance_downgrades" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "release_gate_host_capability_skip_downgrades" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "release_gate_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "release_gate_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "release_gate_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null \
+        && grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        scenario_result "release_gate_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "release_gate_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "release_gate_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "release_gate_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 GIT_SHA="$(git rev-parse HEAD)"
 RCH_OUTPUT_DIR="$REPO_ROOT/artifacts/rch/release_gate/$(basename "$E2E_LOG_DIR")"
