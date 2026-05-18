@@ -27,16 +27,15 @@ e2e_init "ffs_baseline_validation"
 exec > >(tee -a "$E2E_LOG_FILE") 2>&1
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_baseline_validation}"
-case ",${RCH_ENV_ALLOWLIST:-}," in
-    *",CARGO_TARGET_DIR,"*) ;;
-    *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
-esac
+RCH_CAPTURE_VISIBILITY="${FFS_BASELINE_VALIDATION_RCH_VISIBILITY:-${RCH_VISIBILITY:-summary}}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-1800}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 SELF_CHECK="${FFS_BASELINE_VALIDATION_SELF_CHECK:-0}"
 SKIP_SELF_CHECK="${FFS_BASELINE_VALIDATION_SKIP_SELF_CHECK:-0}"
 LOG_DIR="${BASELINE_VALIDATION_LOG_DIR:-$E2E_LOG_DIR}"
 mkdir -p "$LOG_DIR"
+
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR
 
 PASS=0
 FAIL=0
@@ -59,7 +58,7 @@ scenario_result() {
 }
 
 run_rch_capture() {
-    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" e2e_rch_capture "$@"
+    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" e2e_rch_capture "$@"
 }
 
 log_failure_tail() {
