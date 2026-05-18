@@ -108,6 +108,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_VERSION_STORE_FORMAT_SELF_CHECK=1 ./scripts/e
 # Verify the CLI WAL telemetry RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_CLI_WAL_TELEMETRY_SELF_CHECK=1 ./scripts/e2e/ffs_cli_wal_telemetry_e2e.sh
 
+# Verify the crash matrix RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_CRASH_MATRIX_SELF_CHECK=1 ./scripts/e2e/ffs_crash_matrix_e2e.sh
+
 # Verify the fuzz dashboard RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_FUZZ_DASHBOARD_SELF_CHECK=1 ./scripts/e2e/ffs_fuzz_dashboard_e2e.sh
 

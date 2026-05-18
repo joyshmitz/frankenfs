@@ -1369,7 +1369,8 @@
       "required_categories": [
         "happy",
         "edge",
-        "recovery"
+        "recovery",
+        "error"
       ],
       "scenarios": [
         {
@@ -1400,13 +1401,13 @@
           "id": "crash_matrix_structured_logging",
           "category": "edge",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=structured_logging|outcome=PASS"
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_matrix_structured_logging|outcome=PASS"
         },
         {
           "id": "crash_matrix_oracle_validation",
           "category": "edge",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=oracle_validation|outcome=PASS"
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_matrix_oracle_validation|outcome=PASS"
         },
         {
           "id": "wal_replay_tests",
@@ -1418,19 +1419,37 @@
           "id": "crash_matrix_persist_tests",
           "category": "recovery",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=persist_tests|outcome=PASS"
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_matrix_persist_tests|outcome=PASS"
         },
         {
           "id": "crash_matrix_report_serializable",
           "category": "happy",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=report_serializable|outcome=PASS"
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_matrix_report_serializable|outcome=PASS"
         },
         {
           "id": "crash_matrix_deterministic_seed",
           "category": "recovery",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=deterministic_seed|outcome=PASS"
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_matrix_deterministic_seed|outcome=PASS"
+        },
+        {
+          "id": "crash_matrix_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_matrix_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "crash_matrix_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_matrix_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "crash_matrix_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_matrix_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },
