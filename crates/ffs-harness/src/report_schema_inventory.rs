@@ -173,7 +173,7 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
 }
 
 fn readiness_foundation_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
-    vec![
+    let mut rows = vec![
         covered_advisory_row(
             "readiness_lab_validation_report",
             "crates/ffs-harness/src/readiness_lab.rs",
@@ -237,6 +237,9 @@ fn readiness_foundation_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> 
             "claimability_plan_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__claimability_plan__tests__claimability_plan_report_json_shape.snap",
         ),
+    ];
+    rows.extend(rch_capacity_preflight_report_rows());
+    rows.extend([
         covered_advisory_row(
             "low_privilege_demo_report",
             "crates/ffs-harness/src/low_privilege_demo.rs",
@@ -263,6 +266,30 @@ fn readiness_foundation_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> 
             "readiness-action planner fixture validation and dry-run recommendation coverage",
             "readiness_action_fixture_validation_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_fixture_validation_report_json_shape.snap",
+        ),
+    ]);
+    rows
+}
+
+fn rch_capacity_preflight_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
+        covered_advisory_row(
+            "rch_capacity_preflight_report",
+            "crates/ffs-harness/src/rch_capacity_preflight.rs",
+            "RchCapacityPreflightReport",
+            "ffs_rch_capacity_preflight_e2e.sh",
+            "RCH capacity outage gating and proof-handoff diagnostics",
+            "rch_capacity_preflight_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__rch_capacity_preflight__tests__rch_capacity_preflight_report_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "rch_capacity_preflight_validation_report",
+            "crates/ffs-harness/src/rch_capacity_preflight.rs",
+            "RchCapacityPreflightValidationReport",
+            "validate-rch-capacity-preflight",
+            "RCH capacity outage gating and proof-handoff diagnostics",
+            "rch_capacity_preflight_validation_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__rch_capacity_preflight__tests__rch_capacity_preflight_validation_report_json_shape.snap",
         ),
     ]
 }
@@ -309,7 +336,7 @@ fn open_ended_inventory_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> 
 }
 
 fn mounted_writeback_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
-    vec![
+    let mut rows = vec![
         rch_proof_ledger_report_row(),
         covered_advisory_row(
             "fuse_capability_report",
@@ -320,15 +347,9 @@ fn mounted_writeback_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "fuse_capability_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__verification_runner__tests__fuse_capability_report_json_shape.snap",
         ),
-        covered_advisory_row(
-            "mounted_lane_decision",
-            "crates/ffs-harness/src/mounted_lane_gate.rs",
-            "MountedLaneDecision",
-            "mounted lane fail-closed gate evaluator",
-            "mounted FUSE lane skip/fail/pass decision gate",
-            "mounted_lane_decision_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__mounted_lane_gate__tests__mounted_lane_decision_json_shape.snap",
-        ),
+    ];
+    rows.extend(mounted_lane_gate_report_rows());
+    rows.extend([
         covered_advisory_row(
             "mounted_repair_policy_report",
             "crates/ffs-harness/src/mounted_repair_policy.rs",
@@ -401,6 +422,30 @@ fn mounted_writeback_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "writeback-cache crash/replay oracle validator",
             "writeback_crash_replay_report_json_shape",
             "crates/ffs-harness/src/snapshots/ffs_harness__writeback_cache_audit__tests__writeback_crash_replay_report_json_shape.snap",
+        ),
+    ]);
+    rows
+}
+
+fn mounted_lane_gate_report_rows() -> Vec<ReportSchemaInventoryRow> {
+    vec![
+        covered_advisory_row(
+            "mounted_lane_decision",
+            "crates/ffs-harness/src/mounted_lane_gate.rs",
+            "MountedLaneDecision",
+            "mounted lane fail-closed gate evaluator",
+            "mounted FUSE lane skip/fail/pass decision gate",
+            "mounted_lane_decision_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__mounted_lane_gate__tests__mounted_lane_decision_json_shape.snap",
+        ),
+        covered_advisory_row(
+            "mounted_lane_gate",
+            "crates/ffs-harness/src/mounted_lane_gate.rs",
+            "MountedLaneGate",
+            "mounted lane fail-closed gate evaluator",
+            "mounted matrix permissioned-lane fail-closed gate input",
+            "mounted_lane_gate_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__mounted_lane_gate__tests__mounted_lane_gate_json_shape.snap",
         ),
     ]
 }
@@ -1995,13 +2040,14 @@ mod tests {
             let Some(snapshot_name) = file_name.strip_suffix(".snap") else {
                 continue;
             };
+            if !snapshot_name.ends_with("_json_shape") {
+                continue;
+            }
             let Some((_module_prefix, evidence_test)) = snapshot_name.split_once("__tests__")
             else {
                 bail!("snapshot name missing `__tests__` marker: {file_name}");
             };
-            if evidence_test.ends_with("_json_shape") {
-                evidence_tests.insert(evidence_test.to_owned());
-            }
+            evidence_tests.insert(evidence_test.to_owned());
         }
         Ok(evidence_tests)
     }
@@ -2030,6 +2076,14 @@ mod tests {
             producer: "mounted lane fail-closed gate evaluator",
             evidence_test: "mounted_lane_decision_json_shape",
             snapshot_suffix: "ffs_harness__mounted_lane_gate__tests__mounted_lane_decision_json_shape.snap",
+        },
+        ReportInventoryExpectation {
+            report_id: "mounted_lane_gate",
+            module_path: "crates/ffs-harness/src/mounted_lane_gate.rs",
+            rust_type: "MountedLaneGate",
+            producer: "mounted lane fail-closed gate evaluator",
+            evidence_test: "mounted_lane_gate_json_shape",
+            snapshot_suffix: "ffs_harness__mounted_lane_gate__tests__mounted_lane_gate_json_shape.snap",
         },
         ReportInventoryExpectation {
             report_id: "mounted_repair_policy_report",
@@ -2147,12 +2201,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 108);
+        assert_eq!(report.total_rows, 111);
         assert_eq!(report.required_rows, 10);
-        assert_eq!(report.advisory_only_rows, 96);
+        assert_eq!(report.advisory_only_rows, 99);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 107);
+        assert_eq!(report.covered_rows, 110);
         assert_eq!(report.missing_rows, 0);
         for report_id in [
             "swarm_operator_report",
@@ -2182,9 +2236,12 @@ mod tests {
             "parity_report",
             "crash_replay_artifact_report",
             "mounted_write_errno_budget_report",
+            "mounted_lane_gate",
             "readiness_action_fixture_validation_report",
             "cross_oracle_arbitration_report",
             "claimability_plan_report",
+            "rch_capacity_preflight_report",
+            "rch_capacity_preflight_validation_report",
             "agent_mail_reservation_snapshot_report",
             "crash_replay_suite_report",
             "fsx_stress_report",
@@ -2794,6 +2851,55 @@ mod tests {
             row.claim_effect,
             ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
         );
+    }
+
+    #[test]
+    fn inventory_tracks_rch_capacity_preflight_reports() {
+        let inventory = current_report_schema_inventory();
+        for (report_id, rust_type, producer, evidence_test, snapshot_suffix) in [
+            (
+                "rch_capacity_preflight_report",
+                "RchCapacityPreflightReport",
+                "ffs_rch_capacity_preflight_e2e.sh",
+                "rch_capacity_preflight_report_json_shape",
+                "ffs_harness__rch_capacity_preflight__tests__rch_capacity_preflight_report_json_shape.snap",
+            ),
+            (
+                "rch_capacity_preflight_validation_report",
+                "RchCapacityPreflightValidationReport",
+                "validate-rch-capacity-preflight",
+                "rch_capacity_preflight_validation_report_json_shape",
+                "ffs_harness__rch_capacity_preflight__tests__rch_capacity_preflight_validation_report_json_shape.snap",
+            ),
+        ] {
+            let row = inventory
+                .rows
+                .iter()
+                .find(|row| row.report_id == report_id)
+                .expect("inventory includes RCH capacity preflight report row");
+
+            assert_eq!(
+                row.module_path,
+                "crates/ffs-harness/src/rch_capacity_preflight.rs"
+            );
+            assert_eq!(row.rust_type, rust_type);
+            assert_eq!(row.producer, producer);
+            assert_eq!(
+                row.downstream_consumer,
+                "RCH capacity outage gating and proof-handoff diagnostics"
+            );
+            assert_eq!(
+                row.coverage_requirement,
+                ReportSchemaCoverageRequirement::AdvisoryOnly
+            );
+            assert_eq!(row.coverage_status, ReportSchemaCoverageStatus::Covered);
+            assert_eq!(row.evidence_test, evidence_test);
+            assert!(row.snapshot_path.ends_with(snapshot_suffix));
+            assert_eq!(
+                row.claim_effect,
+                ReportSchemaClaimEffect::AdvisoryOnlyNoPublicReadinessChange
+            );
+        }
     }
 
     #[test]

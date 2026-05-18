@@ -1,0 +1,21 @@
+---
+source: crates/ffs-harness/src/rch_capacity_preflight.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "report_path": "report.json",
+  "report_schema_version": 1,
+  "valid": true,
+  "capacity_verdict": "no_admissible_workers",
+  "worker_counts": {
+    "admissible": 0,
+    "critical_pressure": 7,
+    "telemetry_gap": 3,
+    "telemetry_stale": 3,
+    "unhealthy": 3,
+    "unreachable": 2
+  },
+  "probe_verdict": "local_fallback_rejected",
+  "diagnostics": []
+}

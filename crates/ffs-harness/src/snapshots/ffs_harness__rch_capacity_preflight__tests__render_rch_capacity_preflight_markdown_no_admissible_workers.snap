@@ -1,0 +1,17 @@
+---
+source: crates/ffs-harness/src/rch_capacity_preflight.rs
+expression: markdown
+---
+# RCH Capacity Preflight Validation
+
+- Valid: `true`
+- Capacity verdict: `no_admissible_workers`
+- Probe verdict: `local_fallback_rejected`
+- Admissible workers: `0`
+- Critical pressure workers: `7`
+- Telemetry gap workers: `3`
+- Unreachable workers: `2`
+
+## Diagnostics
+
+- none

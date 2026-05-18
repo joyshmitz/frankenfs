@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
@@ -8,7 +9,7 @@ pub const RCH_CAPACITY_PREFLIGHT_VALIDATION_SCHEMA_VERSION: u32 = 1;
 
 const EXPECTED_PROBE_COMMAND: &[&str] = &["cargo", "check", "-p", "ffs-error", "--lib"];
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RchCapacityPreflightReport {
     pub schema_version: u32,
     pub capacity_verdict: String,
@@ -150,17 +151,15 @@ pub fn render_rch_capacity_preflight_markdown(
     let diagnostics = if report.diagnostics.is_empty() {
         "- none\n".to_owned()
     } else {
-        report
-            .diagnostics
-            .iter()
-            .map(|diagnostic| {
-                format!(
-                    "- `{}` `{}`: {}\n",
-                    diagnostic.severity, diagnostic.code, diagnostic.message
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("")
+        let mut output = String::new();
+        for diagnostic in &report.diagnostics {
+            let _ = writeln!(
+                output,
+                "- `{}` `{}`: {}",
+                diagnostic.severity, diagnostic.code, diagnostic.message
+            );
+        }
+        output
     };
 
     format!(
@@ -548,6 +547,65 @@ mod tests {
         assert!(!validation.valid);
         assert!(has_code(&validation, "blocked_without_explanation"));
         assert!(has_code(&validation, "worker_count_without_reason"));
+    }
+
+    #[test]
+    fn rch_capacity_preflight_report_json_shape() -> Result<()> {
+        let report = sample_report();
+        let encoded = serde_json::to_string(&report)?;
+        let decoded: RchCapacityPreflightReport = serde_json::from_str(&encoded)?;
+        assert_eq!(decoded, report);
+
+        let shape = serde_json::json!({
+            "schema_version": report.schema_version,
+            "capacity_verdict": report.capacity_verdict,
+            "status_capture": report.status_capture,
+            "daemon": report.daemon,
+            "worker_counts": report.worker_counts,
+            "blocker_reasons": report.blocker_reasons,
+            "operator_actions": report.operator_actions,
+            "probe": report.probe,
+        });
+        let json = serde_json::to_string_pretty(&shape)?;
+
+        insta::assert_snapshot!("rch_capacity_preflight_report_json_shape", json);
+        Ok(())
+    }
+
+    #[test]
+    fn rch_capacity_preflight_validation_report_json_shape() -> Result<()> {
+        let report = sample_report();
+        let validation = validate(&report);
+        let encoded = serde_json::to_string(&validation)?;
+        let decoded: RchCapacityPreflightValidationReport = serde_json::from_str(&encoded)?;
+        assert_eq!(decoded, validation);
+
+        let shape = serde_json::json!({
+            "schema_version": validation.schema_version,
+            "report_path": validation.report_path,
+            "report_schema_version": validation.report_schema_version,
+            "valid": validation.valid,
+            "capacity_verdict": validation.capacity_verdict,
+            "worker_counts": validation.worker_counts,
+            "probe_verdict": validation.probe_verdict,
+            "diagnostics": validation.diagnostics,
+        });
+        let json = serde_json::to_string_pretty(&shape)?;
+
+        insta::assert_snapshot!("rch_capacity_preflight_validation_report_json_shape", json);
+        Ok(())
+    }
+
+    #[test]
+    fn render_rch_capacity_preflight_markdown_no_admissible_workers() {
+        let report = sample_report();
+        let validation = validate(&report);
+        let markdown = render_rch_capacity_preflight_markdown(&validation);
+
+        insta::assert_snapshot!(
+            "render_rch_capacity_preflight_markdown_no_admissible_workers",
+            markdown
+        );
     }
 
     fn has_code(report: &RchCapacityPreflightValidationReport, code: &str) -> bool {

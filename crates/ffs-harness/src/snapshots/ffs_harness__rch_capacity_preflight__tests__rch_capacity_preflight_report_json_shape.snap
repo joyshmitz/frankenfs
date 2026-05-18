@@ -1,0 +1,52 @@
+---
+source: crates/ffs-harness/src/rch_capacity_preflight.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "capacity_verdict": "no_admissible_workers",
+  "status_capture": {
+    "exit_code": 0,
+    "success": true
+  },
+  "daemon": {
+    "workers_total": 10,
+    "workers_healthy": 7,
+    "slots_total": 134,
+    "slots_available": 134
+  },
+  "worker_counts": {
+    "admissible": 0,
+    "critical_pressure": 7,
+    "telemetry_gap": 3,
+    "telemetry_stale": 3,
+    "unhealthy": 3,
+    "unreachable": 2
+  },
+  "blocker_reasons": [
+    "critical_pressure",
+    "telemetry_gap",
+    "unreachable_workers",
+    "unhealthy_workers"
+  ],
+  "operator_actions": [
+    {
+      "source": "remediation_hints",
+      "message": "worker under critical pressure"
+    }
+  ],
+  "probe": {
+    "requested": true,
+    "command": [
+      "cargo",
+      "check",
+      "-p",
+      "ffs-error",
+      "--lib"
+    ],
+    "exit_code": 1,
+    "verdict": "local_fallback_rejected",
+    "fail_closed": true,
+    "raw_log": "artifacts/e2e/run/rch_capacity_probe.raw"
+  }
+}
