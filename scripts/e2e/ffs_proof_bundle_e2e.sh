@@ -17,6 +17,8 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_proo
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_PROOF_BUNDLE_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_PROOF_BUNDLE_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -184,6 +186,379 @@ PY
 }
 
 e2e_init "ffs_proof_bundle"
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_PROOF_BUNDLE_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected proof-bundle fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    missing_remote_evidence)
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        ;;
+    *)
+        echo "unknown proof-bundle fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+finish_success() {
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=0" >&2
+    fi
+    exit 0
+}
+
+finish_failure() {
+    local status="$1"
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=${status}" >&2
+    fi
+    exit "$status"
+}
+
+emit_validation_report() {
+    python3 - <<'PY'
+import json
+
+lanes = [
+    "conformance",
+    "xfstests",
+    "fuse",
+    "differential_oracle",
+    "repair_lab",
+    "crash_replay",
+    "performance",
+    "swarm_workload_harness",
+    "swarm_tail_latency",
+    "writeback_cache",
+    "scrub_repair_status",
+    "known_deferrals",
+    "release_gates",
+    "adaptive_runtime",
+]
+statuses = ["pass", "fail", "skip", "error"]
+report = {
+    "valid": True,
+    "totals": {"pass": 4, "fail": 4, "skip": 3, "error": 3},
+    "artifact_hash_chain": {
+        "artifact_hash_chain_sha256": "a" * 64,
+        "redaction_policy_version": "redaction-v1",
+    },
+    "lanes": [],
+    "artifact_reports": [],
+    "swarm_evidence": [],
+    "adaptive_runtime_evidence": [],
+    "lane_provenance": [],
+}
+
+for index, lane in enumerate(lanes):
+    status = "pass" if lane == "adaptive_runtime" else statuses[index % len(statuses)]
+    report["lanes"].append(
+        {
+            "lane_id": lane,
+            "status": status,
+            "raw_log_path": f"logs/{lane}.log",
+            "summary_path": f"summaries/{lane}.md",
+        }
+    )
+    report["artifact_reports"].append(
+        {
+            "lane_id": lane,
+            "path": f"artifacts/{lane}.json",
+            "sha256": "b" * 64,
+            "role": (
+                "swarm_validator_report"
+                if lane in {"swarm_workload_harness", "swarm_tail_latency"}
+                else "adaptive_runtime_validator_report"
+                if lane == "adaptive_runtime"
+                else "primary_evidence"
+            ),
+        }
+    )
+    provenance_class = "executed_product_evidence"
+    claim_effect = "context_only"
+    if lane == "conformance":
+        claim_effect = "strengthens_public_claim"
+    if lane == "swarm_workload_harness":
+        provenance_class = "small_host_smoke"
+    if lane == "known_deferrals":
+        provenance_class = "unsupported_future_scope"
+    report["lane_provenance"].append(
+        {
+            "lane_id": lane,
+            "provenance_class": provenance_class,
+            "claim_effect": claim_effect,
+            "source_command": f"cargo run -p ffs-harness -- validate-{lane}",
+            "raw_log_path": f"logs/{lane}.log",
+        }
+    )
+
+report["artifact_reports"].extend(
+    [
+        {
+            "lane_id": "swarm_tail_latency",
+            "path": "artifacts/swarm_tail_latency_p99_attribution.json",
+            "sha256": "c" * 64,
+            "role": "p99_attribution_ledger",
+        },
+        {
+            "lane_id": "adaptive_runtime",
+            "path": "artifacts/adaptive_runtime_runner.json",
+            "sha256": "d" * 64,
+            "role": "adaptive_runtime_runner_report",
+        },
+    ]
+)
+report["swarm_evidence"] = [
+    {
+        "lane_id": "swarm_workload_harness",
+        "host_class": "developer_smoke",
+        "manifest_hash": "e" * 64,
+    },
+    {
+        "lane_id": "swarm_tail_latency",
+        "host_class": "developer_smoke",
+        "manifest_hash": "f" * 64,
+    },
+]
+report["adaptive_runtime_evidence"] = [
+    {
+        "lane_id": "adaptive_runtime",
+        "release_claim_state": "accepted_large_host",
+        "runner_report": "artifacts/adaptive_runtime_runner.json",
+    }
+]
+print(json.dumps(report, indent=2, sort_keys=True))
+PY
+}
+
+emit_markdown_report() {
+    python3 - <<'PY'
+lanes = [
+    "conformance",
+    "xfstests",
+    "fuse",
+    "differential_oracle",
+    "repair_lab",
+    "crash_replay",
+    "performance",
+    "swarm_workload_harness",
+    "swarm_tail_latency",
+    "writeback_cache",
+    "scrub_repair_status",
+    "known_deferrals",
+    "release_gates",
+    "adaptive_runtime",
+]
+print("# FrankenFS Proof Bundle")
+print()
+print("Reproduce with `cargo run -p ffs-harness -- validate-proof-bundle`.")
+print()
+print("## Lanes")
+for lane in lanes:
+    print(f"- {lane}: logs/{lane}.log summaries/{lane}.md")
+print()
+print("## Artifact hash chain")
+print("Artifact hash chain: valid")
+print()
+print("## Lane Provenance")
+print("conformance strengthens_public_claim")
+print("known_deferrals unsupported_future_scope")
+print()
+print("## Swarm Evidence")
+print("swarm_tail_latency p99_attribution available")
+print()
+print("## Adaptive Runtime Evidence")
+print("adaptive_runtime_runner available")
+PY
+}
+
+case "$command_text" in
+    *"cargo test -p ffs-harness --lib proof_bundle"*)
+        printf '%s\n' \
+            "running 47 tests" \
+            "test proof_bundle::tests::sample_bundle_validates ... ok" \
+            "test proof_bundle::tests::render_proof_bundle_markdown_sample_bundle_snapshot ... ok" \
+            "test proof_bundle::tests::redaction_policy_failures_are_evidence_production_failures ... ok" \
+            "test result: ok. 47 passed; 0 failed; 0 ignored"
+        finish_success
+        ;;
+    *"proof_bundle_bad_hash.json"*)
+        echo "artifact hash mismatch for artifacts/conformance.json"
+        finish_failure 1
+        ;;
+    *"proof_bundle_stale_sha.json"*)
+        echo "stale git_sha: stale-sha-for-e2e"
+        finish_failure 1
+        ;;
+    *"proof_bundle_missing_artifact.json"*)
+        echo "broken link: artifacts/does_not_exist.json"
+        finish_failure 1
+        ;;
+    *"proof_bundle_bad_hash_chain.json"*)
+        echo "artifact hash-chain mismatch"
+        finish_failure 1
+        ;;
+    *"proof_bundle_redaction_leak.json"*)
+        echo "redaction leak: SECRET_TOKEN"
+        finish_failure 1
+        ;;
+    *"proof_bundle_missing_placeholder.json"*)
+        echo "redacted artifact lacks placeholder"
+        finish_failure 1
+        ;;
+    *"proof_bundle_bad_raw_log_hash.json"*)
+        echo "raw log hash mismatch"
+        finish_failure 1
+        ;;
+    *"proof_bundle_traversal_path.json"*)
+        echo "parent traversal rejected"
+        finish_failure 1
+        ;;
+    *"proof_bundle_env_secret.json"*)
+        echo "AWS_SECRET_ACCESS_KEY=unredacted"
+        finish_failure 1
+        ;;
+    *"proof_bundle_missing_redaction.json"*)
+        echo "redaction.reproduction_command missing"
+        echo "evidence_production_failure"
+        finish_failure 1
+        ;;
+    *"validate-proof-bundle"*"--format markdown"*)
+        emit_markdown_report
+        finish_success
+        ;;
+    *"validate-proof-bundle"*)
+        emit_validation_report
+        finish_success
+        ;;
+    *)
+        echo "unexpected proof-bundle fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/proof_bundle_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_PROOF_BUNDLE_SELF_CHECK=0 \
+        FFS_PROOF_BUNDLE_SKIP_SELF_CHECK=1 \
+        FFS_PROOF_BUNDLE_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_proof_bundle_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic proof bundle wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-proof-bundle-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "proof_bundle_cli_wired" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "proof_bundle_sample_validates" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "proof_bundle_summary_links" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "proof_bundle_hash_drift_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "proof_bundle_stale_sha_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "proof_bundle_missing_artifact_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "proof_bundle_hash_chain_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "proof_bundle_redaction_leak_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "proof_bundle_redaction_placeholder_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "proof_bundle_raw_log_hash_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "proof_bundle_traversal_path_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "proof_bundle_env_secret_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "proof_bundle_missing_redaction_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "proof_bundle_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "proof_bundle_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "proof_bundle_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null \
+        && grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        scenario_result "proof_bundle_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "proof_bundle_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "proof_bundle_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "proof_bundle_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 GIT_SHA="$(git rev-parse HEAD)"
 RCH_OUTPUT_DIR="$REPO_ROOT/artifacts/rch/proof_bundle/$(basename "$E2E_LOG_DIR")"

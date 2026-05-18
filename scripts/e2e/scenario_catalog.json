@@ -5853,6 +5853,24 @@
           "category": "happy",
           "status": "active",
           "evidence": "scenario_result \"proof_bundle_unit_tests\" \"PASS\""
+        },
+        {
+          "id": "proof_bundle_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=proof_bundle_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "proof_bundle_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=proof_bundle_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "proof_bundle_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=proof_bundle_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },

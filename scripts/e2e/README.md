@@ -60,6 +60,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_REPAIR_EXCHANGE_LOOPBACK_SELF_CHECK=1 ./scrip
 # Run proof bundle offline validation smoke
 ./scripts/e2e/ffs_proof_bundle_e2e.sh
 
+# Verify the proof bundle RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_PROOF_BUNDLE_SELF_CHECK=1 ./scripts/e2e/ffs_proof_bundle_e2e.sh
+
 # Run release-gate policy evaluator smoke
 ./scripts/e2e/ffs_release_gate_e2e.sh
 
@@ -1641,6 +1644,14 @@ The E2E smoke is:
 
 ```bash
 ./scripts/e2e/ffs_proof_bundle_e2e.sh
+```
+
+The wrapper self-check exercises the full proof-bundle scenario list, JSON and
+Markdown extraction, malformed-bundle diagnostics, unit-test accounting, local
+fallback rejection, and missing remote evidence without invoking cargo:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_PROOF_BUNDLE_SELF_CHECK=1 ./scripts/e2e/ffs_proof_bundle_e2e.sh
 ```
 
 It builds a sample bundle with every required lane, validates it, writes
