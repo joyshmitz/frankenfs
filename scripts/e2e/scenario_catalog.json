@@ -3117,6 +3117,24 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=wal_writer_verify|outcome=PASS"
+        },
+        {
+          "id": "wal_writer_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_writer_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "wal_writer_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_writer_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "wal_writer_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=wal_writer_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },
