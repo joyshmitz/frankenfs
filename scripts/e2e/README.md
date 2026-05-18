@@ -108,6 +108,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_FUZZ_DASHBOARD_SELF_CHECK=1 ./scripts/e2e/ffs
 # Verify the crash promotion RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_CRASH_PROMOTION_SELF_CHECK=1 ./scripts/e2e/ffs_crash_promotion_e2e.sh
 
+# Verify the fuzzing gate RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_FUZZING_GATE_SELF_CHECK=1 ./scripts/e2e/ffs_fuzzing_gate_e2e.sh
+
 # Verify the perf comparison RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_PERF_COMPARISON_SELF_CHECK=1 ./scripts/e2e/ffs_perf_comparison_e2e.sh
 

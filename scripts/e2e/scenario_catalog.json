@@ -1740,7 +1740,8 @@
         "happy",
         "edge",
         "degradation",
-        "recovery"
+        "recovery",
+        "error"
       ],
       "scenarios": [
         {
@@ -1795,7 +1796,25 @@
           "id": "fuzzing_gate_traceability",
           "category": "recovery",
           "status": "active",
-          "evidence": "SCENARIO_RESULT|scenario_id=gate_traceability|outcome=PASS"
+          "evidence": "SCENARIO_RESULT|scenario_id=gate_pipeline_traceability|outcome=PASS"
+        },
+        {
+          "id": "fuzzing_gate_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuzzing_gate_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "fuzzing_gate_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuzzing_gate_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "fuzzing_gate_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=fuzzing_gate_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },
