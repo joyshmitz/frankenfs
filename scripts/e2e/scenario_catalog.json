@@ -2470,6 +2470,24 @@
           "category": "edge",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=pgat_logging_traceability|outcome=PASS"
+        },
+        {
+          "id": "program_gate_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=program_gate_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "program_gate_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=program_gate_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "program_gate_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=program_gate_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },

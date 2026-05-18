@@ -69,6 +69,12 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_PROOF_BUNDLE_SELF_CHECK=1 ./scripts/e2e/ffs_p
 # Verify the release-gate RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_RELEASE_GATE_SELF_CHECK=1 ./scripts/e2e/ffs_release_gate_e2e.sh
 
+# Run the V1.1 program acceptance gate
+./scripts/e2e/ffs_program_gate_e2e.sh
+
+# Verify the V1.1 program-gate RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_PROGRAM_GATE_SELF_CHECK=1 ./scripts/e2e/ffs_program_gate_e2e.sh
+
 # Run the V1.2 program gate rollup and emit the release recommendation manifest
 ./scripts/e2e/ffs_v12_program_gate_e2e.sh
 
