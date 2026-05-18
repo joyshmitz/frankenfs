@@ -120,7 +120,7 @@ Every public assertion is backed by a machine-readable artifact:
 
 - Tracked feature coverage lives in `FEATURE_PARITY.md` and is parsed by `ffs-harness::ParityReport::current()`; a CI test enforces the mapping.
 - Release-gate behavior lives in `tests/release-gates/release_gate_policy_v1.json` and is validated by `ffs-harness validate-proof-bundle`.
-- Every report shape (release-gate, writeback-cache audit, ordering oracle, crash-replay oracle, repair confidence, repair corpus, soak/canary, swarm tail latency, fuzz dashboard, mounted-lane decision, …) is snapshot-pinned with `insta` against a checked-in schema inventory, and a drift detector catches silent shape changes.
+- Every public serialized `ffs-harness` report schema (release-gate, writeback-cache audit, ordering oracle, crash-replay oracle, repair confidence, repair corpus, soak/canary, swarm tail latency, fuzz dashboard, mounted-lane decision, …) is snapshot-pinned with `insta` against a checked-in schema inventory, and a drift detector catches silent shape changes. Crate-local human-output snapshots and exact-golden tests are tracked at their own test surfaces instead of being forced into that JSON schema inventory.
 - Every checksum, parser, and reporting surface has metamorphic-relation proptests.
 
 ### 6. Zero unsafe, always
@@ -1393,7 +1393,7 @@ A small illustrative sample (formatting wrapped for readability; the file itself
  "txn_aborted":{"txn_id":482,"reason":"fcw_conflict","read_set_size":4,"write_set_size":2}}
 ```
 
-The exact field set in each detail struct (`CorruptionDetail`, `RepairDetail`, `ScrubCycleDetail`, …) is defined in `crates/ffs-repair/src/evidence.rs` and snapshot-pinned via `insta`. The ledger is line-oriented and append-only, so `jq`, `awk`, or any log-shipping pipeline (Vector, Fluent Bit, Promtail) can consume it without changes. The CLI's `--preset` flags wrap common `jq` filters for operator use.
+The exact field set in each detail struct (`CorruptionDetail`, `RepairDetail`, `ScrubCycleDetail`, …) is defined in `crates/ffs-repair/src/evidence.rs` and locked by serde round trips plus an exact JSONL golden contract. The ledger is line-oriented and append-only, so `jq`, `awk`, or any log-shipping pipeline (Vector, Fluent Bit, Promtail) can consume it without changes. The CLI's `--preset` flags wrap common `jq` filters for operator use.
 
 ### Operator query examples
 
