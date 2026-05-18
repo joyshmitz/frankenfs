@@ -240,6 +240,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_LOG_CONTRACT_SELF_CHECK=1 ./scripts/e2e/ffs_l
 # Verify the open-ended inventory/source-scope RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_OPEN_ENDED_INVENTORY_SCANNER_SELF_CHECK=1 ./scripts/e2e/ffs_open_ended_inventory_scanner_e2e.sh
 
+# Verify the claimability autopilot RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_CLAIMABILITY_AUTOPILOT_SELF_CHECK=1 ./scripts/e2e/ffs_claimability_autopilot_e2e.sh
+
 # Run repair confidence mutation-safety threshold validation
 ./scripts/e2e/ffs_repair_confidence_lab_e2e.sh
 

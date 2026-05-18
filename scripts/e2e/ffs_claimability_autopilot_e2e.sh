@@ -40,6 +40,10 @@ STALE_IN_PROGRESS_SECONDS="${CLAIMABILITY_AUTOPILOT_STALE_IN_PROGRESS_SECONDS:-3
 GENERATED_AT="${CLAIMABILITY_AUTOPILOT_GENERATED_AT:-2033-05-18T03:33:20Z}"
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_CLAIMABILITY_AUTOPILOT_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_CLAIMABILITY_AUTOPILOT_SKIP_SELF_CHECK:-0}"
 
 PERMISSION_FIXTURE="$REPO_ROOT/tests/fixtures/claimability_autopilot_permission_gated.jsonl"
 POLLUTED_FIXTURE="$REPO_ROOT/tests/fixtures/claimability_autopilot_polluted.jsonl"
@@ -111,36 +115,22 @@ run_remote_harness() {
     local stdout_path="$2"
     shift 2
 
-    local stderr_path="${transcript}.stderr"
-
-    local -a command=("$RCH_BIN" exec -- cargo run -q -p ffs-harness -- "$@")
+    local -a command=(cargo run -q -p ffs-harness -- "$@")
     {
         printf 'COMMAND: RCH_VISIBILITY=%q' "$RCH_VISIBILITY"
-        printf ' %q' "${command[@]}"
+        printf ' %q' "$RCH_BIN" "exec" "--" "${command[@]}"
         printf '\n'
     } >"$transcript"
 
     local status=0
-    RCH_VISIBILITY="$RCH_VISIBILITY" "${command[@]}" >"$stdout_path" 2>"$stderr_path" || status=$?
+    RCH_VISIBILITY="$RCH_VISIBILITY" e2e_rch_capture "$stdout_path" "${command[@]}" || status=$?
     {
         e2e_log "STDOUT: $stdout_path"
-        e2e_log "STDERR: $stderr_path"
         cat "$stdout_path"
-        cat "$stderr_path"
     } >>"$transcript"
     if [[ "$status" -ne 0 ]]; then
         e2e_log "Remote harness command failed: transcript=$transcript status=$status"
         return "$status"
-    fi
-    if grep -Fq "[RCH] local" "$transcript" \
-        || grep -Fq "exec called with non-compilation command" "$transcript"; then
-        e2e_log "Remote harness command used local fallback: transcript=$transcript"
-        return 1
-    fi
-    if ! grep -Fq "[RCH] remote" "$transcript" \
-        && ! grep -Fq "Remote command finished: exit=0" "$transcript"; then
-        e2e_log "Remote harness transcript is missing remote proof: transcript=$transcript"
-        return 1
     fi
 }
 
@@ -252,6 +242,333 @@ run_claimability_plan() {
     run_remote_harness "$transcript" "$stdout_path" "${args[@]}" \
         && extract_first_json_object "$transcript" "$plan_json" \
         && render_plan_markdown "$plan_json" "$plan_md"
+}
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_CLAIMABILITY_AUTOPILOT_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected claimability-autopilot fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)"
+        exit 1
+        ;;
+    missing_remote_evidence)
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0"
+        ;;
+    *)
+        echo "unknown claimability-autopilot fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+finish_success() {
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=0"
+    fi
+    exit 0
+}
+
+emit_tracker_report() {
+    cat <<'JSON'
+{
+  "source_aware_queue_state": {
+    "claimable_ids": [
+      "bd-autopilot-ready"
+    ],
+    "verdict": "fixture"
+  }
+}
+JSON
+}
+
+emit_permission_plan() {
+    cat <<'JSON'
+{
+  "bv_snapshot": {
+    "suppressed_parent_epic_ids": [
+      "bd-autopilot-epic"
+    ]
+  },
+  "mutation_policy": "advisory_only",
+  "next_safe_actions": [
+    "do not run permission-gated rows without the required ACK"
+  ],
+  "reservation_allocation_plan": {
+    "safe_reservation_commands": [],
+    "self_held_reservation_count": 0,
+    "self_held_target_paths": [],
+    "status": "none",
+    "suggested_disjoint_target_paths": []
+  },
+  "rows": [
+    {
+      "classification": "permission_gated",
+      "id": "bd-autopilot-permissioned",
+      "permission_gate": {
+        "required_env": "XFSTESTS_REAL_RUN_ACK"
+      }
+    }
+  ],
+  "source_aware_claimable_ids": [],
+  "status": "blocked",
+  "tracker_queue_verdict": "permission_gated"
+}
+JSON
+}
+
+emit_polluted_plan() {
+    cat <<'JSON'
+{
+  "mutation_policy": "advisory_only",
+  "next_safe_actions": [
+    "claim one claimable row with Agent Mail reservation",
+    "inspect Agent Mail and live reservations before reclaiming stale in-progress rows",
+    "preserve foreign rows as owner-handoff only"
+  ],
+  "reservation_allocation_plan": {
+    "safe_reservation_commands": [],
+    "self_held_reservation_count": 0,
+    "self_held_target_paths": [],
+    "status": "none",
+    "suggested_disjoint_target_paths": []
+  },
+  "rows": [
+    {
+      "classification": "claimable",
+      "id": "bd-autopilot-ready"
+    },
+    {
+      "classification": "stale_in_progress_reclaim_candidate",
+      "id": "bd-autopilot-stale"
+    },
+    {
+      "classification": "foreign_excluded",
+      "id": "br-r37-autopilot-foreign",
+      "owner_handoff_required": true
+    }
+  ],
+  "source_aware_claimable_ids": [
+    "bd-autopilot-ready"
+  ],
+  "status": "claimable",
+  "tracker_queue_verdict": "claimable"
+}
+JSON
+}
+
+emit_peer_plan() {
+    cat <<'JSON'
+{
+  "mutation_policy": "advisory_only",
+  "next_safe_actions": [
+    "wait for peer reservation release before editing the reserved surface"
+  ],
+  "reservation_allocation_plan": {
+    "advisory_only": true,
+    "groups": [
+      {
+        "blocked_target_paths": [
+          "scripts/e2e/ffs_claimability_autopilot_e2e.sh"
+        ],
+        "holder": "SageMeadow"
+      }
+    ],
+    "safe_reservation_commands": [
+      "file_reservation_paths paths=crates/ffs-harness/src/claimability_plan.rs,docs/tracker-hygiene.md"
+    ],
+    "self_held_reservation_count": 0,
+    "self_held_target_paths": [],
+    "status": "safe_disjoint_suggestions",
+    "suggested_disjoint_target_paths": [
+      "crates/ffs-harness/src/claimability_plan.rs",
+      "docs/tracker-hygiene.md"
+    ]
+  },
+  "reservation_snapshot": {
+    "active_peer_conflict_count": 1,
+    "conflict_classification": "active_peer_conflict"
+  },
+  "rows": [
+    {
+      "classification": "reserved_by_peer",
+      "id": "bd-autopilot-ready"
+    }
+  ],
+  "source_aware_claimable_ids": [
+    "bd-autopilot-ready"
+  ],
+  "status": "blocked",
+  "tracker_queue_verdict": "claimable"
+}
+JSON
+}
+
+emit_self_plan() {
+    cat <<'JSON'
+{
+  "mutation_policy": "advisory_only",
+  "next_safe_actions": [
+    "self-held reservations overlap this surface; continue only in the same coordinated thread"
+  ],
+  "reservation_allocation_plan": {
+    "safe_reservation_commands": [],
+    "self_held_reservation_count": 1,
+    "self_held_target_paths": [
+      "scripts/e2e/ffs_claimability_autopilot_e2e.sh"
+    ],
+    "status": "self_held_active_reservation",
+    "suggested_disjoint_target_paths": []
+  },
+  "reservation_snapshot": {
+    "active_peer_conflict_count": 0,
+    "active_self_reservation_count": 1,
+    "conflict_classification": "self_held",
+    "self_held_target_paths": [
+      "scripts/e2e/ffs_claimability_autopilot_e2e.sh"
+    ]
+  },
+  "rows": [
+    {
+      "classification": "claimable",
+      "id": "bd-autopilot-ready"
+    }
+  ],
+  "source_aware_claimable_ids": [
+    "bd-autopilot-ready"
+  ],
+  "status": "claimable",
+  "tracker_queue_verdict": "claimable"
+}
+JSON
+}
+
+case "$command_text" in
+    *"validate-tracker-source-hygiene"*)
+        emit_tracker_report
+        finish_success
+        ;;
+    *"claimability-plan"*"claimability_autopilot_permission_gated_tracker_report.json"*)
+        emit_permission_plan
+        finish_success
+        ;;
+    *"claimability-plan"*"claimability_autopilot_peer_reservation.json"*)
+        emit_peer_plan
+        finish_success
+        ;;
+    *"claimability-plan"*"claimability_autopilot_self_reservation.json"*)
+        emit_self_plan
+        finish_success
+        ;;
+    *"claimability-plan"*"claimability_autopilot_polluted_tracker_report.json"*)
+        emit_polluted_plan
+        finish_success
+        ;;
+    *)
+        echo "unexpected claimability-autopilot fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/claimability_autopilot_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_CLAIMABILITY_AUTOPILOT_SELF_CHECK=0 \
+        FFS_CLAIMABILITY_AUTOPILOT_SKIP_SELF_CHECK=1 \
+        FFS_CLAIMABILITY_AUTOPILOT_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_claimability_autopilot_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic claimability autopilot wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-claimability-autopilot-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "claimability_autopilot_transcripts_remote_only" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "claimability_autopilot_peer_reserved_surface" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "claimability_autopilot_fixture_non_mutation" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "claimability_autopilot_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "claimability_autopilot_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null \
+        && grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        scenario_result "claimability_autopilot_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "claimability_autopilot_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "claimability_autopilot_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "claimability_autopilot_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
 }
 
 write_autopilot_summary() {
@@ -369,6 +686,12 @@ write_autopilot_summary() {
 }
 
 e2e_step "Preflight"
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
+
 if ! command -v jq >/dev/null 2>&1; then
     scenario_result "claimability_autopilot_artifacts_written" "FAIL" "jq not found"
     e2e_fail "jq is required for claimability autopilot reporting"
