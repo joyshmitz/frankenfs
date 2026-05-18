@@ -57,6 +57,12 @@ const EXT4_FALLOC_FL_COLLAPSE_RANGE: i32 = 0x08;
 const EXT4_FALLOC_FL_INSERT_RANGE: i32 = 0x20;
 const FUSE_MOUNT_STATE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const FUSE_MOUNT_READY_TIMEOUT: Duration = Duration::from_secs(1);
+const DISC_REVIEW_AUDIT_DATE: CalendarDate = CalendarDate {
+    year: 2026,
+    month: 5,
+    day: 18,
+};
+const DISC_REVIEW_FRESHNESS_HORIZON_DAYS: i32 = 90;
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -110,15 +116,26 @@ fn root_conformance_discrepancies_follow_policy() {
         );
         assert!(
             section.has(DISC_FIELD_VALID_REVIEW_DATE),
-            "{} missing YYYY-MM-DD Review date field",
+            "{} missing calendar-valid YYYY-MM-DD Review date field",
             section.id
         );
+        if let Some(error) = review_freshness_error(
+            &section,
+            DISC_REVIEW_AUDIT_DATE,
+            DISC_REVIEW_FRESHNESS_HORIZON_DAYS,
+        ) {
+            panic!("{error}");
+        }
     }
 }
 
+#[derive(Debug)]
 struct DiscrepancySection<'a> {
     id: &'a str,
     fields: u8,
+    review_date: Option<CalendarDate>,
+    review_date_raw: Option<&'a str>,
+    freshness_exemption: Option<&'a str>,
 }
 
 const DISC_FIELD_REFERENCE: u8 = 1 << 0;
@@ -130,10 +147,16 @@ const DISC_FIELD_VALID_REVIEW_DATE: u8 = 1 << 5;
 
 impl<'a> DiscrepancySection<'a> {
     fn new(id: &'a str) -> Self {
-        Self { id, fields: 0 }
+        Self {
+            id,
+            fields: 0,
+            review_date: None,
+            review_date_raw: None,
+            freshness_exemption: None,
+        }
     }
 
-    fn record_line(&mut self, line: &str) {
+    fn record_line(&mut self, line: &'a str) {
         self.mark_if(
             DISC_FIELD_REFERENCE,
             line_has_nonempty_field(line, "- **Reference:**"),
@@ -155,11 +178,20 @@ impl<'a> DiscrepancySection<'a> {
             DISC_FIELD_TESTS_AFFECTED,
             line_has_nonempty_field(line, "- **Tests affected:**"),
         );
-        self.mark_if(
-            DISC_FIELD_VALID_REVIEW_DATE,
-            line.strip_prefix("- **Review date:**")
-                .is_some_and(|value| valid_yyyy_mm_dd(value.trim())),
-        );
+        if let Some(value) = line.strip_prefix("- **Review date:**") {
+            let value = value.trim();
+            self.review_date_raw = Some(value);
+            if let Some(review_date) = parse_review_date(value) {
+                self.review_date = Some(review_date);
+                self.fields |= DISC_FIELD_VALID_REVIEW_DATE;
+            }
+        }
+        if let Some(value) = line.strip_prefix("- **Freshness exemption:**") {
+            let value = value.trim();
+            if !value.is_empty() {
+                self.freshness_exemption = Some(value);
+            }
+        }
     }
 
     fn mark_if(&mut self, field: u8, condition: bool) {
@@ -218,28 +250,301 @@ fn line_has_nonempty_field(line: &str, field: &str) -> bool {
 }
 
 fn valid_yyyy_mm_dd(value: &str) -> bool {
-    let Some((year, month_day)) = value.split_once('-') else {
-        return false;
-    };
-    let Some((month, day)) = month_day.split_once('-') else {
-        return false;
-    };
+    parse_review_date(value).is_some()
+}
+
+fn parse_review_date(value: &str) -> Option<CalendarDate> {
+    let (year, month_day) = value.split_once('-')?;
+    let (month, day) = month_day.split_once('-')?;
 
     let year_is_valid = year.len() == 4 && year.as_bytes().iter().all(u8::is_ascii_digit);
     let month_is_valid = month.len() == 2 && month.as_bytes().iter().all(u8::is_ascii_digit);
     let day_is_valid = day.len() == 2 && day.as_bytes().iter().all(u8::is_ascii_digit);
 
     if !year_is_valid || !month_is_valid || !day_is_valid {
-        return false;
+        return None;
     }
 
-    let Ok(month) = month.parse::<u8>() else {
-        return false;
+    let year = year.parse::<i32>().ok()?;
+    let month = month.parse::<u8>().ok()?;
+    let day = day.parse::<u8>().ok()?;
+    CalendarDate::new(year, month, day)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CalendarDate {
+    year: i32,
+    month: u8,
+    day: u8,
+}
+
+impl CalendarDate {
+    fn new(year: i32, month: u8, day: u8) -> Option<Self> {
+        let days_in_month = days_in_month(year, month)?;
+        if year > 0 && day > 0 && day <= days_in_month {
+            Some(Self { year, month, day })
+        } else {
+            None
+        }
+    }
+
+    fn days_since_ce(self) -> i32 {
+        days_before_year(self.year) + days_before_month(self.year, self.month) + i32::from(self.day)
+            - 1
+    }
+}
+
+impl std::fmt::Display for CalendarDate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{:04}-{:02}-{:02}",
+            self.year, self.month, self.day
+        )
+    }
+}
+
+fn days_in_month(year: i32, month: u8) -> Option<u8> {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => Some(31),
+        4 | 6 | 9 | 11 => Some(30),
+        2 if is_leap_year(year) => Some(29),
+        2 => Some(28),
+        _ => None,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+fn days_before_year(year: i32) -> i32 {
+    let previous_year = year - 1;
+    (365 * previous_year) + (previous_year / 4) - (previous_year / 100) + (previous_year / 400)
+}
+
+fn days_before_month(year: i32, month: u8) -> i32 {
+    const COMMON_YEAR_MONTH_STARTS: [i32; 12] =
+        [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+    let month_index = usize::from(month - 1);
+    let leap_day = i32::from(month > 2 && is_leap_year(year));
+    COMMON_YEAR_MONTH_STARTS[month_index] + leap_day
+}
+
+fn review_freshness_error(
+    section: &DiscrepancySection<'_>,
+    audit_date: CalendarDate,
+    horizon_days: i32,
+) -> Option<String> {
+    if let Some(exemption) = section.freshness_exemption
+        && !valid_freshness_exemption(exemption)
+    {
+        return Some(format!(
+            "{} review date {} has malformed Freshness exemption; required next action: use `reason=...; owner=...; follow-up=bd-...` or remove the exemption",
+            section.id,
+            section.review_date_raw.unwrap_or("<missing>")
+        ));
+    }
+
+    let Some(review_date) = section.review_date else {
+        return Some(format!(
+            "{} missing calendar-valid Review date; required next action: record a real YYYY-MM-DD date before accepting the divergence",
+            section.id
+        ));
     };
-    let Ok(day) = day.parse::<u8>() else {
-        return false;
-    };
-    (1..=12).contains(&month) && (1..=31).contains(&day)
+
+    let age_days = audit_date.days_since_ce() - review_date.days_since_ce();
+    if age_days < 0 {
+        return Some(format!(
+            "{} review date {} is future-dated relative to audit date {}; required next action: correct the date or re-run the review on that date",
+            section.id, review_date, audit_date
+        ));
+    }
+
+    if age_days > horizon_days && section.freshness_exemption.is_none() {
+        return Some(format!(
+            "{} review date {} is {} days old, above the {}-day freshness horizon; required next action: re-review and refresh the date or add a structured Freshness exemption with reason, owner, and follow-up bead",
+            section.id, review_date, age_days, horizon_days
+        ));
+    }
+
+    None
+}
+
+fn valid_freshness_exemption(value: &str) -> bool {
+    let mut has_reason = false;
+    let mut has_owner = false;
+    let mut has_follow_up = false;
+
+    for part in value.split(';') {
+        let Some((key, value)) = part.trim().split_once('=') else {
+            return false;
+        };
+        let value = value.trim();
+        match key.trim() {
+            "reason" => has_reason = !value.is_empty(),
+            "owner" => has_owner = !value.is_empty(),
+            "follow-up" => has_follow_up = valid_follow_up_bead(value),
+            _ => {}
+        }
+    }
+
+    has_reason && has_owner && has_follow_up
+}
+
+fn valid_follow_up_bead(value: &str) -> bool {
+    value
+        .strip_prefix("bd-")
+        .is_some_and(|suffix| !suffix.is_empty())
+}
+
+#[test]
+fn review_dates_reject_invalid_calendar_dates() {
+    assert!(valid_yyyy_mm_dd("2024-02-29"));
+    assert!(!valid_yyyy_mm_dd("2026-02-31"));
+    assert!(!valid_yyyy_mm_dd("2026-13-01"));
+    assert!(!valid_yyyy_mm_dd("2026-00-01"));
+    assert!(!valid_yyyy_mm_dd("2026-01-00"));
+}
+
+#[test]
+fn active_discrepancy_review_freshness_accepts_fresh_dates() {
+    let markdown = active_discrepancy_markdown("DISC-010", "2026-05-18", None);
+    let section = only_active_discrepancy_section(&markdown);
+
+    let error = review_freshness_error(
+        &section,
+        DISC_REVIEW_AUDIT_DATE,
+        DISC_REVIEW_FRESHNESS_HORIZON_DAYS,
+    );
+
+    assert!(error.is_none(), "{error:?}");
+}
+
+#[test]
+fn active_discrepancy_review_freshness_rejects_stale_dates() {
+    let markdown = active_discrepancy_markdown("DISC-010", "2026-02-16", None);
+    let section = only_active_discrepancy_section(&markdown);
+
+    let error = review_freshness_error(
+        &section,
+        DISC_REVIEW_AUDIT_DATE,
+        DISC_REVIEW_FRESHNESS_HORIZON_DAYS,
+    )
+    .expect("stale review should fail");
+
+    assert!(error.contains("DISC-010"));
+    assert!(error.contains("2026-02-16"));
+    assert!(error.contains("90-day"));
+    assert!(error.contains("required next action"));
+}
+
+#[test]
+fn active_discrepancy_review_freshness_rejects_future_dates() {
+    let markdown = active_discrepancy_markdown("DISC-010", "2026-05-19", None);
+    let section = only_active_discrepancy_section(&markdown);
+
+    let error = review_freshness_error(
+        &section,
+        DISC_REVIEW_AUDIT_DATE,
+        DISC_REVIEW_FRESHNESS_HORIZON_DAYS,
+    )
+    .expect("future review should fail");
+
+    assert!(error.contains("DISC-010"));
+    assert!(error.contains("future-dated"));
+    assert!(error.contains("2026-05-19"));
+}
+
+#[test]
+fn active_discrepancy_review_freshness_accepts_structured_exemption() {
+    let markdown = active_discrepancy_markdown(
+        "DISC-010",
+        "2026-02-16",
+        Some(
+            "reason=legacy fixture frozen until next kernel sample; owner=ffs-harness; follow-up=bd-review-refresh",
+        ),
+    );
+    let section = only_active_discrepancy_section(&markdown);
+
+    let error = review_freshness_error(
+        &section,
+        DISC_REVIEW_AUDIT_DATE,
+        DISC_REVIEW_FRESHNESS_HORIZON_DAYS,
+    );
+
+    assert!(error.is_none(), "{error:?}");
+}
+
+#[test]
+fn active_discrepancy_review_freshness_rejects_malformed_exemption() {
+    let markdown = active_discrepancy_markdown(
+        "DISC-010",
+        "2026-02-16",
+        Some("reason=legacy fixture frozen; owner=ffs-harness"),
+    );
+    let section = only_active_discrepancy_section(&markdown);
+
+    let error = review_freshness_error(
+        &section,
+        DISC_REVIEW_AUDIT_DATE,
+        DISC_REVIEW_FRESHNESS_HORIZON_DAYS,
+    )
+    .expect("malformed exemption should fail");
+
+    assert!(error.contains("DISC-010"));
+    assert!(error.contains("Freshness exemption"));
+    assert!(error.contains("follow-up=bd-"));
+}
+
+#[test]
+fn resolved_disc_r_entries_are_ignored_by_review_freshness_guard() {
+    let markdown = r"
+## Resolved Divergences
+
+### DISC-R010: stale historical divergence
+- **Reference:** reference
+- **Our impl:** implementation
+- **Impact:** impact
+- **Resolution:** FIXED
+- **Tests affected:** historical_test
+- **Review date:** 2020-01-01
+";
+
+    assert!(active_discrepancy_sections(markdown).is_empty());
+}
+
+fn active_discrepancy_markdown(
+    id: &str,
+    review_date: &str,
+    freshness_exemption: Option<&str>,
+) -> String {
+    let exemption = freshness_exemption.map_or_else(String::new, |value| {
+        format!("\n- **Freshness exemption:** {value}")
+    });
+    format!(
+        r"
+## Active Divergences
+
+### {id}: synthetic divergence
+- **Reference:** reference
+- **Our impl:** implementation
+- **Impact:** impact
+- **Resolution:** ACCEPTED -- synthetic test case
+- **Tests affected:** synthetic_test
+- **Review date:** {review_date}{exemption}
+"
+    )
+}
+
+fn only_active_discrepancy_section(markdown: &str) -> DiscrepancySection<'_> {
+    let mut sections = active_discrepancy_sections(markdown);
+    assert_eq!(
+        sections.len(),
+        1,
+        "synthetic markdown should yield one section"
+    );
+    sections.remove(0)
 }
 
 #[test]

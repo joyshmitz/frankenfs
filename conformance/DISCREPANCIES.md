@@ -66,7 +66,11 @@
 1. Every divergence gets a sequential ID (DISC-NNN)
 2. Status: ACCEPTED | INVESTIGATING | WILL-FIX
 3. Must list affected test cases
-4. Must include review date (divergences can become stale)
-5. Resolved divergences move to Historical section with DISC-RNNN IDs
+4. Must include a calendar-valid review date in `YYYY-MM-DD` form
+5. Active divergence review dates must be no more than 90 days old relative to the latest checked audit date
+6. Active divergence review dates must not be future-dated
+7. Stale active divergences must either be re-reviewed with a refreshed review date or carry a structured exemption:
+   `- **Freshness exemption:** reason=<why stale review is acceptable>; owner=<agent/team>; follow-up=bd-...`
+8. Resolved divergences move to Historical section with DISC-RNNN IDs
 
-*Last updated: 2026-04-15*
+*Last updated: 2026-05-18*
