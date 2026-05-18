@@ -15,7 +15,8 @@ export FFS_E2E_DISABLE_TEMP_CLEANUP="${FFS_E2E_DISABLE_TEMP_CLEANUP:-1}"
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_operational_evidence_index}"
-export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_CAPTURE_VISIBILITY="${FFS_OPERATIONAL_EVIDENCE_INDEX_RCH_VISIBILITY:-${RCH_VISIBILITY:-summary}}"
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 SELF_CHECK="${FFS_OPERATIONAL_EVIDENCE_INDEX_SELF_CHECK:-0}"
@@ -47,7 +48,7 @@ run_indexer() {
         "$FFS_HARNESS_BIN" operational-evidence-index --format "$format" "$@" >"$output_path" 2>&1
     else
         RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
-            RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+            RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" \
             e2e_rch_capture "$output_path" \
                 cargo run -p ffs-harness -- operational-evidence-index --format "$format" "$@"
     fi
