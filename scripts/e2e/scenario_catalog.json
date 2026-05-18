@@ -7228,7 +7228,8 @@
       "script": "scripts/e2e/ffs_proof_overhead_budget_e2e.sh",
       "required_categories": [
         "happy",
-        "edge"
+        "edge",
+        "error"
       ],
       "scenarios": [
         {
@@ -7266,6 +7267,24 @@
           "category": "happy",
           "status": "active",
           "evidence": "scenario_result \"proof_budget_unit_tests\" \"PASS\""
+        },
+        {
+          "id": "proof_budget_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "scenario_result \"proof_budget_fixture_complete_self_check\" \"PASS\""
+        },
+        {
+          "id": "proof_budget_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"proof_budget_fixture_local_fallback_self_check\" \"PASS\""
+        },
+        {
+          "id": "proof_budget_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"proof_budget_fixture_missing_remote_evidence_self_check\" \"PASS\""
         }
       ]
     },

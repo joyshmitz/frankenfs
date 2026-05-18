@@ -17,6 +17,9 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_proo
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 RCH_CAPTURE_VISIBILITY="${FFS_PROOF_OVERHEAD_BUDGET_RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-300}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_PROOF_OVERHEAD_BUDGET_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_PROOF_OVERHEAD_BUDGET_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -41,7 +44,250 @@ run_rch_capture() {
     RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" e2e_rch_capture "$output_path" "$@"
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_PROOF_OVERHEAD_BUDGET_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected proof-overhead fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)"
+        exit 1
+        ;;
+    missing_remote_evidence)
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0"
+        ;;
+    *)
+        echo "unknown proof-overhead fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+finish_success() {
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=0"
+    fi
+    exit 0
+}
+
+emit_budget_report() {
+    cat <<'JSON'
+{
+  "human_summary": "proof overhead budget verdict=pass",
+  "log_records": [
+    {
+      "artifact_sizes": [
+        {
+          "artifact_class": "proof_bundle",
+          "cleanup_status": "clean",
+          "dropped_fields": [
+            "host_fingerprint"
+          ],
+          "original_size_bytes": 256,
+          "redaction_policy_version": "redact-v1",
+          "retention_decision": "keep",
+          "sampled_fields": [],
+          "validator_result": "pass"
+        },
+        {
+          "artifact_class": "reproduction_pack",
+          "cleanup_status": "clean",
+          "dropped_fields": [],
+          "original_size_bytes": 256,
+          "redaction_policy_version": "redact-v1",
+          "retention_decision": "keep",
+          "sampled_fields": [],
+          "validator_result": "pass"
+        }
+      ],
+      "baseline_id": "proof-budget-baseline-2026-05-01",
+      "budget_value": 12.0,
+      "compression_retention_decision": "pass",
+      "observed_value": 4.0,
+      "profile": "developer_smoke",
+      "reproduction_command": "ffs-harness validate-proof-overhead-budget --budget fixture --metrics fixture",
+      "scenario_id": "proof_budget_developer_smoke",
+      "threshold_decision": "pass",
+      "unit": "percent"
+    }
+  ],
+  "metric_results": [
+    {"metric": "runtime_overhead_percent", "threshold_decision": "pass"},
+    {"metric": "memory_overhead_percent", "threshold_decision": "pass"},
+    {"metric": "artifact_disk_bytes", "threshold_decision": "pass"},
+    {"metric": "log_bytes", "threshold_decision": "pass"},
+    {"metric": "repair_symbol_bytes", "threshold_decision": "pass"},
+    {"metric": "rch_upload_bytes", "threshold_decision": "pass"},
+    {"metric": "campaign_duration_seconds", "threshold_decision": "pass"},
+    {"metric": "operator_report_bytes", "threshold_decision": "pass"}
+  ],
+  "release_gate_verdict": "pass",
+  "required_log_fields": [
+    "scenario_id",
+    "profile",
+    "baseline_id",
+    "observed_value",
+    "budget_value",
+    "unit",
+    "threshold_decision",
+    "artifact_sizes",
+    "compression_retention_decision",
+    "reproduction_command"
+  ],
+  "retention_result": {
+    "compression_retention_decision": "pass"
+  }
+}
+JSON
+}
+
+emit_unit_tests() {
+    for name in \
+        accepts_valid_budget \
+        rejects_missing_metric \
+        rejects_stale_baseline \
+        rejects_missing_artifact \
+        rejects_lost_reproduction_command \
+        reports_warn_threshold \
+        reports_fail_threshold \
+        records_artifact_sizes \
+        preserves_redaction_policy \
+        preserves_sampled_fields \
+        keeps_mandatory_artifacts \
+        renders_human_summary \
+        validates_required_log_fields \
+        rejects_unknown_artifact_class; do
+        echo "test proof_overhead_budget::tests::${name} ... ok"
+    done
+    echo "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+}
+
+case "$command_text" in
+    "cargo run --quiet -p ffs-harness -- parity")
+        echo "proof overhead parity fixture completed"
+        finish_success
+        ;;
+    *"cargo run --quiet -p ffs-harness -- validate-proof-overhead-budget"*)
+        emit_budget_report
+        finish_success
+        ;;
+    "cargo test -p ffs-harness --lib -- proof_overhead_budget")
+        emit_unit_tests
+        finish_success
+        ;;
+    *)
+        echo "unexpected proof-overhead fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/proof_overhead_budget_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_PROOF_OVERHEAD_BUDGET_SELF_CHECK=0 \
+        FFS_PROOF_OVERHEAD_BUDGET_SKIP_SELF_CHECK=1 \
+        FFS_PROOF_OVERHEAD_BUDGET_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_proof_overhead_budget_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic proof overhead budget wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-proof-overhead-budget-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "proof_budget_metrics_captured" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "proof_budget_release_gate_evaluates" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "proof_budget_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "proof_budget_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "proof_budget_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null \
+        && grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        scenario_result "proof_budget_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "proof_budget_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "proof_budget_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "proof_budget_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
 e2e_init "ffs_proof_overhead_budget"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 RCH_INPUT_DIR="$REPO_ROOT/artifacts/rch_input/$(basename "$E2E_LOG_DIR")/proof_overhead_budget"
 mkdir -p "$RCH_INPUT_DIR"
