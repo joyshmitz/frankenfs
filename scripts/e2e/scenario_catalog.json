@@ -3760,7 +3760,8 @@
       "script": "scripts/e2e/ffs_baseline_validation_e2e.sh",
       "required_categories": [
         "happy",
-        "edge"
+        "edge",
+        "error"
       ],
       "scenarios": [
         {
@@ -3804,6 +3805,24 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=baseline_validation_record_script|outcome=PASS"
+        },
+        {
+          "id": "baseline_validation_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=baseline_validation_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "baseline_validation_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=baseline_validation_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "baseline_validation_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=baseline_validation_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },

@@ -183,6 +183,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_BENCHMARK_GOVERNANCE_SELF_CHECK=1 ./scripts/e
 # Verify the benchmark expansion RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_BENCHMARK_EXPANSION_SELF_CHECK=1 ./scripts/e2e/ffs_benchmark_expansion_e2e.sh
 
+# Verify the baseline validation RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_BASELINE_VALIDATION_SELF_CHECK=1 ./scripts/e2e/ffs_baseline_validation_e2e.sh
+
 # Verify the artifact schema fixture RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_ARTIFACT_SCHEMA_FIXTURES_SELF_CHECK=1 ./scripts/e2e/ffs_artifact_schema_fixtures_e2e.sh
 

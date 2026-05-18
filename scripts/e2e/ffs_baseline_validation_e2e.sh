@@ -32,6 +32,9 @@ case ",${RCH_ENV_ALLOWLIST:-}," in
     *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR" ;;
 esac
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-1800}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_BASELINE_VALIDATION_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_BASELINE_VALIDATION_SKIP_SELF_CHECK:-0}"
 LOG_DIR="${BASELINE_VALIDATION_LOG_DIR:-$E2E_LOG_DIR}"
 mkdir -p "$LOG_DIR"
 
@@ -56,48 +59,7 @@ scenario_result() {
 }
 
 run_rch_capture() {
-    local log_path="$1"
-    shift
-    local status=0
-    local rch_pid
-    local watcher_pid
-
-    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
-        setsid timeout "${RCH_COMMAND_TIMEOUT_SECS}s" "${RCH_BIN:-rch}" exec -- "$@" >"$log_path" 2>&1 &
-    rch_pid=$!
-
-    (
-        while kill -0 "$rch_pid" >/dev/null 2>&1; do
-            if grep -q "Remote command finished: exit=0" "$log_path" \
-                && grep -q "Retrieving artifacts from .*\\.rch-target" "$log_path"; then
-                kill -TERM "-$rch_pid" >/dev/null 2>&1 || true
-                e2e_rch_cancel_matching_queue_entry "$@"
-                break
-            fi
-            sleep 2
-        done
-    ) &
-    watcher_pid=$!
-
-    if wait "$rch_pid"; then
-        status=0
-    else
-        status=$?
-    fi
-
-    kill "$watcher_pid" >/dev/null 2>&1 || true
-    wait "$watcher_pid" >/dev/null 2>&1 || true
-
-    if [[ "$status" -eq 124 ]]; then
-        e2e_rch_cancel_matching_queue_entry "$@"
-    fi
-
-    if [[ "$status" -ne 0 ]] && grep -q "Remote command finished: exit=0" "$log_path"; then
-        echo "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|log=${log_path}|timeout_secs=${RCH_COMMAND_TIMEOUT_SECS}"
-        return 0
-    fi
-
-    return "$status"
+    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" e2e_rch_capture "$@"
 }
 
 log_failure_tail() {
@@ -107,6 +69,159 @@ log_failure_tail() {
         tail -n 80 "$log_path"
     fi
 }
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_BASELINE_VALIDATION_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected baseline-validation fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)"
+        exit 1
+        ;;
+    missing_remote_evidence)
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0"
+        ;;
+    *)
+        echo "unknown baseline-validation fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+finish_success() {
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=0"
+    fi
+    exit 0
+}
+
+case "$command_text" in
+    *"cargo check"*--benches*)
+        echo "baseline-validation fixture bench compilation succeeded"
+        finish_success
+        ;;
+    "cargo test -p ffs-harness --lib -- benchmark_taxonomy")
+        echo "test benchmark_taxonomy::tests::fixture_taxonomy_contract ... ok"
+        echo "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        finish_success
+        ;;
+    *)
+        echo "unexpected baseline-validation fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/baseline_validation_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_BASELINE_VALIDATION_SELF_CHECK=0 \
+        FFS_BASELINE_VALIDATION_SKIP_SELF_CHECK=1 \
+        FFS_BASELINE_VALIDATION_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$PROJECT_ROOT/scripts/e2e/ffs_baseline_validation_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic baseline-validation wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-baseline-validation-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .invalid_scenario_marker_count == 0
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "baseline_validation_bench_compile" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "baseline_validation_json_contract" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "baseline_validation_taxonomy_tests" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "baseline_validation_thresholds_parse" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "baseline_validation_flamegraph_script" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "baseline_validation_extent_bench" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "baseline_validation_record_script" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "baseline_validation_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "baseline_validation_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null \
+        && grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        scenario_result "baseline_validation_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "baseline_validation_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "baseline_validation_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "baseline_validation_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 echo "=== FrankenFS Baseline Validation E2E ==="
 echo "SCENARIO_RESULT markers follow bd-m5wf.1.1 acceptance criteria."
