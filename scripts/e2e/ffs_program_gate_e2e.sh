@@ -74,38 +74,16 @@ run_rch_capture() {
 
 e2e_init "ffs_program_gate"
 
-write_fixture_rch_stub() {
+write_program_gate_fixture_rch_stub() {
     local stub_path="$1"
 
-    cat >"$stub_path" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-
-fixture_case="${FFS_PROGRAM_GATE_FIXTURE_CASE:-complete}"
-
-if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
-    echo "unexpected program-gate fixture rch invocation: $*" >&2
-    exit 64
-fi
-shift 2
-command_text="$*"
-
-case "$fixture_case" in
-    local_fallback)
-        echo "[RCH] local (fixture forced local fallback)"
-        exit 1
-        ;;
-    missing_remote_evidence)
-        ;;
-    complete)
-        echo "[RCH] remote worker=fixture exit=0"
-        ;;
-    *)
-        echo "unknown program-gate fixture case: $fixture_case" >&2
-        exit 64
-        ;;
-esac
-
+    e2e_write_fixture_rch_stub "$stub_path" \
+        --mode-env FFS_PROGRAM_GATE_FIXTURE_CASE \
+        --unexpected-invocation-message "unexpected program-gate fixture rch invocation" \
+        --unknown-case-message "unknown program-gate fixture case" \
+        --local-fallback-stream stdout \
+        --remote-evidence-stream stdout \
+        --complete-body-stdin <<'SH'
 finish_success() {
     if [[ "$fixture_case" == "complete" ]]; then
         echo "Remote command finished: exit=0"
@@ -140,7 +118,6 @@ case "$command_text" in
         ;;
 esac
 SH
-    chmod +x "$stub_path"
 }
 
 extract_child_result_json() {
@@ -177,7 +154,7 @@ run_self_check() {
     e2e_step "Deterministic program-gate wrapper self-check"
     local stub_path child_info child_status child_log result_path
     stub_path="$E2E_LOG_DIR/rch-program-gate-fixture"
-    write_fixture_rch_stub "$stub_path"
+    write_program_gate_fixture_rch_stub "$stub_path"
 
     child_info="$(run_fixture_child "$stub_path" "complete")"
     child_status="${child_info%%$'\t'*}"

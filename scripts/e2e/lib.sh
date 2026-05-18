@@ -1087,6 +1087,7 @@ if [[ "\${1:-}" != "exec" || "\${2:-}" != "--" ]]; then
 fi
 shift 2
 command_text="\$*"
+emit_remote_evidence=1
 
 case "\$fixture_case" in
     local_fallback)
@@ -1094,7 +1095,7 @@ case "\$fixture_case" in
         exit 1
         ;;
     missing_remote_evidence)
-        exit 0
+        emit_remote_evidence=0
         ;;
     complete)
         ;;
@@ -1104,7 +1105,9 @@ case "\$fixture_case" in
         ;;
 esac
 
-emit_fixture_rch_line "\$remote_evidence_stream" "\$remote_evidence_message"
+if [[ "\$emit_remote_evidence" -eq 1 ]]; then
+    emit_fixture_rch_line "\$remote_evidence_stream" "\$remote_evidence_message"
+fi
 ${complete_body}
 SH
     chmod +x "$stub_path"

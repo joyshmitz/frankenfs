@@ -89,38 +89,13 @@ log_scenario() {
     fi
 }
 
-write_fixture_rch_stub() {
+write_log_contract_fixture_rch_stub() {
     local stub_path="$1"
 
-    cat >"$stub_path" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-
-fixture_case="${FFS_LOG_CONTRACT_FIXTURE_CASE:-complete}"
-
-if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
-    echo "unexpected fixture rch invocation: $*" >&2
-    exit 64
-fi
-shift 2
-command_text="$*"
-
-case "$fixture_case" in
-    local_fallback)
-        echo "[RCH] local (fixture forced local fallback)" >&2
-        exit 1
-        ;;
-    complete)
-        echo "[RCH] remote worker=fixture exit=0" >&2
-        ;;
-    missing_remote_evidence)
-        ;;
-    *)
-        echo "unknown log contract fixture case: $fixture_case" >&2
-        exit 64
-        ;;
-esac
-
+    e2e_write_fixture_rch_stub "$stub_path" \
+        --mode-env FFS_LOG_CONTRACT_FIXTURE_CASE \
+        --unknown-case-message "unknown log contract fixture case" \
+        --complete-body-stdin <<'SH'
 case "$command_text" in
     *"cargo test -p ffs-harness --lib log_contract"*)
         printf '%s\n' \
@@ -152,7 +127,6 @@ case "$command_text" in
         ;;
 esac
 SH
-    chmod +x "$stub_path"
 }
 
 run_fixture_child() {
@@ -208,7 +182,7 @@ run_self_check() {
     )
 
     stub_path="$LOG_DIR/rch-log-contract-fixture"
-    write_fixture_rch_stub "$stub_path"
+    write_log_contract_fixture_rch_stub "$stub_path"
 
     echo "=== Scenario: log_contract_fixture_complete_self_check ==="
     child_info="$(run_fixture_child "$stub_path" "complete")"

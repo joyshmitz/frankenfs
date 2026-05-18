@@ -259,8 +259,8 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_REPAIR_CONFIDENCE_LAB_SELF_CHECK=1 ./scripts/
 ## Fixture RCH Stub Migration Inventory
 
 `bd-gijqv.1` inventories the local `write_fixture_rch_stub` functions before
-moving any fixture writer into `lib.sh`. As of 2026-05-18, this tree has 82
-E2E scripts with local fixture RCH stubs:
+moving any fixture writer into `lib.sh`. At inventory capture time on
+2026-05-18, this tree had 82 E2E scripts with local fixture RCH stubs:
 
 - 81 write fixture child logs under `E2E_LOG_DIR`; the nonstandard case is
   `scripts/e2e/ffs_log_contract_e2e.sh`, which uses `LOG_DIR`.
@@ -284,6 +284,10 @@ Recommended first batch for `bd-gijqv`:
 
 This batch deliberately avoids `scripts/e2e/ffs_evidence_metrics_presets_e2e.sh`
 because `bd-fwlfb` owned that surface during the shared-capture migration.
+
+`bd-gijqv.3` migrated that first batch to `e2e_write_fixture_rch_stub`.
+Those scripts now use script-specific wrapper names and no longer define a
+local `write_fixture_rch_stub`; the remaining local-definition count is 79.
 
 Exhaustive inventory buckets:
 
