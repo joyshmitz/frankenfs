@@ -2491,6 +2491,12 @@ missing p99 buckets, impossible CPU counts, or negative durations while keeping
 ./scripts/e2e/ffs_readiness_lab_contracts_e2e.sh
 ```
 
+The RCH capture contract can be verified without running cargo:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_READINESS_LAB_CONTRACTS_SELF_CHECK=1 ./scripts/e2e/ffs_readiness_lab_contracts_e2e.sh
+```
+
 ## Output
 
 Test artifacts are stored in `artifacts/e2e/<timestamp>/`:

@@ -18,6 +18,8 @@ export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGE
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-4}"
 RCH_CAPTURE_VISIBILITY="${FFS_READINESS_LAB_CONTRACTS_RCH_VISIBILITY:-summary}"
+SELF_CHECK="${FFS_READINESS_LAB_CONTRACTS_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_READINESS_LAB_CONTRACTS_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -39,71 +41,7 @@ scenario_result() {
 run_rch_capture() {
     local output_path="$1"
     shift
-    local status=0
-    local pid
-    local deadline
-    local remote_exit=""
-    local wait_status
-    local had_errexit=0
-
-    case $- in
-        *e*) had_errexit=1 ;;
-    esac
-
-    : >"$output_path"
-    set +e
-    RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
-        RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" \
-        "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
-    pid=$!
-    if [[ "$had_errexit" -eq 1 ]]; then
-        set -e
-    fi
-
-    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
-    while kill -0 "$pid" >/dev/null 2>&1; do
-        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
-        if [[ -n "$remote_exit" ]]; then
-            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
-            if kill -0 "$pid" >/dev/null 2>&1; then
-                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=$*"
-                kill -TERM "$pid" >/dev/null 2>&1 || true
-                e2e_rch_cancel_matching_queue_entry "$@"
-            fi
-            break
-        fi
-        if ((SECONDS >= deadline)); then
-            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=$*"
-            kill -TERM "$pid" >/dev/null 2>&1 || true
-            e2e_rch_cancel_matching_queue_entry "$@"
-            status=124
-            break
-        fi
-        sleep 2
-    done
-
-    set +e
-    wait "$pid" >/dev/null 2>&1
-    wait_status=$?
-    if [[ "$had_errexit" -eq 1 ]]; then
-        set -e
-    fi
-    if [[ -n "$remote_exit" ]]; then
-        status="$remote_exit"
-    elif [[ $status -eq 0 ]]; then
-        status="$wait_status"
-    fi
-
-    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
-        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}|command=$*"
-        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
-        return 99
-    fi
-    if [[ $status -eq 0 ]] && ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
-        e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}|command=$*"
-        return 99
-    fi
-    return "$status"
+    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" e2e_rch_capture "$output_path" "$@"
 }
 
 extract_report_json() {
@@ -144,7 +82,359 @@ else:
 PY
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_READINESS_LAB_CONTRACTS_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected readiness-lab fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)"
+        exit 1
+        ;;
+    missing_remote_evidence)
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0"
+        ;;
+    *)
+        echo "unknown readiness-lab fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+finish_success() {
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=0"
+    fi
+    exit 0
+}
+
+finish_failure() {
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=1"
+    fi
+    exit 1
+}
+
+emit_contract_json() {
+    cat <<'JSON'
+{
+  "advisory_artifact_count": 2,
+  "artifact_count": 2,
+  "lab_id": "readiness-lab-e2e",
+  "product_claim_violation_count": 0,
+  "schema_version": 1,
+  "valid": true
+}
+JSON
+}
+
+emit_host_json() {
+    cat <<'JSON'
+{
+  "blocked_count": 2,
+  "candidate_count": 1,
+  "capability_downgrade_count": 1,
+  "product_evidence_claim": "none",
+  "release_gate_effect": "swarm.responsiveness remains hidden until real hosts run",
+  "schema_version": 1,
+  "simulation_id": "readiness-lab-host-simulation-e2e",
+  "small_host_count": 1,
+  "valid": true
+}
+JSON
+}
+
+emit_scheduler_json() {
+    cat <<'JSON'
+{
+  "coalesced_duplicate_count": 1,
+  "dry_run_only": true,
+  "lane_count": 5,
+  "plan_id": "readiness-lab-rch-lane-schedule-e2e",
+  "planned_lane_count": 4,
+  "product_evidence_claim": "none",
+  "rows": [
+    {
+      "dependencies": [],
+      "lane_id": "check"
+    },
+    {
+      "dependencies": [
+        "clippy",
+        "test"
+      ],
+      "lane_id": "dashboard"
+    }
+  ],
+  "schema_version": 1,
+  "valid": true
+}
+JSON
+}
+
+emit_truth_graph_json() {
+    cat <<'JSON'
+{
+  "blocker_edge_count": 3,
+  "contradictory_claim_count": 0,
+  "dry_run_only": true,
+  "edges": [
+    {
+      "bead_id": "bd-rchk0.53.8",
+      "edge_kind": "blocks"
+    },
+    {
+      "edge_kind": "blocks",
+      "validator_report_path": "artifacts/readiness-lab/contracts/report.json"
+    },
+    {
+      "edge_kind": "blocks",
+      "validator_report_path": "artifacts/readiness-lab/host-sim/report.json"
+    },
+    {
+      "edge_kind": "supersedes"
+    }
+  ],
+  "graph_id": "readiness-lab-truth-graph-e2e",
+  "nodes": [
+    {
+      "metadata": {
+        "advisory_only": "true",
+        "blocked_claims": "swarm.responsiveness",
+        "real_campaign_bead": "bd-rchk0.53.8",
+        "recommendation": "managed",
+        "source_bead": "bd-rchk0.212",
+        "topology_advisor_report_path": "artifacts/topology-advisor/report.json"
+      },
+      "node_kind": "topology_runtime_advisor"
+    },
+    {
+      "metadata": {},
+      "node_kind": "simulated_host"
+    }
+  ],
+  "permission_requirement_count": 1,
+  "product_evidence_claim": "none",
+  "release_gate_effect": "advisory_only",
+  "schema_version": 1,
+  "simulated_node_count": 2,
+  "source_count": 5,
+  "stale_claim_count": 1,
+  "valid": true
+}
+JSON
+}
+
+emit_numa_json() {
+    cat <<'JSON'
+{
+  "fixture_count": 6,
+  "missing_shape_count": 0,
+  "product_evidence_claim": "none",
+  "release_gate_effect": "public readiness unchanged until real NUMA/p99 evidence exists",
+  "replay_id": "readiness-lab-numa-p99-e2e",
+  "replay_only": true,
+  "schema_version": 1,
+  "shape_counts": {
+    "balanced_numa": 1,
+    "io_heavy": 1,
+    "memory_pressure": 1,
+    "remote_access": 1,
+    "skewed_numa": 1,
+    "tiny_host": 1
+  },
+  "valid": true
+}
+JSON
+}
+
+emit_unit_tests() {
+    echo "test readiness_lab::tests::valid_contracts_are_advisory ... ok"
+    echo "test readiness_lab::tests::product_claims_are_rejected ... ok"
+    echo "test readiness_lab::tests::truth_graph_links_blockers ... ok"
+    echo "test readiness_lab::tests::numa_replay_is_advisory_only ... ok"
+    echo "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+}
+
+case "$command_text" in
+    *"product_claim_contracts.json"*|*"numa_p99_replay_product_claim.json"*)
+        echo "product_evidence_claim_violation: product pass/fail claims are forbidden in readiness-lab advisory fixtures"
+        finish_failure
+        ;;
+    *"validate-readiness-lab-contracts"*"--format json"*)
+        emit_contract_json
+        finish_success
+        ;;
+    *"validate-readiness-lab-contracts"*"--format markdown"*)
+        echo "# FrankenFS Readiness Lab Contract Report"
+        echo
+        echo "Product-claim violations: \`0\`"
+        finish_success
+        ;;
+    *"simulate-readiness-lab-hosts"*"--format json"*)
+        emit_host_json
+        finish_success
+        ;;
+    *"simulate-readiness-lab-hosts"*"--format markdown"*)
+        echo "# FrankenFS Readiness Lab Host Simulation"
+        echo
+        echo "Product evidence claim: \`none\`"
+        echo
+        echo "swarm.responsiveness remains hidden"
+        finish_success
+        ;;
+    *"plan-readiness-lab-rch-lanes"*"--format json"*)
+        emit_scheduler_json
+        finish_success
+        ;;
+    *"plan-readiness-lab-rch-lanes"*"--format markdown"*)
+        echo "# FrankenFS Readiness Lab RCH Lane Schedule"
+        echo
+        echo "Dry run only: \`true\`"
+        echo "Coalesced duplicates: \`1\`"
+        finish_success
+        ;;
+    *"build-readiness-lab-truth-graph"*"--format json"*)
+        emit_truth_graph_json
+        finish_success
+        ;;
+    *"build-readiness-lab-truth-graph"*"--format markdown"*)
+        echo "# FrankenFS Readiness Lab Truth Graph"
+        echo
+        echo "Product evidence claim: \`none\`"
+        echo "Release gate effect: \`advisory_only\`"
+        echo "Permission requirements: \`1\`"
+        finish_success
+        ;;
+    *"validate-readiness-lab-numa-p99-replay"*"--format json"*)
+        emit_numa_json
+        finish_success
+        ;;
+    *"validate-readiness-lab-numa-p99-replay"*"--format markdown"*)
+        echo "# FrankenFS Readiness Lab NUMA/p99 Replay"
+        echo
+        echo "Product evidence claim: \`none\`"
+        echo "public readiness unchanged"
+        finish_success
+        ;;
+    *"cargo test -p ffs-harness --lib readiness_lab -- --nocapture"*)
+        emit_unit_tests
+        finish_success
+        ;;
+    *)
+        echo "unexpected readiness-lab fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/readiness_lab_contracts_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_READINESS_LAB_CONTRACTS_SELF_CHECK=0 \
+        FFS_READINESS_LAB_CONTRACTS_SKIP_SELF_CHECK=1 \
+        FFS_READINESS_LAB_CONTRACTS_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_readiness_lab_contracts_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic readiness lab contracts wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-readiness-lab-contracts-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "readiness_lab_valid_json" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "readiness_lab_product_claim_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "readiness_lab_numa_p99_product_claim_rejected" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "readiness_lab_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "readiness_lab_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "readiness_lab_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null \
+        && grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        scenario_result "readiness_lab_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "readiness_lab_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "readiness_lab_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "readiness_lab_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
 e2e_init "ffs_readiness_lab_contracts"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 FIXTURE_DIR="$REPO_ROOT/artifacts/rch_e2e/$(basename "$E2E_LOG_DIR")/readiness_lab_contracts"
 REPORT_DIR="$E2E_LOG_DIR/readiness_lab_contracts"
