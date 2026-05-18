@@ -1185,6 +1185,7 @@ EOF
 e2e_mount() {
     local img_path="$1"
     local mnt_point="$2"
+    local ffs_cli_bin="${FFS_CLI_BIN:-}"
 
     # Check FUSE availability
     if [[ ! -e /dev/fuse ]]; then
@@ -1197,8 +1198,17 @@ e2e_mount() {
     mkdir -p "$mnt_point"
     E2E_MOUNT_POINT="$mnt_point"
 
+    if [[ -z "$ffs_cli_bin" ]]; then
+        e2e_fail "FFS_CLI_BIN must point to an executable ffs-cli binary built through RCH before e2e_mount runs"
+    fi
+    if [[ ! -x "$ffs_cli_bin" ]]; then
+        e2e_fail "FFS_CLI_BIN is not executable: $ffs_cli_bin"
+    fi
+
     e2e_log "Mounting: $img_path -> $mnt_point"
-    cargo run -p ffs-cli --release -- mount "$img_path" "$mnt_point" &
+    e2e_log "E2E_MOUNT_PREBUILT_CLI|binary=${ffs_cli_bin}|build_proof=required_rch"
+    e2e_log "E2E_MOUNT_LOCAL_EXECUTION|binary=${ffs_cli_bin}|image=${img_path}|mount_point=${mnt_point}"
+    RUST_LOG="${RUST_LOG:-off}" "$ffs_cli_bin" mount "$img_path" "$mnt_point" &
     local mount_pid=$!
 
     # Wait for mount to be ready

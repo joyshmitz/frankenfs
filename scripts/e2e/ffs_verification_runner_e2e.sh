@@ -1390,10 +1390,16 @@ else
     scenario_result "permissioned_fuse_lane_artifacts" "FAIL" "Only ${FUSE_LANE_FEATURES}/9 FUSE lane hooks found"
 fi
 
-if grep -Eq 'cargo run( --quiet)? -p ffs-harness|cargo run .* -p ffs-harness' scripts/e2e/lib.sh; then
-    scenario_result "permissioned_fuse_lane_rch_harness_binary" "FAIL" "shared FUSE capability helper still has a local cargo fallback"
+if grep -Eq 'cargo run( --quiet)? -p ffs-harness|cargo run .* -p ffs-harness|cargo run( --quiet)? -p ffs-cli|cargo run .* -p ffs-cli' scripts/e2e/lib.sh; then
+    scenario_result "permissioned_fuse_lane_rch_harness_binary" "FAIL" "shared FUSE helpers still have a local cargo fallback"
+elif grep -Fq "FFS_HARNESS_BIN must point to an executable ffs-harness binary built through RCH" scripts/e2e/lib.sh \
+    && grep -Fq "FFS_CLI_BIN must point to an executable ffs-cli binary built through RCH" scripts/e2e/lib.sh \
+    && grep -Fq "FFS_CLI_BIN is not executable:" scripts/e2e/lib.sh \
+    && grep -Fq "E2E_MOUNT_PREBUILT_CLI" scripts/e2e/lib.sh \
+    && grep -Fq "E2E_MOUNT_LOCAL_EXECUTION" scripts/e2e/lib.sh; then
+    scenario_result "permissioned_fuse_lane_rch_harness_binary" "PASS" "shared FUSE helpers require prebuilt RCH binaries and log local mount execution"
 else
-    scenario_result "permissioned_fuse_lane_rch_harness_binary" "PASS" "shared FUSE capability helper requires a prebuilt FFS_HARNESS_BIN"
+    scenario_result "permissioned_fuse_lane_rch_harness_binary" "FAIL" "shared FUSE helpers are missing prebuilt binary guardrails"
 fi
 
 #######################################
