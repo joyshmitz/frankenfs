@@ -4138,7 +4138,8 @@
       "script": "scripts/e2e/ffs_tabletop_drill_e2e.sh",
       "required_categories": [
         "happy",
-        "edge"
+        "edge",
+        "error"
       ],
       "scenarios": [
         {
@@ -4194,6 +4195,24 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=drill_unit_tests_pass|outcome=PASS"
+        },
+        {
+          "id": "tabletop_drill_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tabletop_drill_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "tabletop_drill_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tabletop_drill_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "tabletop_drill_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=tabletop_drill_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },
