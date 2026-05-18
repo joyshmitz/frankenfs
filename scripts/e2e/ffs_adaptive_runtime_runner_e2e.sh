@@ -195,7 +195,289 @@ pathlib.Path(summary_path).write_text(text[start:end].rstrip() + "\n", encoding=
 PY
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_ADAPTIVE_RUNTIME_RUNNER_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected adaptive runtime fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)"
+        exit 1
+        ;;
+    missing_remote_evidence)
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0"
+        ;;
+    *)
+        echo "unknown adaptive runtime fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+artifact_root=""
+mode="dry_run"
+test_dir=""
+command_kind="run"
+if [[ "${1:-}" == "cargo" && "${2:-}" == "test" ]]; then
+    command_kind="test"
+fi
+
+while (($#)); do
+    case "$1" in
+        --artifact-root)
+            artifact_root="${2:-}"
+            shift 2
+            ;;
+        --mode)
+            mode="${2:-}"
+            shift 2
+            ;;
+        --test-dir)
+            test_dir="${2:-}"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+if [[ "$command_kind" == "test" ]]; then
+    echo "test adaptive_runtime_runner::fixture_dry_run_report ... ok"
+    echo "test adaptive_runtime_runner::fixture_refusal_paths ... ok"
+    echo "test result: ok. 2 passed; 0 failed; 0 ignored"
+    [[ "$fixture_case" == "complete" ]] && echo "Remote command finished: exit=0"
+    exit 0
+fi
+
+if [[ -z "$artifact_root" ]]; then
+    artifact_root="/data/tmp/adaptive-runtime-runner-fixture"
+fi
+
+if [[ "$mode" == "permissioned-real" && "$test_dir" == "/" ]]; then
+    cat <<JSON
+{
+  "valid": false,
+  "mode": "permissioned_real",
+  "classification": "refused",
+  "execution": {
+    "permissioned_real_allowed": false
+  },
+  "path_plan": {
+    "raw_stdout_path": "${artifact_root}/raw.stdout",
+    "raw_stderr_path": "${artifact_root}/raw.stderr",
+    "structured_log_path": "${artifact_root}/structured.log",
+    "runner_manifest_path": "${artifact_root}/runner-manifest.json",
+    "cleanup_report_path": "${artifact_root}/cleanup.json",
+    "host_facts_path": "${artifact_root}/host-facts.json"
+  },
+  "host_facts": {
+    "cpu_count": 4,
+    "ram_bytes": 8589934592,
+    "numa_nodes": 1,
+    "kernel": "fixture",
+    "fuse_capability_summary": "fixture"
+  },
+  "artifact_paths": {},
+  "capability_downgrade_reasons": ["fixture unsafe path refusal"],
+  "cleanup_status": "no_mutating_workload_started",
+  "refusal_reasons": ["test_dir must live under artifact_root"]
+}
+JSON
+    echo "# Adaptive Runtime Runner"
+    echo
+    echo "Permissioned real allowed: \`false\`"
+    echo "adaptive runtime runner report written:"
+    [[ "$fixture_case" == "complete" ]] && echo "Remote command finished: exit=2"
+    exit 2
+fi
+
+if [[ "$mode" == "permissioned-real" ]]; then
+    cat <<JSON
+{
+  "valid": false,
+  "mode": "permissioned_real",
+  "classification": "refused",
+  "execution": {
+    "permissioned_real_allowed": false
+  },
+  "path_plan": {
+    "raw_stdout_path": "${artifact_root}/raw.stdout",
+    "raw_stderr_path": "${artifact_root}/raw.stderr",
+    "structured_log_path": "${artifact_root}/structured.log",
+    "runner_manifest_path": "${artifact_root}/runner-manifest.json",
+    "cleanup_report_path": "${artifact_root}/cleanup.json",
+    "host_facts_path": "${artifact_root}/host-facts.json"
+  },
+  "host_facts": {
+    "cpu_count": 4,
+    "ram_bytes": 8589934592,
+    "numa_nodes": 1,
+    "kernel": "fixture",
+    "fuse_capability_summary": "fixture"
+  },
+  "artifact_paths": {},
+  "capability_downgrade_reasons": ["fixture missing ACK refusal"],
+  "cleanup_status": "no_mutating_workload_started",
+  "refusal_reasons": ["FFS_ADAPTIVE_RUNTIME_REAL_RUN_ACK is required for permissioned real runs"]
+}
+JSON
+    echo "# Adaptive Runtime Runner"
+    echo
+    echo "Permissioned real allowed: \`false\`"
+    echo "adaptive runtime runner report written:"
+    [[ "$fixture_case" == "complete" ]] && echo "Remote command finished: exit=2"
+    exit 2
+fi
+
+cat <<JSON
+{
+  "valid": true,
+  "mode": "dry_run",
+  "classification": "capability_downgraded_smoke",
+  "execution": {
+    "permissioned_real_allowed": false
+  },
+  "path_plan": {
+    "raw_stdout_path": "${artifact_root}/raw.stdout",
+    "raw_stderr_path": "${artifact_root}/raw.stderr",
+    "structured_log_path": "${artifact_root}/structured.log",
+    "runner_manifest_path": "${artifact_root}/runner-manifest.json",
+    "cleanup_report_path": "${artifact_root}/cleanup.json",
+    "host_facts_path": "${artifact_root}/host-facts.json"
+  },
+  "host_facts": {
+    "cpu_count": 4,
+    "ram_bytes": 8589934592,
+    "numa_nodes": 1,
+    "kernel": "fixture",
+    "fuse_capability_summary": "fixture"
+  },
+  "artifact_paths": {
+    "report": "${artifact_root}/report.json",
+    "summary": "${artifact_root}/report.md"
+  },
+  "capability_downgrade_reasons": ["fixture dry run"],
+  "cleanup_status": "no_mutating_workload_started",
+  "refusal_reasons": []
+}
+JSON
+echo "# Adaptive Runtime Runner"
+echo
+echo "Permissioned real allowed: \`false\`"
+echo "adaptive runtime runner report written:"
+[[ "$fixture_case" == "complete" ]] && echo "Remote command finished: exit=0"
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/adaptive_runtime_runner_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_ADAPTIVE_RUNTIME_RUNNER_SELF_CHECK=0 \
+        FFS_ADAPTIVE_RUNTIME_RUNNER_SKIP_SELF_CHECK=1 \
+        FFS_ADAPTIVE_RUNTIME_RUNNER_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        RCH_FAILURE_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_adaptive_runtime_runner_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic adaptive runtime runner wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-adaptive-runtime-runner-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "adaptive_runtime_runner_cli_wired" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "adaptive_runtime_runner_dry_run_writes_artifacts" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "adaptive_runtime_runner_dry_run_contract" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "adaptive_runtime_runner_refuses_missing_ack" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "adaptive_runtime_runner_refuses_unsafe_paths" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "adaptive_runtime_runner_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "adaptive_runtime_runner_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "adaptive_runtime_runner_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null \
+        && grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        scenario_result "adaptive_runtime_runner_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "adaptive_runtime_runner_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "adaptive_runtime_runner_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "adaptive_runtime_runner_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
 e2e_init "ffs_adaptive_runtime_runner"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 GIT_SHA="$(git rev-parse --short HEAD)"
 RUNNER_LOG_ROOT="$E2E_LOG_DIR/adaptive-runtime-runner"
