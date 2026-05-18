@@ -16,6 +16,10 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_operational_evidence_index}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_OPERATIONAL_EVIDENCE_INDEX_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_OPERATIONAL_EVIDENCE_INDEX_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -43,10 +47,206 @@ run_indexer() {
         "$FFS_HARNESS_BIN" operational-evidence-index --format "$format" "$@" >"$output_path" 2>&1
     else
         RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
-            RCH_VISIBILITY="${RCH_VISIBILITY:-none}" \
-            "${RCH_BIN:-rch}" exec -- \
-            cargo run -p ffs-harness -- operational-evidence-index --format "$format" "$@" \
-            >"$output_path" 2>&1
+            RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+            e2e_rch_capture "$output_path" \
+                cargo run -p ffs-harness -- operational-evidence-index --format "$format" "$@"
+    fi
+}
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_OPERATIONAL_EVIDENCE_INDEX_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected operational-evidence fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)"
+        exit 1
+        ;;
+    missing_remote_evidence)
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0"
+        ;;
+    *)
+        echo "unknown operational-evidence fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+finish_success() {
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=0"
+    fi
+    exit 0
+}
+
+emit_index_json() {
+    cat <<'JSON'
+{
+  "conflict_count": 1,
+  "index_id": "frankenfs-operational-evidence-index:v1",
+  "records": [
+    {
+      "gate_id": "xfstests",
+      "record_id": "run_20260501:mounted_ext4_rw",
+      "run_id": "run_20260501",
+      "scenario_id": "mounted_ext4_rw",
+      "selected": false,
+      "outcome": "fail"
+    },
+    {
+      "gate_id": "xfstests",
+      "record_id": "run_20260509:mounted_ext4_rw",
+      "run_id": "run_20260509",
+      "scenario_id": "mounted_ext4_rw",
+      "selected": true,
+      "outcome": "pass"
+    }
+  ],
+  "selections": [
+    {
+      "gate_id": "xfstests",
+      "scenario_id": "mounted_ext4_rw",
+      "selected_outcome": "pass",
+      "selected_record_id": "run_20260509:mounted_ext4_rw",
+      "selected_run_id": "run_20260509",
+      "superseded_record_ids": [
+        "run_20260501:mounted_ext4_rw"
+      ]
+    }
+  ],
+  "selected_record_count": 1,
+  "source_record_count": 2
+}
+JSON
+}
+
+emit_index_markdown() {
+    cat <<'MD'
+# FrankenFS Operational Evidence Index
+
+## Latest Truth
+
+- `run_20260509` selected for `mounted_ext4_rw`.
+
+## Conflicts
+
+- `run_20260501` superseded by `run_20260509`.
+MD
+}
+
+case "$command_text" in
+    *"operational-evidence-index --format json"*)
+        emit_index_json
+        finish_success
+        ;;
+    *"operational-evidence-index --format markdown"*)
+        emit_index_markdown
+        finish_success
+        ;;
+    *)
+        echo "unexpected operational-evidence fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/operational_evidence_index_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_OPERATIONAL_EVIDENCE_INDEX_SELF_CHECK=0 \
+        FFS_OPERATIONAL_EVIDENCE_INDEX_SKIP_SELF_CHECK=1 \
+        FFS_OPERATIONAL_EVIDENCE_INDEX_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_operational_evidence_index_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic operational evidence index wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-operational-evidence-index-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .invalid_scenario_marker_count == 0
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "evidence_fixture_conflict_tree" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "evidence_index_selects_latest_authoritative" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "evidence_index_markdown_summary" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "evidence_index_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "evidence_index_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null \
+        && grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        scenario_result "evidence_index_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "evidence_index_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "evidence_index_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "evidence_index_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
     fi
 }
 
@@ -107,6 +307,12 @@ PY
 }
 
 e2e_init "ffs_operational_evidence_index"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 FIXTURE_DIR="$E2E_LOG_DIR/evidence_fixture"
 RAW_JSON="$E2E_LOG_DIR/evidence_index_json_command.log"

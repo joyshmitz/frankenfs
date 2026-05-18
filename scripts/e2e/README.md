@@ -135,6 +135,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_READINESS_DASHBOARD_SELF_CHECK=1 ./scripts/e2
 # Verify the operational readiness report RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_OPERATIONAL_READINESS_REPORT_SELF_CHECK=1 ./scripts/e2e/ffs_operational_readiness_report_e2e.sh
 
+# Verify the operational evidence index RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_OPERATIONAL_EVIDENCE_INDEX_SELF_CHECK=1 ./scripts/e2e/ffs_operational_evidence_index_e2e.sh
+
 # Verify the btrfs capability drift RCH capture contract without running cargo
 FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_BTRFS_CAPABILITY_DRIFT_SELF_CHECK=1 ./scripts/e2e/ffs_btrfs_capability_drift_e2e.sh
 
